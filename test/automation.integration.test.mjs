@@ -109,6 +109,11 @@ async function startHub() {
     socket.on("message", (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request.params);
+      if (request.params.scenario?.create && state.closeWithoutCreate) {
+        state.closeWithoutCreate = false;
+        socket.close();
+        return;
+      }
       const result = respond(state, request.params);
       if (request.params.scenario?.create && state.closeAfterCreate) {
         state.closeAfterCreate = false;
@@ -585,5 +590,104 @@ test("rollback deletes only an unchanged owned scenario and preserves manual edi
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,
+  );
+});
+
+test("an equivalent rule under another name is reused without transferring ownership", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const first = await preview(client);
+  const firstApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  const second = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: { ...previewArguments, name: "Другое название той же связи" },
+  });
+
+  const secondApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  const secondRollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+
+  assert.equal(secondApply.structuredContent.status, "already_present");
+  assert.equal(secondApply.structuredContent.created, false);
+  assert.equal(secondApply.structuredContent.owned, false);
+  assert.equal(
+    secondApply.structuredContent.scenario_index,
+    firstApply.structuredContent.scenario_index,
+  );
+  assert.equal(secondRollback.structuredContent.status, "not_owned");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === firstApply.structuredContent.scenario_index,
+    ),
+    true,
+  );
+});
+
+test("an unknown create outcome stays uncertain and a repeated apply does not resend it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  hub.state.closeWithoutCreate = true;
+
+  const first = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const second = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(first.structuredContent.status, "uncertain");
+  assert.equal(first.structuredContent.action, "inspect_hub_before_retry");
+  assert.equal(second.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("rollback preserves a scenario whose ownership marker was manually removed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const manuallyEdited = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  manuallyEdited.desc = "Ручное описание без маркера";
+
+  const result = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.structuredContent.status, "conflict");
+  assert.equal(result.structuredContent.owned, false);
+  assert.equal(result.structuredContent.action, "review_manual_changes");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === applied.structuredContent.scenario_index,
+    ),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete),
+    false,
   );
 });
