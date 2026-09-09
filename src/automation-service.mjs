@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
@@ -34,7 +35,12 @@ export class AutomationService {
       input.target_value,
       true,
     );
-    const nativeData = buildNativeData(condition, action);
+    const autoOff = selectAutoOff(
+      input.auto_off_after_seconds,
+      condition,
+      action,
+    );
+    const nativeData = buildNativeData(condition, action, autoOff);
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -47,6 +53,7 @@ export class AutomationService {
       updated_at: now,
       condition,
       action,
+      ...(autoOff ? { auto_off: autoOff } : {}),
       native_data: nativeData,
     };
     await this.store.save(change);
@@ -58,6 +65,7 @@ export class AutomationService {
       reason: input.reason,
       condition,
       action,
+      ...(autoOff ? { auto_off: autoOff } : {}),
       native_shape: {
         mechanism: "BLOCK",
         active: true,
@@ -69,7 +77,11 @@ export class AutomationService {
       limitations: [
         "Preview does not change the hub and is not an atomic reservation.",
         "An empty direct scenario list does not rule out dependencies inside arbitrary code or bridges.",
-        "The rule turns the target on; it does not turn it off automatically.",
+        ...(autoOff
+          ? [
+              "The native RESET delay counts from the latest trigger; it does not determine whether a person is still present.",
+            ]
+          : ["The rule does not turn the target off automatically."]),
         "Apply and rollback are serialized only inside this MCP process for the configured hub.",
         "SprutHub has no observed conditional delete; another process or the UI can edit after the rollback check.",
       ],
@@ -512,7 +524,28 @@ function selectCharacteristic(selection, ref, value, requireWrite) {
     : { ...normalized, operator: "=", trigger: true };
 }
 
-function buildNativeData(condition, action) {
+function selectAutoOff(seconds, condition, action) {
+  if (seconds === undefined) return null;
+  if (
+    condition.characteristic.type !== "MotionDetected" ||
+    condition.value !== true ||
+    action.characteristic.type !== "On" ||
+    action.value !== true
+  ) {
+    throw new SprutHubError(
+      "unsupported_auto_off",
+      "Auto-off is supported only for MotionDetected=true to On=true automations.",
+    );
+  }
+  return {
+    after_seconds: seconds,
+    timer_mode: "RESET",
+    restarts_on_each_trigger: true,
+    target_value: false,
+  };
+}
+
+function buildNativeData(condition, action, autoOff) {
   const source = parseCharacteristicRef(condition.characteristic.ref);
   const target = parseCharacteristicRef(action.characteristic.ref);
   return {
@@ -558,6 +591,34 @@ function buildNativeData(condition, action) {
               },
             ],
           },
+          ...(autoOff
+            ? [
+                {
+                  type: "delay",
+                  index: 1,
+                  mode: "RESET",
+                  time: autoOff.after_seconds * 1_000,
+                  targets: [
+                    {
+                      type: "service",
+                      blockId: 6,
+                      aId: target.aId,
+                      sId: target.sId,
+                      hs: action.service.type,
+                      characteristics: [
+                        {
+                          type: "set",
+                          blockId: 7,
+                          cId: target.cId,
+                          hc: action.characteristic.type,
+                          value: "false",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ]
+            : []),
         ],
         else: [],
         then_delay: 0,
@@ -653,9 +714,38 @@ function expectedScenario(change) {
 
 function matchesExpected(scenario, change) {
   const expected = expectedScenario(change);
-  return Object.entries(expected).every(
-    ([key, value]) => scenario[key] === value,
+  const metadataMatches = Object.entries(expected).every(
+    ([key, value]) => key === "data" || scenario[key] === value,
   );
+  if (!metadataMatches || typeof scenario.data !== "string") return false;
+  try {
+    return isDeepStrictEqual(
+      configurationData(JSON.parse(scenario.data)),
+      configurationData(change.native_data),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function configurationData(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.targets))
+    return data;
+  return {
+    ...data,
+    targets: data.targets.map((target) => {
+      if (
+        !target ||
+        typeof target !== "object" ||
+        target.type !== "if" ||
+        !Object.hasOwn(target, "state")
+      ) {
+        return target;
+      }
+      const { state: _runtimeState, ...configuration } = target;
+      return configuration;
+    }),
+  };
 }
 
 function sameRuleBody(scenario, change) {
@@ -686,9 +776,19 @@ function ruleMeaning(data) {
   const target = data?.targets?.length === 1 ? data.targets[0] : null;
   const condition =
     target?.if?.conditions?.length === 1 ? target.if.conditions[0] : null;
-  const action = target?.then?.length === 1 ? target.then[0] : null;
+  const actions = target?.then;
+  const action =
+    Array.isArray(actions) && (actions.length === 1 || actions.length === 2)
+      ? actions[0]
+      : null;
   const setting =
     action?.characteristics?.length === 1 ? action.characteristics[0] : null;
+  const delay = actions?.length === 2 ? actions[1] : null;
+  const delayedAction = delay?.targets?.length === 1 ? delay.targets[0] : null;
+  const delayedSetting =
+    delayedAction?.characteristics?.length === 1
+      ? delayedAction.characteristics[0]
+      : null;
   if (
     target?.type !== "if" ||
     target.if?.type !== "condition" ||
@@ -701,6 +801,18 @@ function ruleMeaning(data) {
     target.then_delay !== 0 ||
     target.else_delay !== 0 ||
     target.mode !== "EVERY"
+  ) {
+    return null;
+  }
+  if (
+    delay !== null &&
+    (delay?.type !== "delay" ||
+      delay.index !== 1 ||
+      !["RESET", "CONTINUE"].includes(delay.mode) ||
+      !Number.isSafeInteger(delay.time) ||
+      delay.time <= 0 ||
+      delayedAction?.type !== "service" ||
+      delayedSetting?.type !== "set")
   ) {
     return null;
   }
@@ -725,6 +837,23 @@ function ruleMeaning(data) {
       hc: setting.hc,
       value: setting.value,
     },
+    ...(delay
+      ? {
+          auto_off: {
+            index: delay.index,
+            mode: delay.mode,
+            time: delay.time,
+            action: {
+              aId: delayedAction.aId,
+              sId: delayedAction.sId,
+              hs: delayedAction.hs,
+              cId: delayedSetting.cId,
+              hc: delayedSetting.hc,
+              value: delayedSetting.value,
+            },
+          },
+        }
+      : {}),
   };
 }
 

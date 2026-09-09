@@ -75,7 +75,7 @@ server.registerTool(
   {
     title: "Preview a native boolean SprutHub automation",
     description:
-      "Prepare and explain one native BLOCK automation from a readable boolean characteristic to a writable boolean characteristic. This preview does not write to SprutHub. It reports existing native mechanisms and preserves their original names and stable references. Use the returned change_ref with the apply tool only when the user's request authorizes the write.",
+      "Prepare and explain one native BLOCK automation from a readable boolean characteristic to a writable boolean characteristic. For MotionDetected=true to On=true, auto_off_after_seconds adds one native RESET delay that writes On=false and restarts its countdown on every trigger. This preview does not write to SprutHub. It reports existing native mechanisms and preserves their original names and stable references. Use the returned change_ref with the apply tool only when the user's request authorizes the write.",
     inputSchema: {
       name: z.string().min(1),
       reason: z.string().min(1),
@@ -85,6 +85,14 @@ server.registerTool(
       target_room_ref: z.string().min(1),
       target_characteristic_ref: z.string().min(1),
       target_value: z.boolean(),
+      auto_off_after_seconds: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Optional seconds after the latest MotionDetected=true trigger before writing On=false",
+        ),
     },
     annotations: {
       readOnlyHint: false,

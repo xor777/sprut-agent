@@ -679,6 +679,60 @@ test("auto-off preview creates one resettable native delay and reuses its exact 
   );
 });
 
+test("different auto-off behavior is not treated as the requested rule", async (t) => {
+  for (const [name, edit] of [
+    ["timeout", (delay) => (delay.time = 30_000)],
+    ["timer mode", (delay) => (delay.mode = "CONTINUE")],
+    [
+      "delayed action",
+      (delay) => (delay.targets[0].characteristics[0].value = "true"),
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const argumentsWithAutoOff = {
+        ...previewArguments,
+        auto_off_after_seconds: 60,
+      };
+      const original = await client.callTool({
+        name: "preview_boolean_automation",
+        arguments: argumentsWithAutoOff,
+      });
+      const originalApply = await client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: original.structuredContent.change_ref },
+      });
+      const scenario = hub.state.scenarios.find(
+        ({ index }) => index === originalApply.structuredContent.scenario_index,
+      );
+      const changedData = JSON.parse(scenario.data);
+      edit(changedData.targets[0].then[1]);
+      scenario.data = JSON.stringify(changedData);
+      const requested = await client.callTool({
+        name: "preview_boolean_automation",
+        arguments: {
+          ...argumentsWithAutoOff,
+          name: `Запрошенное правило после изменения: ${name}`,
+        },
+      });
+
+      const result = await client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: requested.structuredContent.change_ref },
+      });
+
+      assert.equal(result.isError, undefined);
+      assert.equal(result.structuredContent.status, "applied");
+      assert.equal(result.structuredContent.created, true);
+      assert.equal(
+        hub.requests.filter(({ scenario }) => scenario?.create).length,
+        2,
+      );
+    });
+  }
+});
+
 test("apply reconciles a dropped create response without sending create twice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
