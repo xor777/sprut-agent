@@ -10,5 +10,5 @@
     ]
   },
   "formatter": { "indentStyle": "space", "indentWidth": 2 },
-  "linter": { "rules": { "preset": "none" } }
+  "linter": { "rules": { "preset": "recommended" } }
 }
