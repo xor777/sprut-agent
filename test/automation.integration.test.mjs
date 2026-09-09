@@ -597,6 +597,88 @@ test("apply creates one exact native rule and repeated apply does not duplicate 
   );
 });
 
+test("auto-off preview creates one resettable native delay and reuses its exact rule", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const argumentsWithAutoOff = {
+    ...previewArguments,
+    auto_off_after_seconds: 60,
+  };
+  const prepared = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: argumentsWithAutoOff,
+  });
+
+  assert.deepEqual(prepared.structuredContent.auto_off, {
+    after_seconds: 60,
+    timer_mode: "RESET",
+    restarts_on_each_trigger: true,
+    target_value: false,
+  });
+  const first = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const equivalent = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: {
+      ...argumentsWithAutoOff,
+      name: "То же включение и автовыключение",
+    },
+  });
+  const second = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: equivalent.structuredContent.change_ref },
+  });
+
+  const payload = hub.requests.find(({ scenario }) => scenario?.create).scenario
+    .create;
+  const data = JSON.parse(payload.data);
+  assert.deepEqual(data.targets[0].then, [
+    {
+      type: "service",
+      blockId: 4,
+      aId: 34,
+      sId: 13,
+      hs: "Lightbulb",
+      characteristics: [
+        { type: "set", blockId: 5, cId: 15, hc: "On", value: "true" },
+      ],
+    },
+    {
+      type: "delay",
+      index: 1,
+      mode: "RESET",
+      time: 60_000,
+      targets: [
+        {
+          type: "service",
+          blockId: 6,
+          aId: 34,
+          sId: 13,
+          hs: "Lightbulb",
+          characteristics: [
+            {
+              type: "set",
+              blockId: 7,
+              cId: 15,
+              hc: "On",
+              value: "false",
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+  assert.equal(first.structuredContent.status, "applied");
+  assert.equal(second.structuredContent.status, "already_present");
+  assert.equal(second.structuredContent.owned, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
 test("apply reconciles a dropped create response without sending create twice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
