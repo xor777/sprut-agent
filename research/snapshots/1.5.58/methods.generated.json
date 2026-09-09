@@ -1,0 +1,2885 @@
+{
+  "domains": [
+    "accessory",
+    "account",
+    "bridge",
+    "bridgeService",
+    "bundle",
+    "catalog",
+    "characteristic",
+    "cloud",
+    "controller",
+    "device",
+    "extension",
+    "file",
+    "history",
+    "hub",
+    "link",
+    "log",
+    "logic",
+    "notification",
+    "notificationClient",
+    "room",
+    "scenario",
+    "server",
+    "service"
+  ],
+  "operations": [
+    {
+      "endpoint": "accessory.create",
+      "domain": "accessory",
+      "operation": "create",
+      "requestType": "AccessoryCreateRequest",
+      "responseType": "AccessoryMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Accessory.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.delete",
+      "domain": "accessory",
+      "operation": "delete",
+      "requestType": "AccessoryDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Accessory.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.get",
+      "domain": "accessory",
+      "operation": "get",
+      "requestType": "AccessoryGetRequest",
+      "responseType": "AccessoryMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Accessory.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.list",
+      "domain": "accessory",
+      "operation": "list",
+      "requestType": "AccessoryListRequest",
+      "responseType": "AccessoriesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Accessory.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.stream",
+      "domain": "accessory",
+      "operation": "stream",
+      "requestType": "AccessoryStreamMessage",
+      "responseType": "AccessoryStreamMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Accessory.proto",
+      "risk": "R3-sensitive",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.subscribe",
+      "domain": "accessory",
+      "operation": "subscribe",
+      "requestType": "AccessorySubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Accessory.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.supportInfo",
+      "domain": "accessory",
+      "operation": "supportInfo",
+      "requestType": "AccessorySupportInfoRequest",
+      "responseType": "SupportInfoResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Accessory.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "accessory.update",
+      "domain": "accessory",
+      "operation": "update",
+      "requestType": "AccessoryUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Accessory.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "account.answer",
+      "domain": "account",
+      "operation": "answer",
+      "requestType": "AnswerRequest",
+      "responseType": "AccountResponseMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Account.proto",
+      "risk": "R0-auth",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "account.auth",
+      "domain": "account",
+      "operation": "auth",
+      "requestType": "AuthRequest",
+      "responseType": "AccountResponseMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Account.proto",
+      "risk": "R0-auth",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "account.changePassword",
+      "domain": "account",
+      "operation": "changePassword",
+      "requestType": "AccountChangePasswordRequest",
+      "responseType": "AccountResponseMessage",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Account.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "account.delete",
+      "domain": "account",
+      "operation": "delete",
+      "requestType": "AccountDeleteRequest",
+      "responseType": "AccountResponseMessage",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Account.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "account.get",
+      "domain": "account",
+      "operation": "get",
+      "requestType": "AccountGetRequest",
+      "responseType": "AccountMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Account.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.create",
+      "domain": "bridge",
+      "operation": "create",
+      "requestType": "BridgeCreateRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 1005,
+      "responseFieldNumber": 1005,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.delete",
+      "domain": "bridge",
+      "operation": "delete",
+      "requestType": "BridgeDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Bridge.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.get",
+      "domain": "bridge",
+      "operation": "get",
+      "requestType": "BridgeGetRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Bridge.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.getAccessoryBridges",
+      "domain": "bridge",
+      "operation": "getAccessoryBridges",
+      "requestType": "BridgeGetAccessoryBridgesRequest",
+      "responseType": "BridgesServicesMessage",
+      "requestFieldNumber": 1004,
+      "responseFieldNumber": 1004,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.getOptions",
+      "domain": "bridge",
+      "operation": "getOptions",
+      "requestType": "BridgeGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Bridge.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.getServiceBridges",
+      "domain": "bridge",
+      "operation": "getServiceBridges",
+      "requestType": "BridgeGetServiceBridgesRequest",
+      "responseType": "ServiceBridgesMessage",
+      "requestFieldNumber": 1003,
+      "responseFieldNumber": 1003,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.getServices",
+      "domain": "bridge",
+      "operation": "getServices",
+      "requestType": "BridgeGetServicesRequest",
+      "responseType": "BridgeServicesMessageOld",
+      "requestFieldNumber": 1000,
+      "responseFieldNumber": 1000,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.list",
+      "domain": "bridge",
+      "operation": "list",
+      "requestType": "BridgeListRequest",
+      "responseType": "BridgesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Bridge.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.removeService",
+      "domain": "bridge",
+      "operation": "removeService",
+      "requestType": "BridgeRemoveServiceRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 1002,
+      "responseFieldNumber": 1002,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.setOptions",
+      "domain": "bridge",
+      "operation": "setOptions",
+      "requestType": "BridgeSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.setService",
+      "domain": "bridge",
+      "operation": "setService",
+      "requestType": "BridgeSetServiceRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 1001,
+      "responseFieldNumber": 1001,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.types",
+      "domain": "bridge",
+      "operation": "types",
+      "requestType": "BridgeTypesRequest",
+      "responseType": "BridgeTypesMessage",
+      "requestFieldNumber": 1006,
+      "responseFieldNumber": 1006,
+      "proto": "Bridge.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridge.update",
+      "domain": "bridge",
+      "operation": "update",
+      "requestType": "BridgeUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Bridge.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridgeService.create",
+      "domain": "bridgeService",
+      "operation": "create",
+      "requestType": "BridgeServiceCreateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "BridgeService.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridgeService.delete",
+      "domain": "bridgeService",
+      "operation": "delete",
+      "requestType": "BridgeServiceDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "BridgeService.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridgeService.get",
+      "domain": "bridgeService",
+      "operation": "get",
+      "requestType": "BridgeServiceGetRequest",
+      "responseType": "BridgeServiceMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "BridgeService.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bridgeService.list",
+      "domain": "bridgeService",
+      "operation": "list",
+      "requestType": "BridgeServiceListRequest",
+      "responseType": "BridgeServicesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "BridgeService.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bundle.createInstance",
+      "domain": "bundle",
+      "operation": "createInstance",
+      "requestType": "BundleCreateInstanceRequest",
+      "responseType": "BundleCreateInstanceResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Bundle.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bundle.get",
+      "domain": "bundle",
+      "operation": "get",
+      "requestType": "BundleGetRequest",
+      "responseType": "BundleMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Bundle.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "bundle.list",
+      "domain": "bundle",
+      "operation": "list",
+      "requestType": "BundleListRequest",
+      "responseType": "BundlesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Bundle.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.create",
+      "domain": "catalog",
+      "operation": "create",
+      "requestType": "CatalogCreateRequest",
+      "responseType": "CatalogMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Catalog.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.delete",
+      "domain": "catalog",
+      "operation": "delete",
+      "requestType": "CatalogDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Catalog.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.get",
+      "domain": "catalog",
+      "operation": "get",
+      "requestType": "CatalogGetRequest",
+      "responseType": "CatalogMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Catalog.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.list",
+      "domain": "catalog",
+      "operation": "list",
+      "requestType": "CatalogListRequest",
+      "responseType": "CatalogsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Catalog.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.scheme",
+      "domain": "catalog",
+      "operation": "scheme",
+      "requestType": "CatalogSchemeRequest",
+      "responseType": "CatalogSchemeMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Catalog.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.types",
+      "domain": "catalog",
+      "operation": "types",
+      "requestType": "CatalogTypesRequest",
+      "responseType": "CatalogTypesMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Catalog.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "catalog.update",
+      "domain": "catalog",
+      "operation": "update",
+      "requestType": "CatalogUpdateRequest",
+      "responseType": "CatalogMessage",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Catalog.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.get",
+      "domain": "characteristic",
+      "operation": "get",
+      "requestType": "CharacteristicGetRequest",
+      "responseType": "CharacteristicMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Characteristic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.getOptions",
+      "domain": "characteristic",
+      "operation": "getOptions",
+      "requestType": "CharacteristicGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Characteristic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.list",
+      "domain": "characteristic",
+      "operation": "list",
+      "requestType": "CharacteristicListRequest",
+      "responseType": "CharacteristicsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Characteristic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.setOptions",
+      "domain": "characteristic",
+      "operation": "setOptions",
+      "requestType": "CharacteristicSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Characteristic.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.subscribe",
+      "domain": "characteristic",
+      "operation": "subscribe",
+      "requestType": "CharacteristicSubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Characteristic.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.types",
+      "domain": "characteristic",
+      "operation": "types",
+      "requestType": "CharacteristicTypesRequest",
+      "responseType": "CharacteristicTypesMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Characteristic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "characteristic.update",
+      "domain": "characteristic",
+      "operation": "update",
+      "requestType": "CharacteristicUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Characteristic.proto",
+      "risk": "R2-reversible",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "cloud.test",
+      "domain": "cloud",
+      "operation": "test",
+      "requestType": "int32",
+      "responseType": "int32",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Cloud.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.create",
+      "domain": "controller",
+      "operation": "create",
+      "requestType": "ControllerCreateRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 1000,
+      "responseFieldNumber": 1000,
+      "proto": "Controller.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.delete",
+      "domain": "controller",
+      "operation": "delete",
+      "requestType": "ControllerDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.deleteAccessories",
+      "domain": "controller",
+      "operation": "deleteAccessories",
+      "requestType": "ControllerDeleteAccessoriesRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 15,
+      "responseFieldNumber": 15,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.discovery",
+      "domain": "controller",
+      "operation": "discovery",
+      "requestType": "ControllerDiscoveryMessage",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 9,
+      "responseFieldNumber": 9,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.exclusion",
+      "domain": "controller",
+      "operation": "exclusion",
+      "requestType": "ControllerExclusionMessage",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 10,
+      "responseFieldNumber": 10,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.get",
+      "domain": "controller",
+      "operation": "get",
+      "requestType": "ControllerGetRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Controller.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.getOptions",
+      "domain": "controller",
+      "operation": "getOptions",
+      "requestType": "ControllerGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Controller.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.getScanResult",
+      "domain": "controller",
+      "operation": "getScanResult",
+      "requestType": "ControllerScanResultRequest",
+      "responseType": "ControllerScanResponse",
+      "requestFieldNumber": 12,
+      "responseFieldNumber": 12,
+      "proto": "Controller.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.healMesh",
+      "domain": "controller",
+      "operation": "healMesh",
+      "requestType": "ControllerHealMeshRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 14,
+      "responseFieldNumber": 14,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.list",
+      "domain": "controller",
+      "operation": "list",
+      "requestType": "ControllerListRequest",
+      "responseType": "ControllersMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Controller.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.scan",
+      "domain": "controller",
+      "operation": "scan",
+      "requestType": "ControllerScanRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 11,
+      "responseFieldNumber": 11,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.setOptions",
+      "domain": "controller",
+      "operation": "setOptions",
+      "requestType": "ControllerSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Controller.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.types",
+      "domain": "controller",
+      "operation": "types",
+      "requestType": "ControllerTypesRequest",
+      "responseType": "ControllerTypesMessage",
+      "requestFieldNumber": 1001,
+      "responseFieldNumber": 1001,
+      "proto": "Controller.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.update",
+      "domain": "controller",
+      "operation": "update",
+      "requestType": "ControllerUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Controller.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "controller.updateMesh",
+      "domain": "controller",
+      "operation": "updateMesh",
+      "requestType": "ControllerUpdateMeshRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 13,
+      "responseFieldNumber": 13,
+      "proto": "Controller.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.create",
+      "domain": "device",
+      "operation": "create",
+      "requestType": "DeviceCreateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Device.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.createDialog",
+      "domain": "device",
+      "operation": "createDialog",
+      "requestType": "DeviceCreateDialogRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Device.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.delete",
+      "domain": "device",
+      "operation": "delete",
+      "requestType": "DeviceDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.discovery",
+      "domain": "device",
+      "operation": "discovery",
+      "requestType": "DeviceDiscoveryRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 15,
+      "responseFieldNumber": 15,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.get",
+      "domain": "device",
+      "operation": "get",
+      "requestType": "DeviceGetRequest",
+      "responseType": "DeviceMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.getAccessories",
+      "domain": "device",
+      "operation": "getAccessories",
+      "requestType": "DeviceGetAccessories",
+      "responseType": "DeviceAccessories",
+      "requestFieldNumber": 17,
+      "responseFieldNumber": 17,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.getInfo",
+      "domain": "device",
+      "operation": "getInfo",
+      "requestType": "DeviceGetInfoRequest",
+      "responseType": "DeviceInfoMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.getMesh",
+      "domain": "device",
+      "operation": "getMesh",
+      "requestType": "DeviceGetMeshRequest",
+      "responseType": "DeviceMeshMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.getOptions",
+      "domain": "device",
+      "operation": "getOptions",
+      "requestType": "DeviceGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.heal",
+      "domain": "device",
+      "operation": "heal",
+      "requestType": "DeviceHealRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 14,
+      "responseFieldNumber": 14,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.identify",
+      "domain": "device",
+      "operation": "identify",
+      "requestType": "DeviceIdentifyRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 10,
+      "responseFieldNumber": 10,
+      "proto": "Device.proto",
+      "risk": "R2-reversible",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.join",
+      "domain": "device",
+      "operation": "join",
+      "requestType": "DeviceJoinRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 12,
+      "responseFieldNumber": 12,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.joinDialog",
+      "domain": "device",
+      "operation": "joinDialog",
+      "requestType": "DeviceJoinDialogRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 13,
+      "responseFieldNumber": 13,
+      "proto": "Device.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.list",
+      "domain": "device",
+      "operation": "list",
+      "requestType": "DeviceListRequest",
+      "responseType": "DevicesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.reset",
+      "domain": "device",
+      "operation": "reset",
+      "requestType": "DeviceResetRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 11,
+      "responseFieldNumber": 11,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.setOptions",
+      "domain": "device",
+      "operation": "setOptions",
+      "requestType": "DeviceSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 9,
+      "responseFieldNumber": 9,
+      "proto": "Device.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.supportInfo",
+      "domain": "device",
+      "operation": "supportInfo",
+      "requestType": "DeviceSupportInfoRequest",
+      "responseType": "SupportInfoResponse",
+      "requestFieldNumber": 18,
+      "responseFieldNumber": 18,
+      "proto": "Device.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "device.updateFirmware",
+      "domain": "device",
+      "operation": "updateFirmware",
+      "requestType": "DeviceUpdateFirmwareRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 16,
+      "responseFieldNumber": 16,
+      "proto": "Device.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "extension.delete",
+      "domain": "extension",
+      "operation": "delete",
+      "requestType": "ExtensionDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Extension.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "extension.get",
+      "domain": "extension",
+      "operation": "get",
+      "requestType": "ExtensionGetRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Extension.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "extension.getOptions",
+      "domain": "extension",
+      "operation": "getOptions",
+      "requestType": "ExtensionGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Extension.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "extension.list",
+      "domain": "extension",
+      "operation": "list",
+      "requestType": "ExtensionListRequest",
+      "responseType": "ExtensionsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Extension.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "extension.setOptions",
+      "domain": "extension",
+      "operation": "setOptions",
+      "requestType": "ExtensionSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Extension.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.backups",
+      "domain": "file",
+      "operation": "backups",
+      "requestType": "FileBackupsRequest",
+      "responseType": "FilePrepareResponse",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "File.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.complete",
+      "domain": "file",
+      "operation": "complete",
+      "requestType": "FileCompleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "File.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.devInfo",
+      "domain": "file",
+      "operation": "devInfo",
+      "requestType": "FileDevInfoRequest",
+      "responseType": "FilePrepareResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "File.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.filePart",
+      "domain": "file",
+      "operation": "filePart",
+      "requestType": "FilePartRequest",
+      "responseType": "FilePartResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "File.proto",
+      "risk": "R1-transfer",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.logs",
+      "domain": "file",
+      "operation": "logs",
+      "requestType": "FileLogsRequest",
+      "responseType": "FilePrepareResponse",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "File.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "file.ready",
+      "domain": "file",
+      "operation": "ready",
+      "requestType": "FileReadyMessage",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "File.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "history.list",
+      "domain": "history",
+      "operation": "list",
+      "requestType": "HistoryListRequest",
+      "responseType": "HistoriesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "History.proto",
+      "risk": "R0-sensitive-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.add",
+      "domain": "hub",
+      "operation": "add",
+      "requestType": "HubAddRequest",
+      "responseType": "HubAddResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Hub.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.addCheck",
+      "domain": "hub",
+      "operation": "addCheck",
+      "requestType": "HubAddCheckRequest",
+      "responseType": "HubAddCheckResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Hub.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.delete",
+      "domain": "hub",
+      "operation": "delete",
+      "requestType": "HubDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Hub.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.discovery",
+      "domain": "hub",
+      "operation": "discovery",
+      "requestType": "HubDiscoveryRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Hub.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.get",
+      "domain": "hub",
+      "operation": "get",
+      "requestType": "HubGetRequest",
+      "responseType": "HubMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Hub.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.getOptions",
+      "domain": "hub",
+      "operation": "getOptions",
+      "requestType": "HubGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Hub.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.list",
+      "domain": "hub",
+      "operation": "list",
+      "requestType": "HubListRequest",
+      "responseType": "HubsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Hub.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.pool",
+      "domain": "hub",
+      "operation": "pool",
+      "requestType": "HubPoolRequest",
+      "responseType": "HubPoolResponse",
+      "requestFieldNumber": 11,
+      "responseFieldNumber": 11,
+      "proto": "Hub.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.restart",
+      "domain": "hub",
+      "operation": "restart",
+      "requestType": "HubRestartRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 9,
+      "responseFieldNumber": 9,
+      "proto": "Hub.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.setOptions",
+      "domain": "hub",
+      "operation": "setOptions",
+      "requestType": "HubSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Hub.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.supportInfo",
+      "domain": "hub",
+      "operation": "supportInfo",
+      "requestType": "HubSupportInfoRequest",
+      "responseType": "SupportInfoResponse",
+      "requestFieldNumber": 12,
+      "responseFieldNumber": 12,
+      "proto": "Hub.proto",
+      "risk": "R0-sensitive-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "hub.upgrade",
+      "domain": "hub",
+      "operation": "upgrade",
+      "requestType": "HubUpgradeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 10,
+      "responseFieldNumber": 10,
+      "proto": "Hub.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "link.add",
+      "domain": "link",
+      "operation": "add",
+      "requestType": "LinkAddRequest",
+      "responseType": "LinkMessage",
+      "requestFieldNumber": 1000,
+      "responseFieldNumber": 1000,
+      "proto": "Link.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "link.addVirtual",
+      "domain": "link",
+      "operation": "addVirtual",
+      "requestType": "LinkAddVirtualRequest",
+      "responseType": "LinkMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Link.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "link.list",
+      "domain": "link",
+      "operation": "list",
+      "requestType": "LinkListRequest",
+      "responseType": "LinksMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Link.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "link.remove",
+      "domain": "link",
+      "operation": "remove",
+      "requestType": "LinkRemoveRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Link.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "log.list",
+      "domain": "log",
+      "operation": "list",
+      "requestType": "LogListRequest",
+      "responseType": "LogsResponse",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Log.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "log.print",
+      "domain": "log",
+      "operation": "print",
+      "requestType": "LogPrintRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Log.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "log.subscribe",
+      "domain": "log",
+      "operation": "subscribe",
+      "requestType": "LogSubscribeRequest",
+      "responseType": "LogSubscribeResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Log.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "log.unsubscribe",
+      "domain": "log",
+      "operation": "unsubscribe",
+      "requestType": "LogUnSubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Log.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.create",
+      "domain": "logic",
+      "operation": "create",
+      "requestType": "LogicCreateRequest",
+      "responseType": "LogicMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Logic.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.delete",
+      "domain": "logic",
+      "operation": "delete",
+      "requestType": "LogicDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Logic.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.get",
+      "domain": "logic",
+      "operation": "get",
+      "requestType": "LogicGetRequest",
+      "responseType": "LogicMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Logic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.getOptions",
+      "domain": "logic",
+      "operation": "getOptions",
+      "requestType": "LogicGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Logic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.list",
+      "domain": "logic",
+      "operation": "list",
+      "requestType": "LogicListRequest",
+      "responseType": "LogicsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Logic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.setActive",
+      "domain": "logic",
+      "operation": "setActive",
+      "requestType": "LogicSetActiveRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 1000,
+      "responseFieldNumber": 1000,
+      "proto": "Logic.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.setOptions",
+      "domain": "logic",
+      "operation": "setOptions",
+      "requestType": "LogicSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Logic.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.types",
+      "domain": "logic",
+      "operation": "types",
+      "requestType": "LogicTypesRequest",
+      "responseType": "LogicTypesMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Logic.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "logic.update",
+      "domain": "logic",
+      "operation": "update",
+      "requestType": "LogicUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Logic.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.create",
+      "domain": "notification",
+      "operation": "create",
+      "requestType": "NotificationCreateRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 1000,
+      "responseFieldNumber": 1000,
+      "proto": "Notification.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.delete",
+      "domain": "notification",
+      "operation": "delete",
+      "requestType": "NotificationDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Notification.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.get",
+      "domain": "notification",
+      "operation": "get",
+      "requestType": "NotificationGetRequest",
+      "responseType": "ExtensionMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Notification.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.getOptions",
+      "domain": "notification",
+      "operation": "getOptions",
+      "requestType": "NotificationGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Notification.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.list",
+      "domain": "notification",
+      "operation": "list",
+      "requestType": "NotificationListRequest",
+      "responseType": "NotificationsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Notification.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.setOptions",
+      "domain": "notification",
+      "operation": "setOptions",
+      "requestType": "NotificationSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Notification.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.types",
+      "domain": "notification",
+      "operation": "types",
+      "requestType": "NotificationTypesRequest",
+      "responseType": "NotificationTypesMessage",
+      "requestFieldNumber": 1001,
+      "responseFieldNumber": 1001,
+      "proto": "Notification.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notification.update",
+      "domain": "notification",
+      "operation": "update",
+      "requestType": "NotificationUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Notification.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.create",
+      "domain": "notificationClient",
+      "operation": "create",
+      "requestType": "NotificationClientCreateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "NotificationClient.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.createDialog",
+      "domain": "notificationClient",
+      "operation": "createDialog",
+      "requestType": "NotificationClientCreateDialogRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "NotificationClient.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.delete",
+      "domain": "notificationClient",
+      "operation": "delete",
+      "requestType": "NotificationClientDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "NotificationClient.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.get",
+      "domain": "notificationClient",
+      "operation": "get",
+      "requestType": "NotificationClientGetRequest",
+      "responseType": "NotificationClientMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "NotificationClient.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.getOptions",
+      "domain": "notificationClient",
+      "operation": "getOptions",
+      "requestType": "NotificationClientGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "NotificationClient.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.list",
+      "domain": "notificationClient",
+      "operation": "list",
+      "requestType": "NotificationClientListRequest",
+      "responseType": "NotificationClientsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "NotificationClient.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "notificationClient.setOptions",
+      "domain": "notificationClient",
+      "operation": "setOptions",
+      "requestType": "NotificationClientSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "NotificationClient.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.create",
+      "domain": "room",
+      "operation": "create",
+      "requestType": "RoomCreateRequest",
+      "responseType": "RoomMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 6,
+      "proto": "Room.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.delete",
+      "domain": "room",
+      "operation": "delete",
+      "requestType": "RoomDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 8,
+      "proto": "Room.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.get",
+      "domain": "room",
+      "operation": "get",
+      "requestType": "RoomGetRequest",
+      "responseType": "RoomMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 4,
+      "proto": "Room.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.list",
+      "domain": "room",
+      "operation": "list",
+      "requestType": "RoomListRequest",
+      "responseType": "RoomsMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 2,
+      "proto": "Room.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.orders",
+      "domain": "room",
+      "operation": "orders",
+      "requestType": "RoomOrdersMessage",
+      "responseType": "RoomOrdersMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 12,
+      "proto": "Room.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.subscribe",
+      "domain": "room",
+      "operation": "subscribe",
+      "requestType": "RoomSubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 14,
+      "proto": "Room.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "room.update",
+      "domain": "room",
+      "operation": "update",
+      "requestType": "RoomUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 10,
+      "proto": "Room.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.create",
+      "domain": "scenario",
+      "operation": "create",
+      "requestType": "ScenarioCreateRequest",
+      "responseType": "ScenarioMessage",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Scenario.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.delete",
+      "domain": "scenario",
+      "operation": "delete",
+      "requestType": "ScenarioDeleteRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Scenario.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.get",
+      "domain": "scenario",
+      "operation": "get",
+      "requestType": "ScenarioGetRequest",
+      "responseType": "ScenarioMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Scenario.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.getOptions",
+      "domain": "scenario",
+      "operation": "getOptions",
+      "requestType": "ScenarioGetOptionsRequest",
+      "responseType": "OptionsMessage",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Scenario.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.list",
+      "domain": "scenario",
+      "operation": "list",
+      "requestType": "ScenarioListRequest",
+      "responseType": "ScenariosMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Scenario.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.orders",
+      "domain": "scenario",
+      "operation": "orders",
+      "requestType": "ScenarioOrdersMessage",
+      "responseType": "ScenarioOrdersMessage",
+      "requestFieldNumber": 9,
+      "responseFieldNumber": 9,
+      "proto": "Scenario.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.run",
+      "domain": "scenario",
+      "operation": "run",
+      "requestType": "ScenarioRunRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 8,
+      "responseFieldNumber": 8,
+      "proto": "Scenario.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.sdk",
+      "domain": "scenario",
+      "operation": "sdk",
+      "requestType": "ScenarioSdkRequest",
+      "responseType": "ScenarioSdkMessage",
+      "requestFieldNumber": 10,
+      "responseFieldNumber": 10,
+      "proto": "Scenario.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.setOptions",
+      "domain": "scenario",
+      "operation": "setOptions",
+      "requestType": "ScenarioSetOptionsRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 7,
+      "responseFieldNumber": 7,
+      "proto": "Scenario.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.subscribe",
+      "domain": "scenario",
+      "operation": "subscribe",
+      "requestType": "ScenarioSubscribeRequest",
+      "responseType": "ScenarioSubscribeResponse",
+      "requestFieldNumber": 11,
+      "responseFieldNumber": 11,
+      "proto": "Scenario.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.unsubscribe",
+      "domain": "scenario",
+      "operation": "unsubscribe",
+      "requestType": "ScenarioUnSubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 12,
+      "responseFieldNumber": 12,
+      "proto": "Scenario.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "scenario.update",
+      "domain": "scenario",
+      "operation": "update",
+      "requestType": "ScenarioUpdateRequest",
+      "responseType": "ScenarioMessage",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Scenario.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.clientDisconnect",
+      "domain": "server",
+      "operation": "clientDisconnect",
+      "requestType": "ClientDisconnectRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 14,
+      "responseFieldNumber": 14,
+      "proto": "Server.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.clientInfo",
+      "domain": "server",
+      "operation": "clientInfo",
+      "requestType": "ClientInfoMessage",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Server.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.pool",
+      "domain": "server",
+      "operation": "pool",
+      "requestType": "ServerPoolRequest",
+      "responseType": "ServerPoolResponse",
+      "requestFieldNumber": 1004,
+      "responseFieldNumber": 1004,
+      "proto": "Server.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.restart",
+      "domain": "server",
+      "operation": "restart",
+      "requestType": "ServerRestartRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 1006,
+      "responseFieldNumber": 1006,
+      "proto": "Server.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.upgrade",
+      "domain": "server",
+      "operation": "upgrade",
+      "requestType": "ServerUpgradeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 1007,
+      "responseFieldNumber": 1007,
+      "proto": "Server.proto",
+      "risk": "R4-impact",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "server.version",
+      "domain": "server",
+      "operation": "version",
+      "requestType": "VersionRequest",
+      "responseType": "VersionMessage",
+      "requestFieldNumber": 1003,
+      "responseFieldNumber": 1003,
+      "proto": "Server.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.get",
+      "domain": "service",
+      "operation": "get",
+      "requestType": "ServiceGetRequest",
+      "responseType": "ServiceMessage",
+      "requestFieldNumber": 2,
+      "responseFieldNumber": 2,
+      "proto": "Service.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.list",
+      "domain": "service",
+      "operation": "list",
+      "requestType": "ServiceListRequest",
+      "responseType": "ServicesMessage",
+      "requestFieldNumber": 1,
+      "responseFieldNumber": 1,
+      "proto": "Service.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.orders",
+      "domain": "service",
+      "operation": "orders",
+      "requestType": "ServiceOrdersMessage",
+      "responseType": "ServiceOrdersMessage",
+      "requestFieldNumber": 5,
+      "responseFieldNumber": 5,
+      "proto": "Service.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.subscribe",
+      "domain": "service",
+      "operation": "subscribe",
+      "requestType": "ServiceSubscribeRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 6,
+      "responseFieldNumber": 6,
+      "proto": "Service.proto",
+      "risk": "R1-observe",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.types",
+      "domain": "service",
+      "operation": "types",
+      "requestType": "ServiceTypesRequest",
+      "responseType": "ServiceTypesMessage",
+      "requestFieldNumber": 4,
+      "responseFieldNumber": 4,
+      "proto": "Service.proto",
+      "risk": "R0-read",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    },
+    {
+      "endpoint": "service.update",
+      "domain": "service",
+      "operation": "update",
+      "requestType": "ServiceUpdateRequest",
+      "responseType": "EmptyResponse",
+      "requestFieldNumber": 3,
+      "responseFieldNumber": 3,
+      "proto": "Service.proto",
+      "risk": "R3-configuration",
+      "riskStatus": "provisional",
+      "evidence": {
+        "schema": true,
+        "observed": false,
+        "replayed": false
+      }
+    }
+  ]
+}

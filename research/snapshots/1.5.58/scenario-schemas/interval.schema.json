@@ -1,0 +1,26 @@
+{
+  "$id": "http://makesimple.org/schema/interval",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "interval"
+    },
+    "start": {
+      "$ref": "http://makesimple.org/schema/cron"
+    },
+    "end": {
+      "$ref": "http://makesimple.org/schema/cron"
+    },
+    "trigger": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "type",
+    "start",
+    "end",
+    "trigger"
+  ],
+  "additionalProperties": false
+}

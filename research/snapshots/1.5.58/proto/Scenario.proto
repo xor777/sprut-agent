@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ScenarioProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message ScenarioRequest {
+  oneof kind {
+    ScenarioListRequest list = 1;
+    ScenarioGetRequest get = 2;
+    ScenarioUpdateRequest update = 3;
+    ScenarioCreateRequest create = 4;
+    ScenarioDeleteRequest delete = 5;
+    ScenarioGetOptionsRequest getOptions = 6;
+    ScenarioSetOptionsRequest setOptions = 7;
+    ScenarioRunRequest run = 8;
+    ScenarioOrdersMessage orders = 9;
+    ScenarioSdkRequest sdk = 10;
+    ScenarioSubscribeRequest subscribe = 11;
+    ScenarioUnSubscribeRequest unsubscribe = 12;
+  }
+}
+
+message ScenarioResponse {
+  oneof kind {
+    ScenariosMessage list = 1;
+    ScenarioMessage get = 2;
+    ScenarioMessage update = 3;
+    ScenarioMessage create = 4;
+    EmptyResponse delete = 5;
+    OptionsMessage getOptions = 6;
+    EmptyResponse setOptions = 7;
+    EmptyResponse run = 8;
+    ScenarioOrdersMessage orders = 9;
+    ScenarioSdkMessage sdk = 10;
+    ScenarioSubscribeResponse subscribe = 11;
+    EmptyResponse unsubscribe = 12;
+  }
+}
+
+message ScenarioListRequest {
+  optional uint32 aId = 1;
+  optional string expand = 2;
+}
+
+message ScenarioGetRequest {
+  optional string index = 1;
+  optional string expand = 2;
+}
+
+message ScenarioCreateRequest {
+  optional string name = 1;
+  optional string desc = 2;
+  optional bool active = 3;
+  optional bool onStart = 4;
+  optional bool sync = 5;
+  optional ScenarioType type = 6;
+  optional string data = 7;
+  optional string expand = 8;
+}
+
+message ScenarioUpdateRequest {
+  optional string index = 1;
+  optional string name = 2;
+  optional string desc = 3;
+  optional bool active = 4;
+  optional bool onStart = 5;
+  optional bool sync = 6;
+  optional ScenarioType type = 7;
+  optional string data = 8;
+  optional string expand = 9;
+}
+
+message ScenarioDeleteRequest {
+  optional string index = 1;
+}
+
+message ScenarioGetOptionsRequest {
+  optional string index = 1;
+}
+
+message ScenarioSetOptionsRequest {
+  optional string index = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message ScenarioRunRequest {
+  optional string index = 1;
+}
+
+message ScenarioSubscribeRequest {
+  optional string index = 1;
+}
+
+message ScenarioSubscribeResponse {
+  optional string uuid = 1;
+}
+
+message ScenarioUnSubscribeRequest {
+  optional string uuid = 1;
+}
+
+message ScenarioMessage {
+  optional string index = 1;
+  optional string bundleId = 2;
+  optional uint32 order = 3;
+  optional bool predefined = 4;
+  optional string name = 5;
+  optional string desc = 6;
+  repeated uint32 rooms = 7;
+  repeated string iconsIf = 8;
+  repeated string iconsThen = 9;
+  optional bool active = 10;
+  optional bool onStart = 11;
+  optional bool sync = 12;
+  optional bool error = 13;
+  optional ScenarioType type = 14;
+  optional string data = 15;
+}
+
+message ScenariosMessage {
+  repeated ScenarioMessage scenarios = 1;
+}
+
+message ScenarioOrderMessage {
+  optional string index = 1;
+  optional uint32 order = 2;
+}
+
+message ScenarioOrdersMessage {
+  repeated ScenarioOrderMessage orders = 1;
+}
+
+message ScenarioEvent {
+  optional string index = 1;
+  optional ScenarioEventType type = 2;
+  optional uint32 blockId = 3;
+  optional bool state = 4;
+  optional uint32 time = 5;
+}
+
+message ScenarioSdkRequest {}
+
+message ScenarioSdkMessage {
+  string sdk = 1;
+}
+
+enum ScenarioType {
+  BASIC = 0;
+  CODE = 1;
+  BLOCK = 2;
+  LOGIC = 3;
+  TEMPLATE = 4;
+  SMART = 5;
+  GLOBAL = 6;
+}
+
+enum ScenarioEventType {
+  FIRE = 0;
+  CONDITION = 1;
+  DELAY = 2;
+}

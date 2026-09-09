@@ -1,0 +1,28 @@
+{
+  "$id": "http://makesimple.org/schema/notify",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "notify"
+    },
+    "text": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "MESSAGE",
+        "PUSH"
+      ]
+    },
+    "to": {
+      "type": "null"
+    }
+  },
+  "required": [
+    "type",
+    "text"
+  ],
+  "additionalProperties": false
+}

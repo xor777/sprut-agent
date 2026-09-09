@@ -1,0 +1,30 @@
+{
+  "$id": "http://makesimple.org/schema/scenario",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "scenario"
+    },
+    "index": {
+      "type": "string",
+      "nullable": true
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "ACTIVATE",
+        "DEACTIVATE",
+        "FIRE",
+        "ACTIVATE_AND_FIRE",
+        "RESET"
+      ]
+    }
+  },
+  "required": [
+    "type",
+    "index",
+    "mode"
+  ],
+  "additionalProperties": false
+}

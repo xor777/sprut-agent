@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "NotificationClientProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/ExtensionChild.proto";
+
+message NotificationClientRequest {
+  oneof kind {
+    NotificationClientListRequest list = 1;
+    NotificationClientGetRequest get = 2;
+    NotificationClientCreateDialogRequest createDialog = 3;
+    NotificationClientCreateRequest create = 4;
+    NotificationClientDeleteRequest delete = 5;
+    NotificationClientGetOptionsRequest getOptions = 6;
+    NotificationClientSetOptionsRequest setOptions = 7;
+  }
+}
+
+message NotificationClientResponse {
+  oneof kind {
+    NotificationClientsMessage list = 1;
+    NotificationClientMessage get = 2;
+    OptionsMessage createDialog = 3;
+    EmptyResponse create = 4;
+    EmptyResponse delete = 5;
+    OptionsMessage getOptions = 6;
+    EmptyResponse setOptions = 7;
+  }
+}
+
+message NotificationClientListRequest {
+  optional string notificationIndex = 1;
+}
+
+message NotificationClientGetRequest {
+  optional string notificationIndex = 1;
+  optional string id = 2;
+}
+
+message NotificationClientCreateDialogRequest {
+  optional string notificationIndex = 1;
+}
+
+message NotificationClientCreateRequest {
+  optional string notificationIndex = 1;
+  repeated OptionUpdateMessage options = 2;
+
+  //Deprecated
+  optional string name = 1000 [deprecated = true];
+}
+
+message NotificationClientDeleteRequest {
+  optional string notificationIndex = 1;
+  optional string id = 2;
+}
+
+message NotificationClientGetOptionsRequest {
+  optional string notificationIndex = 1;
+  optional string id = 2;
+}
+
+message NotificationClientSetOptionsRequest {
+  optional string notificationIndex = 1;
+  optional string id = 2;
+  repeated OptionUpdateMessage options = 3;
+}
+
+message NotificationClientMessage {
+  optional string notificationIndex = 1;
+  optional string id = 2;
+  optional string name = 3;
+  repeated ExtensionChildButtonType buttons = 4;
+  repeated OptionMessage options = 5; // Опции
+}
+
+message NotificationClientEvent {
+  optional SubscribeType event = 1;
+  repeated NotificationClientMessage clients = 2;
+}
+
+message NotificationClientsMessage {
+  repeated NotificationClientMessage clients = 1;
+}

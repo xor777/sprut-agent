@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "LogicProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message LogicRequest {
+  oneof kind {
+    LogicListRequest list = 1;
+    LogicGetRequest get = 2;
+    LogicCreateRequest create = 3;
+    LogicDeleteRequest delete = 4;
+    LogicUpdateRequest update = 5;
+    LogicTypesRequest types = 6;
+    LogicGetOptionsRequest getOptions = 7;
+    LogicSetOptionsRequest setOptions = 8;
+
+    LogicSetActiveRequest setActive = 1000 [deprecated = true];
+  }
+}
+
+message LogicResponse {
+  oneof kind {
+    LogicsMessage list = 1;
+    LogicMessage get = 2;
+    LogicMessage create = 3;
+    EmptyResponse delete = 4;
+    EmptyResponse update = 5;
+    LogicTypesMessage types = 6;
+    OptionsMessage getOptions = 7;
+    EmptyResponse setOptions = 8;
+
+    EmptyResponse setActive = 1000 [deprecated = true];
+  }
+}
+
+message LogicListRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+}
+
+message LogicCreateRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+}
+
+message LogicGetRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+}
+
+message LogicDeleteRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+}
+
+message LogicSetActiveRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+  optional bool active = 4;
+}
+
+message LogicUpdateRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+  optional bool active = 4;
+}
+
+message LogicGetOptionsRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+}
+
+message LogicSetOptionsRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+  repeated OptionUpdateMessage options = 4;
+}
+
+message LogicTypesRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+}
+
+message LogicMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string type = 3;
+  optional string name = 4;
+  optional string desc = 5;
+  optional bool active = 6;
+  repeated OptionMessage options = 7;
+}
+
+message LogicsMessage {
+  repeated LogicMessage logics = 1;
+}
+
+message LogicTypeMessage {
+  optional string type = 1;
+  optional string name = 2;
+  optional string desc = 3;
+}
+
+message LogicTypesMessage {
+  repeated LogicTypeMessage logicTypes = 1;
+}
+
+message LogicEvent {
+  optional SubscribeType event = 1;
+  repeated LogicMessage logics = 2;
+}

@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "StoreProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/Extension.proto";
+import "SprutHub/API/Scenario.proto";
+
+message BundleRequest {
+  oneof kind {
+    BundleListRequest list = 1;
+    BundleGetRequest get = 2;
+    BundleCreateInstanceRequest createInstance = 3;
+  }
+}
+
+message BundleResponse {
+  oneof kind {
+    BundlesMessage list = 1;
+    BundleMessage get = 2;
+    BundleCreateInstanceResponse createInstance = 3;
+  }
+}
+
+message BundleListRequest {
+  optional BundleType bundleType = 1;
+}
+
+message BundleGetRequest {
+  string bundleId = 1;
+}
+
+message BundleCreateInstanceRequest {
+  string bundleId = 1;
+}
+
+message BundleCreateInstanceResponse {
+  InstanceMessage instance = 1;
+}
+
+message BundlesMessage {
+  repeated BundleMessage bundles = 1;
+}
+
+message BundleMessage {
+  string bundleId = 1;
+  BundleType bundleType = 2;
+  string icon = 3;
+  string name = 4;
+  string desc = 5;
+  string fullDesc = 6;
+  string author = 7;
+  string version = 8;
+  ReleaseState releaseState = 9;
+  bool canCreateInstance = 10;
+  InstanceMessage instance = 11;
+  optional string infoURL = 12;
+  optional string wikiURL = 13;
+}
+
+message InstanceMessage {
+  repeated ExtensionMessage extensions = 1;
+  repeated ScenarioMessage scenarios = 2;
+}

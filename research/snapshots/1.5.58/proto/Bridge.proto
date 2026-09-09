@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "BridgeProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/BridgeService.proto";
+import "SprutHub/API/Extension.proto";
+
+message BridgeRequest {
+  oneof kind {
+    BridgeListRequest list = 1;
+    BridgeGetRequest get = 2;
+    BridgeDeleteRequest delete = 4;
+    BridgeUpdateRequest update = 5;
+    BridgeGetOptionsRequest getOptions = 7;
+    BridgeSetOptionsRequest setOptions = 8;
+
+    BridgeGetServicesRequest getServices = 1000 [deprecated = true];
+    BridgeSetServiceRequest setService = 1001 [deprecated = true];
+    BridgeRemoveServiceRequest removeService = 1002 [deprecated = true];
+    BridgeGetServiceBridgesRequest getServiceBridges = 1003 [deprecated = true];
+    BridgeGetAccessoryBridgesRequest getAccessoryBridges = 1004 [deprecated = true];
+    BridgeCreateRequest create = 1005 [deprecated = true];
+    BridgeTypesRequest types = 1006 [deprecated = true];
+  }
+}
+
+message BridgeResponse {
+  oneof kind {
+    BridgesMessage list = 1;
+    ExtensionMessage get = 2;
+    EmptyResponse delete = 4;
+    EmptyResponse update = 5;
+    OptionsMessage getOptions = 7;
+    EmptyResponse setOptions = 8;
+
+    BridgeServicesMessageOld getServices = 1000 [deprecated = true];
+    EmptyResponse setService = 1001 [deprecated = true];
+    EmptyResponse removeService = 1002 [deprecated = true];
+    ServiceBridgesMessage getServiceBridges = 1003 [deprecated = true];
+    BridgesServicesMessage getAccessoryBridges = 1004 [deprecated = true];
+    ExtensionMessage create = 1005 [deprecated = true];
+    BridgeTypesMessage types = 1006 [deprecated = true];
+  }
+}
+
+message BridgeListRequest {
+}
+
+message BridgeGetRequest {
+  optional string index = 1;
+}
+
+message BridgeCreateRequest {
+  string bundleId = 1;
+
+  optional string type = 1000 [deprecated = true];
+  optional string name = 1001 [deprecated = true];
+}
+
+message BridgeDeleteRequest {
+  optional string index = 1;
+}
+
+message BridgeUpdateRequest {
+  optional string index = 1;
+  optional string name = 2;
+  optional bool enabled = 3;
+}
+
+message BridgeTypesRequest {}
+
+message BridgeGetOptionsRequest {
+  optional string index = 1;
+}
+
+message BridgeSetOptionsRequest {
+  optional string index = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message BridgeGetServicesRequest {
+  optional string index = 1;
+}
+
+message BridgeSetServiceRequest {
+  optional string index = 1;
+  optional BridgeServiceMessage service = 2;
+}
+
+message BridgeRemoveServiceRequest {
+  optional string index = 1;
+  optional BridgeServiceMessage service = 2;
+}
+
+message BridgeGetServiceBridgesRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+}
+
+message BridgeEvent {
+  optional SubscribeType event = 1;
+  repeated ExtensionMessage bridges = 2;
+}
+
+message BridgesMessage {
+  repeated ExtensionMessage bridges = 1;
+}
+
+message BridgeTypesMessage {
+  repeated string types = 1;
+}
+
+message BridgeServicesMessageOld {
+  optional string index = 1;
+  repeated BridgeServiceMessage services = 2;
+}
+
+message BridgesServicesMessage {
+  repeated BridgeServicesMessageOld bridges = 1;
+}
+
+message ServiceBridgesMessage {
+  repeated ServiceBridgeMessage bridges = 1;
+}
+
+message ServiceBridgeMessage {
+  optional string index = 1;
+  optional bool write = 2;
+}
+
+message BridgeGetAccessoryBridgesRequest {
+  optional uint32 aId = 1;
+  optional string index = 2;
+}

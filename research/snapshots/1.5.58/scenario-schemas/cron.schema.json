@@ -1,0 +1,31 @@
+{
+  "$id": "http://makesimple.org/schema/cron",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "cron"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "SUNRISE",
+        "SUNSET"
+      ]
+    },
+    "cron": {
+      "type": "string"
+    },
+    "offset": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "type",
+    "mode",
+    "cron",
+    "offset"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "LogProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message LogRequest {
+  oneof kind {
+    LogListRequest list = 1;
+    LogPrintRequest print = 2;
+    LogSubscribeRequest subscribe = 3;
+    LogUnSubscribeRequest unsubscribe = 4;
+  }
+}
+
+message LogResponse {
+  oneof kind {
+    LogsResponse list = 1;
+    EmptyResponse print = 2;
+    LogSubscribeResponse subscribe = 3;
+    EmptyResponse unsubscribe = 4;
+  }
+}
+
+message LogListRequest {
+  optional uint64 lastTime = 1;
+  optional uint32 count = 2;
+}
+
+message LogPrintRequest {
+  optional LogLevel level = 1;
+  optional string path = 2;
+  optional string message = 3;
+}
+
+message LogMessage {
+  optional uint64 time = 1;
+  optional LogLevel level = 2;
+  optional string path = 3;
+  optional string message = 4;
+}
+
+message LogsMessage {
+  repeated LogMessage log = 1;
+}
+
+message LogsResponse {
+  repeated LogMessage log = 1;
+}
+
+message LogSubscribeRequest {
+}
+
+message LogSubscribeResponse {
+  optional string uuid = 1;
+}
+
+message LogUnSubscribeRequest {
+  optional string uuid = 1;
+}
+
+enum LogLevel {
+  LOG_LEVEL_OFF = 0;
+  LOG_LEVEL_ERROR = 1;
+  LOG_LEVEL_WARN = 2;
+  LOG_LEVEL_INFO = 3;
+  LOG_LEVEL_DEBUG = 4;
+  LOG_LEVEL_TRACE = 5;
+  LOG_LEVEL_ALL = 6;
+}

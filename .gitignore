@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+
+# Raw WebSocket captures contain account and smart-home data.
+research/captures/raw/
+
+# Temporary recorder state must never be committed.
+research/captures/.state/

@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "APIProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Accessory.proto";
+import "SprutHub/API/Account.proto";
+import "SprutHub/API/Bridge.proto";
+import "SprutHub/API/BridgeService.proto";
+import "SprutHub/API/Characteristic.proto";
+import "SprutHub/API/Cloud.proto";
+import "SprutHub/API/Controller.proto";
+import "SprutHub/API/Device.proto";
+import "SprutHub/API/File.proto";
+import "SprutHub/API/Hub.proto";
+import "SprutHub/API/Link.proto";
+import "SprutHub/API/Log.proto";
+import "SprutHub/API/Logic.proto";
+import "SprutHub/API/Notification.proto";
+import "SprutHub/API/NotificationClient.proto";
+import "SprutHub/API/Room.proto";
+import "SprutHub/API/Server.proto";
+import "SprutHub/API/Service.proto";
+import "SprutHub/API/Scenario.proto";
+import "SprutHub/API/History.proto";
+import "SprutHub/API/Catalog.proto";
+import "SprutHub/API/Bundle.proto";
+import "SprutHub/API/Extension.proto";
+
+message APIMessage {
+  optional int32 id = 1;
+  optional string token = 2;
+  optional string serial = 3;
+  optional string cid = 4;
+  optional string userId = 5;
+  optional string method = 6;
+  optional EndpointRequest params = 7;
+  optional EndpointResponse result = 8;
+  optional ErrorResponse error = 9;
+  optional EndpointEvent event = 10;
+}
+
+message EndpointRequest {
+  oneof kind {
+    RoomRequest room = 1;
+    AccessoryRequest accessory = 2;
+    ServiceRequest service = 3;
+    CharacteristicRequest characteristic = 4;
+    DeviceRequest device = 5;
+    LinkRequest link = 6;
+    LogicRequest logic = 7;
+    ServerRequest server = 8;
+    FileRequest file = 9;
+    LogRequest log = 10;
+    ScenarioRequest scenario = 11;
+    ControllerRequest controller = 12;
+    BridgeRequest bridge = 13;
+    BridgeServiceRequest bridgeService = 14;
+    NotificationRequest notification = 15;
+    NotificationClientRequest notificationClient = 16;
+    HubRequest hub = 17;
+    CloudRequest cloud = 18;
+    AccountRequest account = 19;
+    HistoryRequest history = 20;
+    CatalogRequest catalog = 21;
+    BundleRequest bundle = 22;
+    ExtensionRequest extension = 23;
+  }
+}
+
+message EndpointResponse {
+  oneof kind {
+    RoomResponse room = 1;
+    AccessoryResponse accessory = 2;
+    ServiceResponse service = 3;
+    CharacteristicResponse characteristic = 4;
+    DeviceResponse device = 5;
+    LinkResponse link = 6;
+    LogicResponse logic = 7;
+    ServerResponse server = 8;
+    FileResponse file = 9;
+    LogResponse log = 10;
+    ScenarioResponse scenario = 11;
+    ControllerResponse controller = 12;
+    BridgeResponse bridge = 13;
+    BridgeServiceResponse bridgeService = 14;
+    NotificationResponse notification = 15;
+    NotificationClientResponse notificationClient = 16;
+    HubResponse hub = 17;
+    CloudResponse cloud = 18;
+    AccountResponse account = 19;
+    HistoryResponse history = 20;
+    CatalogResponse catalog = 21;
+    BundleResponse bundle = 22;
+    ExtensionResponse extension = 23;
+  }
+}
+
+message EndpointEvent {
+  oneof kind {
+    RoomEvent room = 1;
+    AccessoryEvent accessory = 2;
+    ServiceEvent service = 3;
+    CharacteristicEvent characteristic = 4;
+    DeviceEvent device = 5;
+    LinkEvent link = 6;
+    LogicEvent logic = 7;
+    ServerEvent server = 8;
+    FileReadyMessage file = 9;
+    LogsMessage log = 10;
+    ScenarioEvent scenario = 11;
+    ControllerEvent controller = 12;
+    BridgeEvent bridge = 13;
+    BridgeServiceEvent bridgeService = 14;
+    NotificationEvent notification = 15;
+    NotificationClientEvent notificationClient = 16;
+    HubEvent hub = 17;
+    CloudEvent cloud = 18;
+    ExtensionEvent extension = 23;
+  }
+}
+
+message ErrorResponse
+{
+  optional int32 code = 1;
+  optional string message = 2;
+}

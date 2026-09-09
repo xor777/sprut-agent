@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ExtensionProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message ExtensionRequest {
+  oneof kind {
+    ExtensionListRequest list = 1;
+    ExtensionGetRequest get = 2;
+    ExtensionDeleteRequest delete = 3;
+    ExtensionGetOptionsRequest getOptions = 4;
+    ExtensionSetOptionsRequest setOptions = 5;
+  }
+}
+
+message ExtensionResponse {
+  oneof kind {
+    ExtensionsMessage list = 1;
+    ExtensionMessage get = 2;
+    EmptyResponse delete = 3;
+    OptionsMessage getOptions = 4;
+    EmptyResponse setOptions = 5;
+  }
+}
+
+message ExtensionEvent {
+  SubscribeType event = 1;
+  repeated ExtensionMessage extensions = 2;
+}
+
+message ExtensionListRequest {
+  optional BundleType bundleType = 1;
+}
+
+message ExtensionGetRequest {
+  string key = 1;
+}
+
+message ExtensionDeleteRequest {
+  string key = 1;
+}
+
+message ExtensionGetOptionsRequest {
+  string key = 1;
+}
+
+message ExtensionSetOptionsRequest {
+  string key = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message ExtensionsMessage {
+  repeated ExtensionMessage extensions = 1;
+}
+
+message ExtensionMessage {
+  string key = 1;
+  optional uint32 id = 2;
+  optional string type = 3;
+  optional string bundleId = 4;
+  optional BundleType bundleType = 5;
+  optional string index = 6;
+  optional string name = 7;
+  optional string icon = 8;
+  optional bool enabled = 9;
+  optional bool discovery = 10;
+  optional bool exclusion = 11;
+  optional ReleaseState release = 12;
+  optional LoadingState state = 13;
+  repeated ExtensionButtonType buttons = 14;
+  optional uint32 childCount = 15;
+  repeated OptionMessage options = 16; // Опции
+}
+
+enum ExtensionButtonType {
+  EXT_B_ADD_DIALOG = 0;
+  EXT_B_DISCOVERY = 1;
+  EXT_B_EXCLUSION = 2;
+  EXT_B_NETWORK_MAP = 3;
+}

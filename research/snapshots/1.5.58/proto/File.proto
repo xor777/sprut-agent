@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "FileProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message FileRequest {
+  oneof kind {
+    FileBackupsRequest backups = 1;
+    FileLogsRequest logs = 2;
+    FileDevInfoRequest devInfo = 3;
+    FilePartRequest filePart = 4;
+    FileCompleteRequest complete = 5;
+    FileReadyMessage ready = 6;
+  }
+}
+
+message FileResponse {
+  oneof kind {
+    FilePrepareResponse backups = 1;
+    FilePrepareResponse logs = 2;
+    FilePrepareResponse devInfo = 3;
+    FilePartResponse filePart = 4;
+    EmptyResponse complete = 5;
+    EmptyResponse ready = 6;
+  }
+}
+
+message FileBackupsRequest {}
+
+message FileLogsRequest {}
+
+message FileDevInfoRequest {}
+
+message FilePrepareResponse {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+}
+
+message FileReadyMessage {
+  optional bool success = 1;
+  optional FileLoc loc = 2;
+  optional string path = 3;
+  optional uint64 length = 4;
+}
+
+message FilePartRequest {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+  optional uint64 start = 3;
+  optional uint32 length = 4;
+}
+
+message FilePartResponse {
+  optional string data = 1;
+}
+
+message FileCompleteRequest {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+}
+
+enum FileLoc {
+  LOC_TMP = 0;
+  LOC_BACKUP = 1;
+}

@@ -1,0 +1,18 @@
+{
+  "$id": "http://makesimple.org/schema/code",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "code"
+    },
+    "code": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "code"
+  ],
+  "additionalProperties": false
+}

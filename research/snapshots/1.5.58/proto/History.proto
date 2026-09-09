@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "HistoryProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message HistoryRequest {
+  oneof kind {
+    HistoryListRequest list = 1;
+  }
+}
+
+message HistoryResponse {
+  oneof kind {
+    HistoriesMessage list = 1;
+  }
+}
+
+message HistoryListRequest {
+  optional HistoryFilterMessage filter = 1;
+  optional uint32 limit = 2;
+  optional uint64 afterTimestamp = 3;
+  optional uint64 beforeTimestamp = 4;
+  optional uint64 afterId = 5;
+  optional uint64 beforeId = 6;
+  optional HistoryGroup group = 7;
+
+  repeated HistoryFilterAccessoryMessage filters = 10;
+}
+
+message HistoryFilterMessage {
+  repeated HistoryFilterAccessoryMessage accessories = 1;
+}
+
+message HistoryFilterAccessoryMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+}
+
+message HistoryMessage {
+  optional uint64 id = 1;
+  optional uint64 timestamp = 2;
+  optional uint32 aId = 3;
+  optional uint32 sId = 4;
+  optional uint32 cId = 5;
+  optional Value value = 6;
+  optional Value minValue = 7;
+  optional Value maxValue = 8;
+}
+
+message HistoriesMessage {
+  repeated HistoryMessage histories = 1;
+}
+
+enum HistoryGroup {
+  MINUTE = 0;
+  HOUR = 1;
+  DAY = 2;
+  MONTH = 3;
+  YEAR = 4;
+}

@@ -1,0 +1,83 @@
+{
+  "$id": "http://makesimple.org/schema/conditions",
+  "type": "array",
+  "items": {
+    "if": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "characteristic"
+        }
+      }
+    },
+    "then": {
+      "$ref": "http://makesimple.org/schema/condition_characteristic"
+    },
+    "else": {
+      "if": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "condition"
+          }
+        }
+      },
+      "then": {
+        "$ref": "http://makesimple.org/schema/condition"
+      },
+      "else": {
+        "if": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "code"
+            }
+          }
+        },
+        "then": {
+          "$ref": "http://makesimple.org/schema/code"
+        },
+        "else": {
+          "if": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "cron"
+              }
+            }
+          },
+          "then": {
+            "$ref": "http://makesimple.org/schema/cron"
+          },
+          "else": {
+            "if": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "interval"
+                }
+              }
+            },
+            "then": {
+              "$ref": "http://makesimple.org/schema/interval"
+            },
+            "else": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "enum": [
+                    "characteristic",
+                    "condition",
+                    "code",
+                    "cron",
+                    "interval"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

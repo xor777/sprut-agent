@@ -1,0 +1,50 @@
+{
+  "extractorVersion": 1,
+  "sourceUrl": "https://beta.spruthub.ru/",
+  "webClient": {
+    "version": "1.5.58",
+    "build": "2025-09-16T14:32:15.361Z",
+    "full": "1.5.58 (2025-09-16T14:32:15.361Z)"
+  },
+  "assets": [
+    {
+      "url": "https://beta.spruthub.ru/css/app.e5b68ff69c4da003b219.css",
+      "bytes": 332627,
+      "sha256": "3f26b8a6e81c6a8fdc4d409b39994fdffdcf6e57c9959a16d9e10a2aba83eced"
+    },
+    {
+      "url": "https://beta.spruthub.ru/css/vendors.8d8ad55eb75a7fa711fb.css",
+      "bytes": 141203,
+      "sha256": "32e9f1054b0080b39c140c76c0e209587920e54324dc328c5b359f7774466a38"
+    },
+    {
+      "url": "https://beta.spruthub.ru/js/app.d695670265f657e0b8b7.js",
+      "bytes": 1647793,
+      "sha256": "0be3c92537b0e8b0f55223eb9c182282a3398ba1eeb2ba9239e8322c283627a0"
+    },
+    {
+      "url": "https://beta.spruthub.ru/js/runtime.6148ad10a6f256769fd4.js",
+      "bytes": 3272,
+      "sha256": "584d7109337d0825763b1ce158bf4ab9a67408956a9240241442f0b20724645b"
+    },
+    {
+      "url": "https://beta.spruthub.ru/js/vendors.4671e0c57103c03818ef.js",
+      "bytes": 7024031,
+      "sha256": "c38d5fbbe375ff57f6c0b494181c84e666705c10f1dcf82b646cfa875f11d3f5"
+    }
+  ],
+  "protobuf": {
+    "files": 26,
+    "domains": 23,
+    "operations": 168,
+    "messages": 337,
+    "messageFields": 1278,
+    "enums": 21,
+    "enumValues": 114,
+    "sha256": "1cf907bf981db8a4f8923ef51b28287e95dd30a416753c3b0a6fe42d8a122ccb"
+  },
+  "scenarioSchemas": {
+    "files": 15,
+    "sha256": "1492d80159040669ab5291ce8f0683c30b1918b1e6b30184bcf2ff38a9b0f86c"
+  }
+}

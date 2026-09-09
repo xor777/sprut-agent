@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ControllerProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/Extension.proto";
+
+message ControllerRequest {
+  oneof kind {
+    ControllerListRequest list = 1;
+    ControllerGetRequest get = 2;
+    ControllerDeleteRequest delete = 4;
+    ControllerUpdateRequest update = 5;
+    ControllerGetOptionsRequest getOptions = 7;
+    ControllerSetOptionsRequest setOptions = 8;
+    ControllerDiscoveryMessage discovery = 9;
+    ControllerExclusionMessage exclusion = 10;
+    ControllerScanRequest scan = 11;
+    ControllerScanResultRequest getScanResult = 12;
+    ControllerUpdateMeshRequest updateMesh = 13;
+    ControllerHealMeshRequest healMesh = 14;
+    ControllerDeleteAccessoriesRequest deleteAccessories = 15;
+
+    ControllerCreateRequest create = 1000 [deprecated = true];
+    ControllerTypesRequest types = 1001 [deprecated = true];
+  }
+}
+
+message ControllerResponse {
+  oneof kind {
+    ControllersMessage list = 1;
+    ExtensionMessage get = 2;
+    EmptyResponse delete = 4;
+    EmptyResponse update = 5;
+    OptionsMessage getOptions = 7;
+    EmptyResponse setOptions = 8;
+    EmptyResponse discovery = 9;
+    EmptyResponse exclusion = 10;
+    EmptyResponse scan = 11;
+    ControllerScanResponse getScanResult = 12;
+    EmptyResponse updateMesh = 13;
+    EmptyResponse healMesh = 14;
+    EmptyResponse deleteAccessories = 15;
+
+    ExtensionMessage create = 1000 [deprecated = true];
+    ControllerTypesMessage types = 1001 [deprecated = true];
+  }
+}
+
+message ControllerListRequest {
+}
+
+message ControllerGetRequest {
+  optional string index = 1;
+}
+
+message ControllerCreateRequest {
+  string bundleId = 1;
+
+  optional string type = 1000 [deprecated = true];
+  optional string name = 1001 [deprecated = true];
+}
+
+message ControllerDeleteRequest {
+  optional string index = 1;
+}
+
+message ControllerUpdateRequest {
+  optional string index = 1;
+  optional string name = 2;
+  optional bool enabled = 3;
+}
+
+message ControllerTypesRequest {}
+
+message ControllerGetOptionsRequest {
+  optional string index = 1;
+}
+
+message ControllerSetOptionsRequest {
+  optional string index = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message ControllerDiscoveryMessage {
+  optional string index = 1;
+  optional bool state = 2;
+}
+
+message ControllerExclusionMessage {
+  optional string index = 1;
+  optional bool state = 2;
+}
+
+message ControllerScanRequest {
+  optional string index = 1;
+}
+
+message ControllerScanResultRequest {
+  optional string index = 1;
+}
+
+
+message ControllerScanResponse {
+  repeated ControllerScanMessage scans = 1;
+}
+
+message ControllerScanMessage {
+  optional string id = 1;
+  optional string name = 2;
+  optional string address = 3;
+  optional int32 channel = 4;
+  optional string panId = 5;
+  optional string extPanId = 6;
+  optional string deviceId = 7;
+  optional string version = 8;
+}
+
+message ControllerUpdateMeshRequest {
+  optional string index = 1;
+}
+
+message ControllerHealMeshRequest {
+  optional string index = 1;
+}
+
+message ControllerDeleteAccessoriesRequest {
+  optional string index = 1;
+}
+
+message ControllerEvent {
+  optional SubscribeType event = 1;
+  repeated ExtensionMessage controllers = 2;
+}
+
+message ControllersMessage {
+  repeated ExtensionMessage controllers = 1;
+}
+
+message ControllerTypesMessage {
+  repeated string types = 1;
+}

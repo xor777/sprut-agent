@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ExtensionChildProto";
+
+package SprutHub.API;
+
+enum ExtensionChildButtonType {
+  CHILD_B_INFO = 0;
+  CHILD_B_OPTIONS = 1;
+  CHILD_B_JOIN = 2;
+  CHILD_B_JOIN_DIALOG = 3;
+  CHILD_B_REMOVE = 4;
+  CHILD_B_HEAL = 5;
+  CHILD_B_DISCOVERY = 6;
+  CHILD_B_UPDATE = 7;
+  CHILD_B_UPDATE_FIRMWARE = 8;
+}

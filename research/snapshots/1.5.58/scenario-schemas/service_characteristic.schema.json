@@ -1,0 +1,53 @@
+{
+  "$id": "http://makesimple.org/schema/service_characteristic",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "set",
+        "toggle",
+        "from",
+        "inc",
+        "dec"
+      ]
+    },
+    "cId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "hc": {
+      "type": "string"
+    },
+    "value": {
+      "type": "string",
+      "nullable": true
+    },
+    "from_aId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "from_sId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "from_cId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "from_hs": {
+      "type": "string",
+      "nullable": true
+    },
+    "from_hc": {
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "required": [
+    "type",
+    "cId",
+    "hc"
+  ],
+  "additionalProperties": false
+}

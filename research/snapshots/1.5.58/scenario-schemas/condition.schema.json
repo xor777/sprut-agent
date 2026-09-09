@@ -1,0 +1,26 @@
+{
+  "$id": "http://makesimple.org/schema/condition",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "condition"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "OR",
+        "AND"
+      ]
+    },
+    "conditions": {
+      "$ref": "http://makesimple.org/schema/conditions"
+    }
+  },
+  "required": [
+    "type",
+    "mode",
+    "conditions"
+  ],
+  "additionalProperties": false
+}

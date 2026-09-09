@@ -1,0 +1,57 @@
+{
+  "$id": "http://makesimple.org/schema/condition_characteristic",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "characteristic"
+    },
+    "aId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "sId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "cId": {
+      "type": "integer",
+      "nullable": true
+    },
+    "hs": {
+      "type": "string"
+    },
+    "hc": {
+      "type": "string"
+    },
+    "trigger": {
+      "type": "boolean"
+    },
+    "cond": {
+      "type": "string"
+    },
+    "value": {
+      "type": "string"
+    },
+    "timeCond": {
+      "type": "string",
+      "nullable": true
+    },
+    "time": {
+      "type": "integer",
+      "nullable": true
+    }
+  },
+  "required": [
+    "type",
+    "aId",
+    "sId",
+    "cId",
+    "hs",
+    "hc",
+    "trigger",
+    "cond",
+    "value"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "CloudProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message CloudRequest {
+  oneof kind {
+    int32 test = 1;
+  }
+}
+
+message CloudResponse {
+  oneof kind {
+    int32 test = 1;
+  }
+}
+
+message CloudEvent {
+  optional SubscribeType event = 1;
+  // TODO
+}
+
+message CloudLoginRequest {
+  optional string email = 1;
+  optional string serial = 3;
+  optional string mac = 4;
+}

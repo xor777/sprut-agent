@@ -1,0 +1,228 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "DeviceProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Accessory.proto";
+import "SprutHub/API/ExtensionChild.proto";
+import "SprutHub/API/Utils.proto";
+
+message DeviceRequest {
+  oneof kind {
+    DeviceListRequest list = 1;
+    DeviceGetRequest get = 2;
+    DeviceCreateDialogRequest createDialog = 3;
+    DeviceCreateRequest create = 4;
+    DeviceDeleteRequest delete = 5;
+    DeviceGetInfoRequest getInfo = 6;
+    DeviceGetMeshRequest getMesh = 7;
+    DeviceGetOptionsRequest getOptions = 8;
+    DeviceSetOptionsRequest setOptions = 9;
+    DeviceIdentifyRequest identify = 10;
+    DeviceResetRequest reset = 11;
+    DeviceJoinRequest join = 12;
+    DeviceJoinDialogRequest joinDialog = 13;
+    DeviceHealRequest heal = 14;
+    DeviceDiscoveryRequest discovery = 15;
+    DeviceUpdateFirmwareRequest updateFirmware = 16;
+    DeviceGetAccessories getAccessories = 17;
+    DeviceSupportInfoRequest supportInfo = 18;
+  }
+}
+
+message DeviceResponse {
+  oneof kind {
+    DevicesMessage list = 1;
+    DeviceMessage get = 2;
+    OptionsMessage createDialog = 3;
+    EmptyResponse create = 4;
+    EmptyResponse delete = 5;
+    DeviceInfoMessage getInfo = 6;
+    DeviceMeshMessage getMesh = 7;
+    OptionsMessage getOptions = 8;
+    EmptyResponse setOptions = 9;
+    EmptyResponse identify = 10;
+    EmptyResponse reset = 11;
+    EmptyResponse join = 12;
+    OptionsMessage joinDialog = 13;
+    EmptyResponse heal = 14;
+    EmptyResponse discovery = 15;
+    EmptyResponse updateFirmware = 16;
+    DeviceAccessories getAccessories = 17;
+    SupportInfoResponse supportInfo = 18;
+  }
+}
+
+message DeviceListRequest {
+  optional string controllerIndex = 1;
+  optional string expand = 2;
+}
+
+message DeviceGetRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+  optional string expand = 3;
+}
+
+message DeviceCreateDialogRequest {
+  optional string controllerIndex = 1;
+}
+
+message DeviceCreateRequest {
+  optional string controllerIndex = 1;
+  repeated OptionUpdateMessage options = 2;
+
+  //Deprecated
+  optional string name = 1000 [deprecated = true];
+}
+
+message DeviceDeleteRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceGetInfoRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceInfoMessage {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+  optional string info = 3;
+}
+
+message DeviceGetMeshRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceMeshMessage {
+  optional string id = 1; // Уникальный id устройства
+  optional string address = 2; // Сетевой адрес, если есть
+  optional string role = 3; // Роль устройства в mesh сети (координатор, роутер, конечное устройство)
+  optional string parent = 4; // Место прописки, если предусмотрено протоколом
+  repeated string associated = 5; // Ассоциации или биндинги
+  repeated DeviceNeighborMessage neighbor = 6; // Соседние ноды
+  repeated string route = 7; // Последний успешный маршрут
+  repeated string RSSI = 8; // Последний RSSI, если больше одного то соотносится с маршрутом
+  repeated string LQI = 9; // Последний LQI, если больше одного то соотносится с маршрутом
+  optional uint64 txSpeed = 10; // Скорость отправки данных в kbit/s, если предусмотрено протоколом
+  optional uint64 rxSpeed = 11; // Скорость получения данных в kbit/s, если предусмотрено протоколом
+}
+
+message DeviceNeighborMessage {
+  optional string id = 1; // Уникальный id устройства
+  optional string address = 2; // Сетевой адрес, если есть
+  optional string lqi = 3; // Качество связи с этим соседом, если предусмотрено протоколом
+  optional string hop = 4; // Глубина, или количество шагов, если предусмотрено протоколом
+}
+
+message DeviceGetOptionsRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+
+  optional uint32 endpoint = 1000 [deprecated = true];
+}
+
+message DeviceSetOptionsRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+  repeated OptionUpdateMessage options = 3;
+
+  optional uint32 endpoint = 1000 [deprecated = true];
+}
+
+message DeviceIdentifyRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceResetRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceJoinRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+  repeated OptionUpdateMessage options = 3;
+}
+
+message DeviceJoinDialogRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceHealRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceDiscoveryRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceMessage {
+  optional string controllerIndex = 1; // Индекс контроллера
+  optional string id = 2; // Уникальный id устройства
+  optional string address = 3; // Сетевой адрес, если есть (NWK)
+  optional string name = 4; // Имя устройства
+  optional string firmware = 5; // Прошивка
+  optional string manufacturer = 6; // Производитель
+  optional string model = 7; // Модель
+  optional string init = 8; // Текущий этап спаривания
+  optional string state = 9; // Статус устройства (работает, не отвечает)
+  optional bool online = 11; // Находится ли устройство в сети
+  optional bool paired = 12; // Устройство спарено
+  optional bool removed = 13; // Устройство удалено
+  optional bool firmwareAvailable = 14; // Устройство удалено
+  optional uint32 catalogId = 15; // Номер в каталоге
+  optional string host = 16; // Имя хоста, либо ip адрес, если есть
+  optional uint32 port = 17; // Порт, если есть
+  optional string template = 18; // Указание происхождения шаблона
+  repeated ExtensionChildButtonType buttons = 21; // Кнопки, отображаемые в интерфейсе
+  repeated OptionMessage options = 23; // Опции
+  repeated uint32 roomIds = 24;
+
+  //get
+  optional uint64 lastSeen = 10; // Время последнего сообщения от устройства (unix timestamp)
+
+
+  optional DeviceMeshMessage mesh = 20; // Топология, если это mesh сеть
+  optional string info = 19; // Информация об устройстве в виде html странички без стиля
+
+  //repeated OptionUpdateMessage properties = 22; // Любые дополнительные свойства
+}
+
+message DeviceEvent {
+  optional SubscribeType event = 1;
+  repeated DeviceMessage devices = 2;
+}
+
+message DevicesMessage {
+  repeated DeviceMessage devices = 1;
+}
+
+message DeviceUpdateFirmwareRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceGetAccessories {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}
+
+message DeviceAccessories {
+  repeated AccessoryMessage accessories = 1;
+}
+
+message DeviceSupportInfoRequest {
+  optional string controllerIndex = 1;
+  optional string id = 2;
+}

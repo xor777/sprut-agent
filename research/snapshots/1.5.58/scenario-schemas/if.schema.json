@@ -1,0 +1,47 @@
+{
+  "$id": "http://makesimple.org/schema/if",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "if"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "EVERY",
+        "ONCE"
+      ]
+    },
+    "if": {
+      "$ref": "http://makesimple.org/schema/condition"
+    },
+    "then": {
+      "$ref": "http://makesimple.org/schema/targets"
+    },
+    "else": {
+      "oneOf": [
+        {
+          "$ref": "http://makesimple.org/schema/targets"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "then_delay": {
+      "type": "integer",
+      "nullable": true
+    },
+    "else_delay": {
+      "type": "integer",
+      "nullable": true
+    }
+  },
+  "required": [
+    "type",
+    "if",
+    "then"
+  ],
+  "additionalProperties": false
+}

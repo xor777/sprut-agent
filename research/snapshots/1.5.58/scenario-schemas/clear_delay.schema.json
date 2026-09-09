@@ -1,0 +1,18 @@
+{
+  "$id": "http://makesimple.org/schema/clear_delay",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "clear_delay"
+    },
+    "index": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "type",
+    "index"
+  ],
+  "additionalProperties": false
+}

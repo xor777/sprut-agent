@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "LinkMessageProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message LinkRequest {
+  oneof kind {
+    LinkListRequest list = 1;
+    LinkAddVirtualRequest addVirtual = 3;
+    LinkRemoveRequest remove = 4;
+
+    //Deprecated
+    LinkAddRequest add = 1000 [deprecated = true];
+  }
+}
+
+message LinkResponse {
+  oneof kind {
+    LinksMessage list = 1;
+    LinkMessage addVirtual = 3;
+    EmptyResponse remove = 4;
+
+    //Deprecated
+    LinkMessage add = 1000 [deprecated = true];
+  }
+}
+
+message LinkListRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+}
+
+message LinkAddRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  optional string linkId = 4;
+}
+
+message LinkAddVirtualRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 3;
+  optional uint32 cId = 4;
+  optional uint32 tAId = 5;
+  optional uint32 tSId = 6;
+  optional uint32 tCId = 7;
+}
+
+message LinkRemoveRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  optional string linkId = 4;
+}
+
+message LinksMessage {
+  repeated LinkMessage links = 1;
+
+  //Deprecated
+  optional LinkMessage mainLink = 1000 [deprecated = true];
+}
+
+message LinkEvent {
+  optional SubscribeType event = 1;
+  repeated LinkMessage links = 2;
+}

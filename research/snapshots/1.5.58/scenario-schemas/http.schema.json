@@ -1,0 +1,22 @@
+{
+  "$id": "http://makesimple.org/schema/http",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "http"
+    },
+    "url": {
+      "type": "string"
+    },
+    "method": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "type",
+    "url",
+    "method"
+  ],
+  "additionalProperties": false
+}

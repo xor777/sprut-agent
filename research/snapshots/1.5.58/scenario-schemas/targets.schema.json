@@ -1,0 +1,124 @@
+{
+  "$id": "http://makesimple.org/schema/targets",
+  "type": "array",
+  "items": {
+    "if": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "service"
+        }
+      }
+    },
+    "then": {
+      "$ref": "http://makesimple.org/schema/service"
+    },
+    "else": {
+      "if": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "if"
+          }
+        }
+      },
+      "then": {
+        "$ref": "http://makesimple.org/schema/if"
+      },
+      "else": {
+        "if": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "delay"
+            }
+          }
+        },
+        "then": {
+          "$ref": "http://makesimple.org/schema/delay"
+        },
+        "else": {
+          "if": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "clear_delay"
+              }
+            }
+          },
+          "then": {
+            "$ref": "http://makesimple.org/schema/clear_delay"
+          },
+          "else": {
+            "if": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "notify"
+                }
+              }
+            },
+            "then": {
+              "$ref": "http://makesimple.org/schema/notify"
+            },
+            "else": {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "scenario"
+                  }
+                }
+              },
+              "then": {
+                "$ref": "http://makesimple.org/schema/scenario"
+              },
+              "else": {
+                "if": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "code"
+                    }
+                  }
+                },
+                "then": {
+                  "$ref": "http://makesimple.org/schema/code"
+                },
+                "else": {
+                  "if": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "const": "http"
+                      }
+                    }
+                  },
+                  "then": {
+                    "$ref": "http://makesimple.org/schema/http"
+                  },
+                  "else": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "service",
+                          "if",
+                          "delay",
+                          "clear_delay",
+                          "notify",
+                          "scenario",
+                          "code"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
