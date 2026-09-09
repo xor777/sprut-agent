@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -106,7 +113,7 @@ async function startHub() {
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request.params);
       if (request.params.scenario?.create && state.closeWithoutCreate) {
@@ -130,6 +137,16 @@ async function startHub() {
         return;
       }
       const result = respond(state, request.params);
+      if (request.params.scenario?.create && state.afterCreate) {
+        const afterCreate = state.afterCreate;
+        state.afterCreate = undefined;
+        await afterCreate();
+      }
+      if (request.params.scenario?.delete && state.afterDelete) {
+        const afterDelete = state.afterDelete;
+        state.afterDelete = undefined;
+        await afterDelete();
+      }
       if (request.params.scenario?.create && state.closeAfterCreate) {
         state.closeAfterCreate = false;
         socket.close();
@@ -349,6 +366,31 @@ async function setup(t) {
     await rm(stateDirectory, { recursive: true, force: true });
   });
   return { hub, stateDirectory };
+}
+
+async function blockStateDirectory(t, stateDirectory) {
+  const backupDirectory = `${stateDirectory}-backup`;
+  await rename(stateDirectory, backupDirectory);
+  await writeFile(stateDirectory, "local state storage unavailable\n");
+  let restored = false;
+  const restore = async () => {
+    if (restored) return;
+    await rm(stateDirectory, { force: true });
+    await rename(backupDirectory, stateDirectory);
+    restored = true;
+  };
+  t.after(async () => {
+    if (!restored) await rm(stateDirectory, { force: true });
+    await rm(backupDirectory, { recursive: true, force: true });
+  });
+  return restore;
+}
+
+async function readStateJournal(stateDirectory) {
+  const [file] = (await readdir(stateDirectory)).filter((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  return readFile(path.join(stateDirectory, file), "utf8");
 }
 
 const previewArguments = {
@@ -799,6 +841,48 @@ test("a matching rule with different runtime properties is an explicit conflict"
   }
 });
 
+test("status reflects a foreign equivalent after its runtime conflict is fixed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const owner = await preview(client);
+  const ownerApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: owner.structuredContent.change_ref },
+  });
+  const existing = hub.state.scenarios.find(
+    ({ index }) => index === ownerApply.structuredContent.scenario_index,
+  );
+  existing.active = false;
+  const foreign = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: { ...previewArguments, name: "Внешнее правило" },
+  });
+  const conflict = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+  existing.active = true;
+  const journalBeforeStatus = await readStateJournal(stateDirectory);
+
+  const result = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "already_present");
+  assert.equal(result.structuredContent.scenario_index, existing.index);
+  assert.equal(result.structuredContent.owned, false);
+  assert.equal(result.structuredContent.configuration_matches, true);
+  assert.equal(await readStateJournal(stateDirectory), journalBeforeStatus);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create || scenario?.delete)
+      .length,
+    1,
+  );
+});
+
 test("an incompatible create response remains recoverable without a duplicate", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -986,6 +1070,52 @@ test("a failed readback after a successful create stays recoverable", async (t) 
   );
 });
 
+test("a confirmed create reports its hub effect when the final journal save fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  let restoreStateDirectory;
+  hub.state.afterCreate = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const result = await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "applied");
+  assert.equal(
+    result.structuredContent.change_ref,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(result.structuredContent.created, true);
+  assert.equal(result.structuredContent.hub_configuration_verified, true);
+  assert.deepEqual(result.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_automation_change",
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  await firstClient.close();
+  await restoreStateDirectory();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.created, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
 test("a failed readback after a successful delete stays recoverable", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -1014,6 +1144,59 @@ test("a failed readback after a successful delete stays recoverable", async (t) 
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(recovered.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
+test("a confirmed delete reports its hub effect when the final journal save fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  let restoreStateDirectory;
+  hub.state.afterDelete = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const result = await firstClient.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "rolled_back");
+  assert.equal(
+    result.structuredContent.change_ref,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(result.structuredContent.removed, true);
+  assert.deepEqual(result.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_automation_change",
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+  await firstClient.close();
+  await restoreStateDirectory();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const repeated = await secondClient.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "rolled_back");
+  assert.equal(repeated.structuredContent.status, "rolled_back");
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,
