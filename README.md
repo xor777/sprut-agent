@@ -16,7 +16,6 @@ Node.js 24 и npm:
 ```sh
 npm ci
 npm run check
-npm run test:mutations
 ```
 
 Git hooks проверяют Conventional Commits при коммите и `npm run check` перед push.
@@ -25,6 +24,10 @@ Git hooks проверяют Conventional Commits при коммите и `npm 
 сообщения коммитов. Полный Stryker запускается вручную действием
 `workflow_dispatch` после быстрых проверок; доступ к дому ему не нужен.
 Новый автоматический запуск ветки отменяет её устаревший запуск.
+
+Для проверки тестов изменённого поведения отдельно выполни
+`npm run test:mutations`. Повторять уже выполненный прогон только из-за push
+или изменения документации не нужно.
 
 ## Задачи в Plan
 
