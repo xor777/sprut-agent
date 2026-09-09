@@ -1078,6 +1078,7 @@ test("a confirmed create reports its hub effect when the final journal save fail
   hub.state.afterCreate = async () => {
     restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
   };
+  hub.state.incompatibleCreateResponse = true;
 
   const result = await firstClient.callTool({
     name: "apply_automation_change",
@@ -1092,6 +1093,7 @@ test("a confirmed create reports its hub effect when the final journal save fail
   );
   assert.equal(result.structuredContent.created, true);
   assert.equal(result.structuredContent.hub_configuration_verified, true);
+  assert.equal(result.structuredContent.recovered_after_uncertain_write, true);
   assert.deepEqual(result.structuredContent.local_state, {
     saved: false,
     action: "restore_state_storage_then_get_automation_change",
