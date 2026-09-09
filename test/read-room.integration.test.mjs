@@ -202,9 +202,10 @@ async function startHub(initialState = hubState) {
       }
 
       if (request.params?.room?.get) {
-        const room =
-          state.rooms.find(({ id }) => id === request.params.room.get.id) ??
-          null;
+        const room = Object.hasOwn(state, "roomGetResponse")
+          ? state.roomGetResponse
+          : (state.rooms.find(({ id }) => id === request.params.room.get.id) ??
+            null);
         socket.send(
           JSON.stringify({
             id: request.id,
@@ -224,7 +225,9 @@ async function startHub(initialState = hubState) {
                 list: {
                   accessories: state.accessories?.filter(
                     (accessory) =>
-                      roomId === undefined || accessory.roomId === roomId,
+                      state.ignoreRoomFilter ||
+                      roomId === undefined ||
+                      accessory.roomId === roomId,
                   ),
                 },
               },
@@ -256,9 +259,19 @@ async function startHub(initialState = hubState) {
 
 async function startSilentHandshakeHub() {
   const sockets = new Set();
+  const emptyWaiters = new Set();
+  let acceptedConnections = 0;
   const server = createServer((socket) => {
+    acceptedConnections += 1;
     sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
+    socket.resume();
+    socket.once("close", () => {
+      sockets.delete(socket);
+      if (sockets.size === 0) {
+        for (const resolve of emptyWaiters) resolve();
+        emptyWaiters.clear();
+      }
+    });
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -268,6 +281,28 @@ async function startSilentHandshakeHub() {
     server,
     destroyConnections() {
       for (const socket of sockets) socket.destroy();
+    },
+    get acceptedConnections() {
+      return acceptedConnections;
+    },
+    get openConnections() {
+      return sockets.size;
+    },
+    waitForNoConnections(timeoutMs = 500) {
+      if (sockets.size === 0) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const finish = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          emptyWaiters.delete(finish);
+          reject(
+            new Error("Timed out waiting for the handshake socket to close"),
+          );
+        }, timeoutMs);
+        emptyWaiters.add(finish);
+      });
     },
     url: `ws://127.0.0.1:${address.port}`,
   };
@@ -332,6 +367,7 @@ function findReading(room, ref) {
 
 test("MCP discovers every room before reading the selected stable reference", async (t) => {
   const hub = await startHub();
+  hub.state.ignoreRoomFilter = true;
   const client = await startMcpClient(t, hub);
   const tools = await client.listTools();
   assert.deepEqual(
@@ -715,6 +751,24 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 });
 
 test("incomplete room and service identifiers never become stable references", async (t) => {
+  const incompatibleCatalogHub = await startHub({
+    rooms: null,
+    accessories: [],
+  });
+  const incompatibleCatalogClient = await startMcpClient(
+    t,
+    incompatibleCatalogHub,
+  );
+  const incompatibleCatalog = await incompatibleCatalogClient.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.deepEqual(incompatibleCatalog.structuredContent.error, {
+    code: "incompatible_response",
+    message: "SprutHub returned an incompatible room list.",
+    retryable: false,
+  });
+
   const incompleteRoomHub = await startHub({
     rooms: [{ name: "Room without id" }],
     accessories: [],
@@ -737,6 +791,39 @@ test("incomplete room and service identifiers never become stable references", a
     JSON.stringify(incompleteRoom).includes("room/undefined"),
     false,
   );
+
+  const incompleteSelectedRoomHub = await startHub();
+  incompleteSelectedRoomHub.state.roomGetResponse = {
+    name: "Selected room without id",
+  };
+  const incompleteSelectedRoomClient = await startMcpClient(
+    t,
+    incompleteSelectedRoomHub,
+  );
+  const incompleteSelectedRoom = await incompleteSelectedRoomClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.equal(incompleteSelectedRoom.isError, true);
+  assert.deepEqual(incompleteSelectedRoom.structuredContent.error, {
+    code: "incompatible_response",
+    message: "SprutHub returned incomplete room data.",
+    retryable: false,
+  });
+
+  incompleteSelectedRoomHub.state.roomGetResponse = {
+    id: 11,
+    name: "Different room",
+  };
+  const mismatchedSelectedRoom = await incompleteSelectedRoomClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.deepEqual(mismatchedSelectedRoom.structuredContent.error, {
+    code: "incompatible_response",
+    message: "SprutHub returned incomplete room data.",
+    retryable: false,
+  });
 
   const incompleteServiceHub = await startHub();
   delete incompleteServiceHub.state.accessories[0].services[0].sId;
@@ -937,6 +1024,9 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
       action: "retry",
     },
   });
+  assert.equal(handshakeHub.acceptedConnections, 1);
+  await handshakeHub.waitForNoConnections();
+  assert.equal(handshakeHub.openConnections, 0);
 
   const slowHub = await startHub();
   slowHub.state.responseDelays = [160, 160];
