@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 export class AutomationStore {
+  #writes = Promise.resolve();
+
   constructor({ directory, hubUrl, hubSerial }) {
     this.directory = directory ?? defaultStateDirectory();
     this.hubFingerprint = createHash("sha256")
@@ -20,21 +22,28 @@ export class AutomationStore {
   }
 
   async get(id) {
-    return (await this.#read()).changes[id] ?? null;
+    await this.#writes.catch(() => {});
+    return (await this.#readFile()).changes[id] ?? null;
   }
 
   async save(change) {
-    const state = await this.#read();
-    state.changes[change.id] = change;
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const temporaryFile = `${this.file}.${process.pid}.tmp`;
-    await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await rename(temporaryFile, this.file);
+    const write = this.#writes
+      .catch(() => {})
+      .then(async () => {
+        const state = await this.#readFile();
+        state.changes[change.id] = change;
+        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        const temporaryFile = `${this.file}.${process.pid}.tmp`;
+        await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
+          mode: 0o600,
+        });
+        await rename(temporaryFile, this.file);
+      });
+    this.#writes = write;
+    await write;
   }
 
-  async #read() {
+  async #readFile() {
     try {
       const state = JSON.parse(await readFile(this.file, "utf8"));
       if (

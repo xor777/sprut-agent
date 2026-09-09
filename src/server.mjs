@@ -98,6 +98,55 @@ server.registerTool(
 );
 
 server.registerTool(
+  "apply_automation_change",
+  {
+    title: "Apply a prepared SprutHub automation change",
+    description:
+      "Apply one change returned by preview_boolean_automation. The operation rechecks current bindings and equivalent native rules, creates at most one scenario, and reconciles an interrupted create before any later retry.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(() => getAutomationService().apply(changeRef)),
+);
+
+server.registerTool(
+  "get_automation_change",
+  {
+    title: "Inspect a SprutHub automation change",
+    description:
+      "Read locally recorded ownership and reconcile it with the configured SprutHub. Use this after interruption or restart before deciding whether another write is safe.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(() => getAutomationService().getChange(changeRef)),
+);
+
+server.registerTool(
+  "rollback_automation_change",
+  {
+    title: "Roll back an owned SprutHub automation change",
+    description:
+      "Delete only the scenario created for this change after confirming its ownership marker and exact expected configuration. Manual edits cause a conflict and are preserved. Deleting a scenario does not reverse a physical light state that already changed.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(() => getAutomationService().rollback(changeRef)),
+);
+
+server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",

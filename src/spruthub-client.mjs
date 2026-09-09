@@ -236,6 +236,65 @@ export class SprutHubClient {
     return { ...selections, scenarios, extensions };
   }
 
+  async listScenarioDetails() {
+    const deadline = Date.now() + this.timeoutMs;
+    const scenarios = extractArray(
+      await this.#request({ scenario: { list: {} } }, deadline),
+      ["scenario", "list", "scenarios"],
+    );
+    const details = [];
+    for (const scenario of scenarios) {
+      if (typeof scenario?.index !== "string") {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned a scenario without a stable index.",
+        );
+      }
+      const response = await this.#request(
+        { scenario: { get: { index: scenario.index, expand: "data" } } },
+        deadline,
+      );
+      const container = response.result?.scenario;
+      if (!container || !("get" in container)) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an incompatible scenario response.",
+        );
+      }
+      if (container.get !== null) details.push(container.get);
+    }
+    return details;
+  }
+
+  async createScenario(request) {
+    const response = await this.#request(
+      { scenario: { create: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const scenario = response.result?.scenario?.create;
+    if (!scenario || typeof scenario.index !== "string") {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not identify the created scenario.",
+      );
+    }
+    return scenario;
+  }
+
+  async deleteScenario(index) {
+    const response = await this.#request(
+      { scenario: { delete: { index } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.scenario;
+    if (!container || !("delete" in container)) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not confirm scenario deletion.",
+      );
+    }
+  }
+
   async close() {
     this.#connectingSocket?.terminate();
     if (!this.#socket) return;
