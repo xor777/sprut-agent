@@ -175,7 +175,26 @@ function homeState(serial) {
               connection: "scalar-connection-secret-must-not-leak",
             },
           ],
-          neutralConnectionEcho: "synthetic-account-token",
+          neutralConnectionEcho: "opaque-4f9a8b7c",
+          opaqueKeyForms: {
+            safeNeighbor: "available",
+            nested: {
+              "prefix-opaque-4f9a8b7c-suffix": "hidden-key-container",
+              unknownChild: "key-child-secret-must-not-leak",
+            },
+            inArray: [
+              { safeNeighbor: "available-in-array" },
+              {
+                "prefix-opaque-4f9a8b7c-suffix": "hidden-array-key-container",
+                unknownChild: "array-key-child-secret-must-not-leak",
+              },
+            ],
+          },
+          terminalMarker: {
+            redacted: true,
+            reason: "sensitive_native_data",
+            laterPayload: "marker-child-secret-must-not-leak",
+          },
         }),
       },
       {
@@ -414,6 +433,28 @@ function respond(states, request) {
     };
   }
   if (params.characteristic?.getOptions) {
+    if (params.characteristic.getOptions.cId === 16) {
+      return {
+        characteristic: {
+          getOptions: {
+            options: [
+              {
+                key: "opaque-setting",
+                name: "Opaque setting",
+                type: "GenericString",
+                inputType: "TEXT",
+                read: true,
+                write: false,
+                events: false,
+                value: {
+                  stringValue: "parent-sensitive-secret-must-not-leak",
+                },
+              },
+            ],
+          },
+        },
+      };
+    }
     return {
       characteristic: {
         getOptions: {
@@ -493,7 +534,7 @@ async function startClient(t, hub) {
     env: {
       PATH: process.env.PATH,
       SPRUTHUB_URL: hub.url,
-      SPRUTHUB_TOKEN: "synthetic-account-token",
+      SPRUTHUB_TOKEN: "opaque-4f9a8b7c",
       SPRUTHUB_SERIAL: "home/A",
       SPRUTHUB_CID: "home-entity-test",
       SPRUTHUB_TIMEOUT_MS: "500",
@@ -790,6 +831,21 @@ test("native secrets are redacted from structured and text output", async (t) =>
     block.structuredContent.entity.configuration.value.neutralConnectionEcho,
     "[REDACTED]",
   );
+  const tokenKeys =
+    block.structuredContent.entity.configuration.value.opaqueKeyForms;
+  assert.equal(tokenKeys.safeNeighbor, "available");
+  assert.deepEqual(tokenKeys.nested, {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
+  assert.deepEqual(tokenKeys.inArray, [
+    { safeNeighbor: "available-in-array" },
+    { redacted: true, reason: "sensitive_native_data" },
+  ]);
+  assert.deepEqual(
+    block.structuredContent.entity.configuration.value.terminalMarker,
+    { redacted: true, reason: "sensitive_native_data" },
+  );
   const visible = JSON.stringify({
     characteristic,
     sensitiveCharacteristic,
@@ -814,12 +870,52 @@ test("native secrets are redacted from structured and text output", async (t) =>
     "array-connection-secret-must-not-leak",
     "array-child-secret-must-not-leak",
     "scalar-connection-secret-must-not-leak",
-    "synthetic-account-token",
+    "opaque-4f9a8b7c",
+    "key-child-secret-must-not-leak",
+    "array-key-child-secret-must-not-leak",
+    "marker-child-secret-must-not-leak",
     "must-not-leak",
   ]) {
     assert.doesNotMatch(visible, new RegExp(secret));
   }
   assert.match(visible, /\[REDACTED\]/);
+});
+
+test("sensitive characteristic marker is terminal for every include", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const includeCases = [
+    [],
+    ["options"],
+    ["relations"],
+    ["physical_configuration"],
+    ["diagnostics"],
+    ["options", "relations", "physical_configuration", "diagnostics"],
+  ];
+
+  for (const include of includeCases) {
+    const requestStart = hub.requests.length;
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/16",
+        include,
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.deepEqual(result.structuredContent.entity, {
+      redacted: true,
+      reason: "sensitive_native_data",
+    });
+    assert.doesNotMatch(result.content[0].text, /parent-sensitive-secret/);
+    assert.deepEqual(
+      hub.requests
+        .slice(requestStart)
+        .map(({ params }) => Object.keys(params)[0]),
+      ["hub", "accessory"],
+    );
+  }
 });
 
 test("freshness belongs to each completed native response", async (t) => {
