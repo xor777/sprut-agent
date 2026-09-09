@@ -642,10 +642,18 @@ test("extension refs preserve native instance identity", async (t) => {
 });
 
 test("extension catalog rejects missing and conflicting native identity", async (t) => {
-  for (const mutate of [
-    (extensions) => delete extensions[0].extensionKey,
-    (extensions) => {
-      extensions[1].extensionKey = extensions[0].extensionKey;
+  for (const { mutate, ref, errorCode } of [
+    {
+      mutate: (extensions) => delete extensions[0].extensionKey,
+      ref: "spruthub://hub/home%2FA/extension/yandex",
+      errorCode: "entity_not_found",
+    },
+    {
+      mutate: (extensions) => {
+        extensions[1].extensionKey = extensions[0].extensionKey;
+      },
+      ref: "spruthub://hub/home%2FA/extension/Bridge%3Ayandex_1",
+      errorCode: "incompatible_response",
     },
   ]) {
     const hub = await startHub();
@@ -658,6 +666,13 @@ test("extension catalog rejects missing and conflicting native identity", async 
     assert.equal(result.isError, true);
     assert.equal(result.structuredContent.error.code, "incompatible_response");
     assert.doesNotMatch(result.content[0].text, /extension\/yandex/);
+
+    const read = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: ref },
+    });
+    assert.equal(read.isError, true);
+    assert.equal(read.structuredContent.error.code, errorCode);
   }
 });
 

@@ -81,6 +81,7 @@ export class SprutHubClient {
       "list",
       "extensions",
     ]);
+    const normalizedExtensions = normalizeExtensions(serial, extensions);
     rooms.forEach((room) => {
       validateRoom(room);
     });
@@ -101,9 +102,7 @@ export class SprutHubClient {
         scenarios: scenarios.map((scenario) =>
           normalizeScenarioSummary(serial, scenario),
         ),
-        extensions: extensions.map((extension) =>
-          normalizeExtension(serial, extension),
-        ),
+        extensions: normalizedExtensions,
       },
       coverage: [
         capability(
@@ -744,15 +743,16 @@ export class SprutHubClient {
       deadline,
       { serial: parsed.serial },
     );
-    const extension = extractEntityArray(response, [
+    const extensions = extractEntityArray(response, [
       "extension",
       "list",
       "extensions",
-    ]).find((candidate) => extensionKey(candidate) === parsed.extensionKey);
-    if (!extension) throw entityNotFound("extension");
+    ]).filter((candidate) => extensionKey(candidate) === parsed.extensionKey);
+    if (extensions.length === 0) throw entityNotFound("extension");
+    if (extensions.length > 1) throw incompatibleExtensionIdentity();
     return {
       kind: "extension",
-      ...normalizeExtension(parsed.serial, extension),
+      ...normalizeExtension(parsed.serial, extensions[0]),
     };
   }
 
@@ -1204,7 +1204,28 @@ function normalizeScenarioSummary(serial, scenario) {
 }
 
 function extensionKey(extension) {
-  return extension?.extensionKey ?? extension?.key ?? extension?.type;
+  return typeof extension?.extensionKey === "string" &&
+    extension.extensionKey.trim().length > 0
+    ? extension.extensionKey
+    : null;
+}
+
+function normalizeExtensions(serial, extensions) {
+  const normalized = extensions.map((extension) =>
+    normalizeExtension(serial, extension),
+  );
+  if (new Set(normalized.map(({ key }) => key)).size !== normalized.length) {
+    throw incompatibleExtensionIdentity();
+  }
+  return normalized;
+}
+
+function incompatibleExtensionIdentity() {
+  return new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned an extension without a unique native extensionKey.",
+    "inspect_home",
+  );
 }
 
 function normalizeExtension(serial, extension) {
@@ -1214,10 +1235,7 @@ function normalizeExtension(serial, extension) {
     typeof extension?.name !== "string" ||
     typeof extension.type !== "string"
   ) {
-    throw new SprutHubError(
-      "incompatible_response",
-      "SprutHub returned incomplete extension data.",
-    );
+    throw incompatibleExtensionIdentity();
   }
   return {
     ref: extensionRef(serial, key),
@@ -1293,6 +1311,7 @@ function normalizeCharacteristicDetail(
   ) {
     throw incompleteAccessoryError();
   }
+  if (isSensitiveNativeObject(control)) return redactedNode();
   const value = extractTypedValue(control.value);
   return {
     kind: "characteristic",
@@ -1337,24 +1356,21 @@ function normalizeOption(option) {
       "SprutHub returned an option without a native key.",
     );
   }
+  if (isSensitiveNativeObject(option)) return redactedNode();
   const configured = extractTypedValue(option.value);
-  const sensitive = isSensitiveNativeOption(option);
   return {
     key: redactSensitiveText(option.key),
     name:
       typeof option.name === "string" ? redactSensitiveText(option.name) : "",
     type:
       typeof option.type === "string" ? redactSensitiveText(option.type) : null,
-    configured_value: sensitive
-      ? "[REDACTED]"
-      : sanitizeNativeData(configured.value, option.key),
+    configured_value: sanitizeNativeData(configured.value),
     unit:
       typeof option.unit === "string" ? redactSensitiveText(option.unit) : null,
     read: option.read === true,
     write: option.write === true,
     events: option.events === true,
     ...(option.inputType ? { input_type: option.inputType } : {}),
-    ...(sensitive ? { sensitive: true } : {}),
     ...(option.minValue !== undefined ? { min: option.minValue } : {}),
     ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
     ...(option.minStep !== undefined ? { step: option.minStep } : {}),
@@ -1365,12 +1381,9 @@ function normalizeOption(option) {
               typeof validValue.name === "string"
                 ? redactSensitiveText(validValue.name)
                 : "",
-            value: sensitive
-              ? "[REDACTED]"
-              : sanitizeNativeData(
-                  extractTypedValue(validValue.value).value,
-                  option.key,
-                ),
+            value: sanitizeNativeData(
+              extractTypedValue(validValue.value).value,
+            ),
           })),
         }
       : {}),
@@ -1397,7 +1410,6 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
   const commandOptions = window.options.filter(({ inputType }) =>
     inputType?.startsWith("BUTTON"),
   );
-  const reports = extractWindowReports(diagnosticOptions);
   const options = window.options
     .filter(
       (option) =>
@@ -1407,18 +1419,16 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     )
     .map((option) => {
       const normalized = normalizeOption(option);
+      if (normalized.redacted) return normalized;
       const property = propertyFromNativeOptionKey(option.key);
-      const report = property ? reports.get(property) : undefined;
       return {
         ...normalized,
         ...(property
           ? {
               property,
-              reported_value: report
-                ? parseScalarLike(report.value, normalized.configured_value)
-                : null,
-              reported_source: report ? "window_info_report" : null,
-              reported_observed_at: report ? observedAt : null,
+              reported_value: null,
+              reported_source: null,
+              reported_observed_at: null,
             }
           : {}),
         pending: "unknown",
@@ -1466,20 +1476,6 @@ function propertyFromNativeOptionKey(key) {
   return match?.[1] ?? null;
 }
 
-function extractWindowReports(options) {
-  const reports = new Map();
-  const pattern =
-    /(?:^|>)[0-9A-Fa-f]+_([A-Za-z][A-Za-z0-9_]*)\s+\([0-9A-Fa-f]+\):\s*([^<]+?)\s*\[([A-Z0-9_]+)\]/g;
-  for (const option of options) {
-    const text = extractTypedValue(option.value).value;
-    if (typeof text !== "string") continue;
-    for (const match of text.matchAll(pattern)) {
-      reports.set(match[1], { value: match[2].trim() });
-    }
-  }
-  return reports;
-}
-
 function normalizeWindowControl(option) {
   return {
     key: redactSensitiveText(option.key ?? ""),
@@ -1495,23 +1491,23 @@ function normalizeWindowControl(option) {
   };
 }
 
-function isSensitiveNativeOption(option) {
+function isSensitiveNativeObject(value) {
   return (
-    option?.inputType === "PASSWORD" ||
-    isSensitiveKey(option?.key ?? "") ||
-    isSensitiveKey(option?.name ?? "")
+    value?.inputType === "PASSWORD" ||
+    value?.input_type === "PASSWORD" ||
+    value?.sensitive === true ||
+    Object.keys(value ?? {}).some(isSensitiveKey) ||
+    [value?.key, value?.name, value?.type, value?.ref].some(
+      (candidate) =>
+        typeof candidate === "string" &&
+        !/[=:]/.test(candidate) &&
+        isSensitiveKey(candidate),
+    )
   );
 }
 
-function parseScalarLike(value, example) {
-  if (typeof example === "number") {
-    const number = Number(value);
-    return Number.isFinite(number) ? number : value;
-  }
-  if (typeof example === "boolean" && ["true", "false"].includes(value)) {
-    return value === "true";
-  }
-  return value;
+function redactedNode() {
+  return { redacted: true, reason: "sensitive_native_data" };
 }
 
 function normalizeLogic(serial, accessoryId, serviceId, logic) {
@@ -1553,30 +1549,21 @@ function normalizeScenarioConfiguration(scenario) {
   };
 }
 
-export function sanitizeNativeData(value, key = "", forceSensitive = false) {
-  const sensitive = forceSensitive || isSensitiveKey(key);
+export function sanitizeNativeData(value, key = "") {
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeNativeData(item, "", sensitive));
+    return value.map((item) => sanitizeNativeData(item));
   }
   if (value && typeof value === "object") {
-    const sensitiveContainer =
-      sensitive ||
-      value.inputType === "PASSWORD" ||
-      isSensitiveKey(value.key ?? "") ||
-      isSensitiveKey(value.name ?? "") ||
-      isSensitiveKey(value.type ?? "");
+    if (isSensitiveContainerKey(key) || isSensitiveNativeObject(value)) {
+      return redactedNode();
+    }
     return Object.fromEntries(
       Object.entries(value).map(([childKey, childValue]) => [
         childKey,
-        sanitizeNativeData(
-          childValue,
-          childKey,
-          sensitiveContainer && isSecretValueField(childKey),
-        ),
+        sanitizeNativeData(childValue, childKey),
       ]),
     );
   }
-  if (sensitive) return value == null ? value : "[REDACTED]";
   return typeof value === "string" ? redactSensitiveText(value) : value;
 }
 
@@ -1586,8 +1573,8 @@ function isSensitiveKey(key) {
   );
 }
 
-function isSecretValueField(key) {
-  return /^(?:value|configured_value|default_value|defaultValue|boolValue|intValue|longValue|doubleValue|stringValue|bytesValue|validValues)$/i.test(
+function isSensitiveContainerKey(key) {
+  return /^(?:auth|authentication|authorization|connection|credentials?)$/i.test(
     key,
   );
 }
@@ -1595,22 +1582,10 @@ function isSecretValueField(key) {
 function redactSensitiveText(text) {
   const credentialName =
     "api[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|wifi[_-]?password|api[_-]?key|private[_-]?key|password|passwd|secret|credential|authorization|token";
-  return text
-    .replace(/\bBearer\s+[^\s;"'<>]+/gi, "Bearer [REDACTED]")
-    .replace(
-      new RegExp(
-        `\\b(${credentialName})(\\s*[:=]\\s*)(["'])(?:\\\\.|(?!\\3).)*\\3`,
-        "gi",
-      ),
-      "$1$2$3[REDACTED]$3",
-    )
-    .replace(
-      new RegExp(
-        `\\b(${credentialName})(\\s*[:=]\\s*)(?!\\[REDACTED\\])[^\\s;"'<>]+`,
-        "gi",
-      ),
-      "$1$2[REDACTED]",
-    );
+  const containsCredential =
+    /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
+    new RegExp(`\\b(${credentialName})\\s*[:=]`, "i").test(text);
+  return containsCredential ? "[REDACTED]" : text;
 }
 
 function timeoutError() {
