@@ -595,20 +595,21 @@ function buildNativeData(condition, action, autoOff) {
             ? [
                 {
                   type: "delay",
+                  blockId: 6,
                   index: 1,
                   mode: "RESET",
                   time: autoOff.after_seconds * 1_000,
                   targets: [
                     {
                       type: "service",
-                      blockId: 6,
+                      blockId: 7,
                       aId: target.aId,
                       sId: target.sId,
                       hs: action.service.type,
                       characteristics: [
                         {
                           type: "set",
-                          blockId: 7,
+                          blockId: 8,
                           cId: target.cId,
                           hc: action.characteristic.type,
                           value: "false",
@@ -729,23 +730,16 @@ function matchesExpected(scenario, change) {
 }
 
 function configurationData(data) {
-  if (!data || typeof data !== "object" || !Array.isArray(data.targets))
-    return data;
-  return {
-    ...data,
-    targets: data.targets.map((target) => {
-      if (
-        !target ||
-        typeof target !== "object" ||
-        target.type !== "if" ||
-        !Object.hasOwn(target, "state")
-      ) {
-        return target;
-      }
-      const { state: _runtimeState, ...configuration } = target;
-      return configuration;
-    }),
-  };
+  if (Array.isArray(data)) return data.map(configurationData);
+  if (!data || typeof data !== "object") return data;
+  return Object.fromEntries(
+    Object.entries(data)
+      .filter(
+        ([key]) =>
+          key !== "blockId" && !(key === "state" && data.type === "if"),
+      )
+      .map(([key, value]) => [key, configurationData(value)]),
+  );
 }
 
 function sameRuleBody(scenario, change) {

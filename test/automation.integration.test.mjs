@@ -647,20 +647,21 @@ test("auto-off preview creates one resettable native delay and reuses its exact 
     },
     {
       type: "delay",
+      blockId: 6,
       index: 1,
       mode: "RESET",
       time: 60_000,
       targets: [
         {
           type: "service",
-          blockId: 6,
+          blockId: 7,
           aId: 34,
           sId: 13,
           hs: "Lightbulb",
           characteristics: [
             {
               type: "set",
-              blockId: 7,
+              blockId: 8,
               cId: 15,
               hc: "On",
               value: "false",
@@ -681,6 +682,7 @@ test("auto-off preview creates one resettable native delay and reuses its exact 
 
 test("different auto-off behavior is not treated as the requested rule", async (t) => {
   for (const [name, edit] of [
+    ["delay index", (delay) => (delay.index = 2)],
     ["timeout", (delay) => (delay.time = 30_000)],
     ["timer mode", (delay) => (delay.mode = "CONTINUE")],
     [
