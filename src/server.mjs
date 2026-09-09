@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { SprutHubClient } from "./spruthub-client.mjs";
+import { SprutHubClient, SprutHubError } from "./spruthub-client.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
 let hubClient;
@@ -44,11 +44,18 @@ server.registerTool(
         .describe("Human-readable room name or spruthub://room/<id> reference"),
     },
     outputSchema: {
-      status: z.enum(["ok", "ambiguous"]),
+      status: z.enum(["ok", "ambiguous", "error"]),
       query: z.string().optional(),
       candidates: z.array(roomSchema).optional(),
       room: roomSchema.optional(),
       devices: z.array(deviceSchema).optional(),
+      error: z
+        .object({
+          code: z.string(),
+          message: z.string(),
+          retryable: z.boolean(),
+        })
+        .optional(),
       freshness: z
         .object({
           hubResponseReceivedAt: z.string(),
@@ -71,16 +78,10 @@ server.registerTool(
         structuredContent: reading,
       };
     } catch (error) {
+      const result = toToolError(error);
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              error instanceof Error
-                ? error.message
-                : "Could not read the SprutHub room.",
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
         isError: true,
       };
     }
@@ -100,6 +101,31 @@ function getHubClient() {
     timeoutMs: Number(process.env.SPRUTHUB_TIMEOUT_MS ?? 10_000),
   });
   return hubClient;
+}
+
+function toToolError(error) {
+  if (error instanceof SprutHubError) {
+    return {
+      status: "error",
+      error: {
+        code: error.code,
+        message: error.message,
+        retryable: [
+          "connection_closed",
+          "connection_failed",
+          "timeout",
+        ].includes(error.code),
+      },
+    };
+  }
+  return {
+    status: "error",
+    error: {
+      code: "internal_error",
+      message: "Could not read the SprutHub room.",
+      retryable: false,
+    },
+  };
 }
 
 let shuttingDown = false;

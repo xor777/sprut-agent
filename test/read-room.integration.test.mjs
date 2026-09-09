@@ -171,7 +171,7 @@ async function startHub() {
   };
 }
 
-async function startMcpClient(t, hub) {
+async function startMcpClient(t, hub, environment = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -188,6 +188,7 @@ async function startMcpClient(t, hub) {
       SPRUTHUB_SERIAL: "test-hub",
       SPRUTHUB_CID: "sprut-agent-test",
       SPRUTHUB_TIMEOUT_MS: "250",
+      ...environment,
     },
     stderr: "pipe",
   });
@@ -474,6 +475,10 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
       retryable: false,
     },
   });
+  assert.deepEqual(
+    JSON.parse(missing.content[0].text),
+    missing.structuredContent,
+  );
 
   const kitchen = await client.callTool({
     name: "read_room",
@@ -496,6 +501,27 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
     error: {
       code: "incompatible_response",
       message: "SprutHub returned an incompatible accessory list.",
+      retryable: false,
+    },
+  });
+  assert.deepEqual(
+    JSON.parse(incompatible.content[0].text),
+    incompatible.structuredContent,
+  );
+
+  const invalidClient = await startMcpClient(t, hub, {
+    SPRUTHUB_URL: "not-a-websocket-url",
+  });
+  const internal = await invalidClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(internal.isError, true);
+  assert.deepEqual(internal.structuredContent, {
+    status: "error",
+    error: {
+      code: "internal_error",
+      message: "Could not read the SprutHub room.",
       retryable: false,
     },
   });
