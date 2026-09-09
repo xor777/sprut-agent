@@ -714,6 +714,52 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   });
 });
 
+test("incomplete room and service identifiers never become stable references", async (t) => {
+  const incompleteRoomHub = await startHub({
+    rooms: [{ name: "Room without id" }],
+    accessories: [],
+  });
+  const incompleteRoomClient = await startMcpClient(t, incompleteRoomHub);
+  const incompleteRoom = await incompleteRoomClient.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(incompleteRoom.isError, true);
+  assert.deepEqual(incompleteRoom.structuredContent, {
+    status: "error",
+    error: {
+      code: "incompatible_response",
+      message: "SprutHub returned incomplete room data.",
+      retryable: false,
+    },
+  });
+  assert.equal(
+    JSON.stringify(incompleteRoom).includes("room/undefined"),
+    false,
+  );
+
+  const incompleteServiceHub = await startHub();
+  delete incompleteServiceHub.state.accessories[0].services[0].sId;
+  const incompleteServiceClient = await startMcpClient(t, incompleteServiceHub);
+  const incompleteService = await incompleteServiceClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.equal(incompleteService.isError, true);
+  assert.deepEqual(incompleteService.structuredContent, {
+    status: "error",
+    error: {
+      code: "incompatible_response",
+      message: "SprutHub returned incomplete accessory data.",
+      retryable: false,
+    },
+  });
+  assert.equal(
+    JSON.stringify(incompleteService).includes("service/undefined"),
+    false,
+  );
+});
+
 test("authorization failures identify credential repair without leaking the rejected secret", async (t) => {
   const hub = await startHub();
   hub.state.authorizationError = {
