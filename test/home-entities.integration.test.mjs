@@ -238,7 +238,11 @@ async function startHub() {
   );
   const requests = [];
   const responseSentAt = [];
-  const behavior = { delayWindowMs: 0, unsupportedScenarioGet: false };
+  const behavior = {
+    delayExtensionMs: 0,
+    delayWindowMs: 0,
+    unsupportedScenarioGet: false,
+  };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
@@ -248,6 +252,11 @@ async function startHub() {
       if (behavior.delayWindowMs > 0 && request.params.window?.get) {
         await new Promise((resolve) =>
           setTimeout(resolve, behavior.delayWindowMs),
+        );
+      }
+      if (behavior.delayExtensionMs > 0 && request.params.extension?.list) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, behavior.delayExtensionMs),
         );
       }
       if (behavior.unsupportedScenarioGet && request.params.scenario?.get) {
@@ -671,11 +680,26 @@ test("freshness belongs to each completed native response", async (t) => {
 
 test("coverage names only observed operations and -32601 is unsupported", async (t) => {
   const hub = await startHub();
+  hub.behavior.delayExtensionMs = 50;
   const client = await startClient(t, hub);
   const overview = await client.callTool({
     name: "inspect_home",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
+  const coverageByOperation = new Map(
+    overview.structuredContent.coverage.map((item) => [item.operation, item]),
+  );
+  const extensionSentAt = hub.responseSentAt.findLast(({ request }) =>
+    Boolean(request.params.extension?.list),
+  ).at;
+  assert(
+    Date.parse(coverageByOperation.get("room.list").observed_at) <
+      extensionSentAt,
+  );
+  assert(
+    Date.parse(coverageByOperation.get("extension.list").observed_at) >=
+      extensionSentAt,
+  );
   assert.deepEqual(
     overview.structuredContent.coverage.map(({ operation }) => operation),
     ["hub.list", "room.list", "scenario.list", "extension.list"],
