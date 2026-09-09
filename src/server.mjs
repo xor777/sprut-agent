@@ -5,14 +5,19 @@ import { AutomationService } from "./automation-service.mjs";
 import {
   SprutHubClient,
   SprutHubError,
-  sanitizeNativeData,
+  sanitizeAgentOutput,
 } from "./spruthub-client.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
 let hubClient;
 let automationService;
 
-const readingSchema = z.object({
+const redactedNodeSchema = z.object({
+  redacted: z.literal(true),
+  reason: z.literal("sensitive_native_data"),
+});
+
+const ordinaryReadingSchema = z.object({
   ref: z.string(),
   name: z.string(),
   type: z.string(),
@@ -21,6 +26,7 @@ const readingSchema = z.object({
   unit: z.string().nullable(),
   measuredAt: z.string().nullable(),
 });
+const readingSchema = z.union([ordinaryReadingSchema, redactedNodeSchema]);
 
 const serviceSchema = z.object({
   ref: z.string(),
@@ -222,7 +228,7 @@ server.registerTool(
   {
     title: "Read a SprutHub room",
     description:
-      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Readings include only controls explicitly marked readable; enum gives the hub's native meaning of the raw value, while enum null means no known match. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
+      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Readings include only controls explicitly marked readable; a recognized credential control becomes a redacted marker while safe neighboring readings remain available. Enum gives the hub's native meaning of the raw value, while enum null means no known match. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
     inputSchema: {
       room_ref: z
         .string()
@@ -296,19 +302,25 @@ function toToolError(error) {
 
 async function runRoomTool(operation) {
   try {
-    const result = sanitizeNativeData(await operation());
+    const result = sanitizeAgentOutput(await operation(), connectionSecrets());
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
     };
   } catch (error) {
-    const result = sanitizeNativeData(toToolError(error));
+    const result = sanitizeAgentOutput(toToolError(error), connectionSecrets());
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
       isError: true,
     };
   }
+}
+
+function connectionSecrets() {
+  return [process.env.SPRUTHUB_TOKEN].filter(
+    (value) => typeof value === "string" && value.length > 0,
+  );
 }
 
 let shuttingDown = false;

@@ -1311,7 +1311,7 @@ function normalizeCharacteristicDetail(
   ) {
     throw incompleteAccessoryError();
   }
-  if (isSensitiveNativeObject(control)) return redactedNode();
+  if (isSensitiveNativeNode(control)) return redactedNode();
   const value = extractTypedValue(control.value);
   return {
     kind: "characteristic",
@@ -1356,7 +1356,7 @@ function normalizeOption(option) {
       "SprutHub returned an option without a native key.",
     );
   }
-  if (isSensitiveNativeObject(option)) return redactedNode();
+  if (isSensitiveNativeNode(option)) return redactedNode();
   const configured = extractTypedValue(option.value);
   return {
     key: redactSensitiveText(option.key),
@@ -1443,13 +1443,22 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
           ? redactSensitiveText(window.label.text)
           : null,
       options,
-      layout: layoutOptions.map(normalizeWindowControl),
-      commands: commandOptions.map((option) => ({
-        ...normalizeWindowControl(option),
-        requires_confirmation: option.validValues?.some(
-          ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
-        ),
-      })),
+      layout: layoutOptions.map((option) =>
+        isSensitiveNativeNode(option)
+          ? redactedNode()
+          : normalizeWindowControl(option),
+      ),
+      commands: commandOptions.map((option) =>
+        isSensitiveNativeNode(option)
+          ? redactedNode()
+          : {
+              ...normalizeWindowControl(option),
+              requires_confirmation: option.validValues?.some(
+                ({ confirm }) =>
+                  typeof confirm === "string" && confirm.length > 0,
+              ),
+            },
+      ),
       freshness: {
         observed_at: observedAt,
         source_timestamp: null,
@@ -1457,13 +1466,17 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     },
     ...(includeDiagnostics
       ? {
-          diagnostics: diagnosticOptions.map((option) => ({
-            key: redactSensitiveText(option.key),
-            text: redactSensitiveText(
-              String(extractTypedValue(option.value).value ?? ""),
-            ).slice(0, 16_384),
-            content_origin: "spruthub_device_data",
-          })),
+          diagnostics: diagnosticOptions.map((option) =>
+            isSensitiveNativeNode(option)
+              ? redactedNode()
+              : {
+                  key: redactSensitiveText(option.key),
+                  text: redactSensitiveText(
+                    String(extractTypedValue(option.value).value ?? ""),
+                  ).slice(0, 16_384),
+                  content_origin: "spruthub_device_data",
+                },
+          ),
         }
       : {
           diagnostics_available: diagnosticOptions.length > 0,
@@ -1491,17 +1504,16 @@ function normalizeWindowControl(option) {
   };
 }
 
-function isSensitiveNativeObject(value) {
+function isSensitiveNativeNode(value, key = "") {
+  if (isSensitiveContainerKey(key)) return true;
+  if (!value || typeof value !== "object") return false;
   return (
     value?.inputType === "PASSWORD" ||
     value?.input_type === "PASSWORD" ||
     value?.sensitive === true ||
     Object.keys(value ?? {}).some(isSensitiveKey) ||
     [value?.key, value?.name, value?.type, value?.ref].some(
-      (candidate) =>
-        typeof candidate === "string" &&
-        !/[=:]/.test(candidate) &&
-        isSensitiveKey(candidate),
+      (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
     )
   );
 }
@@ -1550,13 +1562,11 @@ function normalizeScenarioConfiguration(scenario) {
 }
 
 export function sanitizeNativeData(value, key = "") {
+  if (isSensitiveNativeNode(value, key)) return redactedNode();
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeNativeData(item));
   }
   if (value && typeof value === "object") {
-    if (isSensitiveContainerKey(key) || isSensitiveNativeObject(value)) {
-      return redactedNode();
-    }
     return Object.fromEntries(
       Object.entries(value).map(([childKey, childValue]) => [
         childKey,
@@ -1565,6 +1575,25 @@ export function sanitizeNativeData(value, key = "") {
     );
   }
   return typeof value === "string" ? redactSensitiveText(value) : value;
+}
+
+export function sanitizeAgentOutput(value, sensitiveValues = []) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeAgentOutput(item, sensitiveValues));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, childValue]) => [
+        key,
+        sanitizeAgentOutput(childValue, sensitiveValues),
+      ]),
+    );
+  }
+  if (typeof value !== "string") return value;
+  if (sensitiveValues.some((secret) => value.includes(secret))) {
+    return "[REDACTED]";
+  }
+  return redactSensitiveText(value);
 }
 
 function isSensitiveKey(key) {
@@ -1691,6 +1720,7 @@ function normalizeAccessory(serial, accessory) {
         .filter(({ control }) => control.read === true)
         .map((characteristic) => {
           const control = characteristic.control;
+          if (isSensitiveNativeNode(control)) return redactedNode();
           const value = extractTypedValue(control.value);
           return {
             ref: characteristicRef(
