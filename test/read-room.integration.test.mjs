@@ -359,3 +359,47 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   assert.equal(secondRoom.freshness.measurementAt, null);
   assert.equal(hub.requests.length, 4);
 });
+
+test("ambiguous room names return stable choices that can be read explicitly", async (t) => {
+  const hub = await startHub();
+  hub.state.rooms.push(
+    { id: 40, order: 4, name: "Кладовая", visible: true },
+    { id: 41, order: 5, name: "Кладовая", visible: true },
+  );
+  hub.state.accessories.push({
+    id: 410,
+    online: true,
+    name: "Датчик двери",
+    roomId: 41,
+    services: [],
+  });
+  const client = await startMcpClient(t, hub);
+
+  const ambiguous = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кладовая" },
+  });
+  assert.equal(ambiguous.isError, undefined);
+  assert.deepEqual(ambiguous.structuredContent, {
+    status: "ambiguous",
+    query: "Кладовая",
+    candidates: [
+      { ref: "spruthub://room/40", name: "Кладовая" },
+      { ref: "spruthub://room/41", name: "Кладовая" },
+    ],
+  });
+
+  const selected = await client.callTool({
+    name: "read_room",
+    arguments: { room: "spruthub://room/41" },
+  });
+  assert.equal(selected.isError, undefined);
+  assert.deepEqual(selected.structuredContent.room, {
+    ref: "spruthub://room/41",
+    name: "Кладовая",
+  });
+  assert.deepEqual(
+    selected.structuredContent.devices.map(({ ref }) => ref),
+    ["spruthub://accessory/410"],
+  );
+});
