@@ -1,10 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { AutomationService } from "./automation-service.mjs";
 import { SprutHubClient, SprutHubError } from "./spruthub-client.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
 let hubClient;
+let automationService;
 
 const readingSchema = z.object({
   ref: z.string(),
@@ -69,6 +71,33 @@ server.registerTool(
 );
 
 server.registerTool(
+  "preview_boolean_automation",
+  {
+    title: "Preview a native boolean SprutHub automation",
+    description:
+      "Prepare and explain one native BLOCK automation from a readable boolean characteristic to a writable boolean characteristic. This preview does not write to SprutHub. It reports existing native mechanisms and preserves their original names and stable references. Use the returned change_ref with the apply tool only when the user's request authorizes the write.",
+    inputSchema: {
+      name: z.string().min(1),
+      reason: z.string().min(1),
+      source_room_ref: z.string().min(1),
+      source_characteristic_ref: z.string().min(1),
+      source_value: z.boolean(),
+      target_room_ref: z.string().min(1),
+      target_characteristic_ref: z.string().min(1),
+      target_value: z.boolean(),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async (input) =>
+    runRoomTool(() => getAutomationService().previewBooleanAutomation(input)),
+);
+
+server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",
@@ -106,6 +135,16 @@ function getHubClient() {
     timeoutMs: Number(process.env.SPRUTHUB_TIMEOUT_MS ?? 10_000),
   });
   return hubClient;
+}
+
+function getAutomationService() {
+  automationService ??= new AutomationService({
+    client: getHubClient(),
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+    hubUrl: process.env.SPRUTHUB_URL,
+    hubSerial: process.env.SPRUTHUB_SERIAL,
+  });
+  return automationService;
 }
 
 function toToolError(error) {

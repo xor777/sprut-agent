@@ -398,9 +398,11 @@ test("MCP discovers every room before reading the selected stable reference", as
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map(({ name }) => name),
-    ["list_rooms", "read_room"],
+    ["list_rooms", "preview_boolean_automation", "read_room"],
   );
-  for (const tool of tools.tools) {
+  for (const tool of tools.tools.filter(
+    ({ name }) => name !== "preview_boolean_automation",
+  )) {
     assert.deepEqual(tool.annotations, {
       readOnlyHint: true,
       destructiveHint: false,

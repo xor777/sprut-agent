@@ -132,6 +132,110 @@ export class SprutHubClient {
     };
   }
 
+  async inspectAutomation({ source, target }) {
+    const deadline = Date.now() + this.timeoutMs;
+    const selections = {};
+    for (const [role, selected] of Object.entries({ source, target })) {
+      const roomResponse = await this.#request(
+        { room: { get: { id: selected.roomId } } },
+        deadline,
+      );
+      const room = roomResponse.result?.room?.get;
+      validateRoom(room, selected.roomId);
+      const accessoriesResponse = await this.#request(
+        {
+          accessory: {
+            list: {
+              roomId: selected.roomId,
+              expand: "services,characteristics",
+            },
+          },
+        },
+        deadline,
+      );
+      const accessories =
+        accessoriesResponse.result?.accessory?.list?.accessories;
+      if (!Array.isArray(accessories)) throw incompleteAccessoryError();
+      accessories.forEach(validateAccessory);
+
+      const directScenarios = extractArray(
+        await this.#request(
+          { scenario: { list: { aId: selected.aId } } },
+          deadline,
+        ),
+        ["scenario", "list", "scenarios"],
+        true,
+      );
+      const assignedLogics = extractArray(
+        await this.#request(
+          { logic: { list: { aId: selected.aId, sId: selected.sId } } },
+          deadline,
+        ),
+        ["logic", "list", "logics"],
+        true,
+      );
+      const logicTypes = extractArray(
+        await this.#request(
+          { logic: { types: { aId: selected.aId, sId: selected.sId } } },
+          deadline,
+        ),
+        ["logic", "types", "logicTypes"],
+        true,
+      );
+      const links = extractArray(
+        await this.#request(
+          {
+            link: {
+              list: {
+                aId: selected.aId,
+                sId: selected.sId,
+                cId: selected.cId,
+              },
+            },
+          },
+          deadline,
+        ),
+        ["link", "list", "links"],
+        true,
+      );
+      const options = extractArray(
+        await this.#request(
+          {
+            characteristic: {
+              getOptions: {
+                aId: selected.aId,
+                sId: selected.sId,
+                cId: selected.cId,
+              },
+            },
+          },
+          deadline,
+        ),
+        ["characteristic", "getOptions", "options"],
+        true,
+      );
+      selections[role] = {
+        room,
+        accessories,
+        directScenarios,
+        assignedLogics,
+        logicTypes,
+        links,
+        options,
+      };
+    }
+
+    const scenarios = extractArray(
+      await this.#request({ scenario: { list: {} } }, deadline),
+      ["scenario", "list", "scenarios"],
+    );
+    const extensions = extractArray(
+      await this.#request({ extension: { list: {} } }, deadline),
+      ["extension", "list", "extensions"],
+    );
+    return { ...selections, scenarios, extensions };
+  }
+
   async close() {
     this.#connectingSocket?.terminate();
     if (!this.#socket) return;
@@ -278,6 +382,17 @@ export class SprutHubClient {
     }
     this.#pending.clear();
   }
+}
+
+function extractArray(response, path, missingMeansEmpty = false) {
+  let value = response.result;
+  for (const key of path) value = value?.[key];
+  if (Array.isArray(value)) return value;
+  if (missingMeansEmpty && value === undefined) return [];
+  throw new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned an incompatible automation response.",
+  );
 }
 
 function timeoutError() {
