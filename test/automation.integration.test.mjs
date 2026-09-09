@@ -114,10 +114,37 @@ async function startHub() {
         socket.close();
         return;
       }
+      if (request.params.scenario?.list && state.closeNextScenarioList) {
+        state.closeNextScenarioList = false;
+        socket.close();
+        return;
+      }
       const result = respond(state, request.params);
       if (request.params.scenario?.create && state.closeAfterCreate) {
         state.closeAfterCreate = false;
         socket.close();
+        return;
+      }
+      if (request.params.scenario?.create && state.incompatibleCreateResponse) {
+        state.incompatibleCreateResponse = false;
+        state.closeNextScenarioList = state.closeReadbackAfterWrite === true;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: { scenario: { create: {} } },
+          }),
+        );
+        return;
+      }
+      if (request.params.scenario?.delete && state.incompatibleDeleteResponse) {
+        state.incompatibleDeleteResponse = false;
+        state.closeNextScenarioList = state.closeReadbackAfterWrite === true;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: { scenario: {} },
+          }),
+        );
         return;
       }
       socket.send(JSON.stringify({ id: request.id, result }));
@@ -167,8 +194,8 @@ function respond(state, params) {
       scenario: {
         get: {
           ...scenario,
-          onStart: false,
-          sync: false,
+          onStart: scenario.onStart ?? false,
+          sync: scenario.sync ?? false,
           data: scenario.data ?? observed.data,
         },
       },
@@ -698,5 +725,162 @@ test("rollback preserves a scenario whose ownership marker was manually removed"
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.delete),
     false,
+  );
+});
+
+test("a matching rule with different runtime properties is an explicit conflict", async (t) => {
+  for (const [property, value] of [
+    ["active", false],
+    ["sync", true],
+  ]) {
+    await t.test(`${property}=${value}`, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const first = await preview(client);
+      const firstApply = await client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: first.structuredContent.change_ref },
+      });
+      const existing = hub.state.scenarios.find(
+        ({ index }) => index === firstApply.structuredContent.scenario_index,
+      );
+      existing[property] = value;
+      const second = await client.callTool({
+        name: "preview_boolean_automation",
+        arguments: {
+          ...previewArguments,
+          name: `Повтор при ${property}=${value}`,
+        },
+      });
+
+      const result = await client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: second.structuredContent.change_ref },
+      });
+
+      assert.equal(result.isError, undefined);
+      assert.equal(result.structuredContent.status, "conflict");
+      assert.equal(
+        result.structuredContent.reason,
+        "equivalent_rule_runtime_mismatch",
+      );
+      assert.equal(
+        result.structuredContent.scenario_index,
+        firstApply.structuredContent.scenario_index,
+      );
+      assert.deepEqual(result.structuredContent.required_runtime, {
+        active: true,
+        on_start: false,
+        sync: false,
+      });
+      assert.equal(
+        hub.requests.filter(({ scenario }) => scenario?.create).length,
+        1,
+      );
+    });
+  }
+});
+
+test("an incompatible create response remains recoverable without a duplicate", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  hub.state.incompatibleCreateResponse = true;
+  hub.state.closeReadbackAfterWrite = true;
+
+  const uncertain = await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(uncertain.isError, undefined);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.action, "inspect_hub_before_retry");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(recovered.isError, undefined);
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.created, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("an incompatible delete response is reconciled after restart without another delete", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.incompatibleDeleteResponse = true;
+  hub.state.closeReadbackAfterWrite = true;
+
+  const uncertain = await firstClient.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(uncertain.isError, undefined);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.action, "inspect_hub_before_retry");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const repeated = await secondClient.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(recovered.isError, undefined);
+  assert.equal(recovered.structuredContent.status, "rolled_back");
+  assert.equal(repeated.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
+test("parallel equivalent applies in one MCP process create only one native rule", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const [first, second] = await Promise.all([preview(client), preview(client)]);
+
+  const results = await Promise.all(
+    [first, second].map((prepared) =>
+      client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      }),
+    ),
+  );
+
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  assert.deepEqual(
+    results.map(({ structuredContent }) => structuredContent.status).sort(),
+    ["already_present", "applied"],
   );
 });
