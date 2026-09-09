@@ -157,6 +157,13 @@ async function startHub() {
         );
         return;
       }
+      if (
+        (request.params.scenario?.create || request.params.scenario?.delete) &&
+        state.closeReadbackAfterSuccessfulWrite
+      ) {
+        state.closeReadbackAfterSuccessfulWrite = false;
+        state.closeNextScenarioList = true;
+      }
       socket.send(JSON.stringify({ id: request.id, result }));
     });
   });
@@ -944,5 +951,70 @@ test("parallel equivalent applies in one MCP process create only one native rule
   assert.deepEqual(
     results.map(({ structuredContent }) => structuredContent.status).sort(),
     ["already_present", "applied"],
+  );
+});
+
+test("a failed readback after a successful create stays recoverable", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  hub.state.closeReadbackAfterSuccessfulWrite = true;
+
+  const uncertain = await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.created, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("a failed readback after a successful delete stays recoverable", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.closeReadbackAfterSuccessfulWrite = true;
+
+  const uncertain = await firstClient.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
   );
 });
