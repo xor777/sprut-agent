@@ -101,6 +101,7 @@ async function startHub() {
         active: true,
       },
     ],
+    nextScenario: 1,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -108,12 +109,13 @@ async function startHub() {
     socket.on("message", (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request.params);
-      socket.send(
-        JSON.stringify({
-          id: request.id,
-          result: respond(state, request.params),
-        }),
-      );
+      const result = respond(state, request.params);
+      if (request.params.scenario?.create && state.closeAfterCreate) {
+        state.closeAfterCreate = false;
+        socket.close();
+        return;
+      }
+      socket.send(JSON.stringify({ id: request.id, result }));
     });
   });
   const address = server.address();
@@ -162,10 +164,26 @@ function respond(state, params) {
           ...scenario,
           onStart: false,
           sync: false,
-          data: observed.data,
+          data: scenario.data ?? observed.data,
         },
       },
     };
+  }
+  if (params.scenario?.create) {
+    const scenario = {
+      ...structuredClone(params.scenario.create),
+      index: `created-${state.nextScenario++}`,
+      predefined: false,
+    };
+    state.scenarios.push(scenario);
+    return { scenario: { create: scenario } };
+  }
+  if (params.scenario?.delete) {
+    const index = state.scenarios.findIndex(
+      ({ index }) => index === params.scenario.delete.index,
+    );
+    if (index >= 0) state.scenarios.splice(index, 1);
+    return { scenario: { delete: {} } };
   }
   if (params.logic?.list) {
     const logics =
@@ -265,36 +283,49 @@ async function startClient(t, hub, stateDirectory) {
   const client = new Client({ name: "automation-test", version: "1.0.0" });
   t.after(async () => {
     await client.close();
-    for (const socket of hub.server.clients) socket.terminate();
-    await new Promise((resolve) => hub.server.close(resolve));
-    await rm(stateDirectory, { recursive: true, force: true });
   });
   await client.connect(transport);
   return client;
 }
 
-test("automation preview explains current mechanisms without writing to the hub", async (t) => {
+async function setup(t) {
   const hub = await startHub();
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-automation-"),
   );
+  t.after(async () => {
+    for (const socket of hub.server.clients) socket.terminate();
+    await new Promise((resolve) => hub.server.close(resolve));
+    await rm(stateDirectory, { recursive: true, force: true });
+  });
+  return { hub, stateDirectory };
+}
+
+const previewArguments = {
+  name: "Движение в гостиной включает офисную лампу",
+  reason: "Включать свет при движении",
+  source_room_ref: "spruthub://room/1",
+  source_characteristic_ref:
+    "spruthub://accessory/32/service/13/characteristic/15",
+  source_value: true,
+  target_room_ref: "spruthub://room/2",
+  target_characteristic_ref:
+    "spruthub://accessory/34/service/13/characteristic/15",
+  target_value: true,
+};
+
+async function preview(client) {
+  return client.callTool({
+    name: "preview_boolean_automation",
+    arguments: previewArguments,
+  });
+}
+
+test("automation preview explains current mechanisms without writing to the hub", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
 
-  const result = await client.callTool({
-    name: "preview_boolean_automation",
-    arguments: {
-      name: "Движение в гостиной включает офисную лампу",
-      reason: "Включать свет при движении",
-      source_room_ref: "spruthub://room/1",
-      source_characteristic_ref:
-        "spruthub://accessory/32/service/13/characteristic/15",
-      source_value: true,
-      target_room_ref: "spruthub://room/2",
-      target_characteristic_ref:
-        "spruthub://accessory/34/service/13/characteristic/15",
-      target_value: true,
-    },
-  });
+  const result = await preview(client);
 
   assert.equal(result.isError, undefined);
   assert.equal(result.structuredContent.status, "prepared");
@@ -386,5 +417,173 @@ test("automation preview explains current mechanisms without writing to the hub"
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.delete),
     false,
+  );
+});
+
+test("apply creates one exact native rule and repeated apply does not duplicate it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+
+  const first = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const second = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(first.isError, undefined);
+  assert.equal(first.structuredContent.status, "applied");
+  assert.equal(first.structuredContent.created, true);
+  assert.equal(second.structuredContent.status, "applied");
+  assert.equal(second.structuredContent.created, false);
+  const creates = hub.requests.filter(({ scenario }) => scenario?.create);
+  assert.equal(creates.length, 1);
+  const payload = creates[0].scenario.create;
+  assert.deepEqual(
+    {
+      name: payload.name,
+      active: payload.active,
+      onStart: payload.onStart,
+      sync: payload.sync,
+      type: payload.type,
+    },
+    {
+      name: previewArguments.name,
+      active: true,
+      onStart: false,
+      sync: false,
+      type: "BLOCK",
+    },
+  );
+  assert.match(payload.desc, /sprut-agent:automation:[a-f0-9]{24}/);
+  const data = JSON.parse(payload.data);
+  assert.deepEqual(data.targets[0].if.conditions, [
+    {
+      type: "characteristic",
+      blockId: 3,
+      aId: 32,
+      sId: 13,
+      cId: 15,
+      value: "true",
+      cond: "=",
+      trigger: true,
+      hs: "MotionSensor",
+      hc: "MotionDetected",
+      time: 0,
+      timeCond: "",
+    },
+  ]);
+  assert.deepEqual(data.targets[0].then, [
+    {
+      type: "service",
+      blockId: 4,
+      aId: 34,
+      sId: 13,
+      hs: "Lightbulb",
+      characteristics: [
+        { type: "set", blockId: 5, cId: 15, hc: "On", value: "true" },
+      ],
+    },
+  ]);
+  assert.deepEqual(data.targets[0].else, []);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "existing-block"),
+    true,
+  );
+});
+
+test("apply reconciles a dropped create response without sending create twice", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  hub.state.closeAfterCreate = true;
+
+  const result = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "applied");
+  assert.equal(result.structuredContent.recovered_after_disconnect, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("change ownership and status survive an MCP process restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const result = await secondClient.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "applied");
+  assert.equal(result.structuredContent.owned, true);
+  assert.equal(result.structuredContent.configuration_matches, true);
+});
+
+test("rollback deletes only an unchanged owned scenario and preserves manual edits", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const first = await preview(client);
+  const firstApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+
+  const rolledBack = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(rolledBack.isError, undefined);
+  assert.equal(rolledBack.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === firstApply.structuredContent.scenario_index,
+    ),
+    false,
+  );
+
+  const second = await preview(client);
+  const secondApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  const manuallyEdited = hub.state.scenarios.find(
+    ({ index }) => index === secondApply.structuredContent.scenario_index,
+  );
+  manuallyEdited.name = "Ручная правка после создания";
+
+  const refused = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(refused.isError, undefined);
+  assert.equal(refused.structuredContent.status, "conflict");
+  assert.equal(refused.structuredContent.action, "review_manual_changes");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === secondApply.structuredContent.scenario_index,
+    ),
+    true,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
   );
 });
