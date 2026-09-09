@@ -149,6 +149,7 @@ function selectSubprotocol(headers = {}) {
 function matchesSocket(url, targetUrl, socketPath) {
   const socket = new URL(url);
   const target = new URL(targetUrl);
+  target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
   return socket.origin === target.origin && socket.pathname === socketPath;
 }
 
