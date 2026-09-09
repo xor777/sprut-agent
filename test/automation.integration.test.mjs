@@ -114,6 +114,16 @@ async function startHub() {
         socket.close();
         return;
       }
+      if (request.params.scenario?.create && state.rejectNextCreate) {
+        state.rejectNextCreate = false;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: { code: 409, message: "Scenario rejected" },
+          }),
+        );
+        return;
+      }
       if (request.params.scenario?.list && state.closeNextScenarioList) {
         state.closeNextScenarioList = false;
         socket.close();
@@ -813,6 +823,58 @@ test("an incompatible create response remains recoverable without a duplicate", 
   assert.equal(recovered.structuredContent.created, false);
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("an incompatible create response is applied when reconciliation succeeds", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  hub.state.incompatibleCreateResponse = true;
+
+  const result = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "applied");
+  assert.equal(result.structuredContent.recovered_after_uncertain_write, true);
+  assert.equal(result.structuredContent.recovered_after_disconnect, undefined);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("a confirmed create rejection has no hidden effect and can be retried", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  hub.state.rejectNextCreate = true;
+
+  const rejected = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "request_rejected");
+  assert.equal(
+    hub.state.scenarios.filter(({ index }) => index.startsWith("created-"))
+      .length,
+    0,
+  );
+
+  const retried = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(retried.isError, undefined);
+  assert.equal(retried.structuredContent.status, "applied");
+  assert.equal(
+    hub.state.scenarios.filter(({ index }) => index.startsWith("created-"))
+      .length,
     1,
   );
 });
