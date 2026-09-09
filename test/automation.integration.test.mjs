@@ -438,7 +438,6 @@ test("apply creates one exact native rule and repeated apply does not duplicate 
     name: "apply_automation_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-
   assert.equal(first.isError, undefined);
   assert.equal(first.structuredContent.status, "applied");
   assert.equal(first.structuredContent.created, true);
@@ -649,13 +648,23 @@ test("an unknown create outcome stays uncertain and a repeated apply does not re
     name: "apply_automation_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
 
   assert.equal(first.structuredContent.status, "uncertain");
   assert.equal(first.structuredContent.action, "inspect_hub_before_retry");
   assert.equal(second.structuredContent.status, "uncertain");
+  assert.equal(rollback.structuredContent.status, "uncertain");
+  assert.equal(rollback.structuredContent.action, "inspect_hub_before_retry");
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.create).length,
     1,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete),
+    false,
   );
 });
 
