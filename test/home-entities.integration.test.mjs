@@ -74,6 +74,25 @@ function homeState(serial) {
                   value: { boolValue: false },
                 },
               },
+              {
+                aId: 32,
+                sId: 13,
+                cId: 16,
+                hasOptions: false,
+                control: {
+                  name: "WiFiPassword",
+                  type: "GenericString",
+                  read: true,
+                  write: false,
+                  events: false,
+                  value: {
+                    stringValue: "characteristic-secret-must-not-leak",
+                  },
+                  unknownChild: {
+                    payload: "nested-characteristic-secret-must-not-leak",
+                  },
+                },
+              },
             ],
           },
         ],
@@ -124,8 +143,11 @@ function homeState(serial) {
             },
           ],
           connection: {
-            key: "WiFiPassword",
+            key: "WiFiPassword/identifier-secret-must-not-leak",
             value: { stringValue: "block-secret-must-not-leak" },
+            unknownChild: {
+              payload: "nested-block-secret-must-not-leak",
+            },
           },
         }),
       },
@@ -211,7 +233,20 @@ function homeState(serial) {
           value: { intValue: 10 },
         },
         {
-          key: "WiFiPassword",
+          key: "/1/FCC0_ManufacturerSpecific/0202_SensorDetectionSeconds/30",
+          name: "Другой период обнаружения",
+          type: "GenericInteger",
+          inputType: "NUMBER",
+          read: true,
+          write: true,
+          events: true,
+          minValue: 1,
+          maxValue: 200,
+          minStep: 1,
+          value: { intValue: 20 },
+        },
+        {
+          key: "/1/Network/WiFiPassword/key-secret-must-not-leak",
           name: "Wi-Fi password",
           type: "GenericString",
           inputType: "PASSWORD",
@@ -231,8 +266,21 @@ function homeState(serial) {
           value: {
             stringValue:
               serial === "home/A"
-                ? "<li>0102_SensorDetectionSeconds (115F): 61 [UNSIGNED_8_BIT_INTEGER]</li>\nAuthorization: Bearer diagnostic-secret-must-not-leak\nstatus=ok"
+                ? "<li>0102_SensorDetectionSeconds (115F): 61 [UNSIGNED_8_BIT_INTEGER]</li>\n<li>0202_SensorDetectionSeconds (225F): 31 [UNSIGNED_8_BIT_INTEGER]</li>"
                 : "status=ok",
+          },
+        },
+        {
+          key: "ConnectionDiagnostics",
+          name: "Connection diagnostics",
+          type: "GenericString",
+          inputType: "INFO",
+          read: true,
+          write: false,
+          events: true,
+          value: {
+            stringValue:
+              "Authorization: Bearer diagnostic-secret-must-not-leak",
           },
         },
       ],
@@ -285,6 +333,7 @@ async function startHub() {
   const address = server.address();
   assert(address && typeof address === "object");
   return {
+    states,
     requests,
     responseSentAt,
     behavior,
@@ -475,7 +524,7 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
   }
 });
 
-test("characteristic detail separates value, characteristic options, and physical reports", async (t) => {
+test("characteristic detail keeps configuration separate from unlinked diagnostics", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
   const result = await client.callTool({
@@ -510,27 +559,21 @@ test("characteristic detail separates value, characteristic options, and physica
       write: true,
       events: true,
     },
-    {
-      key: "clientSecret",
-      name: "Client secret",
-      type: "GenericString",
-      input_type: "PASSWORD",
-      configured_value: "[REDACTED]",
-      unit: null,
-      read: true,
-      write: true,
-      events: false,
-      sensitive: true,
-    },
+    { redacted: true, reason: "sensitive_native_data" },
   ]);
-  const detection = entity.physical_configuration.options.find(
+  const detections = entity.physical_configuration.options.filter(
     ({ property }) => property === "SensorDetectionSeconds",
   );
+  assert.equal(detections.length, 2);
+  const [detection, otherDetection] = detections;
   assert.equal(detection.configured_value, 10);
-  assert.equal(detection.reported_value, 61);
-  assert.equal(detection.reported_source, "window_info_report");
+  assert.equal(detection.reported_value, null);
+  assert.equal(detection.reported_source, null);
   assert.equal(detection.pending, "unknown");
   assert.equal(detection.source_timestamp, null);
+  assert.equal(otherDetection.configured_value, 20);
+  assert.equal(otherDetection.reported_value, null);
+  assert.equal(otherDetection.reported_source, null);
   assert.deepEqual(
     {
       min: detection.min,
@@ -554,10 +597,10 @@ test("characteristic detail separates value, characteristic options, and physica
     ),
     false,
   );
-  const password = entity.physical_configuration.options.find(
-    ({ key }) => key === "WiFiPassword",
-  );
-  assert.equal(password.configured_value, "[REDACTED]");
+  assert.deepEqual(entity.physical_configuration.options.at(-1), {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
   assert.deepEqual(entity.relations.assigned_logics, [
     {
       ref: "spruthub://hub/home%2FA/accessory/32/service/13/logic/MotionDetectedFromCurrentMotionLevel",
@@ -567,7 +610,8 @@ test("characteristic detail separates value, characteristic options, and physica
     },
   ]);
   assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*61/);
-  assert.doesNotMatch(entity.diagnostics[0].text, /must-not-leak/);
+  assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*31/);
+  assert.equal(entity.diagnostics[1].text, "[REDACTED]");
   assert.equal(entity.freshness.source_timestamp, null);
 });
 
@@ -595,6 +639,26 @@ test("extension refs preserve native instance identity", async (t) => {
     instances.map(({ structuredContent }) => structuredContent.entity.name),
     ["Yandex", "VK"],
   );
+});
+
+test("extension catalog rejects missing and conflicting native identity", async (t) => {
+  for (const mutate of [
+    (extensions) => delete extensions[0].extensionKey,
+    (extensions) => {
+      extensions[1].extensionKey = extensions[0].extensionKey;
+    },
+  ]) {
+    const hub = await startHub();
+    mutate(hub.states.get("home/A").extensions);
+    const client = await startClient(t, hub);
+    const result = await client.callTool({
+      name: "inspect_home",
+      arguments: { home_ref: "spruthub://hub/home%2FA" },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, "incompatible_response");
+    assert.doesNotMatch(result.content[0].text, /extension\/yandex/);
+  }
 });
 
 test("missing independent device report stays unknown", async (t) => {
@@ -634,6 +698,13 @@ test("native secrets are redacted from structured and text output", async (t) =>
       include: ["configuration"],
     },
   });
+  const sensitiveCharacteristic = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/16",
+    },
+  });
   const overview = await client.callTool({
     name: "inspect_home",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
@@ -645,7 +716,21 @@ test("native secrets are redacted from structured and text output", async (t) =>
       include: ["configuration"],
     },
   });
-  const visible = JSON.stringify({ characteristic, scenario, block, overview });
+  assert.deepEqual(sensitiveCharacteristic.structuredContent.entity, {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
+  assert.deepEqual(
+    block.structuredContent.entity.configuration.value.connection,
+    { redacted: true, reason: "sensitive_native_data" },
+  );
+  const visible = JSON.stringify({
+    characteristic,
+    sensitiveCharacteristic,
+    scenario,
+    block,
+    overview,
+  });
   for (const secret of [
     "structured-secret-must-not-leak",
     "option-secret-must-not-leak",
@@ -653,6 +738,11 @@ test("native secrets are redacted from structured and text output", async (t) =>
     "code-secret-must-not-leak",
     "block-secret-must-not-leak",
     "room-secret-must-not-leak",
+    "key-secret-must-not-leak",
+    "identifier-secret-must-not-leak",
+    "characteristic-secret-must-not-leak",
+    "nested-characteristic-secret-must-not-leak",
+    "nested-block-secret-must-not-leak",
     "must-not-leak",
   ]) {
     assert.doesNotMatch(visible, new RegExp(secret));
