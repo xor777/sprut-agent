@@ -13,6 +13,15 @@ const projectRoot = path.resolve(
 );
 const diagnosticsByClient = new WeakMap();
 
+class BoundedTestClient extends Client {
+  callTool(params, resultSchema, options = {}) {
+    return super.callTool(params, resultSchema, {
+      timeout: 1_500,
+      ...options,
+    });
+  }
+}
+
 const hubState = {
   rooms: [
     { id: 10, order: 1, name: " Кухня ", visible: true },
@@ -223,7 +232,10 @@ async function startMcpClient(t, hub, environment = {}) {
     },
     stderr: "pipe",
   });
-  const client = new Client({ name: "sprut-agent-test", version: "1.0.0" });
+  const client = new BoundedTestClient({
+    name: "sprut-agent-test",
+    version: "1.0.0",
+  });
   const diagnostics = [];
   transport.stderr?.on("data", (chunk) => diagnostics.push(chunk.toString()));
   diagnosticsByClient.set(client, diagnostics);
@@ -650,6 +662,31 @@ test("connection failures stay bounded and recover with a fresh reading in the s
       action: "retry",
     },
   });
+  silentHub.state.ignoreRequests = false;
+  const afterTimeout = await silentClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(afterTimeout.isError, undefined);
+  assert.equal(afterTimeout.structuredContent.status, "ok");
+
+  const concurrentHub = await startHub();
+  const concurrentClient = await startMcpClient(t, concurrentHub);
+  const concurrentReads = await Promise.all([
+    concurrentClient.callTool({
+      name: "read_room",
+      arguments: { room: "Кухня" },
+    }),
+    concurrentClient.callTool({
+      name: "read_room",
+      arguments: { room: "Гостиная" },
+    }),
+  ]);
+  assert.deepEqual(
+    concurrentReads.map(({ structuredContent }) => structuredContent.status),
+    ["ok", "ok"],
+  );
+  assert.equal(concurrentHub.metrics.connections, 1);
 
   const recoveringHub = await startHub();
   const recoveringClient = await startMcpClient(t, recoveringHub);

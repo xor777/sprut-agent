@@ -121,6 +121,7 @@ export class SprutHubClient {
           new SprutHubError(
             "timeout",
             "SprutHub did not respond within the request budget.",
+            "retry",
           ),
         );
       }, this.timeoutMs);
@@ -151,6 +152,7 @@ export class SprutHubClient {
           new SprutHubError(
             "connection_failed",
             "Could not connect to SprutHub.",
+            "retry",
           ),
         );
       };
@@ -213,6 +215,7 @@ export class SprutHubClient {
         new SprutHubError(
           "connection_closed",
           "The SprutHub connection closed before the response arrived.",
+          "retry",
         ),
       );
     }
