@@ -599,7 +599,7 @@ function extractBuildInfo(bundleSources) {
 async function fetchText(url) {
   const response = await fetch(url, {
     headers: {
-      "user-agent": "sprut-api-research/1",
+      "user-agent": "sprut-agent-research/1",
     },
     signal: AbortSignal.timeout(30_000),
   });
