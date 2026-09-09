@@ -7,6 +7,7 @@ export class AutomationService {
 
   constructor({ client, stateDirectory, hubUrl, hubSerial }) {
     this.client = client;
+    this.hubSerial = hubSerial;
     this.store = new AutomationStore({
       directory: stateDirectory,
       hubUrl,
@@ -15,10 +16,16 @@ export class AutomationService {
   }
 
   async previewBooleanAutomation(input) {
-    const source = parseCharacteristicRef(input.source_characteristic_ref);
-    const target = parseCharacteristicRef(input.target_characteristic_ref);
-    const sourceRoomId = parseRoomRef(input.source_room_ref);
-    const targetRoomId = parseRoomRef(input.target_room_ref);
+    const source = parseCharacteristicRef(
+      input.source_characteristic_ref,
+      this.hubSerial,
+    );
+    const target = parseCharacteristicRef(
+      input.target_characteristic_ref,
+      this.hubSerial,
+    );
+    const sourceRoomId = parseRoomRef(input.source_room_ref, this.hubSerial);
+    const targetRoomId = parseRoomRef(input.target_room_ref, this.hubSerial);
     const context = await this.client.inspectAutomation({
       source: { ...source, roomId: sourceRoomId },
       target: { ...target, roomId: targetRoomId },
@@ -28,12 +35,14 @@ export class AutomationService {
       source,
       input.source_value,
       false,
+      this.hubSerial,
     );
     const action = selectCharacteristic(
       context.target,
       target,
       input.target_value,
       true,
+      this.hubSerial,
     );
     const autoOff = selectAutoOff(
       input.auto_off_after_seconds,
@@ -49,6 +58,7 @@ export class AutomationService {
       name: input.name,
       reason: input.reason,
       marker: `sprut-agent:automation:${id}`,
+      home_ref: configuredHomeRef(this.hubSerial),
       created_at: now,
       updated_at: now,
       condition,
@@ -268,27 +278,58 @@ export class AutomationService {
         "preview_boolean_automation",
       );
     }
+    if (
+      change.home_ref !== undefined &&
+      change.home_ref !== configuredHomeRef(this.hubSerial)
+    ) {
+      throw unsupportedHomeWrite();
+    }
     return change;
   }
 
   async #preflight(change) {
-    const source = parseCharacteristicRef(change.condition.characteristic.ref);
-    const target = parseCharacteristicRef(change.action.characteristic.ref);
+    const allowLegacy = change.home_ref === undefined;
+    const source = parseCharacteristicRef(
+      change.condition.characteristic.ref,
+      this.hubSerial,
+      allowLegacy,
+    );
+    const target = parseCharacteristicRef(
+      change.action.characteristic.ref,
+      this.hubSerial,
+      allowLegacy,
+    );
     const context = await this.client.inspectAutomation({
-      source: { ...source, roomId: parseRoomRef(change.condition.room.ref) },
-      target: { ...target, roomId: parseRoomRef(change.action.room.ref) },
+      source: {
+        ...source,
+        roomId: parseRoomRef(
+          change.condition.room.ref,
+          this.hubSerial,
+          allowLegacy,
+        ),
+      },
+      target: {
+        ...target,
+        roomId: parseRoomRef(
+          change.action.room.ref,
+          this.hubSerial,
+          allowLegacy,
+        ),
+      },
     });
     const condition = selectCharacteristic(
       context.source,
       source,
       change.condition.value,
       false,
+      this.hubSerial,
     );
     const action = selectCharacteristic(
       context.target,
       target,
       change.action.value,
       true,
+      this.hubSerial,
     );
     if (
       condition.service.type !== change.condition.service.type ||
@@ -421,23 +462,43 @@ export class AutomationService {
   }
 }
 
-function parseRoomRef(ref) {
-  const match = /^spruthub:\/\/room\/(\d+)$/.exec(ref);
-  if (!match) {
+function parseRoomRef(ref, configuredSerial, allowLegacy = false) {
+  const scoped = /^spruthub:\/\/hub\/([^/]+)\/room\/(\d+)$/.exec(ref);
+  if (scoped) {
+    const serial = decodeReferenceSegment(scoped[1]);
+    requireConfiguredHome(serial, configuredSerial);
+    return Number(scoped[2]);
+  }
+  const legacy = allowLegacy ? /^spruthub:\/\/room\/(\d+)$/.exec(ref) : null;
+  if (!legacy) {
     throw new SprutHubError(
       "invalid_room_ref",
-      "Use a room reference returned by list_rooms.",
+      "Use a home-qualified room reference returned by list_rooms.",
       "list_rooms",
     );
   }
-  return Number(match[1]);
+  return Number(legacy[1]);
 }
 
-function parseCharacteristicRef(ref) {
-  const match =
-    /^spruthub:\/\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
+function parseCharacteristicRef(ref, configuredSerial, allowLegacy = false) {
+  const scoped =
+    /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
       ref,
     );
+  if (scoped) {
+    const serial = decodeReferenceSegment(scoped[1]);
+    requireConfiguredHome(serial, configuredSerial);
+    return {
+      aId: Number(scoped[2]),
+      sId: Number(scoped[3]),
+      cId: Number(scoped[4]),
+    };
+  }
+  const match = allowLegacy
+    ? /^spruthub:\/\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
+        ref,
+      )
+    : null;
   if (!match) {
     throw new SprutHubError(
       "invalid_characteristic_ref",
@@ -452,7 +513,37 @@ function parseCharacteristicRef(ref) {
   };
 }
 
-function selectCharacteristic(selection, ref, value, requireWrite) {
+function decodeReferenceSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new SprutHubError(
+      "invalid_characteristic_ref",
+      "Use a home-qualified characteristic reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+}
+
+function requireConfiguredHome(serial, configuredSerial) {
+  if (configuredSerial !== undefined && serial !== configuredSerial) {
+    throw unsupportedHomeWrite();
+  }
+}
+
+function unsupportedHomeWrite() {
+  return new SprutHubError(
+    "unsupported_home_write",
+    "Automation writes are limited to the configured SprutHub home.",
+    "select_configured_home",
+  );
+}
+
+function configuredHomeRef(serial) {
+  return `spruthub://hub/${encodeURIComponent(serial)}`;
+}
+
+function selectCharacteristic(selection, ref, value, requireWrite, serial) {
   const accessory = selection.accessories.find(({ id }) => id === ref.aId);
   const service = accessory?.services?.find(({ sId }) => sId === ref.sId);
   const characteristic = service?.characteristics?.find(
@@ -498,20 +589,20 @@ function selectCharacteristic(selection, ref, value, requireWrite) {
 
   const normalized = {
     room: {
-      ref: `spruthub://room/${selection.room.id}`,
+      ref: `${configuredHomeRef(serial)}/room/${selection.room.id}`,
       name: selection.room.name,
     },
     device: {
-      ref: `spruthub://accessory/${accessory.id}`,
+      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}`,
       name: accessory.name,
     },
     service: {
-      ref: `spruthub://accessory/${accessory.id}/service/${service.sId}`,
+      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}/service/${service.sId}`,
       name: service.name,
       type: service.type,
     },
     characteristic: {
-      ref: `spruthub://accessory/${accessory.id}/service/${service.sId}/characteristic/${characteristic.cId}`,
+      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}/service/${service.sId}/characteristic/${characteristic.cId}`,
       name: control.name,
       type: control.type ?? control.key,
       read: control.read === true,
