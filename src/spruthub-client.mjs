@@ -203,12 +203,16 @@ export class SprutHubClient {
         socket.off("error", failBeforeOpen);
         this.#connectingSocket = undefined;
         this.#socket = socket;
+        socket.on("error", () => {
+          this.#handleConnectionLoss(socket);
+          socket.terminate();
+        });
         resolve(socket);
       });
       socket.on("message", (data) => this.#handleMessage(data));
       socket.on("close", () => {
         if (!settled) failBeforeOpen();
-        if (this.#socket === socket) this.#handleClose();
+        this.#handleConnectionLoss(socket);
       });
     });
     this.#connectPromise = connection;
@@ -254,7 +258,8 @@ export class SprutHubClient {
     pending.resolve(message);
   }
 
-  #handleClose() {
+  #handleConnectionLoss(socket) {
+    if (this.#socket !== socket) return;
     this.#socket = undefined;
     for (const { reject, timer } of this.#pending.values()) {
       clearTimeout(timer);

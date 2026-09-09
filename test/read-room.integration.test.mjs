@@ -921,7 +921,10 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
     name: "read_room",
     arguments: { room_ref: "spruthub://room/10" },
   });
-  assert.equal(findReading(first.structuredContent, temperatureRef).value, 23.5);
+  assert.equal(
+    findReading(first.structuredContent, temperatureRef).value,
+    23.5,
+  );
 
   hub.state.invalidFrameOnRequest = true;
   const interrupted = await client.callTool({
