@@ -1,0 +1,110 @@
+{
+  "observedAt": "2026-09-09T09:23:55.690Z",
+  "webClient": {
+    "origin": "https://beta.spruthub.ru",
+    "asset": "app.16735171810a795a9f2d.js"
+  },
+  "hubVersion": "3.0.0b (20131)",
+  "transport": {
+    "url": "wss://beta.spruthub.ru/spruthub",
+    "subprotocol": "json-rpc"
+  },
+  "provenance": "Observed successful read-only room.list and room-filtered accessory.list on a real hub. Reduced to the selected room and its two CurrentTemperature characteristics. Room/device/service names, all object ids, and temperature values are replaced; hierarchy, native types, unit and read/write flags are preserved. No authentication material is included. This proves shape, not changing readings or all optional fields.",
+  "exchanges": [
+    {
+      "params": {
+        "room": {
+          "list": {}
+        }
+      },
+      "result": {
+        "room": {
+          "list": {
+            "rooms": [
+              {
+                "id": 10,
+                "name": "Room A",
+                "order": 1,
+                "visible": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "accessory": {
+          "list": {
+            "roomId": 10,
+            "expand": "services,characteristics"
+          }
+        }
+      },
+      "result": {
+        "accessory": {
+          "list": {
+            "accessories": [
+              {
+                "id": 100,
+                "roomId": 10,
+                "name": "Climate device A",
+                "online": true,
+                "services": [
+                  {
+                    "aId": 100,
+                    "sId": 10,
+                    "name": "Indoor temperature",
+                    "type": "Thermostat",
+                    "characteristics": [
+                      {
+                        "aId": 100,
+                        "sId": 10,
+                        "cId": 11,
+                        "control": {
+                          "name": "Temperature",
+                          "type": "CurrentTemperature",
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "value": {
+                            "doubleValue": 21.5
+                          },
+                          "unit": "°C"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "aId": 100,
+                    "sId": 20,
+                    "name": "Outdoor temperature",
+                    "type": "TemperatureSensor",
+                    "characteristics": [
+                      {
+                        "aId": 100,
+                        "sId": 20,
+                        "cId": 21,
+                        "control": {
+                          "name": "Temperature",
+                          "type": "CurrentTemperature",
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "value": {
+                            "doubleValue": 10
+                          },
+                          "unit": "°C"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
