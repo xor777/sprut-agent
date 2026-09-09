@@ -3,6 +3,11 @@ name: Check
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -24,7 +29,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm run test:mutations
       - name: Check commit messages
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -37,3 +41,6 @@ jobs:
               git show -s --format=%B "$commit" | npm exec --no -- commitlint
             done
           fi
+      - name: Run mutation tests
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run test:mutations
