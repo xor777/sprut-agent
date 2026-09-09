@@ -142,7 +142,17 @@ export class AutomationService {
         if (!isUncertainWriteError(error)) {
           change.status = "prepared";
           change.updated_at = new Date().toISOString();
-          await this.store.save(change);
+          const localStateSaved = await this.#trySave(change);
+          if (!localStateSaved) {
+            error.details = {
+              change_ref: changeReference,
+              hub_effect: "not_applied",
+              local_state: {
+                saved: false,
+                action: "restore_state_storage_then_preview_boolean_automation",
+              },
+            };
+          }
           throw error;
         }
         change.status = "uncertain";

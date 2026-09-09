@@ -200,6 +200,7 @@ function toToolError(error) {
   if (error instanceof SprutHubError) {
     return {
       status: "error",
+      ...(error.details ?? {}),
       error: {
         code: error.code,
         message: error.message,
