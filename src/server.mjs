@@ -54,7 +54,7 @@ server.registerTool(
   {
     title: "List SprutHub rooms",
     description:
-      "List every room on the configured SprutHub with its original name and stable reference. Use this before read_room so the agent can select the room requested by the user.",
+      "List every room on the configured SprutHub with its original name and stable reference. Use this before read_room. If several rooms plausibly match the user's words, ask which one they mean or read and report each room separately by its original name. Never merge distinct rooms because their readings are equal.",
     inputSchema: {},
     outputSchema: {
       status: z.enum(["ok", "error"]),
@@ -72,7 +72,7 @@ server.registerTool(
   {
     title: "Read a SprutHub room",
     description:
-      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms.",
+      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
     inputSchema: {
       room_ref: z
         .string()
