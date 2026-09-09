@@ -34,7 +34,15 @@ const homes = [
 function homeState(serial) {
   const suffix = serial === "home/A" ? "A" : "B";
   return {
-    rooms: [{ id: 1, name: "Гостиная" }],
+    rooms: [
+      {
+        id: 1,
+        name:
+          serial === "home/A"
+            ? "Гостиная credential=room-secret-must-not-leak"
+            : "Гостиная",
+      },
+    ],
     accessories: [
       {
         id: 32,
@@ -626,6 +634,10 @@ test("native secrets are redacted from structured and text output", async (t) =>
       include: ["configuration"],
     },
   });
+  const overview = await client.callTool({
+    name: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
   const block = await client.callTool({
     name: "get_entity",
     arguments: {
@@ -633,13 +645,14 @@ test("native secrets are redacted from structured and text output", async (t) =>
       include: ["configuration"],
     },
   });
-  const visible = JSON.stringify({ characteristic, scenario, block });
+  const visible = JSON.stringify({ characteristic, scenario, block, overview });
   for (const secret of [
     "structured-secret-must-not-leak",
     "option-secret-must-not-leak",
     "diagnostic-secret-must-not-leak",
     "code-secret-must-not-leak",
     "block-secret-must-not-leak",
+    "room-secret-must-not-leak",
     "must-not-leak",
   ]) {
     assert.doesNotMatch(visible, new RegExp(secret));
