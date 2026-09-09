@@ -47,19 +47,30 @@ export class SprutHubClient {
       );
     }
 
-    const normalizedName = roomName.trim().toLocaleLowerCase("ru");
-    const matches = rooms.filter(
-      ({ name }) =>
-        typeof name === "string" &&
-        name.trim().toLocaleLowerCase("ru") === normalizedName,
+    const selector = roomName.trim();
+    const roomRef = /^spruthub:\/\/room\/(\d+)$/.exec(selector);
+    const normalizedName = selector.toLocaleLowerCase("ru");
+    const matches = rooms.filter(({ id, name }) =>
+      roomRef
+        ? id === Number(roomRef[1])
+        : typeof name === "string" &&
+          name.trim().toLocaleLowerCase("ru") === normalizedName,
     );
-    if (matches.length !== 1) {
+    if (matches.length === 0) {
       throw new SprutHubError(
-        matches.length === 0 ? "room_not_found" : "room_ambiguous",
-        matches.length === 0
-          ? `Room ${JSON.stringify(roomName)} was not found.`
-          : `Room ${JSON.stringify(roomName)} is ambiguous.`,
+        "room_not_found",
+        `Room ${JSON.stringify(roomName)} was not found.`,
       );
+    }
+    if (matches.length > 1) {
+      return {
+        status: "ambiguous",
+        query: roomName,
+        candidates: matches.map((room) => ({
+          ref: `spruthub://room/${room.id}`,
+          name: room.name.trim(),
+        })),
+      };
     }
 
     const accessoriesResponse = await this.#request({

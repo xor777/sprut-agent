@@ -2,14 +2,15 @@
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "mutate": [
     "research/record-websocket.mjs:149:0-155:0",
-    "src/server.mjs:57:0-63:0",
+    "src/server.mjs:66:0-73:0",
     "src/spruthub-client.mjs:40:0-42:0",
-    "src/spruthub-client.mjs:50:0-56:0",
-    "src/spruthub-client.mjs:65:0-68:0",
-    "src/spruthub-client.mjs:77:0-91:0",
-    "src/spruthub-client.mjs:118:0-126:0",
-    "src/spruthub-client.mjs:202:0-226:0",
-    "src/spruthub-client.mjs:226:0-232:0"
+    "src/spruthub-client.mjs:50:0-59:0",
+    "src/spruthub-client.mjs:65:0-75:0",
+    "src/spruthub-client.mjs:76:0-79:0",
+    "src/spruthub-client.mjs:88:0-103:0",
+    "src/spruthub-client.mjs:129:0-137:0",
+    "src/spruthub-client.mjs:213:0-237:0",
+    "src/spruthub-client.mjs:237:0-243:0"
   ],
   "testRunner": "command",
   "commandRunner": { "command": "npm test" },

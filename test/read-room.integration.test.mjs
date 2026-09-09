@@ -363,8 +363,8 @@ test("repeated MCP reads return the latest hub values without losing false, zero
 test("ambiguous room names return stable choices that can be read explicitly", async (t) => {
   const hub = await startHub();
   hub.state.rooms.push(
-    { id: 40, order: 4, name: "Кладовая", visible: true },
-    { id: 41, order: 5, name: "Кладовая", visible: true },
+    { id: 40, order: 4, name: " Кладовая ", visible: true },
+    { id: 41, order: 5, name: " Кладовая ", visible: true },
   );
   hub.state.accessories.push({
     id: 410,
@@ -402,4 +402,15 @@ test("ambiguous room names return stable choices that can be read explicitly", a
     selected.structuredContent.devices.map(({ ref }) => ref),
     ["spruthub://accessory/410"],
   );
+
+  for (const invalidRef of [
+    "prefixspruthub://room/41",
+    "spruthub://room/41/suffix",
+  ]) {
+    const invalid = await client.callTool({
+      name: "read_room",
+      arguments: { room: invalidRef },
+    });
+    assert.equal(invalid.isError, true);
+  }
 });

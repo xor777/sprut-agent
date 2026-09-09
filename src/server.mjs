@@ -29,23 +29,32 @@ const deviceSchema = z.object({
   services: z.array(serviceSchema),
 });
 
+const roomSchema = z.object({ ref: z.string(), name: z.string() });
+
 server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",
     description:
-      "Read devices and current characteristics in one SprutHub room by its human-readable name.",
+      "Read devices and current characteristics in one SprutHub room by its human-readable name or stable room reference.",
     inputSchema: {
-      room: z.string().min(1).describe("Human-readable room name"),
+      room: z
+        .string()
+        .min(1)
+        .describe("Human-readable room name or spruthub://room/<id> reference"),
     },
     outputSchema: {
-      status: z.literal("ok"),
-      room: z.object({ ref: z.string(), name: z.string() }),
-      devices: z.array(deviceSchema),
-      freshness: z.object({
-        hubResponseReceivedAt: z.string(),
-        measurementAt: z.string().nullable(),
-      }),
+      status: z.enum(["ok", "ambiguous"]),
+      query: z.string().optional(),
+      candidates: z.array(roomSchema).optional(),
+      room: roomSchema.optional(),
+      devices: z.array(deviceSchema).optional(),
+      freshness: z
+        .object({
+          hubResponseReceivedAt: z.string(),
+          measurementAt: z.string().nullable(),
+        })
+        .optional(),
     },
     annotations: {
       readOnlyHint: true,
@@ -79,6 +88,8 @@ server.registerTool(
 );
 
 await server.connect(new StdioServerTransport());
+process.stdin.once("end", shutdown);
+process.once("SIGTERM", shutdown);
 
 function getHubClient() {
   hubClient ??= new SprutHubClient({
@@ -89,4 +100,12 @@ function getHubClient() {
     timeoutMs: Number(process.env.SPRUTHUB_TIMEOUT_MS ?? 10_000),
   });
   return hubClient;
+}
+
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await hubClient?.close();
+  process.exit(0);
 }
