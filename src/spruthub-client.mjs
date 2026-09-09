@@ -52,10 +52,13 @@ export class SprutHubClient {
 
     return {
       status: "ok",
-      rooms: rooms.map((room) => ({
-        ref: `spruthub://room/${room.id}`,
-        name: room.name,
-      })),
+      rooms: rooms.map((room) => {
+        validateRoom(room);
+        return {
+          ref: `spruthub://room/${room.id}`,
+          name: room.name,
+        };
+      }),
       freshness: {
         hubResponseReceivedAt: new Date().toISOString(),
         measurementAt: null,
@@ -93,6 +96,7 @@ export class SprutHubClient {
         "list_rooms",
       );
     }
+    validateRoom(room, roomId);
 
     const accessoriesResponse = await this.#request(
       {
@@ -118,6 +122,7 @@ export class SprutHubClient {
         name: room.name,
       },
       devices: accessories
+        .map(validateAccessory)
         .filter(({ roomId }) => roomId === room.id)
         .map(normalizeAccessory),
       freshness: {
@@ -281,6 +286,71 @@ function timeoutError() {
     "SprutHub did not respond within the request budget.",
     "retry",
   );
+}
+
+function validateRoom(room, expectedId) {
+  if (
+    !room ||
+    !isStableId(room.id) ||
+    typeof room.name !== "string" ||
+    (expectedId !== undefined && room.id !== expectedId)
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned incomplete room data.",
+    );
+  }
+}
+
+function validateAccessory(accessory) {
+  if (
+    !accessory ||
+    !isStableId(accessory.id) ||
+    !isStableId(accessory.roomId) ||
+    typeof accessory.name !== "string" ||
+    typeof accessory.online !== "boolean" ||
+    (accessory.services !== undefined && !Array.isArray(accessory.services))
+  ) {
+    throw incompleteAccessoryError();
+  }
+
+  for (const service of accessory.services ?? []) {
+    if (
+      !service ||
+      !isStableId(service.sId) ||
+      typeof service.name !== "string" ||
+      typeof service.type !== "string" ||
+      (service.characteristics !== undefined &&
+        !Array.isArray(service.characteristics))
+    ) {
+      throw incompleteAccessoryError();
+    }
+
+    for (const characteristic of service.characteristics ?? []) {
+      const control = characteristic?.control;
+      if (
+        !isStableId(characteristic?.cId) ||
+        !control ||
+        typeof control.name !== "string" ||
+        (typeof control.type !== "string" && typeof control.key !== "string") ||
+        (control.unit != null && typeof control.unit !== "string")
+      ) {
+        throw incompleteAccessoryError();
+      }
+    }
+  }
+  return accessory;
+}
+
+function incompleteAccessoryError() {
+  return new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned incomplete accessory data.",
+  );
+}
+
+function isStableId(value) {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function normalizeAccessory(accessory) {
