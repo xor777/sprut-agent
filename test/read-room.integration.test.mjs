@@ -1179,6 +1179,7 @@ test("authorization failures identify credential repair without leaking the reje
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
     status: "error",
+    capability_status: "insufficient_access",
     error: {
       code: "authentication_failed",
       message: "SprutHub rejected the configured credentials.",
@@ -1246,6 +1247,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   assert(performance.now() - timeoutStartedAt < 1_000);
   assert.deepEqual(timeout.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "timeout",
       message: "SprutHub did not respond within the request budget.",
@@ -1335,6 +1337,7 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   assert(performance.now() - handshakeStartedAt < 1_000);
   assert.deepEqual(handshakeTimeout.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "timeout",
       message: "SprutHub did not respond within the request budget.",
@@ -1357,6 +1360,7 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   assert(performance.now() - slowStartedAt < 1_000);
   assert.deepEqual(sequenceTimeout.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "timeout",
       message: "SprutHub did not respond within the request budget.",
