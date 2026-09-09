@@ -19,6 +19,7 @@ export class SprutHubError extends Error {
 
 export class SprutHubClient {
   #connectPromise;
+  #connectingSocket;
   #nextRequestId = 1;
   #pending = new Map();
   #socket;
@@ -39,7 +40,8 @@ export class SprutHubClient {
   }
 
   async listRooms() {
-    const roomsResponse = await this.#request({ room: { list: {} } });
+    const deadline = Date.now() + this.timeoutMs;
+    const roomsResponse = await this.#request({ room: { list: {} } }, deadline);
     const rooms = roomsResponse.result?.room?.list?.rooms;
     if (!Array.isArray(rooms)) {
       throw new SprutHubError(
@@ -71,9 +73,11 @@ export class SprutHubClient {
       );
     }
     const roomId = Number(parsedRef[1]);
-    const roomResponse = await this.#request({
-      room: { get: { id: roomId } },
-    });
+    const deadline = Date.now() + this.timeoutMs;
+    const roomResponse = await this.#request(
+      { room: { get: { id: roomId } } },
+      deadline,
+    );
     const roomContainer = roomResponse.result?.room;
     if (!roomContainer || !("get" in roomContainer)) {
       throw new SprutHubError(
@@ -90,11 +94,14 @@ export class SprutHubClient {
       );
     }
 
-    const accessoriesResponse = await this.#request({
-      accessory: {
-        list: { roomId, expand: "services,characteristics" },
+    const accessoriesResponse = await this.#request(
+      {
+        accessory: {
+          list: { roomId, expand: "services,characteristics" },
+        },
       },
-    });
+      deadline,
+    );
     const accessories =
       accessoriesResponse.result?.accessory?.list?.accessories;
     if (!Array.isArray(accessories)) {
@@ -121,6 +128,7 @@ export class SprutHubClient {
   }
 
   async close() {
+    this.#connectingSocket?.terminate();
     if (!this.#socket) return;
     await new Promise((resolve) => {
       this.#socket.once("close", resolve);
@@ -128,20 +136,16 @@ export class SprutHubClient {
     });
   }
 
-  async #request(params) {
-    const socket = await this.#connect();
+  async #request(params, deadline) {
+    const socket = await this.#connect(deadline);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
     const id = this.#nextRequestId++;
     const response = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(
-          new SprutHubError(
-            "timeout",
-            "SprutHub did not respond within the request budget.",
-            "retry",
-          ),
-        );
-      }, this.timeoutMs);
+        reject(timeoutError());
+      }, remainingMs);
       this.#pending.set(id, { resolve, reject, timer });
     });
 
@@ -158,13 +162,27 @@ export class SprutHubClient {
     return response;
   }
 
-  async #connect() {
+  async #connect(deadline) {
     if (this.#socket?.readyState === WebSocket.OPEN) return this.#socket;
     if (this.#connectPromise) return this.#connectPromise;
 
-    this.#connectPromise = new Promise((resolve, reject) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
+
+    const connection = new Promise((resolve, reject) => {
       const socket = new WebSocket(this.url, "json-rpc");
+      this.#connectingSocket = socket;
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(timeoutError());
+        socket.terminate();
+      }, remainingMs);
       const failBeforeOpen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         reject(
           new SprutHubError(
             "connection_failed",
@@ -176,20 +194,32 @@ export class SprutHubClient {
 
       socket.once("error", failBeforeOpen);
       socket.once("open", () => {
+        if (settled) {
+          socket.terminate();
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
         socket.off("error", failBeforeOpen);
+        this.#connectingSocket = undefined;
         this.#socket = socket;
-        this.#connectPromise = undefined;
         resolve(socket);
       });
       socket.on("message", (data) => this.#handleMessage(data));
-      socket.on("close", () => this.#handleClose());
+      socket.on("close", () => {
+        if (!settled) failBeforeOpen();
+        if (this.#socket === socket) this.#handleClose();
+      });
     });
+    this.#connectPromise = connection;
 
     try {
-      return await this.#connectPromise;
-    } catch (error) {
-      this.#connectPromise = undefined;
-      throw error;
+      return await connection;
+    } finally {
+      if (this.#connectPromise === connection) {
+        this.#connectPromise = undefined;
+        this.#connectingSocket = undefined;
+      }
     }
   }
 
@@ -238,6 +268,14 @@ export class SprutHubClient {
     }
     this.#pending.clear();
   }
+}
+
+function timeoutError() {
+  return new SprutHubError(
+    "timeout",
+    "SprutHub did not respond within the request budget.",
+    "retry",
+  );
 }
 
 function normalizeAccessory(accessory) {
