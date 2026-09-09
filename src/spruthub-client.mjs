@@ -9,11 +9,12 @@ const VALUE_FIELDS = [
 ];
 
 export class SprutHubError extends Error {
-  constructor(code, message, action) {
+  constructor(code, message, action, { requestSent = false } = {}) {
     super(message);
     this.name = "SprutHubError";
     this.code = code;
     this.action = action;
+    this.requestSent = requestSent;
   }
 }
 
@@ -276,6 +277,8 @@ export class SprutHubClient {
       throw new SprutHubError(
         "incompatible_response",
         "SprutHub did not identify the created scenario.",
+        "inspect_hub",
+        { requestSent: true },
       );
     }
     return scenario;
@@ -291,6 +294,8 @@ export class SprutHubClient {
       throw new SprutHubError(
         "incompatible_response",
         "SprutHub did not confirm scenario deletion.",
+        "inspect_hub",
+        { requestSent: true },
       );
     }
   }
@@ -327,7 +332,12 @@ export class SprutHubClient {
       }),
     );
 
-    return response;
+    try {
+      return await response;
+    } catch (error) {
+      if (error instanceof SprutHubError) error.requestSent = true;
+      throw error;
+    }
   }
 
   async #connect(deadline) {

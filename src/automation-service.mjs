@@ -2,7 +2,7 @@ import { AutomationStore } from "./automation-store.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 export class AutomationService {
-  #operations = new Map();
+  #writeSequence = Promise.resolve();
 
   constructor({ client, stateDirectory, hubUrl, hubSerial }) {
     this.client = client;
@@ -70,13 +70,15 @@ export class AutomationService {
         "Preview does not change the hub and is not an atomic reservation.",
         "An empty direct scenario list does not rule out dependencies inside arbitrary code or bridges.",
         "The rule turns the target on; it does not turn it off automatically.",
+        "Apply and rollback are serialized only inside this MCP process for the configured hub.",
+        "SprutHub has no observed conditional delete; another process or the UI can edit after the rollback check.",
       ],
     };
   }
 
   async apply(changeReference) {
     const id = parseChangeRef(changeReference);
-    return this.#exclusive(id, async () => {
+    return this.#exclusiveWrite(async () => {
       const change = await this.#requireChange(id);
       await this.#preflight(change);
       let reconciliation = await this.#reconcile(change);
@@ -100,6 +102,15 @@ export class AutomationService {
           created: false,
           owned: false,
         };
+      }
+      if (reconciliation.runtimeConflict) {
+        change.status = "conflict";
+        change.scenario_index = reconciliation.runtimeConflict.index;
+        change.owned = false;
+        change.conflict_reason = "equivalent_rule_runtime_mismatch";
+        change.updated_at = new Date().toISOString();
+        await this.store.save(change);
+        return runtimeConflictResult(change, reconciliation.runtimeConflict);
       }
       if (["creating", "uncertain"].includes(change.status)) {
         change.status = "uncertain";
@@ -125,10 +136,15 @@ export class AutomationService {
         );
         change.scenario_index = created.index;
       } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          change.status = "prepared";
+          change.updated_at = new Date().toISOString();
+          await this.store.save(change);
+          throw error;
+        }
         change.status = "uncertain";
         change.updated_at = new Date().toISOString();
         await this.store.save(change);
-        if (!isUncertainTransportError(error)) throw error;
         try {
           reconciliation = await this.#reconcile(change);
         } catch {
@@ -138,13 +154,23 @@ export class AutomationService {
           await this.#markApplied(change, reconciliation.scenario.index);
           return {
             ...applyResult(change, true),
-            recovered_after_disconnect: true,
+            recovered_after_uncertain_write: true,
+            ...(error.code === "connection_closed"
+              ? { recovered_after_disconnect: true }
+              : {}),
           };
         }
         return uncertainResult(change);
       }
 
-      reconciliation = await this.#reconcile(change);
+      try {
+        reconciliation = await this.#reconcile(change);
+      } catch {
+        change.status = "uncertain";
+        change.updated_at = new Date().toISOString();
+        await this.store.save(change);
+        return uncertainResult(change);
+      }
       if (!reconciliation.owned || !reconciliation.matches) {
         change.status = reconciliation.owned ? "conflict" : "uncertain";
         change.updated_at = new Date().toISOString();
@@ -165,6 +191,15 @@ export class AutomationService {
       return publicChange(change);
     }
     const reconciliation = await this.#reconcile(change);
+    if (change.status === "rollback_uncertain" && !reconciliation.scenario) {
+      return this.#markRolledBack(change, false);
+    }
+    if (
+      change.conflict_reason === "equivalent_rule_runtime_mismatch" &&
+      reconciliation.runtimeConflict
+    ) {
+      return runtimeConflictResult(change, reconciliation.runtimeConflict);
+    }
     if (reconciliation.owned) {
       return {
         ...publicChange(change),
@@ -197,7 +232,7 @@ export class AutomationService {
 
   async rollback(changeReference) {
     const id = parseChangeRef(changeReference);
-    return this.#exclusive(id, async () => {
+    return this.#exclusiveWrite(async () => {
       const change = await this.#requireChange(id);
       if (
         change.status === "prepared" ||
@@ -239,24 +274,30 @@ export class AutomationService {
         await this.store.save(change);
         return conflictResult(change, reconciliation.scenario.index);
       }
-      await this.client.deleteScenario(reconciliation.scenario.index);
-      const afterDelete = await this.#reconcile(change);
-      if (afterDelete.owned) {
-        throw new SprutHubError(
-          "delete_not_confirmed",
-          "The owned scenario is still present after rollback.",
-          "inspect_hub",
-        );
+      try {
+        await this.client.deleteScenario(reconciliation.scenario.index);
+      } catch (error) {
+        if (!isUncertainWriteError(error)) throw error;
+        change.status = "rollback_uncertain";
+        change.updated_at = new Date().toISOString();
+        await this.store.save(change);
+        try {
+          const afterUncertainDelete = await this.#reconcile(change);
+          return this.#finishDeleteReadback(change, afterUncertainDelete, true);
+        } catch {
+          return uncertainResult(change);
+        }
       }
-      change.status = "rolled_back";
-      change.updated_at = new Date().toISOString();
-      await this.store.save(change);
-      return {
-        ...publicChange(change),
-        status: "rolled_back",
-        removed: true,
-        physical_state_reverted: false,
-      };
+      let afterDelete;
+      try {
+        afterDelete = await this.#reconcile(change);
+      } catch {
+        change.status = "rollback_uncertain";
+        change.updated_at = new Date().toISOString();
+        await this.store.save(change);
+        return uncertainResult(change);
+      }
+      return this.#finishDeleteReadback(change, afterDelete, false);
     });
   }
 
@@ -322,14 +363,17 @@ export class AutomationService {
       scenarios.find(({ index }) => index === change.scenario_index) ??
       ownedCandidates[0];
     const owned = scenario !== undefined && ownedCandidates.includes(scenario);
+    const candidates = scenarios.filter(
+      (candidate) =>
+        !ownedCandidates.includes(candidate) && sameRuleBody(candidate, change),
+    );
     return {
       scenario,
       owned,
       matches: owned && matchesExpected(scenario, change),
-      equivalent: scenarios.find(
-        (candidate) =>
-          !ownedCandidates.includes(candidate) &&
-          equivalentRule(candidate, change),
+      equivalent: candidates.find(matchesRequiredRuntime),
+      runtimeConflict: candidates.find(
+        (candidate) => !matchesRequiredRuntime(candidate),
       ),
     };
   }
@@ -342,15 +386,47 @@ export class AutomationService {
     await this.store.save(change);
   }
 
-  async #exclusive(id, operation) {
-    const previous = this.#operations.get(id) ?? Promise.resolve();
-    const current = previous.then(operation, operation);
-    this.#operations.set(id, current);
-    try {
-      return await current;
-    } finally {
-      if (this.#operations.get(id) === current) this.#operations.delete(id);
+  async #finishDeleteReadback(change, reconciliation, recovered) {
+    if (!reconciliation.scenario) {
+      const result = await this.#markRolledBack(change, true);
+      return recovered
+        ? { ...result, recovered_after_uncertain_write: true }
+        : result;
     }
+    if (!reconciliation.owned) {
+      change.status = "conflict";
+      change.updated_at = new Date().toISOString();
+      await this.store.save(change);
+      return ownershipConflictResult(change, reconciliation.scenario.index);
+    }
+    if (!reconciliation.matches) {
+      change.status = "conflict";
+      change.updated_at = new Date().toISOString();
+      await this.store.save(change);
+      return conflictResult(change, reconciliation.scenario.index);
+    }
+    change.status = "rollback_uncertain";
+    change.updated_at = new Date().toISOString();
+    await this.store.save(change);
+    return uncertainResult(change);
+  }
+
+  async #markRolledBack(change, removed) {
+    change.status = "rolled_back";
+    change.updated_at = new Date().toISOString();
+    await this.store.save(change);
+    return {
+      ...publicChange(change),
+      status: "rolled_back",
+      removed,
+      physical_state_reverted: false,
+    };
+  }
+
+  async #exclusiveWrite(operation) {
+    const current = this.#writeSequence.catch(() => {}).then(operation);
+    this.#writeSequence = current;
+    return current;
   }
 }
 
@@ -603,7 +679,7 @@ function matchesExpected(scenario, change) {
   );
 }
 
-function equivalentRule(scenario, change) {
+function sameRuleBody(scenario, change) {
   if (scenario.type !== "BLOCK" || typeof scenario.data !== "string")
     return false;
   try {
@@ -617,6 +693,14 @@ function equivalentRule(scenario, change) {
   } catch {
     return false;
   }
+}
+
+function matchesRequiredRuntime(scenario) {
+  return (
+    scenario.active === true &&
+    scenario.onStart === false &&
+    scenario.sync === false
+  );
 }
 
 function ruleMeaning(data) {
@@ -712,6 +796,24 @@ function ownershipConflictResult(change, scenarioIndex) {
   };
 }
 
+function runtimeConflictResult(change, scenario) {
+  return {
+    ...publicChange(change),
+    status: "conflict",
+    reason: "equivalent_rule_runtime_mismatch",
+    scenario_index: scenario.index,
+    owned: false,
+    configuration_matches: false,
+    current_runtime: {
+      active: scenario.active,
+      on_start: scenario.onStart,
+      sync: scenario.sync,
+    },
+    required_runtime: { active: true, on_start: false, sync: false },
+    action: "review_existing_scenario",
+  };
+}
+
 function uncertainResult(change) {
   return {
     ...publicChange(change),
@@ -721,9 +823,10 @@ function uncertainResult(change) {
   };
 }
 
-function isUncertainTransportError(error) {
+function isUncertainWriteError(error) {
   return (
     error instanceof SprutHubError &&
-    ["connection_closed", "connection_failed", "timeout"].includes(error.code)
+    error.requestSent === true &&
+    !["authentication_failed", "request_rejected"].includes(error.code)
   );
 }

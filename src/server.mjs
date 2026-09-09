@@ -102,7 +102,7 @@ server.registerTool(
   {
     title: "Apply a prepared SprutHub automation change",
     description:
-      "Apply one change returned by preview_boolean_automation. The operation rechecks current bindings and equivalent native rules, creates at most one scenario, and reconciles an interrupted create before any later retry.",
+      "Apply one change returned by preview_boolean_automation. The operation rechecks current bindings and equivalent native rules, serializes writes inside this MCP process, creates at most one scenario, and reconciles an uncertain create before any later retry. A matching inactive or differently scheduled rule is a conflict, not a working equivalent.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
@@ -133,7 +133,7 @@ server.registerTool(
   {
     title: "Roll back an owned SprutHub automation change",
     description:
-      "Delete only the scenario created for this change after confirming its ownership marker and exact expected configuration. Manual edits cause a conflict and are preserved. Deleting a scenario does not reverse a physical light state that already changed.",
+      "Delete only the scenario created for this change after confirming its ownership marker and exact expected configuration. Apply and rollback are serialized inside this MCP process. SprutHub has no observed conditional delete, so the UI or another process can still race after the check. Detected manual edits are preserved. Deleting a scenario does not reverse a physical light state that already changed.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
