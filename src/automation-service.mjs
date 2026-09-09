@@ -83,8 +83,11 @@ export class AutomationService {
       await this.#preflight(change);
       let reconciliation = await this.#reconcile(change);
       if (reconciliation.owned && reconciliation.matches) {
-        await this.#markApplied(change, reconciliation.scenario.index);
-        return applyResult(change, false);
+        const localStateSaved = await this.#markApplied(
+          change,
+          reconciliation.scenario.index,
+        );
+        return withLocalState(applyResult(change, false), localStateSaved);
       }
       if (reconciliation.owned) {
         return conflictResult(change, reconciliation.scenario.index);
@@ -129,7 +132,7 @@ export class AutomationService {
 
       change.status = "creating";
       change.updated_at = new Date().toISOString();
-      await this.store.save(change);
+      await this.#saveBeforeWrite(change);
       try {
         const created = await this.client.createScenario(
           expectedScenario(change),
@@ -144,23 +147,29 @@ export class AutomationService {
         }
         change.status = "uncertain";
         change.updated_at = new Date().toISOString();
-        await this.store.save(change);
+        const uncertainStateSaved = await this.#trySave(change);
         try {
           reconciliation = await this.#reconcile(change);
         } catch {
-          return uncertainResult(change);
+          return withLocalState(uncertainResult(change), uncertainStateSaved);
         }
         if (reconciliation.owned && reconciliation.matches) {
-          await this.#markApplied(change, reconciliation.scenario.index);
-          return {
-            ...applyResult(change, true),
-            recovered_after_uncertain_write: true,
-            ...(error.code === "connection_closed"
-              ? { recovered_after_disconnect: true }
-              : {}),
-          };
+          const localStateSaved = await this.#markApplied(
+            change,
+            reconciliation.scenario.index,
+          );
+          return withLocalState(
+            {
+              ...applyResult(change, true),
+              recovered_after_uncertain_write: true,
+              ...(error.code === "connection_closed"
+                ? { recovered_after_disconnect: true }
+                : {}),
+            },
+            localStateSaved,
+          );
         }
-        return uncertainResult(change);
+        return withLocalState(uncertainResult(change), uncertainStateSaved);
       }
 
       try {
@@ -168,19 +177,23 @@ export class AutomationService {
       } catch {
         change.status = "uncertain";
         change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return uncertainResult(change);
+        const localStateSaved = await this.#trySave(change);
+        return withLocalState(uncertainResult(change), localStateSaved);
       }
       if (!reconciliation.owned || !reconciliation.matches) {
         change.status = reconciliation.owned ? "conflict" : "uncertain";
         change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return reconciliation.owned
+        const localStateSaved = await this.#trySave(change);
+        const result = reconciliation.owned
           ? conflictResult(change, reconciliation.scenario.index)
           : uncertainResult(change);
+        return withLocalState(result, localStateSaved);
       }
-      await this.#markApplied(change, reconciliation.scenario.index);
-      return applyResult(change, true);
+      const localStateSaved = await this.#markApplied(
+        change,
+        reconciliation.scenario.index,
+      );
+      return withLocalState(applyResult(change, true), localStateSaved);
     });
   }
 
@@ -191,8 +204,11 @@ export class AutomationService {
       return publicChange(change);
     }
     const reconciliation = await this.#reconcile(change);
-    if (change.status === "rollback_uncertain" && !reconciliation.scenario) {
-      return this.#markRolledBack(change, false);
+    if (
+      ["deleting", "rollback_uncertain"].includes(change.status) &&
+      !reconciliation.scenario
+    ) {
+      return rolledBackResult(change, false);
     }
     if (
       change.conflict_reason === "equivalent_rule_runtime_mismatch" &&
@@ -209,9 +225,6 @@ export class AutomationService {
         configuration_matches: reconciliation.matches,
       };
     }
-    if (reconciliation.scenario) {
-      return ownershipConflictResult(change, reconciliation.scenario.index);
-    }
     if (reconciliation.equivalent && change.owned === false) {
       return {
         ...publicChange(change),
@@ -220,6 +233,9 @@ export class AutomationService {
         owned: false,
         configuration_matches: true,
       };
+    }
+    if (reconciliation.scenario) {
+      return ownershipConflictResult(change, reconciliation.scenario.index);
     }
     return {
       ...publicChange(change),
@@ -274,18 +290,21 @@ export class AutomationService {
         await this.store.save(change);
         return conflictResult(change, reconciliation.scenario.index);
       }
+      change.status = "deleting";
+      change.updated_at = new Date().toISOString();
+      await this.#saveBeforeWrite(change);
       try {
         await this.client.deleteScenario(reconciliation.scenario.index);
       } catch (error) {
         if (!isUncertainWriteError(error)) throw error;
         change.status = "rollback_uncertain";
         change.updated_at = new Date().toISOString();
-        await this.store.save(change);
+        const uncertainStateSaved = await this.#trySave(change);
         try {
           const afterUncertainDelete = await this.#reconcile(change);
           return this.#finishDeleteReadback(change, afterUncertainDelete, true);
         } catch {
-          return uncertainResult(change);
+          return withLocalState(uncertainResult(change), uncertainStateSaved);
         }
       }
       let afterDelete;
@@ -294,8 +313,8 @@ export class AutomationService {
       } catch {
         change.status = "rollback_uncertain";
         change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return uncertainResult(change);
+        const localStateSaved = await this.#trySave(change);
+        return withLocalState(uncertainResult(change), localStateSaved);
       }
       return this.#finishDeleteReadback(change, afterDelete, false);
     });
@@ -383,7 +402,7 @@ export class AutomationService {
     change.scenario_index = scenarioIndex;
     change.owned = true;
     change.updated_at = new Date().toISOString();
-    await this.store.save(change);
+    return this.#trySave(change);
   }
 
   async #finishDeleteReadback(change, reconciliation, recovered) {
@@ -396,31 +415,53 @@ export class AutomationService {
     if (!reconciliation.owned) {
       change.status = "conflict";
       change.updated_at = new Date().toISOString();
-      await this.store.save(change);
-      return ownershipConflictResult(change, reconciliation.scenario.index);
+      const localStateSaved = await this.#trySave(change);
+      return withLocalState(
+        ownershipConflictResult(change, reconciliation.scenario.index),
+        localStateSaved,
+      );
     }
     if (!reconciliation.matches) {
       change.status = "conflict";
       change.updated_at = new Date().toISOString();
-      await this.store.save(change);
-      return conflictResult(change, reconciliation.scenario.index);
+      const localStateSaved = await this.#trySave(change);
+      return withLocalState(
+        conflictResult(change, reconciliation.scenario.index),
+        localStateSaved,
+      );
     }
     change.status = "rollback_uncertain";
     change.updated_at = new Date().toISOString();
-    await this.store.save(change);
-    return uncertainResult(change);
+    const localStateSaved = await this.#trySave(change);
+    return withLocalState(uncertainResult(change), localStateSaved);
   }
 
   async #markRolledBack(change, removed) {
     change.status = "rolled_back";
     change.updated_at = new Date().toISOString();
-    await this.store.save(change);
-    return {
-      ...publicChange(change),
-      status: "rolled_back",
-      removed,
-      physical_state_reverted: false,
-    };
+    const localStateSaved = await this.#trySave(change);
+    return withLocalState(rolledBackResult(change, removed), localStateSaved);
+  }
+
+  async #trySave(change) {
+    try {
+      await this.store.save(change);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async #saveBeforeWrite(change) {
+    try {
+      await this.store.save(change);
+    } catch {
+      throw new SprutHubError(
+        "state_storage_unavailable",
+        "Could not save the recovery state required before writing to SprutHub.",
+        "restore_state_storage_then_retry",
+      );
+    }
   }
 
   async #exclusiveWrite(operation) {
@@ -759,6 +800,26 @@ function applyResult(change, created) {
     configuration_matches: true,
     hub_configuration_verified: true,
     physical_effect_observed: false,
+  };
+}
+
+function rolledBackResult(change, removed) {
+  return {
+    ...publicChange(change),
+    status: "rolled_back",
+    removed,
+    physical_state_reverted: false,
+  };
+}
+
+function withLocalState(result, saved) {
+  if (saved) return result;
+  return {
+    ...result,
+    local_state: {
+      saved: false,
+      action: "restore_state_storage_then_get_automation_change",
+    },
   };
 }
 

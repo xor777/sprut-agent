@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import {
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rename,
   rm,
   writeFile,
@@ -137,6 +137,11 @@ async function startHub() {
         return;
       }
       const result = respond(state, request.params);
+      if (request.params.scenario?.list && state.afterScenarioList) {
+        const afterScenarioList = state.afterScenarioList;
+        state.afterScenarioList = undefined;
+        await afterScenarioList();
+      }
       if (request.params.scenario?.create && state.afterCreate) {
         const afterCreate = state.afterCreate;
         state.afterCreate = undefined;
@@ -997,10 +1002,12 @@ test("an incompatible delete response is reconciled after restart without anothe
   await firstClient.close();
 
   const secondClient = await startClient(t, hub, stateDirectory);
+  const journalBeforeStatus = await readStateJournal(stateDirectory);
   const recovered = await secondClient.callTool({
     name: "get_automation_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  assert.equal(await readStateJournal(stateDirectory), journalBeforeStatus);
   const repeated = await secondClient.callTool({
     name: "rollback_automation_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -1199,6 +1206,50 @@ test("a confirmed delete reports its hub effect when the final journal save fail
   });
   assert.equal(recovered.structuredContent.status, "rolled_back");
   assert.equal(repeated.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
+test("rollback does not delete when its recovery intent cannot be saved", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  let restoreStateDirectory;
+  hub.state.afterScenarioList = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const refused = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(refused.isError, true);
+  assert.equal(
+    refused.structuredContent.error.code,
+    "state_storage_unavailable",
+  );
+  assert.equal(
+    refused.structuredContent.error.action,
+    "restore_state_storage_then_retry",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    0,
+  );
+  await restoreStateDirectory();
+
+  const retried = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(retried.structuredContent.status, "rolled_back");
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,
