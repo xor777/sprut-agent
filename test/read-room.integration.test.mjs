@@ -11,6 +11,7 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+const diagnosticsByClient = new WeakMap();
 
 const hubState = {
   rooms: [
@@ -130,6 +131,16 @@ async function startHub() {
       const request = JSON.parse(data.toString());
       requests.push(request);
 
+      if (state.authorizationError) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: state.authorizationError,
+          }),
+        );
+        return;
+      }
+
       if (request.params?.room?.list) {
         socket.send(
           JSON.stringify({
@@ -193,6 +204,9 @@ async function startMcpClient(t, hub, environment = {}) {
     stderr: "pipe",
   });
   const client = new Client({ name: "sprut-agent-test", version: "1.0.0" });
+  const diagnostics = [];
+  transport.stderr?.on("data", (chunk) => diagnostics.push(chunk.toString()));
+  diagnosticsByClient.set(client, diagnostics);
 
   t.after(async () => {
     await client.close();
@@ -525,4 +539,34 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
       retryable: false,
     },
   });
+});
+
+test("authorization failures identify credential repair without leaking the rejected secret", async (t) => {
+  const hub = await startHub();
+  hub.state.authorizationError = {
+    code: 401,
+    message: "invalid synthetic-test-token",
+  };
+  const client = await startMcpClient(t, hub);
+
+  const result = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, {
+    status: "error",
+    error: {
+      code: "authentication_failed",
+      message: "SprutHub rejected the configured credentials.",
+      retryable: false,
+      action: "check_credentials",
+    },
+  });
+
+  const visibleOutput = JSON.stringify({
+    result,
+    diagnostics: diagnosticsByClient.get(client),
+  });
+  assert.equal(visibleOutput.includes("synthetic-test-token"), false);
 });
