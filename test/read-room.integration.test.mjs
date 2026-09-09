@@ -71,6 +71,28 @@ const hubState = {
                 value: { doubleValue: 23.5 },
               },
             },
+            {
+              aId: 101,
+              sId: 1,
+              cId: 2,
+              control: {
+                key: "current-humidity",
+                name: "Влажность",
+                type: "CurrentHumidity",
+                unit: "%",
+                value: { intValue: 0 },
+              },
+            },
+            {
+              aId: 101,
+              sId: 1,
+              cId: 3,
+              control: {
+                key: "air-quality",
+                name: "Качество воздуха",
+                type: "AirQuality",
+              },
+            },
           ],
         },
         {
@@ -98,6 +120,7 @@ const hubState = {
 };
 
 async function startHub() {
+  const state = structuredClone(hubState);
   const requests = [];
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -111,7 +134,7 @@ async function startHub() {
         socket.send(
           JSON.stringify({
             id: request.id,
-            result: { room: { list: { rooms: hubState.rooms } } },
+            result: { room: { list: { rooms: state.rooms } } },
           }),
         );
         return;
@@ -122,7 +145,7 @@ async function startHub() {
           JSON.stringify({
             id: request.id,
             result: {
-              accessory: { list: { accessories: hubState.accessories } },
+              accessory: { list: { accessories: state.accessories } },
             },
           }),
         );
@@ -140,11 +163,15 @@ async function startHub() {
 
   const address = server.address();
   assert(address && typeof address === "object");
-  return { server, requests, url: `ws://127.0.0.1:${address.port}` };
+  return {
+    server,
+    state,
+    requests,
+    url: `ws://127.0.0.1:${address.port}`,
+  };
 }
 
-test("MCP room tool returns only the requested room with stable object references", async (t) => {
-  const hub = await startHub();
+async function startMcpClient(t, hub) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -160,6 +187,7 @@ test("MCP room tool returns only the requested room with stable object reference
       SPRUTHUB_TOKEN: "synthetic-test-token",
       SPRUTHUB_SERIAL: "test-hub",
       SPRUTHUB_CID: "sprut-agent-test",
+      SPRUTHUB_TIMEOUT_MS: "250",
     },
     stderr: "pipe",
   });
@@ -172,6 +200,19 @@ test("MCP room tool returns only the requested room with stable object reference
   });
 
   await client.connect(transport);
+  return client;
+}
+
+function findReading(room, ref) {
+  return room.devices
+    .flatMap(({ services }) => services)
+    .flatMap(({ readings }) => readings)
+    .find((reading) => reading.ref === ref);
+}
+
+test("MCP room tool returns only the requested room with stable object references", async (t) => {
+  const hub = await startHub();
+  const client = await startMcpClient(t, hub);
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map(({ name }) => name),
@@ -255,4 +296,66 @@ test("MCP room tool returns only the requested room with stable object reference
       },
     },
   ]);
+});
+
+test("repeated MCP reads return the latest hub values without losing false, zero, or unknown", async (t) => {
+  const hub = await startHub();
+  const client = await startMcpClient(t, hub);
+  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+
+  const firstResult = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(firstResult.isError, undefined);
+  const firstTemperature = findReading(
+    firstResult.structuredContent,
+    temperatureRef,
+  );
+  assert.equal(firstTemperature.value, 23.5);
+
+  hub.state.accessories[1].services[0].characteristics[0].control.value = {
+    doubleValue: 24.75,
+  };
+
+  const secondResult = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(secondResult.isError, undefined);
+  const secondRoom = secondResult.structuredContent;
+  const secondTemperature = findReading(secondRoom, temperatureRef);
+  assert.equal(secondTemperature.ref, firstTemperature.ref);
+  assert.equal(secondTemperature.value, 24.75);
+
+  assert.equal(
+    findReading(
+      secondRoom,
+      "spruthub://accessory/100/service/1/characteristic/1",
+    ).value,
+    false,
+  );
+  assert.equal(
+    findReading(
+      secondRoom,
+      "spruthub://accessory/101/service/1/characteristic/2",
+    ).value,
+    0,
+  );
+  assert.deepEqual(
+    findReading(
+      secondRoom,
+      "spruthub://accessory/101/service/1/characteristic/3",
+    ),
+    {
+      ref: "spruthub://accessory/101/service/1/characteristic/3",
+      name: "Качество воздуха",
+      type: "AirQuality",
+      value: null,
+      unit: null,
+      measuredAt: null,
+    },
+  );
+  assert.equal(secondRoom.freshness.measurementAt, null);
+  assert.equal(hub.requests.length, 4);
 });

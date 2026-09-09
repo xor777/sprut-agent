@@ -86,6 +86,7 @@ function getHubClient() {
     token: process.env.SPRUTHUB_TOKEN,
     serial: process.env.SPRUTHUB_SERIAL,
     cid: process.env.SPRUTHUB_CID,
+    timeoutMs: Number(process.env.SPRUTHUB_TIMEOUT_MS ?? 10_000),
   });
   return hubClient;
 }

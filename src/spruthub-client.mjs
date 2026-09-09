@@ -224,7 +224,7 @@ function normalizeAccessory(accessory) {
 }
 
 function extractValue(value) {
-  if (!value || typeof value !== "object") return null;
+  if (!value) return null;
   for (const field of VALUE_FIELDS) {
     if (Object.hasOwn(value, field)) return value[field];
   }

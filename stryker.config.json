@@ -9,7 +9,7 @@
     "src/spruthub-client.mjs:77:0-91:0",
     "src/spruthub-client.mjs:118:0-126:0",
     "src/spruthub-client.mjs:202:0-226:0",
-    "src/spruthub-client.mjs:228:0-232:0"
+    "src/spruthub-client.mjs:226:0-232:0"
   ],
   "testRunner": "command",
   "commandRunner": { "command": "npm test" },
