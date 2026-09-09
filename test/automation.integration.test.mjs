@@ -123,6 +123,12 @@ async function startHub() {
       }
       if (request.params.scenario?.create && state.rejectNextCreate) {
         state.rejectNextCreate = false;
+        if (state.beforeCreateRejectionResponse) {
+          const beforeCreateRejectionResponse =
+            state.beforeCreateRejectionResponse;
+          state.beforeCreateRejectionResponse = undefined;
+          await beforeCreateRejectionResponse();
+        }
         socket.send(
           JSON.stringify({
             id: request.id,
@@ -973,6 +979,61 @@ test("a confirmed create rejection has no hidden effect and can be retried", asy
     hub.state.scenarios.filter(({ index }) => index.startsWith("created-"))
       .length,
     1,
+  );
+});
+
+test("a confirmed create rejection survives failure to restore the prepared journal state", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  let restoreStateDirectory;
+  hub.state.rejectNextCreate = true;
+  hub.state.beforeCreateRejectionResponse = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const rejected = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "request_rejected");
+  assert.equal(
+    rejected.structuredContent.change_ref,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(rejected.structuredContent.hub_effect, "not_applied");
+  assert.deepEqual(rejected.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_preview_boolean_automation",
+  });
+  assert.equal(
+    hub.state.scenarios.filter(({ index }) => index.startsWith("created-"))
+      .length,
+    0,
+  );
+  await restoreStateDirectory();
+
+  const staleRetry = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(staleRetry.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+
+  const replacement = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: replacement.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    2,
   );
 });
 
