@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -158,9 +159,14 @@ async function startHub(initialState = hubState) {
 
   server.on("connection", (socket) => {
     metrics.connections += 1;
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request);
+
+      const responseDelayMs = state.responseDelays?.shift();
+      if (responseDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
+      }
 
       if (state.closeOnRequest) {
         state.closeOnRequest = false;
@@ -242,6 +248,25 @@ async function startHub(initialState = hubState) {
   };
 }
 
+async function startSilentHandshakeHub() {
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  return {
+    server,
+    destroyConnections() {
+      for (const socket of sockets) socket.destroy();
+    },
+    url: `ws://127.0.0.1:${address.port}`,
+  };
+}
+
 async function getClosedWebSocketUrl() {
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -283,7 +308,8 @@ async function startMcpClient(t, hub, environment = {}) {
 
   t.after(async () => {
     await client.close();
-    for (const socket of hub.server.clients) socket.terminate();
+    hub.destroyConnections?.();
+    for (const socket of hub.server.clients ?? []) socket.terminate();
     await new Promise((resolve) => hub.server.close(resolve));
   });
 
@@ -839,4 +865,43 @@ test("connection failures stay bounded and recover with a fresh reading in the s
     26.25,
   );
   assert.equal(recoveringHub.metrics.connections, 2);
+});
+
+test("one tool deadline covers the WebSocket handshake and every room RPC", async (t) => {
+  const handshakeHub = await startSilentHandshakeHub();
+  const handshakeClient = await startMcpClient(t, handshakeHub);
+  const handshakeStartedAt = performance.now();
+  const handshakeTimeout = await handshakeClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert(performance.now() - handshakeStartedAt < 1_000);
+  assert.deepEqual(handshakeTimeout.structuredContent, {
+    status: "error",
+    error: {
+      code: "timeout",
+      message: "SprutHub did not respond within the request budget.",
+      retryable: true,
+      action: "retry",
+    },
+  });
+
+  const slowHub = await startHub();
+  slowHub.state.responseDelays = [160, 160];
+  const slowClient = await startMcpClient(t, slowHub);
+  const slowStartedAt = performance.now();
+  const sequenceTimeout = await slowClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert(performance.now() - slowStartedAt < 1_000);
+  assert.deepEqual(sequenceTimeout.structuredContent, {
+    status: "error",
+    error: {
+      code: "timeout",
+      message: "SprutHub did not respond within the request budget.",
+      retryable: true,
+      action: "retry",
+    },
+  });
 });
