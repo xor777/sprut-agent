@@ -414,3 +414,89 @@ test("ambiguous room names return stable choices that can be read explicitly", a
     assert.equal(invalid.isError, true);
   }
 });
+
+test("empty, missing, incompatible, and unavailable room data remain distinct", async (t) => {
+  const hub = await startHub();
+  hub.state.rooms.push({
+    id: 50,
+    order: 6,
+    name: "Пустая",
+    visible: true,
+  });
+  hub.state.accessories.push({
+    id: 103,
+    online: false,
+    name: "Недоступный контакт",
+    roomId: 10,
+    services: [
+      {
+        aId: 103,
+        sId: 1,
+        name: "Контакт",
+        type: "ContactSensor",
+        characteristics: [
+          {
+            aId: 103,
+            sId: 1,
+            cId: 1,
+            control: {
+              key: "contact-state",
+              name: "Открыт",
+              type: "ContactState",
+              unit: "boolean",
+              value: { boolValue: false },
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const client = await startMcpClient(t, hub);
+
+  const empty = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Пустая" },
+  });
+  assert.equal(empty.isError, undefined);
+  assert.equal(empty.structuredContent.status, "ok");
+  assert.deepEqual(empty.structuredContent.devices, []);
+
+  const missing = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Чердак" },
+  });
+  assert.equal(missing.isError, true);
+  assert.deepEqual(missing.structuredContent, {
+    status: "error",
+    error: {
+      code: "room_not_found",
+      message: 'Room "Чердак" was not found.',
+      retryable: false,
+    },
+  });
+
+  const kitchen = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  const unavailable = kitchen.structuredContent.devices.find(
+    ({ ref }) => ref === "spruthub://accessory/103",
+  );
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.services[0].readings[0].value, false);
+
+  hub.state.accessories = null;
+  const incompatible = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(incompatible.isError, true);
+  assert.deepEqual(incompatible.structuredContent, {
+    status: "error",
+    error: {
+      code: "incompatible_response",
+      message: "SprutHub returned an incompatible accessory list.",
+      retryable: false,
+    },
+  });
+});
