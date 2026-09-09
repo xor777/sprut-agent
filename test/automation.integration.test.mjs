@@ -407,13 +407,13 @@ async function readStateJournal(stateDirectory) {
 const previewArguments = {
   name: "Движение в гостиной включает офисную лампу",
   reason: "Включать свет при движении",
-  source_room_ref: "spruthub://room/1",
+  source_room_ref: "spruthub://hub/automation-test-hub/room/1",
   source_characteristic_ref:
-    "spruthub://accessory/32/service/13/characteristic/15",
+    "spruthub://hub/automation-test-hub/accessory/32/service/13/characteristic/15",
   source_value: true,
-  target_room_ref: "spruthub://room/2",
+  target_room_ref: "spruthub://hub/automation-test-hub/room/2",
   target_characteristic_ref:
-    "spruthub://accessory/34/service/13/characteristic/15",
+    "spruthub://hub/automation-test-hub/accessory/34/service/13/characteristic/15",
   target_value: true,
 };
 
@@ -437,18 +437,21 @@ test("automation preview explains current mechanisms without writing to the hub"
     /^spruthub-change:\/\/automation\/[a-f0-9]{24}$/,
   );
   assert.deepEqual(result.structuredContent.condition, {
-    room: { ref: "spruthub://room/1", name: "Гостиная" },
+    room: {
+      ref: "spruthub://hub/automation-test-hub/room/1",
+      name: "Гостиная",
+    },
     device: {
-      ref: "spruthub://accessory/32",
+      ref: "spruthub://hub/automation-test-hub/accessory/32",
       name: "Датчик движения",
     },
     service: {
-      ref: "spruthub://accessory/32/service/13",
+      ref: "spruthub://hub/automation-test-hub/accessory/32/service/13",
       name: "Движение",
       type: "MotionSensor",
     },
     characteristic: {
-      ref: "spruthub://accessory/32/service/13/characteristic/15",
+      ref: "spruthub://hub/automation-test-hub/accessory/32/service/13/characteristic/15",
       name: "Обнаружено движение",
       type: "MotionDetected",
       read: true,
@@ -775,6 +778,54 @@ test("change ownership and status survive an MCP process restart", async (t) => 
   assert.equal(result.structuredContent.status, "applied");
   assert.equal(result.structuredContent.owned, true);
   assert.equal(result.structuredContent.configuration_matches, true);
+});
+
+test("a prepared legacy journal remains usable only through its configured-home fingerprint", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(firstClient);
+  await firstClient.close();
+
+  const [journalName] = (await readdir(stateDirectory)).filter((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  const journalPath = path.join(stateDirectory, journalName);
+  const journal = JSON.parse(await readFile(journalPath, "utf8"));
+  const changeId = prepared.structuredContent.change_ref.split("/").at(-1);
+  const change = journal.changes[changeId];
+  delete change.home_ref;
+  for (const selection of [change.condition, change.action]) {
+    selection.room.ref = selection.room.ref.replace(
+      "spruthub://hub/automation-test-hub",
+      "spruthub:/",
+    );
+    selection.device.ref = selection.device.ref.replace(
+      "spruthub://hub/automation-test-hub",
+      "spruthub:/",
+    );
+    selection.service.ref = selection.service.ref.replace(
+      "spruthub://hub/automation-test-hub",
+      "spruthub:/",
+    );
+    selection.characteristic.ref = selection.characteristic.ref.replace(
+      "spruthub://hub/automation-test-hub",
+      "spruthub:/",
+    );
+  }
+  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const applied = await secondClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
 });
 
 test("SprutHub runtime target state does not block status or rollback", async (t) => {

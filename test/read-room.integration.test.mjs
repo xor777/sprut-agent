@@ -399,6 +399,9 @@ test("MCP discovers every room before reading the selected stable reference", as
   assert.deepEqual(
     tools.tools.map(({ name }) => name),
     [
+      "list_homes",
+      "inspect_home",
+      "get_entity",
       "list_rooms",
       "preview_boolean_automation",
       "apply_automation_change",
@@ -408,7 +411,14 @@ test("MCP discovers every room before reading the selected stable reference", as
     ],
   );
   for (const tool of tools.tools.filter(({ name }) =>
-    ["list_rooms", "get_automation_change", "read_room"].includes(name),
+    [
+      "list_homes",
+      "inspect_home",
+      "get_entity",
+      "list_rooms",
+      "get_automation_change",
+      "read_room",
+    ].includes(name),
   )) {
     assert.deepEqual(tool.annotations, {
       readOnlyHint: true,
@@ -424,17 +434,17 @@ test("MCP discovers every room before reading the selected stable reference", as
   });
   assert.equal(catalog.isError, undefined);
   assert.deepEqual(catalog.structuredContent.rooms, [
-    { ref: "spruthub://room/10", name: " Кухня " },
-    { ref: "spruthub://room/20", name: "Гостиная" },
-    { ref: "spruthub://room/30", name: "Office" },
-    { ref: "spruthub://room/31", name: "1 - Офис" },
-    { ref: "spruthub://room/40", name: "Кладовая" },
-    { ref: "spruthub://room/41", name: "Кладовая" },
+    { ref: "spruthub://hub/test-hub/room/10", name: " Кухня " },
+    { ref: "spruthub://hub/test-hub/room/20", name: "Гостиная" },
+    { ref: "spruthub://hub/test-hub/room/30", name: "Office" },
+    { ref: "spruthub://hub/test-hub/room/31", name: "1 - Офис" },
+    { ref: "spruthub://hub/test-hub/room/40", name: "Кладовая" },
+    { ref: "spruthub://hub/test-hub/room/41", name: "Кладовая" },
   ]);
 
   const result = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(
     result.isError,
@@ -446,19 +456,22 @@ test("MCP discovers every room before reading the selected stable reference", as
   assert.deepEqual(JSON.parse(result.content[0].text), reading);
   assert.equal(reading.status, "ok");
   assert.deepEqual(reading.room, {
-    ref: "spruthub://room/10",
+    ref: "spruthub://hub/test-hub/room/10",
     name: " Кухня ",
   });
   assert.equal(reading.devices.length, 3);
 
   const lamp = reading.devices.find(
-    ({ ref }) => ref === "spruthub://accessory/100",
+    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/100",
   );
   assert.equal(lamp.name, "Лампа");
   assert.equal(lamp.available, true);
-  assert.deepEqual(lamp.services[0].ref, "spruthub://accessory/100/service/1");
+  assert.deepEqual(
+    lamp.services[0].ref,
+    "spruthub://hub/test-hub/accessory/100/service/1",
+  );
   assert.deepEqual(lamp.services[0].readings[0], {
-    ref: "spruthub://accessory/100/service/1/characteristic/1",
+    ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
     name: "Включена",
     type: "On",
     value: false,
@@ -467,13 +480,13 @@ test("MCP discovers every room before reading the selected stable reference", as
   });
 
   const thermometer = reading.devices.find(
-    ({ ref }) => ref === "spruthub://accessory/101",
+    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/101",
   );
   assert.deepEqual(thermometer.services[0].readings[0].value, 23.5);
   assert.deepEqual(thermometer.services[0].readings[0].unit, "°C");
   assert.equal(thermometer.services[0].readings[0].type, "CurrentTemperature");
   assert.deepEqual(thermometer.services[0].readings[3], {
-    ref: "spruthub://accessory/101/service/1/characteristic/4",
+    ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/4",
     name: "Уставка температуры",
     type: "TargetTemperature",
     value: 22,
@@ -482,12 +495,15 @@ test("MCP discovers every room before reading the selected stable reference", as
   });
   assert.deepEqual(thermometer.services[1].readings, []);
   assert.deepEqual(
-    reading.devices.find(({ ref }) => ref === "spruthub://accessory/102")
-      .services,
+    reading.devices.find(
+      ({ ref }) => ref === "spruthub://hub/test-hub/accessory/102",
+    ).services,
     [],
   );
   assert.equal(
-    reading.devices.some(({ ref }) => ref === "spruthub://accessory/200"),
+    reading.devices.some(
+      ({ ref }) => ref === "spruthub://hub/test-hub/accessory/200",
+    ),
     false,
   );
   assert.equal(reading.freshness.measurementAt, null);
@@ -590,7 +606,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
   const read = async () => {
     const result = await client.callTool({
       name: "read_room",
-      arguments: { room_ref: "spruthub://room/20" },
+      arguments: { room_ref: "spruthub://hub/test-hub/room/20" },
     });
     assert.equal(result.isError, undefined);
     return result.structuredContent.devices[0];
@@ -642,53 +658,53 @@ test("observed multisensor projection keeps readable native enum meaning", async
     {
       services: [
         {
-          ref: "spruthub://accessory/200/service/10",
+          ref: "spruthub://hub/test-hub/accessory/200/service/10",
           type: "AccessoryInformation",
           readings: [
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/501",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/501",
               type: "C_Room",
               value: "Room B",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/503",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/503",
               type: "Manufacturer",
               value: "Aqara",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/504",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/504",
               type: "Model",
               value: "RTCGQ14LM",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/505",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/505",
               type: "Name",
               value: "Motion device B",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/506",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/506",
               type: "SerialNumber",
               value: "example-motion-device",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/507",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/507",
               type: "FirmwareRevision",
               value: "11",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/508",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/508",
               type: "C_Online",
               value: true,
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/10/characteristic/509",
+              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/509",
               type: "C_CatalogId",
               value: 3987,
               unit: null,
@@ -696,17 +712,17 @@ test("observed multisensor projection keeps readable native enum meaning", async
           ],
         },
         {
-          ref: "spruthub://accessory/200/service/20",
+          ref: "spruthub://hub/test-hub/accessory/200/service/20",
           type: "MotionSensor",
           readings: [
             {
-              ref: "spruthub://accessory/200/service/20/characteristic/510",
+              ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/510",
               type: "MotionDetected",
               value: false,
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/20/characteristic/511",
+              ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/511",
               type: "Name",
               value: "Motion sensor",
               unit: null,
@@ -714,17 +730,17 @@ test("observed multisensor projection keeps readable native enum meaning", async
           ],
         },
         {
-          ref: "spruthub://accessory/200/service/30",
+          ref: "spruthub://hub/test-hub/accessory/200/service/30",
           type: "LightSensor",
           readings: [
             {
-              ref: "spruthub://accessory/200/service/30/characteristic/512",
+              ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/512",
               type: "Name",
               value: "Датчик освещенности",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/30/characteristic/513",
+              ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/513",
               type: "CurrentAmbientLightLevel",
               value: 100,
               unit: "lux",
@@ -732,29 +748,29 @@ test("observed multisensor projection keeps readable native enum meaning", async
           ],
         },
         {
-          ref: "spruthub://accessory/200/service/40",
+          ref: "spruthub://hub/test-hub/accessory/200/service/40",
           type: "BatteryService",
           readings: [
             {
-              ref: "spruthub://accessory/200/service/40/characteristic/514",
+              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/514",
               type: "Name",
               value: "Батарея",
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/40/characteristic/515",
+              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/515",
               type: "BatteryLevel",
               value: 60,
               unit: "%",
             },
             {
-              ref: "spruthub://accessory/200/service/40/characteristic/516",
+              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/516",
               type: "StatusLowBattery",
               value: 0,
               unit: null,
             },
             {
-              ref: "spruthub://accessory/200/service/40/characteristic/517",
+              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
               type: "ChargingState",
               value: 2,
               unit: null,
@@ -765,7 +781,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
       readingCount: 16,
       hasIdentify: false,
       motion: {
-        ref: "spruthub://accessory/200/service/20/characteristic/510",
+        ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/510",
         name: "Обнаружено движение",
         type: "MotionDetected",
         value: false,
@@ -773,7 +789,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       light: {
-        ref: "spruthub://accessory/200/service/30/characteristic/513",
+        ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/513",
         name: "Освещенность",
         type: "CurrentAmbientLightLevel",
         value: 100,
@@ -781,7 +797,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       batteryLevel: {
-        ref: "spruthub://accessory/200/service/40/characteristic/515",
+        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/515",
         name: "Уровень заряда",
         type: "BatteryLevel",
         value: 60,
@@ -789,7 +805,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       lowBattery: {
-        ref: "spruthub://accessory/200/service/40/characteristic/516",
+        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/516",
         name: "Батарея разряжена",
         type: "StatusLowBattery",
         value: 0,
@@ -798,7 +814,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       charging: {
-        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
         name: "Идет зарядка",
         type: "ChargingState",
         value: 2,
@@ -807,7 +823,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       checkedMismatch: {
-        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
         name: "Идет зарядка",
         type: "ChargingState",
         value: 1,
@@ -816,7 +832,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         measuredAt: null,
       },
       unknown: {
-        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
         name: "Идет зарядка",
         type: "FutureChargingState",
         value: 99,
@@ -831,11 +847,12 @@ test("observed multisensor projection keeps readable native enum meaning", async
 test("repeated MCP reads return the latest hub values without losing false, zero, or unknown", async (t) => {
   const hub = await startHub();
   const client = await startMcpClient(t, hub);
-  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+  const temperatureRef =
+    "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
 
   const firstResult = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(firstResult.isError, undefined);
   const firstTemperature = findReading(
@@ -850,7 +867,7 @@ test("repeated MCP reads return the latest hub values without losing false, zero
 
   const secondResult = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(secondResult.isError, undefined);
   const secondRoom = secondResult.structuredContent;
@@ -861,24 +878,24 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   assert.equal(
     findReading(
       secondRoom,
-      "spruthub://accessory/100/service/1/characteristic/1",
+      "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
     ).value,
     false,
   );
   assert.equal(
     findReading(
       secondRoom,
-      "spruthub://accessory/101/service/1/characteristic/2",
+      "spruthub://hub/test-hub/accessory/101/service/1/characteristic/2",
     ).value,
     0,
   );
   assert.deepEqual(
     findReading(
       secondRoom,
-      "spruthub://accessory/101/service/1/characteristic/3",
+      "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
     ),
     {
-      ref: "spruthub://accessory/101/service/1/characteristic/3",
+      ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
       name: "Качество воздуха",
       type: "AirQuality",
       value: null,
@@ -899,29 +916,29 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     arguments: {},
   });
   assert.deepEqual(catalog.structuredContent.rooms.slice(2), [
-    { ref: "spruthub://room/30", name: "Office" },
-    { ref: "spruthub://room/31", name: "1 - Офис" },
-    { ref: "spruthub://room/40", name: "Кладовая" },
-    { ref: "spruthub://room/41", name: "Кладовая" },
+    { ref: "spruthub://hub/test-hub/room/30", name: "Office" },
+    { ref: "spruthub://hub/test-hub/room/31", name: "1 - Офис" },
+    { ref: "spruthub://hub/test-hub/room/40", name: "Кладовая" },
+    { ref: "spruthub://hub/test-hub/room/41", name: "Кладовая" },
   ]);
 
   const selected = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/41" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/41" },
   });
   assert.equal(selected.isError, undefined);
   assert.deepEqual(selected.structuredContent.room, {
-    ref: "spruthub://room/41",
+    ref: "spruthub://hub/test-hub/room/41",
     name: "Кладовая",
   });
   assert.deepEqual(
     selected.structuredContent.devices.map(({ ref }) => ref),
-    ["spruthub://accessory/410"],
+    ["spruthub://hub/test-hub/accessory/410"],
   );
 
   for (const invalidRef of [
-    "prefixspruthub://room/41",
-    "spruthub://room/41/suffix",
+    "prefixspruthub://hub/test-hub/room/41",
+    "spruthub://hub/test-hub/room/41/suffix",
   ]) {
     const invalid = await client.callTool({
       name: "read_room",
@@ -930,7 +947,7 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     assert.equal(invalid.isError, true);
     assert.deepEqual(invalid.structuredContent.error, {
       code: "invalid_room_ref",
-      message: "Use a room reference returned by list_rooms.",
+      message: "Use a configured-home room reference returned by list_rooms.",
       retryable: false,
       action: "list_rooms",
     });
@@ -978,7 +995,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const empty = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/50" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/50" },
   });
   assert.equal(empty.isError, undefined);
   assert.equal(empty.structuredContent.status, "ok");
@@ -986,7 +1003,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const missing = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/999" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/999" },
   });
   assert.equal(missing.isError, true);
   assert.deepEqual(missing.structuredContent, {
@@ -1005,10 +1022,10 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const kitchen = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   const unavailable = kitchen.structuredContent.devices.find(
-    ({ ref }) => ref === "spruthub://accessory/103",
+    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/103",
   );
   assert.equal(unavailable.available, false);
   assert.equal(unavailable.services[0].readings[0].value, false);
@@ -1016,7 +1033,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   hub.state.accessories = null;
   const incompatible = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(incompatible.isError, true);
   assert.deepEqual(incompatible.structuredContent, {
@@ -1037,7 +1054,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   });
   const internal = await invalidClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(internal.isError, true);
   assert.deepEqual(internal.structuredContent, {
@@ -1102,7 +1119,7 @@ test("incomplete room and service identifiers never become stable references", a
   );
   const incompleteSelectedRoom = await incompleteSelectedRoomClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(incompleteSelectedRoom.isError, true);
   assert.deepEqual(incompleteSelectedRoom.structuredContent.error, {
@@ -1117,7 +1134,7 @@ test("incomplete room and service identifiers never become stable references", a
   };
   const mismatchedSelectedRoom = await incompleteSelectedRoomClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.deepEqual(mismatchedSelectedRoom.structuredContent.error, {
     code: "incompatible_response",
@@ -1130,7 +1147,7 @@ test("incomplete room and service identifiers never become stable references", a
   const incompleteServiceClient = await startMcpClient(t, incompleteServiceHub);
   const incompleteService = await incompleteServiceClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(incompleteService.isError, true);
   assert.deepEqual(incompleteService.structuredContent, {
@@ -1157,7 +1174,7 @@ test("authorization failures identify credential repair without leaking the reje
 
   const result = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
@@ -1176,7 +1193,7 @@ test("authorization failures identify credential repair without leaking the reje
   };
   const rejected = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(rejected.isError, true);
   assert.deepEqual(rejected.structuredContent, {
@@ -1205,7 +1222,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const unavailableStartedAt = performance.now();
   const unavailable = await unavailableClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert(performance.now() - unavailableStartedAt < 1_000);
   assert.deepEqual(unavailable.structuredContent, {
@@ -1224,7 +1241,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const timeoutStartedAt = performance.now();
   const timeout = await silentClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert(performance.now() - timeoutStartedAt < 1_000);
   assert.deepEqual(timeout.structuredContent, {
@@ -1239,7 +1256,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   silentHub.state.ignoreRequests = false;
   const afterTimeout = await silentClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(afterTimeout.isError, undefined);
   assert.equal(afterTimeout.structuredContent.status, "ok");
@@ -1249,11 +1266,11 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const concurrentReads = await Promise.all([
     concurrentClient.callTool({
       name: "read_room",
-      arguments: { room_ref: "spruthub://room/10" },
+      arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
     }),
     concurrentClient.callTool({
       name: "read_room",
-      arguments: { room_ref: "spruthub://room/20" },
+      arguments: { room_ref: "spruthub://hub/test-hub/room/20" },
     }),
   ]);
   assert.deepEqual(
@@ -1266,10 +1283,11 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const recoveringClient = await startMcpClient(t, recoveringHub);
   const first = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(first.isError, undefined);
-  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+  const temperatureRef =
+    "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
   assert.equal(
     findReading(first.structuredContent, temperatureRef).value,
     23.5,
@@ -1278,7 +1296,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   recoveringHub.state.closeOnRequest = true;
   const interrupted = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
@@ -1296,7 +1314,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
     };
   const recovered = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(recovered.isError, undefined);
   assert.equal(
@@ -1312,7 +1330,7 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   const handshakeStartedAt = performance.now();
   const handshakeTimeout = await handshakeClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert(performance.now() - handshakeStartedAt < 1_000);
   assert.deepEqual(handshakeTimeout.structuredContent, {
@@ -1334,7 +1352,7 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   const slowStartedAt = performance.now();
   const sequenceTimeout = await slowClient.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert(performance.now() - slowStartedAt < 1_000);
   assert.deepEqual(sequenceTimeout.structuredContent, {
@@ -1351,11 +1369,12 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
 test("a post-open WebSocket error is retryable in the same MCP session", async (t) => {
   const hub = await startHub();
   const client = await startMcpClient(t, hub);
-  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+  const temperatureRef =
+    "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
 
   const first = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(
     findReading(first.structuredContent, temperatureRef).value,
@@ -1365,7 +1384,7 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   hub.state.invalidFrameOnRequest = true;
   const interrupted = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
@@ -1382,7 +1401,7 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   };
   const recovered = await client.callTool({
     name: "read_room",
-    arguments: { room_ref: "spruthub://room/10" },
+    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(
     findReading(recovered.structuredContent, temperatureRef).value,

@@ -107,6 +107,7 @@ function homeState(serial) {
                   },
                 ],
               },
+              // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK scenarios use this native key.
               then: [],
               else: [],
               then_delay: 0,
@@ -168,7 +169,9 @@ function homeState(serial) {
 }
 
 async function startHub() {
-  const states = new Map(homes.map(({ serial }) => [serial, homeState(serial)]));
+  const states = new Map(
+    homes.map(({ serial }) => [serial, homeState(serial)]),
+  );
   const requests = [];
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -194,13 +197,11 @@ function respond(states, request) {
   const state = states.get(request.serial);
   assert(state, `unexpected home serial: ${request.serial}`);
   const params = request.params;
-  if (params.room?.list)
-    return { room: { list: { rooms: state.rooms } } };
+  if (params.room?.list) return { room: { list: { rooms: state.rooms } } };
   if (params.room?.get)
     return {
       room: {
-        get:
-          state.rooms.find(({ id }) => id === params.room.get.id) ?? null,
+        get: state.rooms.find(({ id }) => id === params.room.get.id) ?? null,
       },
     };
   if (params.accessory?.list) {
@@ -266,7 +267,8 @@ function respond(states, request) {
     return {
       scenario: {
         list: {
-          scenarios: params.scenario.list.aId === undefined ? state.scenarios : [],
+          scenarios:
+            params.scenario.list.aId === undefined ? state.scenarios : [],
         },
       },
     };
@@ -347,7 +349,9 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
       available: true,
     },
   ]);
-  for (const request of hub.requests.filter(({ params }) => !params.hub?.list)) {
+  for (const request of hub.requests.filter(
+    ({ params }) => !params.hub?.list,
+  )) {
     assert.equal(request.serial, "home B");
   }
   for (const request of hub.requests.filter(({ params }) => params.hub?.list)) {
@@ -363,7 +367,12 @@ test("characteristic detail separates value, characteristic options, and physica
     arguments: {
       entity_ref:
         "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
-      include: ["options", "physical_configuration", "relations", "diagnostics"],
+      include: [
+        "options",
+        "physical_configuration",
+        "relations",
+        "diagnostics",
+      ],
     },
   });
   assert.equal(result.isError, undefined, result.content[0]?.text);
@@ -430,15 +439,44 @@ test("scenario detail returns native BLOCK data and redacted code instead of tru
   assert.equal(block.structuredContent.entity.type, "BLOCK");
   assert.equal(block.structuredContent.entity.configuration.format, "json");
   assert.equal(
-    block.structuredContent.entity.configuration.value.targets[0].if.conditions[0]
-      .trigger,
+    block.structuredContent.entity.configuration.value.targets[0].if
+      .conditions[0].trigger,
     true,
   );
   assert.equal(code.structuredContent.entity.type, "GLOBAL");
   assert.equal(code.structuredContent.entity.configuration.format, "code");
-  assert.match(code.structuredContent.entity.configuration.text, /\[REDACTED\]/);
+  assert.match(
+    code.structuredContent.entity.configuration.text,
+    /\[REDACTED\]/,
+  );
   assert.doesNotMatch(
     code.structuredContent.entity.configuration.text,
     /must-not-leak/,
   );
+});
+
+test("automation preview rejects foreign-home references before any hub request", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const requestCount = hub.requests.length;
+
+  const result = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: {
+      name: "Чужой дом",
+      reason: "Проверка границы записи",
+      source_room_ref: "spruthub://hub/home%2FA/room/1",
+      source_characteristic_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      source_value: true,
+      target_room_ref: "spruthub://hub/home%20B/room/1",
+      target_characteristic_ref:
+        "spruthub://hub/home%20B/accessory/32/service/13/characteristic/15",
+      target_value: true,
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.code, "unsupported_home_write");
+  assert.equal(hub.requests.length, requestCount);
 });
