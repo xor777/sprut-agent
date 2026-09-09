@@ -810,6 +810,64 @@ test("SprutHub runtime target state does not block status or rollback", async (t
   );
 });
 
+test("status restores a legacy auto-off journal after SprutHub assigns block IDs", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "preview_boolean_automation",
+    arguments: { ...previewArguments, auto_off_after_seconds: 60 },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  await firstClient.close();
+
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  const normalizedData = JSON.parse(scenario.data);
+  const normalizedDelay = normalizedData.targets[0].then[1];
+  normalizedDelay.blockId = 6;
+  normalizedDelay.targets[0].blockId = 7;
+  normalizedDelay.targets[0].characteristics[0].blockId = 8;
+  scenario.data = JSON.stringify(normalizedData);
+
+  const [journalName] = (await readdir(stateDirectory)).filter((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  const journalPath = path.join(stateDirectory, journalName);
+  const legacyJournal = JSON.parse(await readFile(journalPath, "utf8"));
+  const changeId = prepared.structuredContent.change_ref.split("/").at(-1);
+  const legacyDelay =
+    legacyJournal.changes[changeId].native_data.targets[0].then[1];
+  delete legacyDelay.blockId;
+  legacyDelay.targets[0].blockId = 6;
+  legacyDelay.targets[0].characteristics[0].blockId = 7;
+  await writeFile(journalPath, `${JSON.stringify(legacyJournal, null, 2)}\n`);
+  const journalBeforeStatus = await readFile(journalPath, "utf8");
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const result = await secondClient.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "applied");
+  assert.equal(result.structuredContent.owned, true);
+  assert.equal(result.structuredContent.configuration_matches, true);
+  assert.equal(await readFile(journalPath, "utf8"), journalBeforeStatus);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete),
+    false,
+  );
+});
+
 test("rollback still protects unknown scenario configuration", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
