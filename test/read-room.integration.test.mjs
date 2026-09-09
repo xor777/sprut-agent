@@ -15,7 +15,10 @@ const projectRoot = path.resolve(
 const diagnosticsByClient = new WeakMap();
 const observedRoomReading = JSON.parse(
   await readFile(
-    new URL("../research/protocol/2026-09-09-room-reading.json", import.meta.url),
+    new URL(
+      "../research/protocol/2026-09-09-room-reading.json",
+      import.meta.url,
+    ),
     "utf8",
   ),
 );
@@ -528,15 +531,12 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     name: "list_rooms",
     arguments: {},
   });
-  assert.deepEqual(
-    catalog.structuredContent.rooms.slice(2),
-    [
-      { ref: "spruthub://room/30", name: "Office" },
-      { ref: "spruthub://room/31", name: "1 - Офис" },
-      { ref: "spruthub://room/40", name: "Кладовая" },
-      { ref: "spruthub://room/41", name: "Кладовая" },
-    ],
-  );
+  assert.deepEqual(catalog.structuredContent.rooms.slice(2), [
+    { ref: "spruthub://room/30", name: "Office" },
+    { ref: "spruthub://room/31", name: "1 - Офис" },
+    { ref: "spruthub://room/40", name: "Кладовая" },
+    { ref: "spruthub://room/41", name: "Кладовая" },
+  ]);
 
   const selected = await client.callTool({
     name: "read_room",
