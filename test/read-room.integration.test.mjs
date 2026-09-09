@@ -14,8 +14,9 @@ const projectRoot = path.resolve(
 
 const hubState = {
   rooms: [
-    { id: 10, order: 1, name: "Кухня", visible: true },
+    { id: 10, order: 1, name: " Кухня ", visible: true },
     { id: 20, order: 2, name: "Гостиная", visible: true },
+    { id: 30, order: 3, name: null, visible: true },
   ],
   accessories: [
     {
@@ -63,7 +64,7 @@ const hubState = {
               sId: 1,
               cId: 1,
               control: {
-                key: "CurrentTemperature",
+                key: "current-temperature",
                 name: "Температура",
                 type: "CurrentTemperature",
                 unit: "°C",
@@ -72,7 +73,19 @@ const hubState = {
             },
           ],
         },
+        {
+          aId: 101,
+          sId: 2,
+          name: "Диагностика",
+          type: "Diagnostics",
+        },
       ],
+    },
+    {
+      id: 102,
+      online: true,
+      name: "Шлюз",
+      roomId: 10,
     },
     {
       id: 200,
@@ -138,6 +151,11 @@ test("MCP room tool returns only the requested room with stable object reference
     cwd: projectRoot,
     env: {
       PATH: process.env.PATH,
+      ...(process.env.__STRYKER_ACTIVE_MUTANT__ === undefined
+        ? {}
+        : {
+            __STRYKER_ACTIVE_MUTANT__: process.env.__STRYKER_ACTIVE_MUTANT__,
+          }),
       SPRUTHUB_URL: hub.url,
       SPRUTHUB_TOKEN: "synthetic-test-token",
       SPRUTHUB_SERIAL: "test-hub",
@@ -159,10 +177,16 @@ test("MCP room tool returns only the requested room with stable object reference
     tools.tools.map(({ name }) => name),
     ["read_room"],
   );
+  assert.deepEqual(tools.tools[0].annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
 
   const result = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room: "  кухня  " },
   });
   assert.equal(
     result.isError,
@@ -171,12 +195,13 @@ test("MCP room tool returns only the requested room with stable object reference
   );
 
   const reading = result.structuredContent;
+  assert.deepEqual(JSON.parse(result.content[0].text), reading);
   assert.equal(reading.status, "ok");
   assert.deepEqual(reading.room, {
     ref: "spruthub://room/10",
     name: "Кухня",
   });
-  assert.equal(reading.devices.length, 2);
+  assert.equal(reading.devices.length, 3);
 
   const lamp = reading.devices.find(
     ({ ref }) => ref === "spruthub://accessory/100",
@@ -198,6 +223,13 @@ test("MCP room tool returns only the requested room with stable object reference
   );
   assert.deepEqual(thermometer.services[0].readings[0].value, 23.5);
   assert.deepEqual(thermometer.services[0].readings[0].unit, "°C");
+  assert.equal(thermometer.services[0].readings[0].type, "CurrentTemperature");
+  assert.deepEqual(thermometer.services[1].readings, []);
+  assert.deepEqual(
+    reading.devices.find(({ ref }) => ref === "spruthub://accessory/102")
+      .services,
+    [],
+  );
   assert.equal(
     reading.devices.some(({ ref }) => ref === "spruthub://accessory/200"),
     false,
@@ -205,8 +237,22 @@ test("MCP room tool returns only the requested room with stable object reference
   assert.equal(reading.freshness.measurementAt, null);
   assert.match(reading.freshness.hubResponseReceivedAt, /^\d{4}-\d{2}-\d{2}T/);
 
-  assert.deepEqual(
-    hub.requests.map(({ params }) => Object.keys(params)[0]),
-    ["room", "accessory"],
-  );
+  assert.deepEqual(hub.requests, [
+    {
+      id: 1,
+      token: "synthetic-test-token",
+      serial: "test-hub",
+      cid: "sprut-agent-test",
+      params: { room: { list: {} } },
+    },
+    {
+      id: 2,
+      token: "synthetic-test-token",
+      serial: "test-hub",
+      cid: "sprut-agent-test",
+      params: {
+        accessory: { list: { expand: "services,characteristics" } },
+      },
+    },
+  ]);
 });
