@@ -38,7 +38,7 @@ export class SprutHubClient {
     this.timeoutMs = timeoutMs;
   }
 
-  async readRoom(roomName) {
+  async listRooms() {
     const roomsResponse = await this.#request({ room: { list: {} } });
     const rooms = roomsResponse.result?.room?.list?.rooms;
     if (!Array.isArray(rooms)) {
@@ -48,34 +48,52 @@ export class SprutHubClient {
       );
     }
 
-    const selector = roomName.trim();
-    const roomRef = /^spruthub:\/\/room\/(\d+)$/.exec(selector);
-    const normalizedName = selector.toLocaleLowerCase("ru");
-    const matches = rooms.filter(({ id, name }) =>
-      roomRef
-        ? id === Number(roomRef[1])
-        : typeof name === "string" &&
-          name.trim().toLocaleLowerCase("ru") === normalizedName,
-    );
-    if (matches.length === 0) {
+    return {
+      status: "ok",
+      rooms: rooms.map((room) => ({
+        ref: `spruthub://room/${room.id}`,
+        name: room.name,
+      })),
+      freshness: {
+        hubResponseReceivedAt: new Date().toISOString(),
+        measurementAt: null,
+      },
+    };
+  }
+
+  async readRoom(roomRef) {
+    const parsedRef = /^spruthub:\/\/room\/(\d+)$/.exec(roomRef);
+    if (!parsedRef) {
       throw new SprutHubError(
-        "room_not_found",
-        `Room ${JSON.stringify(roomName)} was not found.`,
+        "invalid_room_ref",
+        "Use a room reference returned by list_rooms.",
+        "list_rooms",
       );
     }
-    if (matches.length > 1) {
-      return {
-        status: "ambiguous",
-        query: roomName,
-        candidates: matches.map((room) => ({
-          ref: `spruthub://room/${room.id}`,
-          name: room.name.trim(),
-        })),
-      };
+    const roomId = Number(parsedRef[1]);
+    const roomResponse = await this.#request({
+      room: { get: { id: roomId } },
+    });
+    const roomContainer = roomResponse.result?.room;
+    if (!roomContainer || !("get" in roomContainer)) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible room response.",
+      );
+    }
+    const room = roomContainer.get;
+    if (room === null) {
+      throw new SprutHubError(
+        "room_not_found",
+        "The selected SprutHub room was not found.",
+        "list_rooms",
+      );
     }
 
     const accessoriesResponse = await this.#request({
-      accessory: { list: { expand: "services,characteristics" } },
+      accessory: {
+        list: { roomId, expand: "services,characteristics" },
+      },
     });
     const accessories =
       accessoriesResponse.result?.accessory?.list?.accessories;
@@ -86,12 +104,11 @@ export class SprutHubClient {
       );
     }
 
-    const room = matches[0];
     return {
       status: "ok",
       room: {
         ref: `spruthub://room/${room.id}`,
-        name: room.name.trim(),
+        name: room.name,
       },
       devices: accessories
         .filter(({ roomId }) => roomId === room.id)

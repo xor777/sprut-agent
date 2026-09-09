@@ -30,63 +30,66 @@ const deviceSchema = z.object({
 });
 
 const roomSchema = z.object({ ref: z.string(), name: z.string() });
+const errorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    action: z.string().optional(),
+  })
+  .optional();
+const freshnessSchema = z.object({
+  hubResponseReceivedAt: z.string(),
+  measurementAt: z.string().nullable(),
+});
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+server.registerTool(
+  "list_rooms",
+  {
+    title: "List SprutHub rooms",
+    description:
+      "List every room on the configured SprutHub with its original name and stable reference. Use this before read_room so the agent can select the room requested by the user.",
+    inputSchema: {},
+    outputSchema: {
+      status: z.enum(["ok", "error"]),
+      rooms: z.array(roomSchema).optional(),
+      error: errorSchema,
+      freshness: freshnessSchema.optional(),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async () => runRoomTool(() => getHubClient().listRooms()),
+);
 
 server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",
     description:
-      "Read devices and current characteristics in one SprutHub room by its human-readable name or stable room reference.",
+      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms.",
     inputSchema: {
-      room: z
+      room_ref: z
         .string()
         .min(1)
-        .describe("Human-readable room name or spruthub://room/<id> reference"),
+        .describe("spruthub://room/<id> reference returned by list_rooms"),
     },
     outputSchema: {
-      status: z.enum(["ok", "ambiguous", "error"]),
-      query: z.string().optional(),
-      candidates: z.array(roomSchema).optional(),
+      status: z.enum(["ok", "error"]),
       room: roomSchema.optional(),
       devices: z.array(deviceSchema).optional(),
-      error: z
-        .object({
-          code: z.string(),
-          message: z.string(),
-          retryable: z.boolean(),
-          action: z.string().optional(),
-        })
-        .optional(),
-      freshness: z
-        .object({
-          hubResponseReceivedAt: z.string(),
-          measurementAt: z.string().nullable(),
-        })
-        .optional(),
+      error: errorSchema,
+      freshness: freshnessSchema.optional(),
     },
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: true,
-    },
+    annotations: readOnlyAnnotations,
   },
-  async ({ room }) => {
-    try {
-      const reading = await getHubClient().readRoom(room);
-      return {
-        content: [{ type: "text", text: JSON.stringify(reading, null, 2) }],
-        structuredContent: reading,
-      };
-    } catch (error) {
-      const result = toToolError(error);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-        isError: true,
-      };
-    }
-  },
+  async ({ room_ref: roomRef }) =>
+    runRoomTool(() => getHubClient().readRoom(roomRef)),
 );
 
 await server.connect(new StdioServerTransport());
@@ -128,6 +131,23 @@ function toToolError(error) {
       retryable: false,
     },
   };
+}
+
+async function runRoomTool(operation) {
+  try {
+    const result = await operation();
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      structuredContent: result,
+    };
+  } catch (error) {
+    const result = toToolError(error);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      structuredContent: result,
+      isError: true,
+    };
+  }
 }
 
 let shuttingDown = false;
