@@ -10,7 +10,7 @@
     "research:diff": "node research/compare-snapshots.mjs",
     "research:record": "node research/record-websocket.mjs",
     "research:snapshot": "node research/extract-spruthub.mjs",
-    "test": "node --test research/*.test.mjs",
+    "test": "node --test",
     "test:mutations": "stryker run"
   },
   "engines": {
@@ -23,5 +23,9 @@
     "@stryker-mutator/core": "10.0.0",
     "husky": "9.1.7",
     "ws": "8.21.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.5.4"
   }
 }
