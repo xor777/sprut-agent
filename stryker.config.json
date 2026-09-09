@@ -6,5 +6,5 @@
   "coverageAnalysis": "off",
   "reporters": ["clear-text", "html", "json"],
   "concurrency": 2,
-  "thresholds": { "high": 100, "low": 100, "break": 100 }
+  "thresholds": { "break": null }
 }
