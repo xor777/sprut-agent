@@ -610,7 +610,16 @@ test("observed multisensor projection keeps readable native enum meaning", async
   const initialReadings = initial.services.flatMap(({ readings }) => readings);
   assert.deepEqual(
     {
-      serviceTypes: initial.services.map(({ type }) => type),
+      services: initial.services.map(({ ref, type, readings }) => ({
+        ref,
+        type,
+        readings: readings.map(({ ref, type, value, unit }) => ({
+          ref,
+          type,
+          value,
+          unit,
+        })),
+      })),
       readingCount: initialReadings.length,
       hasIdentify: initialReadings.some(({ type }) => type === "Identify"),
       motion: readingByType(initial, "MotionDetected"),
@@ -622,11 +631,127 @@ test("observed multisensor projection keeps readable native enum meaning", async
       unknown: readingByType(unknown, "FutureChargingState"),
     },
     {
-      serviceTypes: [
-        "AccessoryInformation",
-        "MotionSensor",
-        "LightSensor",
-        "BatteryService",
+      services: [
+        {
+          ref: "spruthub://accessory/200/service/10",
+          type: "AccessoryInformation",
+          readings: [
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/501",
+              type: "C_Room",
+              value: "Room B",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/503",
+              type: "Manufacturer",
+              value: "Aqara",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/504",
+              type: "Model",
+              value: "RTCGQ14LM",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/505",
+              type: "Name",
+              value: "Motion device B",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/506",
+              type: "SerialNumber",
+              value: "example-motion-device",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/507",
+              type: "FirmwareRevision",
+              value: "11",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/508",
+              type: "C_Online",
+              value: true,
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/10/characteristic/509",
+              type: "C_CatalogId",
+              value: 3987,
+              unit: null,
+            },
+          ],
+        },
+        {
+          ref: "spruthub://accessory/200/service/20",
+          type: "MotionSensor",
+          readings: [
+            {
+              ref: "spruthub://accessory/200/service/20/characteristic/510",
+              type: "MotionDetected",
+              value: false,
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/20/characteristic/511",
+              type: "Name",
+              value: "Motion sensor",
+              unit: null,
+            },
+          ],
+        },
+        {
+          ref: "spruthub://accessory/200/service/30",
+          type: "LightSensor",
+          readings: [
+            {
+              ref: "spruthub://accessory/200/service/30/characteristic/512",
+              type: "Name",
+              value: "Датчик освещенности",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/30/characteristic/513",
+              type: "CurrentAmbientLightLevel",
+              value: 100,
+              unit: "lux",
+            },
+          ],
+        },
+        {
+          ref: "spruthub://accessory/200/service/40",
+          type: "BatteryService",
+          readings: [
+            {
+              ref: "spruthub://accessory/200/service/40/characteristic/514",
+              type: "Name",
+              value: "Батарея",
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/40/characteristic/515",
+              type: "BatteryLevel",
+              value: 60,
+              unit: "%",
+            },
+            {
+              ref: "spruthub://accessory/200/service/40/characteristic/516",
+              type: "StatusLowBattery",
+              value: 0,
+              unit: null,
+            },
+            {
+              ref: "spruthub://accessory/200/service/40/characteristic/517",
+              type: "ChargingState",
+              value: 2,
+              unit: null,
+            },
+          ],
+        },
       ],
       readingCount: 16,
       hasIdentify: false,
