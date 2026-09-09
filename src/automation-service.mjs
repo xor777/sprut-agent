@@ -82,44 +82,17 @@ export class AutomationService {
       const change = await this.#requireChange(id);
       await this.#preflight(change);
       let reconciliation = await this.#reconcile(change);
-      if (reconciliation.owned && reconciliation.matches) {
-        const localStateSaved = await this.#markApplied(
-          change,
-          reconciliation.scenario.index,
-        );
-        return withLocalState(applyResult(change, false), localStateSaved);
-      }
-      if (reconciliation.owned) {
-        return conflictResult(change, reconciliation.scenario.index);
-      }
-      if (reconciliation.equivalent) {
-        change.status = "already_present";
-        change.scenario_index = reconciliation.equivalent.index;
-        change.owned = false;
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return {
-          status: "already_present",
-          change_ref: changeReference,
-          scenario_index: reconciliation.equivalent.index,
-          created: false,
-          owned: false,
-        };
-      }
-      if (reconciliation.runtimeConflict) {
-        change.status = "conflict";
-        change.scenario_index = reconciliation.runtimeConflict.index;
-        change.owned = false;
-        change.conflict_reason = "equivalent_rule_runtime_mismatch";
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return runtimeConflictResult(change, reconciliation.runtimeConflict);
+      let observation = observeReconciliation(change, reconciliation);
+      if (observation.kind !== "absent") {
+        return this.#finishObservation(change, observation, {
+          ...(observation.kind === "owned_match"
+            ? verifiedApplyFields(false)
+            : {}),
+          ...(observation.kind === "equivalent" ? { created: false } : {}),
+        });
       }
       if (["creating", "uncertain"].includes(change.status)) {
-        change.status = "uncertain";
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return uncertainResult(change);
+        return this.#finish(change, { status: "uncertain" }, uncertainResult);
       }
       if (change.status === "rolled_back") {
         return {
@@ -140,120 +113,72 @@ export class AutomationService {
         change.scenario_index = created.index;
       } catch (error) {
         if (!isUncertainWriteError(error)) {
-          change.status = "prepared";
-          change.updated_at = new Date().toISOString();
-          const localStateSaved = await this.#trySave(change);
-          if (!localStateSaved) {
-            error.details = {
-              change_ref: changeReference,
-              hub_effect: "not_applied",
-              local_state: {
-                saved: false,
-                action: "restore_state_storage_then_preview_boolean_automation",
-              },
-            };
-          }
+          error.details = await this.#finishKnownNoEffect(
+            change,
+            changeReference,
+            "prepared",
+            "restore_state_storage_then_preview_boolean_automation",
+          );
           throw error;
         }
-        change.status = "uncertain";
-        change.updated_at = new Date().toISOString();
-        const uncertainStateSaved = await this.#trySave(change);
         try {
           reconciliation = await this.#reconcile(change);
         } catch {
-          return withLocalState(uncertainResult(change), uncertainStateSaved);
+          return this.#finish(change, { status: "uncertain" }, uncertainResult);
         }
-        if (reconciliation.owned && reconciliation.matches) {
-          const localStateSaved = await this.#markApplied(
-            change,
-            reconciliation.scenario.index,
-          );
-          return withLocalState(
-            {
-              ...applyResult(change, true),
-              recovered_after_uncertain_write: true,
-              ...(error.code === "connection_closed"
-                ? { recovered_after_disconnect: true }
-                : {}),
-            },
-            localStateSaved,
-          );
+        observation = observeReconciliation(change, reconciliation);
+        if (observation.kind === "owned_match") {
+          return this.#finishObservation(change, observation, {
+            ...verifiedApplyFields(true),
+            recovered_after_uncertain_write: true,
+            ...(error.code === "connection_closed"
+              ? { recovered_after_disconnect: true }
+              : {}),
+          });
         }
-        return withLocalState(uncertainResult(change), uncertainStateSaved);
+        if (
+          ["owned_conflict", "ownership_conflict"].includes(observation.kind)
+        ) {
+          return this.#finishObservation(change, observation);
+        }
+        return this.#finish(change, { status: "uncertain" }, uncertainResult);
       }
 
       try {
         reconciliation = await this.#reconcile(change);
       } catch {
-        change.status = "uncertain";
-        change.updated_at = new Date().toISOString();
-        const localStateSaved = await this.#trySave(change);
-        return withLocalState(uncertainResult(change), localStateSaved);
+        return this.#finish(change, { status: "uncertain" }, uncertainResult);
       }
-      if (!reconciliation.owned || !reconciliation.matches) {
-        change.status = reconciliation.owned ? "conflict" : "uncertain";
-        change.updated_at = new Date().toISOString();
-        const localStateSaved = await this.#trySave(change);
-        const result = reconciliation.owned
-          ? conflictResult(change, reconciliation.scenario.index)
-          : uncertainResult(change);
-        return withLocalState(result, localStateSaved);
+      observation = observeReconciliation(change, reconciliation);
+      if (observation.kind === "owned_match") {
+        return this.#finishObservation(
+          change,
+          observation,
+          verifiedApplyFields(true),
+        );
       }
-      const localStateSaved = await this.#markApplied(
-        change,
-        reconciliation.scenario.index,
-      );
-      return withLocalState(applyResult(change, true), localStateSaved);
+      if (["owned_conflict", "ownership_conflict"].includes(observation.kind)) {
+        return this.#finishObservation(change, observation);
+      }
+      return this.#finish(change, { status: "uncertain" }, uncertainResult);
     });
   }
 
   async getChange(changeReference) {
     const id = parseChangeRef(changeReference);
     const change = await this.#requireChange(id);
+    const reconciliation = await this.#reconcile(change);
+    const observation = observeReconciliation(change, reconciliation);
+    if (observation.kind !== "absent") {
+      return observationResult(change, observation);
+    }
+    if (["deleting", "rollback_uncertain"].includes(change.status)) {
+      return rolledBackResult(change, false);
+    }
     if (["prepared", "rolled_back"].includes(change.status)) {
       return publicChange(change);
     }
-    const reconciliation = await this.#reconcile(change);
-    if (
-      ["deleting", "rollback_uncertain"].includes(change.status) &&
-      !reconciliation.scenario
-    ) {
-      return rolledBackResult(change, false);
-    }
-    if (
-      change.conflict_reason === "equivalent_rule_runtime_mismatch" &&
-      reconciliation.runtimeConflict
-    ) {
-      return runtimeConflictResult(change, reconciliation.runtimeConflict);
-    }
-    if (reconciliation.owned) {
-      return {
-        ...publicChange(change),
-        status: reconciliation.matches ? "applied" : "conflict",
-        scenario_index: reconciliation.scenario.index,
-        owned: true,
-        configuration_matches: reconciliation.matches,
-      };
-    }
-    if (reconciliation.equivalent && change.owned === false) {
-      return {
-        ...publicChange(change),
-        status: "already_present",
-        scenario_index: reconciliation.equivalent.index,
-        owned: false,
-        configuration_matches: true,
-      };
-    }
-    if (reconciliation.scenario) {
-      return ownershipConflictResult(change, reconciliation.scenario.index);
-    }
-    return {
-      ...publicChange(change),
-      status: "uncertain",
-      owned: change.owned === true,
-      configuration_matches: false,
-      action: "inspect_hub_before_retry",
-    };
+    return uncertainResult(change);
   }
 
   async rollback(changeReference) {
@@ -271,60 +196,52 @@ export class AutomationService {
         };
       }
       const reconciliation = await this.#reconcile(change);
-      if (reconciliation.scenario && !reconciliation.owned) {
-        change.status = "conflict";
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return ownershipConflictResult(change, reconciliation.scenario.index);
-      }
-      if (!reconciliation.owned) {
+      const observation = observeReconciliation(change, reconciliation);
+      if (observation.kind === "absent") {
         if (["creating", "uncertain"].includes(change.status)) {
-          change.status = "uncertain";
-          change.updated_at = new Date().toISOString();
-          await this.store.save(change);
-          return uncertainResult(change);
+          return this.#finish(change, { status: "uncertain" }, uncertainResult);
         }
-        change.status = "rolled_back";
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return {
-          ...publicChange(change),
-          status: "rolled_back",
-          removed: false,
-          physical_state_reverted: false,
-        };
+        return this.#finish(change, { status: "rolled_back" }, (current) =>
+          rolledBackResult(current, false),
+        );
       }
-      if (!reconciliation.matches) {
-        change.status = "conflict";
-        change.updated_at = new Date().toISOString();
-        await this.store.save(change);
-        return conflictResult(change, reconciliation.scenario.index);
+      if (observation.kind !== "owned_match") {
+        return this.#finishObservation(change, observation);
       }
       change.status = "deleting";
       change.updated_at = new Date().toISOString();
       await this.#saveBeforeWrite(change);
       try {
-        await this.client.deleteScenario(reconciliation.scenario.index);
+        await this.client.deleteScenario(observation.scenario.index);
       } catch (error) {
-        if (!isUncertainWriteError(error)) throw error;
-        change.status = "rollback_uncertain";
-        change.updated_at = new Date().toISOString();
-        const uncertainStateSaved = await this.#trySave(change);
+        if (!isUncertainWriteError(error)) {
+          error.details = await this.#finishKnownNoEffect(
+            change,
+            changeReference,
+            "applied",
+          );
+          throw error;
+        }
         try {
           const afterUncertainDelete = await this.#reconcile(change);
           return this.#finishDeleteReadback(change, afterUncertainDelete, true);
         } catch {
-          return withLocalState(uncertainResult(change), uncertainStateSaved);
+          return this.#finish(
+            change,
+            { status: "rollback_uncertain" },
+            uncertainResult,
+          );
         }
       }
       let afterDelete;
       try {
         afterDelete = await this.#reconcile(change);
       } catch {
-        change.status = "rollback_uncertain";
-        change.updated_at = new Date().toISOString();
-        const localStateSaved = await this.#trySave(change);
-        return withLocalState(uncertainResult(change), localStateSaved);
+        return this.#finish(
+          change,
+          { status: "rollback_uncertain" },
+          uncertainResult,
+        );
       }
       return this.#finishDeleteReadback(change, afterDelete, false);
     });
@@ -407,50 +324,61 @@ export class AutomationService {
     };
   }
 
-  async #markApplied(change, scenarioIndex) {
-    change.status = "applied";
-    change.scenario_index = scenarioIndex;
-    change.owned = true;
-    change.updated_at = new Date().toISOString();
-    return this.#trySave(change);
-  }
-
   async #finishDeleteReadback(change, reconciliation, recovered) {
-    if (!reconciliation.scenario) {
-      const result = await this.#markRolledBack(change, true);
-      return recovered
-        ? { ...result, recovered_after_uncertain_write: true }
-        : result;
+    const observation = observeReconciliation(change, reconciliation);
+    if (observation.kind === "absent") {
+      return this.#finish(change, { status: "rolled_back" }, (current) => ({
+        ...rolledBackResult(current, true),
+        ...(recovered ? { recovered_after_uncertain_write: true } : {}),
+      }));
     }
-    if (!reconciliation.owned) {
-      change.status = "conflict";
-      change.updated_at = new Date().toISOString();
-      const localStateSaved = await this.#trySave(change);
-      return withLocalState(
-        ownershipConflictResult(change, reconciliation.scenario.index),
-        localStateSaved,
-      );
+    if (observation.kind !== "owned_match") {
+      return this.#finishObservation(change, observation);
     }
-    if (!reconciliation.matches) {
-      change.status = "conflict";
-      change.updated_at = new Date().toISOString();
-      const localStateSaved = await this.#trySave(change);
-      return withLocalState(
-        conflictResult(change, reconciliation.scenario.index),
-        localStateSaved,
-      );
-    }
-    change.status = "rollback_uncertain";
-    change.updated_at = new Date().toISOString();
-    const localStateSaved = await this.#trySave(change);
-    return withLocalState(uncertainResult(change), localStateSaved);
+    return this.#finish(
+      change,
+      { status: "rollback_uncertain" },
+      uncertainResult,
+    );
   }
 
-  async #markRolledBack(change, removed) {
-    change.status = "rolled_back";
-    change.updated_at = new Date().toISOString();
+  async #finishObservation(change, observation, extra = {}) {
+    return this.#finish(change, observationState(observation), (current) => ({
+      ...observationResult(current, observation),
+      ...extra,
+    }));
+  }
+
+  async #finishKnownNoEffect(
+    change,
+    changeReference,
+    status,
+    persistenceAction,
+  ) {
+    return this.#finish(
+      change,
+      { status },
+      () => ({
+        change_ref: changeReference,
+        hub_effect: "not_applied",
+      }),
+      persistenceAction,
+    );
+  }
+
+  async #finish(
+    change,
+    state,
+    makeResult,
+    persistenceAction = "restore_state_storage_then_get_automation_change",
+  ) {
+    Object.assign(change, state, { updated_at: new Date().toISOString() });
     const localStateSaved = await this.#trySave(change);
-    return withLocalState(rolledBackResult(change, removed), localStateSaved);
+    return withLocalState(
+      makeResult(change),
+      localStateSaved,
+      persistenceAction,
+    );
   }
 
   async #trySave(change) {
@@ -800,14 +728,9 @@ function ruleMeaning(data) {
   };
 }
 
-function applyResult(change, created) {
+function verifiedApplyFields(created) {
   return {
-    ...publicChange(change),
-    status: "applied",
-    scenario_index: change.scenario_index,
     created,
-    owned: true,
-    configuration_matches: true,
     hub_configuration_verified: true,
     physical_effect_observed: false,
   };
@@ -822,15 +745,100 @@ function rolledBackResult(change, removed) {
   };
 }
 
-function withLocalState(result, saved) {
+function withLocalState(
+  result,
+  saved,
+  action = "restore_state_storage_then_get_automation_change",
+) {
   if (saved) return result;
   return {
     ...result,
     local_state: {
       saved: false,
-      action: "restore_state_storage_then_get_automation_change",
+      action,
     },
   };
+}
+
+function observeReconciliation(change, reconciliation) {
+  if (reconciliation.owned) {
+    return {
+      kind: reconciliation.matches ? "owned_match" : "owned_conflict",
+      scenario: reconciliation.scenario,
+    };
+  }
+  if (change.owned === true) {
+    return reconciliation.scenario
+      ? { kind: "ownership_conflict", scenario: reconciliation.scenario }
+      : { kind: "absent" };
+  }
+  if (reconciliation.equivalent) {
+    return { kind: "equivalent", scenario: reconciliation.equivalent };
+  }
+  if (reconciliation.runtimeConflict) {
+    return {
+      kind: "runtime_conflict",
+      scenario: reconciliation.runtimeConflict,
+    };
+  }
+  return reconciliation.scenario
+    ? { kind: "ownership_conflict", scenario: reconciliation.scenario }
+    : { kind: "absent" };
+}
+
+function observationState(observation) {
+  const state = {
+    scenario_index: observation.scenario.index,
+    conflict_reason: undefined,
+  };
+  switch (observation.kind) {
+    case "owned_match":
+      return { ...state, status: "applied", owned: true };
+    case "owned_conflict":
+      return { ...state, status: "conflict", owned: true };
+    case "equivalent":
+      return { ...state, status: "already_present", owned: false };
+    case "runtime_conflict":
+      return {
+        ...state,
+        status: "conflict",
+        owned: false,
+        conflict_reason: "equivalent_rule_runtime_mismatch",
+      };
+    case "ownership_conflict":
+      return { ...state, status: "conflict", owned: false };
+    default:
+      throw new Error(`Cannot persist ${observation.kind} observation.`);
+  }
+}
+
+function observationResult(change, observation) {
+  switch (observation.kind) {
+    case "owned_match":
+      return {
+        ...publicChange(change),
+        status: "applied",
+        scenario_index: observation.scenario.index,
+        owned: true,
+        configuration_matches: true,
+      };
+    case "owned_conflict":
+      return conflictResult(change, observation.scenario.index);
+    case "equivalent":
+      return {
+        ...publicChange(change),
+        status: "already_present",
+        scenario_index: observation.scenario.index,
+        owned: false,
+        configuration_matches: true,
+      };
+    case "runtime_conflict":
+      return runtimeConflictResult(change, observation.scenario);
+    case "ownership_conflict":
+      return ownershipConflictResult(change, observation.scenario.index);
+    default:
+      throw new Error(`Cannot describe ${observation.kind} observation.`);
+  }
 }
 
 function publicChange(change) {
@@ -889,7 +897,6 @@ function uncertainResult(change) {
   return {
     ...publicChange(change),
     status: "uncertain",
-    created: false,
     action: "inspect_hub_before_retry",
   };
 }
