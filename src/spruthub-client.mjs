@@ -9,12 +9,13 @@ const VALUE_FIELDS = [
 ];
 
 export class SprutHubError extends Error {
-  constructor(code, message, action, { requestSent = false } = {}) {
+  constructor(code, message, action, { requestSent = false, ...details } = {}) {
     super(message);
     this.name = "SprutHubError";
     this.code = code;
     this.action = action;
     this.requestSent = requestSent;
+    if (Object.keys(details).length > 0) this.details = details;
   }
 }
 
@@ -42,8 +43,7 @@ export class SprutHubClient {
 
   async listHomes() {
     const deadline = Date.now() + this.timeoutMs;
-    const homes = await this.#listHomes(deadline);
-    const observedAt = new Date().toISOString();
+    const { homes, observedAt } = await this.#listHomes(deadline);
     return {
       status: "ok",
       homes: homes.map((home) => normalizeHome(home, observedAt)),
@@ -60,7 +60,10 @@ export class SprutHubClient {
   async inspectHome(homeReference) {
     const serial = parseHomeRef(homeReference);
     const deadline = Date.now() + this.timeoutMs;
-    const home = await this.#requireHome(serial, deadline);
+    const { home, observedAt: homeObservedAt } = await this.#requireHome(
+      serial,
+      deadline,
+    );
     const [roomsResponse, scenariosResponse, extensionsResponse] =
       await Promise.all([
         this.#request({ room: { list: {} } }, deadline, { serial }),
@@ -81,10 +84,15 @@ export class SprutHubClient {
     rooms.forEach((room) => {
       validateRoom(room);
     });
-    const observedAt = new Date().toISOString();
+    const observedAt = latestObservedAt([
+      homeObservedAt,
+      roomsResponse.responseReceivedAt,
+      scenariosResponse.responseReceivedAt,
+      extensionsResponse.responseReceivedAt,
+    ]);
     return {
       status: "ok",
-      home: normalizeHome(home, observedAt),
+      home: normalizeHome(home, homeObservedAt),
       entities: {
         rooms: rooms.map((room) => ({
           ref: roomRef(serial, room.id),
@@ -98,30 +106,29 @@ export class SprutHubClient {
         ),
       },
       coverage: [
-        capability("rooms", "room.list", "live_confirmed", observedAt),
         capability(
-          "accessories_services_characteristics",
-          "accessory.list/get",
+          "account_homes",
+          "hub.list",
           "live_confirmed",
-          observedAt,
+          homeObservedAt,
+        ),
+        capability(
+          "rooms",
+          "room.list",
+          "live_confirmed",
+          roomsResponse.responseReceivedAt,
         ),
         capability(
           "scenarios",
-          "scenario.list/get",
+          "scenario.list",
           "live_confirmed",
-          observedAt,
+          scenariosResponse.responseReceivedAt,
         ),
         capability(
           "extensions",
           "extension.list",
           "live_confirmed",
-          observedAt,
-        ),
-        capability(
-          "device_settings",
-          "accessory.deviceWindow → window.get",
-          "live_confirmed",
-          observedAt,
+          extensionsResponse.responseReceivedAt,
         ),
       ],
       unsupported_in_this_slice: [
@@ -137,18 +144,16 @@ export class SprutHubClient {
   async getEntity(entityReference, include = []) {
     const parsed = parseEntityRef(entityReference);
     const deadline = Date.now() + this.timeoutMs;
-    const home = await this.#requireHome(parsed.serial, deadline);
-    const observedAt = new Date().toISOString();
-    const requested = new Set(include);
-    const entity = await this.#readEntity(
-      parsed,
-      requested,
+    const { home, observedAt: homeObservedAt } = await this.#requireHome(
+      parsed.serial,
       deadline,
-      observedAt,
     );
+    const requested = new Set(include);
+    const entity = await this.#readEntity(parsed, requested, deadline);
+    const observedAt = new Date().toISOString();
     return {
       status: "ok",
-      home: normalizeHome(home, observedAt),
+      home: normalizeHome(home, homeObservedAt),
       entity,
       freshness: freshness(observedAt),
     };
@@ -427,13 +432,12 @@ export class SprutHubClient {
       );
     }
     homes.forEach(validateHome);
-    return homes;
+    return { homes, observedAt: response.responseReceivedAt };
   }
 
   async #requireHome(serial, deadline) {
-    const home = (await this.#listHomes(deadline)).find(
-      (candidate) => candidate.serial === serial,
-    );
+    const { homes, observedAt } = await this.#listHomes(deadline);
+    const home = homes.find((candidate) => candidate.serial === serial);
     if (!home) {
       throw new SprutHubError(
         "home_not_found",
@@ -441,10 +445,10 @@ export class SprutHubClient {
         "list_homes",
       );
     }
-    return home;
+    return { home, observedAt };
   }
 
-  async #readEntity(parsed, requested, deadline, observedAt) {
+  async #readEntity(parsed, requested, deadline) {
     if (parsed.kind === "home") {
       return { kind: "home", ref: homeRef(parsed.serial) };
     }
@@ -454,7 +458,7 @@ export class SprutHubClient {
     if (
       ["accessory", "service", "characteristic", "logic"].includes(parsed.kind)
     ) {
-      return this.#readAccessoryEntity(parsed, requested, deadline, observedAt);
+      return this.#readAccessoryEntity(parsed, requested, deadline);
     }
     if (parsed.kind === "scenario") {
       return this.#readScenarioEntity(parsed, requested, deadline);
@@ -463,7 +467,7 @@ export class SprutHubClient {
       return this.#readExtensionEntity(parsed, deadline);
     }
     if (parsed.kind === "window") {
-      return this.#readWindowEntity(parsed, requested, deadline, observedAt);
+      return this.#readWindowEntity(parsed, requested, deadline);
     }
     throw invalidEntityRef();
   }
@@ -508,7 +512,7 @@ export class SprutHubClient {
     };
   }
 
-  async #readAccessoryEntity(parsed, requested, deadline, observedAt) {
+  async #readAccessoryEntity(parsed, requested, deadline) {
     const response = await this.#request(
       { accessory: { get: { id: parsed.accessoryId } } },
       deadline,
@@ -519,6 +523,7 @@ export class SprutHubClient {
       ["accessory", "get"],
       "accessory",
     );
+    const observedAt = response.responseReceivedAt;
     validateAccessory(accessory);
     if (parsed.kind === "accessory") {
       const entity = normalizeAccessoryDetail(
@@ -544,7 +549,6 @@ export class SprutHubClient {
             accessory,
             requested,
             deadline,
-            observedAt,
           ),
         );
       }
@@ -654,7 +658,6 @@ export class SprutHubClient {
           accessory,
           requested,
           deadline,
-          observedAt,
         ),
       );
     }
@@ -696,13 +699,7 @@ export class SprutHubClient {
     return extractEntityArray(response, ["logic", "list", "logics"], true);
   }
 
-  async #readPhysicalConfiguration(
-    serial,
-    accessory,
-    requested,
-    deadline,
-    observedAt,
-  ) {
+  async #readPhysicalConfiguration(serial, accessory, requested, deadline) {
     if (typeof accessory.deviceWindow !== "string") {
       return { physical_configuration: null };
     }
@@ -716,7 +713,7 @@ export class SprutHubClient {
       serial,
       window,
       requested.has("diagnostics"),
-      observedAt,
+      response.responseReceivedAt,
     );
   }
 
@@ -759,7 +756,7 @@ export class SprutHubClient {
     };
   }
 
-  async #readWindowEntity(parsed, requested, deadline, observedAt) {
+  async #readWindowEntity(parsed, requested, deadline) {
     const response = await this.#request(
       { window: { get: { windowKey: parsed.windowKey } } },
       deadline,
@@ -770,7 +767,7 @@ export class SprutHubClient {
       parsed.serial,
       window,
       requested.has("diagnostics"),
-      observedAt,
+      response.responseReceivedAt,
     );
     return {
       kind: "window",
@@ -847,6 +844,7 @@ export class SprutHubClient {
             "connection_failed",
             "Could not connect to SprutHub.",
             "retry",
+            { capability_status: "unknown" },
           ),
         );
       };
@@ -900,20 +898,35 @@ export class SprutHubClient {
     this.#pending.delete(message.id);
 
     if (message.error) {
-      pending.reject(
-        message.error.code === 401
-          ? new SprutHubError(
-              "authentication_failed",
-              "SprutHub rejected the configured credentials.",
-              "check_credentials",
-            )
-          : new SprutHubError(
-              "request_rejected",
-              "SprutHub rejected the request.",
-            ),
-      );
+      if (message.error.code === 401) {
+        pending.reject(
+          new SprutHubError(
+            "authentication_failed",
+            "SprutHub rejected the configured credentials.",
+            "check_credentials",
+            { capability_status: "insufficient_access" },
+          ),
+        );
+      } else if (message.error.code === -32601) {
+        pending.reject(
+          new SprutHubError(
+            "unsupported",
+            "SprutHub does not support this operation on the selected home.",
+            "inspect_home",
+            { capability_status: "unsupported" },
+          ),
+        );
+      } else {
+        pending.reject(
+          new SprutHubError(
+            "request_rejected",
+            "SprutHub rejected the request.",
+          ),
+        );
+      }
       return;
     }
+    message.responseReceivedAt = new Date().toISOString();
     pending.resolve(message);
   }
 
@@ -927,6 +940,7 @@ export class SprutHubClient {
           "connection_closed",
           "The SprutHub connection closed before the response arrived.",
           "retry",
+          { capability_status: "unknown" },
         ),
       );
     }
@@ -996,13 +1010,21 @@ function validateHome(home) {
 function normalizeHome(home, observedAt) {
   return {
     ref: homeRef(home.serial),
-    name: home.name,
+    name: redactSensitiveText(home.name),
     online: home.online,
     access: {
-      owner: home.owner === true,
+      ownership:
+        typeof home.owner === "boolean"
+          ? home.owner
+            ? "owner"
+            : "not_owner"
+          : "unknown",
+      native_owner:
+        typeof home.owner === "string" ? redactSensitiveText(home.owner) : null,
       support: home.support === true,
     },
-    model: typeof home.model === "string" ? home.model : null,
+    model:
+      typeof home.model === "string" ? redactSensitiveText(home.model) : null,
     firmware: {
       version: home.version?.current?.version ?? null,
       revision: home.version?.current?.revision ?? null,
@@ -1025,6 +1047,10 @@ function freshness(observedAt) {
     hubResponseReceivedAt: observedAt,
     measurementAt: null,
   };
+}
+
+function latestObservedAt(values) {
+  return values.reduce((latest, value) => (value > latest ? value : latest));
 }
 
 function homeRef(serial) {
@@ -1178,7 +1204,7 @@ function normalizeScenarioSummary(serial, scenario) {
 }
 
 function extensionKey(extension) {
-  return extension?.key ?? extension?.type;
+  return extension?.extensionKey ?? extension?.key ?? extension?.type;
 }
 
 function normalizeExtension(serial, extension) {
@@ -1196,8 +1222,16 @@ function normalizeExtension(serial, extension) {
   return {
     ref: extensionRef(serial, key),
     key,
-    name: extension.name,
-    type: extension.type,
+    name: redactSensitiveText(extension.name),
+    type: redactSensitiveText(extension.type),
+    index:
+      typeof extension.index === "string"
+        ? redactSensitiveText(extension.index)
+        : null,
+    options_window_ref:
+      typeof extension.optionsWindow === "string"
+        ? windowRef(serial, extension.optionsWindow)
+        : null,
     bundle_type: extension.bundleType ?? null,
     enabled: extension.enabled === true,
     state: extension.state ?? null,
@@ -1304,21 +1338,39 @@ function normalizeOption(option) {
     );
   }
   const configured = extractTypedValue(option.value);
+  const sensitive = isSensitiveNativeOption(option);
   return {
-    key: option.key,
-    name: typeof option.name === "string" ? option.name : "",
-    type: option.type ?? null,
-    configured_value: configured.value,
-    unit: option.unit ?? null,
+    key: redactSensitiveText(option.key),
+    name:
+      typeof option.name === "string" ? redactSensitiveText(option.name) : "",
+    type:
+      typeof option.type === "string" ? redactSensitiveText(option.type) : null,
+    configured_value: sensitive
+      ? "[REDACTED]"
+      : sanitizeNativeData(configured.value, option.key),
+    unit:
+      typeof option.unit === "string" ? redactSensitiveText(option.unit) : null,
     read: option.read === true,
     write: option.write === true,
     events: option.events === true,
     ...(option.inputType ? { input_type: option.inputType } : {}),
+    ...(sensitive ? { sensitive: true } : {}),
+    ...(option.minValue !== undefined ? { min: option.minValue } : {}),
+    ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
+    ...(option.minStep !== undefined ? { step: option.minStep } : {}),
     ...(option.validValues
       ? {
           valid_values: option.validValues.map((validValue) => ({
-            name: validValue.name ?? "",
-            value: extractTypedValue(validValue.value).value,
+            name:
+              typeof validValue.name === "string"
+                ? redactSensitiveText(validValue.name)
+                : "",
+            value: sensitive
+              ? "[REDACTED]"
+              : sanitizeNativeData(
+                  extractTypedValue(validValue.value).value,
+                  option.key,
+                ),
           })),
         }
       : {}),
@@ -1339,16 +1391,36 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
   const diagnosticOptions = window.options.filter((option) =>
     ["HTML", "INFO", "CLIPBOARD"].includes(option.inputType),
   );
+  const layoutOptions = window.options.filter(({ inputType }) =>
+    ["GROUP", "LABEL", "DIVIDER"].includes(inputType),
+  );
+  const commandOptions = window.options.filter(({ inputType }) =>
+    inputType?.startsWith("BUTTON"),
+  );
+  const reports = extractWindowReports(diagnosticOptions);
   const options = window.options
     .filter(
-      (option) => !["HTML", "INFO", "CLIPBOARD"].includes(option.inputType),
+      (option) =>
+        !diagnosticOptions.includes(option) &&
+        !layoutOptions.includes(option) &&
+        !commandOptions.includes(option),
     )
     .map((option) => {
       const normalized = normalizeOption(option);
-      const reported = reportedFromNativeOptionKey(option.key, normalized);
+      const property = propertyFromNativeOptionKey(option.key);
+      const report = property ? reports.get(property) : undefined;
       return {
         ...normalized,
-        ...(reported ?? {}),
+        ...(property
+          ? {
+              property,
+              reported_value: report
+                ? parseScalarLike(report.value, normalized.configured_value)
+                : null,
+              reported_source: report ? "window_info_report" : null,
+              reported_observed_at: report ? observedAt : null,
+            }
+          : {}),
         pending: "unknown",
         source_timestamp: null,
       };
@@ -1356,8 +1428,18 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
   return {
     physical_configuration: {
       ref: windowRef(serial, window.windowKey),
-      name: window.label?.text ?? null,
+      name:
+        typeof window.label?.text === "string"
+          ? redactSensitiveText(window.label.text)
+          : null,
       options,
+      layout: layoutOptions.map(normalizeWindowControl),
+      commands: commandOptions.map((option) => ({
+        ...normalizeWindowControl(option),
+        requires_confirmation: option.validValues?.some(
+          ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
+        ),
+      })),
       freshness: {
         observed_at: observedAt,
         source_timestamp: null,
@@ -1366,7 +1448,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     ...(includeDiagnostics
       ? {
           diagnostics: diagnosticOptions.map((option) => ({
-            key: option.key,
+            key: redactSensitiveText(option.key),
             text: redactSensitiveText(
               String(extractTypedValue(option.value).value ?? ""),
             ).slice(0, 16_384),
@@ -1379,14 +1461,46 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
   };
 }
 
-function reportedFromNativeOptionKey(key, option) {
+function propertyFromNativeOptionKey(key) {
   const match = /\/[0-9A-Fa-f]+_([A-Za-z][A-Za-z0-9_]*)\/([^/]+)$/.exec(key);
-  if (!match) return null;
+  return match?.[1] ?? null;
+}
+
+function extractWindowReports(options) {
+  const reports = new Map();
+  const pattern =
+    /(?:^|>)[0-9A-Fa-f]+_([A-Za-z][A-Za-z0-9_]*)\s+\([0-9A-Fa-f]+\):\s*([^<]+?)\s*\[([A-Z0-9_]+)\]/g;
+  for (const option of options) {
+    const text = extractTypedValue(option.value).value;
+    if (typeof text !== "string") continue;
+    for (const match of text.matchAll(pattern)) {
+      reports.set(match[1], { value: match[2].trim() });
+    }
+  }
+  return reports;
+}
+
+function normalizeWindowControl(option) {
   return {
-    property: match[1],
-    reported_value: parseScalarLike(match[2], option.configured_value),
-    reported_source: "native_option_key",
+    key: redactSensitiveText(option.key ?? ""),
+    name:
+      typeof option.name === "string" ? redactSensitiveText(option.name) : "",
+    type:
+      typeof option.type === "string" ? redactSensitiveText(option.type) : null,
+    input_type: option.inputType ?? null,
+    parent:
+      typeof option.parent === "string"
+        ? redactSensitiveText(option.parent)
+        : null,
   };
+}
+
+function isSensitiveNativeOption(option) {
+  return (
+    option?.inputType === "PASSWORD" ||
+    isSensitiveKey(option?.key ?? "") ||
+    isSensitiveKey(option?.name ?? "")
+  );
 }
 
 function parseScalarLike(value, example) {
@@ -1439,34 +1553,64 @@ function normalizeScenarioConfiguration(scenario) {
   };
 }
 
-function sanitizeNativeData(value, key = "") {
-  if (isSensitiveKey(key)) return "[REDACTED]";
-  if (Array.isArray(value))
-    return value.map((item) => sanitizeNativeData(item));
+export function sanitizeNativeData(value, key = "", forceSensitive = false) {
+  const sensitive = forceSensitive || isSensitiveKey(key);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeNativeData(item, "", sensitive));
+  }
   if (value && typeof value === "object") {
+    const sensitiveContainer =
+      sensitive ||
+      value.inputType === "PASSWORD" ||
+      isSensitiveKey(value.key ?? "") ||
+      isSensitiveKey(value.name ?? "") ||
+      isSensitiveKey(value.type ?? "");
     return Object.fromEntries(
       Object.entries(value).map(([childKey, childValue]) => [
         childKey,
-        sanitizeNativeData(childValue, childKey),
+        sanitizeNativeData(
+          childValue,
+          childKey,
+          sensitiveContainer && isSecretValueField(childKey),
+        ),
       ]),
     );
   }
+  if (sensitive) return value == null ? value : "[REDACTED]";
   return typeof value === "string" ? redactSensitiveText(value) : value;
 }
 
 function isSensitiveKey(key) {
-  return /(?:password|passwd|secret|token|authorization|api[_-]?key)/i.test(
+  return /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i.test(
+    key,
+  );
+}
+
+function isSecretValueField(key) {
+  return /^(?:value|configured_value|default_value|defaultValue|boolValue|intValue|longValue|doubleValue|stringValue|bytesValue|validValues)$/i.test(
     key,
   );
 }
 
 function redactSensitiveText(text) {
+  const credentialName =
+    "api[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|wifi[_-]?password|api[_-]?key|private[_-]?key|password|passwd|secret|credential|authorization|token";
   return text
+    .replace(/\bBearer\s+[^\s;"'<>]+/gi, "Bearer [REDACTED]")
     .replace(
-      /\b(api[_-]?token|token|password|passwd|secret|authorization|api[_-]?key)(\s*[:=]\s*)(["']?)[^\s;"'<>]+\3/gi,
+      new RegExp(
+        `\\b(${credentialName})(\\s*[:=]\\s*)(["'])(?:\\\\.|(?!\\3).)*\\3`,
+        "gi",
+      ),
       "$1$2$3[REDACTED]$3",
     )
-    .replace(/\bBearer\s+[^\s;"'<>]+/gi, "Bearer [REDACTED]");
+    .replace(
+      new RegExp(
+        `\\b(${credentialName})(\\s*[:=]\\s*)(?!\\[REDACTED\\])[^\\s;"'<>]+`,
+        "gi",
+      ),
+      "$1$2[REDACTED]",
+    );
 }
 
 function timeoutError() {
@@ -1474,6 +1618,7 @@ function timeoutError() {
     "timeout",
     "SprutHub did not respond within the request budget.",
     "retry",
+    { capability_status: "unknown" },
   );
 }
 

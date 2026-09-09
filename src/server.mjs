@@ -2,7 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { AutomationService } from "./automation-service.mjs";
-import { SprutHubClient, SprutHubError } from "./spruthub-client.mjs";
+import {
+  SprutHubClient,
+  SprutHubError,
+  sanitizeNativeData,
+} from "./spruthub-client.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
 let hubClient;
@@ -292,13 +296,13 @@ function toToolError(error) {
 
 async function runRoomTool(operation) {
   try {
-    const result = await operation();
+    const result = sanitizeNativeData(await operation());
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
     };
   } catch (error) {
-    const result = toToolError(error);
+    const result = sanitizeNativeData(toToolError(error));
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
