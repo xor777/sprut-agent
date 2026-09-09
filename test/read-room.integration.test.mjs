@@ -163,6 +163,12 @@ async function startHub(initialState = hubState) {
       const request = JSON.parse(data.toString());
       requests.push(request);
 
+      if (state.invalidFrameOnRequest) {
+        state.invalidFrameOnRequest = false;
+        socket._socket.write(Buffer.from([0x83, 0x00]));
+        return;
+      }
+
       const responseDelayMs = state.responseDelays?.shift();
       if (responseDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
@@ -904,4 +910,43 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
       action: "retry",
     },
   });
+});
+
+test("a post-open WebSocket error is retryable in the same MCP session", async (t) => {
+  const hub = await startHub();
+  const client = await startMcpClient(t, hub);
+  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+
+  const first = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.equal(findReading(first.structuredContent, temperatureRef).value, 23.5);
+
+  hub.state.invalidFrameOnRequest = true;
+  const interrupted = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.deepEqual(interrupted.structuredContent, {
+    status: "error",
+    error: {
+      code: "connection_closed",
+      message: "The SprutHub connection closed before the response arrived.",
+      retryable: true,
+      action: "retry",
+    },
+  });
+
+  hub.state.accessories[1].services[0].characteristics[0].control.value = {
+    doubleValue: 27.5,
+  };
+  const recovered = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://room/10" },
+  });
+  assert.equal(
+    findReading(recovered.structuredContent, temperatureRef).value,
+    27.5,
+  );
 });
