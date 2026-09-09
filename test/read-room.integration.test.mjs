@@ -117,6 +117,18 @@ const hubState = {
                 type: "AirQuality",
               },
             },
+            {
+              aId: 101,
+              sId: 1,
+              cId: 4,
+              control: {
+                key: "target-temperature",
+                name: "Уставка температуры",
+                type: "TargetTemperature",
+                unit: "°C",
+                value: { doubleValue: 22 },
+              },
+            },
           ],
         },
         {
@@ -437,6 +449,14 @@ test("MCP discovers every room before reading the selected stable reference", as
   assert.deepEqual(thermometer.services[0].readings[0].value, 23.5);
   assert.deepEqual(thermometer.services[0].readings[0].unit, "°C");
   assert.equal(thermometer.services[0].readings[0].type, "CurrentTemperature");
+  assert.deepEqual(thermometer.services[0].readings[3], {
+    ref: "spruthub://accessory/101/service/1/characteristic/4",
+    name: "Уставка температуры",
+    type: "TargetTemperature",
+    value: 22,
+    unit: "°C",
+    measuredAt: null,
+  });
   assert.deepEqual(thermometer.services[1].readings, []);
   assert.deepEqual(
     reading.devices.find(({ ref }) => ref === "spruthub://accessory/102")
