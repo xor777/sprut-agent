@@ -23,6 +23,15 @@ const observedRoomReading = JSON.parse(
     "utf8",
   ),
 );
+const observedMotionReading = JSON.parse(
+  await readFile(
+    new URL(
+      "../research/protocol/2026-09-09-motion-reading.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 
 class BoundedTestClient extends Client {
   callTool(params, resultSchema, options = {}) {
@@ -547,6 +556,131 @@ test("observed real-hub projection keeps both temperature service contexts", asy
   );
   assert.notEqual(services[0].readings[0].ref, services[1].readings[0].ref);
   assert.deepEqual(hub.requests[2].params, accessoryExchange.params);
+});
+
+test("observed multisensor projection keeps readable native enum meaning", async (t) => {
+  const [roomExchange, accessoryExchange] = observedMotionReading.exchanges;
+  const observedAccessory = structuredClone(
+    accessoryExchange.result.accessory.list.accessories[0],
+  );
+  const motionControl = observedAccessory.services
+    .flatMap(({ characteristics = [] }) => characteristics)
+    .find(({ control }) => control.type === "MotionDetected").control;
+  motionControl.value = { boolValue: false };
+
+  const hub = await startHub({
+    rooms: [roomExchange.result.room.get],
+    accessories: [observedAccessory],
+  });
+  const client = await startMcpClient(t, hub);
+  const read = async () => {
+    const result = await client.callTool({
+      name: "read_room",
+      arguments: { room_ref: "spruthub://room/20" },
+    });
+    assert.equal(result.isError, undefined);
+    return result.structuredContent.devices[0];
+  };
+  const readingByType = (device, type) =>
+    device.services
+      .flatMap(({ readings }) => readings)
+      .find((reading) => reading.type === type);
+
+  const initial = await read();
+  const chargingControl = hub.state.accessories[0].services
+    .flatMap(({ characteristics = [] }) => characteristics)
+    .find(({ control }) => control.type === "ChargingState").control;
+  chargingControl.value = { intValue: 1 };
+  const checkedMismatch = await read();
+  chargingControl.type = "FutureChargingState";
+  chargingControl.value = { intValue: 99 };
+  const unknown = await read();
+
+  const initialReadings = initial.services.flatMap(({ readings }) => readings);
+  assert.deepEqual(
+    {
+      serviceTypes: initial.services.map(({ type }) => type),
+      readingCount: initialReadings.length,
+      hasIdentify: initialReadings.some(({ type }) => type === "Identify"),
+      motion: readingByType(initial, "MotionDetected"),
+      light: readingByType(initial, "CurrentAmbientLightLevel"),
+      batteryLevel: readingByType(initial, "BatteryLevel"),
+      lowBattery: readingByType(initial, "StatusLowBattery"),
+      charging: readingByType(initial, "ChargingState"),
+      checkedMismatch: readingByType(checkedMismatch, "ChargingState"),
+      unknown: readingByType(unknown, "FutureChargingState"),
+    },
+    {
+      serviceTypes: [
+        "AccessoryInformation",
+        "MotionSensor",
+        "LightSensor",
+        "BatteryService",
+      ],
+      readingCount: 16,
+      hasIdentify: false,
+      motion: {
+        ref: "spruthub://accessory/200/service/20/characteristic/510",
+        name: "Обнаружено движение",
+        type: "MotionDetected",
+        value: false,
+        unit: null,
+        measuredAt: null,
+      },
+      light: {
+        ref: "spruthub://accessory/200/service/30/characteristic/513",
+        name: "Освещенность",
+        type: "CurrentAmbientLightLevel",
+        value: 100,
+        unit: "lux",
+        measuredAt: null,
+      },
+      batteryLevel: {
+        ref: "spruthub://accessory/200/service/40/characteristic/515",
+        name: "Уровень заряда",
+        type: "BatteryLevel",
+        value: 60,
+        unit: "%",
+        measuredAt: null,
+      },
+      lowBattery: {
+        ref: "spruthub://accessory/200/service/40/characteristic/516",
+        name: "Батарея разряжена",
+        type: "StatusLowBattery",
+        value: 0,
+        unit: null,
+        enum: { key: "BATTERY_LEVEL_NORMAL", name: "Нет" },
+        measuredAt: null,
+      },
+      charging: {
+        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        name: "Идет зарядка",
+        type: "ChargingState",
+        value: 2,
+        unit: null,
+        enum: { key: "NOT_CHARGEABLE", name: "Не заряжаемый" },
+        measuredAt: null,
+      },
+      checkedMismatch: {
+        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        name: "Идет зарядка",
+        type: "ChargingState",
+        value: 1,
+        unit: null,
+        enum: { key: "CHARGING", name: "Да" },
+        measuredAt: null,
+      },
+      unknown: {
+        ref: "spruthub://accessory/200/service/40/characteristic/517",
+        name: "Идет зарядка",
+        type: "FutureChargingState",
+        value: 99,
+        unit: null,
+        enum: null,
+        measuredAt: null,
+      },
+    },
+  );
 });
 
 test("repeated MCP reads return the latest hub values without losing false, zero, or unknown", async (t) => {
