@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,12 @@ const projectRoot = path.resolve(
   "..",
 );
 const diagnosticsByClient = new WeakMap();
+const observedRoomReading = JSON.parse(
+  await readFile(
+    new URL("../research/protocol/2026-09-09-room-reading.json", import.meta.url),
+    "utf8",
+  ),
+);
 
 class BoundedTestClient extends Client {
   callTool(params, resultSchema, options = {}) {
@@ -26,7 +33,10 @@ const hubState = {
   rooms: [
     { id: 10, order: 1, name: " Кухня ", visible: true },
     { id: 20, order: 2, name: "Гостиная", visible: true },
-    { id: 30, order: 3, name: null, visible: true },
+    { id: 30, order: 3, name: "Office", visible: true },
+    { id: 31, order: 4, name: "1 - Офис", visible: true },
+    { id: 40, order: 5, name: "Кладовая", visible: true },
+    { id: 41, order: 6, name: "Кладовая", visible: true },
   ],
   accessories: [
     {
@@ -126,11 +136,18 @@ const hubState = {
       roomId: 20,
       services: [],
     },
+    {
+      id: 410,
+      online: true,
+      name: "Датчик двери",
+      roomId: 41,
+      services: [],
+    },
   ],
 };
 
-async function startHub() {
-  const state = structuredClone(hubState);
+async function startHub(initialState = hubState) {
+  const state = structuredClone(initialState);
   const requests = [];
   const metrics = { connections: 0 };
   const server = new WebSocketServer({ port: 0 });
@@ -169,12 +186,33 @@ async function startHub() {
         return;
       }
 
+      if (request.params?.room?.get) {
+        const room =
+          state.rooms.find(({ id }) => id === request.params.room.get.id) ??
+          null;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: { room: { get: room } },
+          }),
+        );
+        return;
+      }
+
       if (request.params?.accessory?.list) {
+        const roomId = request.params.accessory.list.roomId;
         socket.send(
           JSON.stringify({
             id: request.id,
             result: {
-              accessory: { list: { accessories: state.accessories } },
+              accessory: {
+                list: {
+                  accessories: state.accessories?.filter(
+                    (accessory) =>
+                      roomId === undefined || accessory.roomId === roomId,
+                  ),
+                },
+              },
             },
           }),
         );
@@ -257,24 +295,40 @@ function findReading(room, ref) {
     .find((reading) => reading.ref === ref);
 }
 
-test("MCP room tool returns only the requested room with stable object references", async (t) => {
+test("MCP discovers every room before reading the selected stable reference", async (t) => {
   const hub = await startHub();
   const client = await startMcpClient(t, hub);
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map(({ name }) => name),
-    ["read_room"],
+    ["list_rooms", "read_room"],
   );
-  assert.deepEqual(tools.tools[0].annotations, {
-    readOnlyHint: true,
-    destructiveHint: false,
-    idempotentHint: true,
-    openWorldHint: true,
+  for (const tool of tools.tools) {
+    assert.deepEqual(tool.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
+  }
+
+  const catalog = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
   });
+  assert.equal(catalog.isError, undefined);
+  assert.deepEqual(catalog.structuredContent.rooms, [
+    { ref: "spruthub://room/10", name: " Кухня " },
+    { ref: "spruthub://room/20", name: "Гостиная" },
+    { ref: "spruthub://room/30", name: "Office" },
+    { ref: "spruthub://room/31", name: "1 - Офис" },
+    { ref: "spruthub://room/40", name: "Кладовая" },
+    { ref: "spruthub://room/41", name: "Кладовая" },
+  ]);
 
   const result = await client.callTool({
     name: "read_room",
-    arguments: { room: "  кухня  " },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(
     result.isError,
@@ -287,7 +341,7 @@ test("MCP room tool returns only the requested room with stable object reference
   assert.equal(reading.status, "ok");
   assert.deepEqual(reading.room, {
     ref: "spruthub://room/10",
-    name: "Кухня",
+    name: " Кухня ",
   });
   assert.equal(reading.devices.length, 3);
 
@@ -338,11 +392,70 @@ test("MCP room tool returns only the requested room with stable object reference
       token: "synthetic-test-token",
       serial: "test-hub",
       cid: "sprut-agent-test",
+      params: { room: { get: { id: 10 } } },
+    },
+    {
+      id: 3,
+      token: "synthetic-test-token",
+      serial: "test-hub",
+      cid: "sprut-agent-test",
       params: {
-        accessory: { list: { expand: "services,characteristics" } },
+        accessory: {
+          list: { roomId: 10, expand: "services,characteristics" },
+        },
       },
     },
   ]);
+});
+
+test("observed real-hub projection keeps both temperature service contexts", async (t) => {
+  const [roomExchange, accessoryExchange] = observedRoomReading.exchanges;
+  const hub = await startHub({
+    rooms: roomExchange.result.room.list.rooms,
+    accessories: accessoryExchange.result.accessory.list.accessories,
+  });
+  const client = await startMcpClient(t, hub);
+
+  const catalog = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  const selectedRef = catalog.structuredContent.rooms[0].ref;
+  const result = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: selectedRef },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.devices.length, 1);
+  const services = result.structuredContent.devices[0].services;
+  assert.deepEqual(
+    services.map(({ name, type, readings }) => ({
+      name,
+      type,
+      readingType: readings[0].type,
+      value: readings[0].value,
+      unit: readings[0].unit,
+    })),
+    [
+      {
+        name: "Indoor temperature",
+        type: "Thermostat",
+        readingType: "CurrentTemperature",
+        value: 21.5,
+        unit: "°C",
+      },
+      {
+        name: "Outdoor temperature",
+        type: "TemperatureSensor",
+        readingType: "CurrentTemperature",
+        value: 10,
+        unit: "°C",
+      },
+    ],
+  );
+  assert.notEqual(services[0].readings[0].ref, services[1].readings[0].ref);
+  assert.deepEqual(hub.requests[2].params, accessoryExchange.params);
 });
 
 test("repeated MCP reads return the latest hub values without losing false, zero, or unknown", async (t) => {
@@ -352,7 +465,7 @@ test("repeated MCP reads return the latest hub values without losing false, zero
 
   const firstResult = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(firstResult.isError, undefined);
   const firstTemperature = findReading(
@@ -367,7 +480,7 @@ test("repeated MCP reads return the latest hub values without losing false, zero
 
   const secondResult = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(secondResult.isError, undefined);
   const secondRoom = secondResult.structuredContent;
@@ -407,38 +520,27 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   assert.equal(hub.requests.length, 4);
 });
 
-test("ambiguous room names return stable choices that can be read explicitly", async (t) => {
+test("room catalog keeps duplicate and prefixed names for agent-side selection", async (t) => {
   const hub = await startHub();
-  hub.state.rooms.push(
-    { id: 40, order: 4, name: " Кладовая ", visible: true },
-    { id: 41, order: 5, name: " Кладовая ", visible: true },
-  );
-  hub.state.accessories.push({
-    id: 410,
-    online: true,
-    name: "Датчик двери",
-    roomId: 41,
-    services: [],
-  });
   const client = await startMcpClient(t, hub);
 
-  const ambiguous = await client.callTool({
-    name: "read_room",
-    arguments: { room: "Кладовая" },
+  const catalog = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
   });
-  assert.equal(ambiguous.isError, undefined);
-  assert.deepEqual(ambiguous.structuredContent, {
-    status: "ambiguous",
-    query: "Кладовая",
-    candidates: [
+  assert.deepEqual(
+    catalog.structuredContent.rooms.slice(2),
+    [
+      { ref: "spruthub://room/30", name: "Office" },
+      { ref: "spruthub://room/31", name: "1 - Офис" },
       { ref: "spruthub://room/40", name: "Кладовая" },
       { ref: "spruthub://room/41", name: "Кладовая" },
     ],
-  });
+  );
 
   const selected = await client.callTool({
     name: "read_room",
-    arguments: { room: "spruthub://room/41" },
+    arguments: { room_ref: "spruthub://room/41" },
   });
   assert.equal(selected.isError, undefined);
   assert.deepEqual(selected.structuredContent.room, {
@@ -456,9 +558,15 @@ test("ambiguous room names return stable choices that can be read explicitly", a
   ]) {
     const invalid = await client.callTool({
       name: "read_room",
-      arguments: { room: invalidRef },
+      arguments: { room_ref: invalidRef },
     });
     assert.equal(invalid.isError, true);
+    assert.deepEqual(invalid.structuredContent.error, {
+      code: "invalid_room_ref",
+      message: "Use a room reference returned by list_rooms.",
+      retryable: false,
+      action: "list_rooms",
+    });
   }
 });
 
@@ -502,7 +610,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const empty = await client.callTool({
     name: "read_room",
-    arguments: { room: "Пустая" },
+    arguments: { room_ref: "spruthub://room/50" },
   });
   assert.equal(empty.isError, undefined);
   assert.equal(empty.structuredContent.status, "ok");
@@ -510,15 +618,16 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const missing = await client.callTool({
     name: "read_room",
-    arguments: { room: "Чердак" },
+    arguments: { room_ref: "spruthub://room/999" },
   });
   assert.equal(missing.isError, true);
   assert.deepEqual(missing.structuredContent, {
     status: "error",
     error: {
       code: "room_not_found",
-      message: 'Room "Чердак" was not found.',
+      message: "The selected SprutHub room was not found.",
       retryable: false,
+      action: "list_rooms",
     },
   });
   assert.deepEqual(
@@ -528,7 +637,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
 
   const kitchen = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   const unavailable = kitchen.structuredContent.devices.find(
     ({ ref }) => ref === "spruthub://accessory/103",
@@ -539,7 +648,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   hub.state.accessories = null;
   const incompatible = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(incompatible.isError, true);
   assert.deepEqual(incompatible.structuredContent, {
@@ -560,7 +669,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   });
   const internal = await invalidClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(internal.isError, true);
   assert.deepEqual(internal.structuredContent, {
@@ -583,7 +692,7 @@ test("authorization failures identify credential repair without leaking the reje
 
   const result = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
@@ -602,7 +711,7 @@ test("authorization failures identify credential repair without leaking the reje
   };
   const rejected = await client.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(rejected.isError, true);
   assert.deepEqual(rejected.structuredContent, {
@@ -631,7 +740,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const unavailableStartedAt = performance.now();
   const unavailable = await unavailableClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert(performance.now() - unavailableStartedAt < 1_000);
   assert.deepEqual(unavailable.structuredContent, {
@@ -650,7 +759,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const timeoutStartedAt = performance.now();
   const timeout = await silentClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert(performance.now() - timeoutStartedAt < 1_000);
   assert.deepEqual(timeout.structuredContent, {
@@ -665,7 +774,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   silentHub.state.ignoreRequests = false;
   const afterTimeout = await silentClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(afterTimeout.isError, undefined);
   assert.equal(afterTimeout.structuredContent.status, "ok");
@@ -675,11 +784,11 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const concurrentReads = await Promise.all([
     concurrentClient.callTool({
       name: "read_room",
-      arguments: { room: "Кухня" },
+      arguments: { room_ref: "spruthub://room/10" },
     }),
     concurrentClient.callTool({
       name: "read_room",
-      arguments: { room: "Гостиная" },
+      arguments: { room_ref: "spruthub://room/20" },
     }),
   ]);
   assert.deepEqual(
@@ -692,7 +801,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const recoveringClient = await startMcpClient(t, recoveringHub);
   const first = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(first.isError, undefined);
   const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
@@ -704,7 +813,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   recoveringHub.state.closeOnRequest = true;
   const interrupted = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
@@ -722,7 +831,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
     };
   const recovered = await recoveringClient.callTool({
     name: "read_room",
-    arguments: { room: "Кухня" },
+    arguments: { room_ref: "spruthub://room/10" },
   });
   assert.equal(recovered.isError, undefined);
   assert.equal(
