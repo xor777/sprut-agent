@@ -564,8 +564,26 @@ test("authorization failures identify credential repair without leaking the reje
     },
   });
 
+  hub.state.authorizationError = {
+    code: 500,
+    message: "request failed near synthetic-test-token",
+  };
+  const rejected = await client.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(rejected.isError, true);
+  assert.deepEqual(rejected.structuredContent, {
+    status: "error",
+    error: {
+      code: "request_rejected",
+      message: "SprutHub rejected the request.",
+      retryable: false,
+    },
+  });
+
   const visibleOutput = JSON.stringify({
-    result,
+    results: [result, rejected],
     diagnostics: diagnosticsByClient.get(client),
   });
   assert.equal(visibleOutput.includes("synthetic-test-token"), false);

@@ -9,10 +9,11 @@ const VALUE_FIELDS = [
 ];
 
 export class SprutHubError extends Error {
-  constructor(code, message) {
+  constructor(code, message, action) {
     super(message);
     this.name = "SprutHubError";
     this.code = code;
+    this.action = action;
   }
 }
 
@@ -188,7 +189,16 @@ export class SprutHubClient {
 
     if (message.error) {
       pending.reject(
-        new SprutHubError("request_rejected", "SprutHub rejected the request."),
+        message.error.code === 401
+          ? new SprutHubError(
+              "authentication_failed",
+              "SprutHub rejected the configured credentials.",
+              "check_credentials",
+            )
+          : new SprutHubError(
+              "request_rejected",
+              "SprutHub rejected the request.",
+            ),
       );
       return;
     }

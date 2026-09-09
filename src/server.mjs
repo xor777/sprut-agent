@@ -54,6 +54,7 @@ server.registerTool(
           code: z.string(),
           message: z.string(),
           retryable: z.boolean(),
+          action: z.string().optional(),
         })
         .optional(),
       freshness: z
@@ -115,6 +116,7 @@ function toToolError(error) {
           "connection_failed",
           "timeout",
         ].includes(error.code),
+        ...(error.action ? { action: error.action } : {}),
       },
     };
   }
