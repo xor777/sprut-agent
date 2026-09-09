@@ -149,6 +149,33 @@ function homeState(serial) {
               payload: "nested-block-secret-must-not-leak",
             },
           },
+          siblingForms: [
+            {
+              kind: "object",
+              connection: {
+                ordinary: "object-connection-secret-must-not-leak",
+                unknownChild: {
+                  payload: "object-child-secret-must-not-leak",
+                },
+              },
+            },
+            {
+              kind: "array",
+              connection: [
+                {
+                  ordinary: "array-connection-secret-must-not-leak",
+                  unknownChild: {
+                    payload: "array-child-secret-must-not-leak",
+                  },
+                },
+              ],
+            },
+            {
+              kind: "scalar",
+              connection: "scalar-connection-secret-must-not-leak",
+            },
+          ],
+          neutralConnectionEcho: "synthetic-account-token",
         }),
       },
       {
@@ -246,14 +273,24 @@ function homeState(serial) {
           value: { intValue: 20 },
         },
         {
-          key: "/1/Network/WiFiPassword/key-secret-must-not-leak",
-          name: "Wi-Fi password",
+          key: "WiFiPassword=identifier-secret-must-not-leak",
+          name: "Network setting",
+          type: "GenericString",
+          inputType: "TEXT",
+          read: true,
+          write: true,
+          events: false,
+          value: { stringValue: "structured-secret-must-not-leak" },
+        },
+        {
+          key: "opaque-setting",
+          name: "Opaque setting",
           type: "GenericString",
           inputType: "PASSWORD",
           read: true,
           write: true,
           events: false,
-          value: { stringValue: "structured-secret-must-not-leak" },
+          value: { stringValue: "password-metadata-secret-must-not-leak" },
         },
         {
           key: "Info",
@@ -597,10 +634,10 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
     ),
     false,
   );
-  assert.deepEqual(entity.physical_configuration.options.at(-1), {
-    redacted: true,
-    reason: "sensitive_native_data",
-  });
+  assert.deepEqual(entity.physical_configuration.options.slice(-2), [
+    { redacted: true, reason: "sensitive_native_data" },
+    { redacted: true, reason: "sensitive_native_data" },
+  ]);
   assert.deepEqual(entity.relations.assigned_logics, [
     {
       ref: "spruthub://hub/home%2FA/accessory/32/service/13/logic/MotionDetectedFromCurrentMotionLevel",
@@ -739,6 +776,20 @@ test("native secrets are redacted from structured and text output", async (t) =>
     block.structuredContent.entity.configuration.value.connection,
     { redacted: true, reason: "sensitive_native_data" },
   );
+  assert.deepEqual(
+    block.structuredContent.entity.configuration.value.siblingForms.map(
+      ({ connection }) => connection,
+    ),
+    [
+      { redacted: true, reason: "sensitive_native_data" },
+      { redacted: true, reason: "sensitive_native_data" },
+      { redacted: true, reason: "sensitive_native_data" },
+    ],
+  );
+  assert.equal(
+    block.structuredContent.entity.configuration.value.neutralConnectionEcho,
+    "[REDACTED]",
+  );
   const visible = JSON.stringify({
     characteristic,
     sensitiveCharacteristic,
@@ -758,6 +809,12 @@ test("native secrets are redacted from structured and text output", async (t) =>
     "characteristic-secret-must-not-leak",
     "nested-characteristic-secret-must-not-leak",
     "nested-block-secret-must-not-leak",
+    "object-connection-secret-must-not-leak",
+    "object-child-secret-must-not-leak",
+    "array-connection-secret-must-not-leak",
+    "array-child-secret-must-not-leak",
+    "scalar-connection-secret-must-not-leak",
+    "synthetic-account-token",
     "must-not-leak",
   ]) {
     assert.doesNotMatch(visible, new RegExp(secret));

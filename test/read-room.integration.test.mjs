@@ -143,6 +143,18 @@ const hubState = {
                 value: { doubleValue: 22 },
               },
             },
+            {
+              aId: 101,
+              sId: 1,
+              cId: 5,
+              control: {
+                read: true,
+                key: "WiFiPassword",
+                name: "WiFiPassword",
+                type: "GenericString",
+                value: { stringValue: "legacy-secret-must-not-leak" },
+              },
+            },
           ],
         },
         {
@@ -493,6 +505,11 @@ test("MCP discovers every room before reading the selected stable reference", as
     unit: "°C",
     measuredAt: null,
   });
+  assert.deepEqual(thermometer.services[0].readings[4], {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
+  assert.doesNotMatch(result.content[0].text, /legacy-secret-must-not-leak/);
   assert.deepEqual(thermometer.services[1].readings, []);
   assert.deepEqual(
     reading.devices.find(
