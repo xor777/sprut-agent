@@ -123,13 +123,22 @@ const hubState = {
 async function startHub() {
   const state = structuredClone(hubState);
   const requests = [];
+  const metrics = { connections: 0 };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
 
   server.on("connection", (socket) => {
+    metrics.connections += 1;
     socket.on("message", (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request);
+
+      if (state.closeOnRequest) {
+        state.closeOnRequest = false;
+        socket.close();
+        return;
+      }
+      if (state.ignoreRequests) return;
 
       if (state.authorizationError) {
         socket.send(
@@ -177,9 +186,20 @@ async function startHub() {
   return {
     server,
     state,
+    metrics,
     requests,
     url: `ws://127.0.0.1:${address.port}`,
   };
+}
+
+async function getClosedWebSocketUrl() {
+  const server = new WebSocketServer({ port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const url = `ws://127.0.0.1:${address.port}`;
+  await new Promise((resolve) => server.close(resolve));
+  return url;
 }
 
 async function startMcpClient(t, hub, environment = {}) {
@@ -587,4 +607,90 @@ test("authorization failures identify credential repair without leaking the reje
     diagnostics: diagnosticsByClient.get(client),
   });
   assert.equal(visibleOutput.includes("synthetic-test-token"), false);
+});
+
+test("connection failures stay bounded and recover with a fresh reading in the same MCP session", async (t) => {
+  const unavailableHub = await startHub();
+  const closedUrl = await getClosedWebSocketUrl();
+  const unavailableClient = await startMcpClient(t, unavailableHub, {
+    SPRUTHUB_URL: closedUrl,
+  });
+
+  const unavailableStartedAt = performance.now();
+  const unavailable = await unavailableClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert(performance.now() - unavailableStartedAt < 1_000);
+  assert.deepEqual(unavailable.structuredContent, {
+    status: "error",
+    error: {
+      code: "connection_failed",
+      message: "Could not connect to SprutHub.",
+      retryable: true,
+      action: "retry",
+    },
+  });
+
+  const silentHub = await startHub();
+  silentHub.state.ignoreRequests = true;
+  const silentClient = await startMcpClient(t, silentHub);
+  const timeoutStartedAt = performance.now();
+  const timeout = await silentClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert(performance.now() - timeoutStartedAt < 1_000);
+  assert.deepEqual(timeout.structuredContent, {
+    status: "error",
+    error: {
+      code: "timeout",
+      message: "SprutHub did not respond within the request budget.",
+      retryable: true,
+      action: "retry",
+    },
+  });
+
+  const recoveringHub = await startHub();
+  const recoveringClient = await startMcpClient(t, recoveringHub);
+  const first = await recoveringClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(first.isError, undefined);
+  const temperatureRef = "spruthub://accessory/101/service/1/characteristic/1";
+  assert.equal(
+    findReading(first.structuredContent, temperatureRef).value,
+    23.5,
+  );
+
+  recoveringHub.state.closeOnRequest = true;
+  const interrupted = await recoveringClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.deepEqual(interrupted.structuredContent, {
+    status: "error",
+    error: {
+      code: "connection_closed",
+      message: "The SprutHub connection closed before the response arrived.",
+      retryable: true,
+      action: "retry",
+    },
+  });
+
+  recoveringHub.state.accessories[1].services[0].characteristics[0].control.value =
+    {
+      doubleValue: 26.25,
+    };
+  const recovered = await recoveringClient.callTool({
+    name: "read_room",
+    arguments: { room: "Кухня" },
+  });
+  assert.equal(recovered.isError, undefined);
+  assert.equal(
+    findReading(recovered.structuredContent, temperatureRef).value,
+    26.25,
+  );
+  assert.equal(recoveringHub.metrics.connections, 2);
 });
