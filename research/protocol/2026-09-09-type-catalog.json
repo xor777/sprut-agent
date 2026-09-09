@@ -1,0 +1,185 @@
+{
+  "webClient": {
+    "origin": "https://beta.spruthub.ru",
+    "asset": "app.16735171810a795a9f2d.js"
+  },
+  "hubVersion": "3.0.0b (20131)",
+  "provenance": "Read-only service.types and characteristic.types replies from the selected real hub on 2026-09-09. Only types related to the observed motion multisensor retained. Service required/optional entries reduced to type names; characteristic metadata retained. Catalog UUIDs identify standard types, not household devices. No credentials or instance data.",
+  "catalogs": [
+    {
+      "method": "service.types",
+      "observedAt": "2026-09-09T11:34:59.834Z",
+      "totalTypeCount": 103,
+      "types": [
+        {
+          "system": false,
+          "id": "00000096-0000-1000-8000-0026BB765291",
+          "shortId": "96",
+          "type": "BatteryService",
+          "name": "Батарея",
+          "required": ["BatteryLevel", "ChargingState", "StatusLowBattery"],
+          "optional": ["Name"]
+        },
+        {
+          "system": false,
+          "id": "00000084-0000-1000-8000-0026BB765291",
+          "shortId": "84",
+          "type": "LightSensor",
+          "name": "Датчик освещенности",
+          "required": ["CurrentAmbientLightLevel"],
+          "optional": [
+            "Name",
+            "StatusActive",
+            "StatusFault",
+            "StatusLowBattery",
+            "StatusTampered"
+          ]
+        },
+        {
+          "system": false,
+          "id": "00000085-0000-1000-8000-0026BB765291",
+          "shortId": "85",
+          "type": "MotionSensor",
+          "name": "Датчик движения",
+          "required": ["MotionDetected"],
+          "optional": [
+            "Name",
+            "StatusActive",
+            "StatusFault",
+            "StatusTampered",
+            "StatusLowBattery",
+            "ContributingSensors",
+            "MotionEnabled",
+            "C_CurrentMotionLevel"
+          ]
+        }
+      ]
+    },
+    {
+      "method": "characteristic.types",
+      "observedAt": "2026-09-09T11:34:59.919Z",
+      "totalTypeCount": 308,
+      "types": [
+        {
+          "minValue": 0,
+          "maxValue": 100,
+          "minStep": 1,
+          "read": true,
+          "write": false,
+          "events": true,
+          "hidden": false,
+          "id": "00000068-0000-1000-8000-0026BB765291",
+          "shortId": "68",
+          "type": "BatteryLevel",
+          "name": "Уровень заряда",
+          "format": "Integer",
+          "unit": "%"
+        },
+        {
+          "minValue": 0,
+          "maxValue": 2,
+          "minStep": 1,
+          "read": true,
+          "write": false,
+          "events": true,
+          "hidden": false,
+          "id": "0000008F-0000-1000-8000-0026BB765291",
+          "shortId": "8F",
+          "type": "ChargingState",
+          "name": "Идет зарядка",
+          "format": "Integer",
+          "validValues": [
+            {
+              "value": {
+                "intValue": 0
+              },
+              "key": "NOT_CHARGING",
+              "name": "Нет"
+            },
+            {
+              "value": {
+                "intValue": 1
+              },
+              "key": "CHARGING",
+              "name": "Да"
+            },
+            {
+              "value": {
+                "intValue": 2
+              },
+              "key": "NOT_CHARGEABLE",
+              "name": "Не заряжаемый"
+            }
+          ]
+        },
+        {
+          "minValue": 0,
+          "maxValue": 100000,
+          "minStep": 1,
+          "read": true,
+          "write": false,
+          "events": true,
+          "hidden": false,
+          "id": "0000006B-0000-1000-8000-0026BB765291",
+          "shortId": "6B",
+          "type": "CurrentAmbientLightLevel",
+          "name": "Освещенность",
+          "format": "Double",
+          "unit": "lux"
+        },
+        {
+          "read": false,
+          "write": true,
+          "events": false,
+          "hidden": false,
+          "id": "00000014-0000-1000-8000-0026BB765291",
+          "shortId": "14",
+          "type": "Identify",
+          "name": "Идентифицировать",
+          "format": "Boolean"
+        },
+        {
+          "read": true,
+          "write": false,
+          "events": true,
+          "hidden": false,
+          "id": "00000022-0000-1000-8000-0026BB765291",
+          "shortId": "22",
+          "type": "MotionDetected",
+          "name": "Обнаружено движение",
+          "format": "Boolean"
+        },
+        {
+          "minValue": 0,
+          "maxValue": 1,
+          "minStep": 1,
+          "read": true,
+          "write": false,
+          "events": true,
+          "hidden": false,
+          "id": "00000079-0000-1000-8000-0026BB765291",
+          "shortId": "79",
+          "type": "StatusLowBattery",
+          "name": "Батарея разряжена",
+          "format": "Integer",
+          "validValues": [
+            {
+              "value": {
+                "intValue": 0
+              },
+              "key": "BATTERY_LEVEL_NORMAL",
+              "name": "Нет"
+            },
+            {
+              "value": {
+                "intValue": 1
+              },
+              "key": "BATTERY_LEVEL_LOW",
+              "name": "Да"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

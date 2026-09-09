@@ -1,0 +1,481 @@
+{
+  "observedAt": "2026-09-09T11:20:45.234Z",
+  "webClient": {
+    "origin": "https://beta.spruthub.ru",
+    "asset": "app.16735171810a795a9f2d.js"
+  },
+  "hubVersion": "3.0.0b (20131)",
+  "sourceHead": "85850c944b41043b0e5db3d140efbbcef9e8d67c",
+  "transport": {
+    "url": "wss://beta.spruthub.ru/spruthub",
+    "subprotocol": "json-rpc"
+  },
+  "provenance": "Reduced projection of read-only room.get and accessory.list responses from one real Aqara RTCGQ14LM. Room/device names, serial number, all object ids, battery percentage and illuminance have been replaced. All 17 characteristics, value types, native read/write flags, units and validValues of the selected device are retained. Identify is explicitly write-only. Separate MCP and native UI observations verified changing illuminance; those readings are not reproduced as raw frames here. No credentials or unrelated devices are included.",
+  "exchanges": [
+    {
+      "params": {
+        "room": {
+          "get": {
+            "id": 20
+          }
+        }
+      },
+      "result": {
+        "room": {
+          "get": {
+            "id": 20,
+            "name": "Room B"
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "accessory": {
+          "list": {
+            "roomId": 20,
+            "expand": "services,characteristics"
+          }
+        }
+      },
+      "result": {
+        "accessory": {
+          "list": {
+            "accessories": [
+              {
+                "id": 200,
+                "roomId": 20,
+                "name": "Motion device B",
+                "online": true,
+                "services": [
+                  {
+                    "aId": 200,
+                    "sId": 10,
+                    "name": "Информация об аксессуаре",
+                    "type": "AccessoryInformation",
+                    "characteristics": [
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 501,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 1,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Room B"
+                          },
+                          "name": "Комната",
+                          "type": "C_Room"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 502,
+                        "control": {
+                          "order": 6,
+                          "read": false,
+                          "write": true,
+                          "events": false,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "boolValue": false
+                          },
+                          "name": "Идентифицировать",
+                          "type": "Identify"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 503,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 2,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Aqara"
+                          },
+                          "name": "Производитель",
+                          "type": "Manufacturer"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 504,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 3,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "RTCGQ14LM"
+                          },
+                          "name": "Модель",
+                          "type": "Model"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 505,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 0,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": false,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Motion device B"
+                          },
+                          "name": "Имя",
+                          "type": "Name"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 506,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 4,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "example-motion-device"
+                          },
+                          "name": "Серийный номер",
+                          "type": "SerialNumber"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 507,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 5,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "11"
+                          },
+                          "name": "Версия прошивки",
+                          "type": "FirmwareRevision"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 508,
+                        "control": {
+                          "order": 14,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "boolValue": true
+                          },
+                          "name": "В сети",
+                          "type": "C_Online"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 10,
+                        "cId": 509,
+                        "control": {
+                          "order": 13,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "intValue": 3987
+                          },
+                          "name": "Посмотреть в каталоге",
+                          "type": "C_CatalogId"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "aId": 200,
+                    "sId": 20,
+                    "name": "Motion sensor",
+                    "type": "MotionSensor",
+                    "characteristics": [
+                      {
+                        "aId": 200,
+                        "sId": 20,
+                        "cId": 510,
+                        "control": {
+                          "order": 0,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "boolValue": true
+                          },
+                          "name": "Обнаружено движение",
+                          "type": "MotionDetected"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 20,
+                        "cId": 511,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 1,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": false,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Motion sensor"
+                          },
+                          "name": "Имя",
+                          "type": "Name"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "aId": 200,
+                    "sId": 30,
+                    "name": "Датчик освещенности",
+                    "type": "LightSensor",
+                    "characteristics": [
+                      {
+                        "aId": 200,
+                        "sId": 30,
+                        "cId": 512,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 1,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": false,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Датчик освещенности"
+                          },
+                          "name": "Имя",
+                          "type": "Name"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 30,
+                        "cId": 513,
+                        "control": {
+                          "minValue": 0,
+                          "maxValue": 100000,
+                          "minStep": 1,
+                          "order": 0,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "doubleValue": 100
+                          },
+                          "name": "Освещенность",
+                          "type": "CurrentAmbientLightLevel",
+                          "unit": "lux"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "aId": 200,
+                    "sId": 40,
+                    "name": "Батарея",
+                    "type": "BatteryService",
+                    "characteristics": [
+                      {
+                        "aId": 200,
+                        "sId": 40,
+                        "cId": 514,
+                        "control": {
+                          "maxLen": 64,
+                          "order": 3,
+                          "read": true,
+                          "write": false,
+                          "events": false,
+                          "hidden": false,
+                          "visible": false,
+                          "disabled": false,
+                          "value": {
+                            "stringValue": "Батарея"
+                          },
+                          "name": "Имя",
+                          "type": "Name"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 40,
+                        "cId": 515,
+                        "control": {
+                          "minValue": 0,
+                          "maxValue": 100,
+                          "minStep": 1,
+                          "order": 0,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "intValue": 60
+                          },
+                          "name": "Уровень заряда",
+                          "type": "BatteryLevel",
+                          "unit": "%"
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 40,
+                        "cId": 516,
+                        "control": {
+                          "minValue": 0,
+                          "maxValue": 1,
+                          "minStep": 1,
+                          "order": 2,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": true,
+                          "disabled": false,
+                          "value": {
+                            "intValue": 0
+                          },
+                          "name": "Батарея разряжена",
+                          "type": "StatusLowBattery",
+                          "validValues": [
+                            {
+                              "checked": true,
+                              "value": {
+                                "intValue": 0
+                              },
+                              "key": "BATTERY_LEVEL_NORMAL",
+                              "name": "Нет"
+                            },
+                            {
+                              "checked": true,
+                              "value": {
+                                "intValue": 1
+                              },
+                              "key": "BATTERY_LEVEL_LOW",
+                              "name": "Да"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "aId": 200,
+                        "sId": 40,
+                        "cId": 517,
+                        "control": {
+                          "minValue": 0,
+                          "maxValue": 2,
+                          "minStep": 1,
+                          "order": 1,
+                          "read": true,
+                          "write": false,
+                          "events": true,
+                          "hidden": false,
+                          "visible": false,
+                          "disabled": false,
+                          "value": {
+                            "intValue": 2
+                          },
+                          "name": "Идет зарядка",
+                          "type": "ChargingState",
+                          "validValues": [
+                            {
+                              "checked": false,
+                              "value": {
+                                "intValue": 0
+                              },
+                              "key": "NOT_CHARGING",
+                              "name": "Нет"
+                            },
+                            {
+                              "checked": false,
+                              "value": {
+                                "intValue": 1
+                              },
+                              "key": "CHARGING",
+                              "name": "Да"
+                            },
+                            {
+                              "checked": true,
+                              "value": {
+                                "intValue": 2
+                              },
+                              "key": "NOT_CHARGEABLE",
+                              "name": "Не заряжаемый"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
