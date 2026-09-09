@@ -1228,6 +1228,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   assert(performance.now() - unavailableStartedAt < 1_000);
   assert.deepEqual(unavailable.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "connection_failed",
       message: "Could not connect to SprutHub.",
@@ -1302,6 +1303,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   });
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "connection_closed",
       message: "The SprutHub connection closed before the response arrived.",
@@ -1392,6 +1394,7 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   });
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
+    capability_status: "unknown",
     error: {
       code: "connection_closed",
       message: "The SprutHub connection closed before the response arrived.",
