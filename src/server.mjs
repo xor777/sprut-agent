@@ -11,6 +11,7 @@ const readingSchema = z.object({
   name: z.string(),
   type: z.string(),
   value: z.union([z.boolean(), z.number(), z.string(), z.null()]),
+  enum: z.object({ key: z.string(), name: z.string() }).nullable().optional(),
   unit: z.string().nullable(),
   measuredAt: z.string().nullable(),
 });
@@ -72,7 +73,7 @@ server.registerTool(
   {
     title: "Read a SprutHub room",
     description:
-      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
+      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Readings include only controls explicitly marked readable; enum gives the hub's native meaning of the raw value, while enum null means no known match. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
     inputSchema: {
       room_ref: z
         .string()

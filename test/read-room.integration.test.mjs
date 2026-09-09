@@ -69,6 +69,7 @@ const hubState = {
               sId: 1,
               cId: 1,
               control: {
+                read: true,
                 key: "On",
                 name: "Включена",
                 type: "On",
@@ -97,6 +98,7 @@ const hubState = {
               sId: 1,
               cId: 1,
               control: {
+                read: true,
                 key: "current-temperature",
                 name: "Температура",
                 type: "CurrentTemperature",
@@ -109,6 +111,7 @@ const hubState = {
               sId: 1,
               cId: 2,
               control: {
+                read: true,
                 key: "current-humidity",
                 name: "Влажность",
                 type: "CurrentHumidity",
@@ -121,6 +124,7 @@ const hubState = {
               sId: 1,
               cId: 3,
               control: {
+                read: true,
                 key: "air-quality",
                 name: "Качество воздуха",
                 type: "AirQuality",
@@ -131,6 +135,7 @@ const hubState = {
               sId: 1,
               cId: 4,
               control: {
+                read: true,
                 key: "target-temperature",
                 name: "Уставка температуры",
                 type: "TargetTemperature",
@@ -586,10 +591,16 @@ test("observed multisensor projection keeps readable native enum meaning", async
       .flatMap(({ readings }) => readings)
       .find((reading) => reading.type === type);
 
-  const initial = await read();
   const chargingControl = hub.state.accessories[0].services
     .flatMap(({ characteristics = [] }) => characteristics)
     .find(({ control }) => control.type === "ChargingState").control;
+  chargingControl.validValues.unshift({
+    checked: true,
+    value: { doubleValue: 2 },
+    key: "WRONG_NUMERIC_TYPE",
+    name: "Wrong numeric type",
+  });
+  const initial = await read();
   chargingControl.value = { intValue: 1 };
   const checkedMismatch = await read();
   chargingControl.type = "FutureChargingState";
@@ -817,6 +828,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
             sId: 1,
             cId: 1,
             control: {
+              read: true,
               key: "contact-state",
               name: "Открыт",
               type: "ContactState",

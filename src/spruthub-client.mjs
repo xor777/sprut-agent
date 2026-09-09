@@ -333,9 +333,25 @@ function validateAccessory(accessory) {
         !control ||
         typeof control.name !== "string" ||
         (typeof control.type !== "string" && typeof control.key !== "string") ||
-        (control.unit != null && typeof control.unit !== "string")
+        (control.unit != null && typeof control.unit !== "string") ||
+        (control.read === true &&
+          control.validValues !== undefined &&
+          !Array.isArray(control.validValues))
       ) {
         throw incompleteAccessoryError();
+      }
+
+      for (const validValue of control.read === true
+        ? (control.validValues ?? [])
+        : []) {
+        if (
+          !validValue ||
+          typeof validValue.key !== "string" ||
+          typeof validValue.name !== "string" ||
+          !extractTypedValue(validValue.value).found
+        ) {
+          throw incompleteAccessoryError();
+        }
       }
     }
   }
@@ -362,25 +378,46 @@ function normalizeAccessory(accessory) {
       ref: `spruthub://accessory/${accessory.id}/service/${service.sId}`,
       name: service.name,
       type: service.type,
-      readings: (service.characteristics ?? []).map((characteristic) => {
-        const control = characteristic.control ?? {};
-        return {
-          ref: `spruthub://accessory/${accessory.id}/service/${service.sId}/characteristic/${characteristic.cId}`,
-          name: control.name,
-          type: control.type ?? control.key,
-          value: extractValue(control.value),
-          unit: control.unit ?? null,
-          measuredAt: null,
-        };
-      }),
+      readings: (service.characteristics ?? [])
+        .filter(({ control }) => control.read === true)
+        .map((characteristic) => {
+          const control = characteristic.control;
+          const value = extractTypedValue(control.value);
+          return {
+            ref: `spruthub://accessory/${accessory.id}/service/${service.sId}/characteristic/${characteristic.cId}`,
+            name: control.name,
+            type: control.type ?? control.key,
+            value: value.value,
+            ...(control.validValues
+              ? { enum: matchEnumValue(control.validValues, value) }
+              : {}),
+            unit: control.unit ?? null,
+            measuredAt: null,
+          };
+        }),
     })),
   };
 }
 
-function extractValue(value) {
-  if (!value) return null;
+function extractTypedValue(value) {
+  if (!value) return { found: false, field: null, value: null };
   for (const field of VALUE_FIELDS) {
-    if (Object.hasOwn(value, field)) return value[field];
+    if (Object.hasOwn(value, field)) {
+      return { found: true, field, value: value[field] };
+    }
   }
-  return null;
+  return { found: false, field: null, value: null };
+}
+
+function matchEnumValue(validValues, currentValue) {
+  if (!currentValue.found) return null;
+  const match = validValues.find((validValue) => {
+    const candidate = extractTypedValue(validValue.value);
+    return (
+      candidate.found &&
+      candidate.field === currentValue.field &&
+      Object.is(candidate.value, currentValue.value)
+    );
+  });
+  return match ? { key: match.key, name: match.name } : null;
 }
