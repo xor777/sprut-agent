@@ -231,7 +231,8 @@ function respond(state, params) {
     const index = state.scenarios.findIndex(
       ({ index }) => index === params.scenario.delete.index,
     );
-    if (index >= 0) state.scenarios.splice(index, 1);
+    if (index >= 0 && !state.keepScenarioOnDelete)
+      state.scenarios.splice(index, 1);
     return { scenario: { delete: {} } };
   }
   if (params.logic?.list) {
@@ -1016,5 +1017,40 @@ test("a failed readback after a successful delete stays recoverable", async (t) 
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,
+  );
+});
+
+test("a successful delete response cannot claim rollback while the scenario remains", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.keepScenarioOnDelete = true;
+
+  const uncertain = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === applied.structuredContent.scenario_index,
+    ),
+    true,
+  );
+
+  hub.state.keepScenarioOnDelete = false;
+  const retried = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(retried.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    2,
   );
 });
