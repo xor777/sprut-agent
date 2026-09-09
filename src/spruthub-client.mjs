@@ -587,6 +587,7 @@ export class SprutHubClient {
       characteristic,
       observedAt,
     );
+    if (isRedactedNode(entity)) return entity;
     if (requested.has("options")) {
       const optionsResponse = await this.#request(
         {
@@ -1578,10 +1579,18 @@ export function sanitizeNativeData(value, key = "") {
 }
 
 export function sanitizeAgentOutput(value, sensitiveValues = []) {
+  if (isRedactedNode(value)) return redactedNode();
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeAgentOutput(item, sensitiveValues));
   }
   if (value && typeof value === "object") {
+    if (
+      Object.keys(value).some((key) =>
+        sensitiveValues.some((secret) => key.includes(secret)),
+      )
+    ) {
+      return redactedNode();
+    }
     return Object.fromEntries(
       Object.entries(value).map(([key, childValue]) => [
         key,
@@ -1594,6 +1603,16 @@ export function sanitizeAgentOutput(value, sensitiveValues = []) {
     return "[REDACTED]";
   }
   return redactSensitiveText(value);
+}
+
+function isRedactedNode(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.redacted === true &&
+    value.reason === "sensitive_native_data"
+  );
 }
 
 function isSensitiveKey(key) {
