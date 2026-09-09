@@ -753,6 +753,7 @@ test("an unknown create outcome stays uncertain and a repeated apply does not re
 
   assert.equal(first.structuredContent.status, "uncertain");
   assert.equal(first.structuredContent.action, "inspect_hub_before_retry");
+  assert.equal("created" in first.structuredContent, false);
   assert.equal(second.structuredContent.status, "uncertain");
   assert.equal(rollback.structuredContent.status, "uncertain");
   assert.equal(rollback.structuredContent.action, "inspect_hub_before_retry");
@@ -890,6 +891,114 @@ test("status reflects a foreign equivalent after its runtime conflict is fixed",
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.create || scenario?.delete)
       .length,
+    1,
+  );
+});
+
+test("an equivalent no-op stays observable when its final journal save fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const owner = await preview(client);
+  const ownerApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: owner.structuredContent.change_ref },
+  });
+  const foreign = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: { ...previewArguments, name: "Эквивалентный запрос" },
+  });
+  let restoreStateDirectory;
+  hub.state.afterScenarioList = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const result = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "already_present");
+  assert.equal(
+    result.structuredContent.scenario_index,
+    ownerApply.structuredContent.scenario_index,
+  );
+  assert.equal(result.structuredContent.created, false);
+  assert.equal(result.structuredContent.owned, false);
+  assert.deepEqual(result.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_automation_change",
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  await restoreStateDirectory();
+
+  const current = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+  assert.equal(current.structuredContent.status, "already_present");
+  assert.equal(current.structuredContent.owned, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("a runtime conflict stays observable when its final journal save fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const owner = await preview(client);
+  const ownerApply = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: owner.structuredContent.change_ref },
+  });
+  const existing = hub.state.scenarios.find(
+    ({ index }) => index === ownerApply.structuredContent.scenario_index,
+  );
+  existing.active = false;
+  const foreign = await client.callTool({
+    name: "preview_boolean_automation",
+    arguments: { ...previewArguments, name: "Конфликтующий запрос" },
+  });
+  let restoreStateDirectory;
+  hub.state.afterScenarioList = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const result = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.status, "conflict");
+  assert.equal(
+    result.structuredContent.reason,
+    "equivalent_rule_runtime_mismatch",
+  );
+  assert.equal(result.structuredContent.scenario_index, existing.index);
+  assert.equal(result.structuredContent.owned, false);
+  assert.deepEqual(result.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_automation_change",
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  await restoreStateDirectory();
+
+  const current = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: foreign.structuredContent.change_ref },
+  });
+  assert.equal(current.structuredContent.status, "conflict");
+  assert.equal(current.structuredContent.scenario_index, existing.index);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
     1,
   );
 });
