@@ -639,6 +639,74 @@ test("change ownership and status survive an MCP process restart", async (t) => 
   assert.equal(result.structuredContent.configuration_matches, true);
 });
 
+test("SprutHub runtime target state does not block status or rollback", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  const executedData = JSON.parse(scenario.data);
+  executedData.targets[0].state = true;
+  scenario.data = JSON.stringify(executedData);
+
+  const status = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(status.isError, undefined);
+  assert.equal(status.structuredContent.status, "applied");
+  assert.equal(status.structuredContent.configuration_matches, true);
+  assert.equal(rollback.isError, undefined);
+  assert.equal(rollback.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenario.index),
+    false,
+  );
+});
+
+test("rollback still protects unknown scenario configuration", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  const manuallyEditedData = JSON.parse(scenario.data);
+  manuallyEditedData.targets[0].manual_extension = true;
+  scenario.data = JSON.stringify(manuallyEditedData);
+
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(rollback.isError, undefined);
+  assert.equal(rollback.structuredContent.status, "conflict");
+  assert.equal(rollback.structuredContent.action, "review_manual_changes");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenario.index),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete),
+    false,
+  );
+});
+
 test("rollback deletes only an unchanged owned scenario and preserves manual edits", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
