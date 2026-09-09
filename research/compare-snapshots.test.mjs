@@ -106,8 +106,7 @@ test("wire contract removals and field changes block promotion", () => {
   assert.ok(
     report.breaking.some(
       ({ kind, target }) =>
-        kind === "field-wire-contract-changed" &&
-        target === "RoomMessage.id",
+        kind === "field-wire-contract-changed" && target === "RoomMessage.id",
     ),
   );
 });
@@ -180,9 +179,7 @@ test("new enum values require review and reused numbers are breaking", () => {
     }),
   );
   assert.equal(blocked.verdict, "blocked");
-  assert.ok(
-    blocked.breaking.some(({ kind }) => kind === "enum-number-reused"),
-  );
+  assert.ok(blocked.breaking.some(({ kind }) => kind === "enum-number-reused"));
 });
 
 test("client code changes stay visible when schemas do not change", () => {

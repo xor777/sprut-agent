@@ -170,7 +170,8 @@ async function main() {
   let writeQueue = Promise.resolve();
   const writeRecord = (record) => {
     writeQueue = writeQueue.then(() =>
-      handle.write(`${JSON.stringify(record)}\n`, null, "utf8"));
+      handle.write(`${JSON.stringify(record)}\n`, null, "utf8"),
+    );
     return writeQueue;
   };
 
@@ -178,11 +179,10 @@ async function main() {
   const sockets = new Map();
   session.onEvent = (event) => {
     if (event.method === "Network.webSocketCreated") {
-      if (!matchesSocket(
-        event.params.url,
-        options.targetUrl,
-        options.socketPath,
-      )) return;
+      if (
+        !matchesSocket(event.params.url, options.targetUrl, options.socketPath)
+      )
+        return;
 
       sockets.set(event.params.requestId, {
         url: event.params.url,
@@ -217,8 +217,10 @@ async function main() {
       return;
     }
 
-    if (event.method === "Network.webSocketFrameError" ||
-      event.method === "Network.webSocketClosed") {
+    if (
+      event.method === "Network.webSocketFrameError" ||
+      event.method === "Network.webSocketClosed"
+    ) {
       const socket = sockets.get(event.params.requestId);
       if (!socket) return;
       void writeRecord({
@@ -245,12 +247,17 @@ async function main() {
   });
 
   process.stdout.write(
-    `${JSON.stringify({
-      status: "recording",
-      output,
-      target: target.url,
-      instruction: "Reload Sprut.hub, reproduce one read-only experiment, then press Ctrl-C.",
-    }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        status: "recording",
+        output,
+        target: target.url,
+        instruction:
+          "Reload Sprut.hub, reproduce one read-only experiment, then press Ctrl-C.",
+      },
+      null,
+      2,
+    )}\n`,
   );
 
   const stop = async () => {

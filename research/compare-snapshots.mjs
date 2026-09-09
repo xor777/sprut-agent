@@ -1,21 +1,11 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  readdir,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CATEGORY_ORDER = [
-  "breaking",
-  "review",
-  "additive",
-  "behavioralUnknown",
-];
+const CATEGORY_ORDER = ["breaking", "review", "additive", "behavioralUnknown"];
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -340,8 +330,7 @@ function versionOf(snapshot) {
     version: snapshot.manifest.webClient?.version ?? null,
     build: snapshot.manifest.webClient?.build ?? null,
     protobufSha256: snapshot.manifest.protobuf?.sha256 ?? null,
-    scenarioSchemasSha256:
-      snapshot.manifest.scenarioSchemas?.sha256 ?? null,
+    scenarioSchemasSha256: snapshot.manifest.scenarioSchemas?.sha256 ?? null,
   };
 }
 
@@ -398,10 +387,7 @@ export function compareContracts(fromSnapshot, toSnapshot) {
 
   if (result.breaking.length > 0) {
     result.verdict = "blocked";
-  } else if (
-    result.review.length > 0 ||
-    result.behavioralUnknown.length > 0
-  ) {
+  } else if (result.review.length > 0 || result.behavioralUnknown.length > 0) {
     result.verdict = "review";
   } else if (result.additive.length > 0) {
     result.verdict = "compatible-additive";
@@ -421,7 +407,9 @@ async function hashDirectory(directory, suffix) {
     if (!entry.isFile() || !entry.name.endsWith(suffix)) {
       continue;
     }
-    result[entry.name] = sha256(await readFile(path.join(directory, entry.name)));
+    result[entry.name] = sha256(
+      await readFile(path.join(directory, entry.name)),
+    );
   }
   return result;
 }

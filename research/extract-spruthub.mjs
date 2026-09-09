@@ -50,7 +50,7 @@ export function decodeJsString(raw) {
     }
 
     const simpleEscapes = {
-      "0": "\0",
+      0: "\0",
       b: "\b",
       f: "\f",
       n: "\n",
@@ -195,8 +195,10 @@ function jsLiteralToJson(literal) {
       continue;
     }
 
-    if (character === "!" && (literal[index + 1] === "0" ||
-      literal[index + 1] === "1")) {
+    if (
+      character === "!" &&
+      (literal[index + 1] === "0" || literal[index + 1] === "1")
+    ) {
       result += literal[index + 1] === "0" ? "true" : "false";
       index += 1;
       continue;
@@ -229,8 +231,7 @@ function jsLiteralToJson(literal) {
 
 export function extractJsonSchemas(bundleSource) {
   const schemas = [];
-  const pattern =
-    /\{\$id:"(http:\/\/makesimple\.org\/schema\/[^"]+)"/g;
+  const pattern = /\{\$id:"(http:\/\/makesimple\.org\/schema\/[^"]+)"/g;
 
   for (const match of bundleSource.matchAll(pattern)) {
     const literal = extractJsObjectLiteral(bundleSource, match.index);
@@ -254,7 +255,8 @@ export function extractJsonSchemas(bundleSource) {
   }
 
   return [...unique.values()].sort((left, right) =>
-    left.id.localeCompare(right.id));
+    left.id.localeCompare(right.id),
+  );
 }
 
 function findNamedBlock(source, keyword, name) {
@@ -273,9 +275,11 @@ function parseOneofFields(messageBlock) {
   const openingBraceIndex = messageBlock.indexOf("{", match.index);
   const oneofBlock = extractBalancedBlock(messageBlock, openingBraceIndex);
 
-  return [...oneofBlock.matchAll(
-    /^\s*([A-Za-z_][A-Za-z0-9_.]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)(?:\s*\[[^\]]+\])?\s*;/gm,
-  )].map((field) => ({
+  return [
+    ...oneofBlock.matchAll(
+      /^\s*([A-Za-z_][A-Za-z0-9_.]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)(?:\s*\[[^\]]+\])?\s*;/gm,
+    ),
+  ].map((field) => ({
     type: field[1],
     name: field[2],
     number: Number(field[3]),
@@ -298,9 +302,9 @@ function inferProtoFilename(body, moduleId) {
     return `${outerClass.replace(/Proto$/, "")}.proto`;
   }
 
-  const requestMessages = [...body.matchAll(
-    /\bmessage\s+([A-Z][A-Za-z0-9_]*)Request\s*\{/g,
-  )];
+  const requestMessages = [
+    ...body.matchAll(/\bmessage\s+([A-Z][A-Za-z0-9_]*)Request\s*\{/g),
+  ];
 
   for (const requestMessage of requestMessages) {
     const domain = requestMessage[1];
@@ -335,7 +339,8 @@ export function extractProtoModules(bundleSource) {
   }
 
   return modules.sort((left, right) =>
-    left.filename.localeCompare(right.filename));
+    left.filename.localeCompare(right.filename),
+  );
 }
 
 function parseDomainNames(protoSource) {
@@ -463,7 +468,8 @@ export function parseDomainContracts(protoModules) {
   }
 
   return operations.sort((left, right) =>
-    left.endpoint.localeCompare(right.endpoint));
+    left.endpoint.localeCompare(right.endpoint),
+  );
 }
 
 function findOneofRanges(messageBlock) {
@@ -491,9 +497,10 @@ function parseMessageFields(messageBlock) {
 
   return [...messageBlock.matchAll(fieldPattern)].map((field) => {
     const options = field[5]?.trim() ?? null;
-    const oneof = oneofRanges.find(
-      (range) => field.index >= range.start && field.index <= range.end,
-    )?.name ?? null;
+    const oneof =
+      oneofRanges.find(
+        (range) => field.index >= range.start && field.index <= range.end,
+      )?.name ?? null;
 
     return {
       name: field[3],
@@ -549,9 +556,11 @@ export function parseProtoTypes(protoModules) {
   }
 
   messages.sort((left, right) =>
-    `${left.proto}:${left.name}`.localeCompare(`${right.proto}:${right.name}`));
+    `${left.proto}:${left.name}`.localeCompare(`${right.proto}:${right.name}`),
+  );
   enums.sort((left, right) =>
-    `${left.proto}:${left.name}`.localeCompare(`${right.proto}:${right.name}`));
+    `${left.proto}:${left.name}`.localeCompare(`${right.proto}:${right.name}`),
+  );
 
   return { messages, enums };
 }
@@ -572,8 +581,9 @@ function extractAssetUrls(html, baseUrl) {
 
 function extractBuildInfo(bundleSources) {
   for (const source of bundleSources) {
-    const match =
-      /\{version:"([^"]+)",build:"([^"]+)",full:"([^"]+)"\}/.exec(source);
+    const match = /\{version:"([^"]+)",build:"([^"]+)",full:"([^"]+)"\}/.exec(
+      source,
+    );
     if (match) {
       return {
         version: match[1],
@@ -660,11 +670,7 @@ async function inspectSnapshot(directory) {
   }
 }
 
-export async function selectSnapshotDirectory(
-  outputDir,
-  version,
-  manifest,
-) {
+export async function selectSnapshotDirectory(outputDir, version, manifest) {
   const root = path.resolve(outputDir);
   const safeVersion = version.replace(/[^a-z0-9._-]/giu, "_");
   const fingerprint = snapshotFingerprint(manifest);
@@ -792,12 +798,13 @@ async function writeSnapshot({
       "utf8",
     );
     const hashLines = [
-      ...assets.map((asset) =>
-        `${sha256(asset.source)}  asset:${asset.url}`),
-      ...protoModules.map((proto) =>
-        `${proto.sha256}  proto:${proto.filename}`),
-      ...scenarioSchemas.map((schema) =>
-        `${schema.sha256}  scenario-schema:${schema.filename}`),
+      ...assets.map((asset) => `${sha256(asset.source)}  asset:${asset.url}`),
+      ...protoModules.map(
+        (proto) => `${proto.sha256}  proto:${proto.filename}`,
+      ),
+      ...scenarioSchemas.map(
+        (schema) => `${schema.sha256}  scenario-schema:${schema.filename}`,
+      ),
     ].sort();
     await writeFile(
       path.join(temporaryDir, "hashes.txt"),
@@ -818,7 +825,8 @@ export async function createSnapshot(options) {
   const html = await fetchText(options.baseUrl);
   const assetUrls = extractAssetUrls(html, options.baseUrl);
   const scriptUrls = assetUrls.filter((url) =>
-    new URL(url).pathname.endsWith(".js"));
+    new URL(url).pathname.endsWith(".js"),
+  );
 
   if (scriptUrls.length === 0) {
     throw new Error("No JavaScript assets found in Sprut.hub HTML");
@@ -847,7 +855,8 @@ export async function createSnapshot(options) {
   }
 
   const protoModules = [...protoByFilename.values()].sort((left, right) =>
-    left.filename.localeCompare(right.filename));
+    left.filename.localeCompare(right.filename),
+  );
   if (protoModules.length === 0) {
     throw new Error("No embedded protobuf schemas found");
   }
@@ -864,8 +873,8 @@ export async function createSnapshot(options) {
       scenarioSchemaById.set(schema.id, schema);
     }
   }
-  const scenarioSchemas = [...scenarioSchemaById.values()].sort(
-    (left, right) => left.id.localeCompare(right.id),
+  const scenarioSchemas = [...scenarioSchemaById.values()].sort((left, right) =>
+    left.id.localeCompare(right.id),
   );
 
   return writeSnapshot({
@@ -883,13 +892,17 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   const result = await createSnapshot(options);
   process.stdout.write(
-    `${JSON.stringify({
-      snapshot: result.snapshotDir,
-      reused: result.reused,
-      webClient: result.manifest.webClient,
-      protobuf: result.manifest.protobuf,
-      scenarioSchemas: result.manifest.scenarioSchemas,
-    }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        snapshot: result.snapshotDir,
+        reused: result.reused,
+        webClient: result.manifest.webClient,
+        protobuf: result.manifest.protobuf,
+        scenarioSchemas: result.manifest.scenarioSchemas,
+      },
+      null,
+      2,
+    )}\n`,
   );
 }
 

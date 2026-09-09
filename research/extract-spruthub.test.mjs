@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -49,9 +49,7 @@ test("parseDomainContracts maps request and response oneof fields", () => {
     }
   `;
 
-  const operations = parseDomainContracts([
-    { filename: "Room.proto", body },
-  ]);
+  const operations = parseDomainContracts([{ filename: "Room.proto", body }]);
 
   assert.deepEqual(
     operations.map((operation) => ({
@@ -76,10 +74,7 @@ test("parseDomainContracts maps request and response oneof fields", () => {
 
 test("risk classification is conservative for writes", () => {
   assert.equal(classifyRisk("room", "list"), "R0-read");
-  assert.equal(
-    classifyRisk("characteristic", "update"),
-    "R2-reversible",
-  );
+  assert.equal(classifyRisk("characteristic", "update"), "R2-reversible");
   assert.equal(classifyRisk("scenario", "run"), "R4-impact");
   assert.equal(classifyRisk("room", "update"), "R3-configuration");
 });
@@ -221,11 +216,7 @@ test("snapshot selection preserves an existing version across hotfix builds", as
       webClient: { version: "1.2.3", build: "build-b" },
       assets: [{ url: "https://example.test/app.js", sha256: "asset-b" }],
     };
-    const hotfix = await selectSnapshotDirectory(
-      root,
-      "1.2.3",
-      hotfixManifest,
-    );
+    const hotfix = await selectSnapshotDirectory(root, "1.2.3", hotfixManifest);
     assert.equal(
       hotfix.directory,
       path.join(

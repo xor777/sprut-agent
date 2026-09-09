@@ -1,14 +1,27 @@
 {
-  "name": "sprut-api-research",
+  "name": "sprut-agent",
+  "description": "Agent-first tools for configuring and debugging a SprutHub home",
   "private": true,
   "type": "module",
   "scripts": {
+    "prepare": "husky",
+    "check": "biome check . && npm test",
+    "format": "biome format --write .",
     "research:diff": "node research/compare-snapshots.mjs",
     "research:record": "node research/record-websocket.mjs",
     "research:snapshot": "node research/extract-spruthub.mjs",
-    "test": "node --test research/*.test.mjs"
+    "test": "node --test research/*.test.mjs",
+    "test:mutations": "stryker run"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@commitlint/cli": "21.2.2",
+    "@commitlint/config-conventional": "21.2.2",
+    "@stryker-mutator/core": "10.0.0",
+    "husky": "9.1.7",
+    "ws": "8.21.3"
   }
 }

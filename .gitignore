@@ -1,5 +1,11 @@
 .DS_Store
 node_modules/
+.env
+.env.*
+!.env.example
+.stryker-tmp/
+reports/
+coverage/
 
 # Raw WebSocket captures contain account and smart-home data.
 research/captures/raw/
