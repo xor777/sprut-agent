@@ -714,15 +714,7 @@ export class AutomationService {
     }
     if (change.applied_snapshot !== undefined) {
       const current = await this.#observeLogicAssignment(change);
-      if (current !== null) {
-        return this.#recordOwnedLogicAssignment(change, current);
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "assignment_missing_after_creation",
-        configuration_matches: false,
-        configuration_differences: { assignment: "missing" },
-        last_verification: freshVerification("created_assignment_missing"),
-      });
+      return this.#recordOwnedLogicAssignment(change, current);
     }
     const current = await this.#observeLogicAssignment(change);
     if (current !== null) {
@@ -760,6 +752,11 @@ export class AutomationService {
         last_verification: failedVerification(error),
       });
     }
+    if (change.applied_snapshot !== undefined) {
+      return this.#recordOwnedLogicAssignment(change, current, {
+        recoveredAfterUncertainWrite: !acknowledged,
+      });
+    }
     if (current === null) {
       return this.#finishNative(change, "uncertain", undefined, {
         configuration_matches: false,
@@ -767,11 +764,6 @@ export class AutomationService {
         ...(acknowledged
           ? { conflict_reason: "ack_without_requested_result" }
           : {}),
-      });
-    }
-    if (change.applied_snapshot !== undefined) {
-      return this.#recordOwnedLogicAssignment(change, current, {
-        recoveredAfterUncertainWrite: !acknowledged,
       });
     }
     return this.#finishNative(change, "applied", undefined, {
@@ -806,14 +798,6 @@ export class AutomationService {
       );
     }
     if (change.applied_snapshot !== undefined) {
-      if (current === null) {
-        return this.#finishNative(change, "conflict", undefined, {
-          conflict_reason: "assignment_missing_after_creation",
-          configuration_matches: false,
-          configuration_differences: { assignment: "missing" },
-          last_verification: freshVerification("created_assignment_missing"),
-        });
-      }
       return this.#recordOwnedLogicAssignment(change, current);
     }
     return this.#recordLogicAssignmentObservation(
@@ -859,6 +843,10 @@ export class AutomationService {
           current === null ? "baseline_absent" : "baseline_absent_missing",
         ),
       });
+    }
+    const ownership = this.#logicAssignmentOwnership(change, current);
+    if (ownership === "lost" && current !== null) {
+      return this.#finishLostLogicAssignmentOwnership(change, current);
     }
     if (current === null) {
       return this.#finishNative(change, "restored", undefined, {
@@ -949,6 +937,9 @@ export class AutomationService {
     current,
     { recoveredAfterUncertainWrite = false } = {},
   ) {
+    if (this.#logicAssignmentOwnership(change, current) === "lost") {
+      return this.#finishLostLogicAssignmentOwnership(change, current);
+    }
     const observation = logicAssignmentConfigurationObservation(
       change.applied_snapshot,
       current,
@@ -969,6 +960,30 @@ export class AutomationService {
       saved,
       "restore_state_storage_then_get_native_change",
     );
+  }
+
+  #logicAssignmentOwnership(change, current) {
+    if (change.applied_snapshot === undefined) return "unconfirmed";
+    if (current === null) change.assignment_ownership_lost = true;
+    return change.assignment_ownership_lost === true ? "lost" : "owned";
+  }
+
+  #finishLostLogicAssignmentOwnership(change, current) {
+    const missing = current === null;
+    return this.#finishNative(change, "conflict", undefined, {
+      conflict_reason: missing
+        ? "assignment_missing_after_creation"
+        : "assignment_reappeared_after_ownership_loss",
+      configuration_matches: false,
+      configuration_differences: {
+        assignment: missing ? "missing" : "present_after_ownership_loss",
+      },
+      last_verification: freshVerification(
+        missing
+          ? "created_assignment_missing"
+          : "assignment_reappeared_after_ownership_loss",
+      ),
+    });
   }
 
   async #requireNativeChange(id) {
@@ -3219,10 +3234,13 @@ function publicNativeChange(
       ...(change.recovered_after_uncertain_write
         ? { recovered_after_uncertain_write: true }
         : {}),
+      ...(change.assignment_ownership_lost === true
+        ? { assignment_ownership_lost: true }
+        : {}),
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
-      ...(change.configuration_differences
+      ...(configurationMatches !== undefined && change.configuration_differences
         ? {
             configuration_differences: structuredClone(
               change.configuration_differences,
