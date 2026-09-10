@@ -241,13 +241,17 @@ export class AutomationService {
   }
 
   async #applyValueChange(change) {
-    if (change.status === "restored") return publicNativeChange(change);
+    if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "uncertain"].includes(change.status)) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#reconcileValueAfterWrite(change, "restore");
+      }
       const current = await this.#readNativeValue(change, {
         requireWrite: true,
       });
       if (valuesEqual(current, change.requested_value)) {
         return this.#finishNative(change, "applied", current, {
+          applied_value_observed: true,
           last_verification: freshVerification("requested_value_observed"),
           recovered_after_uncertain_write: true,
         });
@@ -266,16 +270,18 @@ export class AutomationService {
     }
     if (change.status === "applied") {
       const current = await this.#readNativeValue(change);
-      return valuesEqual(current, change.requested_value)
-        ? this.#recordNativeObservation(
-            change,
-            current,
-            "requested_value_observed",
-          )
-        : this.#finishNative(change, "conflict", current, {
-            conflict_reason: "value_changed_after_apply",
-            last_verification: freshVerification("conflict"),
-          });
+      if (valuesEqual(current, change.requested_value)) {
+        change.applied_value_observed = true;
+        return this.#recordNativeObservation(
+          change,
+          current,
+          "requested_value_observed",
+        );
+      }
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "value_changed_after_apply",
+        last_verification: freshVerification("conflict"),
+      });
     }
     const { value: current, contract } = await this.#readNativeValueState(
       change,
@@ -320,13 +326,23 @@ export class AutomationService {
           : "requested_value_observed";
       return valuesEqual(observed, expected)
         ? this.#finishNative(change, completedStatus, observed, {
+            ...(direction === "apply" ? { applied_value_observed: true } : {}),
             last_verification: freshVerification(result),
             ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
           })
         : this.#finishNative(change, "uncertain", observed, {
-            last_verification: freshVerification("requested_value_missing"),
+            last_verification: freshVerification(
+              direction === "restore"
+                ? "baseline_value_missing"
+                : "requested_value_missing",
+            ),
             ...(acknowledged
-              ? { conflict_reason: "ack_without_requested_result" }
+              ? {
+                  conflict_reason:
+                    direction === "restore"
+                      ? "ack_without_baseline_result"
+                      : "ack_without_requested_result",
+                }
               : {}),
           });
     } catch (error) {
@@ -357,6 +373,7 @@ export class AutomationService {
       valuesEqual(current, change.requested_value)
     ) {
       return this.#finishNative(change, "applied", current, {
+        applied_value_observed: true,
         last_verification: freshVerification("requested_value_observed"),
       });
     }
@@ -582,7 +599,7 @@ export class AutomationService {
   }
 
   async #restoreWindowOptionChange(change) {
-    if (change.status === "restored") return publicNativeChange(change);
+    if (change.status === "restored") return publicStoredNativeChange(change);
     const { value: current, contract } = await this.#readNativeValueState(
       change,
       {
@@ -590,6 +607,12 @@ export class AutomationService {
       },
     );
     validateCharacteristicValue(change.baseline_value.value, contract);
+    if (change.applied_value_observed !== true) {
+      return this.#finishNative(change, "not_owned", current, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: freshVerification("current_value_observed"),
+      });
+    }
     if (valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "restored", current, {
         last_verification: freshVerification("baseline_value_observed"),
@@ -687,7 +710,7 @@ export class AutomationService {
   }
 
   async #applyBlockChange(change) {
-    if (change.status === "restored") return publicNativeChange(change);
+    if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
         ? this.#reconcileBlockRestore(change, false)
@@ -797,7 +820,7 @@ export class AutomationService {
   }
 
   async #restoreBlockChange(change) {
-    if (change.status === "restored") return publicNativeChange(change);
+    if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
         ? this.#reconcileBlockRestore(change, false)
@@ -2187,6 +2210,12 @@ function failedVerification(error) {
   };
 }
 
+function savedVerification(verification) {
+  return verification
+    ? { ...structuredClone(verification), fresh: false }
+    : { fresh: false, checked_at: null };
+}
+
 function nativeIntentDirection(change) {
   return (
     change.write_intent?.direction ??
@@ -2332,6 +2361,12 @@ function parseNativeChangeRef(ref) {
   return match[1];
 }
 
+function publicStoredNativeChange(change) {
+  return publicNativeChange(change, undefined, {
+    verification: savedVerification(change.last_verification),
+  });
+}
+
 function publicNativeChange(
   change,
   observedValue = change.observed_value,
@@ -2398,6 +2433,30 @@ function publicNativeChange(
       ],
     };
   }
+  const valueChoices =
+    change.kind === "window_option"
+      ? {
+          baseline: namedWindowValue(change, change.baseline_value),
+          requested: namedWindowValue(change, change.requested_value),
+          ...(observedValue
+            ? { observed: namedWindowValue(change, observedValue) }
+            : {}),
+        }
+      : undefined;
+  const conflictResolution =
+    change.kind === "window_option" &&
+    change.status === "conflict" &&
+    change.applied_value_observed === true &&
+    observedValue
+      ? {
+          requires_user_decision: true,
+          action_if_authorized: "prepare_new_window_option_change",
+          effect: {
+            replace: namedWindowValue(change, observedValue),
+            with: namedWindowValue(change, change.baseline_value),
+          },
+        }
+      : undefined;
   return {
     status: change.status,
     change_ref: `spruthub-change://native/${change.id}`,
@@ -2417,6 +2476,7 @@ function publicNativeChange(
       ? { write_intent: structuredClone(change.write_intent) }
       : {}),
     ...(observedValue ? { observed_value: observedValue } : {}),
+    ...(valueChoices ? { value_choices: valueChoices } : {}),
     ...(verification ? { verification } : {}),
     ...(change.conflict_reason
       ? { conflict_reason: change.conflict_reason }
@@ -2425,8 +2485,12 @@ function publicNativeChange(
       ? { recovered_after_uncertain_write: true }
       : {}),
     ...(change.kind === "window_option"
-      ? { option_key: change.option_key }
+      ? {
+          option_key: change.option_key,
+          applied_value_observed: change.applied_value_observed === true,
+        }
       : {}),
+    ...(conflictResolution ? { conflict_resolution: conflictResolution } : {}),
     restore_supported: change.kind === "window_option",
     ...(change.kind === "characteristic_value"
       ? { physical_effect_reversible: false }
@@ -2438,7 +2502,24 @@ function publicNativeChange(
       change.kind === "window_option"
         ? "Restoration is allowed only while the current setting still matches this change."
         : "A runtime command does not provide rollback of physical effects.",
+      ...(change.kind === "window_option"
+        ? [
+            "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
+          ]
+        : []),
     ],
+  };
+}
+
+function namedWindowValue(change, value) {
+  const candidate = change.contract?.valid_values?.find((validValue) =>
+    valuesEqual(validValue, value),
+  );
+  return {
+    ...structuredClone(value),
+    ...(candidate && typeof candidate.name === "string"
+      ? { name: candidate.name }
+      : {}),
   };
 }
 

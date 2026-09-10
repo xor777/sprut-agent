@@ -558,6 +558,12 @@ test("a window option applies one native setting and restores its baseline after
     value: 0,
     kind: "intValue",
   });
+  assert.equal(
+    applied.structuredContent.limitations.some((limitation) =>
+      limitation.includes("physical power cycle remain unverified"),
+    ),
+    true,
+  );
   assert.equal(hub.state.window.options[1].value.intValue, 1);
   assert.deepEqual(
     hub.requests.filter(({ window }) => window?.update),
@@ -728,6 +734,20 @@ test("a lost executed window write is reconciled without another update", async 
   });
   assert.equal(repeated.structuredContent.status, "applied");
   assert.equal(hub.requests.filter(({ window }) => window?.update).length, 1);
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const repeatedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(repeatedRestore.structuredContent.status, "restored");
+  assert.equal(repeatedRestore.structuredContent.verification.fresh, false);
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 });
 
 test("window option contract rejects controls outside the reversible setting slice", async (t) => {
