@@ -273,7 +273,12 @@ function sendUnrelatedFrames(socket, requestId) {
   reply(socket, requestId + 10_000, {});
 }
 
-async function startClient(t, hub, sessionFile, { timeoutMs = "1000" } = {}) {
+async function startClient(
+  t,
+  hub,
+  sessionFile,
+  { timeoutMs = "1000", serial } = {},
+) {
   const connectionFile = path.join(path.dirname(sessionFile), "connection.env");
   await writeFile(
     connectionFile,
@@ -293,6 +298,7 @@ async function startClient(t, hub, sessionFile, { timeoutMs = "1000" } = {}) {
       SPRUT_AGENT_SESSION_FILE: sessionFile,
       SPRUTHUB_TIMEOUT_MS: timeoutMs,
       SPRUT_AGENT_STATE_DIR: path.join(path.dirname(sessionFile), "changes"),
+      ...(serial ? { SPRUTHUB_SERIAL: serial } : {}),
     },
     stderr: "pipe",
   });
@@ -415,11 +421,13 @@ test("password enrollment stops without answering on the user's behalf", async (
   assert.equal(publicResult.includes(password), false);
 });
 
-test("multiple homes allow explicit reads without creating a write binding", async (t) => {
+test("a write-bound home does not restrict explicit reads or follow their selection", async (t) => {
   const hub = await startHub(t, {
     homes: [home("home/A", "Дом A"), home("home B", "Дом B")],
   });
-  const client = await startClient(t, hub, await withSessionPath(t));
+  const client = await startClient(t, hub, await withSessionPath(t), {
+    serial: "home/A",
+  });
   const catalog = await client.callTool({
     name: "list_homes",
     arguments: {},
@@ -436,7 +444,39 @@ test("multiple homes allow explicit reads without creating a write binding", asy
     room.structuredContent.room.ref,
     "spruthub://hub/home%20B/room/1",
   );
+  assert.deepEqual(
+    hub.requests
+      .filter(
+        ({ params }) => params.room?.get || params.accessory?.list?.roomId,
+      )
+      .map(({ serial }) => serial),
+    ["home B", "home B"],
+  );
 
+  const defaultRooms = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(defaultRooms.isError, undefined, defaultRooms.content[0]?.text);
+  assert.equal(
+    defaultRooms.structuredContent.rooms[0].ref,
+    "spruthub://hub/home%2FA/room/1",
+  );
+
+  const inaccessible = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://hub/home%20C/room/1" },
+  });
+  assert.equal(inaccessible.isError, true);
+  assert.equal(inaccessible.structuredContent.error.code, "home_not_found");
+  assert.equal(
+    hub.requests.some(
+      ({ serial, params }) => serial === "home C" && params.room?.get,
+    ),
+    false,
+  );
+
+  const requestCount = hub.requests.length;
   const preview = await client.callTool({
     name: "preview_boolean_automation",
     arguments: {
@@ -453,11 +493,8 @@ test("multiple homes allow explicit reads without creating a write binding", asy
     },
   });
   assert.equal(preview.isError, true);
-  assert.equal(preview.structuredContent.error.code, "home_selection_required");
-  assert.equal(
-    hub.requests.some(({ params }) => params.scenario?.create),
-    false,
-  );
+  assert.equal(preview.structuredContent.error.code, "unsupported_home_write");
+  assert.equal(hub.requests.length, requestCount);
 });
 
 test("a stalled WebSocket handshake returns a bounded error without killing MCP", async (t) => {
