@@ -699,6 +699,80 @@ test("versioned BLOCK contract prepares different supported compositions", async
   );
 });
 
+test("BLOCK grammar rejects known nodes in unsupported child slots before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    ["set in root.targets", (data) => {
+      data.targets.push({ type: "set", cId: 15, hc: "On", value: "true" });
+    }],
+    ["characteristic in if.then", (data) => {
+      data.targets[0].then.unshift(characteristicCondition({ trigger: false }));
+    }],
+    ["set in condition.conditions", (data) => {
+      data.targets[0].if.conditions.push({
+        type: "set",
+        cId: 15,
+        hc: "On",
+        value: "true",
+      });
+    }],
+    ["characteristic in delay.targets", (data) => {
+      data.targets[0].then[1].targets.push(
+        characteristicCondition({ trigger: false }),
+      );
+    }],
+    ["single object in if.then", (data) => {
+      data.targets[0].then = data.targets[0].then[0];
+    }],
+  ];
+  const results = [];
+
+  for (const [name, mutate] of cases) {
+    const data = blockData({ nested: true });
+    delete data.vendorConfiguration;
+    mutate(data);
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name: `Неверная позиция: ${name}`,
+        description: "Не отправлять неподдержанный BLOCK",
+        active: false,
+        on_start: false,
+        sync: false,
+        data,
+        reason: "Проверить грамматику BLOCK",
+      },
+    });
+    results.push({
+      name,
+      isError: prepared.isError,
+      code: prepared.structuredContent?.error?.code,
+    });
+    if (!prepared.isError) {
+      await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+    }
+  }
+
+  assert.deepEqual(
+    results,
+    cases.map(([name]) => ({
+      name,
+      isError: true,
+      code: "invalid_block_data",
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
 test("BLOCK create survives a lost response and restores only an unchanged result", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -1356,6 +1430,67 @@ test("status exposes failed fresh reads and clears stale configuration matches",
     characteristicUnavailable.structuredContent.verification.fresh,
     false,
   );
+});
+
+test("fresh BLOCK match recovers from an earlier conflict before restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить возврат к applied snapshot",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const appliedData = hub.state.scenarios[0].data;
+
+  const manuallyEdited = JSON.parse(appliedData);
+  manuallyEdited.manual = true;
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+  const conflict = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.configuration_matches, false);
+
+  hub.state.scenarios[0].data = appliedData;
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const matchedAgain = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(matchedAgain.isError, undefined, matchedAgain.content[0]?.text);
+  assert.equal(matchedAgain.structuredContent.status, "applied");
+  assert.equal(matchedAgain.structuredContent.configuration_matches, true);
+  assert.equal(matchedAgain.structuredContent.verification.fresh, true);
+  assert.equal("conflict_reason" in matchedAgain.structuredContent, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+    "get must only observe the returned applied configuration",
+  );
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.configuration_matches, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    2,
+  );
+  assert.deepEqual(JSON.parse(hub.state.scenarios[0].data), blockData());
 });
 
 test("native preparation rejects unsafe targets and values before send", async (t) => {
