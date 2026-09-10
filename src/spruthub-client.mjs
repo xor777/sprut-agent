@@ -582,6 +582,11 @@ export class SprutHubClient {
           ref: accessoryRef(parsed.serial, accessory.id),
           name: accessory.name,
           available: accessory.online,
+          services: (accessory.services ?? []).map((service) => ({
+            ref: serviceRef(parsed.serial, accessory.id, service.sId),
+            name: service.name,
+            type: service.type,
+          })),
         })),
     };
   }

@@ -597,6 +597,13 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
       ref: "spruthub://hub/home%20B/accessory/32",
       name: "Датчик B",
       available: true,
+      services: [
+        {
+          ref: "spruthub://hub/home%20B/accessory/32/service/13",
+          name: "Движение",
+          type: "MotionSensor",
+        },
+      ],
     },
   ]);
   for (const request of hub.requests.filter(

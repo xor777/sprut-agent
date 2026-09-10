@@ -14,8 +14,7 @@ const projectRoot = path.resolve(
   "..",
 );
 const serial = "native-change-test-hub";
-const characteristicRef =
-  `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
+const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
 
 async function startHub() {
   const requests = [];
