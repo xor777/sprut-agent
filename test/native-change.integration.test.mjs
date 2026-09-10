@@ -336,6 +336,7 @@ async function startHub() {
       rejectScenarioGetAsInternalError: false,
       closeAfterLogicCreate: false,
       closeAfterLogicSetOptions: false,
+      failNextLogicList: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -403,11 +404,13 @@ async function startHub() {
         (params.characteristic?.get &&
           state.behavior.failNextCharacteristicGet) ||
         (params.window?.get && state.behavior.failNextWindowGet) ||
-        (params.scenario?.get && state.behavior.failNextScenarioGet)
+        (params.scenario?.get && state.behavior.failNextScenarioGet) ||
+        (params.logic?.list && state.behavior.failNextLogicList)
       ) {
         state.behavior.failNextCharacteristicGet = false;
         state.behavior.failNextWindowGet = false;
         state.behavior.failNextScenarioGet = false;
+        state.behavior.failNextLogicList = false;
         socket.send(
           JSON.stringify({
             id: request.id,
@@ -3184,6 +3187,156 @@ test("an existing or manually assigned logic is not claimed for deletion", async
   assert.equal(hub.state.logics.length, 1);
   assert.equal(
     hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+});
+
+test("a disappeared owned logic assignment is not reclaimed after the owner recreates it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатную logic",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.logics.length = 0;
+
+  const missing = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(missing.structuredContent.status, "conflict");
+  assert.equal(
+    missing.structuredContent.conflict_reason,
+    "assignment_missing_after_creation",
+  );
+  assert.equal(missing.structuredContent.assignment_ownership_lost, true);
+
+  hub.state.logics.push(assignedSmoothLogic());
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  for (const tool of [
+    "get_native_change",
+    "apply_native_change",
+    "restore_native_change",
+  ]) {
+    const result = await secondClient.callTool({
+      name: tool,
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(result.structuredContent.status, "conflict", tool);
+    assert.equal(
+      result.structuredContent.conflict_reason,
+      "assignment_reappeared_after_ownership_loss",
+      tool,
+    );
+    assert.equal(
+      result.structuredContent.assignment_ownership_lost,
+      true,
+      tool,
+    );
+  }
+  assert.equal(hub.state.logics.length, 1);
+  assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+});
+
+test("restoring an absent owned logic stays terminal if another assignment later appears", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатную logic",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.logics.length = 0;
+
+  const restored = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.assignment_ownership_lost, true);
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+
+  hub.state.logics.push(assignedSmoothLogic());
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const observed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "restored");
+  assert.equal(observed.structuredContent.configuration_matches, false);
+  assert.equal(observed.structuredContent.assignment_ownership_lost, true);
+  const repeatedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeatedRestore.structuredContent.status, "restored");
+  assert.equal(hub.state.logics.length, 1);
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+});
+
+test("a failed fresh logic read does not expose saved configuration differences as current", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатную logic",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.logics[0].active = true;
+  const changed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.deepEqual(changed.structuredContent.configuration_differences, {
+    active: { created: false, current: true },
+  });
+
+  hub.state.logics[0].active = false;
+  hub.state.behavior.failNextLogicList = true;
+  const unavailable = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(unavailable.isError, undefined, unavailable.content[0]?.text);
+  assert.equal(unavailable.structuredContent.verification.fresh, false);
+  assert.equal("configuration_matches" in unavailable.structuredContent, false);
+  assert.equal(
+    "configuration_differences" in unavailable.structuredContent,
     false,
   );
 });
