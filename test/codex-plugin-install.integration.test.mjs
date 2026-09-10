@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
   chmod,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readlink,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -26,6 +30,7 @@ const projectRoot = path.resolve(
   "..",
 );
 const codexBinary = process.env.SPRUT_TEST_CODEX_BIN ?? "codex";
+const legacyCommit = "be527a92ed00c0f41b14d2e399bec2dc7891be33";
 
 test("Codex installs the complete plugin, reads the office, and keeps the connection on repeat", {
   timeout: 30_000,
@@ -272,6 +277,167 @@ test("installation reports an occupied product MCP name and works after explicit
   await client.close();
 });
 
+test("Codex completes the transition from the prior manual skill without removing it", {
+  timeout: 30_000,
+}, async (t) => {
+  const scratch = await mkdtemp(
+    path.join(tmpdir(), "sprut-plugin-transition-"),
+  );
+  const marketplaceRoot = path.join(scratch, "marketplace");
+  const codexHome = path.join(scratch, "codex-home");
+  const userHome = path.join(scratch, "user-home");
+  const workspace = path.join(scratch, "workspace");
+  const legacyCheckout = path.join(scratch, "legacy-checkout");
+  const legacySkillDirectory = path.join(
+    legacyCheckout,
+    "skills",
+    "spruthub-master",
+  );
+  const legacySkillFile = path.join(legacySkillDirectory, "SKILL.md");
+  const userSkillDirectory = path.join(
+    userHome,
+    ".agents",
+    "skills",
+    "spruthub-master",
+  );
+  t.after(() => rm(scratch, { recursive: true }));
+  await Promise.all([
+    copyPluginSource(marketplaceRoot),
+    mkdir(codexHome, { recursive: true }),
+    mkdir(userHome, { recursive: true }),
+    mkdir(workspace, { recursive: true }),
+    mkdir(legacySkillDirectory, { recursive: true }),
+    mkdir(path.dirname(userSkillDirectory), { recursive: true }),
+  ]);
+  const legacySkill = (
+    await run(
+      "git",
+      ["show", `${legacyCommit}:skills/spruthub-master/SKILL.md`],
+      { cwd: projectRoot },
+    )
+  ).stdout;
+  await writeFile(legacySkillFile, legacySkill);
+  await symlink(legacySkillDirectory, userSkillDirectory, "dir");
+
+  const legacyConfig = [
+    "[mcp_servers.sprut]",
+    'command = "node"',
+    'args = ["legacy-server.mjs"]',
+    'env = { SPRUTHUB_PASSWORD = "legacy-secret-must-stay-local" }',
+    "",
+  ].join("\n");
+  const configFile = path.join(codexHome, "config.toml");
+  await writeFile(configFile, legacyConfig);
+  const environment = {
+    PATH: process.env.PATH,
+    HOME: userHome,
+    CODEX_HOME: codexHome,
+    SPRUT_CODEX_BIN: codexBinary,
+  };
+  const cli = (args) =>
+    run(codexBinary, args, {
+      cwd: workspace,
+      env: environment,
+    });
+
+  await cli(["plugin", "marketplace", "add", marketplaceRoot, "--json"]);
+  const installation = JSON.parse(
+    (await cli(["plugin", "add", "sprut-agent@sprut-agent", "--json"])).stdout,
+  );
+  const checkScript = path.join(
+    installation.installedPath,
+    "check-install.mjs",
+  );
+  const before = await listCodexSkills(environment, workspace);
+  const legacyBefore = before.find(
+    (skill) => skill.name === "spruthub-master" && skill.pluginId == null,
+  );
+  const productBefore = before.find(
+    (skill) => skill.pluginId === "sprut-agent@sprut-agent",
+  );
+  assert.equal(legacyBefore?.enabled, true);
+  assert.equal(legacyBefore?.path, legacySkillFile);
+  assert.equal(productBefore?.enabled, true);
+
+  await assert.rejects(
+    run(process.execPath, [checkScript, installation.installedPath], {
+      cwd: workspace,
+      env: environment,
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /active prior manual skill/);
+      assert.match(error.stderr, new RegExp(escapeRegExp(legacySkillFile)));
+      assert.doesNotMatch(error.stderr, /legacy-secret-must-stay-local/);
+      assert.equal(error.stdout.includes('"status":"ready"'), false);
+      return true;
+    },
+  );
+
+  const recovery = await run(
+    process.execPath,
+    [
+      checkScript,
+      installation.installedPath,
+      "--disable-legacy-skill",
+      legacyBefore.path,
+    ],
+    { cwd: workspace, env: environment },
+  );
+  assert.match(recovery.stdout, /"status":"ready"/);
+  const after = await listCodexSkills(environment, workspace);
+  assert.equal(
+    after.find((skill) => skill.path === legacyBefore.path)?.enabled,
+    false,
+  );
+  assert.equal(
+    after.find((skill) => skill.pluginId === "sprut-agent@sprut-agent")
+      ?.enabled,
+    true,
+  );
+  assert.equal((await lstat(userSkillDirectory)).isSymbolicLink(), true);
+  assert.equal(await readlink(userSkillDirectory), legacySkillDirectory);
+  assert.equal(await readFile(legacySkillFile, "utf8"), legacySkill);
+  assert.equal(
+    (await readFile(configFile, "utf8")).includes(legacyConfig),
+    true,
+  );
+
+  const repeat = await run(
+    process.execPath,
+    [checkScript, installation.installedPath],
+    { cwd: workspace, env: environment },
+  );
+  assert.match(repeat.stdout, /"status":"ready"/);
+
+  const hub = await startHub(t);
+  const connectionDirectory = path.join(userHome, ".config", "sprut-agent");
+  await mkdir(connectionDirectory, { recursive: true });
+  await writeFile(
+    path.join(connectionDirectory, "connection.env"),
+    [
+      "SPRUTHUB_LOGIN=owner@example.invalid",
+      "SPRUTHUB_PASSWORD=local-only-password",
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_TIMEOUT_MS=1000",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const effectiveTransport = await getEffectiveTransport(
+    cli,
+    installation.installedPath,
+  );
+  const client = await startInstalledClient(effectiveTransport, userHome);
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.equal(
+    homes.structuredContent.homes[0].ref,
+    "spruthub://hub/installed-home",
+  );
+  await client.close();
+});
+
 async function copyPluginSource(destination) {
   await cp(projectRoot, destination, {
     recursive: true,
@@ -298,6 +464,66 @@ async function getEffectiveTransport(cli, installedRoot) {
     "Codex must resolve the product MCP to the installed plugin copy",
   );
   return effective.transport;
+}
+
+async function listCodexSkills(environment, cwd) {
+  const child = spawn(codexBinary, ["app-server", "--stdio"], {
+    cwd,
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const lines = createInterface({ input: child.stdout });
+  const iterator = lines[Symbol.asyncIterator]();
+  try {
+    child.stdin.write(
+      `${JSON.stringify({
+        id: 0,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "sprut-install-test", version: "1.0.0" },
+          capabilities: { experimentalApi: true },
+        },
+      })}\n`,
+    );
+    await readAppServerResponse(iterator, 0, stderr);
+    child.stdin.write(
+      `${JSON.stringify({
+        id: 1,
+        method: "skills/list",
+        params: { cwds: [cwd], forceReload: true },
+      })}\n`,
+    );
+    const response = await readAppServerResponse(iterator, 1, stderr);
+    return response.result.data.flatMap((entry) => entry.skills);
+  } finally {
+    lines.close();
+    child.stdin.end();
+    if (child.exitCode === null) child.kill();
+  }
+}
+
+async function readAppServerResponse(iterator, id, stderr) {
+  while (true) {
+    const { value, done } = await iterator.next();
+    if (done) throw new Error(`Codex app-server stopped: ${stderr}`);
+    const message = JSON.parse(value);
+    if (message.id !== id) continue;
+    if (message.error) {
+      throw new Error(
+        `Codex app-server request failed: ${message.error.message}`,
+      );
+    }
+    return message;
+  }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function startInstalledClient(effectiveTransport, userHome) {
