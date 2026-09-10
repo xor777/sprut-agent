@@ -893,6 +893,35 @@ test("restore preserves unknown vendor blockId and state fields", async (t) => {
   );
 });
 
+test("BLOCK data restore revalidates current bindings before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить topology drift перед restore",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.accessories[1].services[0].type = "Outlet";
+
+  const refused = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refused.isError, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+});
+
 test("a restored BLOCK change is terminal and recovers a lost final save", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
