@@ -273,7 +273,6 @@ async function main() {
 async function closeHub(hub) {
   if (hub === null) return;
   for (const socket of hub.server.clients) socket.terminate();
-  if (!hub.server.listening) return;
   await new Promise((resolve, reject) => {
     hub.server.close((error) => (error ? reject(error) : resolve()));
   });
