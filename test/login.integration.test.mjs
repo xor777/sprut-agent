@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -329,13 +330,19 @@ test("an empty profile returns an executable local credential setup", async (t) 
   const hub = await startHub(t);
   const directory = await mkdtemp(path.join(tmpdir(), "sprut empty profile-"));
   t.after(() => rm(directory, { recursive: true }));
-  const transport = new StdioClientTransport({
+  const configRoot = path.join(directory, "xdg config");
+  const launch = {
     command: process.execPath,
     args: [path.join(projectRoot, "src", "server.mjs")],
     cwd: directory,
-    env: { PATH: process.env.PATH, HOME: directory },
+    env: {
+      PATH: process.env.PATH,
+      HOME: directory,
+      XDG_CONFIG_HOME: configRoot,
+    },
     stderr: "pipe",
-  });
+  };
+  const transport = new StdioClientTransport(launch);
   const client = new Client({ name: "empty-profile-test", version: "1.0.0" });
   await client.connect(transport);
   t.after(() => client.close());
@@ -345,48 +352,28 @@ test("an empty profile returns an executable local credential setup", async (t) 
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error.code, "configuration");
   assert.equal(result.structuredContent.error.action, "configure_credentials");
-  const connectionFile = path.join(
-    directory,
-    ".config",
-    "sprut-agent",
-    "connection.env",
-  );
-  const launch = `'${process.execPath}' --env-file='${connectionFile}' '${path.join(projectRoot, "src", "server.mjs")}'`;
+  const connectionFile = path.join(configRoot, "sprut-agent", "connection.env");
   const credentialSetup = {
     file: connectionFile,
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    launch,
+    restart: "Restart the same MCP application after saving the file.",
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
   };
-  assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
-  assert.equal(
-    result.structuredContent.error.message,
-    `Configure SprutHub locally: create '${connectionFile}' with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart with ${launch}. Do not send credential values in chat.`,
-  );
-  assert.equal(JSON.stringify(result).includes("/absolute/path"), false);
-
-  await client.close();
   await mkdir(path.dirname(connectionFile), { recursive: true });
   await writeFile(
     connectionFile,
     [
-      `SPRUTHUB_LOGIN=${login}`,
-      `SPRUTHUB_PASSWORD=${password}`,
-      `SPRUTHUB_URL=${hub.url}`,
+      `SPRUTHUB_LOGIN='${login}'`,
+      `SPRUTHUB_PASSWORD='${password}'`,
+      `SPRUTHUB_URL='${hub.url}'`,
       "SPRUTHUB_SERIAL=home/A",
       "",
     ].join("\n"),
     { mode: 0o600 },
   );
-  const configuredTransport = new StdioClientTransport({
-    command: "/bin/sh",
-    args: ["-c", credentialSetup.launch],
-    cwd: directory,
-    env: { PATH: process.env.PATH, HOME: directory },
-    stderr: "pipe",
-  });
+  const configuredTransport = new StdioClientTransport(launch);
   const configuredClient = new Client({
     name: "configured-profile-test",
     version: "1.0.0",
@@ -399,6 +386,54 @@ test("an empty profile returns an executable local credential setup", async (t) 
   });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
+  const room = await configuredClient.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
+  });
+  assert.equal(room.isError, undefined, room.content[0]?.text);
+  assert.equal(room.structuredContent.devices[0].name, "Термометр");
+  assert.equal(
+    room.structuredContent.devices[0].services[0].readings[0].value,
+    22.5,
+  );
+  assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
+  assert.equal(
+    result.structuredContent.error.message,
+    `Configure SprutHub locally: create '${connectionFile}' with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart the same MCP application. Do not send credential values in chat.`,
+  );
+  assert.equal(JSON.stringify(result).includes("/absolute/path"), false);
+
+  await client.close();
+  const authAnswers = hub.requests.filter(
+    ({ params }) => params.account?.answer,
+  ).length;
+  await configuredClient.close();
+
+  const restartedTransport = new StdioClientTransport(launch);
+  const restartedClient = new Client({
+    name: "restarted-profile-test",
+    version: "1.0.0",
+  });
+  await restartedClient.connect(restartedTransport);
+  t.after(() => restartedClient.close());
+  const restartedHomes = await restartedClient.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(
+    restartedHomes.isError,
+    undefined,
+    restartedHomes.content[0]?.text,
+  );
+  assert.equal(
+    restartedHomes.structuredContent.homes[0].ref,
+    "spruthub://hub/home%2FA",
+  );
+  assert.equal(
+    hub.requests.filter(({ params }) => params.account?.answer).length,
+    authAnswers,
+    "the next process must reuse the saved session instead of logging in again",
+  );
   const publicResult = JSON.stringify(result);
   for (const secret of [login, password, token]) {
     assert.equal(publicResult.includes(secret), false);
@@ -410,28 +445,37 @@ test("a partial profile preserves safe credential guidance without reflecting cr
   const cases = [
     {
       missingField: "SPRUTHUB_LOGIN",
-      partialEnv: { SPRUTHUB_PASSWORD: "sprut" },
+      partialFile: "SPRUTHUB_PASSWORD=sprut\n",
       remainingCredential: "sprut",
     },
     {
       missingField: "SPRUTHUB_PASSWORD",
-      partialEnv: { SPRUTHUB_LOGIN: "credential_setup" },
+      partialFile: "SPRUTHUB_LOGIN=credential_setup\n",
       remainingCredential: "credential_setup",
     },
   ];
 
-  for (const { missingField, partialEnv, remainingCredential } of cases) {
+  for (const { missingField, partialFile, remainingCredential } of cases) {
     const directory = await mkdtemp(
       path.join(tmpdir(), `sprut agent's partial ${missingField}-`),
     );
     t.after(() => rm(directory, { recursive: true }));
-    const transport = new StdioClientTransport({
+    const connectionFile = path.join(
+      directory,
+      ".config",
+      "sprut-agent",
+      "connection.env",
+    );
+    await mkdir(path.dirname(connectionFile), { recursive: true });
+    await writeFile(connectionFile, partialFile, { mode: 0o600 });
+    const launch = {
       command: process.execPath,
       args: [path.join(projectRoot, "src", "server.mjs")],
       cwd: directory,
-      env: { PATH: process.env.PATH, HOME: directory, ...partialEnv },
+      env: { PATH: process.env.PATH, HOME: directory },
       stderr: "pipe",
-    });
+    };
+    const transport = new StdioClientTransport(launch);
     const client = new Client({
       name: `partial-${missingField.toLowerCase()}-test`,
       version: "1.0.0",
@@ -443,18 +487,11 @@ test("a partial profile preserves safe credential guidance without reflecting cr
       name: "list_homes",
       arguments: {},
     });
-    const connectionFile = path.join(
-      directory,
-      ".config",
-      "sprut-agent",
-      "connection.env",
-    );
-    const launch = `${shellQuote(process.execPath)} --env-file=${shellQuote(connectionFile)} ${shellQuote(path.join(projectRoot, "src", "server.mjs"))}`;
     const credentialSetup = {
       file: connectionFile,
       required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
       permissions: "0600",
-      launch,
+      restart: "Restart the same MCP application after saving the file.",
       secret_handling:
         "Create and fill the file locally; do not send credentials in chat.",
     };
@@ -464,7 +501,7 @@ test("a partial profile preserves safe credential guidance without reflecting cr
       missing_field: missingField,
       error: {
         code: "configuration",
-        message: `Configure SprutHub locally: create ${shellQuote(connectionFile)} with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart with ${launch}. Do not send credential values in chat.`,
+        message: `Configure SprutHub locally: create ${shellQuote(connectionFile)} with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart the same MCP application. Do not send credential values in chat.`,
         retryable: false,
         action: "configure_credentials",
       },
@@ -494,13 +531,7 @@ test("a partial profile preserves safe credential guidance without reflecting cr
       ].join("\n"),
       { mode: 0o600 },
     );
-    const configuredTransport = new StdioClientTransport({
-      command: "/bin/sh",
-      args: ["-c", credentialSetup.launch],
-      cwd: directory,
-      env: { PATH: process.env.PATH, HOME: directory },
-      stderr: "pipe",
-    });
+    const configuredTransport = new StdioClientTransport(launch);
     const configuredClient = new Client({
       name: `completed-${missingField.toLowerCase()}-test`,
       version: "1.0.0",
@@ -525,6 +556,122 @@ function responseStringValues(value) {
   if (!value || typeof value !== "object") return [];
   return Object.values(value).flatMap(responseStringValues);
 }
+
+test("explicit connection environment wins over conflicting file values", async (t) => {
+  const hub = await startHub(t);
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut env precedence-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const connectionFile = path.join(
+    directory,
+    ".config",
+    "sprut-agent",
+    "connection.env",
+  );
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      "SPRUTHUB_LOGIN=file-login@example.invalid",
+      "SPRUTHUB_PASSWORD=file-password",
+      "SPRUTHUB_URL=ws://127.0.0.1:1",
+      "SPRUTHUB_SERIAL=file-home",
+      "UNSUPPORTED_CONNECTION_KEY=must-not-be-applied",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: directory,
+    env: {
+      PATH: process.env.PATH,
+      HOME: directory,
+      SPRUTHUB_LOGIN: login,
+      SPRUTHUB_PASSWORD: password,
+      SPRUTHUB_URL: hub.url,
+      SPRUTHUB_SERIAL: "home/A",
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({
+    name: "env-precedence-test",
+    version: "1.0.0",
+  });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
+  assert.equal(hub.connectionCount, 1);
+});
+
+test("an unsafe credential file returns one fixable local error", async (t) => {
+  const hub = await startHub(t);
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut unsafe profile-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const connectionFile = path.join(
+    directory,
+    ".config",
+    "sprut-agent",
+    "connection.env",
+  );
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      `SPRUTHUB_URL=${hub.url}`,
+      "",
+    ].join("\n"),
+    { mode: 0o644 },
+  );
+  const launch = {
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: directory,
+    env: { PATH: process.env.PATH, HOME: directory },
+    stderr: "pipe",
+  };
+  const transport = new StdioClientTransport(launch);
+  const client = new Client({ name: "unsafe-profile-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const failed = await client.callTool({ name: "list_homes", arguments: {} });
+
+  assert.equal(failed.isError, true);
+  assert.equal(
+    failed.structuredContent.error.code,
+    "credential_file_unavailable",
+  );
+  assert.equal(failed.structuredContent.error.action, "fix_credential_file");
+  assert.equal(failed.structuredContent.credential_setup.file, connectionFile);
+  assert.match(failed.structuredContent.error.message, /mode 0600/);
+  assert.equal(hub.connectionCount, 0);
+
+  await client.close();
+  await chmod(connectionFile, 0o600);
+  const repairedTransport = new StdioClientTransport(launch);
+  const repairedClient = new Client({
+    name: "repaired-profile-test",
+    version: "1.0.0",
+  });
+  await repairedClient.connect(repairedTransport);
+  t.after(() => repairedClient.close());
+  const repaired = await repairedClient.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(repaired.isError, undefined, repaired.content[0]?.text);
+  assert.equal(
+    repaired.structuredContent.homes[0].ref,
+    "spruthub://hub/home%2FA",
+  );
+});
 
 test("challenge login serves concurrent public reads and a restart reuses the session", async (t) => {
   const hub = await startHub(t, { sendForeignFrames: true });
