@@ -2141,7 +2141,7 @@ function changeSummary(change, homeRef) {
     return {
       change_ref: reference,
       operation: change.kind,
-      status: change.status,
+      recorded_status: change.status,
       target_refs: nativeAffectedRefs(change, homeRef),
       created_at: change.created_at,
       updated_at: change.updated_at,
@@ -2164,7 +2164,7 @@ function changeSummary(change, homeRef) {
   return {
     change_ref: reference,
     operation: "legacy_boolean_automation",
-    status: change.status,
+    recorded_status: change.status,
     target_refs: uniqueRefs([
       ...characteristicRefs,
       ...ancestorRefs,

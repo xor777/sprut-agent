@@ -41,7 +41,9 @@
 `get_native_change_contract`, затем разделяет `prepare_native_change`,
 `apply_native_change`, `get_native_change` и `restore_native_change`.
 `list_native_changes` даёт ограниченную историю по дому и точной entity ref,
-включая старые automation changes. Для BLOCK она индексирует canonical refs
+включая старые automation changes. `recorded_status` в этой истории — сохранённый
+исход на `updated_at`, а не текущая проверка; для неё используется возвращённый
+`next`. Для BLOCK история индексирует canonical refs
 сценария и участвующих accessory/service/characteristic до и после update;
 старые unqualified refs привязываются только к fingerprint текущего журнала.
 Это поиск, а не разрешение на запись.

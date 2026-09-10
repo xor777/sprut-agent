@@ -284,7 +284,7 @@ server.registerTool(
   {
     title: "Find recorded SprutHub changes",
     description:
-      "Return a bounded history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. BLOCK history includes its scenario and known accessory, service and characteristic bindings before and after an update. Each summary gives a stable change ref and the tool call for current reconciliation; discovery does not authorize restoration.",
+      "Return a bounded saved history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. recorded_status is the locally stored outcome at updated_at, not a current hub observation. BLOCK history includes its scenario and known accessory, service and characteristic bindings before and after an update. Follow each summary's next tool call for current reconciliation; listing does not poll the whole live home or authorize restoration.",
     inputSchema: {
       home_ref: z.string().min(1),
       entity_ref: z.string().min(1).optional(),

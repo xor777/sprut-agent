@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { argon2id } from "hash-wasm";
 import { WebSocket } from "ws";
@@ -73,13 +74,16 @@ export class SprutHubConnection {
       });
     }
 
+    const setup = credentialSetup(this.#env);
     const login = requiredCredential(
       this.#env.SPRUTHUB_LOGIN,
       "SPRUTHUB_LOGIN",
+      setup,
     );
     const password = requiredCredential(
       this.#env.SPRUTHUB_PASSWORD,
       "SPRUTHUB_PASSWORD",
+      setup,
     );
     const url = this.#env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL;
     const sessionFile = resolveSessionFile(this.#env);
@@ -524,36 +528,52 @@ function parseTimeout(value) {
   return parsed;
 }
 
-function requiredCredential(value, name) {
+function requiredCredential(value, name, setup) {
   if (typeof value !== "string" || value.length === 0) {
     throw new SprutHubError(
       "configuration",
-      `${name} is required when SPRUTHUB_TOKEN is not configured.`,
+      credentialSetupMessage(setup),
       "configure_credentials",
-      {
-        credential_setup: {
-          file: "~/.config/sprut-agent/connection.env",
-          required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
-          permissions: "0600",
-          launch:
-            "node --env-file=$HOME/.config/sprut-agent/connection.env /absolute/path/to/sprut-agent/src/server.mjs",
-          secret_handling:
-            "Create and fill the file locally; do not send credentials in chat.",
-        },
-      },
+      { credential_setup: setup, missing_field: name },
     );
   }
   return value;
 }
 
+function credentialSetup(env) {
+  const file = path.join(
+    resolveConfigRoot(env),
+    "sprut-agent",
+    "connection.env",
+  );
+  const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
+  return {
+    file,
+    required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
+    permissions: "0600",
+    launch: `${shellQuote(process.execPath)} --env-file=${shellQuote(file)} ${shellQuote(server)}`,
+    secret_handling:
+      "Create and fill the file locally; do not send credentials in chat.",
+  };
+}
+
+function credentialSetupMessage(setup) {
+  return `Configure SprutHub locally: create ${shellQuote(setup.file)} with ${setup.required_fields.join(" and ")}, set mode ${setup.permissions}, then restart with ${setup.launch}. Do not send credential values in chat.`;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function resolveConfigRoot(env) {
+  if (env.XDG_CONFIG_HOME) return path.resolve(env.XDG_CONFIG_HOME);
+  return path.join(env.HOME ? path.resolve(env.HOME) : homedir(), ".config");
+}
+
 function resolveSessionFile(env) {
-  if (env.SPRUT_AGENT_SESSION_FILE) {
+  if (env.SPRUT_AGENT_SESSION_FILE)
     return path.resolve(env.SPRUT_AGENT_SESSION_FILE);
-  }
-  const configRoot = env.XDG_CONFIG_HOME
-    ? path.resolve(env.XDG_CONFIG_HOME)
-    : path.join(homedir(), ".config");
-  return path.join(configRoot, "sprut-agent", "session.json");
+  return path.join(resolveConfigRoot(env), "sprut-agent", "session.json");
 }
 
 async function loadSession(file, expected) {
