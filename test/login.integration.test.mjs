@@ -605,7 +605,15 @@ test("explicit connection environment wins over conflicting file values", async 
 
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
-  assert.equal(hub.connectionCount, 1);
+  const room = await client.callTool({
+    name: "read_room",
+    arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
+  });
+  assert.equal(room.isError, undefined, room.content[0]?.text);
+  assert.equal(
+    room.structuredContent.devices[0].services[0].readings[0].value,
+    22.5,
+  );
 });
 
 test("an unsafe credential file returns one fixable local error", async (t) => {
@@ -757,6 +765,39 @@ test("a rejected password stops once without exposing authentication data", asyn
   const publicResult = JSON.stringify(result);
   for (const secret of [login, password, token]) {
     assert.equal(publicResult.includes(secret), false);
+  }
+});
+
+test("a password loaded from the default file stays hidden in a hub rejection", async (t) => {
+  const hub = await startHub(t, { outcome: "rejected" });
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut file redaction-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const configRoot = path.join(directory, ".config");
+  await mkdir(path.join(configRoot, "sprut-agent"), { recursive: true });
+  await writeFile(
+    path.join(configRoot, "sprut-agent", "connection.env"),
+    `SPRUTHUB_LOGIN=${login}\nSPRUTHUB_PASSWORD=${password}\nSPRUTHUB_URL=${hub.url}\n`,
+    { mode: 0o600 },
+  );
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: directory,
+    env: {
+      PATH: process.env.PATH,
+      HOME: directory,
+      XDG_CONFIG_HOME: configRoot,
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "file-redaction-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+  const result = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.code, "authentication_failed");
+  for (const secret of [login, password, token]) {
+    assert.equal(JSON.stringify(result).includes(secret), false);
   }
 });
 

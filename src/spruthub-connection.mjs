@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { parseEnv } from "node:util";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { argon2id } from "hash-wasm";
 import { WebSocket } from "ws";
@@ -27,6 +27,15 @@ const MAX_AUTH_STEPS = 8;
 const MAX_ARGON_MEMORY_KIB = 256 * 1024;
 const MAX_ARGON_ITERATIONS = 10;
 const MAX_ARGON_PARALLELISM = 8;
+const CONNECTION_ENV_FIELDS = [
+  "SPRUTHUB_LOGIN",
+  "SPRUTHUB_PASSWORD",
+  "SPRUTHUB_TOKEN",
+  "SPRUTHUB_URL",
+  "SPRUTHUB_SERIAL",
+  "SPRUTHUB_CID",
+  "SPRUTHUB_TIMEOUT_MS",
+];
 const localCredentialConfigurationErrors = new WeakSet();
 
 export function isLocalCredentialConfigurationError(error) {
@@ -68,6 +77,13 @@ export class SprutHubConnection {
   }
 
   async #createClient() {
+    const setup = credentialSetup(this.#env);
+    this.#env = await loadCredentialFile(this.#env, setup);
+    this.#remember(
+      this.#env.SPRUTHUB_LOGIN,
+      this.#env.SPRUTHUB_PASSWORD,
+      this.#env.SPRUTHUB_TOKEN,
+    );
     const timeoutMs = parseTimeout(this.#env.SPRUTHUB_TIMEOUT_MS);
     if (this.#env.SPRUTHUB_TOKEN) {
       return new SprutHubClient({
@@ -79,7 +95,6 @@ export class SprutHubConnection {
       });
     }
 
-    const setup = credentialSetup(this.#env);
     const login = requiredCredential(
       this.#env.SPRUTHUB_LOGIN,
       "SPRUTHUB_LOGIN",
@@ -553,19 +568,18 @@ function credentialSetup(env) {
     "sprut-agent",
     "connection.env",
   );
-  const server = fileURLToPath(new URL("./server.mjs", import.meta.url));
   return {
     file,
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    launch: `${shellQuote(process.execPath)} --env-file=${shellQuote(file)} ${shellQuote(server)}`,
+    restart: "Restart the same MCP application after saving the file.",
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
   };
 }
 
 function credentialSetupMessage(setup) {
-  return `Configure SprutHub locally: create ${shellQuote(setup.file)} with ${setup.required_fields.join(" and ")}, set mode ${setup.permissions}, then restart with ${setup.launch}. Do not send credential values in chat.`;
+  return `Configure SprutHub locally: create ${shellQuote(setup.file)} with ${setup.required_fields.join(" and ")}, set mode ${setup.permissions}, then restart the same MCP application. Do not send credential values in chat.`;
 }
 
 function shellQuote(value) {
@@ -575,6 +589,47 @@ function shellQuote(value) {
 function resolveConfigRoot(env) {
   if (env.XDG_CONFIG_HOME) return path.resolve(env.XDG_CONFIG_HOME);
   return path.join(env.HOME ? path.resolve(env.HOME) : homedir(), ".config");
+}
+
+async function loadCredentialFile(env, setup) {
+  let info;
+  try {
+    info = await stat(setup.file);
+  } catch (error) {
+    if (error.code === "ENOENT") return env;
+    throw credentialFileError(setup);
+  }
+  if (!info.isFile() || (info.mode & 0o077) !== 0) {
+    throw credentialFileError(setup);
+  }
+
+  let parsed;
+  try {
+    parsed = parseEnv(await readFile(setup.file, "utf8"));
+  } catch {
+    throw credentialFileError(setup);
+  }
+  const merged = { ...env };
+  for (const name of CONNECTION_ENV_FIELDS) {
+    if (
+      (!Object.hasOwn(env, name) || env[name] === undefined) &&
+      Object.hasOwn(parsed, name)
+    ) {
+      merged[name] = parsed[name];
+    }
+  }
+  return merged;
+}
+
+function credentialFileError(setup) {
+  const error = new SprutHubError(
+    "credential_file_unavailable",
+    `Cannot use local SprutHub credential file ${shellQuote(setup.file)}. Make it a regular readable file with mode ${setup.permissions}, then restart the same MCP application.`,
+    "fix_credential_file",
+    { credential_setup: setup },
+  );
+  localCredentialConfigurationErrors.add(error);
+  return error;
 }
 
 function resolveSessionFile(env) {
