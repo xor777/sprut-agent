@@ -242,6 +242,7 @@ async function startHub() {
       closeAfterCharacteristicUpdate: false,
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
+      holdNextWindowUpdate: false,
       failNextCharacteristicGet: false,
       failNextWindowGet: false,
       failWindowGetAfterUpdate: false,
@@ -364,6 +365,10 @@ async function startHub() {
           }
         }
         state.behavior.dropNextWindowUpdate = false;
+        if (state.behavior.holdNextWindowUpdate) {
+          state.behavior.holdNextWindowUpdate = false;
+          return;
+        }
         if (state.behavior.failWindowGetAfterUpdate) {
           state.behavior.failWindowGetAfterUpdate = false;
           state.behavior.failNextWindowGet = true;
@@ -750,6 +755,42 @@ test("a lost executed window write is reconciled without another update", async 
   assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 });
 
+test("a lost apply readback can be restored without a preliminary get", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  hub.state.behavior.failWindowGetAfterUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.write_intent.direction, "apply");
+  assert.equal(hub.state.window.options[0].value.intValue, 0);
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.applied_value_observed, true);
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
+});
+
 test("window option contract rejects controls outside the reversible setting slice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -953,6 +994,50 @@ test("an uncertain restore cannot be turned back into apply", async (t) => {
   assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 });
 
+test("a restore interrupted before readback cannot be turned back into apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.holdNextWindowUpdate = true;
+  const interruptedRestore = firstClient
+    .callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    })
+    .catch((error) => error);
+  await waitFor(
+    () => hub.requests.filter(({ window }) => window?.update).length === 2,
+  );
+  await firstClient.close();
+  await interruptedRestore;
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const reconciled = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(reconciled.isError, undefined, reconciled.content[0]?.text);
+  assert.equal(reconciled.structuredContent.status, "restored");
+  assert.equal(reconciled.structuredContent.write_intent.direction, "restore");
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
+});
+
 test("a terminal window restore is explicit that no fresh readback occurred", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -1010,6 +1095,14 @@ async function startClient(t, hub, stateDirectory) {
   await client.connect(transport);
   t.after(async () => client.close());
   return client;
+}
+
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function setup(t) {
