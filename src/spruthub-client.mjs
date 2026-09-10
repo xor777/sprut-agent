@@ -448,27 +448,30 @@ export class SprutHubClient {
   }
 
   async #readEntity(parsed, requested, deadline) {
+    let entity;
+    let ownerContext = {};
     if (parsed.kind === "home") {
-      return { kind: "home", ref: homeRef(parsed.serial) };
-    }
-    if (parsed.kind === "room") {
-      return this.#readRoomEntity(parsed, deadline);
-    }
-    if (
+      entity = { kind: "home", ref: homeRef(parsed.serial) };
+    } else if (parsed.kind === "room") {
+      entity = await this.#readRoomEntity(parsed, deadline);
+    } else if (
       ["accessory", "service", "characteristic", "logic"].includes(parsed.kind)
     ) {
-      return this.#readAccessoryEntity(parsed, requested, deadline);
+      ({ entity, ownerContext } = await this.#readAccessoryEntity(
+        parsed,
+        requested,
+        deadline,
+      ));
+    } else if (parsed.kind === "scenario") {
+      entity = await this.#readScenarioEntity(parsed, requested, deadline);
+    } else if (parsed.kind === "extension") {
+      entity = await this.#readExtensionEntity(parsed, deadline);
+    } else if (parsed.kind === "window") {
+      entity = await this.#readWindowEntity(parsed, requested, deadline);
+    } else {
+      throw invalidEntityRef();
     }
-    if (parsed.kind === "scenario") {
-      return this.#readScenarioEntity(parsed, requested, deadline);
-    }
-    if (parsed.kind === "extension") {
-      return this.#readExtensionEntity(parsed, deadline);
-    }
-    if (parsed.kind === "window") {
-      return this.#readWindowEntity(parsed, requested, deadline);
-    }
-    throw invalidEntityRef();
+    return addIncludeResolution(entity, requested, ownerContext);
   }
 
   async #readRoomEntity(parsed, deadline) {
@@ -524,6 +527,12 @@ export class SprutHubClient {
     );
     const observedAt = response.responseReceivedAt;
     validateAccessory(accessory);
+    const ownerContext = {
+      device_window_ref:
+        typeof accessory.deviceWindow === "string"
+          ? windowRef(parsed.serial, accessory.deviceWindow)
+          : null,
+    };
     if (parsed.kind === "accessory") {
       const entity = normalizeAccessoryDetail(
         parsed.serial,
@@ -551,19 +560,22 @@ export class SprutHubClient {
           ),
         );
       }
-      return entity;
+      return { entity, ownerContext };
     }
     const service = accessory.services?.find(
       ({ sId }) => sId === parsed.serviceId,
     );
     if (!service) throw entityNotFound("service");
     if (parsed.kind === "service") {
-      return normalizeServiceDetail(
-        parsed.serial,
-        accessory,
-        service,
-        observedAt,
-      );
+      return {
+        entity: normalizeServiceDetail(
+          parsed.serial,
+          accessory,
+          service,
+          observedAt,
+        ),
+        ownerContext,
+      };
     }
     if (parsed.kind === "logic") {
       const logics = await this.#readLogics(
@@ -574,7 +586,10 @@ export class SprutHubClient {
       );
       const logic = logics.find(({ type }) => type === parsed.logicType);
       if (!logic) throw entityNotFound("logic");
-      return normalizeLogic(parsed.serial, accessory.id, service.sId, logic);
+      return {
+        entity: normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
+        ownerContext,
+      };
     }
     const characteristic = service.characteristics?.find(
       ({ cId }) => cId === parsed.characteristicId,
@@ -587,7 +602,7 @@ export class SprutHubClient {
       characteristic,
       observedAt,
     );
-    if (isRedactedNode(entity)) return entity;
+    if (isRedactedNode(entity)) return { entity, ownerContext };
     if (requested.has("options")) {
       const optionsResponse = await this.#request(
         {
@@ -602,11 +617,13 @@ export class SprutHubClient {
         deadline,
         { serial: parsed.serial },
       );
-      entity.options = extractEntityArray(
-        optionsResponse,
-        ["characteristic", "getOptions", "options"],
-        true,
-      ).map(normalizeOption);
+      entity.options = extractEntityArray(optionsResponse, [
+        "characteristic",
+        "getOptions",
+        "options",
+      ]).map(normalizeOption);
+      entity.option_scope.status =
+        entity.options.length === 0 ? "checked_empty" : "found";
     }
     if (requested.has("relations")) {
       const [logics, linksResponse, scenariosResponse] = await Promise.all([
@@ -661,7 +678,7 @@ export class SprutHubClient {
         ),
       );
     }
-    return entity;
+    return { entity, ownerContext };
   }
 
   async #readAccessoryRelations(serial, accessory, deadline) {
@@ -961,10 +978,31 @@ function extractArray(response, path, missingMeansEmpty = false) {
 }
 
 function extractEntityArray(response, path, missingMeansEmpty = false) {
-  let value = response.result;
-  for (const key of path) value = value?.[key];
+  let container = response.result;
+  for (const key of path.slice(0, -1)) {
+    if (
+      !container ||
+      typeof container !== "object" ||
+      Array.isArray(container) ||
+      !Object.hasOwn(container, key)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible entity list.",
+      );
+    }
+    container = container[key];
+  }
+  if (!container || typeof container !== "object" || Array.isArray(container)) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible entity list.",
+    );
+  }
+  const key = path.at(-1);
+  const value = container[key];
   if (Array.isArray(value)) return value;
-  if (missingMeansEmpty && value === undefined) return [];
+  if (missingMeansEmpty && !Object.hasOwn(container, key)) return [];
   throw new SprutHubError(
     "incompatible_response",
     "SprutHub returned an incompatible entity list.",
@@ -1314,14 +1352,15 @@ function normalizeCharacteristicDetail(
   }
   if (isSensitiveNativeNode(control)) return redactedNode();
   const value = extractTypedValue(control.value);
+  const ref = characteristicRef(
+    serial,
+    accessory.id,
+    service.sId,
+    characteristic.cId,
+  );
   return {
     kind: "characteristic",
-    ref: characteristicRef(
-      serial,
-      accessory.id,
-      service.sId,
-      characteristic.cId,
-    ),
+    ref,
     name: control.name,
     type: control.type ?? control.key,
     current_value: {
@@ -1343,11 +1382,181 @@ function normalizeCharacteristicDetail(
         value: extractTypedValue(validValue.value).value,
       })),
     },
+    option_scope: {
+      native_has_options:
+        typeof characteristic.hasOptions === "boolean"
+          ? characteristic.hasOptions
+          : null,
+      status: "not_read",
+      next: {
+        tool: "get_entity",
+        arguments: { entity_ref: ref, include: ["options"] },
+      },
+    },
     freshness: {
       observed_at: observedAt,
       source_timestamp: null,
     },
   };
+}
+
+function addIncludeResolution(entity, requested, ownerContext) {
+  if (isRedactedNode(entity) || requested.size === 0) return entity;
+  const requestedIncludes = [...requested];
+  const applied = requestedIncludes.filter((include) =>
+    includeWasApplied(entity, include),
+  );
+  const notApplied = requestedIncludes
+    .filter((include) => !includeWasApplied(entity, include))
+    .map((include) => explainUnappliedInclude(entity, include, ownerContext));
+  return {
+    ...entity,
+    include_resolution: {
+      requested: requestedIncludes,
+      applied,
+      not_applied: notApplied,
+    },
+  };
+}
+
+function includeWasApplied(entity, include) {
+  if (include === "configuration") {
+    return entity.kind === "scenario" && Object.hasOwn(entity, "configuration");
+  }
+  if (include === "options") {
+    return entity.kind === "characteristic" && Object.hasOwn(entity, "options");
+  }
+  if (include === "relations") {
+    return (
+      ["accessory", "characteristic"].includes(entity.kind) &&
+      Object.hasOwn(entity, "relations")
+    );
+  }
+  if (include === "physical_configuration") {
+    return (
+      (["accessory", "characteristic"].includes(entity.kind) &&
+        Object.hasOwn(entity, "physical_configuration")) ||
+      (entity.kind === "window" && Object.hasOwn(entity, "options"))
+    );
+  }
+  if (include === "diagnostics") {
+    return (
+      ["accessory", "characteristic", "window"].includes(entity.kind) &&
+      Object.hasOwn(entity, "diagnostics")
+    );
+  }
+  return false;
+}
+
+function explainUnappliedInclude(entity, include, ownerContext) {
+  const next = nextReadTowardOwner(entity, include, ownerContext);
+  if (next) {
+    return {
+      include,
+      reason: ownerScopeReason(entity, include),
+      next,
+    };
+  }
+  return {
+    include,
+    reason: "not_supported_for_entity",
+    limitation:
+      "No safe owning-entity reference for this include is available in this result.",
+  };
+}
+
+function nextReadTowardOwner(entity, include, ownerContext) {
+  if (entity.kind === "home") {
+    return {
+      tool: "inspect_home",
+      arguments: { home_ref: entity.ref },
+    };
+  }
+
+  if (
+    ["physical_configuration", "diagnostics"].includes(include) &&
+    Object.hasOwn(ownerContext, "device_window_ref")
+  ) {
+    if (typeof ownerContext.device_window_ref !== "string") return null;
+    return {
+      tool: "get_entity",
+      arguments: {
+        entity_ref: ownerContext.device_window_ref,
+        include: [include],
+      },
+    };
+  }
+
+  const containerRoute = ownerCandidatesFromContainer(entity, include);
+  if (containerRoute.length > 0) {
+    return { tool: "get_entity", candidates: containerRoute };
+  }
+
+  if (
+    entity.kind === "extension" &&
+    typeof entity.options_window_ref === "string" &&
+    ["options", "physical_configuration", "diagnostics"].includes(include)
+  ) {
+    return {
+      tool: "get_entity",
+      arguments: {
+        entity_ref: entity.options_window_ref,
+        ...(["physical_configuration", "diagnostics"].includes(include)
+          ? { include: [include] }
+          : {}),
+      },
+    };
+  }
+
+  return null;
+}
+
+function ownerCandidatesFromContainer(entity, include) {
+  if (
+    entity.kind === "room" &&
+    ["options", "relations", "physical_configuration", "diagnostics"].includes(
+      include,
+    )
+  ) {
+    return entity.accessories.map(({ ref }) => ({
+      entity_ref: ref,
+      include: [include],
+    }));
+  }
+
+  if (
+    ["accessory", "service"].includes(entity.kind) &&
+    ["options", "relations"].includes(include)
+  ) {
+    const services = entity.kind === "accessory" ? entity.services : [entity];
+    return services.flatMap((service) =>
+      (service.characteristics ?? [])
+        .filter((characteristic) => !isRedactedNode(characteristic))
+        .map((characteristic) => ({
+          entity_ref: characteristic.ref,
+          include: [include],
+          ...(include === "options"
+            ? {
+                native_has_options:
+                  characteristic.option_scope.native_has_options,
+              }
+            : {}),
+        })),
+    );
+  }
+
+  return [];
+}
+
+function ownerScopeReason(entity, include) {
+  if (entity.kind === "home") return "catalog_required";
+  if (entity.kind === "extension") return "window_scoped";
+  if (include === "configuration") return "scenario_scoped";
+  if (include === "options") return "characteristic_scoped";
+  if (["physical_configuration", "diagnostics"].includes(include)) {
+    return "device_window_scoped";
+  }
+  return "related_entity_scoped";
 }
 
 function normalizeOption(option) {
