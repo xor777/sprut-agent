@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   readlink,
+  realpath,
   rm,
   stat,
   symlink,
@@ -305,8 +306,9 @@ test("installation reports an occupied product MCP name and works after explicit
 test("Codex completes the transition from the prior manual skill without removing it", {
   timeout: 30_000,
 }, async (t) => {
-  const scratch = await mkdtemp(
-    path.join(tmpdir(), "sprut-plugin-transition-"),
+  // Codex reports canonical paths; macOS tmpdir can use the /var symlink.
+  const scratch = await realpath(
+    await mkdtemp(path.join(tmpdir(), "sprut-plugin-transition-")),
   );
   const marketplaceRoot = path.join(scratch, "marketplace");
   const codexHome = path.join(scratch, "codex-home");
