@@ -264,7 +264,7 @@ server.registerTool(
   {
     title: "Restore a native SprutHub configuration change",
     description:
-      "Restore the saved BLOCK baseline, or delete a BLOCK created by this change, only while the current configuration still matches the applied snapshot. Manual or unknown edits are preserved as a conflict. Characteristic runtime commands are not reversible through this tool.",
+      "Restore the saved BLOCK baseline, or delete a BLOCK created by this change, only while the current configuration still matches the applied snapshot and current bindings remain valid. Manual or unknown edits are preserved as a conflict. Restored is terminal for this change ref. Characteristic runtime commands are not reversible through this tool.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
@@ -284,7 +284,7 @@ server.registerTool(
   {
     title: "Find recorded SprutHub changes",
     description:
-      "Return a bounded history of native and legacy automation changes for the configured home, optionally filtered by one exact affected entity ref. Each summary gives a stable change ref and the tool call for current reconciliation; discovery does not authorize restoration.",
+      "Return a bounded history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. BLOCK history includes its scenario and known accessory, service and characteristic bindings before and after an update. Each summary gives a stable change ref and the tool call for current reconciliation; discovery does not authorize restoration.",
     inputSchema: {
       home_ref: z.string().min(1),
       entity_ref: z.string().min(1).optional(),
@@ -307,7 +307,7 @@ server.registerTool(
   {
     title: "Apply a prepared native SprutHub change",
     description:
-      "Apply one prepared native change after comparing its current state with the saved baseline. Intent is persisted before send; native ACK and readback are reported separately. Inspect an uncertain change instead of blindly repeating it.",
+      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. Inspect an uncertain change instead of blindly repeating it.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
@@ -327,7 +327,7 @@ server.registerTool(
   {
     title: "Inspect a native SprutHub change",
     description:
-      "Read a prepared native change and reconcile its current observed state after interruption or restart without sending the write again.",
+      "Read a prepared native change and reconcile its current observed state after interruption or restart without sending the write again. verification.fresh distinguishes a new readback from a saved operation outcome.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: readOnlyAnnotations,
   },

@@ -77,6 +77,7 @@ export class AutomationService {
       requested_value: requestedValue,
       native_write_sent: false,
       native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
       created_at: now,
       updated_at: now,
       history: [{ status: "prepared", at: now }],
@@ -124,6 +125,7 @@ export class AutomationService {
       },
       native_write_sent: false,
       native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
       created_at: now,
       updated_at: now,
       history: [{ status: "prepared", at: now }],
@@ -163,6 +165,7 @@ export class AutomationService {
       requested_snapshot: { ...structuredClone(baseline), data },
       native_write_sent: false,
       native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
       created_at: now,
       updated_at: now,
       history: [{ status: "prepared", at: now }],
@@ -182,26 +185,35 @@ export class AutomationService {
   }
 
   async #applyCharacteristicChange(change) {
-    const current = await this.#readCharacteristicValue(change);
+    if (["applying", "uncertain"].includes(change.status)) {
+      return this.#reconcileCharacteristicAfterWrite(change);
+    }
     if (change.status === "applied") {
+      const current = await this.#readCharacteristicValue(change);
       return valuesEqual(current, change.requested_value)
-        ? publicNativeChange(change, current)
+        ? this.#recordNativeObservation(
+            change,
+            current,
+            "requested_value_observed",
+          )
         : this.#finishNative(change, "conflict", current, {
             conflict_reason: "value_changed_after_apply",
+            last_verification: freshVerification("conflict"),
           });
     }
-    if (["applying", "uncertain"].includes(change.status)) {
-      return valuesEqual(current, change.requested_value)
-        ? this.#finishNative(change, "applied", current)
-        : this.#finishNative(change, "uncertain", current);
-    }
+    const { value: current, contract } = await this.#readCharacteristicState(
+      change,
+      { requireWrite: true },
+    );
+    validateCharacteristicValue(change.requested_value.value, contract);
     if (!valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "baseline_changed",
+        last_verification: freshVerification("conflict"),
       });
     }
 
-    await this.#persistNativeIntent(change, "applying");
+    await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.client.updateCharacteristic({
         ...change.target,
@@ -210,6 +222,7 @@ export class AutomationService {
         },
       });
       change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
         await this.#finishNative(change, "not_applied", current);
@@ -225,15 +238,20 @@ export class AutomationService {
       const observed = await this.#readCharacteristicValue(change);
       return valuesEqual(observed, change.requested_value)
         ? this.#finishNative(change, "applied", observed, {
+            last_verification: freshVerification("requested_value_observed"),
             ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
           })
         : this.#finishNative(change, "uncertain", observed, {
+            last_verification: freshVerification("requested_value_missing"),
             ...(acknowledged
               ? { conflict_reason: "ack_without_requested_result" }
               : {}),
           });
-    } catch {
-      return this.#finishNative(change, "uncertain");
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
     }
   }
 
@@ -246,14 +264,18 @@ export class AutomationService {
     let current;
     try {
       current = await this.#readCharacteristicValue(change);
-    } catch {
-      return publicNativeChange(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
     }
     if (
       ["applying", "uncertain"].includes(change.status) &&
       valuesEqual(current, change.requested_value)
     ) {
-      return this.#finishNative(change, "applied", current);
+      return this.#finishNative(change, "applied", current, {
+        last_verification: freshVerification("requested_value_observed"),
+      });
     }
     if (
       change.status === "applied" &&
@@ -261,9 +283,16 @@ export class AutomationService {
     ) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "value_changed_after_apply",
+        last_verification: freshVerification("conflict"),
       });
     }
-    return publicNativeChange(change, current);
+    return this.#recordNativeObservation(
+      change,
+      current,
+      valuesEqual(current, change.requested_value)
+        ? "requested_value_observed"
+        : "current_value_observed",
+    );
   }
 
   async restoreNativeChange(changeReference) {
@@ -284,12 +313,14 @@ export class AutomationService {
   async listNativeChanges({ home_ref: homeRef, entity_ref: entityRef, limit }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     if (entityRef !== undefined) requireEntityHome(entityRef, this.hubSerial);
-    const all = (await this.store.list())
+    const storedChanges = await this.store.list();
+    await this.#reconcileHistoryScenario(storedChanges, entityRef);
+    const all = storedChanges
       .filter(
         (change) =>
           change.home_ref === undefined || change.home_ref === homeRef,
       )
-      .map(changeSummary)
+      .map((change) => changeSummary(change, homeRef))
       .filter(
         (change) =>
           entityRef === undefined || change.target_refs.includes(entityRef),
@@ -302,6 +333,34 @@ export class AutomationService {
       changes: all.slice(0, limit),
       truncated: all.length > limit,
     };
+  }
+
+  async #reconcileHistoryScenario(changes, entityRef) {
+    if (entityRef === undefined) return;
+    let target;
+    try {
+      target = parseScenarioRef(entityRef, this.hubSerial);
+    } catch {
+      return;
+    }
+    const candidates = changes.filter(
+      (change) =>
+        change.kind === "block_create" &&
+        !change.scenario_index &&
+        ["applying", "uncertain"].includes(change.status) &&
+        nativeIntentDirection(change) === "apply",
+    );
+    if (candidates.length === 0) return;
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) return;
+    for (const change of candidates) {
+      if (
+        typeof scenario.desc === "string" &&
+        scenario.desc.includes(`[${change.marker}]`)
+      ) {
+        await this.#reconcileObservedBlockApply(change, scenario, false);
+      }
+    }
   }
 
   async #requireNativeChange(id) {
@@ -323,9 +382,11 @@ export class AutomationService {
     return change;
   }
 
-  async #readCharacteristicValue(change) {
+  async #readCharacteristicState(change, { requireWrite = false } = {}) {
     const characteristic = await this.client.getCharacteristic(change.target);
-    const contract = characteristicContract(characteristic.control);
+    const contract = characteristicContract(characteristic.control, {
+      requireWrite,
+    });
     if (
       contract.type !== change.contract.type ||
       contract.kind !== change.contract.kind
@@ -336,7 +397,14 @@ export class AutomationService {
         "prepare_native_change",
       );
     }
-    return typedNativeValue(characteristic.control.value);
+    return {
+      value: typedNativeValue(characteristic.control.value),
+      contract,
+    };
+  }
+
+  async #readCharacteristicValue(change) {
+    return (await this.#readCharacteristicState(change)).value;
   }
 
   async #finishNative(change, status, observedValue, extra = {}) {
@@ -352,16 +420,54 @@ export class AutomationService {
       ...(observedValue ? { observed_value: observedValue } : {}),
       updated_at: now,
     });
+    change.write_intent = change.write_intent
+      ? {
+          ...change.write_intent,
+          phase: status === "uncertain" ? "needs_reconciliation" : "reconciled",
+        }
+      : change.write_intent;
+    if (status === "conflict") change.configuration_matches = false;
+    if (
+      status === "uncertain" &&
+      !Object.hasOwn(extra, "configuration_matches")
+    )
+      change.configuration_matches = undefined;
     change.history.push({ status, at: now });
     const saved = await this.#trySave(change);
-    return withLocalState(publicNativeChange(change, observedValue), saved);
+    return withLocalState(
+      publicNativeChange(change, observedValue),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
   }
 
-  async #persistNativeIntent(change, status) {
+  async #recordNativeObservation(change, observedValue, result) {
+    change.observed_value = observedValue;
+    change.last_verification = freshVerification(result);
+    change.updated_at = new Date().toISOString();
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change, observedValue),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
+  }
+
+  async #persistNativeIntent(change, status, direction) {
     const now = new Date().toISOString();
     Object.assign(change, {
       status,
       native_write_sent: true,
+      native_acknowledged: false,
+      configuration_matches: undefined,
+      conflict_reason: undefined,
+      recovered_after_uncertain_write: undefined,
+      write_intent: {
+        direction,
+        phase: "sending",
+        acknowledged: false,
+        at: now,
+      },
       updated_at: now,
     });
     change.history.push({ status, at: now });
@@ -369,37 +475,35 @@ export class AutomationService {
   }
 
   async #applyBlockChange(change) {
+    if (change.status === "restored") return publicNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileBlockRestore(change, false)
+        : this.#reconcileBlockAfterWrite(change, false);
+    }
     const current = await this.#observeBlock(change);
     if (change.status === "applied") {
       return blockMatchesApplied(change, current)
-        ? publicNativeChange(change)
+        ? this.#recordBlockObservation(change, true, "applied_configuration")
         : this.#finishNative(change, "conflict", undefined, {
             conflict_reason: "manual_change",
+            configuration_matches: false,
+            last_verification: freshVerification("conflict"),
           });
-    }
-    if (["applying", "uncertain"].includes(change.status)) {
-      if (blockMatchesRequested(change, current)) {
-        return this.#finishNative(change, "applied", undefined, {
-          scenario_index: current.index,
-          applied_snapshot: scenarioSnapshot(current),
-          configuration_matches: true,
-          recovered_after_uncertain_write: true,
-        });
-      }
-      if (blockStillAtBaseline(change, current)) {
-        return this.#finishNative(change, "uncertain");
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-      });
     }
     if (!blockStillAtBaseline(change, current)) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "baseline_changed",
+        configuration_matches: false,
+        last_verification: freshVerification("conflict"),
       });
     }
+    await validateBlockData(change.requested_snapshot.data, this.client, {
+      allowUnknownFrom:
+        change.kind === "block_create" ? null : scenarioSnapshot(current).data,
+    });
 
-    await this.#persistNativeIntent(change, "applying");
+    await this.#persistNativeIntent(change, "applying", "apply");
     try {
       if (change.kind === "block_create") {
         const created = await this.client.createScenario(
@@ -413,6 +517,7 @@ export class AutomationService {
         );
       }
       change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
         await this.#finishNative(change, "not_applied");
@@ -426,21 +531,12 @@ export class AutomationService {
   async #reconcileBlockAfterWrite(change, acknowledged) {
     try {
       const current = await this.#observeBlock(change);
-      if (blockMatchesRequested(change, current)) {
-        return this.#finishNative(change, "applied", undefined, {
-          scenario_index: current.index,
-          applied_snapshot: scenarioSnapshot(current),
-          configuration_matches: true,
-          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-        });
-      }
+      return this.#reconcileObservedBlockApply(change, current, acknowledged);
+    } catch (error) {
       return this.#finishNative(change, "uncertain", undefined, {
-        ...(acknowledged
-          ? { conflict_reason: "ack_without_requested_result" }
-          : {}),
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
       });
-    } catch {
-      return this.#finishNative(change, "uncertain");
     }
   }
 
@@ -448,37 +544,59 @@ export class AutomationService {
     let current;
     try {
       current = await this.#observeBlock(change);
-    } catch {
-      return publicNativeChange(change);
-    }
-    if (
-      ["applying", "uncertain"].includes(change.status) &&
-      blockMatchesRequested(change, current)
-    ) {
-      return this.#finishNative(change, "applied", undefined, {
-        scenario_index: current.index,
-        applied_snapshot: scenarioSnapshot(current),
-        configuration_matches: true,
-        recovered_after_uncertain_write: true,
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+        configurationMatches: undefined,
       });
+    }
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileObservedBlockRestore(change, current, false)
+        : this.#reconcileObservedBlockApply(change, current, false);
+    }
+    if (change.status === "restored") {
+      return this.#recordBlockObservation(
+        change,
+        blockMatchesBaseline(change, current),
+        "baseline_configuration",
+      );
     }
     if (change.status === "applied" && !blockMatchesApplied(change, current)) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("conflict"),
       });
     }
-    return publicNativeChange(change);
+    return this.#recordBlockObservation(
+      change,
+      change.status === "applied" && blockMatchesApplied(change, current),
+      "current_configuration_observed",
+    );
   }
 
   async #restoreBlockChange(change) {
-    const current = await this.#observeBlock(change);
     if (change.status === "restored") return publicNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileBlockRestore(change, false)
+        : this.#reconcileBlockAfterWrite(change, false);
+    }
+    const current = await this.#observeBlock(change);
     if (!change.applied_snapshot || !blockMatchesApplied(change, current)) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("conflict"),
       });
     }
-    await this.#persistNativeIntent(change, "restoring");
+    if (change.kind === "block_data_update") {
+      await validateBlockData(change.baseline_snapshot.data, this.client, {
+        allowUnknownFrom: scenarioSnapshot(current).data,
+      });
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       if (change.kind === "block_create") {
         await this.client.deleteScenario(change.scenario_index);
@@ -489,6 +607,7 @@ export class AutomationService {
         );
       }
       change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
         await this.#finishNative(change, "applied");
@@ -502,20 +621,68 @@ export class AutomationService {
   async #reconcileBlockRestore(change, acknowledged) {
     try {
       const current = await this.#observeBlock(change);
-      if (blockMatchesBaseline(change, current)) {
-        return this.#finishNative(change, "restored", undefined, {
-          configuration_matches: true,
-          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-        });
-      }
+      return this.#reconcileObservedBlockRestore(change, current, acknowledged);
+    } catch (error) {
       return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+  }
+
+  async #reconcileObservedBlockApply(change, current, acknowledged) {
+    if (blockMatchesRequested(change, current)) {
+      return this.#finishNative(change, "applied", undefined, {
+        scenario_index: current.index,
+        applied_snapshot: scenarioSnapshot(current),
+        configuration_matches: true,
+        last_verification: freshVerification("applied_configuration"),
+        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+      });
+    }
+    if (blockStillAtBaseline(change, current)) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: false,
+        last_verification: freshVerification("baseline_configuration"),
         ...(acknowledged
           ? { conflict_reason: "ack_without_requested_result" }
           : {}),
       });
-    } catch {
-      return this.#finishNative(change, "uncertain");
     }
+    return this.#finishNative(change, "conflict", undefined, {
+      conflict_reason: "manual_change",
+      configuration_matches: false,
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  async #reconcileObservedBlockRestore(change, current, acknowledged) {
+    if (blockMatchesBaseline(change, current)) {
+      return this.#finishNative(change, "restored", undefined, {
+        configuration_matches: true,
+        last_verification: freshVerification("baseline_configuration"),
+        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      configuration_matches: false,
+      last_verification: freshVerification("baseline_configuration_missing"),
+      ...(acknowledged
+        ? { conflict_reason: "ack_without_requested_result" }
+        : {}),
+    });
+  }
+
+  async #recordBlockObservation(change, matches, result) {
+    change.configuration_matches = matches;
+    change.last_verification = freshVerification(result);
+    change.updated_at = new Date().toISOString();
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
   }
 
   async #observeBlock(change) {
@@ -1170,7 +1337,8 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
   if (
     !isRecord(data) ||
     !Array.isArray(data.targets) ||
-    data.targets.length === 0
+    data.targets.length === 0 ||
+    !blockNodeArray(data.targets)
   ) {
     throw invalidBlock("root", "targets must be a non-empty array");
   }
@@ -1194,7 +1362,9 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
     delayIndexes: new Set(),
     triggers: 0,
   };
-  validateTargetArray(data.targets, "targets", context);
+  visitKnownBlockNodes(data, (node, kind, path) => {
+    validateBlockNode(node, kind, path, context);
+  });
   if (context.triggers === 0) {
     throw invalidBlock("targets", "at least one trigger=true is required");
   }
@@ -1252,44 +1422,77 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
   }
 }
 
-function validateTargetArray(targets, path, context) {
-  if (!Array.isArray(targets)) throw invalidBlock(path, "must be an array");
-  targets.forEach((target, index) => {
-    validateTarget(target, `${path}[${index}]`, context);
-  });
-}
-
-function validateTarget(target, path, context) {
-  if (!isRecord(target) || typeof target.type !== "string") {
-    throw invalidBlock(path, "target type is required");
-  }
-  if (target.type === "if") {
+function validateBlockNode(node, kind, path, context) {
+  if (kind === "root") return;
+  if (kind === "if") {
     if (
-      target.mode !== "EVERY" ||
-      target.then_delay !== 0 ||
-      target.else_delay !== 0
+      node.mode !== "EVERY" ||
+      node.then_delay !== 0 ||
+      node.else_delay !== 0 ||
+      !blockNode(node.if) ||
+      !blockNodeArray(node.then) ||
+      !blockNodeArray(node.else)
     ) {
       throw invalidBlock(
         path,
-        "only EVERY with zero branch delays is supported",
+        "only EVERY with a condition and zero-delay branches is supported",
       );
     }
-    validateCondition(target.if, `${path}.if`, context);
-    validateTargetArray(target.then, `${path}.then`, context);
-    validateTargetArray(target.else, `${path}.else`, context);
     return;
   }
-  if (target.type === "service") {
+  if (kind === "condition") {
     if (
-      !stableNativeId(target.aId) ||
-      !stableNativeId(target.sId) ||
-      typeof target.hs !== "string" ||
-      !Array.isArray(target.characteristics) ||
-      target.characteristics.length === 0
+      !["AND", "OR"].includes(node.mode) ||
+      !Array.isArray(node.conditions) ||
+      node.conditions.length === 0 ||
+      !blockNodeArray(node.conditions)
+    ) {
+      throw invalidBlock(path, "AND/OR condition must not be empty");
+    }
+    return;
+  }
+  if (kind === "characteristic") {
+    if (
+      !stableNativeId(node.aId) ||
+      !stableNativeId(node.sId) ||
+      !stableNativeId(node.cId) ||
+      typeof node.hs !== "string" ||
+      typeof node.hc !== "string" ||
+      typeof node.trigger !== "boolean" ||
+      typeof node.cond !== "string" ||
+      typeof node.value !== "string" ||
+      node.timeCond !== "" ||
+      node.time !== 0
+    ) {
+      throw invalidBlock(path, "characteristic condition is incomplete");
+    }
+    if (node.trigger) context.triggers += 1;
+    context.conditions.push({
+      role: "condition",
+      path,
+      aId: node.aId,
+      sId: node.sId,
+      cId: node.cId,
+      hs: node.hs,
+      hc: node.hc,
+      trigger: node.trigger,
+      cond: node.cond,
+      value: node.value,
+    });
+    return;
+  }
+  if (kind === "service") {
+    if (
+      !stableNativeId(node.aId) ||
+      !stableNativeId(node.sId) ||
+      typeof node.hs !== "string" ||
+      !Array.isArray(node.characteristics) ||
+      node.characteristics.length === 0 ||
+      !blockNodeArray(node.characteristics)
     ) {
       throw invalidBlock(path, "service action is incomplete");
     }
-    target.characteristics.forEach((action, index) => {
+    node.characteristics.forEach((action, index) => {
       const actionPath = `${path}.characteristics[${index}]`;
       if (
         !isRecord(action) ||
@@ -1303,87 +1506,44 @@ function validateTarget(target, path, context) {
       context.actions.push({
         role: "action",
         path: actionPath,
-        aId: target.aId,
-        sId: target.sId,
+        aId: node.aId,
+        sId: node.sId,
         cId: action.cId,
-        hs: target.hs,
+        hs: node.hs,
         hc: action.hc,
         value: action.value,
       });
     });
     return;
   }
-  if (target.type === "delay") {
+  if (kind === "set") return;
+  if (kind === "delay") {
     if (
-      !Number.isSafeInteger(target.index) ||
-      target.index < 0 ||
-      context.delayIndexes.has(target.index) ||
-      target.mode !== "RESET" ||
-      !Number.isSafeInteger(target.time) ||
-      target.time <= 0
+      !Number.isSafeInteger(node.index) ||
+      node.index < 0 ||
+      context.delayIndexes.has(node.index) ||
+      node.mode !== "RESET" ||
+      !Number.isSafeInteger(node.time) ||
+      node.time <= 0 ||
+      !blockNodeArray(node.targets)
     ) {
       throw invalidBlock(
         path,
         "RESET delay index/time is invalid or duplicated",
       );
     }
-    context.delayIndexes.add(target.index);
-    validateTargetArray(target.targets, `${path}.targets`, context);
+    context.delayIndexes.add(node.index);
     return;
   }
-  throw invalidBlock(path, `target type ${target.type} is not supported`);
+  throw invalidBlock(path, `node type ${kind ?? "missing"} is not supported`);
 }
 
-function validateCondition(condition, path, context) {
-  if (!isRecord(condition) || typeof condition.type !== "string") {
-    throw invalidBlock(path, "condition type is required");
-  }
-  if (condition.type === "condition") {
-    if (
-      !["AND", "OR"].includes(condition.mode) ||
-      !Array.isArray(condition.conditions) ||
-      condition.conditions.length === 0
-    ) {
-      throw invalidBlock(path, "AND/OR condition must not be empty");
-    }
-    condition.conditions.forEach((child, index) => {
-      validateCondition(child, `${path}.conditions[${index}]`, context);
-    });
-    return;
-  }
-  if (condition.type !== "characteristic") {
-    throw invalidBlock(
-      path,
-      `condition type ${condition.type} is not supported`,
-    );
-  }
-  if (
-    !stableNativeId(condition.aId) ||
-    !stableNativeId(condition.sId) ||
-    !stableNativeId(condition.cId) ||
-    typeof condition.hs !== "string" ||
-    typeof condition.hc !== "string" ||
-    typeof condition.trigger !== "boolean" ||
-    typeof condition.cond !== "string" ||
-    typeof condition.value !== "string" ||
-    condition.timeCond !== "" ||
-    condition.time !== 0
-  ) {
-    throw invalidBlock(path, "characteristic condition is incomplete");
-  }
-  if (condition.trigger) context.triggers += 1;
-  context.conditions.push({
-    role: "condition",
-    path,
-    aId: condition.aId,
-    sId: condition.sId,
-    cId: condition.cId,
-    hs: condition.hs,
-    hc: condition.hc,
-    trigger: condition.trigger,
-    cond: condition.cond,
-    value: condition.value,
-  });
+function blockNode(value) {
+  return isRecord(value) && typeof value.type === "string";
+}
+
+function blockNodeArray(value) {
+  return Array.isArray(value) && value.every(blockNode);
 }
 
 const BLOCK_ALLOWED_KEYS = {
@@ -1419,67 +1579,41 @@ const BLOCK_ALLOWED_KEYS = {
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
 };
 
+const BLOCK_CHILD_FIELDS = {
+  root: ["targets"],
+  if: ["if", "then", "else"],
+  condition: ["conditions"],
+  service: ["characteristics"],
+  delay: ["targets"],
+};
+
 function collectUnknownBlockFields(data) {
   const unknown = [];
-  collectUnknownNode(data, "root", "root", unknown);
+  visitKnownBlockNodes(data, (node, kind, path) => {
+    const allowed = BLOCK_ALLOWED_KEYS[kind] ?? new Set();
+    for (const [key, value] of Object.entries(node)) {
+      if (!allowed.has(key)) unknown.push({ path: `${path}.${key}`, value });
+    }
+  });
   return unknown.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function collectUnknownNode(node, kind, path, unknown) {
-  if (!isRecord(node)) return;
-  const allowed = BLOCK_ALLOWED_KEYS[kind] ?? new Set();
-  for (const [key, value] of Object.entries(node)) {
-    if (!allowed.has(key)) unknown.push({ path: `${path}.${key}`, value });
-  }
-  if (kind === "root") {
-    node.targets?.forEach((child, index) => {
-      collectUnknownNode(
-        child,
-        child?.type,
-        `${path}.targets[${index}]`,
-        unknown,
-      );
-    });
-  } else if (kind === "if") {
-    collectUnknownNode(node.if, node.if?.type, `${path}.if`, unknown);
-    for (const key of ["then", "else"]) {
-      node[key]?.forEach((child, index) => {
-        collectUnknownNode(
-          child,
-          child?.type,
-          `${path}.${key}[${index}]`,
-          unknown,
-        );
-      });
+function visitKnownBlockNodes(data, visitor) {
+  const visit = (node, kind, path) => {
+    if (!isRecord(node)) return;
+    visitor(node, kind, path);
+    for (const key of BLOCK_CHILD_FIELDS[kind] ?? []) {
+      const value = node[key];
+      if (Array.isArray(value)) {
+        value.forEach((child, index) => {
+          visit(child, child?.type, `${path}.${key}[${index}]`);
+        });
+      } else {
+        visit(value, value?.type, `${path}.${key}`);
+      }
     }
-  } else if (kind === "condition") {
-    node.conditions?.forEach((child, index) => {
-      collectUnknownNode(
-        child,
-        child?.type,
-        `${path}.conditions[${index}]`,
-        unknown,
-      );
-    });
-  } else if (kind === "service") {
-    node.characteristics?.forEach((child, index) => {
-      collectUnknownNode(
-        child,
-        child?.type,
-        `${path}.characteristics[${index}]`,
-        unknown,
-      );
-    });
-  } else if (kind === "delay") {
-    node.targets?.forEach((child, index) => {
-      collectUnknownNode(
-        child,
-        child?.type,
-        `${path}.targets[${index}]`,
-        unknown,
-      );
-    });
-  }
+  };
+  visit(data, "root", "root");
 }
 
 function invalidBlock(path, message) {
@@ -1672,6 +1806,34 @@ function valuesEqual(left, right) {
   return left?.kind === right?.kind && Object.is(left?.value, right?.value);
 }
 
+function freshVerification(result) {
+  return {
+    fresh: true,
+    checked_at: new Date().toISOString(),
+    result,
+  };
+}
+
+function failedVerification(error) {
+  return {
+    fresh: false,
+    checked_at: null,
+    error: {
+      code: error instanceof SprutHubError ? error.code : "read_failed",
+      ...(error instanceof SprutHubError && error.action
+        ? { action: error.action }
+        : {}),
+    },
+  };
+}
+
+function nativeIntentDirection(change) {
+  return (
+    change.write_intent?.direction ??
+    (change.status === "restoring" ? "restore" : "apply")
+  );
+}
+
 function scenarioSnapshot(scenario) {
   if (
     !isRecord(scenario) ||
@@ -1784,7 +1946,17 @@ function parseNativeChangeRef(ref) {
   return match[1];
 }
 
-function publicNativeChange(change, observedValue = change.observed_value) {
+function publicNativeChange(
+  change,
+  observedValue = change.observed_value,
+  options = {},
+) {
+  const verification = Object.hasOwn(options, "verification")
+    ? options.verification
+    : change.last_verification;
+  const configurationMatches = Object.hasOwn(options, "configurationMatches")
+    ? options.configurationMatches
+    : change.configuration_matches;
   if (change.kind !== "characteristic_value") {
     const diff =
       change.kind === "block_create"
@@ -1814,15 +1986,19 @@ function publicNativeChange(change, observedValue = change.observed_value) {
       diff,
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
       ...(change.scenario_index
         ? {
             scenario_index: change.scenario_index,
             scenario_ref: `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`,
           }
         : {}),
-      ...(change.configuration_matches !== undefined
-        ? { configuration_matches: change.configuration_matches }
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
         : {}),
+      ...(verification ? { verification } : {}),
       ...(change.recovered_after_uncertain_write
         ? { recovered_after_uncertain_write: true }
         : {}),
@@ -1851,7 +2027,11 @@ function publicNativeChange(change, observedValue = change.observed_value) {
     },
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
+    ...(change.write_intent
+      ? { write_intent: structuredClone(change.write_intent) }
+      : {}),
     ...(observedValue ? { observed_value: observedValue } : {}),
+    ...(verification ? { verification } : {}),
     ...(change.conflict_reason
       ? { conflict_reason: change.conflict_reason }
       : {}),
@@ -1869,7 +2049,7 @@ function publicNativeChange(change, observedValue = change.observed_value) {
   };
 }
 
-function changeSummary(change) {
+function changeSummary(change, homeRef) {
   if (
     ["characteristic_value", "block_create", "block_data_update"].includes(
       change.kind,
@@ -1880,7 +2060,7 @@ function changeSummary(change) {
       change_ref: reference,
       operation: change.kind,
       status: change.status,
-      target_refs: [change.target_ref],
+      target_refs: nativeAffectedRefs(change, homeRef),
       created_at: change.created_at,
       updated_at: change.updated_at,
       next: {
@@ -1890,19 +2070,26 @@ function changeSummary(change) {
     };
   }
   const reference = changeRef(change.id);
+  const characteristicRefs = [
+    change.condition?.characteristic?.ref,
+    change.action?.characteristic?.ref,
+  ]
+    .filter(Boolean)
+    .map((ref) => canonicalEntityRef(ref, homeRef));
+  const ancestorRefs = characteristicRefs.flatMap((ref) =>
+    canonicalAncestors(ref),
+  );
   return {
     change_ref: reference,
     operation: "legacy_boolean_automation",
     status: change.status,
-    target_refs: [
-      change.condition?.characteristic?.ref,
-      change.action?.characteristic?.ref,
+    target_refs: uniqueRefs([
+      ...characteristicRefs,
+      ...ancestorRefs,
       ...(change.scenario_index
-        ? [
-            `${change.home_ref ?? "spruthub://legacy-home"}/scenario/${encodeURIComponent(change.scenario_index)}`,
-          ]
+        ? [`${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`]
         : []),
-    ].filter(Boolean),
+    ]),
     created_at: change.created_at,
     updated_at: change.updated_at,
     next: {
@@ -1910,6 +2097,78 @@ function changeSummary(change) {
       arguments: { change_ref: reference },
     },
   };
+}
+
+function nativeAffectedRefs(change, homeRef) {
+  const refs = [canonicalEntityRef(change.target_ref, homeRef)];
+  if (change.kind === "characteristic_value") {
+    refs.push(...canonicalAncestors(refs[0]));
+  } else {
+    if (change.scenario_index) {
+      refs.push(
+        `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
+      );
+    }
+    const configurations =
+      change.kind === "block_create"
+        ? [change.requested_snapshot?.data]
+        : [change.baseline_snapshot?.data, change.requested_snapshot?.data];
+    for (const data of configurations) {
+      refs.push(...blockAffectedRefs(data, homeRef));
+    }
+  }
+  return uniqueRefs(refs);
+}
+
+function blockAffectedRefs(data, homeRef) {
+  const refs = [];
+  visitKnownBlockNodes(data, (node, kind) => {
+    if (kind === "characteristic") {
+      refs.push(...bindingRefs(homeRef, node.aId, node.sId, node.cId));
+    }
+    if (kind === "service") {
+      refs.push(...bindingRefs(homeRef, node.aId, node.sId));
+      for (const action of node.characteristics ?? []) {
+        refs.push(...bindingRefs(homeRef, node.aId, node.sId, action?.cId));
+      }
+    }
+  });
+  return uniqueRefs(refs);
+}
+
+function bindingRefs(homeRef, aId, sId, cId) {
+  if (!stableNativeId(aId)) return [];
+  const accessory = `${homeRef}/accessory/${aId}`;
+  if (!stableNativeId(sId)) return [accessory];
+  const service = `${accessory}/service/${sId}`;
+  return stableNativeId(cId)
+    ? [accessory, service, `${service}/characteristic/${cId}`]
+    : [accessory, service];
+}
+
+function canonicalEntityRef(ref, homeRef) {
+  if (typeof ref !== "string") return ref;
+  if (ref.startsWith(`${homeRef}/`) || ref === homeRef) return ref;
+  const legacy = /^spruthub:\/\/(room|accessory)\/(.+)$/.exec(ref);
+  return legacy ? `${homeRef}/${legacy[1]}/${legacy[2]}` : ref;
+}
+
+function canonicalAncestors(ref) {
+  const characteristic =
+    /^(spruthub:\/\/hub\/[^/]+\/accessory\/\d+\/service\/\d+)\/characteristic\/\d+$/.exec(
+      ref,
+    );
+  if (characteristic) {
+    const service = characteristic[1];
+    return [service.replace(/\/service\/\d+$/, ""), service];
+  }
+  const service =
+    /^(spruthub:\/\/hub\/[^/]+\/accessory\/\d+)\/service\/\d+$/.exec(ref);
+  return service ? [service[1]] : [];
+}
+
+function uniqueRefs(refs) {
+  return [...new Set(refs.filter((ref) => typeof ref === "string"))];
 }
 
 function selectCharacteristic(selection, ref, value, requireWrite, serial) {
@@ -2190,16 +2449,29 @@ function matchesExpected(scenario, change) {
 }
 
 function configurationData(data) {
-  if (Array.isArray(data)) return data.map(configurationData);
-  if (!data || typeof data !== "object") return data;
-  return Object.fromEntries(
-    Object.entries(data)
-      .filter(
-        ([key]) =>
-          key !== "blockId" && !(key === "state" && data.type === "if"),
-      )
-      .map(([key, value]) => [key, configurationData(value)]),
-  );
+  return normalizedKnownBlockNode(data, "root");
+}
+
+function normalizedKnownBlockNode(node, kind) {
+  if (!isRecord(node)) return structuredClone(node);
+  const childFields = new Set(BLOCK_CHILD_FIELDS[kind] ?? []);
+  const isKnownNode = Object.hasOwn(BLOCK_ALLOWED_KEYS, kind);
+  const normalized = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (
+      (isKnownNode && key === "blockId") ||
+      (kind === "if" && key === "state")
+    )
+      continue;
+    if (!childFields.has(key)) {
+      normalized[key] = structuredClone(value);
+      continue;
+    }
+    normalized[key] = Array.isArray(value)
+      ? value.map((child) => normalizedKnownBlockNode(child, child?.type))
+      : normalizedKnownBlockNode(value, value?.type);
+  }
+  return normalized;
 }
 
 function sameRuleBody(scenario, change) {

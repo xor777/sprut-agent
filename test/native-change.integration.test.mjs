@@ -97,19 +97,29 @@ function blockData({ delay = 60_000, nested = false } = {}) {
 
 function withRuntimeBlockFields(data) {
   let nextBlockId = 1;
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.map(visit);
-    if (value === null || typeof value !== "object") return value;
-    const normalized = Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [key, visit(child)]),
-    );
-    if (typeof normalized.type === "string") {
+  const childFields = {
+    root: ["targets"],
+    if: ["if", "then", "else"],
+    condition: ["conditions"],
+    service: ["characteristics"],
+    delay: ["targets"],
+  };
+  const visit = (value, kind) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      return structuredClone(value);
+    const normalized = structuredClone(value);
+    if (kind !== "root") {
       normalized.blockId = nextBlockId++;
-      if (normalized.type === "if") normalized.state = false;
+      if (kind === "if") normalized.state = false;
+    }
+    for (const key of childFields[kind] ?? []) {
+      normalized[key] = Array.isArray(value[key])
+        ? value[key].map((child) => visit(child, child?.type))
+        : visit(value[key], value[key]?.type);
     }
     return normalized;
   };
-  return visit(data);
+  return visit(data, "root");
 }
 
 async function startHub() {
@@ -371,10 +381,16 @@ async function startHub() {
       } else {
         assert.fail(`unsupported test request: ${JSON.stringify(params)}`);
       }
-      if (params.scenario?.delete && state.behavior.afterDelete) {
-        const afterDelete = state.behavior.afterDelete;
-        state.behavior.afterDelete = undefined;
-        await afterDelete();
+      for (const [matches, callbackName] of [
+        [params.scenario?.create, "afterCreate"],
+        [params.scenario?.update, "afterUpdate"],
+        [params.scenario?.delete, "afterDelete"],
+      ]) {
+        if (matches && state.behavior[callbackName]) {
+          const callback = state.behavior[callbackName];
+          state.behavior[callbackName] = undefined;
+          await callback();
+        }
       }
       socket.send(JSON.stringify({ id: request.id, result }));
     });
@@ -868,10 +884,11 @@ test("restore preserves unknown vendor blockId and state fields", async (t) => {
       reason: "Сохранить vendor configuration",
     },
   });
-  await client.callTool({
+  const applied = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  assert.equal(applied.structuredContent.status, "applied");
   const manuallyEdited = JSON.parse(hub.state.scenarios[0].data);
   manuallyEdited.vendorConfiguration.blockId = "manual-change";
   manuallyEdited.vendorConfiguration.state = "manual-state";
@@ -959,6 +976,14 @@ test("a restored BLOCK change is terminal and recovers a lost final save", async
     saved: false,
     action: "restore_state_storage_then_get_native_change",
   });
+  assert.equal(
+    restoredWithoutSave.structuredContent.write_intent.direction,
+    "restore",
+  );
+  assert.equal(
+    restoredWithoutSave.structuredContent.write_intent.acknowledged,
+    true,
+  );
   await firstClient.close();
   await restoreStateDirectory();
 
@@ -976,6 +1001,9 @@ test("a restored BLOCK change is terminal and recovers a lost final save", async
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(recovered.structuredContent.status, "restored");
+  assert.equal(recovered.structuredContent.native_acknowledged, false);
+  assert.equal(recovered.structuredContent.write_intent.direction, "restore");
+  assert.equal(recovered.structuredContent.write_intent.phase, "reconciled");
   assert.equal(repeatedApply.structuredContent.status, "restored");
   assert.equal(repeatedRestore.structuredContent.status, "restored");
   assert.equal(
@@ -984,6 +1012,110 @@ test("a restored BLOCK change is terminal and recovers a lost final save", async
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
+test("BLOCK create recovers when its applied result cannot be saved", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "BLOCK с потерянным journal save",
+      description: "Восстановить результат после рестарта",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить create recovery",
+    },
+  });
+  let restoreStateDirectory;
+  hub.state.behavior.afterCreate = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const appliedWithoutSave = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(appliedWithoutSave.structuredContent.status, "applied");
+  assert.deepEqual(appliedWithoutSave.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_native_change",
+  });
+  await firstClient.close();
+  await restoreStateDirectory();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: appliedWithoutSave.structuredContent.scenario_ref,
+    },
+  });
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.equal(
+    history.structuredContent.changes[0].change_ref,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(history.structuredContent.changes[0].status, "applied");
+  const recovered = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.verification.fresh, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+});
+
+test("BLOCK update recovers when its applied result cannot be saved", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить update recovery",
+    },
+  });
+  let restoreStateDirectory;
+  hub.state.behavior.afterUpdate = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const appliedWithoutSave = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(appliedWithoutSave.structuredContent.status, "applied");
+  assert.deepEqual(appliedWithoutSave.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_native_change",
+  });
+  await firstClient.close();
+  await restoreStateDirectory();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.verification.fresh, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
     1,
   );
 });
@@ -1082,7 +1214,15 @@ test("history discovers changes by home and entity after restart", async (t) => 
       change_ref: prepared.structuredContent.change_ref,
       operation: "block_data_update",
       status: "prepared",
-      target_refs: [scenarioRef],
+      target_refs: [
+        scenarioRef,
+        `${homeRef}/accessory/32`,
+        `${homeRef}/accessory/32/service/13`,
+        `${homeRef}/accessory/32/service/13/characteristic/15`,
+        `${homeRef}/accessory/34`,
+        `${homeRef}/accessory/34/service/13`,
+        characteristicRef,
+      ],
       created_at: history.structuredContent.changes[0].created_at,
       updated_at: history.structuredContent.changes[0].updated_at,
       next: {
