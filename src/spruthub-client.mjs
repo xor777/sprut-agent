@@ -19,6 +19,23 @@ export class SprutHubError extends Error {
   }
 }
 
+export function parseSprutHubMessage(data) {
+  let message;
+  try {
+    message = JSON.parse(data.toString());
+  } catch {
+    throw invalidMessage();
+  }
+  if (
+    message === null ||
+    typeof message !== "object" ||
+    Array.isArray(message)
+  ) {
+    throw invalidMessage();
+  }
+  return message;
+}
+
 export class SprutHubClient {
   #connectPromise;
   #connectingSocket;
@@ -27,7 +44,7 @@ export class SprutHubClient {
   #socket;
 
   constructor({ url, token, serial, cid, timeoutMs = 10_000 }) {
-    if (!url || !token || !serial || !cid) {
+    if (!url || !token || !cid) {
       throw new SprutHubError(
         "configuration",
         "SprutHub connection settings are incomplete.",
@@ -36,7 +53,7 @@ export class SprutHubClient {
 
     this.url = url;
     this.token = token;
-    this.serial = serial;
+    this.serial = serial ?? null;
     this.cid = cid;
     this.timeoutMs = timeoutMs;
   }
@@ -159,8 +176,13 @@ export class SprutHubClient {
   }
 
   async listRooms() {
+    if (this.serial === null) throw homeSelectionRequired();
     const deadline = Date.now() + this.timeoutMs;
-    const roomsResponse = await this.#request({ room: { list: {} } }, deadline);
+    const roomsResponse = await this.#request(
+      { room: { list: {} } },
+      deadline,
+      { serial: this.serial },
+    );
     const rooms = roomsResponse.result?.room?.list?.rooms;
     if (!Array.isArray(rooms)) {
       throw new SprutHubError(
@@ -192,7 +214,10 @@ export class SprutHubClient {
     } catch {
       throw invalidRoomRef();
     }
-    if (parsedRef.kind !== "room" || parsedRef.serial !== this.serial) {
+    if (
+      parsedRef.kind !== "room" ||
+      (this.serial !== null && parsedRef.serial !== this.serial)
+    ) {
       throw invalidRoomRef();
     }
     const roomId = parsedRef.roomId;
@@ -200,6 +225,7 @@ export class SprutHubClient {
     const roomResponse = await this.#request(
       { room: { get: { id: roomId } } },
       deadline,
+      { serial: parsedRef.serial },
     );
     const roomContainer = roomResponse.result?.room;
     if (!roomContainer || !("get" in roomContainer)) {
@@ -225,6 +251,7 @@ export class SprutHubClient {
         },
       },
       deadline,
+      { serial: parsedRef.serial },
     );
     const accessories =
       accessoriesResponse.result?.accessory?.list?.accessories;
@@ -238,13 +265,13 @@ export class SprutHubClient {
     return {
       status: "ok",
       room: {
-        ref: roomRef(this.serial, room.id),
+        ref: roomRef(parsedRef.serial, room.id),
         name: room.name,
       },
       devices: accessories
         .map(validateAccessory)
         .filter(({ roomId }) => roomId === room.id)
-        .map((accessory) => normalizeAccessory(this.serial, accessory)),
+        .map((accessory) => normalizeAccessory(parsedRef.serial, accessory)),
       freshness: {
         hubResponseReceivedAt: new Date().toISOString(),
         measurementAt: null,
@@ -905,8 +932,13 @@ export class SprutHubClient {
   #handleMessage(data) {
     let message;
     try {
-      message = JSON.parse(data.toString());
-    } catch {
+      message = parseSprutHubMessage(data);
+    } catch (error) {
+      for (const { reject, timer } of this.#pending.values()) {
+        clearTimeout(timer);
+        reject(error);
+      }
+      this.#pending.clear();
       return;
     }
 
@@ -1216,6 +1248,23 @@ function invalidRoomRef() {
     "invalid_room_ref",
     "Use a configured-home room reference returned by list_rooms.",
     "list_rooms",
+  );
+}
+
+function invalidMessage() {
+  return new SprutHubError(
+    "invalid_message",
+    "SprutHub returned an invalid JSON-RPC message.",
+    "retry",
+    { capability_status: "unknown" },
+  );
+}
+
+function homeSelectionRequired() {
+  return new SprutHubError(
+    "home_selection_required",
+    "Select one SprutHub home before using an operation that is not home-qualified.",
+    "configure_home",
   );
 }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,21 +36,55 @@ function home(serial, name) {
   };
 }
 
-async function startHub(t, { outcome = "challenge", homes } = {}) {
+async function startHub(
+  t,
+  {
+    outcome = "challenge",
+    homes,
+    dropFirstConnection = false,
+    delayFirstConnection = false,
+    nullFirstAuth = false,
+    nullFirstRoomList = false,
+    sendForeignFrames = false,
+  } = {},
+) {
   const availableHomes = homes ?? [home("home/A", "Основной дом")];
   const requests = [];
+  let connectionCount = 0;
+  let nullAuthSent = false;
+  let nullRoomListSent = false;
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
+    connectionCount += 1;
+    const dropThisConnection = dropFirstConnection && connectionCount === 1;
+    const delayThisConnection = delayFirstConnection && connectionCount === 1;
     let stage = "new";
     socket.on("message", (raw) => {
       const request = JSON.parse(raw.toString());
       requests.push(request);
+      if (dropThisConnection) {
+        socket.close();
+        return;
+      }
       const params = request.params;
       if (params.account?.auth) {
         assert.equal("token" in request, false);
         assert.equal("serial" in request, false);
         assert.deepEqual(params.account.auth, { params: [] });
+        if (nullFirstAuth && !nullAuthSent) {
+          nullAuthSent = true;
+          socket.send("null");
+          return;
+        }
+        if (sendForeignFrames) sendUnrelatedFrames(socket, request.id);
+        if (delayThisConnection) {
+          answer(socket, request.id, "auth", {
+            status: "ACCOUNT_RESPONSE_TOO_FAST",
+            question: { type: "QUESTION_TYPE_EMAIL", delay: 1 },
+          });
+          return;
+        }
         stage = "email";
         answer(socket, request.id, "auth", {
           status: "ACCOUNT_RESPONSE_SUCCESS",
@@ -124,6 +159,12 @@ async function startHub(t, { outcome = "challenge", homes } = {}) {
       );
       assert(selected, `unexpected home serial ${request.serial}`);
       if (params.room?.list) {
+        if (nullFirstRoomList && !nullRoomListSent) {
+          nullRoomListSent = true;
+          socket.send("null");
+          return;
+        }
+        if (sendForeignFrames) sendUnrelatedFrames(socket, request.id);
         reply(socket, request.id, {
           room: { list: { rooms: [{ id: 1, name: "Офис" }] } },
         });
@@ -195,7 +236,28 @@ async function startHub(t, { outcome = "challenge", homes } = {}) {
     await new Promise((resolve) => server.close(resolve));
   });
   const address = server.address();
-  return { url: `ws://127.0.0.1:${address.port}`, requests };
+  return {
+    url: `ws://127.0.0.1:${address.port}`,
+    requests,
+    get connectionCount() {
+      return connectionCount;
+    },
+  };
+}
+
+async function startStalledHandshake(t) {
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  return { url: `ws://127.0.0.1:${server.address().port}` };
 }
 
 function answer(socket, id, operation, response) {
@@ -206,18 +268,30 @@ function reply(socket, id, result) {
   socket.send(JSON.stringify({ id, result }));
 }
 
-async function startClient(t, hub, sessionFile) {
+function sendUnrelatedFrames(socket, requestId) {
+  socket.send(JSON.stringify({ params: { event: { update: {} } } }));
+  reply(socket, requestId + 10_000, {});
+}
+
+async function startClient(t, hub, sessionFile, { timeoutMs = "1000" } = {}) {
+  const connectionFile = path.join(path.dirname(sessionFile), "connection.env");
+  await writeFile(
+    connectionFile,
+    `SPRUTHUB_LOGIN=${login}\nSPRUTHUB_PASSWORD=${password}\n`,
+    { mode: 0o600 },
+  );
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/server.mjs"],
-    cwd: projectRoot,
+    args: [
+      `--env-file=${connectionFile}`,
+      path.join(projectRoot, "src", "server.mjs"),
+    ],
+    cwd: path.dirname(sessionFile),
     env: {
       PATH: process.env.PATH,
-      SPRUTHUB_LOGIN: login,
-      SPRUTHUB_PASSWORD: password,
       SPRUTHUB_URL: hub.url,
       SPRUT_AGENT_SESSION_FILE: sessionFile,
-      SPRUTHUB_TIMEOUT_MS: "1000",
+      SPRUTHUB_TIMEOUT_MS: timeoutMs,
       SPRUT_AGENT_STATE_DIR: path.join(path.dirname(sessionFile), "changes"),
     },
     stderr: "pipe",
@@ -235,7 +309,7 @@ async function withSessionPath(t) {
 }
 
 test("challenge login serves concurrent public reads and a restart reuses the session", async (t) => {
-  const hub = await startHub(t);
+  const hub = await startHub(t, { sendForeignFrames: true });
   const sessionFile = await withSessionPath(t);
   const client = await startClient(t, hub, sessionFile);
 
@@ -299,9 +373,14 @@ test("a rejected password stops once without exposing authentication data", asyn
   const hub = await startHub(t, { outcome: "rejected" });
   const client = await startClient(t, hub, await withSessionPath(t));
   const result = await client.callTool({ name: "list_homes", arguments: {} });
+  const repeated = await client.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
 
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error.code, "authentication_failed");
+  assert.equal(repeated.structuredContent.error.code, "authentication_failed");
   assert.equal(
     hub.requests.filter(({ params }) => params.account?.auth).length,
     1,
@@ -379,4 +458,101 @@ test("multiple homes allow explicit reads without creating a write binding", asy
     hub.requests.some(({ params }) => params.scenario?.create),
     false,
   );
+});
+
+test("a stalled WebSocket handshake returns a bounded error without killing MCP", async (t) => {
+  const hub = await startStalledHandshake(t);
+  const client = await startClient(t, hub, await withSessionPath(t), {
+    timeoutMs: "150",
+  });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await client.callTool({ name: "list_homes", arguments: {} });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, "timeout");
+    assert.equal(result.structuredContent.error.retryable, true);
+  }
+});
+
+test("a new MCP call starts a fresh auth flow after transport recovery", async (t) => {
+  const hub = await startHub(t, { dropFirstConnection: true });
+  const client = await startClient(t, hub, await withSessionPath(t));
+
+  const failed = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.structuredContent.error.code, "connection_closed");
+  assert.equal(failed.structuredContent.error.retryable, true);
+
+  const recovered = await client.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  assert.equal(recovered.structuredContent.homes.length, 1);
+  assert.equal(hub.connectionCount, 3);
+  assert.equal(
+    hub.requests.filter(({ params }) => params.account?.auth).length,
+    2,
+  );
+  assert.equal(
+    hub.requests.filter(({ params }) => params.account?.answer).length,
+    3,
+  );
+});
+
+test("a server delay allows a fresh user-initiated auth flow", async (t) => {
+  const hub = await startHub(t, { delayFirstConnection: true });
+  const client = await startClient(t, hub, await withSessionPath(t));
+
+  const delayed = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(delayed.isError, true);
+  assert.equal(delayed.structuredContent.error.code, "authentication_delayed");
+  assert.equal(delayed.structuredContent.error.retryable, true);
+  assert.equal(delayed.structuredContent.retry_after_seconds, 1);
+
+  const recovered = await client.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  assert.equal(
+    hub.requests.filter(({ params }) => params.account?.auth).length,
+    2,
+  );
+});
+
+test("a null auth frame is contained and a later MCP call can recover", async (t) => {
+  const hub = await startHub(t, { nullFirstAuth: true });
+  const client = await startClient(t, hub, await withSessionPath(t));
+
+  const invalid = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid.structuredContent.error.code, "invalid_message");
+  assert.equal(invalid.structuredContent.error.retryable, true);
+
+  const recovered = await client.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  assert.equal(recovered.structuredContent.homes.length, 1);
+});
+
+test("a null ordinary RPC frame does not kill MCP or block the next read", async (t) => {
+  const hub = await startHub(t, { nullFirstRoomList: true });
+  const client = await startClient(t, hub, await withSessionPath(t));
+  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+
+  const invalid = await client.callTool({ name: "list_rooms", arguments: {} });
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid.structuredContent.error.code, "invalid_message");
+  assert.equal(invalid.structuredContent.error.retryable, true);
+
+  const recovered = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  assert.equal(recovered.structuredContent.rooms[0].name, "Офис");
 });

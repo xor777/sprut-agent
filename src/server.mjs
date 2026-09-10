@@ -2,13 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { AutomationService } from "./automation-service.mjs";
-import {
-  SprutHubClient,
-  SprutHubError,
-  sanitizeAgentOutput,
-} from "./spruthub-client.mjs";
+import { SprutHubError, sanitizeAgentOutput } from "./spruthub-client.mjs";
+import { SprutHubConnection } from "./spruthub-connection.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
+const connection = new SprutHubConnection({ env: process.env });
 let hubClient;
 let automationService;
 
@@ -71,7 +69,7 @@ server.registerTool(
     inputSchema: {},
     annotations: readOnlyAnnotations,
   },
-  async () => runRoomTool(() => getHubClient().listHomes()),
+  async () => runRoomTool(async () => (await getHubClient()).listHomes()),
 );
 
 server.registerTool(
@@ -89,7 +87,7 @@ server.registerTool(
     annotations: readOnlyAnnotations,
   },
   async ({ home_ref: homeRef }) =>
-    runRoomTool(() => getHubClient().inspectHome(homeRef)),
+    runRoomTool(async () => (await getHubClient()).inspectHome(homeRef)),
 );
 
 server.registerTool(
@@ -121,7 +119,9 @@ server.registerTool(
     annotations: readOnlyAnnotations,
   },
   async ({ entity_ref: entityRef, include }) =>
-    runRoomTool(() => getHubClient().getEntity(entityRef, include)),
+    runRoomTool(async () =>
+      (await getHubClient()).getEntity(entityRef, include),
+    ),
 );
 
 server.registerTool(
@@ -139,7 +139,7 @@ server.registerTool(
     },
     annotations: readOnlyAnnotations,
   },
-  async () => runRoomTool(() => getHubClient().listRooms()),
+  async () => runRoomTool(async () => (await getHubClient()).listRooms()),
 );
 
 server.registerTool(
@@ -174,7 +174,9 @@ server.registerTool(
     },
   },
   async (input) =>
-    runRoomTool(() => getAutomationService().previewBooleanAutomation(input)),
+    runRoomTool(async () =>
+      (await getAutomationService()).previewBooleanAutomation(input),
+    ),
 );
 
 server.registerTool(
@@ -192,7 +194,7 @@ server.registerTool(
     },
   },
   async ({ change_ref: changeRef }) =>
-    runRoomTool(() => getAutomationService().apply(changeRef)),
+    runRoomTool(async () => (await getAutomationService()).apply(changeRef)),
 );
 
 server.registerTool(
@@ -205,7 +207,9 @@ server.registerTool(
     annotations: readOnlyAnnotations,
   },
   async ({ change_ref: changeRef }) =>
-    runRoomTool(() => getAutomationService().getChange(changeRef)),
+    runRoomTool(async () =>
+      (await getAutomationService()).getChange(changeRef),
+    ),
 );
 
 server.registerTool(
@@ -223,7 +227,7 @@ server.registerTool(
     },
   },
   async ({ change_ref: changeRef }) =>
-    runRoomTool(() => getAutomationService().rollback(changeRef)),
+    runRoomTool(async () => (await getAutomationService()).rollback(changeRef)),
 );
 
 server.registerTool(
@@ -248,30 +252,32 @@ server.registerTool(
     annotations: readOnlyAnnotations,
   },
   async ({ room_ref: roomRef }) =>
-    runRoomTool(() => getHubClient().readRoom(roomRef)),
+    runRoomTool(async () => (await getHubClient()).readRoom(roomRef)),
 );
 
 await server.connect(new StdioServerTransport());
 process.stdin.once("end", shutdown);
 process.once("SIGTERM", shutdown);
 
-function getHubClient() {
-  hubClient ??= new SprutHubClient({
-    url: process.env.SPRUTHUB_URL,
-    token: process.env.SPRUTHUB_TOKEN,
-    serial: process.env.SPRUTHUB_SERIAL,
-    cid: process.env.SPRUTHUB_CID,
-    timeoutMs: Number(process.env.SPRUTHUB_TIMEOUT_MS ?? 10_000),
-  });
+async function getHubClient() {
+  hubClient ??= await connection.getClient();
   return hubClient;
 }
 
-function getAutomationService() {
+async function getAutomationService() {
+  const client = await getHubClient();
+  if (client.serial === null) {
+    throw new SprutHubError(
+      "home_selection_required",
+      "Select one SprutHub home before preparing or applying an automation.",
+      "configure_home",
+    );
+  }
   automationService ??= new AutomationService({
-    client: getHubClient(),
+    client,
     stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
-    hubUrl: process.env.SPRUTHUB_URL,
-    hubSerial: process.env.SPRUTHUB_SERIAL,
+    hubUrl: client.url,
+    hubSerial: client.serial,
   });
   return automationService;
 }
@@ -287,6 +293,8 @@ function toToolError(error) {
         retryable: [
           "connection_closed",
           "connection_failed",
+          "invalid_message",
+          "authentication_delayed",
           "timeout",
         ].includes(error.code),
         ...(error.action ? { action: error.action } : {}),
@@ -321,9 +329,7 @@ async function runRoomTool(operation) {
 }
 
 function connectionSecrets() {
-  return [process.env.SPRUTHUB_TOKEN].filter(
-    (value) => typeof value === "string" && value.length > 0,
-  );
+  return connection.secrets;
 }
 
 let shuttingDown = false;
