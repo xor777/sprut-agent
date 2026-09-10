@@ -1,0 +1,340 @@
+{
+  "observedOn": "2026-09-09",
+  "hubVersion": "3.0.0b (20131)",
+  "webAsset": "app.16735171810a795a9f2d.js",
+  "provenance": "Reduced and anonymized read-only observations. Accessory ids, scenario index/name/room ids and physical link identifiers replaced. One complete native BLOCK data tree retained; it is an example read from the hub, not the proposed motion-to-light rule. Context responses retain only selected fields. Empty scenario.list results are observed empty response objects. No writes or rollback were performed. No credentials or script bodies included.",
+  "scenarioGet": {
+    "params": {
+      "scenario": {
+        "get": {
+          "index": "example-block",
+          "expand": "data"
+        }
+      }
+    },
+    "result": {
+      "scenario": {
+        "get": {
+          "type": "BLOCK",
+          "predefined": false,
+          "active": true,
+          "onStart": false,
+          "sync": false,
+          "error": false,
+          "index": "example-block",
+          "name": "Example scheduled outlet",
+          "desc": "",
+          "data": "{\"blockId\":0,\"targets\":[{\"type\":\"if\",\"blockId\":1,\"if\":{\"type\":\"condition\",\"blockId\":2,\"mode\":\"AND\",\"conditions\":[{\"type\":\"interval\",\"blockId\":3,\"start\":{\"type\":\"cron\",\"blockId\":4,\"cron\":\"0 0 22 ? * * *\",\"mode\":\"NONE\",\"offset\":0},\"end\":{\"type\":\"cron\",\"blockId\":5,\"cron\":\"0 0 4 ? * * *\",\"mode\":\"NONE\",\"offset\":0},\"trigger\":false},{\"type\":\"characteristic\",\"blockId\":6,\"aId\":100,\"sId\":13,\"cId\":15,\"value\":\"0\",\"cond\":\"=\",\"trigger\":false,\"hs\":\"SecuritySystem\",\"hc\":\"SecuritySystemCurrentState\",\"time\":0,\"timeCond\":\"\"}]},\"then\":[{\"type\":\"service\",\"blockId\":7,\"aId\":200,\"sId\":13,\"hs\":\"Outlet\",\"characteristics\":[{\"type\":\"set\",\"blockId\":8,\"cId\":15,\"hc\":\"On\",\"value\":\"true\"}]}],\"else\":[{\"type\":\"service\",\"blockId\":9,\"aId\":200,\"sId\":13,\"hs\":\"Outlet\",\"characteristics\":[{\"type\":\"set\",\"blockId\":10,\"cId\":15,\"hc\":\"On\",\"value\":\"false\"}]}],\"then_delay\":0,\"else_delay\":0,\"mode\":\"EVERY\"}]}",
+          "rooms": [10, 20]
+        }
+      }
+    }
+  },
+  "contextExchanges": [
+    {
+      "params": {
+        "scenario": {
+          "list": {
+            "aId": 300
+          }
+        }
+      },
+      "result": {
+        "scenario": {
+          "list": {}
+        }
+      }
+    },
+    {
+      "params": {
+        "scenario": {
+          "list": {
+            "aId": 400
+          }
+        }
+      },
+      "result": {
+        "scenario": {
+          "list": {}
+        }
+      }
+    },
+    {
+      "params": {
+        "logic": {
+          "list": {
+            "aId": 400,
+            "sId": 13
+          }
+        }
+      },
+      "result": {
+        "logic": {
+          "list": {
+            "logics": [
+              {
+                "type": "LightbulbControl",
+                "name": "Связь включения и уровня",
+                "active": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "logic": {
+          "types": {
+            "aId": 300,
+            "sId": 13
+          }
+        }
+      },
+      "result": {
+        "logic": {
+          "types": {
+            "logicTypes": [
+              {
+                "type": "MotionDetectedFromCurrentMotionLevel",
+                "name": "Наличие движения исходя из уровня движения"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "logic": {
+          "types": {
+            "aId": 400,
+            "sId": 13
+          }
+        }
+      },
+      "result": {
+        "logic": {
+          "types": {
+            "logicTypes": [
+              {
+                "type": "AdaptiveLighting",
+                "name": "Адаптивное освещение",
+                "desc": "Автоматическая регулировка цветовой температуры в течение дня"
+              },
+              {
+                "type": "LightInTime",
+                "name": "Яркость от времени",
+                "desc": ""
+              },
+              {
+                "type": "LightbulbControl",
+                "name": "Связь включения и уровня"
+              },
+              {
+                "type": "SmoothBrightnessChange",
+                "name": "Плавное изменение яркости",
+                "desc": "Изменяет яркость включаемой лампочки от начального до конечного значения за указанное количество секунд"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "link": {
+          "list": {
+            "aId": 300,
+            "sId": 13,
+            "cId": 15
+          }
+        }
+      },
+      "result": {
+        "link": {
+          "list": {
+            "links": [
+              {
+                "type": "SYSTEM",
+                "index": "example-physical-binding",
+                "controller": "example-controller"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "link": {
+          "list": {
+            "aId": 400,
+            "sId": 13,
+            "cId": 15
+          }
+        }
+      },
+      "result": {
+        "link": {
+          "list": {
+            "links": [
+              {
+                "type": "SYSTEM",
+                "index": "example-physical-binding",
+                "controller": "example-controller"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "characteristic": {
+          "getOptions": {
+            "aId": 300,
+            "sId": 13,
+            "cId": 15
+          }
+        }
+      },
+      "result": {
+        "characteristic": {
+          "getOptions": {
+            "options": [
+              {
+                "key": "primary",
+                "name": "Основное",
+                "type": "GenericInteger",
+                "value": {
+                  "intValue": 0
+                },
+                "read": true,
+                "write": true
+              },
+              {
+                "key": "ShowAllEvents",
+                "name": "Выводить все события в лог",
+                "type": "GenericBoolean",
+                "value": {
+                  "boolValue": false
+                },
+                "read": true,
+                "write": true
+              },
+              {
+                "key": "Inversed",
+                "name": "Инвертировать",
+                "type": "GenericBoolean",
+                "value": {
+                  "boolValue": false
+                },
+                "read": true,
+                "write": true
+              },
+              {
+                "key": "SwitchOffTime",
+                "name": "Выключить через (сек.)",
+                "type": "GenericDouble",
+                "value": {
+                  "doubleValue": 180
+                },
+                "read": true,
+                "write": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "params": {
+        "extension": {
+          "list": {}
+        }
+      },
+      "result": {
+        "extension": {
+          "list": {
+            "extensions": [
+              {
+                "type": "google",
+                "bundleType": "BRIDGE",
+                "name": "Google",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "homekit",
+                "bundleType": "BRIDGE",
+                "name": "HomeKit",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "yandex",
+                "bundleType": "BRIDGE",
+                "name": "Yandex",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "yandex",
+                "bundleType": "BRIDGE",
+                "name": "VK",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "xiaomi",
+                "bundleType": "CONTROLLER",
+                "name": "Xiaomi",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "zigbee",
+                "bundleType": "CONTROLLER",
+                "name": "ZigBee",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "telegram",
+                "bundleType": "NOTIFICATION",
+                "name": "Telegram",
+                "enabled": true,
+                "state": "FAILED"
+              },
+              {
+                "type": "web",
+                "bundleType": "NOTIFICATION",
+                "name": "Уведомления",
+                "enabled": true,
+                "state": "LOADED"
+              },
+              {
+                "type": "appstore",
+                "bundleType": "PLUGIN",
+                "name": "Магазин приложений",
+                "enabled": true,
+                "state": "LOADED"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "sdk": {
+    "request": {
+      "scenario": {
+        "sdk": {}
+      }
+    },
+    "responseField": "result.scenario.sdk.sdk",
+    "bytes": 38010,
+    "sha256": "1c54e25f642e8cc82cd774db7ea40f3f9c610d0ec28b78904172d08be085ad6d"
+  }
+}
