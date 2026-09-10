@@ -83,8 +83,11 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     stat(path.join(installedRoot, ".codex-plugin", "plugin.json")),
     stat(path.join(installedRoot, ".mcp.json")),
     stat(path.join(installedRoot, "dist", "server.mjs")),
+    stat(path.join(installedRoot, "check-install.mjs")),
     stat(path.join(installedRoot, "skills", "spruthub-master", "SKILL.md")),
   ]);
+
+  const effectiveTransport = await getEffectiveTransport(cli, installedRoot);
 
   const hub = await startHub(t);
   const configRoot = path.join(userHome, ".config");
@@ -104,7 +107,7 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   );
   await chmod(connectionFile, 0o600);
 
-  const firstClient = await startInstalledClient(installedRoot, userHome);
+  const firstClient = await startInstalledClient(effectiveTransport, userHome);
   const homes = await firstClient.callTool({
     name: "list_homes",
     arguments: {},
@@ -148,7 +151,11 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     1,
   );
 
-  const secondClient = await startInstalledClient(installedRoot, userHome);
+  const restartedTransport = await getEffectiveTransport(cli, installedRoot);
+  const secondClient = await startInstalledClient(
+    restartedTransport,
+    userHome,
+  );
   const restartedHomes = await secondClient.callTool({
     name: "list_homes",
     arguments: {},
@@ -171,6 +178,99 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   assert.equal(session.includes("local-only-password"), false);
 });
 
+test("installation reports an occupied product MCP name and works after explicit recovery", {
+  timeout: 30_000,
+}, async (t) => {
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-plugin-conflict-"));
+  const marketplaceRoot = path.join(scratch, "marketplace");
+  const codexHome = path.join(scratch, "codex-home");
+  const userHome = path.join(scratch, "user-home");
+  const workspace = path.join(scratch, "workspace");
+  t.after(() => rm(scratch, { recursive: true }));
+  await Promise.all([
+    copyPluginSource(marketplaceRoot),
+    mkdir(codexHome, { recursive: true }),
+    mkdir(userHome, { recursive: true }),
+    mkdir(workspace, { recursive: true }),
+  ]);
+
+  const occupiedConfig = [
+    "[mcp_servers.sprut-agent]",
+    'command = "neighbor-command"',
+    'args = ["--keep-me"]',
+    "",
+  ].join("\n");
+  const configFile = path.join(codexHome, "config.toml");
+  await writeFile(configFile, occupiedConfig);
+  const environment = {
+    PATH: process.env.PATH,
+    HOME: userHome,
+    CODEX_HOME: codexHome,
+    SPRUT_CODEX_BIN: codexBinary,
+  };
+  const cli = (args) =>
+    run(codexBinary, args, {
+      cwd: workspace,
+      env: environment,
+    });
+
+  await cli(["plugin", "marketplace", "add", marketplaceRoot, "--json"]);
+  const installation = JSON.parse(
+    (await cli(["plugin", "add", "sprut-agent@sprut-agent", "--json"]))
+      .stdout,
+  );
+  const checkScript = path.join(installation.installedPath, "check-install.mjs");
+  await assert.rejects(
+    run(process.execPath, [checkScript, installation.installedPath], {
+      cwd: workspace,
+      env: environment,
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /MCP name "sprut-agent" is already occupied/);
+      assert.match(error.stderr, /codex mcp remove sprut-agent/);
+      return true;
+    },
+  );
+  assert.equal(
+    (await readFile(configFile, "utf8")).includes(occupiedConfig),
+    true,
+  );
+
+  await cli(["mcp", "remove", "sprut-agent"]);
+  await run(process.execPath, [checkScript, installation.installedPath], {
+    cwd: workspace,
+    env: environment,
+  });
+
+  const hub = await startHub(t);
+  const connectionDirectory = path.join(
+    userHome,
+    ".config",
+    "sprut-agent",
+  );
+  await mkdir(connectionDirectory, { recursive: true });
+  await writeFile(
+    path.join(connectionDirectory, "connection.env"),
+    [
+      "SPRUTHUB_TOKEN=installed-session-token",
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_TIMEOUT_MS=1000",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const effectiveTransport = await getEffectiveTransport(
+    cli,
+    installation.installedPath,
+  );
+  const client = await startInstalledClient(effectiveTransport, userHome);
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.equal(homes.structuredContent.homes[0].name, "Дом");
+  await client.close();
+});
+
 async function copyPluginSource(destination) {
   await cp(projectRoot, destination, {
     recursive: true,
@@ -183,15 +283,27 @@ async function copyPluginSource(destination) {
   });
 }
 
-async function startInstalledClient(installedRoot, userHome) {
-  const manifest = JSON.parse(
-    await readFile(path.join(installedRoot, ".mcp.json"), "utf8"),
+async function getEffectiveTransport(cli, installedRoot) {
+  const effective = JSON.parse(
+    (await cli(["mcp", "get", "sprut-agent", "--json"])).stdout,
   );
-  const launch = manifest.mcpServers.sprut;
+  assert.equal(effective.name, "sprut-agent");
+  assert.equal(effective.transport.type, "stdio");
+  assert.equal(effective.transport.command, "node");
+  assert.deepEqual(effective.transport.args, ["./dist/server.mjs"]);
+  assert.equal(
+    path.resolve(effective.transport.cwd),
+    path.resolve(installedRoot),
+    "Codex must resolve the product MCP to the installed plugin copy",
+  );
+  return effective.transport;
+}
+
+async function startInstalledClient(effectiveTransport, userHome) {
   const transport = new StdioClientTransport({
-    command: launch.command,
-    args: launch.args,
-    cwd: path.resolve(installedRoot, launch.cwd),
+    command: effectiveTransport.command,
+    args: effectiveTransport.args,
+    cwd: effectiveTransport.cwd,
     env: {
       PATH: process.env.PATH,
       HOME: userHome,
