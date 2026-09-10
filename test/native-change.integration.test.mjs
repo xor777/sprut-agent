@@ -16,9 +16,72 @@ const projectRoot = path.resolve(
 const serial = "native-change-test-hub";
 const homeRef = `spruthub://hub/${serial}`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
+const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
+const smoothLogicType = "SmoothBrightnessChange";
+const smoothLogicRef = `${serviceRef}/logic/${smoothLogicType}`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
 const deviceWindowRef = `${homeRef}/window/Controller%2Fzigbee_demo%2FChild%2FDEVICE_A%2F`;
 const startupOptionKey = "/11/0006_OnOff/4003_StartUpOnOff/255";
+const smoothOptionKeys = {
+  start: "StartValue",
+  end: "EndValue",
+  duration: "Duration",
+};
+
+function smoothLogicOptions() {
+  return [
+    {
+      key: "Primary",
+      name: "Плавное изменение яркости",
+      type: "Group",
+      inputType: "GROUP",
+      read: true,
+      write: false,
+      disabled: false,
+    },
+    {
+      key: smoothOptionKeys.start,
+      name: "Начальная яркость",
+      type: "GenericInteger",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 1 },
+    },
+    {
+      key: smoothOptionKeys.end,
+      name: "Конечная яркость",
+      type: "GenericInteger",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 100 },
+    },
+    {
+      key: smoothOptionKeys.duration,
+      name: "Продолжительность",
+      type: "GenericInteger",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 900 },
+    },
+  ];
+}
+
+function assignedSmoothLogic({ active = false } = {}) {
+  return {
+    aId: 34,
+    sId: 13,
+    type: smoothLogicType,
+    name: "Плавное изменение яркости",
+    active,
+    optionsWindow: `Logic/${smoothLogicType}/34/13`,
+  };
+}
 
 function setAction({
   aId = 34,
@@ -236,6 +299,15 @@ async function startHub() {
         },
       ],
     },
+    logicTypes: [
+      {
+        type: smoothLogicType,
+        name: "Плавное изменение яркости",
+        desc: "Плавно меняет яркость при включении света",
+      },
+    ],
+    logics: [],
+    logicOptions: { [smoothLogicType]: smoothLogicOptions() },
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
@@ -252,6 +324,8 @@ async function startHub() {
       invalidNextScenarioList: false,
       missingScenarioGetAsNotFoundError: false,
       rejectScenarioGetAsInternalError: false,
+      closeAfterLogicCreate: false,
+      closeAfterLogicSetOptions: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -333,7 +407,15 @@ async function startHub() {
         return;
       }
       let result;
-      if (params.characteristic?.get) {
+      if (params.hub?.list) {
+        result = {
+          hub: {
+            list: {
+              hubs: [{ serial, name: "Тестовый дом", online: true }],
+            },
+          },
+        };
+      } else if (params.characteristic?.get) {
         const selected = state.accessories
           .find(({ id }) => id === params.characteristic.get.aId)
           ?.services.find(({ sId }) => sId === params.characteristic.get.sId)
@@ -389,6 +471,107 @@ async function startHub() {
           return;
         }
         result = { characteristic: { update: {} } };
+      } else if (params.logic?.types) {
+        result = {
+          logic: { types: { logicTypes: structuredClone(state.logicTypes) } },
+        };
+      } else if (params.logic?.list) {
+        result = {
+          logic: {
+            list: {
+              logics: state.logics
+                .filter(
+                  ({ aId, sId }) =>
+                    aId === params.logic.list.aId &&
+                    sId === params.logic.list.sId,
+                )
+                .map((logic) => structuredClone(logic)),
+            },
+          },
+        };
+      } else if (params.logic?.get) {
+        const logic = state.logics.find(
+          ({ aId, sId, type }) =>
+            aId === params.logic.get.aId &&
+            sId === params.logic.get.sId &&
+            type === params.logic.get.type,
+        );
+        if (!logic) {
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: -32603, message: "Not found" },
+            }),
+          );
+          return;
+        }
+        result = { logic: { get: structuredClone(logic) } };
+      } else if (params.logic?.getOptions) {
+        const logic = state.logics.find(
+          ({ aId, sId, type }) =>
+            aId === params.logic.getOptions.aId &&
+            sId === params.logic.getOptions.sId &&
+            type === params.logic.getOptions.type,
+        );
+        if (!logic) {
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: -32603, message: "Not found" },
+            }),
+          );
+          return;
+        }
+        result = {
+          logic: {
+            getOptions: {
+              options: structuredClone(state.logicOptions[logic.type]),
+            },
+          },
+        };
+      } else if (params.logic?.create) {
+        const created = {
+          ...structuredClone(params.logic.create),
+          active: false,
+          optionsWindow: `Logic/${params.logic.create.type}/34/13`,
+        };
+        state.logics.push(created);
+        if (state.behavior.closeAfterLogicCreate) {
+          state.behavior.closeAfterLogicCreate = false;
+          socket.close();
+          return;
+        }
+        result = { logic: { create: structuredClone(created) } };
+      } else if (params.logic?.setOptions) {
+        const options = state.logicOptions[params.logic.setOptions.type];
+        for (const update of params.logic.setOptions.options) {
+          const option = options.find(({ key }) => key === update.key);
+          if (option) option.value = structuredClone(update.value);
+        }
+        if (state.behavior.closeAfterLogicSetOptions) {
+          state.behavior.closeAfterLogicSetOptions = false;
+          socket.close();
+          return;
+        }
+        result = { logic: { setOptions: {} } };
+      } else if (params.logic?.update) {
+        const logic = state.logics.find(
+          ({ aId, sId, type }) =>
+            aId === params.logic.update.aId &&
+            sId === params.logic.update.sId &&
+            type === params.logic.update.type,
+        );
+        if (logic) logic.active = params.logic.update.active;
+        result = { logic: { update: {} } };
+      } else if (params.logic?.delete) {
+        const index = state.logics.findIndex(
+          ({ aId, sId, type }) =>
+            aId === params.logic.delete.aId &&
+            sId === params.logic.delete.sId &&
+            type === params.logic.delete.type,
+        );
+        if (index >= 0) state.logics.splice(index, 1);
+        result = { logic: { delete: {} } };
       } else if (params.accessory?.get) {
         result = {
           accessory: {
@@ -2699,5 +2882,332 @@ test("native preparation rejects unsafe targets and values before send", async (
         characteristic?.update || scenario?.create || scenario?.update,
     ),
     false,
+  );
+});
+
+test("a native logic assignment is configured without a duplicate and restored after restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const service = await firstClient.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: serviceRef },
+  });
+  assert.equal(service.isError, undefined, service.content[0]?.text);
+  assert.deepEqual(service.structuredContent.entity.assigned_logics, []);
+  assert.deepEqual(service.structuredContent.entity.available_logic_types, [
+    {
+      ref: smoothLogicRef,
+      type: smoothLogicType,
+      name: "Плавное изменение яркости",
+      description: "Плавно меняет яркость при включении света",
+      assigned: false,
+    },
+  ]);
+
+  const assignment = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатное мягкое включение офисной лампы",
+    },
+  });
+  assert.equal(assignment.isError, undefined, assignment.content[0]?.text);
+  assert.equal(assignment.structuredContent.status, "prepared");
+  const assigned = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(assigned.isError, undefined, assigned.content[0]?.text);
+  assert.equal(assigned.structuredContent.status, "applied");
+  assert.equal(hub.state.logics.length, 1);
+  assert.equal(hub.state.logics[0].active, false);
+
+  const logic = await firstClient.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: smoothLogicRef, include: ["options"] },
+  });
+  assert.equal(logic.isError, undefined, logic.content[0]?.text);
+  assert.equal(logic.structuredContent.entity.active, false);
+  assert.deepEqual(
+    logic.structuredContent.entity.options.map(
+      ({ key, type, input_type, value, capabilities }) => ({
+        key,
+        type,
+        input_type,
+        value,
+        capabilities,
+      }),
+    ),
+    [
+      {
+        key: "Primary",
+        type: "Group",
+        input_type: "GROUP",
+        value: null,
+        capabilities: { read: true, write: false, disabled: false },
+      },
+      {
+        key: smoothOptionKeys.start,
+        type: "GenericInteger",
+        input_type: "NUMBER",
+        value: 1,
+        capabilities: { read: true, write: true, disabled: false },
+      },
+      {
+        key: smoothOptionKeys.end,
+        type: "GenericInteger",
+        input_type: "NUMBER",
+        value: 100,
+        capabilities: { read: true, write: true, disabled: false },
+      },
+      {
+        key: smoothOptionKeys.duration,
+        type: "GenericInteger",
+        input_type: "NUMBER",
+        value: 900,
+        capabilities: { read: true, write: true, disabled: false },
+      },
+    ],
+  );
+
+  const changes = [];
+  for (const [optionKey, value] of [
+    [smoothOptionKeys.start, 1],
+    [smoothOptionKeys.end, 40],
+    [smoothOptionKeys.duration, 5],
+  ]) {
+    const prepared = await firstClient.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "logic_option",
+        target_ref: smoothLogicRef,
+        option_key: optionKey,
+        value,
+        reason: "Настроить штатное мягкое включение офисной лампы",
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    if (prepared.structuredContent.status === "prepared") {
+      const applied = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+      changes.push(prepared.structuredContent.change_ref);
+    } else {
+      assert.equal(prepared.structuredContent.status, "already_desired");
+    }
+  }
+  const activation = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_active",
+      target_ref: smoothLogicRef,
+      value: true,
+      reason: "Активировать настроенное штатное поведение",
+    },
+  });
+  const activated = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: activation.structuredContent.change_ref },
+  });
+  assert.equal(activated.structuredContent.status, "applied");
+  changes.push(activation.structuredContent.change_ref);
+  assert.equal(hub.state.logics[0].active, true);
+  assert.deepEqual(
+    hub.state.logicOptions[smoothLogicType]
+      .filter(({ value }) => value)
+      .map(({ key, value }) => [key, value.intValue]),
+    [
+      [smoothOptionKeys.start, 1],
+      [smoothOptionKeys.end, 40],
+      [smoothOptionKeys.duration, 5],
+    ],
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeatedAssignment = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Повторить ту же просьбу",
+    },
+  });
+  assert.equal(repeatedAssignment.structuredContent.status, "already_desired");
+  assert.equal(
+    repeatedAssignment.structuredContent.owned_change_created,
+    false,
+  );
+  const repeatedActivation = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_active",
+      target_ref: smoothLogicRef,
+      value: true,
+      reason: "Повторить ту же просьбу",
+    },
+  });
+  assert.equal(repeatedActivation.structuredContent.status, "already_desired");
+  assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
+
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: smoothLogicRef },
+  });
+  assert.deepEqual(
+    history.structuredContent.changes.map(({ operation }) => operation),
+    ["logic_active", "logic_option", "logic_option", "logic_assignment"],
+  );
+  for (const changeRef of changes.reverse()) {
+    const restored = await secondClient.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    assert.equal(restored.structuredContent.status, "restored");
+  }
+  const removed = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.deepEqual(hub.state.logics, []);
+  assert.equal(hub.requests.filter(({ logic }) => logic?.delete).length, 1);
+  assert.equal(
+    hub.requests.some(({ scenario }) =>
+      Boolean(scenario?.create || scenario?.update || scenario?.delete),
+    ),
+    false,
+  );
+});
+
+test("an existing or manually assigned logic is not claimed for deletion", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.logics.push(assignedSmoothLogic({ active: true }));
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const existing = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Использовать существующую штатную logic",
+    },
+  });
+  assert.deepEqual(existing.structuredContent, {
+    status: "already_desired",
+    operation: "logic_assignment",
+    target_ref: smoothLogicRef,
+    native_write_sent: false,
+    owned_change_created: false,
+  });
+
+  hub.state.logics.length = 0;
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Подготовить назначение",
+    },
+  });
+  hub.state.logics.push(assignedSmoothLogic());
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "not_owned");
+  assert.equal(hub.state.logics.length, 1);
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+});
+
+test("an uncertain logic create is reconciled once and manual option edits block deletion", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатную logic",
+    },
+  });
+  hub.state.behavior.closeAfterLogicCreate = true;
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+  assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
+
+  hub.state.logicOptions[smoothLogicType].find(
+    ({ key }) => key === smoothOptionKeys.end,
+  ).value = { intValue: 55 };
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "conflict");
+  assert.equal(restored.structuredContent.conflict_reason, "manual_change");
+  assert.equal(hub.state.logics.length, 1);
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.delete),
+    false,
+  );
+});
+
+test("logic writes require a catalogued type and a writable GenericInteger NUMBER option", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.logicTypes.length = 0;
+  const unavailable = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Не создавать вымышленный механизм",
+    },
+  });
+  assert.equal(unavailable.isError, true);
+  assert.equal(
+    unavailable.structuredContent.error.code,
+    "logic_type_unavailable",
+  );
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.create),
+    false,
+  );
+
+  hub.state.logicTypes.push({
+    type: smoothLogicType,
+    name: "Плавное изменение яркости",
+    desc: "Плавно меняет яркость при включении света",
+  });
+  hub.state.logics.push(assignedSmoothLogic());
+  hub.state.logicOptions[smoothLogicType].find(
+    ({ key }) => key === smoothOptionKeys.duration,
+  ).inputType = "SLIDER";
+  const unsupported = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      option_key: smoothOptionKeys.duration,
+    },
+  });
+  assert.equal(unsupported.isError, true);
+  assert.equal(
+    unsupported.structuredContent.error.code,
+    "unsupported_logic_option",
   );
 });
