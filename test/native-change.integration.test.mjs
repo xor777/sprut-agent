@@ -550,9 +550,6 @@ async function startHub() {
           optionsWindow: `Logic/${params.logic.create.type}/34/13`,
         };
         state.logics.push(created);
-        state.logicOptions[
-          logicOptionsKey(created.aId, created.sId, created.type)
-        ] = smoothLogicOptions();
         if (state.behavior.closeAfterLogicCreate) {
           state.behavior.closeAfterLogicCreate = false;
           socket.close();
@@ -594,12 +591,7 @@ async function startHub() {
             sId === params.logic.delete.sId &&
             type === params.logic.delete.type,
         );
-        if (index >= 0) {
-          const [deleted] = state.logics.splice(index, 1);
-          delete state.logicOptions[
-            logicOptionsKey(deleted.aId, deleted.sId, deleted.type)
-          ];
-        }
+        if (index >= 0) state.logics.splice(index, 1);
         result = { logic: { delete: {} } };
       } else if (params.accessory?.get) {
         result = {
@@ -3263,6 +3255,12 @@ test("an uncertain logic create is reconciled once and configuration changes blo
 
 test("cosmetic logic metadata does not block deletion of an owned assignment", async (t) => {
   const { hub, stateDirectory } = await setup(t);
+  configuredSmoothLogicOptions(hub.state).find(
+    ({ key }) => key === smoothOptionKeys.end,
+  ).value = { intValue: 40 };
+  configuredSmoothLogicOptions(hub.state).find(
+    ({ key }) => key === smoothOptionKeys.duration,
+  ).value = { intValue: 5 };
   const client = await startClient(t, hub, stateDirectory);
   const prepared = await client.callTool({
     name: "prepare_native_change",
@@ -3277,6 +3275,17 @@ test("cosmetic logic metadata does not block deletion of an owned assignment", a
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(applied.structuredContent.status, "applied");
+  assert.deepEqual(
+    configuredSmoothLogicOptions(hub.state)
+      .filter(({ key }) =>
+        [smoothOptionKeys.end, smoothOptionKeys.duration].includes(key),
+      )
+      .map(({ key, value }) => [key, value.intValue]),
+    [
+      [smoothOptionKeys.end, 40],
+      [smoothOptionKeys.duration, 5],
+    ],
+  );
 
   Object.assign(hub.state.logics[0], {
     name: "Локализованное название",
