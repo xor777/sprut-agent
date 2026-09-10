@@ -622,16 +622,6 @@ export class AutomationService {
         pending.outcome === "expected_missing" &&
         valuesEqual(pending.current, change.requested_value);
       if (!completedApply && !retryableRestore) {
-        if (
-          pending.direction === "apply" &&
-          pending.outcome === "expected_missing" &&
-          valuesEqual(pending.current, change.baseline_value)
-        ) {
-          return this.#finishNative(change, "not_owned", pending.current, {
-            conflict_reason: "change_was_not_applied",
-            last_verification: freshVerification("current_value_observed"),
-          });
-        }
         return pending.result;
       }
       currentState = { value: pending.current, contract: pending.contract };
@@ -2103,7 +2093,9 @@ function windowOptionContract(option, { requireWrite = true } = {}) {
       );
     }
     return {
-      name: typeof candidate.name === "string" ? candidate.name : "",
+      ...(typeof candidate.name === "string" && candidate.name.length > 0
+        ? { name: candidate.name }
+        : {}),
       ...typed,
     };
   });
@@ -2552,7 +2544,9 @@ function namedWindowValue(change, value) {
   );
   return {
     ...structuredClone(value),
-    ...(candidate && typeof candidate.name === "string"
+    ...(candidate &&
+    typeof candidate.name === "string" &&
+    candidate.name.length > 0
       ? { name: candidate.name }
       : {}),
   };
