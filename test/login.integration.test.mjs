@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -315,7 +322,8 @@ async function withSessionPath(t) {
 }
 
 test("an empty profile returns an executable local credential setup", async (t) => {
-  const directory = await mkdtemp(path.join(tmpdir(), "sprut-empty-profile-"));
+  const hub = await startHub(t);
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut empty profile-"));
   t.after(() => rm(directory, { recursive: true }));
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -333,15 +341,64 @@ test("an empty profile returns an executable local credential setup", async (t) 
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error.code, "configuration");
   assert.equal(result.structuredContent.error.action, "configure_credentials");
-  assert.deepEqual(result.structuredContent.credential_setup, {
-    file: "~/.config/sprut-agent/connection.env",
+  const connectionFile = path.join(
+    directory,
+    ".config",
+    "sprut-agent",
+    "connection.env",
+  );
+  const launch = `'${process.execPath}' --env-file='${connectionFile}' '${path.join(projectRoot, "src", "server.mjs")}'`;
+  const credentialSetup = {
+    file: connectionFile,
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    launch:
-      "node --env-file=$HOME/.config/sprut-agent/connection.env /absolute/path/to/sprut-agent/src/server.mjs",
+    launch,
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
+  };
+  assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
+  assert.equal(
+    result.structuredContent.error.message,
+    `Configure SprutHub locally: create '${connectionFile}' with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart with ${launch}. Do not send credential values in chat.`,
+  );
+  assert.equal(JSON.stringify(result).includes("/absolute/path"), false);
+
+  await client.close();
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_SERIAL=home/A",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const configuredTransport = new StdioClientTransport({
+    command: "/bin/sh",
+    args: ["-c", credentialSetup.launch],
+    cwd: directory,
+    env: { PATH: process.env.PATH, HOME: directory },
+    stderr: "pipe",
   });
+  const configuredClient = new Client({
+    name: "configured-profile-test",
+    version: "1.0.0",
+  });
+  await configuredClient.connect(configuredTransport);
+  t.after(() => configuredClient.close());
+  const homes = await configuredClient.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
+  const publicResult = JSON.stringify(result);
+  for (const secret of [login, password, token]) {
+    assert.equal(publicResult.includes(secret), false);
+  }
 });
 
 test("challenge login serves concurrent public reads and a restart reuses the session", async (t) => {

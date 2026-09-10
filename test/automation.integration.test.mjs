@@ -559,7 +559,7 @@ test("native history keeps legacy automation changes discoverable by target", as
   assert.deepEqual(history.structuredContent.changes[0], {
     change_ref: prepared.structuredContent.change_ref,
     operation: "legacy_boolean_automation",
-    status: "prepared",
+    recorded_status: "prepared",
     target_refs: [
       previewArguments.source_characteristic_ref,
       previewArguments.target_characteristic_ref,

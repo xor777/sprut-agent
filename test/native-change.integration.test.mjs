@@ -1156,7 +1156,7 @@ test("BLOCK create recovers when its applied result cannot be saved", async (t) 
     history.structuredContent.changes[0].change_ref,
     prepared.structuredContent.change_ref,
   );
-  assert.equal(history.structuredContent.changes[0].status, "applied");
+  assert.equal(history.structuredContent.changes[0].recorded_status, "applied");
   const recovered = await secondClient.callTool({
     name: "get_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -1304,7 +1304,7 @@ test("history discovers changes by home and entity after restart", async (t) => 
     {
       change_ref: prepared.structuredContent.change_ref,
       operation: "block_data_update",
-      status: "prepared",
+      recorded_status: "prepared",
       target_refs: [
         scenarioRef,
         `${homeRef}/accessory/32`,
@@ -1323,6 +1323,66 @@ test("history discovers changes by home and entity after restart", async (t) => 
     },
   ]);
   assert.equal(history.structuredContent.truncated, false);
+});
+
+test("history labels a saved conflict before its next tool verifies current applied state", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Отличить сохранённый конфликт от текущего состояния",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const appliedData = hub.state.scenarios[0].data;
+  const manuallyEdited = JSON.parse(appliedData);
+  manuallyEdited.manual = true;
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+  const conflict = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  hub.state.scenarios[0].data = appliedData;
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const requestsBeforeHistory = hub.requests.length;
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: scenarioRef },
+  });
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.equal(history.structuredContent.changes.length, 1);
+  const [saved] = history.structuredContent.changes;
+  assert.equal(saved.recorded_status, "conflict");
+  assert.equal("status" in saved, false);
+  assert.equal(typeof saved.updated_at, "string");
+  assert.deepEqual(saved.next, {
+    tool: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    hub.requests.length,
+    requestsBeforeHistory,
+    "listing saved history must not poll the live hub",
+  );
+
+  const current = await secondClient.callTool({
+    name: saved.next.tool,
+    arguments: saved.next.arguments,
+  });
+  assert.equal(current.isError, undefined, current.content[0]?.text);
+  assert.equal(current.structuredContent.status, "applied");
+  assert.equal(current.structuredContent.configuration_matches, true);
+  assert.equal(current.structuredContent.verification.fresh, true);
 });
 
 test("history indexes created scenarios and BLOCK bindings before and after update", async (t) => {
