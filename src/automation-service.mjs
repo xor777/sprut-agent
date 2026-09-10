@@ -242,31 +242,18 @@ export class AutomationService {
 
   async #applyValueChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
-    if (["applying", "uncertain"].includes(change.status)) {
-      if (nativeIntentDirection(change) === "restore") {
-        return this.#reconcileValueAfterWrite(change, "restore");
-      }
-      const current = await this.#readNativeValue(change, {
-        requireWrite: true,
-      });
-      if (valuesEqual(current, change.requested_value)) {
-        return this.#finishNative(change, "applied", current, {
-          applied_value_observed: true,
-          last_verification: freshVerification("requested_value_observed"),
-          recovered_after_uncertain_write: true,
-        });
-      }
-      if (change.kind === "characteristic_value") {
-        return this.#finishNative(change, "uncertain", current, {
-          last_verification: freshVerification("requested_value_missing"),
-        });
-      }
-      if (!valuesEqual(current, change.baseline_value)) {
-        return this.#finishNative(change, "conflict", current, {
-          conflict_reason: "manual_change",
-          last_verification: freshVerification("conflict"),
-        });
-      }
+    let currentState;
+    const pending = await this.#reconcilePendingValueChange(change, {
+      requireWrite: true,
+    });
+    if (pending) {
+      const retryableApply =
+        pending.direction === "apply" &&
+        pending.outcome === "expected_missing" &&
+        change.kind === "window_option" &&
+        valuesEqual(pending.current, change.baseline_value);
+      if (!retryableApply) return pending.result;
+      currentState = { value: pending.current, contract: pending.contract };
     }
     if (change.status === "applied") {
       const current = await this.#readNativeValue(change);
@@ -283,12 +270,11 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
-    const { value: current, contract } = await this.#readNativeValueState(
-      change,
-      {
+    const { value: current, contract } =
+      currentState ??
+      (await this.#readNativeValueState(change, {
         requireWrite: true,
-      },
-    );
+      }));
     validateCharacteristicValue(change.requested_value.value, contract);
     if (!valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "conflict", current, {
@@ -313,44 +299,94 @@ export class AutomationService {
   }
 
   async #reconcileValueAfterWrite(change, direction, acknowledged = false) {
+    const pending = await this.#reconcilePendingValueChange(change, {
+      acknowledged,
+    });
+    if (!pending || pending.direction !== direction) {
+      throw new Error("Native write intent changed before readback.");
+    }
+    return pending.result;
+  }
+
+  async #reconcilePendingValueChange(
+    change,
+    { requireWrite = false, acknowledged = false } = {},
+  ) {
+    if (!["applying", "restoring", "uncertain"].includes(change.status)) {
+      return undefined;
+    }
+    const direction = nativeIntentDirection(change);
+    let state;
     try {
-      const observed = await this.#readNativeValue(change);
-      const expected =
-        direction === "restore"
-          ? change.baseline_value
-          : change.requested_value;
+      state = await this.#readNativeValueState(change, { requireWrite });
+    } catch (error) {
+      return {
+        direction,
+        outcome: "read_failed",
+        result: await this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          last_verification: failedVerification(error),
+        }),
+      };
+    }
+    const { value: current, contract } = state;
+    const expected =
+      direction === "restore" ? change.baseline_value : change.requested_value;
+    if (valuesEqual(current, expected)) {
       const completedStatus = direction === "restore" ? "restored" : "applied";
-      const result =
+      const verificationResult =
         direction === "restore"
           ? "baseline_value_observed"
           : "requested_value_observed";
-      return valuesEqual(observed, expected)
-        ? this.#finishNative(change, completedStatus, observed, {
-            ...(direction === "apply" ? { applied_value_observed: true } : {}),
-            last_verification: freshVerification(result),
-            ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-          })
-        : this.#finishNative(change, "uncertain", observed, {
-            last_verification: freshVerification(
-              direction === "restore"
-                ? "baseline_value_missing"
-                : "requested_value_missing",
-            ),
-            ...(acknowledged
-              ? {
-                  conflict_reason:
-                    direction === "restore"
-                      ? "ack_without_baseline_result"
-                      : "ack_without_requested_result",
-                }
-              : {}),
-          });
-    } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
+      return {
+        direction,
+        outcome: "expected_observed",
+        current,
+        contract,
+        result: await this.#finishNative(change, completedStatus, current, {
+          ...(direction === "apply" ? { applied_value_observed: true } : {}),
+          last_verification: freshVerification(verificationResult),
+          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+        }),
+      };
     }
+    if (
+      change.kind === "window_option" &&
+      !valuesEqual(current, change.baseline_value) &&
+      !valuesEqual(current, change.requested_value)
+    ) {
+      return {
+        direction,
+        outcome: "conflict",
+        current,
+        contract,
+        result: await this.#finishNative(change, "conflict", current, {
+          conflict_reason: "manual_change",
+          last_verification: freshVerification("conflict"),
+        }),
+      };
+    }
+    const verificationResult =
+      direction === "restore"
+        ? "baseline_value_missing"
+        : "requested_value_missing";
+    return {
+      direction,
+      outcome: "expected_missing",
+      current,
+      contract,
+      result: await this.#finishNative(change, "uncertain", current, {
+        last_verification: freshVerification(verificationResult),
+        ...(acknowledged
+          ? {
+              conflict_reason:
+                direction === "restore"
+                  ? "ack_without_baseline_result"
+                  : "ack_without_requested_result",
+            }
+          : {}),
+      }),
+    };
   }
 
   async getNativeChange(changeReference) {
@@ -359,42 +395,14 @@ export class AutomationService {
     if (!isNativeValueChange(change)) {
       return this.#getBlockChange(change);
     }
+    const pending = await this.#reconcilePendingValueChange(change);
+    if (pending) return pending.result;
     let current;
     try {
       current = await this.#readNativeValue(change);
     } catch (error) {
       return publicNativeChange(change, undefined, {
         verification: failedVerification(error),
-      });
-    }
-    if (
-      ["applying", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "apply" &&
-      valuesEqual(current, change.requested_value)
-    ) {
-      return this.#finishNative(change, "applied", current, {
-        applied_value_observed: true,
-        last_verification: freshVerification("requested_value_observed"),
-      });
-    }
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore" &&
-      valuesEqual(current, change.baseline_value)
-    ) {
-      return this.#finishNative(change, "restored", current, {
-        last_verification: freshVerification("baseline_value_observed"),
-      });
-    }
-    if (
-      change.kind === "window_option" &&
-      ["applying", "restoring", "uncertain"].includes(change.status) &&
-      !valuesEqual(current, change.requested_value) &&
-      !valuesEqual(current, change.baseline_value)
-    ) {
-      return this.#finishNative(change, "conflict", current, {
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
       });
     }
     if (
@@ -570,6 +578,7 @@ export class AutomationService {
         "prepare_native_change",
       );
     }
+    change.contract = contract;
     return { value: typedNativeValue(option.value), contract };
   }
 
@@ -600,12 +609,38 @@ export class AutomationService {
 
   async #restoreWindowOptionChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
-    const { value: current, contract } = await this.#readNativeValueState(
-      change,
-      {
+    let currentState;
+    const pending = await this.#reconcilePendingValueChange(change, {
+      requireWrite: true,
+    });
+    if (pending) {
+      const completedApply =
+        pending.direction === "apply" &&
+        pending.outcome === "expected_observed";
+      const retryableRestore =
+        pending.direction === "restore" &&
+        pending.outcome === "expected_missing" &&
+        valuesEqual(pending.current, change.requested_value);
+      if (!completedApply && !retryableRestore) {
+        if (
+          pending.direction === "apply" &&
+          pending.outcome === "expected_missing" &&
+          valuesEqual(pending.current, change.baseline_value)
+        ) {
+          return this.#finishNative(change, "not_owned", pending.current, {
+            conflict_reason: "change_was_not_applied",
+            last_verification: freshVerification("current_value_observed"),
+          });
+        }
+        return pending.result;
+      }
+      currentState = { value: pending.current, contract: pending.contract };
+    }
+    const { value: current, contract } =
+      currentState ??
+      (await this.#readNativeValueState(change, {
         requireWrite: true,
-      },
-    );
+      }));
     validateCharacteristicValue(change.baseline_value.value, contract);
     if (change.applied_value_observed !== true) {
       return this.#finishNative(change, "not_owned", current, {
