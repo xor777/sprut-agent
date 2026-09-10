@@ -8,7 +8,7 @@
       "name": "sprut-agent",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./dist/plugin"
       },
       "policy": {
         "installation": "AVAILABLE",

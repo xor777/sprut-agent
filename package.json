@@ -7,7 +7,7 @@
     "build:plugin": "node scripts/build-plugin.mjs",
     "prepare": "husky",
     "check": "npm run check:plugin-bundle && biome check . && npm test",
-    "check:plugin-bundle": "npm run build:plugin && git diff --exit-code -- dist/server.mjs",
+    "check:plugin-bundle": "npm run build:plugin && git diff --exit-code -- dist",
     "format": "biome format --write .",
     "start": "node src/server.mjs",
     "eval:spruthub-master": "node research/evaluate-spruthub-master.mjs",

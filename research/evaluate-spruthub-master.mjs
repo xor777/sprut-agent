@@ -109,6 +109,17 @@ async function main() {
           { encoding: "utf8", env: pluginEnvironment },
         ),
       );
+      execFileSync(
+        process.execPath,
+        [
+          path.join(installedPlugin.installedPath, "check-install.mjs"),
+          installedPlugin.installedPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...pluginEnvironment, SPRUT_CODEX_BIN: codexBinary },
+        },
+      );
       installedSkill = path.join(
         installedPlugin.installedPath,
         "skills",

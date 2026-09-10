@@ -88,6 +88,11 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   ]);
 
   const effectiveTransport = await getEffectiveTransport(cli, installedRoot);
+  const preservedNeighbor = JSON.parse(
+    (await cli(["mcp", "get", "sprut", "--json"])).stdout,
+  );
+  assert.equal(preservedNeighbor.transport.command, "neighbor-command");
+  assert.deepEqual(preservedNeighbor.transport.args, ["--keep-me"]);
 
   const hub = await startHub(t);
   const configRoot = path.join(userHome, ".config");
@@ -152,10 +157,7 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   );
 
   const restartedTransport = await getEffectiveTransport(cli, installedRoot);
-  const secondClient = await startInstalledClient(
-    restartedTransport,
-    userHome,
-  );
+  const secondClient = await startInstalledClient(restartedTransport, userHome);
   const restartedHomes = await secondClient.callTool({
     name: "list_homes",
     arguments: {},
@@ -216,10 +218,12 @@ test("installation reports an occupied product MCP name and works after explicit
 
   await cli(["plugin", "marketplace", "add", marketplaceRoot, "--json"]);
   const installation = JSON.parse(
-    (await cli(["plugin", "add", "sprut-agent@sprut-agent", "--json"]))
-      .stdout,
+    (await cli(["plugin", "add", "sprut-agent@sprut-agent", "--json"])).stdout,
   );
-  const checkScript = path.join(installation.installedPath, "check-install.mjs");
+  const checkScript = path.join(
+    installation.installedPath,
+    "check-install.mjs",
+  );
   await assert.rejects(
     run(process.execPath, [checkScript, installation.installedPath], {
       cwd: workspace,
@@ -244,16 +248,13 @@ test("installation reports an occupied product MCP name and works after explicit
   });
 
   const hub = await startHub(t);
-  const connectionDirectory = path.join(
-    userHome,
-    ".config",
-    "sprut-agent",
-  );
+  const connectionDirectory = path.join(userHome, ".config", "sprut-agent");
   await mkdir(connectionDirectory, { recursive: true });
   await writeFile(
     path.join(connectionDirectory, "connection.env"),
     [
-      "SPRUTHUB_TOKEN=installed-session-token",
+      "SPRUTHUB_LOGIN=owner@example.invalid",
+      "SPRUTHUB_PASSWORD=local-only-password",
       `SPRUTHUB_URL=${hub.url}`,
       "SPRUTHUB_TIMEOUT_MS=1000",
       "",

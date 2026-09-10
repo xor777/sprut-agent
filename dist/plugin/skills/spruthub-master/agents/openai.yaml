@@ -1,0 +1,4 @@
+interface:
+  display_name: "SprutHub Master"
+  short_description: "Проектирует и проверяет решения для SprutHub"
+  default_prompt: "Use $spruthub-master to inspect this home request and choose a verified native SprutHub solution."
