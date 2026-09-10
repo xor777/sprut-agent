@@ -791,6 +791,113 @@ test("a lost apply readback can be restored without a preliminary get", async (t
   assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 });
 
+test("a baseline read does not discard a delayed window apply", async (t) => {
+  for (const readBeforeRestore of [false, true]) {
+    await t.test(
+      readBeforeRestore ? "after get" : "without get",
+      async (scenario) => {
+        const { hub, stateDirectory } = await setup(scenario);
+        const firstClient = await startClient(scenario, hub, stateDirectory);
+        const prepared = await firstClient.callTool({
+          name: "prepare_native_change",
+          arguments: {
+            operation: "window_option",
+            target_ref: deviceWindowRef,
+            option_key: startupOptionKey,
+            value: 0,
+            reason: "Не включать лампу после восстановления питания",
+          },
+        });
+        hub.state.behavior.dropNextWindowUpdate = true;
+
+        const applied = await firstClient.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(applied.structuredContent.status, "uncertain");
+        assert.equal(applied.structuredContent.write_intent.direction, "apply");
+        assert.equal(hub.state.window.options[0].value.intValue, 255);
+
+        if (readBeforeRestore) {
+          const observed = await firstClient.callTool({
+            name: "get_native_change",
+            arguments: { change_ref: prepared.structuredContent.change_ref },
+          });
+          assert.equal(observed.structuredContent.status, "uncertain");
+          assert.equal(
+            observed.structuredContent.write_intent.direction,
+            "apply",
+          );
+        }
+
+        const waitingRestore = await firstClient.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(
+          waitingRestore.isError,
+          undefined,
+          waitingRestore.content[0]?.text,
+        );
+        assert.equal(waitingRestore.structuredContent.status, "uncertain");
+        assert.equal(
+          waitingRestore.structuredContent.write_intent.direction,
+          "apply",
+        );
+        assert.deepEqual(waitingRestore.structuredContent.observed_value, {
+          value: 255,
+          kind: "intValue",
+        });
+        assert.equal(
+          hub.requests.filter(({ window }) => window?.update).length,
+          1,
+        );
+
+        hub.state.behavior.failNextWindowGet = true;
+        const unreadableRestore = await firstClient.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(
+          unreadableRestore.isError,
+          undefined,
+          unreadableRestore.content[0]?.text,
+        );
+        assert.equal(unreadableRestore.structuredContent.status, "uncertain");
+        assert.equal(
+          unreadableRestore.structuredContent.write_intent.direction,
+          "apply",
+        );
+        assert.equal(
+          unreadableRestore.structuredContent.verification.fresh,
+          false,
+        );
+        assert.equal(
+          hub.requests.filter(({ window }) => window?.update).length,
+          1,
+        );
+
+        hub.state.window.options[0].value = { intValue: 0 };
+        await firstClient.close();
+        const secondClient = await startClient(scenario, hub, stateDirectory);
+        const restored = await secondClient.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+
+        assert.equal(restored.isError, undefined, restored.content[0]?.text);
+        assert.equal(restored.structuredContent.status, "restored");
+        assert.equal(restored.structuredContent.applied_value_observed, true);
+        assert.equal(hub.state.window.options[0].value.intValue, 255);
+        assert.equal(
+          hub.requests.filter(({ window }) => window?.update).length,
+          2,
+        );
+      },
+    );
+  }
+});
+
 test("window option contract rejects controls outside the reversible setting slice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -853,6 +960,9 @@ test("window option restore preserves a third value chosen after apply", async (
   for (const validValue of hub.state.window.options[0].validValues) {
     validValue.name = `Актуально: ${validValue.name}`;
   }
+  delete hub.state.window.options[0].validValues.find(
+    ({ value }) => value.intValue === 1,
+  ).name;
   hub.state.window.options[0].value = { intValue: 1 };
 
   const conflict = await client.callTool({
@@ -875,7 +985,6 @@ test("window option restore preserves a third value chosen after apply", async (
     observed: {
       value: 1,
       kind: "intValue",
-      name: "Актуально: Включена",
     },
   });
   assert.deepEqual(conflict.structuredContent.conflict_resolution, {
@@ -885,7 +994,6 @@ test("window option restore preserves a third value chosen after apply", async (
       replace: {
         value: 1,
         kind: "intValue",
-        name: "Актуально: Включена",
       },
       with: {
         value: 255,
