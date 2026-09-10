@@ -1513,6 +1513,123 @@ test("fresh BLOCK match recovers from an earlier conflict before restore", async
   );
 });
 
+test("restored BLOCK observations keep terminal status and consistent snapshot facts", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const update = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить наблюдение restored update",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  const restoredUpdate = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(restoredUpdate.structuredContent.status, "restored");
+  const restoredData = hub.state.scenarios[0].data;
+  const manuallyEdited = JSON.parse(restoredData);
+  manuallyEdited.manual = true;
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+  const writesBeforeGet = hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
+  ).length;
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const driftedUpdate = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(driftedUpdate.structuredContent.status, "restored");
+  assert.equal(driftedUpdate.structuredContent.configuration_matches, false);
+  assert.equal(driftedUpdate.structuredContent.verification.fresh, true);
+  assert.equal(
+    driftedUpdate.structuredContent.verification.result,
+    "baseline_configuration_missing",
+  );
+
+  hub.state.scenarios[0].data = restoredData;
+  const matchingUpdate = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(matchingUpdate.structuredContent.status, "restored");
+  assert.equal(matchingUpdate.structuredContent.configuration_matches, true);
+  assert.equal(
+    matchingUpdate.structuredContent.verification.result,
+    "baseline_configuration",
+  );
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) =>
+        scenario?.create || scenario?.update || scenario?.delete,
+    ).length,
+    writesBeforeGet,
+  );
+
+  const createData = blockData({ nested: true });
+  delete createData.vendorConfiguration;
+  const create = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Восстановленный create",
+      description: "Проверить повторное появление",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Проверить observation после удаления",
+    },
+  });
+  const appliedCreate = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  const createdScenario = structuredClone(
+    hub.state.scenarios.find(
+      ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+    ),
+  );
+  const restoredCreate = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  assert.equal(restoredCreate.structuredContent.status, "restored");
+  hub.state.scenarios.push(createdScenario);
+  const writesBeforeCreateGet = hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
+  ).length;
+
+  const reappearedCreate = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  assert.equal(reappearedCreate.structuredContent.status, "restored");
+  assert.equal(reappearedCreate.structuredContent.configuration_matches, false);
+  assert.equal(reappearedCreate.structuredContent.verification.fresh, true);
+  assert.equal(
+    reappearedCreate.structuredContent.verification.result,
+    "baseline_configuration_missing",
+  );
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) =>
+        scenario?.create || scenario?.update || scenario?.delete,
+    ).length,
+    writesBeforeCreateGet,
+  );
+});
+
 test("native preparation rejects unsafe targets and values before send", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
