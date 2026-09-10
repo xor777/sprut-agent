@@ -214,14 +214,14 @@ export class SprutHubClient {
     } catch {
       throw invalidRoomRef();
     }
-    if (
-      parsedRef.kind !== "room" ||
-      (this.serial !== null && parsedRef.serial !== this.serial)
-    ) {
+    if (parsedRef.kind !== "room") {
       throw invalidRoomRef();
     }
     const roomId = parsedRef.roomId;
     const deadline = Date.now() + this.timeoutMs;
+    if (this.serial === null || parsedRef.serial !== this.serial) {
+      await this.#requireHome(parsedRef.serial, deadline);
+    }
     const roomResponse = await this.#request(
       { room: { get: { id: roomId } } },
       deadline,
@@ -1246,8 +1246,8 @@ function invalidEntityRef(action = "inspect_home") {
 function invalidRoomRef() {
   return new SprutHubError(
     "invalid_room_ref",
-    "Use a configured-home room reference returned by list_rooms.",
-    "list_rooms",
+    "Use a home-qualified room reference returned by list_rooms or inspect_home.",
+    "inspect_home",
   );
 }
 

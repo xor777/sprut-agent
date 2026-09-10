@@ -964,9 +964,10 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     assert.equal(invalid.isError, true);
     assert.deepEqual(invalid.structuredContent.error, {
       code: "invalid_room_ref",
-      message: "Use a configured-home room reference returned by list_rooms.",
+      message:
+        "Use a home-qualified room reference returned by list_rooms or inspect_home.",
       retryable: false,
-      action: "list_rooms",
+      action: "inspect_home",
     });
   }
 });
