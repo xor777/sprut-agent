@@ -1060,7 +1060,8 @@ test("an observed empty logic getOptions keeps the assigned logic readable", asy
   assert.equal(empty.isError, undefined, empty.content[0]?.text);
   assert.equal(empty.structuredContent.entity.kind, "logic");
   assert.deepEqual(empty.structuredContent.entity.options, []);
-  assert.deepEqual(empty.structuredContent.include_resolution, {
+  assert.deepEqual(empty.structuredContent.entity.include_resolution, {
+    requested: ["options"],
     applied: ["options"],
     not_applied: [],
   });

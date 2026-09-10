@@ -3115,7 +3115,7 @@ test("a native logic assignment is configured without a duplicate and restored a
   });
   assert.deepEqual(
     history.structuredContent.changes.map(({ operation }) => operation),
-    ["logic_active", "logic_option", "logic_option", "logic_assignment"],
+    ["logic_assignment", "logic_active", "logic_option", "logic_option"],
   );
   for (const changeRef of changes.reverse()) {
     const restored = await secondClient.callTool({
