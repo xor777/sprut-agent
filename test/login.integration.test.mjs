@@ -573,8 +573,10 @@ test("explicit connection environment wins over conflicting file values", async 
     [
       "SPRUTHUB_LOGIN=file-login@example.invalid",
       "SPRUTHUB_PASSWORD=file-password",
+      "SPRUTHUB_TOKEN=file-token",
       "SPRUTHUB_URL=ws://127.0.0.1:1",
       "SPRUTHUB_SERIAL=file-home",
+      "SPRUTHUB_CID=file-client",
       "UNSUPPORTED_CONNECTION_KEY=must-not-be-applied",
       "",
     ].join("\n"),
@@ -616,6 +618,87 @@ test("explicit connection environment wins over conflicting file values", async 
   );
 });
 
+test("complete explicit credentials ignore an unsafe default file", async (t) => {
+  for (const source of ["environment", "node --env-file"]) {
+    await t.test(source, async (t) => {
+      const hub = await startHub(t);
+      const directory = await mkdtemp(
+        path.join(tmpdir(), "sprut explicit profile-"),
+      );
+      t.after(() => rm(directory, { recursive: true }));
+      const connectionFile = path.join(
+        directory,
+        ".config",
+        "sprut-agent",
+        "connection.env",
+      );
+      await mkdir(path.dirname(connectionFile), { recursive: true });
+      await writeFile(
+        connectionFile,
+        [
+          "SPRUTHUB_TOKEN=unrelated-file-token",
+          "SPRUTHUB_URL=ws://127.0.0.1:1",
+          "SPRUTHUB_SERIAL=unrelated-file-home",
+          "SPRUTHUB_CID=unrelated-file-client",
+          "",
+        ].join("\n"),
+      );
+      await chmod(connectionFile, 0o644);
+
+      const explicitEnvironment = {
+        SPRUTHUB_LOGIN: login,
+        SPRUTHUB_PASSWORD: password,
+        SPRUTHUB_URL: hub.url,
+        SPRUTHUB_SERIAL: "home/A",
+      };
+      const args = [path.join(projectRoot, "src", "server.mjs")];
+      if (source === "node --env-file") {
+        const explicitFile = path.join(directory, "explicit.env");
+        await writeFile(
+          explicitFile,
+          Object.entries(explicitEnvironment)
+            .map(([name, value]) => `${name}=${value}`)
+            .join("\n"),
+        );
+        await chmod(explicitFile, 0o600);
+        args.unshift(`--env-file=${explicitFile}`);
+      }
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args,
+        cwd: directory,
+        env: {
+          PATH: process.env.PATH,
+          HOME: directory,
+          ...(source === "environment" ? explicitEnvironment : {}),
+        },
+        stderr: "pipe",
+      });
+      const client = new Client({
+        name: "explicit-profile-test",
+        version: "1.0.0",
+      });
+      await client.connect(transport);
+      t.after(() => client.close());
+
+      const homes = await client.callTool({
+        name: "list_homes",
+        arguments: {},
+      });
+      assert.equal(homes.isError, undefined, homes.content[0]?.text);
+      const room = await client.callTool({
+        name: "read_room",
+        arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
+      });
+      assert.equal(room.isError, undefined, room.content[0]?.text);
+      assert.equal(
+        room.structuredContent.devices[0].services[0].readings[0].value,
+        22.5,
+      );
+    });
+  }
+});
+
 test("an unsafe credential file returns one fixable local error", async (t) => {
   const hub = await startHub(t);
   const directory = await mkdtemp(path.join(tmpdir(), "sprut unsafe profile-"));
@@ -635,8 +718,8 @@ test("an unsafe credential file returns one fixable local error", async (t) => {
       `SPRUTHUB_URL=${hub.url}`,
       "",
     ].join("\n"),
-    { mode: 0o644 },
   );
+  await chmod(connectionFile, 0o644);
   const launch = {
     command: process.execPath,
     args: [path.join(projectRoot, "src", "server.mjs")],
