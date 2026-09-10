@@ -3252,6 +3252,7 @@ function publicNativeChange(
         "Assignment creation, option updates, and activation are separate native operations, not one atomic transaction.",
         "Deletion is allowed only after child changes restore the saved created active state and option values.",
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+        "An unobserved delete/recreate at the same address is indistinguishable; ownership history across restarts requires successful journal persistence.",
       ],
     };
   }
