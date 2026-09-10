@@ -640,7 +640,11 @@ export class SprutHubClient {
       { logic: { getOptions: { aId, sId, type } } },
       Date.now() + this.timeoutMs,
     );
-    return extractEntityArray(response, ["logic", "getOptions", "options"]);
+    return extractEntityArray(
+      response,
+      ["logic", "getOptions", "options"],
+      true,
+    );
   }
 
   async createLogic({ aId, sId, type }) {
@@ -2151,7 +2155,10 @@ function normalizeLogic(serial, accessoryId, serviceId, logic) {
   return {
     ref: logicRef(serial, accessoryId, serviceId, logic.type),
     type: logic.type,
-    name: logic.name ?? logic.type,
+    name:
+      typeof logic.name === "string"
+        ? redactSensitiveText(logic.name)
+        : logic.type,
     active: logic.active === true,
   };
 }

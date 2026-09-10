@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
-import { SprutHubError } from "./spruthub-client.mjs";
+import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -712,19 +712,16 @@ export class AutomationService {
       const current = await this.#observeLogicAssignment(change);
       if (current !== null) return pending;
     }
-    if (change.status === "applied") {
+    if (change.applied_snapshot !== undefined) {
       const current = await this.#observeLogicAssignment(change);
-      if (logicSnapshotsEqual(current, change.applied_snapshot)) {
-        return this.#recordLogicAssignmentObservation(
-          change,
-          current,
-          "applied_configuration",
-        );
+      if (current !== null) {
+        return this.#recordOwnedLogicAssignment(change, current);
       }
       return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
+        conflict_reason: "assignment_missing_after_creation",
         configuration_matches: false,
-        last_verification: freshVerification("applied_configuration_missing"),
+        configuration_differences: { assignment: "missing" },
+        last_verification: freshVerification("created_assignment_missing"),
       });
     }
     const current = await this.#observeLogicAssignment(change);
@@ -772,20 +769,16 @@ export class AutomationService {
           : {}),
       });
     }
-    if (
-      change.applied_snapshot !== undefined &&
-      !logicSnapshotsEqual(current, change.applied_snapshot)
-    ) {
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        configuration_matches: false,
-        last_verification: freshVerification("applied_configuration_missing"),
+    if (change.applied_snapshot !== undefined) {
+      return this.#recordOwnedLogicAssignment(change, current, {
+        recoveredAfterUncertainWrite: !acknowledged,
       });
     }
     return this.#finishNative(change, "applied", undefined, {
       applied_snapshot: current,
       configuration_matches: true,
-      last_verification: freshVerification("applied_configuration"),
+      configuration_differences: undefined,
+      last_verification: freshVerification("created_configuration"),
       ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
     });
   }
@@ -812,19 +805,16 @@ export class AutomationService {
         current === null ? "baseline_absent" : "baseline_absent_missing",
       );
     }
-    if (change.status === "applied") {
-      if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+    if (change.applied_snapshot !== undefined) {
+      if (current === null) {
         return this.#finishNative(change, "conflict", undefined, {
-          conflict_reason: "manual_change",
+          conflict_reason: "assignment_missing_after_creation",
           configuration_matches: false,
-          last_verification: freshVerification("applied_configuration_missing"),
+          configuration_differences: { assignment: "missing" },
+          last_verification: freshVerification("created_assignment_missing"),
         });
       }
-      return this.#recordLogicAssignmentObservation(
-        change,
-        current,
-        "applied_configuration",
-      );
+      return this.#recordOwnedLogicAssignment(change, current);
     }
     return this.#recordLogicAssignmentObservation(
       change,
@@ -873,14 +863,18 @@ export class AutomationService {
     if (current === null) {
       return this.#finishNative(change, "restored", undefined, {
         configuration_matches: true,
+        configuration_differences: undefined,
         last_verification: freshVerification("baseline_absent"),
       });
     }
-    if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+    const observation = logicAssignmentConfigurationObservation(
+      change.applied_snapshot,
+      current,
+    );
+    if (!observation.matches) {
       return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        configuration_matches: false,
-        last_verification: freshVerification("applied_configuration_missing"),
+        conflict_reason: "configuration_changed_after_creation",
+        ...observation.fields,
       });
     }
     await this.#persistNativeIntent(change, "restoring", "restore");
@@ -913,15 +907,19 @@ export class AutomationService {
     if (current === null) {
       return this.#finishNative(change, "restored", undefined, {
         configuration_matches: true,
+        configuration_differences: undefined,
         last_verification: freshVerification("baseline_absent"),
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
     }
-    if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+    const observation = logicAssignmentConfigurationObservation(
+      change.applied_snapshot,
+      current,
+    );
+    if (!observation.matches) {
       return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        configuration_matches: false,
-        last_verification: freshVerification("applied_configuration_missing"),
+        conflict_reason: "configuration_changed_after_creation",
+        ...observation.fields,
       });
     }
     return this.#finishNative(change, "uncertain", undefined, {
@@ -938,6 +936,33 @@ export class AutomationService {
       result === "applied_configuration" || result === "baseline_absent";
     change.last_verification = freshVerification(result);
     change.updated_at = new Date().toISOString();
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
+  }
+
+  async #recordOwnedLogicAssignment(
+    change,
+    current,
+    { recoveredAfterUncertainWrite = false } = {},
+  ) {
+    const observation = logicAssignmentConfigurationObservation(
+      change.applied_snapshot,
+      current,
+    );
+    Object.assign(change, observation.fields, {
+      status: "applied",
+      conflict_reason: undefined,
+      recovered_after_uncertain_write:
+        recoveredAfterUncertainWrite ||
+        change.recovered_after_uncertain_write === true
+          ? true
+          : undefined,
+      updated_at: new Date().toISOString(),
+    });
     const saved = await this.#trySave(change);
     return withLocalState(
       publicNativeChange(change),
@@ -1247,6 +1272,7 @@ export class AutomationService {
       native_write_sent: true,
       native_acknowledged: false,
       configuration_matches: undefined,
+      configuration_differences: undefined,
       conflict_reason: undefined,
       recovered_after_uncertain_write: undefined,
       write_intent: {
@@ -2682,8 +2708,12 @@ function windowOptionContract(option, { requireWrite = true } = {}) {
 function logicAssignmentContract(target, type, assigned) {
   return {
     type: target.type,
-    name: typeof type.name === "string" ? type.name : target.type,
-    description: typeof type.desc === "string" ? type.desc : "",
+    name:
+      typeof type.name === "string"
+        ? sanitizeNativeData(type.name)
+        : target.type,
+    description:
+      typeof type.desc === "string" ? sanitizeNativeData(type.desc) : "",
     assigned,
     create_active: false,
     confirmation: "scoped_logic_list_and_configuration_readback",
@@ -2709,7 +2739,7 @@ function logicOptionContract(option, { requireWrite = true } = {}) {
   if (
     option.read !== true ||
     (requireWrite && option.write !== true) ||
-    option.disabled !== false
+    option.disabled === true
   ) {
     throw new SprutHubError(
       "insufficient_rights",
@@ -2930,21 +2960,89 @@ function logicAssignmentSnapshot(logic, options) {
       "SprutHub returned incomplete logic options.",
     );
   }
+  const normalizedOptions = options
+    .map((option) => logicOptionConfiguration(option))
+    .sort((left, right) => left.key.localeCompare(right.key));
+  if (
+    normalizedOptions.some(
+      (option, index) => option.key === normalizedOptions[index - 1]?.key,
+    )
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned the same logic option key more than once.",
+    );
+  }
   return {
     logic: {
       type: logic.type,
       active: logicActiveValue(logic).value,
-      options_window:
-        typeof logic.optionsWindow === "string" ? logic.optionsWindow : null,
     },
-    options: options
-      .map((option) => nativeConfigurationFingerprint(option))
-      .sort((left, right) => left.localeCompare(right)),
+    options: normalizedOptions,
   };
 }
 
-function logicSnapshotsEqual(left, right) {
-  return isDeepStrictEqual(left, right);
+function logicOptionConfiguration(option) {
+  if (
+    !isRecord(option) ||
+    typeof option.key !== "string" ||
+    typeof option.type !== "string"
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned incomplete logic option configuration.",
+    );
+  }
+  const hasValue = Object.hasOwn(option, "value");
+  return {
+    key: option.key,
+    type: option.type,
+    value_present: hasValue,
+    ...(hasValue
+      ? { value_fingerprint: nativeConfigurationFingerprint(option.value) }
+      : {}),
+  };
+}
+
+function logicAssignmentConfigurationObservation(created, current) {
+  const differences = logicAssignmentConfigurationDifferences(created, current);
+  const matches = differences === undefined;
+  return {
+    matches,
+    fields: {
+      configuration_matches: matches,
+      configuration_differences: differences,
+      last_verification: freshVerification(
+        matches ? "created_configuration" : "created_configuration_changed",
+      ),
+    },
+  };
+}
+
+function logicAssignmentConfigurationDifferences(created, current) {
+  const differences = {};
+  if (created.logic.active !== current.logic.active) {
+    differences.active = {
+      created: created.logic.active,
+      current: current.logic.active,
+    };
+  }
+  const createdOptions = new Map(
+    created.options.map((option) => [option.key, option]),
+  );
+  const currentOptions = new Map(
+    current.options.map((option) => [option.key, option]),
+  );
+  const optionKeys = [
+    ...new Set([...createdOptions.keys(), ...currentOptions.keys()]),
+  ]
+    .filter(
+      (key) =>
+        !isDeepStrictEqual(createdOptions.get(key), currentOptions.get(key)),
+    )
+    .sort((left, right) => left.localeCompare(right));
+  if (optionKeys.length > 0) differences.option_keys = optionKeys;
+  return Object.keys(differences).length > 0 ? differences : undefined;
 }
 
 function nativeConfigurationFingerprint(value) {
@@ -3124,10 +3222,17 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
+      ...(change.configuration_differences
+        ? {
+            configuration_differences: structuredClone(
+              change.configuration_differences,
+            ),
+          }
+        : {}),
       restore_supported: true,
       limitations: [
         "Assignment creation, option updates, and activation are separate native operations, not one atomic transaction.",
-        "Deletion is allowed only after child changes restore the exact saved created configuration.",
+        "Deletion is allowed only after child changes restore the saved created active state and option values.",
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
       ],
     };

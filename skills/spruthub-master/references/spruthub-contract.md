@@ -9,7 +9,7 @@
 - `list_homes` возвращает доступные дома. Все дальнейшие refs содержат percent-encoded serial выбранного дома; локальные ID разных домов нельзя смешивать.
 - `inspect_home(home_ref)` даёт компактный каталог комнат, сценариев и extensions и честную `coverage`. Успешный list не доказывает, что соответствующий get также сработал.
 - `get_entity(entity_ref, include)` читает room, accessory, service, characteristic, scenario, extension, назначенную logic или окно физических настроек. Room даёт компактную иерархию физических accessory и вложенных service с их собственными ref/name/type без чтения значений; выбранный service затем раскрывается отдельно. `include` относится к указанной сущности и не является рекурсивным обходом её детей.
-- У настройки есть конкретный владелец. `include=options` раскрывает native options для characteristic или назначенной logic ref. Безопасная характеристика возвращает `option_scope`: native `true`/`false`/`null`, статус `not_read`/`found`/`checked_empty` и точный следующий вызов. Только совместимый `characteristic.getOptions` или `logic.getOptions` с явным массивом подтверждает прочитанную область; отсутствующий или неверный operation container даёт `incompatible_response`. Container include не запускает рекурсивное чтение: `include_resolution.not_applied` возвращает причину и безопасный следующий вызов, когда его можно построить по возвращённой ссылке, иначе явное ограничение. Terminal redacted marker не раскрывает refs, availability или include metadata.
+- У настройки есть конкретный владелец. `include=options` раскрывает native options для characteristic или назначенной logic ref. Безопасная характеристика возвращает `option_scope`: native `true`/`false`/`null`, статус `not_read`/`found`/`checked_empty` и точный следующий вызов. Для `characteristic.getOptions` прочитанную область подтверждает явный массив. Для `logic.getOptions` также наблюдён существующий пустой operation container: он означает известный пустой список; отсутствующий container, `null` или не-массивное значение остаются `incompatible_response`. Container include не запускает рекурсивное чтение: `include_resolution.not_applied` возвращает причину и безопасный следующий вызов, когда его можно построить по возвращённой ссылке, иначе явное ограничение. Terminal redacted marker не раскрывает refs, availability или include metadata.
 - Physical window и назначенная logic — отдельные области: читайте возвращённый window ref или logic ref самостоятельно. Пустой `physical_configuration.options` не означает, что у характеристики нет options; пустой результат характеристики не говорит о window или logic. В выводе различайте «найдено», «эта область проверена и пуста» и «область не исследована».
 - Запрашивайте только нужные `options`, `relations`, `physical_configuration`, `diagnostics`. Каждый requested include для принятой сущности перечисляется как `applied` или `not_applied`; успешный ответ без такого исхода не считается полным обследованием устройства.
 - `list_rooms` → `read_room` — компактный совместимый путь. Исходное имя остаётся рядом с показаниями; одинаковые значения разных комнат не объединяются.
@@ -67,8 +67,11 @@
   даёт `logic_type_unavailable`. Новое назначение создаётся неактивным, а потеря
   ответа сверяется по scoped service/type без второго create. Снимок созданной
   logic включает options; удаление допустимо последним только после возврата
-  `active` и options к этому снимку. Чужое или вручную изменённое назначение не
-  удаляется.
+  `active` и типизированных значений options к этому снимку. Изменение подписей,
+  локали и флагов представления не меняет конфигурацию. Пока `active`, состав,
+  тип или значение options отличается, назначение остаётся принадлежащим change,
+  но удаление блокируется с указанием отличающихся ключей без догадки об авторе.
+  Чужое назначение не присваивается и не удаляется.
 - `logic_active` использует boolean value-change, а `logic_option` — один
   readable/writable/enabled `GenericInteger/NUMBER` option с `intValue`.
   Значения не зашиты по имени logic или ключу option. Оба изменения используют

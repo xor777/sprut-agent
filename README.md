@@ -148,6 +148,11 @@ include ответ даёт следующий исполнимый вызов �
 логика остаются отдельными владельцами настроек. Terminal redacted marker не
 получает `include_resolution` и не раскрывает ссылки.
 
+Для назначенной logic наблюдённый ответ `logic.getOptions` с существующим пустым
+operation container означает известный пустой список options. Отсутствующий
+container, `null` или не-массивное значение options остаются несовместимым
+ответом.
+
 Все новые ссылки квалифицированы домом: `spruthub://hub/<serial>/room/<id>` и
 `spruthub://hub/<serial>/accessory/<aId>/service/<sId>/characteristic/<cId>`;
 serial кодируется как компонент URI. Поэтому одинаковые локальные ID двух домов
