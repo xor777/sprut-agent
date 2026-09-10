@@ -17,6 +17,8 @@ const serial = "native-change-test-hub";
 const homeRef = `spruthub://hub/${serial}`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
+const deviceWindowRef = `${homeRef}/window/Controller%2Fzigbee_demo%2FChild%2FDEVICE_A%2F`;
+const startupOptionKey = "/11/0006_OnOff/4003_StartUpOnOff/255";
 
 function setAction({
   aId = 34,
@@ -195,10 +197,47 @@ async function startHub() {
         vendorTopLevel: "preserve-me",
       },
     ],
+    window: {
+      windowKey: "Controller/zigbee_demo/Child/DEVICE_A/",
+      label: { text: "Настройки лампы" },
+      options: [
+        {
+          key: startupOptionKey,
+          name: "После восстановления питания",
+          type: "GenericInteger",
+          inputType: "LIST",
+          read: true,
+          write: true,
+          disabled: false,
+          value: { intValue: 255 },
+          validValues: [
+            { name: "Выключена", value: { intValue: 0 }, checked: true },
+            { name: "Включена", value: { intValue: 1 }, checked: true },
+            { name: "Предыдущее состояние", value: { intValue: 255 }, checked: true },
+          ],
+        },
+        {
+          key: "/11/0008_Level/4000_Transition/0",
+          name: "Плавность включения",
+          type: "GenericInteger",
+          inputType: "LIST",
+          read: true,
+          write: true,
+          disabled: false,
+          value: { intValue: 1 },
+          validValues: [
+            { name: "Сразу", value: { intValue: 0 } },
+            { name: "Плавно", value: { intValue: 1 } },
+          ],
+        },
+      ],
+    },
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
       closeAfterCharacteristicUpdate: false,
+      closeAfterWindowUpdate: false,
+      dropNextWindowUpdate: false,
       failNextCharacteristicGet: false,
       failNextScenarioGet: false,
       ignoreNextUpdate: false,
@@ -294,6 +333,24 @@ async function startHub() {
         result = {
           characteristic: { get: structuredClone(selected) ?? null },
         };
+      } else if (params.window?.get) {
+        result = { window: { get: structuredClone(state.window) } };
+      } else if (params.window?.update) {
+        if (!state.behavior.dropNextWindowUpdate) {
+          for (const update of params.window.update.options) {
+            const option = state.window.options.find(
+              ({ key }) => key === update.key,
+            );
+            if (option) option.value = structuredClone(update.value);
+          }
+        }
+        state.behavior.dropNextWindowUpdate = false;
+        if (state.behavior.closeAfterWindowUpdate) {
+          state.behavior.closeAfterWindowUpdate = false;
+          socket.close();
+          return;
+        }
+        result = { window: { update: {} } };
       } else if (params.characteristic?.update) {
         state.characteristic.control.value = structuredClone(
           params.characteristic.update.control.value,
@@ -425,6 +482,225 @@ async function startHub() {
     url: `ws://127.0.0.1:${address.port}`,
   };
 }
+
+test("a window option applies one native setting and restores its baseline after restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.deepEqual(contract.structuredContent.contract, {
+    type: "GenericInteger",
+    input_type: "LIST",
+    kind: "intValue",
+    valid_values: [
+      { name: "Выключена", value: 0, kind: "intValue" },
+      { name: "Включена", value: 1, kind: "intValue" },
+      { name: "Предыдущее состояние", value: 255, kind: "intValue" },
+    ],
+    confirmation: "separate_window_get_readback",
+  });
+
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.diff, {
+    value: { from: 255, to: 0, kind: "intValue" },
+  });
+  assert.equal(prepared.structuredContent.restore_supported, true);
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.deepEqual(applied.structuredContent.observed_value, {
+    value: 0,
+    kind: "intValue",
+  });
+  assert.equal(hub.state.window.options[1].value.intValue, 1);
+  assert.deepEqual(
+    hub.requests.filter(({ window }) => window?.update),
+    [
+      {
+        window: {
+          update: {
+            windowKey: "Controller/zigbee_demo/Child/DEVICE_A/",
+            options: [
+              { key: startupOptionKey, value: { intValue: 0 } },
+            ],
+          },
+        },
+      },
+    ],
+  );
+  assert.ok(hub.requests.at(-1).window?.get);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
+  });
+  assert.deepEqual(history.structuredContent.changes.map(({ change_ref }) => change_ref), [
+    prepared.structuredContent.change_ref,
+  ]);
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(restored.structuredContent.observed_value, {
+    value: 255,
+    kind: "intValue",
+  });
+  assert.equal(hub.state.window.options[1].value.intValue, 1);
+  assert.equal(
+    hub.requests.filter(({ window }) => window?.update).length,
+    2,
+  );
+
+  const repeated = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(
+    hub.requests.filter(({ window }) => window?.update).length,
+    2,
+  );
+});
+
+test("an already desired window option creates no owned change or write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.window.options[0].value = { intValue: 0 };
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent, {
+    status: "already_desired",
+    operation: "window_option",
+    target_ref: deviceWindowRef,
+    option_key: startupOptionKey,
+    observed_value: { value: 0, kind: "intValue" },
+    native_write_sent: false,
+    owned_change_created: false,
+  });
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  assert.equal(hub.requests.some(({ window }) => window?.update), false);
+});
+
+test("a lost unexecuted window write can retry without losing the baseline", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  hub.state.behavior.dropNextWindowUpdate = true;
+  hub.state.behavior.closeAfterWindowUpdate = true;
+
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.deepEqual(uncertain.structuredContent.observed_value, {
+    value: 255,
+    kind: "intValue",
+  });
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const applied = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(hub.state.window.options[0].value.intValue, 0);
+  assert.equal(
+    hub.requests.filter(({ window }) => window?.update).length,
+    2,
+  );
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+});
+
+test("window option restore preserves a third value chosen after apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.window.options[0].value = { intValue: 1 };
+
+  const conflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(hub.state.window.options[0].value.intValue, 1);
+  assert.equal(
+    hub.requests.filter(({ window }) => window?.update).length,
+    1,
+  );
+});
 
 async function startClient(t, hub, stateDirectory) {
   const transport = new StdioClientTransport({
