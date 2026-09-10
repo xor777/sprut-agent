@@ -546,6 +546,44 @@ export class SprutHubClient {
     }
   }
 
+  async getWindow(windowKey) {
+    const response = await this.#request(
+      { window: { get: { windowKey } } },
+      Date.now() + this.timeoutMs,
+    );
+    const window = response.result?.window?.get;
+    if (
+      !window ||
+      window.windowKey !== windowKey ||
+      !Array.isArray(window.options)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible device-window response.",
+      );
+    }
+    return {
+      ...window,
+      responseReceivedAt: response.responseReceivedAt,
+    };
+  }
+
+  async updateWindowOption({ windowKey, key, value }) {
+    const response = await this.#request(
+      { window: { update: { windowKey, options: [{ key, value }] } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.window;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the device-window update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async deleteScenario(index) {
     const response = await this.#request(
       { scenario: { delete: { index } } },

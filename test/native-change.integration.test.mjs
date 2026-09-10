@@ -213,7 +213,11 @@ async function startHub() {
           validValues: [
             { name: "Выключена", value: { intValue: 0 }, checked: true },
             { name: "Включена", value: { intValue: 1 }, checked: true },
-            { name: "Предыдущее состояние", value: { intValue: 255 }, checked: true },
+            {
+              name: "Предыдущее состояние",
+              value: { intValue: 255 },
+              checked: true,
+            },
           ],
         },
         {
@@ -543,9 +547,7 @@ test("a window option applies one native setting and restores its baseline after
         window: {
           update: {
             windowKey: "Controller/zigbee_demo/Child/DEVICE_A/",
-            options: [
-              { key: startupOptionKey, value: { intValue: 0 } },
-            ],
+            options: [{ key: startupOptionKey, value: { intValue: 0 } }],
           },
         },
       },
@@ -559,13 +561,15 @@ test("a window option applies one native setting and restores its baseline after
     name: "list_native_changes",
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
-  assert.deepEqual(history.structuredContent.changes.map(({ change_ref }) => change_ref), [
-    prepared.structuredContent.change_ref,
-  ]);
+  assert.deepEqual(
+    history.structuredContent.changes.map(({ change_ref }) => change_ref),
+    [prepared.structuredContent.change_ref],
+  );
+  const discoveredChangeRef = history.structuredContent.changes[0].change_ref;
 
   const restored = await secondClient.callTool({
     name: "restore_native_change",
-    arguments: { change_ref: prepared.structuredContent.change_ref },
+    arguments: { change_ref: discoveredChangeRef },
   });
   assert.equal(restored.isError, undefined, restored.content[0]?.text);
   assert.equal(restored.structuredContent.status, "restored");
@@ -574,19 +578,23 @@ test("a window option applies one native setting and restores its baseline after
     kind: "intValue",
   });
   assert.equal(hub.state.window.options[1].value.intValue, 1);
-  assert.equal(
-    hub.requests.filter(({ window }) => window?.update).length,
-    2,
-  );
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 
   const repeated = await secondClient.callTool({
     name: "restore_native_change",
-    arguments: { change_ref: prepared.structuredContent.change_ref },
+    arguments: { change_ref: discoveredChangeRef },
   });
   assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
   assert.equal(
-    hub.requests.filter(({ window }) => window?.update).length,
-    2,
+    hub.requests.some(
+      ({ characteristic, scenario }) =>
+        characteristic?.update ||
+        scenario?.create ||
+        scenario?.update ||
+        scenario?.delete,
+    ),
+    false,
   );
 });
 
@@ -620,7 +628,10 @@ test("an already desired window option creates no owned change or write", async 
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
-  assert.equal(hub.requests.some(({ window }) => window?.update), false);
+  assert.equal(
+    hub.requests.some(({ window }) => window?.update),
+    false,
+  );
 });
 
 test("a lost unexecuted window write can retry without losing the baseline", async (t) => {
@@ -657,10 +668,7 @@ test("a lost unexecuted window write can retry without losing the baseline", asy
   });
   assert.equal(applied.structuredContent.status, "applied");
   assert.equal(hub.state.window.options[0].value.intValue, 0);
-  assert.equal(
-    hub.requests.filter(({ window }) => window?.update).length,
-    2,
-  );
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
 
   const restored = await secondClient.callTool({
     name: "restore_native_change",
@@ -668,6 +676,81 @@ test("a lost unexecuted window write can retry without losing the baseline", asy
   });
   assert.equal(restored.structuredContent.status, "restored");
   assert.equal(hub.state.window.options[0].value.intValue, 255);
+});
+
+test("a lost executed window write is reconciled without another update", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  hub.state.behavior.closeAfterWindowUpdate = true;
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.native_acknowledged, false);
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "applied");
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 1);
+});
+
+test("window option contract rejects controls outside the reversible setting slice", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const option = hub.state.window.options[0];
+  const unsupported = [
+    { type: "GenericInteger", inputType: "BUTTON" },
+    { type: "GenericBoolean", inputType: "LIST" },
+    { type: "GenericInteger", inputType: "LIST", validValues: undefined },
+    { type: "GenericInteger", inputType: "LIST", disabled: true },
+  ];
+
+  for (const fields of unsupported) {
+    Object.assign(option, {
+      type: "GenericInteger",
+      inputType: "LIST",
+      disabled: false,
+      validValues: [
+        { name: "Выключена", value: { intValue: 0 } },
+        { name: "Предыдущее состояние", value: { intValue: 255 } },
+      ],
+      ...fields,
+    });
+    const contract = await client.callTool({
+      name: "get_native_change_contract",
+      arguments: {
+        operation: "window_option",
+        target_ref: deviceWindowRef,
+        option_key: startupOptionKey,
+      },
+    });
+    assert.equal(contract.isError, true);
+    assert.match(
+      contract.structuredContent.error.code,
+      /unsupported_window_option|insufficient_rights/,
+    );
+  }
+  assert.equal(
+    hub.requests.some(({ window }) => window?.update),
+    false,
+  );
 });
 
 test("window option restore preserves a third value chosen after apply", async (t) => {
@@ -696,10 +779,7 @@ test("window option restore preserves a third value chosen after apply", async (
   assert.equal(conflict.structuredContent.status, "conflict");
   assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
   assert.equal(hub.state.window.options[0].value.intValue, 1);
-  assert.equal(
-    hub.requests.filter(({ window }) => window?.update).length,
-    1,
-  );
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 1);
 });
 
 async function startClient(t, hub, stateDirectory) {

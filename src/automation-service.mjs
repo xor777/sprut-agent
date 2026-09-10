@@ -33,6 +33,17 @@ export class AutomationService {
         contract: characteristicContract(characteristic.control),
       };
     }
+    if (input.operation === "window_option") {
+      const target = parseWindowRef(input.target_ref, this.hubSerial);
+      const { option } = await this.#readWindowOption(target, input.option_key);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        contract: windowOptionContract(option),
+      };
+    }
     if (["block_create", "block_data_update"].includes(input.operation)) {
       return {
         status: "ok",
@@ -53,6 +64,9 @@ export class AutomationService {
     if (input.operation === "block_data_update") {
       return this.#prepareBlockUpdate(input);
     }
+    if (input.operation === "window_option") {
+      return this.#prepareWindowOptionChange(input);
+    }
     throw unsupportedNativeOperation();
   }
 
@@ -71,6 +85,48 @@ export class AutomationService {
       home_ref: configuredHomeRef(this.hubSerial),
       reason: input.reason,
       target_ref: input.target_ref,
+      target,
+      contract,
+      baseline_value: baselineValue,
+      requested_value: requestedValue,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareWindowOptionChange(input) {
+    const target = parseWindowRef(input.target_ref, this.hubSerial);
+    const { option } = await this.#readWindowOption(target, input.option_key);
+    const contract = windowOptionContract(option);
+    const requestedValue = validateCharacteristicValue(input.value, contract);
+    const baselineValue = typedNativeValue(option.value);
+    if (valuesEqual(baselineValue, requestedValue)) {
+      return {
+        status: "already_desired",
+        operation: "window_option",
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        observed_value: baselineValue,
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "window_option",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      option_key: input.option_key,
       target,
       contract,
       baseline_value: baselineValue,
@@ -178,18 +234,38 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
-      return change.kind === "characteristic_value"
-        ? this.#applyCharacteristicChange(change)
+      return isNativeValueChange(change)
+        ? this.#applyValueChange(change)
         : this.#applyBlockChange(change);
     });
   }
 
-  async #applyCharacteristicChange(change) {
+  async #applyValueChange(change) {
+    if (change.status === "restored") return publicNativeChange(change);
     if (["applying", "uncertain"].includes(change.status)) {
-      return this.#reconcileCharacteristicAfterWrite(change);
+      const current = await this.#readNativeValue(change, {
+        requireWrite: true,
+      });
+      if (valuesEqual(current, change.requested_value)) {
+        return this.#finishNative(change, "applied", current, {
+          last_verification: freshVerification("requested_value_observed"),
+          recovered_after_uncertain_write: true,
+        });
+      }
+      if (change.kind === "characteristic_value") {
+        return this.#finishNative(change, "uncertain", current, {
+          last_verification: freshVerification("requested_value_missing"),
+        });
+      }
+      if (!valuesEqual(current, change.baseline_value)) {
+        return this.#finishNative(change, "conflict", current, {
+          conflict_reason: "manual_change",
+          last_verification: freshVerification("conflict"),
+        });
+      }
     }
     if (change.status === "applied") {
-      const current = await this.#readCharacteristicValue(change);
+      const current = await this.#readNativeValue(change);
       return valuesEqual(current, change.requested_value)
         ? this.#recordNativeObservation(
             change,
@@ -201,9 +277,11 @@ export class AutomationService {
             last_verification: freshVerification("conflict"),
           });
     }
-    const { value: current, contract } = await this.#readCharacteristicState(
+    const { value: current, contract } = await this.#readNativeValueState(
       change,
-      { requireWrite: true },
+      {
+        requireWrite: true,
+      },
     );
     validateCharacteristicValue(change.requested_value.value, contract);
     if (!valuesEqual(current, change.baseline_value)) {
@@ -215,12 +293,7 @@ export class AutomationService {
 
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
-      await this.client.updateCharacteristic({
-        ...change.target,
-        value: {
-          [change.requested_value.kind]: change.requested_value.value,
-        },
-      });
+      await this.#writeNativeValue(change, change.requested_value);
       change.native_acknowledged = true;
       change.write_intent.acknowledged = true;
     } catch (error) {
@@ -228,17 +301,26 @@ export class AutomationService {
         await this.#finishNative(change, "not_applied", current);
         throw error;
       }
-      return this.#reconcileCharacteristicAfterWrite(change);
+      return this.#reconcileValueAfterWrite(change, "apply");
     }
-    return this.#reconcileCharacteristicAfterWrite(change, true);
+    return this.#reconcileValueAfterWrite(change, "apply", true);
   }
 
-  async #reconcileCharacteristicAfterWrite(change, acknowledged = false) {
+  async #reconcileValueAfterWrite(change, direction, acknowledged = false) {
     try {
-      const observed = await this.#readCharacteristicValue(change);
-      return valuesEqual(observed, change.requested_value)
-        ? this.#finishNative(change, "applied", observed, {
-            last_verification: freshVerification("requested_value_observed"),
+      const observed = await this.#readNativeValue(change);
+      const expected =
+        direction === "restore"
+          ? change.baseline_value
+          : change.requested_value;
+      const completedStatus = direction === "restore" ? "restored" : "applied";
+      const result =
+        direction === "restore"
+          ? "baseline_value_observed"
+          : "requested_value_observed";
+      return valuesEqual(observed, expected)
+        ? this.#finishNative(change, completedStatus, observed, {
+            last_verification: freshVerification(result),
             ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
           })
         : this.#finishNative(change, "uncertain", observed, {
@@ -258,12 +340,12 @@ export class AutomationService {
   async getNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
     const change = await this.#requireNativeChange(id);
-    if (change.kind !== "characteristic_value") {
+    if (!isNativeValueChange(change)) {
       return this.#getBlockChange(change);
     }
     let current;
     try {
-      current = await this.#readCharacteristicValue(change);
+      current = await this.#readNativeValue(change);
     } catch (error) {
       return publicNativeChange(change, undefined, {
         verification: failedVerification(error),
@@ -271,10 +353,31 @@ export class AutomationService {
     }
     if (
       ["applying", "uncertain"].includes(change.status) &&
+      nativeIntentDirection(change) === "apply" &&
       valuesEqual(current, change.requested_value)
     ) {
       return this.#finishNative(change, "applied", current, {
         last_verification: freshVerification("requested_value_observed"),
+      });
+    }
+    if (
+      ["restoring", "uncertain"].includes(change.status) &&
+      nativeIntentDirection(change) === "restore" &&
+      valuesEqual(current, change.baseline_value)
+    ) {
+      return this.#finishNative(change, "restored", current, {
+        last_verification: freshVerification("baseline_value_observed"),
+      });
+    }
+    if (
+      change.kind === "window_option" &&
+      ["applying", "restoring", "uncertain"].includes(change.status) &&
+      !valuesEqual(current, change.requested_value) &&
+      !valuesEqual(current, change.baseline_value)
+    ) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
       });
     }
     if (
@@ -305,6 +408,9 @@ export class AutomationService {
           "A characteristic command does not provide rollback of physical effects.",
           "get_native_change",
         );
+      }
+      if (change.kind === "window_option") {
+        return this.#restoreWindowOptionChange(change);
       }
       return this.#restoreBlockChange(change);
     });
@@ -366,9 +472,12 @@ export class AutomationService {
   async #requireNativeChange(id) {
     const change = await this.store.get(id);
     if (
-      !["characteristic_value", "block_create", "block_data_update"].includes(
-        change?.kind,
-      )
+      ![
+        "characteristic_value",
+        "window_option",
+        "block_create",
+        "block_data_update",
+      ].includes(change?.kind)
     ) {
       throw new SprutHubError(
         "change_not_found",
@@ -403,8 +512,111 @@ export class AutomationService {
     };
   }
 
-  async #readCharacteristicValue(change) {
-    return (await this.#readCharacteristicState(change)).value;
+  async #readWindowOption(target, optionKey) {
+    if (typeof optionKey !== "string" || optionKey.length === 0) {
+      throw new SprutHubError(
+        "option_key_required",
+        "Select one window option before reading its write contract.",
+        "get_entity",
+      );
+    }
+    const window = await this.client.getWindow(target.windowKey);
+    const matches = window.options.filter(({ key }) => key === optionKey);
+    if (matches.length !== 1) {
+      throw new SprutHubError(
+        matches.length === 0
+          ? "window_option_not_found"
+          : "incompatible_response",
+        matches.length === 0
+          ? "The selected window option was not found."
+          : "SprutHub returned the selected window option more than once.",
+        "get_entity",
+      );
+    }
+    return { window, option: matches[0] };
+  }
+
+  async #readWindowOptionState(change, { requireWrite = false } = {}) {
+    const { option } = await this.#readWindowOption(
+      change.target,
+      change.option_key,
+    );
+    const contract = windowOptionContract(option, { requireWrite });
+    if (
+      contract.type !== change.contract.type ||
+      contract.input_type !== change.contract.input_type ||
+      contract.kind !== change.contract.kind
+    ) {
+      throw new SprutHubError(
+        "binding_changed",
+        "The selected window option contract changed after preparation.",
+        "prepare_native_change",
+      );
+    }
+    return { value: typedNativeValue(option.value), contract };
+  }
+
+  async #readNativeValueState(change, options = {}) {
+    return change.kind === "window_option"
+      ? this.#readWindowOptionState(change, options)
+      : this.#readCharacteristicState(change, options);
+  }
+
+  async #readNativeValue(change, options = {}) {
+    return (await this.#readNativeValueState(change, options)).value;
+  }
+
+  async #writeNativeValue(change, value) {
+    const nativeValue = { [value.kind]: value.value };
+    if (change.kind === "window_option") {
+      return this.client.updateWindowOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeValue,
+      });
+    }
+    return this.client.updateCharacteristic({
+      ...change.target,
+      value: nativeValue,
+    });
+  }
+
+  async #restoreWindowOptionChange(change) {
+    if (change.status === "restored") return publicNativeChange(change);
+    const { value: current, contract } = await this.#readNativeValueState(
+      change,
+      {
+        requireWrite: true,
+      },
+    );
+    validateCharacteristicValue(change.baseline_value.value, contract);
+    if (valuesEqual(current, change.baseline_value)) {
+      return this.#finishNative(change, "restored", current, {
+        last_verification: freshVerification("baseline_value_observed"),
+        ...(nativeIntentDirection(change) === "restore"
+          ? { recovered_after_uncertain_write: true }
+          : {}),
+      });
+    }
+    if (!valuesEqual(current, change.requested_value)) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      await this.#writeNativeValue(change, change.baseline_value);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied", current);
+        throw error;
+      }
+      return this.#reconcileValueAfterWrite(change, "restore");
+    }
+    return this.#reconcileValueAfterWrite(change, "restore", true);
   }
 
   async #finishNative(change, status, observedValue, extra = {}) {
@@ -1271,6 +1483,28 @@ function parseScenarioRef(ref, configuredSerial) {
   return { index: decodeReferenceSegment(match[2]) };
 }
 
+function parseWindowRef(ref, configuredSerial) {
+  const match = /^spruthub:\/\/hub\/([^/]+)\/window\/([^/]+)$/.exec(ref);
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_window_ref",
+      "Use a home-qualified window reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  const windowKey = decodeReferenceSegment(match[2]);
+  if (windowKey.length === 0) {
+    throw new SprutHubError(
+      "invalid_window_ref",
+      "Use a home-qualified window reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+  return { windowKey };
+}
+
 function requireEntityHome(ref, configuredSerial) {
   const match = /^spruthub:\/\/hub\/([^/]+)(?:\/|$)/.exec(ref);
   if (!match) {
@@ -1767,6 +2001,70 @@ function characteristicContract(control, { requireWrite = true } = {}) {
   };
 }
 
+function windowOptionContract(option, { requireWrite = true } = {}) {
+  if (option?.type !== "GenericInteger" || option.inputType !== "LIST") {
+    throw new SprutHubError(
+      "unsupported_window_option",
+      "Only GenericInteger/LIST window settings are supported.",
+      "get_entity",
+    );
+  }
+  if (
+    option.read !== true ||
+    (requireWrite && option.write !== true) ||
+    option.disabled === true
+  ) {
+    throw new SprutHubError(
+      "insufficient_rights",
+      "The selected window setting must be readable, writable, and enabled.",
+      "get_entity",
+    );
+  }
+  const current = typedNativeValue(option.value);
+  if (current.kind !== "intValue") {
+    throw new SprutHubError(
+      "unsupported_window_option",
+      "The selected window setting does not use intValue.",
+      "get_entity",
+    );
+  }
+  if (!Array.isArray(option.validValues) || option.validValues.length === 0) {
+    throw new SprutHubError(
+      "unsupported_window_option",
+      "The selected window setting has no explicit valid values.",
+      "get_entity",
+    );
+  }
+  const validValues = option.validValues.map((candidate) => {
+    const typed = typedNativeValue(candidate?.value);
+    if (typed.kind !== "intValue") {
+      throw new SprutHubError(
+        "unsupported_window_option",
+        "The selected window setting has incompatible valid values.",
+        "get_entity",
+      );
+    }
+    return {
+      name: typeof candidate.name === "string" ? candidate.name : "",
+      ...typed,
+    };
+  });
+  if (!validValues.some((candidate) => valuesEqual(candidate, current))) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "The current window setting is not in its explicit valid-values set.",
+      "get_entity",
+    );
+  }
+  return {
+    type: option.type,
+    input_type: option.inputType,
+    kind: current.kind,
+    valid_values: validValues,
+    confirmation: "separate_window_get_readback",
+  };
+}
+
 function typedNativeValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new SprutHubError(
@@ -1862,6 +2160,10 @@ function isStepAligned(value, min, step) {
 
 function valuesEqual(left, right) {
   return left?.kind === right?.kind && Object.is(left?.value, right?.value);
+}
+
+function isNativeValueChange(change) {
+  return ["characteristic_value", "window_option"].includes(change?.kind);
 }
 
 function freshVerification(result) {
@@ -2041,7 +2343,7 @@ function publicNativeChange(
   const configurationMatches = Object.hasOwn(options, "configurationMatches")
     ? options.configurationMatches
     : change.configuration_matches;
-  if (change.kind !== "characteristic_value") {
+  if (!isNativeValueChange(change)) {
     const diff =
       change.kind === "block_create"
         ? {
@@ -2122,22 +2424,32 @@ function publicNativeChange(
     ...(change.recovered_after_uncertain_write
       ? { recovered_after_uncertain_write: true }
       : {}),
-    restore_supported: false,
-    physical_effect_reversible: false,
+    ...(change.kind === "window_option"
+      ? { option_key: change.option_key }
+      : {}),
+    restore_supported: change.kind === "window_option",
+    ...(change.kind === "characteristic_value"
+      ? { physical_effect_reversible: false }
+      : {}),
     command_caused_observation: "unknown",
     limitations: [
       "Readback observes the value but cannot prove this command caused it.",
       "SprutHub exposes no native compare-and-set for this operation.",
-      "A runtime command does not provide rollback of physical effects.",
+      change.kind === "window_option"
+        ? "Restoration is allowed only while the current setting still matches this change."
+        : "A runtime command does not provide rollback of physical effects.",
     ],
   };
 }
 
 function changeSummary(change, homeRef) {
   if (
-    ["characteristic_value", "block_create", "block_data_update"].includes(
-      change.kind,
-    )
+    [
+      "characteristic_value",
+      "window_option",
+      "block_create",
+      "block_data_update",
+    ].includes(change.kind)
   ) {
     const reference = `spruthub-change://native/${change.id}`;
     return {
@@ -2187,7 +2499,7 @@ function nativeAffectedRefs(change, homeRef) {
   const refs = [canonicalEntityRef(change.target_ref, homeRef)];
   if (change.kind === "characteristic_value") {
     refs.push(...canonicalAncestors(refs[0]));
-  } else {
+  } else if (!isNativeValueChange(change)) {
     if (change.scenario_index) {
       refs.push(
         `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,

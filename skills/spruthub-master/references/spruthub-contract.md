@@ -51,6 +51,13 @@
 - `characteristic_value` проверяет фактический native type, права, kind,
   диапазон, шаг, длину и перечисление. Readback — наблюдение значения, а не
   доказательство физической причинности; автоматического отката нет.
+- `window_option` принимает существующий window ref и точный option key. В этом
+  срезе поддержан только readable/writable/enabled `GenericInteger/LIST` с
+  `intValue` и непустыми `validValues`; текущее значение находится в
+  `option.value`, а не в `validValues[].checked`. Уже нужное значение не создаёт
+  change. Запись отправляет один option и подтверждается отдельным `window.get`.
+  Restore возвращает сохранённый baseline только при совпадении текущего
+  значения с применённым; третье значение не затирается.
 - `block_create` требует явные `name`, `description`, `active`, `onStart`,
   `sync`, `type=BLOCK` и `data`. После неопределённого create маркер позволяет
   сверить хаб без повторной отправки.
@@ -87,7 +94,8 @@
 
 Для motion → light поддержан необязательный `auto_off_after_seconds`: native delay `RESET` переносит действие на полный срок при повторном входе в соответствующий delay-блок. Событие, после которого condition=false и delay не посещён, само по себе таймер не перезапускает. Это не доказательство времени последнего физического движения. [SprutHub Wiki о задержке, oldid 1333](https://wiki.spruthub.ru/index.php?title=%D0%97%D0%B0%D0%B4%D0%B5%D1%80%D0%B6%D0%BA%D0%B0_%D0%B2%D1%8B%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D1%8F&oldid=1333).
 
-Запись options/logic, pairing, backup и произвольного кода/GLOBAL этим контрактом
-не поддерживается. Первый login настраивается локальным credential-файлом и не
-является native change. Не подменяйте отсутствующие операции raw RPC или
-`write: true` в данных.
+Запись других options, logic, pairing, backup и произвольного кода/GLOBAL этим
+контрактом не поддерживается. `window_option` подтверждает настройку хаба, но не
+доставку до устройства и не физический результат после отключения питания.
+Первый login настраивается локальным credential-файлом и не является native
+change. Не подменяйте отсутствующие операции raw RPC или `write: true` в данных.

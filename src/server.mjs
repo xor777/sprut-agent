@@ -205,14 +205,16 @@ server.registerTool(
   {
     title: "Read a supported native change contract",
     description:
-      "Return the versioned, limited contract for one supported native write without changing the hub. For characteristic_value, provide the selected characteristic ref to receive its live value kind and constraints. BLOCK contracts cover only the explicitly listed nodes and semantics.",
+      "Return the versioned, limited contract for one supported native write without changing the hub. For characteristic_value, provide the selected characteristic ref. For window_option, provide the window ref and exact option key to receive its live valid values and readback boundary. BLOCK contracts cover only the explicitly listed nodes and semantics.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
+        "window_option",
         "block_create",
         "block_data_update",
       ]),
       target_ref: z.string().min(1).optional(),
+      option_key: z.string().min(1).optional(),
     },
     annotations: readOnlyAnnotations,
   },
@@ -227,10 +229,11 @@ server.registerTool(
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Prepare one typed native change with its current baseline and concrete diff. Supported operations are characteristic_value, BLOCK creation with explicit runtime flags, and full BLOCK data replacement. Preparation validates the configured home, actual native entities and supported BLOCK subset before any write.",
+      "Prepare one typed native change with its current baseline and concrete diff. Supported operations are characteristic_value, one GenericInteger/LIST window_option, BLOCK creation with explicit runtime flags, and full BLOCK data replacement. Preparation validates the configured home and current native contract before any write; an already desired window option creates no owned change.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
+        "window_option",
         "block_create",
         "block_data_update",
       ]),
@@ -241,6 +244,7 @@ server.registerTool(
           "Home-qualified characteristic, scenario, or home reference for the selected operation",
         ),
       value: z.union([z.boolean(), z.number(), z.string()]).optional(),
+      option_key: z.string().min(1).optional(),
       name: z.string().min(1).optional(),
       description: z.string().optional(),
       active: z.boolean().optional(),
@@ -267,7 +271,7 @@ server.registerTool(
   {
     title: "Restore a native SprutHub configuration change",
     description:
-      "Restore the saved BLOCK baseline, or delete a BLOCK created by this change, only while the current configuration still matches the applied snapshot and current bindings remain valid. Manual or unknown edits are preserved as a conflict. Restored is terminal for this change ref. Characteristic runtime commands are not reversible through this tool.",
+      "Restore the saved window-option or BLOCK baseline, or delete a BLOCK created by this change, only while the current configuration still matches the applied snapshot and current bindings remain valid. Manual or unknown edits are preserved as a conflict. Restored is terminal for this change ref. Characteristic runtime commands are not reversible through this tool.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
