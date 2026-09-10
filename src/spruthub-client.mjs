@@ -430,6 +430,51 @@ export class SprutHubClient {
     return scenario;
   }
 
+  async getCharacteristic({ aId, sId, cId }) {
+    const response = await this.#request(
+      { characteristic: { get: { aId, sId, cId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const characteristic = response.result?.characteristic?.get;
+    if (
+      !characteristic ||
+      characteristic.aId !== aId ||
+      characteristic.sId !== sId ||
+      characteristic.cId !== cId ||
+      !characteristic.control ||
+      typeof characteristic.control !== "object"
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible characteristic response.",
+      );
+    }
+    return {
+      ...characteristic,
+      responseReceivedAt: response.responseReceivedAt,
+    };
+  }
+
+  async updateCharacteristic({ aId, sId, cId, value }) {
+    const response = await this.#request(
+      {
+        characteristic: {
+          update: { aId, sId, cId, control: { value } },
+        },
+      },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.characteristic;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the characteristic update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async deleteScenario(index) {
     const response = await this.#request(
       { scenario: { delete: { index } } },

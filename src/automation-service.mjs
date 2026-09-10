@@ -15,6 +15,174 @@ export class AutomationService {
     });
   }
 
+  async prepareNativeChange(input) {
+    if (input.operation !== "characteristic_value") {
+      throw new SprutHubError(
+        "unsupported_native_operation",
+        "This native operation is not supported in the current slice.",
+      );
+    }
+    const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
+    const characteristic = await this.client.getCharacteristic(target);
+    const contract = characteristicContract(characteristic.control);
+    const requestedValue = validateCharacteristicValue(input.value, contract);
+    const baselineValue = typedNativeValue(characteristic.control.value);
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "characteristic_value",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      target,
+      contract,
+      baseline_value: baselineValue,
+      requested_value: requestedValue,
+      native_write_sent: false,
+      native_acknowledged: false,
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async applyNativeChange(changeReference) {
+    const id = parseNativeChangeRef(changeReference);
+    return this.#exclusiveWrite(async () => {
+      const change = await this.#requireNativeChange(id);
+      const current = await this.#readCharacteristicValue(change);
+      if (change.status === "applied") {
+        return valuesEqual(current, change.requested_value)
+          ? publicNativeChange(change, current)
+          : this.#finishNative(change, "conflict", current, {
+              conflict_reason: "value_changed_after_apply",
+            });
+      }
+      if (["applying", "uncertain"].includes(change.status)) {
+        return valuesEqual(current, change.requested_value)
+          ? this.#finishNative(change, "applied", current)
+          : this.#finishNative(change, "uncertain", current);
+      }
+      if (!valuesEqual(current, change.baseline_value)) {
+        return this.#finishNative(change, "conflict", current, {
+          conflict_reason: "baseline_changed",
+        });
+      }
+
+      change.status = "applying";
+      change.native_write_sent = true;
+      change.updated_at = new Date().toISOString();
+      change.history.push({ status: "applying", at: change.updated_at });
+      await this.#saveBeforeWrite(change);
+      try {
+        await this.client.updateCharacteristic({
+          ...change.target,
+          value: {
+            [change.requested_value.kind]: change.requested_value.value,
+          },
+        });
+        change.native_acknowledged = true;
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          await this.#finishNative(change, "not_applied", current);
+          throw error;
+        }
+        try {
+          const observed = await this.#readCharacteristicValue(change);
+          return valuesEqual(observed, change.requested_value)
+            ? this.#finishNative(change, "applied", observed)
+            : this.#finishNative(change, "uncertain", observed);
+        } catch {
+          return this.#finishNative(change, "uncertain");
+        }
+      }
+
+      try {
+        const observed = await this.#readCharacteristicValue(change);
+        return valuesEqual(observed, change.requested_value)
+          ? this.#finishNative(change, "applied", observed)
+          : this.#finishNative(change, "uncertain", observed, {
+              conflict_reason: "ack_without_requested_result",
+            });
+      } catch {
+        return this.#finishNative(change, "uncertain");
+      }
+    });
+  }
+
+  async getNativeChange(changeReference) {
+    const id = parseNativeChangeRef(changeReference);
+    const change = await this.#requireNativeChange(id);
+    let current;
+    try {
+      current = await this.#readCharacteristicValue(change);
+    } catch {
+      return publicNativeChange(change);
+    }
+    if (
+      ["applying", "uncertain"].includes(change.status) &&
+      valuesEqual(current, change.requested_value)
+    ) {
+      return this.#finishNative(change, "applied", current);
+    }
+    if (
+      change.status === "applied" &&
+      !valuesEqual(current, change.requested_value)
+    ) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "value_changed_after_apply",
+      });
+    }
+    return publicNativeChange(change, current);
+  }
+
+  async #requireNativeChange(id) {
+    const change = await this.store.get(id);
+    if (change?.kind !== "characteristic_value") {
+      throw new SprutHubError(
+        "change_not_found",
+        "The native change was not found for this configured hub.",
+        "prepare_native_change",
+      );
+    }
+    if (change.home_ref !== configuredHomeRef(this.hubSerial)) {
+      throw unsupportedHomeWrite();
+    }
+    return change;
+  }
+
+  async #readCharacteristicValue(change) {
+    const characteristic = await this.client.getCharacteristic(change.target);
+    const contract = characteristicContract(characteristic.control);
+    if (
+      contract.type !== change.contract.type ||
+      contract.kind !== change.contract.kind
+    ) {
+      throw new SprutHubError(
+        "binding_changed",
+        "The selected characteristic contract changed after preparation.",
+        "prepare_native_change",
+      );
+    }
+    return typedNativeValue(characteristic.control.value);
+  }
+
+  async #finishNative(change, status, observedValue, extra = {}) {
+    const now = new Date().toISOString();
+    Object.assign(change, extra, {
+      status,
+      ...(observedValue ? { observed_value: observedValue } : {}),
+      updated_at: now,
+    });
+    change.history.push({ status, at: now });
+    const saved = await this.#trySave(change);
+    return withLocalState(publicNativeChange(change, observedValue), saved);
+  }
+
   async previewBooleanAutomation(input) {
     const source = parseCharacteristicRef(
       input.source_characteristic_ref,
@@ -541,6 +709,151 @@ function unsupportedHomeWrite() {
 
 function configuredHomeRef(serial) {
   return `spruthub://hub/${encodeURIComponent(serial)}`;
+}
+
+function characteristicContract(control) {
+  if (control.read !== true || control.write !== true) {
+    throw new SprutHubError(
+      "insufficient_rights",
+      "The selected characteristic must be readable and writable.",
+      "get_entity",
+    );
+  }
+  const current = typedNativeValue(control.value);
+  if (typeof control.type !== "string" || control.type.length === 0) {
+    throw new SprutHubError(
+      "unsupported_characteristic",
+      "The selected characteristic has no stable native type.",
+    );
+  }
+  return {
+    type: control.type,
+    kind: current.kind,
+    ...(typeof control.minValue === "number" ? { min: control.minValue } : {}),
+    ...(typeof control.maxValue === "number" ? { max: control.maxValue } : {}),
+    ...(typeof control.minStep === "number" ? { step: control.minStep } : {}),
+    ...(typeof control.minLen === "number"
+      ? { min_length: control.minLen }
+      : {}),
+    ...(typeof control.maxLen === "number"
+      ? { max_length: control.maxLen }
+      : {}),
+    ...(Array.isArray(control.validValues)
+      ? { valid_values: structuredClone(control.validValues) }
+      : {}),
+  };
+}
+
+function typedNativeValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new SprutHubError(
+      "unsupported_characteristic",
+      "The selected characteristic has no supported current value.",
+    );
+  }
+  const kinds = [
+    "boolValue",
+    "intValue",
+    "longValue",
+    "doubleValue",
+    "stringValue",
+  ].filter((key) => Object.hasOwn(value, key));
+  if (kinds.length !== 1) {
+    throw new SprutHubError(
+      "unsupported_characteristic",
+      "The selected characteristic value kind is ambiguous or unsupported.",
+    );
+  }
+  return { value: value[kinds[0]], kind: kinds[0] };
+}
+
+function validateCharacteristicValue(value, contract) {
+  const expected = {
+    boolValue: "boolean",
+    intValue: "number",
+    longValue: "number",
+    doubleValue: "number",
+    stringValue: "string",
+  }[contract.kind];
+  if (
+    typeof value !== expected ||
+    (expected === "number" && !Number.isFinite(value)) ||
+    (["intValue", "longValue"].includes(contract.kind) &&
+      !Number.isSafeInteger(value))
+  ) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      `The requested value must match ${contract.kind}.`,
+    );
+  }
+  if (
+    (contract.min !== undefined && value < contract.min) ||
+    (contract.max !== undefined && value > contract.max)
+  ) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "The requested value is outside the native range.",
+    );
+  }
+  if (
+    typeof value === "string" &&
+    ((contract.min_length !== undefined &&
+      value.length < contract.min_length) ||
+      (contract.max_length !== undefined && value.length > contract.max_length))
+  ) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "The requested value has an invalid native length.",
+    );
+  }
+  return { value, kind: contract.kind };
+}
+
+function valuesEqual(left, right) {
+  return left?.kind === right?.kind && Object.is(left?.value, right?.value);
+}
+
+function parseNativeChangeRef(ref) {
+  const match = /^spruthub-change:\/\/native\/([a-f0-9]{24})$/.exec(ref);
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_change_ref",
+      "Use a change reference returned by prepare_native_change.",
+      "prepare_native_change",
+    );
+  }
+  return match[1];
+}
+
+function publicNativeChange(change, observedValue = change.observed_value) {
+  return {
+    status: change.status,
+    change_ref: `spruthub-change://native/${change.id}`,
+    operation: change.kind,
+    reason: change.reason,
+    target_ref: change.target_ref,
+    diff: {
+      value: {
+        from: change.baseline_value.value,
+        to: change.requested_value.value,
+        kind: change.requested_value.kind,
+      },
+    },
+    native_write_sent: change.native_write_sent,
+    native_acknowledged: change.native_acknowledged,
+    ...(observedValue ? { observed_value: observedValue } : {}),
+    ...(change.conflict_reason
+      ? { conflict_reason: change.conflict_reason }
+      : {}),
+    restore_supported: false,
+    physical_effect_reversible: false,
+    command_caused_observation: "unknown",
+    limitations: [
+      "Readback observes the value but cannot prove this command caused it.",
+      "SprutHub exposes no native compare-and-set for this operation.",
+      "A runtime command does not provide rollback of physical effects.",
+    ],
+  };
 }
 
 function selectCharacteristic(selection, ref, value, requireWrite, serial) {

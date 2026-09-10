@@ -198,6 +198,69 @@ server.registerTool(
 );
 
 server.registerTool(
+  "prepare_native_change",
+  {
+    title: "Prepare a native SprutHub change",
+    description:
+      "Prepare one typed native change with its current baseline and concrete diff. The current slice supports characteristic_value; preparation validates the selected home, native value kind, read/write access, and range before any write.",
+    inputSchema: {
+      operation: z.literal("characteristic_value"),
+      target_ref: z
+        .string()
+        .min(1)
+        .describe("Home-qualified characteristic reference from get_entity"),
+      value: z.union([z.boolean(), z.number(), z.string()]),
+      reason: z.string().min(1),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async (input) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).prepareNativeChange(input),
+    ),
+);
+
+server.registerTool(
+  "apply_native_change",
+  {
+    title: "Apply a prepared native SprutHub change",
+    description:
+      "Apply one prepared native change after comparing its current state with the saved baseline. Intent is persisted before send; native ACK and readback are reported separately. Inspect an uncertain change instead of blindly repeating it.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).applyNativeChange(changeRef),
+    ),
+);
+
+server.registerTool(
+  "get_native_change",
+  {
+    title: "Inspect a native SprutHub change",
+    description:
+      "Read a prepared native change and reconcile its current observed state after interruption or restart without sending the write again.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).getNativeChange(changeRef),
+    ),
+);
+
+server.registerTool(
   "get_automation_change",
   {
     title: "Inspect a SprutHub automation change",
