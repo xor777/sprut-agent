@@ -562,7 +562,19 @@ export class AutomationService {
         "baseline_configuration",
       );
     }
-    if (change.status === "applied" && !blockMatchesApplied(change, current)) {
+    const matchesApplied = blockMatchesApplied(change, current);
+    if (matchesApplied) {
+      return change.status === "applied"
+        ? this.#recordBlockObservation(change, true, "applied_configuration")
+        : this.#finishNative(change, "applied", undefined, {
+            configuration_matches: true,
+            last_verification: freshVerification("applied_configuration"),
+          });
+    }
+    if (change.applied_snapshot !== undefined) {
+      if (change.status === "conflict") {
+        return this.#recordBlockObservation(change, false, "conflict");
+      }
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
         configuration_matches: false,
@@ -571,7 +583,7 @@ export class AutomationService {
     }
     return this.#recordBlockObservation(
       change,
-      change.status === "applied" && blockMatchesApplied(change, current),
+      false,
       "current_configuration_observed",
     );
   }
@@ -1362,9 +1374,15 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
     delayIndexes: new Set(),
     triggers: 0,
   };
-  visitKnownBlockNodes(data, (node, kind, path) => {
-    validateBlockNode(node, kind, path, context);
-  });
+  visitKnownBlockNodes(
+    data,
+    (node, kind, path) => {
+      validateBlockNode(node, kind, path, context);
+    },
+    (path, message) => {
+      throw invalidBlock(path, message);
+    },
+  );
   if (context.triggers === 0) {
     throw invalidBlock("targets", "at least one trigger=true is required");
   }
@@ -1580,11 +1598,30 @@ const BLOCK_ALLOWED_KEYS = {
 };
 
 const BLOCK_CHILD_FIELDS = {
-  root: ["targets"],
-  if: ["if", "then", "else"],
-  condition: ["conditions"],
-  service: ["characteristics"],
-  delay: ["targets"],
+  root: {
+    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+  },
+  if: {
+    if: {
+      shape: "single",
+      kinds: new Set(["condition", "characteristic"]),
+    },
+    // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
+    then: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+    else: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+  },
+  condition: {
+    conditions: {
+      shape: "array",
+      kinds: new Set(["condition", "characteristic"]),
+    },
+  },
+  service: {
+    characteristics: { shape: "array", kinds: new Set(["set"]) },
+  },
+  delay: {
+    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+  },
 };
 
 function collectUnknownBlockFields(data) {
@@ -1598,22 +1635,48 @@ function collectUnknownBlockFields(data) {
   return unknown.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function visitKnownBlockNodes(data, visitor) {
+function visitKnownBlockNodes(data, visitor, invalidChild) {
   const visit = (node, kind, path) => {
     if (!isRecord(node)) return;
     visitor(node, kind, path);
-    for (const key of BLOCK_CHILD_FIELDS[kind] ?? []) {
+    for (const [key, rule] of Object.entries(BLOCK_CHILD_FIELDS[kind] ?? {})) {
       const value = node[key];
-      if (Array.isArray(value)) {
+      const childPath = `${path}.${key}`;
+      if (rule.shape === "array") {
+        if (!Array.isArray(value)) {
+          invalidChild?.(childPath, "child field must be an array");
+          continue;
+        }
         value.forEach((child, index) => {
-          visit(child, child?.type, `${path}.${key}[${index}]`);
+          visitBlockChild(
+            child,
+            `${childPath}[${index}]`,
+            rule,
+            visit,
+            invalidChild,
+          );
         });
-      } else {
-        visit(value, value?.type, `${path}.${key}`);
+        continue;
       }
+      if (Array.isArray(value) || !isRecord(value)) {
+        invalidChild?.(childPath, "child field must be one object");
+        continue;
+      }
+      visitBlockChild(value, childPath, rule, visit, invalidChild);
     }
   };
   visit(data, "root", "root");
+}
+
+function visitBlockChild(child, path, rule, visit, invalidChild) {
+  if (!isRecord(child) || !rule.kinds.has(child.type)) {
+    invalidChild?.(
+      path,
+      `child type must be one of ${[...rule.kinds].join(", ")}`,
+    );
+    return;
+  }
+  visit(child, child.type, path);
 }
 
 function invalidBlock(path, message) {
@@ -2454,7 +2517,6 @@ function configurationData(data) {
 
 function normalizedKnownBlockNode(node, kind) {
   if (!isRecord(node)) return structuredClone(node);
-  const childFields = new Set(BLOCK_CHILD_FIELDS[kind] ?? []);
   const isKnownNode = Object.hasOwn(BLOCK_ALLOWED_KEYS, kind);
   const normalized = {};
   for (const [key, value] of Object.entries(node)) {
@@ -2463,15 +2525,26 @@ function normalizedKnownBlockNode(node, kind) {
       (kind === "if" && key === "state")
     )
       continue;
-    if (!childFields.has(key)) {
+    const rule = BLOCK_CHILD_FIELDS[kind]?.[key];
+    if (!rule) {
       normalized[key] = structuredClone(value);
       continue;
     }
-    normalized[key] = Array.isArray(value)
-      ? value.map((child) => normalizedKnownBlockNode(child, child?.type))
-      : normalizedKnownBlockNode(value, value?.type);
+    if (rule.shape === "array") {
+      normalized[key] = Array.isArray(value)
+        ? value.map((child) => normalizedBlockChild(child, rule))
+        : structuredClone(value);
+      continue;
+    }
+    normalized[key] = normalizedBlockChild(value, rule);
   }
   return normalized;
+}
+
+function normalizedBlockChild(child, rule) {
+  return isRecord(child) && rule.kinds.has(child.type)
+    ? normalizedKnownBlockNode(child, child.type)
+    : structuredClone(child);
 }
 
 function sameRuleBody(scenario, change) {

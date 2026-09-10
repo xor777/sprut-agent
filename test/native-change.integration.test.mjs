@@ -703,28 +703,45 @@ test("BLOCK grammar rejects known nodes in unsupported child slots before send",
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const cases = [
-    ["set in root.targets", (data) => {
-      data.targets.push({ type: "set", cId: 15, hc: "On", value: "true" });
-    }],
-    ["characteristic in if.then", (data) => {
-      data.targets[0].then.unshift(characteristicCondition({ trigger: false }));
-    }],
-    ["set in condition.conditions", (data) => {
-      data.targets[0].if.conditions.push({
-        type: "set",
-        cId: 15,
-        hc: "On",
-        value: "true",
-      });
-    }],
-    ["characteristic in delay.targets", (data) => {
-      data.targets[0].then[1].targets.push(
-        characteristicCondition({ trigger: false }),
-      );
-    }],
-    ["single object in if.then", (data) => {
-      data.targets[0].then = data.targets[0].then[0];
-    }],
+    [
+      "set in root.targets",
+      (data) => {
+        data.targets.push({ type: "set", cId: 15, hc: "On", value: "true" });
+      },
+    ],
+    [
+      "characteristic in if.then",
+      (data) => {
+        data.targets[0].then.unshift(
+          characteristicCondition({ trigger: false }),
+        );
+      },
+    ],
+    [
+      "set in condition.conditions",
+      (data) => {
+        data.targets[0].if.conditions.push({
+          type: "set",
+          cId: 15,
+          hc: "On",
+          value: "true",
+        });
+      },
+    ],
+    [
+      "characteristic in delay.targets",
+      (data) => {
+        data.targets[0].then[1].targets.push(
+          characteristicCondition({ trigger: false }),
+        );
+      },
+    ],
+    [
+      "single object in if.then",
+      (data) => {
+        Reflect.set(data.targets[0], "then", data.targets[0].then[0]);
+      },
+    ],
   ];
   const results = [];
 
@@ -1490,7 +1507,10 @@ test("fresh BLOCK match recovers from an earlier conflict before restore", async
     hub.requests.filter(({ scenario }) => scenario?.update).length,
     2,
   );
-  assert.deepEqual(JSON.parse(hub.state.scenarios[0].data), blockData());
+  assert.deepEqual(
+    JSON.parse(hub.state.scenarios[0].data),
+    withRuntimeBlockFields(blockData()),
+  );
 });
 
 test("native preparation rejects unsafe targets and values before send", async (t) => {
