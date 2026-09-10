@@ -3,7 +3,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { AutomationService } from "./automation-service.mjs";
 import { SprutHubError, sanitizeAgentOutput } from "./spruthub-client.mjs";
-import { SprutHubConnection } from "./spruthub-connection.mjs";
+import {
+  isLocalCredentialConfigurationError,
+  SprutHubConnection,
+} from "./spruthub-connection.mjs";
 
 const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
 const connection = new SprutHubConnection({ env: process.env });
@@ -459,7 +462,10 @@ async function runRoomTool(operation) {
       structuredContent: result,
     };
   } catch (error) {
-    const result = sanitizeAgentOutput(toToolError(error), connectionSecrets());
+    const toolError = toToolError(error);
+    const result = isLocalCredentialConfigurationError(error)
+      ? toolError
+      : sanitizeAgentOutput(toolError, connectionSecrets());
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,

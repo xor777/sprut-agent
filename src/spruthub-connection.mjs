@@ -27,6 +27,11 @@ const MAX_AUTH_STEPS = 8;
 const MAX_ARGON_MEMORY_KIB = 256 * 1024;
 const MAX_ARGON_ITERATIONS = 10;
 const MAX_ARGON_PARALLELISM = 8;
+const localCredentialConfigurationErrors = new WeakSet();
+
+export function isLocalCredentialConfigurationError(error) {
+  return localCredentialConfigurationErrors.has(error);
+}
 
 export class SprutHubConnection {
   #clientPromise;
@@ -530,12 +535,14 @@ function parseTimeout(value) {
 
 function requiredCredential(value, name, setup) {
   if (typeof value !== "string" || value.length === 0) {
-    throw new SprutHubError(
+    const error = new SprutHubError(
       "configuration",
       credentialSetupMessage(setup),
       "configure_credentials",
       { credential_setup: setup, missing_field: name },
     );
+    localCredentialConfigurationErrors.add(error);
+    throw error;
   }
   return value;
 }
