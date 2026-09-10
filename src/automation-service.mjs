@@ -77,6 +77,25 @@ export class AutomationService {
         contract: logicOptionContract(option),
       };
     }
+    if (input.operation === "accessory_placement") {
+      const target = parseAccessoryRef(input.target_ref, this.hubSerial);
+      const accessory = await this.client.getAccessory(target.id);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: accessoryPlacementContract(accessory),
+      };
+    }
+    if (input.operation === "room_create") {
+      parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: roomCreateContract(),
+      };
+    }
     if (["block_create", "block_data_update"].includes(input.operation)) {
       return {
         status: "ok",
@@ -102,6 +121,12 @@ export class AutomationService {
     }
     if (input.operation === "logic_assignment") {
       return this.#prepareLogicAssignment(input);
+    }
+    if (input.operation === "accessory_placement") {
+      return this.#prepareAccessoryPlacement(input);
+    }
+    if (input.operation === "room_create") {
+      return this.#prepareRoomCreate(input);
     }
     if (["logic_active", "logic_option"].includes(input.operation)) {
       return this.#prepareLogicValueChange(input);
@@ -271,6 +296,108 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
+  async #prepareAccessoryPlacement(input) {
+    const target = parseAccessoryRef(input.target_ref, this.hubSerial);
+    const roomId = parseRoomRef(input.room_ref, this.hubSerial);
+    const name = requiredNativeName(input.name, "accessory placement");
+    const [accessory, room] = await Promise.all([
+      this.client.getAccessory(target.id),
+      this.client.getRoom(roomId),
+    ]);
+    if (!room) {
+      throw new SprutHubError(
+        "room_not_found",
+        "The selected destination room was not found.",
+        "inspect_home",
+      );
+    }
+    const baselineRoom = await this.client.getRoom(accessory.roomId);
+    if (!baselineRoom) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "The accessory references a room that SprutHub did not return.",
+      );
+    }
+    const baseline = accessoryPlacementSnapshot(accessory, baselineRoom);
+    const requested = {
+      name,
+      room_id: room.id,
+      room_name: room.name,
+      binding: structuredClone(baseline.binding),
+    };
+    if (accessoryPlacementMatches(baseline, requested)) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        observed: publicAccessoryPlacement(baseline, this.hubSerial),
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "accessory_placement",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      target,
+      baseline_snapshot: baseline,
+      requested_snapshot: requested,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareRoomCreate(input) {
+    parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+    const name = requiredNativeName(input.name, "room creation");
+    const rooms = await this.#listRoomRecords();
+    const matching = rooms.filter((room) => room.name === name);
+    if (matching.length > 0) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        matching_rooms: matching.map((room) =>
+          publicRoom(room, this.hubSerial),
+        ),
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "room_create",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      requested_name: name,
+      baseline_room_ids: rooms.map(({ id: roomId }) => roomId),
+      native_write_sent: false,
+      native_acknowledged: false,
+      room_creation_owned: false,
+      last_verification: freshVerification("baseline_absent"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
   async #prepareBlockCreate(input) {
     if (
       typeof input.name !== "string" ||
@@ -363,6 +490,12 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
+      if (change.kind === "accessory_placement") {
+        return this.#applyAccessoryPlacement(change);
+      }
+      if (change.kind === "room_create") {
+        return this.#applyRoomCreate(change);
+      }
       if (change.kind === "logic_assignment") {
         return this.#applyLogicAssignment(change);
       }
@@ -524,6 +657,12 @@ export class AutomationService {
   async getNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
     const change = await this.#requireNativeChange(id);
+    if (change.kind === "accessory_placement") {
+      return this.#getAccessoryPlacement(change);
+    }
+    if (change.kind === "room_create") {
+      return this.#getRoomCreate(change);
+    }
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
@@ -562,6 +701,12 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
+      if (change.kind === "accessory_placement") {
+        return this.#restoreAccessoryPlacement(change);
+      }
+      if (change.kind === "room_create") {
+        return this.#restoreRoomCreate(change);
+      }
       if (change.kind === "characteristic_value") {
         throw new SprutHubError(
           "restore_unsupported",
@@ -580,6 +725,500 @@ export class AutomationService {
       }
       return this.#restoreBlockChange(change);
     });
+  }
+
+  async #applyAccessoryPlacement(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#reconcileAccessoryRestore(change, false);
+      }
+      const pending = await this.#reconcileAccessoryApply(change, false);
+      if (
+        pending.status !== "uncertain" ||
+        !accessoryPlacementMatches(
+          change.observed_snapshot,
+          change.baseline_snapshot,
+        )
+      ) {
+        return pending;
+      }
+    }
+    const current = await this.#observeAccessoryPlacement(change);
+    if (change.status === "applied") {
+      if (accessoryPlacementMatches(current, change.applied_snapshot)) {
+        return this.#finishNative(change, "applied", undefined, {
+          observed_snapshot: current,
+          last_verification: freshVerification("applied_snapshot_observed"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    if (!accessoryPlacementMatches(current, change.baseline_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "baseline_changed",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    const destination = await this.client.getRoom(
+      change.requested_snapshot.room_id,
+    );
+    if (!destination) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "destination_room_missing",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.updateAccessory({
+        id: change.target.id,
+        name: change.requested_snapshot.name,
+        roomId: change.requested_snapshot.room_id,
+      });
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "not_applied", undefined, {
+          observed_snapshot: current,
+        });
+        throw error;
+      }
+      return this.#reconcileAccessoryApply(change, false);
+    }
+    return this.#reconcileAccessoryApply(change, true);
+  }
+
+  async #reconcileAccessoryApply(change, acknowledged) {
+    let current;
+    try {
+      current = await this.#observeAccessoryPlacement(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (change.applied_snapshot !== undefined) {
+      if (accessoryPlacementMatches(current, change.applied_snapshot)) {
+        return this.#finishNative(change, "applied", undefined, {
+          observed_snapshot: current,
+          last_verification: freshVerification("applied_snapshot_observed"),
+          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    if (!isDeepStrictEqual(current.binding, change.baseline_snapshot.binding)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "binding_changed",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    const requestedExactly = accessoryPlacementMatches(
+      current,
+      change.requested_snapshot,
+    );
+    const requestedRoomObserved =
+      current.room_id === change.requested_snapshot.room_id;
+    if (acknowledged && requestedRoomObserved) {
+      change.applied_snapshot = structuredClone(current);
+      return this.#finishNative(change, "applied", undefined, {
+        observed_snapshot: current,
+        applied_snapshot: structuredClone(current),
+        last_verification: freshVerification("requested_room_observed"),
+      });
+    }
+    if (requestedExactly) {
+      change.applied_snapshot = structuredClone(current);
+      return this.#finishNative(change, "applied", undefined, {
+        observed_snapshot: current,
+        applied_snapshot: structuredClone(current),
+        recovered_after_uncertain_write: true,
+        last_verification: freshVerification("requested_values_observed"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      observed_snapshot: current,
+      configuration_matches: undefined,
+      conflict_reason: requestedRoomObserved
+        ? "possible_name_normalization_after_lost_response"
+        : undefined,
+      last_verification: freshVerification(
+        requestedRoomObserved
+          ? "requested_room_observed_name_unknown"
+          : "requested_values_missing",
+      ),
+    });
+  }
+
+  async #getAccessoryPlacement(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileAccessoryRestore(change, false)
+        : this.#reconcileAccessoryApply(change, false);
+    }
+    let current;
+    try {
+      current = await this.#observeAccessoryPlacement(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    if (
+      change.status === "applied" &&
+      !accessoryPlacementMatches(current, change.applied_snapshot)
+    ) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    return this.#finishNative(change, change.status, undefined, {
+      observed_snapshot: current,
+      last_verification: freshVerification("current_configuration_observed"),
+    });
+  }
+
+  async #restoreAccessoryPlacement(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    let current;
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      const direction = nativeIntentDirection(change);
+      const pending =
+        direction === "restore"
+          ? await this.#reconcileAccessoryRestore(change, false)
+          : await this.#reconcileAccessoryApply(change, false);
+      if (pending.status === "restored") return pending;
+      if (direction === "apply" && pending.status === "applied") {
+        current = change.observed_snapshot;
+      } else {
+        const retryableRestore =
+          direction === "restore" &&
+          pending.status === "uncertain" &&
+          accessoryPlacementMatches(
+            change.observed_snapshot,
+            change.applied_snapshot,
+          );
+        if (!retryableRestore) return pending;
+        current = change.observed_snapshot;
+      }
+    }
+    if (change.applied_snapshot === undefined) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    current ??= await this.#observeAccessoryPlacement(change);
+    if (accessoryPlacementMatches(current, change.baseline_snapshot)) {
+      return this.#finishNative(change, "restored", undefined, {
+        observed_snapshot: current,
+        last_verification: freshVerification("baseline_snapshot_observed"),
+      });
+    }
+    if (!accessoryPlacementMatches(current, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    const baselineRoom = await this.client.getRoom(
+      change.baseline_snapshot.room_id,
+    );
+    if (!baselineRoom) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "baseline_room_missing",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      await this.client.updateAccessory({
+        id: change.target.id,
+        name: change.baseline_snapshot.name,
+        roomId: change.baseline_snapshot.room_id,
+      });
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied", undefined, {
+          observed_snapshot: current,
+        });
+        throw error;
+      }
+      return this.#reconcileAccessoryRestore(change, false);
+    }
+    return this.#reconcileAccessoryRestore(change, true);
+  }
+
+  async #reconcileAccessoryRestore(change, acknowledged) {
+    let current;
+    try {
+      current = await this.#observeAccessoryPlacement(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (accessoryPlacementMatches(current, change.baseline_snapshot)) {
+      return this.#finishNative(change, "restored", undefined, {
+        observed_snapshot: current,
+        last_verification: freshVerification("baseline_snapshot_observed"),
+        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+      });
+    }
+    if (!accessoryPlacementMatches(current, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      observed_snapshot: current,
+      configuration_matches: undefined,
+      conflict_reason: acknowledged ? "ack_without_baseline_result" : undefined,
+      last_verification: freshVerification("baseline_snapshot_missing"),
+    });
+  }
+
+  async #observeAccessoryPlacement(change) {
+    const accessory = await this.client.getAccessory(change.target.id);
+    const room = await this.client.getRoom(accessory.roomId);
+    return accessoryPlacementSnapshot(accessory, room);
+  }
+
+  async #applyRoomCreate(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_room_id !== undefined) {
+      return this.#observeOwnedRoom(change);
+    }
+    if (change.native_write_sent) {
+      return this.#recordUnownedRoomCandidates(change);
+    }
+    const candidates = await this.#matchingRooms(change);
+    if (candidates.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        candidate_rooms: candidates,
+        conflict_reason: "matching_room_appeared",
+        last_verification: freshVerification("baseline_absent_missing"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      const room = await this.client.createRoom(change.requested_name);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+      change.created_room_id = room.id;
+      change.applied_snapshot = roomSnapshot(room);
+      change.room_creation_owned = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "not_applied");
+        throw error;
+      }
+      return this.#recordUnownedRoomCandidates(change);
+    }
+    return this.#observeOwnedRoom(change);
+  }
+
+  async #getRoomCreate(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_room_id !== undefined) {
+      return this.#observeOwnedRoom(change);
+    }
+    if (change.native_write_sent) {
+      return this.#recordUnownedRoomCandidates(change);
+    }
+    const candidates = await this.#matchingRooms(change);
+    if (candidates.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        candidate_rooms: candidates,
+        conflict_reason: "matching_room_appeared",
+        last_verification: freshVerification("baseline_absent_missing"),
+      });
+    }
+    return this.#finishNative(change, change.status, undefined, {
+      candidate_rooms: [],
+      last_verification: freshVerification("baseline_absent"),
+    });
+  }
+
+  async #observeOwnedRoom(change) {
+    let room;
+    try {
+      room = await this.client.getRoom(change.created_room_id);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    if (room === null) {
+      if (
+        ["restoring", "uncertain"].includes(change.status) &&
+        nativeIntentDirection(change) === "restore"
+      ) {
+        return this.#finishNative(change, "restored", undefined, {
+          last_verification: freshVerification("created_room_absent"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "created_room_missing",
+        last_verification: freshVerification("created_room_missing"),
+      });
+    }
+    const snapshot = roomSnapshot(room);
+    if (!isDeepStrictEqual(snapshot, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_room: snapshot,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    return this.#finishNative(change, "applied", undefined, {
+      observed_room: snapshot,
+      last_verification: freshVerification("created_room_observed"),
+    });
+  }
+
+  async #recordUnownedRoomCandidates(change) {
+    let candidates;
+    try {
+      candidates = await this.#newMatchingRooms(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        room_creation_owned: false,
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      candidate_rooms: candidates,
+      room_creation_owned: false,
+      configuration_matches: undefined,
+      conflict_reason: "room_creation_outcome_unknown",
+      last_verification: freshVerification(
+        candidates.length > 0
+          ? "unowned_matching_room_observed"
+          : "matching_room_missing",
+      ),
+    });
+  }
+
+  async #restoreRoomCreate(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (
+      change.room_creation_owned !== true ||
+      change.created_room_id === undefined ||
+      change.applied_snapshot === undefined
+    ) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "room_creation_not_confirmed",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    let room = await this.client.getRoom(change.created_room_id);
+    if (room === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        last_verification: freshVerification("created_room_absent"),
+      });
+    }
+    const snapshot = roomSnapshot(room);
+    if (!isDeepStrictEqual(snapshot, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_room: snapshot,
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    const contents = await this.client.listAccessoriesInRoom(
+      change.created_room_id,
+    );
+    if (contents.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_room: snapshot,
+        room_contents: contents.map(({ id, name }) => ({
+          ref: `${change.home_ref}/accessory/${id}`,
+          name,
+        })),
+        conflict_reason: "room_not_empty",
+        last_verification: freshVerification("room_not_empty"),
+      });
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      await this.client.deleteRoom(change.created_room_id);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied", undefined, {
+          observed_room: snapshot,
+        });
+        throw error;
+      }
+    }
+    try {
+      room = await this.client.getRoom(change.created_room_id);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (room === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        last_verification: freshVerification("created_room_absent"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      observed_room: roomSnapshot(room),
+      conflict_reason: change.native_acknowledged
+        ? "ack_without_room_deletion"
+        : undefined,
+      last_verification: freshVerification("created_room_still_present"),
+    });
+  }
+
+  async #newMatchingRooms(change) {
+    const baseline = new Set(change.baseline_room_ids);
+    return (await this.#matchingRooms(change)).filter(
+      (room) => !baseline.has(room.id),
+    );
+  }
+
+  async #matchingRooms(change) {
+    return (await this.#listRoomRecords()).filter(
+      (room) => room.name === change.requested_name,
+    );
+  }
+
+  async #listRoomRecords() {
+    const result = await this.client.listRooms();
+    return result.rooms.map((room) => ({
+      id: parseRoomRef(room.ref, this.hubSerial),
+      name: room.name,
+    }));
   }
 
   async listNativeChanges({ home_ref: homeRef, entity_ref: entityRef, limit }) {
@@ -995,6 +1634,8 @@ export class AutomationService {
         "logic_active",
         "logic_option",
         "logic_assignment",
+        "accessory_placement",
+        "room_create",
         "block_create",
         "block_data_update",
       ].includes(change?.kind)
@@ -2008,6 +2649,20 @@ function parseRoomRef(ref, configuredSerial, allowLegacy = false) {
   return Number(legacy[1]);
 }
 
+function parseAccessoryRef(ref, configuredSerial) {
+  const match = /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)$/.exec(ref ?? "");
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_accessory_ref",
+      "Use a home-qualified accessory reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  return { id: Number(match[2]) };
+}
+
 function parseCharacteristicRef(ref, configuredSerial, allowLegacy = false) {
   const scoped =
     /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
@@ -2190,6 +2845,54 @@ function unsupportedNativeOperation() {
     "unsupported_native_operation",
     "This native operation is not supported in the current slice.",
   );
+}
+
+function accessoryPlacementContract(accessory) {
+  return {
+    current: {
+      name: accessory.name,
+      room_id: accessory.roomId,
+    },
+    write: "accessory.update({id,name,roomId})",
+    scope: "one_accessory",
+    confirmation: "empty_ack_then_separate_accessory_get",
+    restore: "saved_name_and_room_only_while_applied_snapshot_matches",
+    limitations: [
+      "Services and other accessories sharing the same physical device are not changed.",
+      "SprutHub may normalize the requested name; the observed saved name is reported separately.",
+      "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+    ],
+  };
+}
+
+function roomCreateContract() {
+  return {
+    write: "room.create({name})",
+    response: "RoomMessage",
+    confirmation: "separate_room_get",
+    restore:
+      "delete_only_a_confirmed_created_room_with_unchanged_configuration_and_no_accessories",
+    evidence: {
+      create_request: "official_frontend",
+      create_response: "bundled_official_protobuf_schema",
+      live_create: false,
+    },
+    limitations: [
+      "A lost create response cannot establish ownership from a matching name alone and is never retried blindly.",
+      "Room deletion is not attempted when creation ownership, unchanged configuration, or emptiness is unconfirmed.",
+    ],
+  };
+}
+
+function requiredNativeName(value, operation) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new SprutHubError(
+      "name_required",
+      `A non-empty name is required for ${operation}.`,
+      "prepare_native_change",
+    );
+  }
+  return value;
 }
 
 function blockContract() {
@@ -2889,6 +3592,59 @@ function valuesEqual(left, right) {
   return left?.kind === right?.kind && Object.is(left?.value, right?.value);
 }
 
+function accessoryPlacementSnapshot(accessory, room) {
+  return {
+    name: accessory.name,
+    room_id: accessory.roomId,
+    room_name: room?.name ?? null,
+    binding: {
+      id: accessory.id,
+      endpoint: accessory.endpoint ?? null,
+      extension_key: accessory.extensionKey ?? null,
+      controller_index: accessory.controllerIndex ?? null,
+      device_id: accessory.deviceId ?? null,
+      device_window: accessory.deviceWindow ?? null,
+      services: (accessory.services ?? [])
+        .map(({ sId, type }) => ({ id: sId, type }))
+        .sort((left, right) => left.id - right.id),
+    },
+  };
+}
+
+function accessoryPlacementMatches(left, right) {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.name === right.name &&
+    left.room_id === right.room_id &&
+    isDeepStrictEqual(left.binding, right.binding)
+  );
+}
+
+function roomSnapshot(room) {
+  return {
+    id: room.id,
+    name: room.name,
+    order: room.order ?? null,
+    visible: room.visible ?? null,
+  };
+}
+
+function publicRoom(room, serial) {
+  return {
+    ref: `${configuredHomeRef(serial)}/room/${room.id}`,
+    name: room.name,
+  };
+}
+
+function publicAccessoryPlacement(snapshot, serial) {
+  return {
+    name: snapshot.name,
+    room_ref: `${configuredHomeRef(serial)}/room/${snapshot.room_id}`,
+    room_name: snapshot.room_name,
+  };
+}
+
 function isNativeValueChange(change) {
   return [
     "characteristic_value",
@@ -3208,6 +3964,111 @@ function publicNativeChange(
   const configurationMatches = Object.hasOwn(options, "configurationMatches")
     ? options.configurationMatches
     : change.configuration_matches;
+  if (change.kind === "accessory_placement") {
+    const serial = decodeReferenceSegment(
+      /^spruthub:\/\/hub\/([^/]+)$/.exec(change.home_ref)?.[1] ?? "",
+    );
+    const observed = change.observed_snapshot;
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      diff: {
+        name: {
+          from: change.baseline_snapshot.name,
+          to: change.requested_snapshot.name,
+        },
+        room: {
+          from: {
+            ref: `${change.home_ref}/room/${change.baseline_snapshot.room_id}`,
+            name: change.baseline_snapshot.room_name,
+          },
+          to: {
+            ref: `${change.home_ref}/room/${change.requested_snapshot.room_id}`,
+            name: change.requested_snapshot.room_name,
+          },
+        },
+      },
+      requested: publicAccessoryPlacement(change.requested_snapshot, serial),
+      ...(observed
+        ? { observed: publicAccessoryPlacement(observed, serial) }
+        : {}),
+      ...(change.applied_snapshot
+        ? {
+            applied: publicAccessoryPlacement(change.applied_snapshot, serial),
+            name_normalized:
+              change.applied_snapshot.name !== change.requested_snapshot.name,
+          }
+        : {}),
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.recovered_after_uncertain_write
+        ? { recovered_after_uncertain_write: true }
+        : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      restore_supported: true,
+      limitations: [
+        "Only the selected accessory name and room are written; services and sibling accessories are not updated.",
+        "The observed saved name can differ from the requested name because SprutHub may normalize it.",
+        "Restoration is allowed only while the current accessory metadata and physical binding match the saved applied snapshot.",
+        "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+      ],
+    };
+  }
+  if (change.kind === "room_create") {
+    const room = change.applied_snapshot
+      ? publicRoom(
+          change.applied_snapshot,
+          decodeReferenceSegment(
+            /^spruthub:\/\/hub\/([^/]+)$/.exec(change.home_ref)?.[1] ?? "",
+          ),
+        )
+      : undefined;
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      diff: { room: { from: null, to: { name: change.requested_name } } },
+      ...(room ? { room } : {}),
+      room_creation_owned: change.room_creation_owned === true,
+      ...(change.candidate_rooms
+        ? {
+            candidate_rooms: change.candidate_rooms.map((candidate) => ({
+              ref: `${change.home_ref}/room/${candidate.id}`,
+              name: candidate.name,
+            })),
+          }
+        : {}),
+      ...(change.room_contents
+        ? { room_contents: structuredClone(change.room_contents) }
+        : {}),
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      restore_supported: change.room_creation_owned === true,
+      limitations: [
+        "A matching room observed after a lost create response is a usable candidate but is not owned by this change.",
+        "Deletion is allowed only for a confirmed created room whose configuration is unchanged and which contains no accessories.",
+        "SprutHub room creation and deletion are schema-confirmed but not live-confirmed in this slice.",
+      ],
+    };
+  }
   if (change.kind === "logic_assignment") {
     return {
       status: change.status,
@@ -3413,6 +4274,8 @@ function changeSummary(change, homeRef) {
       "logic_active",
       "logic_option",
       "logic_assignment",
+      "accessory_placement",
+      "room_create",
       "block_create",
       "block_data_update",
     ].includes(change.kind)
@@ -3463,6 +4326,19 @@ function changeSummary(change, homeRef) {
 
 function nativeAffectedRefs(change, homeRef) {
   const refs = [canonicalEntityRef(change.target_ref, homeRef)];
+  if (change.kind === "accessory_placement") {
+    refs.push(
+      `${homeRef}/room/${change.baseline_snapshot.room_id}`,
+      `${homeRef}/room/${change.requested_snapshot.room_id}`,
+    );
+  } else if (change.kind === "room_create") {
+    if (change.created_room_id !== undefined) {
+      refs.push(`${homeRef}/room/${change.created_room_id}`);
+    }
+    for (const candidate of change.candidate_rooms ?? []) {
+      refs.push(`${homeRef}/room/${candidate.id}`);
+    }
+  }
   if (
     [
       "characteristic_value",
@@ -3472,7 +4348,7 @@ function nativeAffectedRefs(change, homeRef) {
     ].includes(change.kind)
   ) {
     refs.push(...canonicalAncestors(refs[0]));
-  } else if (!isNativeValueChange(change)) {
+  } else if (["block_create", "block_data_update"].includes(change.kind)) {
     if (change.scenario_index) {
       refs.push(
         `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,

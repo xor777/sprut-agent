@@ -452,6 +452,95 @@ export class SprutHubClient {
     return accessory;
   }
 
+  async updateAccessory({ id, name, roomId }) {
+    const response = await this.#request(
+      { accessory: { update: { id, name, roomId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.accessory;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the accessory update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async getRoom(id) {
+    const response = await this.#request(
+      { room: { get: { id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.room;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible room response.",
+      );
+    }
+    if (container.get === null) return null;
+    validateRoom(container.get, id);
+    return container.get;
+  }
+
+  async createRoom(name) {
+    const response = await this.#request(
+      { room: { create: { name } } },
+      Date.now() + this.timeoutMs,
+    );
+    const room = response.result?.room?.create;
+    try {
+      validateRoom(room);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return room;
+  }
+
+  async deleteRoom(id) {
+    const response = await this.#request(
+      { room: { delete: { id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.room;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the room deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async listAccessoriesInRoom(roomId) {
+    const response = await this.#request(
+      { accessory: { list: { roomId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const accessories = extractEntityArray(response, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    for (const accessory of accessories) {
+      validateAccessory(accessory);
+      if (accessory.roomId !== roomId) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an accessory from a different room.",
+        );
+      }
+    }
+    return accessories;
+  }
+
   async getScenario(index) {
     const deadline = Date.now() + this.timeoutMs;
     let response;

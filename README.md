@@ -343,13 +343,24 @@ Read-only envelope `room.list`, `room.get` и фильтрованный по `r
 
 Для общего нативного изменения сначала вызови `get_native_change_contract`,
 затем `prepare_native_change` и проверь сохранённые baseline и diff. Поддержаны
-операции `characteristic_value`, `window_option`, `block_create` и
-`block_data_update`, а также `logic_assignment`, `logic_active` и `logic_option`;
+операции `accessory_placement`, `room_create`, `characteristic_value`,
+`window_option`, `block_create` и `block_data_update`, а также
+`logic_assignment`, `logic_active` и `logic_option`;
 `block_data_update` заменяет только полное `data`, не имя и
 runtime-флаги сценария. Для `window_option` передай ref прочитанного физического
 окна и точный `option_key`; контракт возвращает допустимые значения. Уже
 установленное значение даёт `already_desired` без записи и без фиктивного
 собственного change.
+`accessory_placement` принимает ref одного accessory, точный существующий
+`room_ref` и новое имя. Он отправляет только имя/комнату выбранного accessory,
+показывает requested и сохранённое после пустого ACK имя и не затрагивает
+services или соседние accessories общего физического устройства. Если комнаты
+нет, `room_create` выполняется отдельным change; его ref затем используется для
+размещения. Потерянный ответ create не вызывает повтор: новые одноимённые комнаты
+возвращаются как кандидаты без права удаления. Возврат выполняется в обратном
+порядке — сначала accessory, затем только подтверждённо собственная, неизменённая
+и пустая комната. Создание/удаление комнаты подтверждено официальными frontend и
+protobuf-схемой, но ещё не проверено live-записью.
 Сервис через `get_entity` раскрывает назначенные logic и каталог доступных типов.
 Неназначенный тип имеет готовый logic ref; новое назначение создаётся неактивным.
 После этого прочитай logic с `include=options`, отдельно настрой нужные числовые

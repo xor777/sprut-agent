@@ -205,7 +205,7 @@ server.registerTool(
   {
     title: "Read a supported native change contract",
     description:
-      "Return the live limited contract for one supported native write without changing the hub. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref; logic_option also requires its exact live option key and currently supports writable GenericInteger/NUMBER. Characteristic, device-window and BLOCK contracts remain separately bounded.",
+      "Return the live limited contract for one supported native write without changing the hub. Accessory placement changes only one accessory name and room; room creation is a separate reversible change. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref; logic_option also requires its exact live option key and currently supports writable GenericInteger/NUMBER. Characteristic, device-window and BLOCK contracts remain separately bounded.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -213,6 +213,8 @@ server.registerTool(
         "logic_assignment",
         "logic_active",
         "logic_option",
+        "accessory_placement",
+        "room_create",
         "block_create",
         "block_data_update",
       ]),
@@ -232,7 +234,7 @@ server.registerTool(
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Prepare one typed native change with its current baseline and concrete diff. Supported operations include a catalogued native logic assignment, its active flag, one writable GenericInteger/NUMBER option, characteristic_value, one GenericInteger/LIST window_option, and bounded BLOCK changes. A new logic assignment is created inactive; configure its options before activating it. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired setting creates no owned change.",
+      "Prepare one typed native change with its current baseline and concrete diff. Supported operations include one accessory name-and-room placement, creation of an absent room, a catalogued native logic assignment, its active flag, one writable GenericInteger/NUMBER option, characteristic_value, one GenericInteger/LIST window_option, and bounded BLOCK changes. Room creation and accessory placement are separate changes so they can be reconciled and restored in reverse order. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired setting creates no owned change.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -240,6 +242,8 @@ server.registerTool(
         "logic_assignment",
         "logic_active",
         "logic_option",
+        "accessory_placement",
+        "room_create",
         "block_create",
         "block_data_update",
       ]),
@@ -247,11 +251,18 @@ server.registerTool(
         .string()
         .min(1)
         .describe(
-          "Home-qualified characteristic, window, logic, scenario, or home reference for the selected operation",
+          "Home-qualified accessory, characteristic, window, logic, scenario, or home reference for the selected operation",
         ),
       value: z.union([z.boolean(), z.number(), z.string()]).optional(),
       option_key: z.string().min(1).optional(),
       name: z.string().min(1).optional(),
+      room_ref: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Existing home-qualified room reference required for accessory_placement",
+        ),
       description: z.string().optional(),
       active: z.boolean().optional(),
       on_start: z.boolean().optional(),
@@ -277,7 +288,7 @@ server.registerTool(
   {
     title: "Restore a native SprutHub configuration change",
     description:
-      "Restore one saved reversible setting or BLOCK baseline, or delete an assignment/BLOCK created by this change, only while current configuration still matches the applied snapshot and bindings remain valid. Restore logic child changes in reverse order before deleting an owned assignment. Manual or unknown edits are preserved as a conflict. Restored is terminal for this change ref; physical characteristic commands remain non-reversible.",
+      "Restore one saved reversible setting or BLOCK/accessory baseline, or delete an assignment/BLOCK/room created by this change, only while current configuration still matches the applied snapshot and bindings remain valid. Restore an accessory before deleting its owned destination room, and restore logic child changes before deleting an owned assignment. A room with contents and manual or unknown edits are preserved. Restored is terminal for this change ref; physical characteristic commands remain non-reversible.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
@@ -297,7 +308,7 @@ server.registerTool(
   {
     title: "Find recorded SprutHub changes",
     description:
-      "Return a bounded saved history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. recorded_status is the locally stored outcome at updated_at, not a current hub observation. BLOCK history includes its scenario and known accessory, service and characteristic bindings before and after an update. Follow each summary's next tool call for current reconciliation; listing does not poll the whole live home or authorize restoration.",
+      "Return a bounded saved history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. recorded_status is the locally stored outcome at updated_at, not a current hub observation. Accessory placement includes its accessory and rooms; room creation includes the identified or candidate room. BLOCK history includes its scenario and known accessory, service and characteristic bindings. Follow each summary's next tool call for current reconciliation; listing does not poll the whole live home or authorize restoration.",
     inputSchema: {
       home_ref: z.string().min(1),
       entity_ref: z.string().min(1).optional(),
