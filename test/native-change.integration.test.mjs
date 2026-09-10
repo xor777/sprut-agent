@@ -202,6 +202,7 @@ async function startHub() {
       failNextCharacteristicGet: false,
       failNextScenarioGet: false,
       ignoreNextUpdate: false,
+      missingScenarioGetAsNotFoundError: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -323,14 +324,24 @@ async function startHub() {
           },
         };
       } else if (params.scenario?.get) {
+        const scenario = state.scenarios.find(
+          ({ index }) => index === params.scenario.get.index,
+        );
+        if (!scenario && state.behavior.missingScenarioGetAsNotFoundError) {
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: {
+                code: -32603,
+                message: `Not found: 'Scenario ${params.scenario.get.index}'`,
+              },
+            }),
+          );
+          return;
+        }
         result = {
           scenario: {
-            get:
-              structuredClone(
-                state.scenarios.find(
-                  ({ index }) => index === params.scenario.get.index,
-                ),
-              ) ?? null,
+            get: structuredClone(scenario) ?? null,
           },
         };
       } else if (params.scenario?.create) {
@@ -884,6 +895,62 @@ test("BLOCK create survives a lost response and restores only an unchanged resul
   assert.equal(
     hub.requests.filter(({ scenario: request }) => request?.delete).length,
     1,
+  );
+});
+
+test("BLOCK create restore confirms real SprutHub not-found after restart without another delete", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "BLOCK с реальным not-found",
+      description: "Подтвердить удаление полным каталогом",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить восстановление после рестарта",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const scenarioListsBeforeRestore = hub.requests.filter(
+    ({ scenario }) => scenario?.list,
+  ).length;
+  hub.state.behavior.missingScenarioGetAsNotFoundError = true;
+
+  const restored = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  assert.equal(recovered.structuredContent.status, "restored");
+  assert.equal(recovered.structuredContent.verification.fresh, true);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.list).length -
+      scenarioListsBeforeRestore,
+    2,
+    "each not-found observation must be confirmed by a fresh full catalog",
   );
 });
 
