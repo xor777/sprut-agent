@@ -430,6 +430,60 @@ export class SprutHubClient {
     return scenario;
   }
 
+  async getAccessory(id) {
+    const response = await this.#request(
+      { accessory: { get: { id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const accessory = response.result?.accessory?.get;
+    validateAccessory(accessory);
+    if (accessory.id !== id) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a different accessory than requested.",
+      );
+    }
+    return accessory;
+  }
+
+  async getScenario(index) {
+    const response = await this.#request(
+      { scenario: { get: { index, expand: "data" } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.scenario;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible scenario response.",
+      );
+    }
+    if (container.get === null) return null;
+    if (container.get.index !== index) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a different scenario than requested.",
+      );
+    }
+    return container.get;
+  }
+
+  async updateScenarioData(index, data) {
+    const response = await this.#request(
+      { scenario: { update: { index, data } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.scenario;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the scenario update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async getCharacteristic({ aId, sId, cId }) {
     const response = await this.#request(
       { characteristic: { get: { aId, sId, cId } } },

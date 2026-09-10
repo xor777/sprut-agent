@@ -26,6 +26,11 @@ export class AutomationStore {
     return (await this.#readFile()).changes[id] ?? null;
   }
 
+  async list() {
+    await this.#writes.catch(() => {});
+    return Object.values((await this.#readFile()).changes);
+  }
+
   async save(change) {
     const write = this.#writes
       .catch(() => {})

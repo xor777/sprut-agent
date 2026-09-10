@@ -314,6 +314,36 @@ async function withSessionPath(t) {
   return path.join(directory, "session.json");
 }
 
+test("an empty profile returns an executable local credential setup", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut-empty-profile-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: directory,
+    env: { PATH: process.env.PATH, HOME: directory },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "empty-profile-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const result = await client.callTool({ name: "list_homes", arguments: {} });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.code, "configuration");
+  assert.equal(result.structuredContent.error.action, "configure_credentials");
+  assert.deepEqual(result.structuredContent.credential_setup, {
+    file: "~/.config/sprut-agent/connection.env",
+    required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
+    permissions: "0600",
+    launch:
+      "node --env-file=$HOME/.config/sprut-agent/connection.env /absolute/path/to/sprut-agent/src/server.mjs",
+    secret_handling:
+      "Create and fill the file locally; do not send credentials in chat.",
+  });
+});
+
 test("challenge login serves concurrent public reads and a restart reuses the session", async (t) => {
   const hub = await startHub(t, { sendForeignFrames: true });
   const sessionFile = await withSessionPath(t);

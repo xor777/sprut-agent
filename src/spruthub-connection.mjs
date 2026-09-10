@@ -530,6 +530,17 @@ function requiredCredential(value, name) {
       "configuration",
       `${name} is required when SPRUTHUB_TOKEN is not configured.`,
       "configure_credentials",
+      {
+        credential_setup: {
+          file: "~/.config/sprut-agent/connection.env",
+          required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
+          permissions: "0600",
+          launch:
+            "node --env-file=$HOME/.config/sprut-agent/connection.env /absolute/path/to/sprut-agent/src/server.mjs",
+          secret_handling:
+            "Create and fill the file locally; do not send credentials in chat.",
+        },
+      },
     );
   }
   return value;

@@ -198,18 +198,52 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_native_change_contract",
+  {
+    title: "Read a supported native change contract",
+    description:
+      "Return the versioned, limited contract for one supported native write without changing the hub. For characteristic_value, provide the selected characteristic ref to receive its live value kind and constraints. BLOCK contracts cover only the explicitly listed nodes and semantics.",
+    inputSchema: {
+      operation: z.enum([
+        "characteristic_value",
+        "block_create",
+        "block_data_update",
+      ]),
+      target_ref: z.string().min(1).optional(),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async (input) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).getNativeChangeContract(input),
+    ),
+);
+
+server.registerTool(
   "prepare_native_change",
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Prepare one typed native change with its current baseline and concrete diff. The current slice supports characteristic_value; preparation validates the selected home, native value kind, read/write access, and range before any write.",
+      "Prepare one typed native change with its current baseline and concrete diff. Supported operations are characteristic_value, BLOCK creation with explicit runtime flags, and full BLOCK data replacement. Preparation validates the configured home, actual native entities and supported BLOCK subset before any write.",
     inputSchema: {
-      operation: z.literal("characteristic_value"),
+      operation: z.enum([
+        "characteristic_value",
+        "block_create",
+        "block_data_update",
+      ]),
       target_ref: z
         .string()
         .min(1)
-        .describe("Home-qualified characteristic reference from get_entity"),
-      value: z.union([z.boolean(), z.number(), z.string()]),
+        .describe(
+          "Home-qualified characteristic, scenario, or home reference for the selected operation",
+        ),
+      value: z.union([z.boolean(), z.number(), z.string()]).optional(),
+      name: z.string().min(1).optional(),
+      description: z.string().optional(),
+      active: z.boolean().optional(),
+      on_start: z.boolean().optional(),
+      sync: z.boolean().optional(),
+      data: z.record(z.string(), z.unknown()).optional(),
       reason: z.string().min(1),
     },
     annotations: {
@@ -222,6 +256,49 @@ server.registerTool(
   async (input) =>
     runRoomTool(async () =>
       (await getAutomationService()).prepareNativeChange(input),
+    ),
+);
+
+server.registerTool(
+  "restore_native_change",
+  {
+    title: "Restore a native SprutHub configuration change",
+    description:
+      "Restore the saved BLOCK baseline, or delete a BLOCK created by this change, only while the current configuration still matches the applied snapshot. Manual or unknown edits are preserved as a conflict. Characteristic runtime commands are not reversible through this tool.",
+    inputSchema: { change_ref: z.string().min(1) },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ change_ref: changeRef }) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).restoreNativeChange(changeRef),
+    ),
+);
+
+server.registerTool(
+  "list_native_changes",
+  {
+    title: "Find recorded SprutHub changes",
+    description:
+      "Return a bounded history of native and legacy automation changes for the configured home, optionally filtered by one exact affected entity ref. Each summary gives a stable change ref and the tool call for current reconciliation; discovery does not authorize restoration.",
+    inputSchema: {
+      home_ref: z.string().min(1),
+      entity_ref: z.string().min(1).optional(),
+      limit: z.number().int().min(1).max(50).default(20),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ home_ref: homeRef, entity_ref: entityRef, limit }) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).listNativeChanges({
+        home_ref: homeRef,
+        entity_ref: entityRef,
+        limit,
+      }),
     ),
 );
 

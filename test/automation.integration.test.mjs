@@ -526,6 +526,39 @@ test("automation preview explains current mechanisms without writing to the hub"
   );
 });
 
+test("native history keeps legacy automation changes discoverable by target", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: "spruthub://hub/automation-test-hub",
+      entity_ref: previewArguments.target_characteristic_ref,
+    },
+  });
+
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.equal(history.structuredContent.status, "ok");
+  assert.equal(history.structuredContent.changes.length, 1);
+  assert.deepEqual(history.structuredContent.changes[0], {
+    change_ref: prepared.structuredContent.change_ref,
+    operation: "legacy_boolean_automation",
+    status: "prepared",
+    target_refs: [
+      previewArguments.source_characteristic_ref,
+      previewArguments.target_characteristic_ref,
+    ],
+    created_at: history.structuredContent.changes[0].created_at,
+    updated_at: history.structuredContent.changes[0].updated_at,
+    next: {
+      tool: "get_automation_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    },
+  });
+});
+
 test("apply creates one exact native rule and repeated apply does not duplicate it", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

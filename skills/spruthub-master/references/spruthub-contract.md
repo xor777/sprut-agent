@@ -37,7 +37,35 @@
 
 ## Поддержанная запись
 
-На указанной версии публичная запись ограничена boolean source → boolean target:
+Общий публичный write-path сначала раскрывает версионный контракт через
+`get_native_change_contract`, затем разделяет `prepare_native_change`,
+`apply_native_change`, `get_native_change` и `restore_native_change`.
+`list_native_changes` даёт ограниченную историю по дому и точной entity ref,
+включая старые automation changes; это поиск, а не разрешение на запись.
+
+- `characteristic_value` проверяет фактический native type, права, kind,
+  диапазон, шаг, длину и перечисление. Readback — наблюдение значения, а не
+  доказательство физической причинности; автоматического отката нет.
+- `block_create` требует явные `name`, `description`, `active`, `onStart`,
+  `sync`, `type=BLOCK` и `data`. После неопределённого create маркер позволяет
+  сверить хаб без повторной отправки.
+- `block_data_update` заменяет полное `data` и отправляет только `{index,data}`:
+  изменение имени и runtime-флагов этим контрактом не поддержано. Ответ хаба
+  может не содержать data, поэтому обязательна отдельная сверка.
+- BLOCK manifest версии `2026-09-10` допускает `root.targets`, вложенные `if`
+  (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
+  опубликованными comparisons, service/set и delay `RESET`. Нужен хотя бы один
+  `trigger=true`; одна характеристика не может быть условием и действием.
+- Все `aId/sId/cId` и native types проверяются в настроенном доме. Новый BLOCK
+  не принимает неизвестные поля; update обязан сохранить их без изменений.
+  Семантическая сверка игнорирует только `blockId` и runtime `if.state`.
+- В API нет compare-and-set. Проверка baseline снижает риск, но не закрывает
+  гонку между последним чтением и записью. Restore BLOCK разрешён только при
+  совпадении текущей конфигурации с применённым снимком; ручная правка даёт
+  conflict и сохраняется.
+
+Специализированная публичная запись boolean source → boolean target остаётся
+совместимым путём:
 
 1. `preview_boolean_automation` заново читает source/target и владельцев поведения, строит native BLOCK и возвращает `change_ref`. Он не меняет хаб, но сохраняет локальную историю.
 2. `apply_automation_change` повторно сверяет refs и конфликты. Не воспроизводите алгоритм equivalence по памяти: используйте фактический preview/status и его причину. Совместимый существующий BLOCK переиспользуется; близкий сценарий с несовместимыми runtime-флагами или семантикой даёт conflict, а не дубликат. В проверенном runtime `onStart` и `sync` должны быть выключены.
@@ -47,4 +75,7 @@
 
 Для motion → light поддержан необязательный `auto_off_after_seconds`: native delay `RESET` переносит действие на полный срок при повторном входе в соответствующий delay-блок. Событие, после которого condition=false и delay не посещён, само по себе таймер не перезапускает. Это не доказательство времени последнего физического движения. [SprutHub Wiki о задержке, oldid 1333](https://wiki.spruthub.ru/index.php?title=%D0%97%D0%B0%D0%B4%D0%B5%D1%80%D0%B6%D0%BA%D0%B0_%D0%B2%D1%8B%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D1%8F&oldid=1333).
 
-Запись options/logic, pairing, backup, произвольного кода/GLOBAL и первый login этим контрактом не поддерживаются. Не подменяйте их raw RPC или `write: true` в данных.
+Запись options/logic, pairing, backup и произвольного кода/GLOBAL этим контрактом
+не поддерживается. Первый login настраивается локальным credential-файлом и не
+является native change. Не подменяйте отсутствующие операции raw RPC или
+`write: true` в данных.

@@ -89,6 +89,23 @@ function blockData({ delay = 60_000, nested = false } = {}) {
   };
 }
 
+function withRuntimeBlockFields(data) {
+  let nextBlockId = 1;
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (value === null || typeof value !== "object") return value;
+    const normalized = Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, visit(child)]),
+    );
+    if (typeof normalized.type === "string") {
+      normalized.blockId = nextBlockId++;
+      if (normalized.type === "if") normalized.state = false;
+    }
+    return normalized;
+  };
+  return visit(data);
+}
+
 async function startHub() {
   const requests = [];
   const state = {
@@ -165,10 +182,64 @@ async function startHub() {
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
+      closeAfterCharacteristicUpdate: false,
       ignoreNextUpdate: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
+  state.accessories[1].services[0].characteristics.push(
+    {
+      aId: 34,
+      sId: 13,
+      cId: 16,
+      control: {
+        name: "Яркость",
+        type: "Brightness",
+        read: true,
+        write: true,
+        minValue: 0,
+        maxValue: 100,
+        minStep: 1,
+        value: { intValue: 20 },
+      },
+    },
+    {
+      aId: 34,
+      sId: 13,
+      cId: 17,
+      control: {
+        name: "Только чтение",
+        type: "StatusActive",
+        read: true,
+        write: false,
+        value: { boolValue: true },
+      },
+    },
+    {
+      aId: 34,
+      sId: 13,
+      cId: 18,
+      control: {
+        name: "Режим",
+        type: "TargetMode",
+        read: true,
+        write: true,
+        value: { stringValue: "home" },
+        validValues: [
+          {
+            key: "home",
+            name: "Дома",
+            value: { stringValue: "home" },
+          },
+          {
+            key: "away",
+            name: "Вне дома",
+            value: { stringValue: "away" },
+          },
+        ],
+      },
+    },
+  );
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
@@ -178,13 +249,24 @@ async function startHub() {
       const params = request.params;
       let result;
       if (params.characteristic?.get) {
+        const selected = state.accessories
+          .find(({ id }) => id === params.characteristic.get.aId)
+          ?.services.find(({ sId }) => sId === params.characteristic.get.sId)
+          ?.characteristics.find(
+            ({ cId }) => cId === params.characteristic.get.cId,
+          );
         result = {
-          characteristic: { get: structuredClone(state.characteristic) },
+          characteristic: { get: structuredClone(selected) ?? null },
         };
       } else if (params.characteristic?.update) {
         state.characteristic.control.value = structuredClone(
           params.characteristic.update.control.value,
         );
+        if (state.behavior.closeAfterCharacteristicUpdate) {
+          state.behavior.closeAfterCharacteristicUpdate = false;
+          socket.close();
+          return;
+        }
         result = { characteristic: { update: {} } };
       } else if (params.accessory?.get) {
         result = {
@@ -221,6 +303,9 @@ async function startHub() {
       } else if (params.scenario?.create) {
         const created = {
           ...structuredClone(params.scenario.create),
+          data: JSON.stringify(
+            withRuntimeBlockFields(JSON.parse(params.scenario.create.data)),
+          ),
           index: `created-${state.nextScenario++}`,
           predefined: false,
         };
@@ -236,7 +321,9 @@ async function startHub() {
           ({ index }) => index === params.scenario.update.index,
         );
         if (!state.behavior.ignoreNextUpdate) {
-          scenario.data = params.scenario.update.data;
+          scenario.data = JSON.stringify(
+            withRuntimeBlockFields(JSON.parse(params.scenario.update.data)),
+          );
         }
         state.behavior.ignoreNextUpdate = false;
         result = {
@@ -388,6 +475,42 @@ test("a characteristic value uses one recoverable native change path", async (t)
   );
 });
 
+test("a lost characteristic response is reconciled without another command", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: characteristicRef,
+      value: true,
+      reason: "Включить лампу",
+    },
+  });
+  hub.state.behavior.closeAfterCharacteristicUpdate = true;
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.native_acknowledged, false);
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    1,
+  );
+});
+
 test("versioned BLOCK contract prepares different supported compositions", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -435,6 +558,20 @@ test("versioned BLOCK contract prepares different supported compositions", async
     assert.equal(prepared.structuredContent.status, "prepared");
     assert.equal(prepared.structuredContent.operation, "block_create");
     assert.equal(prepared.structuredContent.native_write_sent, false);
+    assert.equal(prepared.structuredContent.diff.configuration.from, null);
+    assert.equal(prepared.structuredContent.diff.configuration.to.name, name);
+    assert.equal(
+      prepared.structuredContent.diff.configuration.to.type,
+      "BLOCK",
+    );
+    assert.deepEqual(
+      prepared.structuredContent.diff.configuration.to.data,
+      data,
+    );
+    assert.match(
+      prepared.structuredContent.diff.configuration.to.desc,
+      /sprut-agent:native:[a-f0-9]{24}/,
+    );
   }
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
@@ -504,6 +641,7 @@ test("BLOCK create survives a lost response and restores only an unchanged resul
   const scenario = hub.state.scenarios.find(
     ({ index }) => index === applied.structuredContent.scenario_index,
   );
+  const appliedData = scenario.data;
   scenario.data = JSON.stringify({
     ...JSON.parse(scenario.data),
     manual: true,
@@ -517,6 +655,24 @@ test("BLOCK create survives a lost response and restores only an unchanged resul
   assert.equal(
     hub.requests.filter(({ scenario: request }) => request?.delete).length,
     0,
+  );
+
+  scenario.data = appliedData;
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === applied.structuredContent.scenario_index,
+    ),
+    false,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario: request }) => request?.delete).length,
+    1,
   );
 });
 
@@ -536,6 +692,8 @@ test("BLOCK data update verifies readback and restores its complete baseline", a
   assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   assert.equal(prepared.structuredContent.status, "prepared");
   assert.equal(prepared.structuredContent.diff.data.changed, true);
+  assert.deepEqual(prepared.structuredContent.diff.data.from, blockData());
+  assert.deepEqual(prepared.structuredContent.diff.data.to, requestedData);
   assert.equal(prepared.structuredContent.restore_supported, true);
 
   const applied = await client.callTool({
@@ -580,10 +738,9 @@ test("BLOCK data update verifies readback and restores its complete baseline", a
   assert.equal(restored.isError, undefined, restored.content[0]?.text);
   assert.equal(restored.structuredContent.status, "restored");
   assert.equal(restored.structuredContent.configuration_matches, true);
-  assert.deepEqual(
-    JSON.parse(hub.state.scenarios[0].data),
-    blockData({ delay: 60_000 }),
-  );
+  const restoredData = JSON.parse(hub.state.scenarios[0].data);
+  assert.equal(restoredData.targets[0].then[1].time, 60_000);
+  assert.deepEqual(restoredData.vendorConfiguration, { preserved: true });
 });
 
 test("ACK without the requested BLOCK result stays uncertain and is not resent", async (t) => {
@@ -623,6 +780,37 @@ test("ACK without the requested BLOCK result stays uncertain and is not resent",
   );
 });
 
+test("a changed BLOCK baseline is preserved before any update", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Изменить RESET delay",
+    },
+  });
+  hub.state.scenarios[0].data = JSON.stringify(blockData({ delay: 55_000 }));
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  assert.equal(applied.structuredContent.status, "conflict");
+  assert.equal(applied.structuredContent.conflict_reason, "baseline_changed");
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+    55_000,
+  );
+});
+
 test("history discovers changes by home and entity after restart", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -659,4 +847,85 @@ test("history discovers changes by home and entity after restart", async (t) => 
     },
   ]);
   assert.equal(history.structuredContent.truncated, false);
+});
+
+test("native preparation rejects unsafe targets and values before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const brightnessRef = `${homeRef}/accessory/34/service/13/characteristic/16`;
+  const readOnlyRef = `${homeRef}/accessory/34/service/13/characteristic/17`;
+  const modeRef = `${homeRef}/accessory/34/service/13/characteristic/18`;
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "characteristic_value", target_ref: brightnessRef },
+  });
+  assert.deepEqual(contract.structuredContent.contract, {
+    type: "Brightness",
+    kind: "intValue",
+    min: 0,
+    max: 100,
+    step: 1,
+  });
+
+  for (const arguments_ of [
+    {
+      operation: "characteristic_value",
+      target_ref: brightnessRef,
+      value: 101,
+      reason: "Недопустимый диапазон",
+    },
+    {
+      operation: "characteristic_value",
+      target_ref: readOnlyRef,
+      value: false,
+      reason: "Недоступная запись",
+    },
+    {
+      operation: "characteristic_value",
+      target_ref: modeRef,
+      value: "vacation",
+      reason: "Неизвестное enum-значение",
+    },
+    {
+      operation: "characteristic_value",
+      target_ref:
+        "spruthub://hub/other-home/accessory/34/service/13/characteristic/15",
+      value: true,
+      reason: "Чужой дом",
+    },
+  ]) {
+    const rejected = await client.callTool({
+      name: "prepare_native_change",
+      arguments: arguments_,
+    });
+    assert.equal(rejected.isError, true);
+  }
+
+  const unknownData = blockData();
+  delete unknownData.vendorConfiguration;
+  unknownData.targets[0].then[0].unsupportedAction = true;
+  const unknown = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Неподдержанный BLOCK",
+      description: "Не применять",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: unknownData,
+      reason: "Проверить схему",
+    },
+  });
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.structuredContent.error.code, "invalid_block_data");
+  assert.equal(
+    hub.requests.some(
+      ({ characteristic, scenario }) =>
+        characteristic?.update || scenario?.create || scenario?.update,
+    ),
+    false,
+  );
 });
