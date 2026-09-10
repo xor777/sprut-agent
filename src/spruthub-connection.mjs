@@ -78,7 +78,9 @@ export class SprutHubConnection {
 
   async #createClient() {
     const setup = credentialSetup(this.#env);
-    this.#env = await loadCredentialFile(this.#env, setup);
+    if (!hasCompleteExplicitConnection(this.#env)) {
+      this.#env = await loadCredentialFile(this.#env, setup);
+    }
     this.#remember(
       this.#env.SPRUTHUB_LOGIN,
       this.#env.SPRUTHUB_PASSWORD,
@@ -589,6 +591,17 @@ function shellQuote(value) {
 function resolveConfigRoot(env) {
   if (env.XDG_CONFIG_HOME) return path.resolve(env.XDG_CONFIG_HOME);
   return path.join(env.HOME ? path.resolve(env.HOME) : homedir(), ".config");
+}
+
+function hasCompleteExplicitConnection(env) {
+  if (hasValue(env.SPRUTHUB_TOKEN)) {
+    return hasValue(env.SPRUTHUB_URL) && hasValue(env.SPRUTHUB_CID);
+  }
+  return hasValue(env.SPRUTHUB_LOGIN) && hasValue(env.SPRUTHUB_PASSWORD);
+}
+
+function hasValue(value) {
+  return typeof value === "string" && value.length > 0;
 }
 
 async function loadCredentialFile(env, setup) {

@@ -619,7 +619,11 @@ test("explicit connection environment wins over conflicting file values", async 
 });
 
 test("complete explicit credentials ignore an unsafe default file", async (t) => {
-  for (const source of ["environment", "node --env-file"]) {
+  for (const source of [
+    "login environment",
+    "login node --env-file",
+    "token environment",
+  ]) {
     await t.test(source, async (t) => {
       const hub = await startHub(t);
       const directory = await mkdtemp(
@@ -645,14 +649,21 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
       );
       await chmod(connectionFile, 0o644);
 
-      const explicitEnvironment = {
-        SPRUTHUB_LOGIN: login,
-        SPRUTHUB_PASSWORD: password,
-        SPRUTHUB_URL: hub.url,
-        SPRUTHUB_SERIAL: "home/A",
-      };
+      const explicitEnvironment = source.startsWith("token")
+        ? {
+            SPRUTHUB_TOKEN: token,
+            SPRUTHUB_URL: hub.url,
+            SPRUTHUB_SERIAL: "home/A",
+            SPRUTHUB_CID: "explicit-token-client",
+          }
+        : {
+            SPRUTHUB_LOGIN: login,
+            SPRUTHUB_PASSWORD: password,
+            SPRUTHUB_URL: hub.url,
+            SPRUTHUB_SERIAL: "home/A",
+          };
       const args = [path.join(projectRoot, "src", "server.mjs")];
-      if (source === "node --env-file") {
+      if (source.endsWith("node --env-file")) {
         const explicitFile = path.join(directory, "explicit.env");
         await writeFile(
           explicitFile,
@@ -670,7 +681,7 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
         env: {
           PATH: process.env.PATH,
           HOME: directory,
-          ...(source === "environment" ? explicitEnvironment : {}),
+          ...(source.endsWith("environment") ? explicitEnvironment : {}),
         },
         stderr: "pipe",
       });
@@ -697,6 +708,84 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
       );
     });
   }
+});
+
+test("an incomplete explicit profile uses the file without replacing an empty value", async (t) => {
+  const hub = await startHub(t);
+  const directory = await mkdtemp(
+    path.join(tmpdir(), "sprut incomplete profile-"),
+  );
+  t.after(() => rm(directory, { recursive: true }));
+  const connectionFile = path.join(
+    directory,
+    ".config",
+    "sprut-agent",
+    "connection.env",
+  );
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      "SPRUTHUB_URL=ws://127.0.0.1:1",
+      "SPRUTHUB_SERIAL=file-home",
+      "",
+    ].join("\n"),
+  );
+  await chmod(connectionFile, 0o600);
+  const launch = (extraEnv = {}) => ({
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: directory,
+    env: {
+      PATH: process.env.PATH,
+      HOME: directory,
+      SPRUTHUB_URL: hub.url,
+      SPRUTHUB_SERIAL: "home/A",
+      ...extraEnv,
+    },
+    stderr: "pipe",
+  });
+
+  const partialClient = new Client({
+    name: "incomplete-profile-test",
+    version: "1.0.0",
+  });
+  await partialClient.connect(new StdioClientTransport(launch()));
+  const homes = await partialClient.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  await partialClient.close();
+
+  const connectionCount = hub.connectionCount;
+  const emptyClient = new Client({
+    name: "empty-explicit-value-test",
+    version: "1.0.0",
+  });
+  await emptyClient.connect(
+    new StdioClientTransport(
+      launch({
+        SPRUTHUB_LOGIN: "",
+        SPRUT_AGENT_SESSION_FILE: path.join(directory, "empty-session.json"),
+      }),
+    ),
+  );
+  t.after(() => emptyClient.close());
+  const rejected = await emptyClient.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "configuration");
+  assert.equal(
+    rejected.structuredContent.error.action,
+    "configure_credentials",
+  );
+  assert.equal(rejected.structuredContent.missing_field, "SPRUTHUB_LOGIN");
+  assert.equal(hub.connectionCount, connectionCount);
 });
 
 test("an unsafe credential file returns one fixable local error", async (t) => {
