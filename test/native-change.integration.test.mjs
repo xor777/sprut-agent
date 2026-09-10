@@ -850,6 +850,9 @@ test("window option restore preserves a third value chosen after apply", async (
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  for (const validValue of hub.state.window.options[0].validValues) {
+    validValue.name = `Актуально: ${validValue.name}`;
+  }
   hub.state.window.options[0].value = { intValue: 1 };
 
   const conflict = await client.callTool({
@@ -862,20 +865,32 @@ test("window option restore preserves a third value chosen after apply", async (
     baseline: {
       value: 255,
       kind: "intValue",
-      name: "Предыдущее состояние",
+      name: "Актуально: Предыдущее состояние",
     },
-    requested: { value: 0, kind: "intValue", name: "Выключена" },
-    observed: { value: 1, kind: "intValue", name: "Включена" },
+    requested: {
+      value: 0,
+      kind: "intValue",
+      name: "Актуально: Выключена",
+    },
+    observed: {
+      value: 1,
+      kind: "intValue",
+      name: "Актуально: Включена",
+    },
   });
   assert.deepEqual(conflict.structuredContent.conflict_resolution, {
     requires_user_decision: true,
     action_if_authorized: "prepare_new_window_option_change",
     effect: {
-      replace: { value: 1, kind: "intValue", name: "Включена" },
+      replace: {
+        value: 1,
+        kind: "intValue",
+        name: "Актуально: Включена",
+      },
       with: {
         value: 255,
         kind: "intValue",
-        name: "Предыдущее состояние",
+        name: "Актуально: Предыдущее состояние",
       },
     },
   });
@@ -1100,7 +1115,8 @@ async function startClient(t, hub, stateDirectory) {
 async function waitFor(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    if (Date.now() >= deadline)
+      throw new Error("Timed out waiting for condition");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
