@@ -202,7 +202,9 @@ async function startHub() {
       failNextCharacteristicGet: false,
       failNextScenarioGet: false,
       ignoreNextUpdate: false,
+      invalidNextScenarioList: false,
       missingScenarioGetAsNotFoundError: false,
+      rejectScenarioGetAsInternalError: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -314,20 +316,28 @@ async function startHub() {
           },
         };
       } else if (params.scenario?.list) {
-        result = {
-          scenario: {
-            list: {
-              scenarios: state.scenarios.map(({ data: _data, ...scenario }) =>
-                structuredClone(scenario),
-              ),
+        if (state.behavior.invalidNextScenarioList) {
+          state.behavior.invalidNextScenarioList = false;
+          result = { scenario: { list: { scenarios: {} } } };
+        } else {
+          result = {
+            scenario: {
+              list: {
+                scenarios: state.scenarios.map(({ data: _data, ...scenario }) =>
+                  structuredClone(scenario),
+                ),
+              },
             },
-          },
-        };
+          };
+        }
       } else if (params.scenario?.get) {
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.get.index,
         );
-        if (!scenario && state.behavior.missingScenarioGetAsNotFoundError) {
+        if (
+          state.behavior.rejectScenarioGetAsInternalError ||
+          (!scenario && state.behavior.missingScenarioGetAsNotFoundError)
+        ) {
           socket.send(
             JSON.stringify({
               id: request.id,
@@ -924,6 +934,9 @@ test("BLOCK create restore confirms real SprutHub not-found after restart withou
   const scenarioListsBeforeRestore = hub.requests.filter(
     ({ scenario }) => scenario?.list,
   ).length;
+  const unrelatedScenarioReadsBeforeRestore = hub.requests.filter(
+    ({ scenario }) => scenario?.get?.index === "existing-block",
+  ).length;
   hub.state.behavior.missingScenarioGetAsNotFoundError = true;
 
   const restored = await firstClient.callTool({
@@ -946,11 +959,81 @@ test("BLOCK create restore confirms real SprutHub not-found after restart withou
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,
   );
-  assert.equal(
+  assert.ok(
     hub.requests.filter(({ scenario }) => scenario?.list).length -
-      scenarioListsBeforeRestore,
-    2,
-    "each not-found observation must be confirmed by a fresh full catalog",
+      scenarioListsBeforeRestore >=
+      2,
+    "restore and post-restart observations must use fresh full catalogs",
+  );
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) => scenario?.get?.index === "existing-block",
+    ).length,
+    unrelatedScenarioReadsBeforeRestore,
+    "marker lookup must not read unrelated scenario configurations",
+  );
+});
+
+test("scenario get rejection needs a valid catalog absence before it changes lifecycle state", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "BLOCK с проверкой каталога",
+      description: "Не считать произвольный отказ отсутствием",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить отрицательные исходы чтения",
+    },
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const writesBeforeReads = hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
+  ).length;
+
+  hub.state.behavior.rejectScenarioGetAsInternalError = true;
+  const presentButRejected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.rejectScenarioGetAsInternalError = false;
+
+  const createdIndex = applied.structuredContent.scenario_index;
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== createdIndex,
+  );
+  hub.state.behavior.missingScenarioGetAsNotFoundError = true;
+  hub.state.behavior.invalidNextScenarioList = true;
+  const missingWithInvalidCatalog = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+
+  for (const observation of [presentButRejected, missingWithInvalidCatalog]) {
+    assert.equal(observation.isError, undefined, observation.content[0]?.text);
+    assert.equal(observation.structuredContent.status, "applied");
+    assert.equal(observation.structuredContent.verification.fresh, false);
+    assert.equal(
+      "configuration_matches" in observation.structuredContent,
+      false,
+    );
+  }
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) =>
+        scenario?.create || scenario?.update || scenario?.delete,
+    ).length,
+    writesBeforeReads,
   );
 });
 

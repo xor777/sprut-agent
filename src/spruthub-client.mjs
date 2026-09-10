@@ -9,12 +9,19 @@ const VALUE_FIELDS = [
 ];
 
 export class SprutHubError extends Error {
-  constructor(code, message, action, { requestSent = false, ...details } = {}) {
+  constructor(
+    code,
+    message,
+    action,
+    { requestSent = false, protocolErrorCode, ...details } = {},
+  ) {
     super(message);
     this.name = "SprutHubError";
     this.code = code;
     this.action = action;
     this.requestSent = requestSent;
+    if (protocolErrorCode !== undefined)
+      this.protocolErrorCode = protocolErrorCode;
     if (Object.keys(details).length > 0) this.details = details;
   }
 }
@@ -383,20 +390,19 @@ export class SprutHubClient {
     return { ...selections, scenarios, extensions };
   }
 
-  async listScenarioDetails() {
+  async listScenarioDetails({ descriptionIncludes } = {}) {
     const deadline = Date.now() + this.timeoutMs;
-    const scenarios = extractArray(
+    const scenarios = extractScenarioCatalog(
       await this.#request({ scenario: { list: {} } }, deadline),
-      ["scenario", "list", "scenarios"],
     );
     const details = [];
     for (const scenario of scenarios) {
-      if (typeof scenario?.index !== "string") {
-        throw new SprutHubError(
-          "incompatible_response",
-          "SprutHub returned a scenario without a stable index.",
-        );
-      }
+      if (
+        descriptionIncludes !== undefined &&
+        typeof scenario.desc === "string" &&
+        !scenario.desc.includes(descriptionIncludes)
+      )
+        continue;
       const response = await this.#request(
         { scenario: { get: { index: scenario.index, expand: "data" } } },
         deadline,
@@ -447,10 +453,21 @@ export class SprutHubClient {
   }
 
   async getScenario(index) {
-    const response = await this.#request(
-      { scenario: { get: { index, expand: "data" } } },
-      Date.now() + this.timeoutMs,
-    );
+    const deadline = Date.now() + this.timeoutMs;
+    let response;
+    try {
+      response = await this.#request(
+        { scenario: { get: { index, expand: "data" } } },
+        deadline,
+      );
+    } catch (error) {
+      if (!isScenarioNotFoundCandidate(error)) throw error;
+      const scenarios = extractScenarioCatalog(
+        await this.#request({ scenario: { list: {} } }, deadline),
+      );
+      if (scenarios.some((scenario) => scenario.index === index)) throw error;
+      return null;
+    }
     const container = response.result?.scenario;
     if (!container || !Object.hasOwn(container, "get")) {
       throw new SprutHubError(
@@ -1075,6 +1092,8 @@ export class SprutHubClient {
           new SprutHubError(
             "request_rejected",
             "SprutHub rejected the request.",
+            undefined,
+            { protocolErrorCode: message.error.code },
           ),
         );
       }
@@ -1110,6 +1129,27 @@ function extractArray(response, path, missingMeansEmpty = false) {
   throw new SprutHubError(
     "incompatible_response",
     "SprutHub returned an incompatible automation response.",
+  );
+}
+
+function extractScenarioCatalog(response) {
+  const scenarios = extractArray(response, ["scenario", "list", "scenarios"]);
+  for (const scenario of scenarios) {
+    if (typeof scenario?.index !== "string") {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a scenario without a stable index.",
+      );
+    }
+  }
+  return scenarios;
+}
+
+function isScenarioNotFoundCandidate(error) {
+  return (
+    error instanceof SprutHubError &&
+    error.code === "request_rejected" &&
+    error.protocolErrorCode === -32603
   );
 }
 

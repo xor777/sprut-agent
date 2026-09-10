@@ -698,7 +698,9 @@ export class AutomationService {
       const scenario = await this.client.getScenario(change.scenario_index);
       if (scenario) return scenario;
     }
-    const scenarios = await this.client.listScenarioDetails();
+    const scenarios = await this.client.listScenarioDetails({
+      descriptionIncludes: `[${change.marker}]`,
+    });
     const matches = scenarios.filter(
       ({ desc }) =>
         typeof desc === "string" && desc.includes(`[${change.marker}]`),
