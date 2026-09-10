@@ -483,19 +483,19 @@ export class AutomationService {
     }
     const current = await this.#observeBlock(change);
     if (change.status === "applied") {
-      return blockMatchesApplied(change, current)
-        ? this.#recordBlockObservation(change, true, "applied_configuration")
+      const observation = blockSnapshotObservation(change, current, "applied");
+      return observation.matches
+        ? this.#recordBlockObservation(change, observation)
         : this.#finishNative(change, "conflict", undefined, {
             conflict_reason: "manual_change",
-            configuration_matches: false,
-            last_verification: freshVerification("conflict"),
+            ...observation.fields,
           });
     }
-    if (!blockStillAtBaseline(change, current)) {
+    const baseline = blockSnapshotObservation(change, current, "baseline");
+    if (!baseline.matches) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "baseline_changed",
-        configuration_matches: false,
-        last_verification: freshVerification("conflict"),
+        ...baseline.fields,
       });
     }
     await validateBlockData(change.requested_snapshot.data, this.client, {
@@ -558,33 +558,29 @@ export class AutomationService {
     if (change.status === "restored") {
       return this.#recordBlockObservation(
         change,
-        blockMatchesBaseline(change, current),
-        "baseline_configuration",
+        blockSnapshotObservation(change, current, "baseline"),
       );
     }
-    const matchesApplied = blockMatchesApplied(change, current);
-    if (matchesApplied) {
+    const applied = blockSnapshotObservation(change, current, "applied");
+    if (applied.matches) {
       return change.status === "applied"
-        ? this.#recordBlockObservation(change, true, "applied_configuration")
+        ? this.#recordBlockObservation(change, applied)
         : this.#finishNative(change, "applied", undefined, {
-            configuration_matches: true,
-            last_verification: freshVerification("applied_configuration"),
+            ...applied.fields,
           });
     }
     if (change.applied_snapshot !== undefined) {
       if (change.status === "conflict") {
-        return this.#recordBlockObservation(change, false, "conflict");
+        return this.#recordBlockObservation(change, applied);
       }
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
-        configuration_matches: false,
-        last_verification: freshVerification("conflict"),
+        ...applied.fields,
       });
     }
     return this.#recordBlockObservation(
       change,
-      false,
-      "current_configuration_observed",
+      blockSnapshotObservation(change, current, "requested"),
     );
   }
 
@@ -596,11 +592,11 @@ export class AutomationService {
         : this.#reconcileBlockAfterWrite(change, false);
     }
     const current = await this.#observeBlock(change);
-    if (!change.applied_snapshot || !blockMatchesApplied(change, current)) {
+    const applied = blockSnapshotObservation(change, current, "applied");
+    if (!applied.matches) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
-        configuration_matches: false,
-        last_verification: freshVerification("conflict"),
+        ...applied.fields,
       });
     }
     if (change.kind === "block_data_update") {
@@ -643,19 +639,19 @@ export class AutomationService {
   }
 
   async #reconcileObservedBlockApply(change, current, acknowledged) {
-    if (blockMatchesRequested(change, current)) {
+    const requested = blockSnapshotObservation(change, current, "requested");
+    if (requested.matches) {
       return this.#finishNative(change, "applied", undefined, {
         scenario_index: current.index,
         applied_snapshot: scenarioSnapshot(current),
-        configuration_matches: true,
-        last_verification: freshVerification("applied_configuration"),
+        ...requested.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
     }
-    if (blockStillAtBaseline(change, current)) {
+    const baseline = blockSnapshotObservation(change, current, "baseline");
+    if (baseline.matches) {
       return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: false,
-        last_verification: freshVerification("baseline_configuration"),
+        ...requested.fields,
         ...(acknowledged
           ? { conflict_reason: "ack_without_requested_result" }
           : {}),
@@ -663,31 +659,28 @@ export class AutomationService {
     }
     return this.#finishNative(change, "conflict", undefined, {
       conflict_reason: "manual_change",
-      configuration_matches: false,
-      last_verification: freshVerification("conflict"),
+      ...requested.fields,
     });
   }
 
   async #reconcileObservedBlockRestore(change, current, acknowledged) {
-    if (blockMatchesBaseline(change, current)) {
+    const baseline = blockSnapshotObservation(change, current, "baseline");
+    if (baseline.matches) {
       return this.#finishNative(change, "restored", undefined, {
-        configuration_matches: true,
-        last_verification: freshVerification("baseline_configuration"),
+        ...baseline.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
     }
     return this.#finishNative(change, "uncertain", undefined, {
-      configuration_matches: false,
-      last_verification: freshVerification("baseline_configuration_missing"),
+      ...baseline.fields,
       ...(acknowledged
         ? { conflict_reason: "ack_without_requested_result" }
         : {}),
     });
   }
 
-  async #recordBlockObservation(change, matches, result) {
-    change.configuration_matches = matches;
-    change.last_verification = freshVerification(result);
+  async #recordBlockObservation(change, observation) {
+    Object.assign(change, observation.fields);
     change.updated_at = new Date().toISOString();
     const saved = await this.#trySave(change);
     return withLocalState(
@@ -1981,6 +1974,32 @@ function blockMatchesApplied(change, scenario) {
 function blockMatchesBaseline(change, scenario) {
   if (change.kind === "block_create") return scenario === null;
   return blockStillAtBaseline(change, scenario);
+}
+
+function blockSnapshotObservation(change, scenario, snapshot) {
+  let matches;
+  if (snapshot === "baseline") {
+    matches = blockMatchesBaseline(change, scenario);
+  } else if (snapshot === "applied") {
+    matches = blockMatchesApplied(change, scenario);
+  } else if (snapshot === "requested") {
+    matches = blockMatchesRequested(change, scenario);
+  } else {
+    throw new TypeError(`Unknown BLOCK snapshot ${snapshot}.`);
+  }
+  const result =
+    snapshot === "baseline"
+      ? "baseline_configuration"
+      : "applied_configuration";
+  return {
+    matches,
+    fields: {
+      configuration_matches: matches,
+      last_verification: freshVerification(
+        matches ? result : `${result}_missing`,
+      ),
+    },
+  };
 }
 
 function snapshotsEqual(left, right) {
