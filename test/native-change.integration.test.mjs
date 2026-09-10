@@ -243,7 +243,10 @@ async function startHub() {
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
       failNextCharacteristicGet: false,
+      failNextWindowGet: false,
+      failWindowGetAfterUpdate: false,
       failNextScenarioGet: false,
+      rejectNextWindowUpdate: false,
       ignoreNextUpdate: false,
       invalidNextScenarioList: false,
       missingScenarioGetAsNotFoundError: false,
@@ -314,9 +317,11 @@ async function startHub() {
       if (
         (params.characteristic?.get &&
           state.behavior.failNextCharacteristicGet) ||
+        (params.window?.get && state.behavior.failNextWindowGet) ||
         (params.scenario?.get && state.behavior.failNextScenarioGet)
       ) {
         state.behavior.failNextCharacteristicGet = false;
+        state.behavior.failNextWindowGet = false;
         state.behavior.failNextScenarioGet = false;
         socket.send(
           JSON.stringify({
@@ -340,6 +345,16 @@ async function startHub() {
       } else if (params.window?.get) {
         result = { window: { get: structuredClone(state.window) } };
       } else if (params.window?.update) {
+        if (state.behavior.rejectNextWindowUpdate) {
+          state.behavior.rejectNextWindowUpdate = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: 400, message: "window update rejected" },
+            }),
+          );
+          return;
+        }
         if (!state.behavior.dropNextWindowUpdate) {
           for (const update of params.window.update.options) {
             const option = state.window.options.find(
@@ -349,6 +364,10 @@ async function startHub() {
           }
         }
         state.behavior.dropNextWindowUpdate = false;
+        if (state.behavior.failWindowGetAfterUpdate) {
+          state.behavior.failWindowGetAfterUpdate = false;
+          state.behavior.failNextWindowGet = true;
+        }
         if (state.behavior.closeAfterWindowUpdate) {
           state.behavior.closeAfterWindowUpdate = false;
           socket.close();
@@ -778,8 +797,177 @@ test("window option restore preserves a third value chosen after apply", async (
   });
   assert.equal(conflict.structuredContent.status, "conflict");
   assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.deepEqual(conflict.structuredContent.value_choices, {
+    baseline: {
+      value: 255,
+      kind: "intValue",
+      name: "Предыдущее состояние",
+    },
+    requested: { value: 0, kind: "intValue", name: "Выключена" },
+    observed: { value: 1, kind: "intValue", name: "Включена" },
+  });
+  assert.deepEqual(conflict.structuredContent.conflict_resolution, {
+    requires_user_decision: true,
+    action_if_authorized: "prepare_new_window_option_change",
+    effect: {
+      replace: { value: 1, kind: "intValue", name: "Включена" },
+      with: {
+        value: 255,
+        kind: "intValue",
+        name: "Предыдущее состояние",
+      },
+    },
+  });
   assert.equal(hub.state.window.options[0].value.intValue, 1);
   assert.equal(hub.requests.filter(({ window }) => window?.update).length, 1);
+});
+
+test("a prepared window change cannot restore a matching manual value", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  hub.state.window.options[0].value = { intValue: 0 };
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const observed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
+  });
+
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "not_owned");
+  assert.equal(observed.structuredContent.status, "not_owned");
+  assert.equal(
+    history.structuredContent.changes[0].recorded_status,
+    "not_owned",
+  );
+  assert.equal(hub.state.window.options[0].value.intValue, 0);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 0);
+});
+
+test("a rejected window apply never earns the right to restore a matching manual value", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  hub.state.behavior.rejectNextWindowUpdate = true;
+  const rejected = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  hub.state.window.options[0].value = { intValue: 0 };
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "not_owned");
+  assert.equal(hub.state.window.options[0].value.intValue, 0);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 1);
+});
+
+test("an uncertain restore cannot be turned back into apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.failWindowGetAfterUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.write_intent.direction, "restore");
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const reconciled = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(reconciled.structuredContent.status, "restored");
+  assert.equal(reconciled.structuredContent.write_intent.direction, "restore");
+  assert.equal(hub.state.window.options[0].value.intValue, 255);
+  assert.equal(hub.requests.filter(({ window }) => window?.update).length, 2);
+});
+
+test("a terminal window restore is explicit that no fresh readback occurred", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 0,
+      reason: "Не включать лампу после восстановления питания",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const readsBeforeRepeat = hub.requests.filter(
+    ({ window }) => window?.get,
+  ).length;
+
+  const repeated = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(repeated.structuredContent.verification.fresh, false);
+  assert.equal(
+    hub.requests.filter(({ window }) => window?.get).length,
+    readsBeforeRepeat,
+  );
 });
 
 async function startClient(t, hub, stateDirectory) {
