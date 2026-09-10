@@ -15,6 +15,8 @@ const projectRoot = path.resolve(
 );
 const serial = "native-change-test-hub";
 const homeRef = `spruthub://hub/${serial}`;
+const accessoryRef = `${homeRef}/accessory/34`;
+const workshopRoomRef = `${homeRef}/room/2`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
 const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
@@ -198,6 +200,10 @@ function withRuntimeBlockFields(data) {
 async function startHub() {
   const requests = [];
   const state = {
+    rooms: [
+      { id: 1, order: 1, name: "Офис", visible: true },
+      { id: 2, order: 2, name: "Мастерская", visible: true },
+    ],
     characteristic: {
       aId: 34,
       sId: 13,
@@ -244,6 +250,8 @@ async function startHub() {
         roomId: 1,
         name: "Лампа",
         online: true,
+        extensionKey: "zigbee_demo",
+        deviceId: "DEVICE_A",
         services: [
           {
             aId: 34,
@@ -253,6 +261,15 @@ async function startHub() {
             characteristics: [],
           },
         ],
+      },
+      {
+        id: 35,
+        roomId: 1,
+        name: "Подсветка той же лампы",
+        online: true,
+        extensionKey: "zigbee_demo",
+        deviceId: "DEVICE_A",
+        services: [],
       },
     ],
     scenarios: [
@@ -337,6 +354,9 @@ async function startHub() {
       closeAfterLogicCreate: false,
       closeAfterLogicSetOptions: false,
       failNextLogicList: false,
+      closeAfterAccessoryUpdate: false,
+      closeAfterRoomCreate: false,
+      normalizeNextAccessoryName: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -428,6 +448,37 @@ async function startHub() {
             },
           },
         };
+      } else if (params.room?.list) {
+        result = { room: { list: { rooms: structuredClone(state.rooms) } } };
+      } else if (params.room?.get) {
+        result = {
+          room: {
+            get:
+              structuredClone(
+                state.rooms.find(({ id }) => id === params.room.get.id),
+              ) ?? null,
+          },
+        };
+      } else if (params.room?.create) {
+        const room = {
+          id: Math.max(...state.rooms.map(({ id }) => id), 0) + 1,
+          order: state.rooms.length + 1,
+          name: params.room.create.name,
+          visible: true,
+        };
+        state.rooms.push(room);
+        if (state.behavior.closeAfterRoomCreate) {
+          state.behavior.closeAfterRoomCreate = false;
+          socket.close();
+          return;
+        }
+        result = { room: { create: structuredClone(room) } };
+      } else if (params.room?.delete) {
+        const roomIndex = state.rooms.findIndex(
+          ({ id }) => id === params.room.delete.id,
+        );
+        if (roomIndex >= 0) state.rooms.splice(roomIndex, 1);
+        result = { room: { delete: {} } };
       } else if (params.characteristic?.get) {
         const selected = state.accessories
           .find(({ id }) => id === params.characteristic.get.aId)
@@ -607,6 +658,37 @@ async function startHub() {
               ) ?? null,
           },
         };
+      } else if (params.accessory?.list) {
+        result = {
+          accessory: {
+            list: {
+              accessories: state.accessories
+                .filter(
+                  ({ roomId }) =>
+                    params.accessory.list.roomId === undefined ||
+                    roomId === params.accessory.list.roomId,
+                )
+                .map((accessory) => structuredClone(accessory)),
+            },
+          },
+        };
+      } else if (params.accessory?.update) {
+        const accessory = state.accessories.find(
+          ({ id }) => id === params.accessory.update.id,
+        );
+        if (accessory) {
+          accessory.name = state.behavior.normalizeNextAccessoryName
+            ? params.accessory.update.name.replace(/\s*·\s*/g, " ")
+            : params.accessory.update.name;
+          accessory.roomId = params.accessory.update.roomId;
+        }
+        state.behavior.normalizeNextAccessoryName = false;
+        if (state.behavior.closeAfterAccessoryUpdate) {
+          state.behavior.closeAfterAccessoryUpdate = false;
+          socket.close();
+          return;
+        }
+        result = { accessory: { update: {} } };
       } else if (params.scenario?.list) {
         if (state.behavior.invalidNextScenarioList) {
           state.behavior.invalidNextScenarioList = false;
@@ -3592,4 +3674,265 @@ test("logic writes require a catalogued type and a writable GenericInteger NUMBE
     assignmentContract.structuredContent.contract.description,
     "[REDACTED]",
   );
+});
+
+test("an accessory is renamed and moved as one owned change, then restored after restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.normalizeNextAccessoryName = true;
+
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: workshopRoomRef,
+      name: "Рабочая · лампа",
+      reason: "Перенести настольную лампу в мастерскую и переименовать",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.diff, {
+    name: { from: "Лампа", to: "Рабочая · лампа" },
+    room: {
+      from: { ref: `${homeRef}/room/1`, name: "Офис" },
+      to: { ref: workshopRoomRef, name: "Мастерская" },
+    },
+  });
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.native_acknowledged, true);
+  assert.deepEqual(applied.structuredContent.observed, {
+    name: "Рабочая лампа",
+    room_ref: workshopRoomRef,
+    room_name: "Мастерская",
+  });
+  assert.deepEqual(
+    hub.requests.filter(({ accessory }) => accessory?.update),
+    [
+      {
+        accessory: {
+          update: { id: 34, name: "Рабочая · лампа", roomId: 2 },
+        },
+      },
+    ],
+  );
+  assert.deepEqual(hub.state.accessories.find(({ id }) => id === 35), {
+    id: 35,
+    roomId: 1,
+    name: "Подсветка той же лампы",
+    online: true,
+    extensionKey: "zigbee_demo",
+    deviceId: "DEVICE_A",
+    services: [],
+  });
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: accessoryRef, limit: 10 },
+  });
+  assert.equal(history.structuredContent.changes.length, 1);
+  assert.equal(
+    history.structuredContent.changes[0].change_ref,
+    prepared.structuredContent.change_ref,
+  );
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.state.accessories.find(({ id }) => id === 34).name, "Лампа");
+  assert.equal(hub.state.accessories.find(({ id }) => id === 34).roomId, 1);
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    2,
+  );
+});
+
+test("a later manual accessory edit blocks restoration without touching the hub", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: workshopRoomRef,
+      name: "Рабочая лампа",
+      reason: "Упорядочить лампу",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.accessories.find(({ id }) => id === 34).name =
+    "Ручное имя владельца";
+  const writesBeforeRestore = hub.requests.filter(
+    ({ accessory }) => accessory?.update,
+  ).length;
+
+  const conflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 34).name,
+    "Ручное имя владельца",
+  );
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    writesBeforeRestore,
+  );
+});
+
+test("a created room is reused after restart and removed only after its accessory is restored", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const roomChange = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Лаборатория",
+      reason: "Создать отсутствующую комнату для лампы",
+    },
+  });
+  const created = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: roomChange.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.room_creation_owned, true);
+  const createdRoomRef = created.structuredContent.room.ref;
+
+  const accessoryChange = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: createdRoomRef,
+      name: "Рабочая лампа",
+      reason: "Разместить лампу в созданной комнате",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: accessoryChange.structuredContent.change_ref },
+  });
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+
+  const repeatedRoomApply = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: roomChange.structuredContent.change_ref },
+  });
+  assert.equal(repeatedRoomApply.structuredContent.status, "applied");
+  assert.equal(hub.requests.filter(({ room }) => room?.create).length, 1);
+  const occupied = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: roomChange.structuredContent.change_ref },
+  });
+  assert.equal(occupied.structuredContent.status, "conflict");
+  assert.equal(occupied.structuredContent.conflict_reason, "room_not_empty");
+  assert.equal(hub.requests.filter(({ room }) => room?.delete).length, 0);
+
+  const accessoryRestored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: accessoryChange.structuredContent.change_ref },
+  });
+  assert.equal(accessoryRestored.structuredContent.status, "restored");
+  const roomRestored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: roomChange.structuredContent.change_ref },
+  });
+  assert.equal(roomRestored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.rooms.some(({ id }) => `${homeRef}/room/${id}` === createdRoomRef),
+    false,
+  );
+});
+
+test("a lost room-create response exposes one candidate and never repeats creation", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Архив",
+      reason: "Создать отсутствующую комнату",
+    },
+  });
+  hub.state.behavior.closeAfterRoomCreate = true;
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.room_creation_owned, false);
+  assert.equal(uncertain.structuredContent.candidate_rooms.length, 1);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(hub.requests.filter(({ room }) => room?.create).length, 1);
+  const candidateRoomRef = repeated.structuredContent.candidate_rooms[0].ref;
+  const accessoryChange = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: candidateRoomRef,
+      name: "Лампа архива",
+      reason: "Закончить перенос без повторного создания комнаты",
+    },
+  });
+  const applied = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: accessoryChange.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(hub.requests.filter(({ room }) => room?.create).length, 1);
+  const notOwned = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(notOwned.structuredContent.status, "not_owned");
+  assert.equal(hub.requests.filter(({ room }) => room?.delete).length, 0);
+});
+
+test("a home-qualified accessory placement rejects the same local id in another home", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const refused = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: "spruthub://hub/other-home/accessory/34",
+      room_ref: workshopRoomRef,
+      name: "Чужая лампа",
+      reason: "Не затрагивать другой дом",
+    },
+  });
+  assert.equal(refused.isError, true);
+  assert.equal(refused.structuredContent.error.code, "unsupported_home_write");
+  assert.equal(hub.requests.some(({ accessory }) => accessory?.update), false);
 });
