@@ -354,6 +354,7 @@ async function startHub() {
     delayExtensionMs: 0,
     delayWindowMs: 0,
     unsupportedScenarioGet: false,
+    characteristicOptionsResult: null,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -381,7 +382,7 @@ async function startHub() {
         );
         return;
       }
-      const result = respond(states, request);
+      const result = respond(states, request, behavior);
       responseSentAt.push({ request, at: Date.now() });
       socket.send(JSON.stringify({ id: request.id, result }));
     });
@@ -398,7 +399,7 @@ async function startHub() {
   };
 }
 
-function respond(states, request) {
+function respond(states, request, behavior) {
   if (request.params.hub?.list) return { hub: { list: { hubs: homes } } };
   const state = states.get(request.serial);
   assert(state, `unexpected home serial: ${request.serial}`);
@@ -433,6 +434,12 @@ function respond(states, request) {
     };
   }
   if (params.characteristic?.getOptions) {
+    if (behavior.characteristicOptionsResult !== null) {
+      return behavior.characteristicOptionsResult;
+    }
+    if (params.characteristic.getOptions.cId === 17) {
+      return { characteristic: { getOptions: { options: [] } } };
+    }
     if (params.characteristic.getOptions.cId === 16) {
       return {
         characteristic: {
@@ -691,6 +698,545 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
   assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*31/);
   assert.equal(entity.diagnostics[1].text, "[REDACTED]");
   assert.equal(entity.freshness.source_timestamp, null);
+});
+
+test("get_entity distinguishes unread, found, empty, and unapplied option scopes", async (t) => {
+  const hub = await startHub();
+  const service = hub.states.get("home/A").accessories[0].services[0];
+  service.characteristics.push({
+    aId: 32,
+    sId: 13,
+    cId: 17,
+    control: {
+      name: "Освещённость",
+      type: "CurrentAmbientLightLevel",
+      read: true,
+      write: false,
+      events: true,
+      unit: "lux",
+      value: { doubleValue: 24 },
+    },
+  });
+  const client = await startClient(t, hub);
+
+  const accessoryStart = hub.requests.length;
+  const accessory = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32",
+      include: ["options"],
+    },
+  });
+  assert.equal(accessory.isError, undefined, accessory.content[0]?.text);
+  const nested = accessory.structuredContent.entity.services[0].characteristics;
+  assert.deepEqual(nested[0].option_scope, {
+    native_has_options: true,
+    status: "not_read",
+    next: {
+      tool: "get_entity",
+      arguments: {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+        include: ["options"],
+      },
+    },
+  });
+  assert.deepEqual(nested[1], {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
+  assert.deepEqual(nested[2].option_scope, {
+    native_has_options: null,
+    status: "not_read",
+    next: {
+      tool: "get_entity",
+      arguments: {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
+        include: ["options"],
+      },
+    },
+  });
+  assert.deepEqual(accessory.structuredContent.entity.include_resolution, {
+    requested: ["options"],
+    applied: [],
+    not_applied: [
+      {
+        include: "options",
+        reason: "characteristic_scoped",
+        next: {
+          tool: "get_entity",
+          candidates: [
+            {
+              entity_ref:
+                "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+              include: ["options"],
+              native_has_options: true,
+            },
+            {
+              entity_ref:
+                "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
+              include: ["options"],
+              native_has_options: null,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.deepEqual(
+    hub.requests
+      .slice(accessoryStart)
+      .map(({ params }) => Object.keys(params)[0]),
+    ["hub", "accessory"],
+  );
+
+  const serviceResult = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      include: ["options"],
+    },
+  });
+  assert.deepEqual(
+    serviceResult.structuredContent.entity.include_resolution,
+    accessory.structuredContent.entity.include_resolution,
+  );
+
+  const found = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      include: ["options"],
+    },
+  });
+  assert.equal(found.isError, undefined, found.content[0]?.text);
+  assert.equal(found.structuredContent.entity.options.length, 2);
+  assert.deepEqual(found.structuredContent.entity.option_scope, {
+    ...nested[0].option_scope,
+    status: "found",
+  });
+  assert.deepEqual(found.structuredContent.entity.include_resolution, {
+    requested: ["options"],
+    applied: ["options"],
+    not_applied: [],
+  });
+
+  const empty = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
+      include: ["options"],
+    },
+  });
+  assert.equal(empty.isError, undefined, empty.content[0]?.text);
+  assert.deepEqual(empty.structuredContent.entity.options, []);
+  assert.deepEqual(empty.structuredContent.entity.option_scope, {
+    ...nested[2].option_scope,
+    status: "checked_empty",
+  });
+  assert.deepEqual(empty.structuredContent.entity.include_resolution, {
+    requested: ["options"],
+    applied: ["options"],
+    not_applied: [],
+  });
+});
+
+test("get_entity rejects incomplete option operations without turning them into checked empty", async (t) => {
+  const hub = await startHub();
+  const service = hub.states.get("home/A").accessories[0].services[0];
+  service.characteristics.push({
+    aId: 32,
+    sId: 13,
+    cId: 17,
+    hasOptions: true,
+    control: {
+      name: "Освещённость",
+      type: "CurrentAmbientLightLevel",
+      read: true,
+      write: false,
+      events: true,
+      unit: "lux",
+      value: { doubleValue: 24 },
+    },
+  });
+  const client = await startClient(t, hub);
+  const entity_ref =
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15";
+
+  for (const invalidResult of [
+    {},
+    { characteristic: { getOptions: null } },
+    { characteristic: { getOptions: { options: {} } } },
+  ]) {
+    hub.behavior.characteristicOptionsResult = invalidResult;
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref, include: ["options"] },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, "incompatible_response");
+  }
+
+  hub.behavior.characteristicOptionsResult = null;
+  const explicitEmpty = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
+      include: ["options"],
+    },
+  });
+  assert.equal(
+    explicitEmpty.isError,
+    undefined,
+    explicitEmpty.content[0]?.text,
+  );
+  assert.deepEqual(explicitEmpty.structuredContent.entity.options, []);
+  assert.equal(
+    explicitEmpty.structuredContent.entity.option_scope.status,
+    "checked_empty",
+  );
+  assert.deepEqual(explicitEmpty.structuredContent.entity.include_resolution, {
+    requested: ["options"],
+    applied: ["options"],
+    not_applied: [],
+  });
+});
+
+test("get_entity resolves every requested include at the common entity boundary", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const cases = [
+    {
+      kind: "home",
+      entity_ref: "spruthub://hub/home%2FA",
+      expectedApplied: [],
+      expectedNext: {
+        tool: "inspect_home",
+        arguments: { home_ref: "spruthub://hub/home%2FA" },
+      },
+    },
+    {
+      kind: "room",
+      entity_ref: "spruthub://hub/home%2FA/room/1",
+      expectedApplied: [],
+      expectedCandidate: "spruthub://hub/home%2FA/accessory/32",
+    },
+    {
+      kind: "accessory",
+      entity_ref: "spruthub://hub/home%2FA/accessory/32",
+      expectedApplied: ["physical_configuration", "relations", "diagnostics"],
+      expectedCandidate:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+    },
+    {
+      kind: "service",
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      expectedApplied: [],
+      expectedCandidate:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+    },
+    {
+      kind: "characteristic",
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      expectedApplied: [
+        "options",
+        "physical_configuration",
+        "relations",
+        "diagnostics",
+      ],
+    },
+    {
+      kind: "scenario",
+      entity_ref: "spruthub://hub/home%2FA/scenario/motion-block",
+      expectedApplied: ["configuration"],
+    },
+    {
+      kind: "extension",
+      entity_ref: "spruthub://hub/home%2FA/extension/Bridge%3Ayandex_1",
+      expectedApplied: [],
+      expectedNext: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/window/Bridge%2Fyandex_1%2F",
+        },
+      },
+    },
+    {
+      kind: "logic",
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/logic/MotionDetectedFromCurrentMotionLevel",
+      expectedApplied: [],
+    },
+    {
+      kind: "window",
+      entity_ref: "spruthub://hub/home%2FA/window/window-A",
+      expectedApplied: ["physical_configuration", "diagnostics"],
+    },
+  ];
+  const includes = [
+    "configuration",
+    "options",
+    "physical_configuration",
+    "relations",
+    "diagnostics",
+  ];
+
+  for (const testCase of cases) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: testCase.entity_ref,
+        include: includes,
+      },
+    });
+    assert.equal(
+      result.isError,
+      undefined,
+      `${testCase.kind}: ${result.content[0]?.text}`,
+    );
+    const resolution = result.structuredContent.entity.include_resolution;
+    assert.deepEqual(resolution?.requested, includes, testCase.kind);
+    assert.deepEqual(
+      [...resolution.applied].sort(),
+      [...testCase.expectedApplied].sort(),
+      testCase.kind,
+    );
+    assert.deepEqual(
+      resolution.not_applied.map(({ include }) => include).sort(),
+      includes
+        .filter((include) => !testCase.expectedApplied.includes(include))
+        .sort(),
+      testCase.kind,
+    );
+    const outcome = resolution.not_applied.find(
+      ({ include }) => include === "options",
+    );
+    if (!outcome) continue;
+    if (testCase.expectedNext) {
+      assert.deepEqual(outcome.next, testCase.expectedNext, testCase.kind);
+      const followUp = await client.callTool({
+        name: outcome.next.tool,
+        arguments: outcome.next.arguments,
+      });
+      assert.equal(
+        followUp.isError,
+        undefined,
+        `${testCase.kind} next: ${followUp.content[0]?.text}`,
+      );
+    } else if (testCase.expectedCandidate) {
+      assert.equal(outcome.next?.tool, "get_entity", testCase.kind);
+      const candidate = outcome.next.candidates.find(
+        ({ entity_ref }) => entity_ref === testCase.expectedCandidate,
+      );
+      assert.ok(candidate, testCase.kind);
+      const followUp = await client.callTool({
+        name: outcome.next.tool,
+        arguments: {
+          entity_ref: candidate.entity_ref,
+          include: candidate.include,
+        },
+      });
+      assert.equal(
+        followUp.isError,
+        undefined,
+        `${testCase.kind} candidate: ${followUp.content[0]?.text}`,
+      );
+    } else {
+      assert.equal(typeof outcome.limitation, "string", testCase.kind);
+      assert.equal(Object.hasOwn(outcome, "next"), false, testCase.kind);
+    }
+  }
+});
+
+test("get_entity non-option next reads advance through known safe owner refs", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const cases = [
+    {
+      kind: "room",
+      entity_ref: "spruthub://hub/home%2FA/room/1",
+      includes: ["relations", "physical_configuration", "diagnostics"],
+      expectedCandidate: "spruthub://hub/home%2FA/accessory/32",
+    },
+    {
+      kind: "service_characteristic",
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      includes: ["relations"],
+      expectedCandidate:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+    },
+    {
+      kind: "service_window",
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      includes: ["physical_configuration", "diagnostics"],
+      expectedNextRef: "spruthub://hub/home%2FA/window/window-A",
+    },
+    {
+      kind: "extension",
+      entity_ref: "spruthub://hub/home%2FA/extension/Bridge%3Ayandex_1",
+      includes: ["physical_configuration", "diagnostics"],
+      expectedNextRef: "spruthub://hub/home%2FA/window/Bridge%2Fyandex_1%2F",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: testCase.entity_ref,
+        include: testCase.includes,
+      },
+    });
+    assert.equal(result.isError, undefined, testCase.kind);
+    for (const include of testCase.includes) {
+      const outcome =
+        result.structuredContent.entity.include_resolution.not_applied.find(
+          (candidate) => candidate.include === include,
+        );
+      assert.ok(outcome?.next, `${testCase.kind}:${include}`);
+      let nextArguments = outcome.next.arguments;
+      if (testCase.expectedCandidate) {
+        const candidate = outcome.next.candidates.find(
+          ({ entity_ref }) => entity_ref === testCase.expectedCandidate,
+        );
+        assert.ok(candidate, `${testCase.kind}:${include}`);
+        nextArguments = {
+          entity_ref: candidate.entity_ref,
+          include: candidate.include,
+        };
+      } else {
+        assert.equal(
+          nextArguments.entity_ref,
+          testCase.expectedNextRef,
+          `${testCase.kind}:${include}`,
+        );
+      }
+      const followUp = await client.callTool({
+        name: outcome.next.tool,
+        arguments: nextArguments,
+      });
+      assert.equal(
+        followUp.isError,
+        undefined,
+        `${testCase.kind}:${include} next: ${followUp.content[0]?.text}`,
+      );
+      assert.ok(
+        followUp.structuredContent.entity.include_resolution.applied.includes(
+          include,
+        ),
+        `${testCase.kind}:${include}`,
+      );
+    }
+  }
+
+  const home = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA",
+      include: ["configuration"],
+    },
+  });
+  const homeOutcome =
+    home.structuredContent.entity.include_resolution.not_applied[0];
+  assert.deepEqual(homeOutcome.next, {
+    tool: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
+  const catalog = await client.callTool({
+    name: homeOutcome.next.tool,
+    arguments: homeOutcome.next.arguments,
+  });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.ok(catalog.structuredContent.entities.scenarios.length > 0);
+
+  const window = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/window/window-A",
+      include: ["physical_configuration"],
+    },
+  });
+  assert.deepEqual(window.structuredContent.entity.include_resolution, {
+    requested: ["physical_configuration"],
+    applied: ["physical_configuration"],
+    not_applied: [],
+  });
+
+  const scenario = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/motion-block",
+      include: ["relations"],
+    },
+  });
+  const unavailable =
+    scenario.structuredContent.entity.include_resolution.not_applied[0];
+  assert.equal(typeof unavailable.limitation, "string");
+  assert.equal(Object.hasOwn(unavailable, "next"), false);
+});
+
+test("get_entity stops diagnostics routing after the physical owner is checked", async (t) => {
+  for (const variant of ["missing_window", "empty_diagnostics"]) {
+    await t.test(variant, async (t) => {
+      const hub = await startHub();
+      const accessory = hub.states.get("home/A").accessories[0];
+      if (variant === "missing_window") {
+        delete accessory.deviceWindow;
+      } else {
+        hub.states.get("home/A").window.options = hub.states
+          .get("home/A")
+          .window.options.filter(
+            ({ inputType }) =>
+              !["HTML", "INFO", "CLIPBOARD"].includes(inputType),
+          );
+      }
+      const client = await startClient(t, hub);
+
+      const room = await client.callTool({
+        name: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/room/1",
+          include: ["diagnostics"],
+        },
+      });
+      const roomOutcome =
+        room.structuredContent.entity.include_resolution.not_applied[0];
+      const accessoryCandidate = roomOutcome.next.candidates[0];
+      const owner = await client.callTool({
+        name: roomOutcome.next.tool,
+        arguments: {
+          entity_ref: accessoryCandidate.entity_ref,
+          include: accessoryCandidate.include,
+        },
+      });
+      assert.equal(owner.isError, undefined, owner.content[0]?.text);
+      const entity = owner.structuredContent.entity;
+
+      if (variant === "missing_window") {
+        assert.equal(entity.native.device_window_ref, null);
+        assert.equal(entity.physical_configuration, null);
+        assert.deepEqual(entity.include_resolution.applied, []);
+        assert.equal(entity.include_resolution.not_applied.length, 1);
+        const outcome = entity.include_resolution.not_applied[0];
+        assert.equal(outcome.include, "diagnostics");
+        assert.equal(typeof outcome.limitation, "string");
+        assert.equal(Object.hasOwn(outcome, "next"), false);
+      } else {
+        assert.notEqual(entity.native.device_window_ref, null);
+        assert.deepEqual(entity.diagnostics, []);
+        assert.deepEqual(entity.include_resolution, {
+          requested: ["diagnostics"],
+          applied: ["diagnostics"],
+          not_applied: [],
+        });
+      }
+    });
+  }
 });
 
 test("extension refs preserve native instance identity", async (t) => {
