@@ -530,12 +530,26 @@ test("native history keeps legacy automation changes discoverable by target", as
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const prepared = await preview(client);
+  const [journalName] = (await readdir(stateDirectory)).filter((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  const journalPath = path.join(stateDirectory, journalName);
+  const journal = JSON.parse(await readFile(journalPath, "utf8"));
+  const changeId = prepared.structuredContent.change_ref.split("/").at(-1);
+  const change = journal.changes[changeId];
+  delete change.home_ref;
+  change.condition.characteristic.ref =
+    "spruthub://accessory/32/service/13/characteristic/15";
+  change.action.characteristic.ref =
+    "spruthub://accessory/34/service/13/characteristic/15";
+  change.scenario_index = "23";
+  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 
   const history = await client.callTool({
     name: "list_native_changes",
     arguments: {
       home_ref: "spruthub://hub/automation-test-hub",
-      entity_ref: previewArguments.target_characteristic_ref,
+      entity_ref: "spruthub://hub/automation-test-hub/scenario/23",
     },
   });
 
@@ -549,6 +563,11 @@ test("native history keeps legacy automation changes discoverable by target", as
     target_refs: [
       previewArguments.source_characteristic_ref,
       previewArguments.target_characteristic_ref,
+      "spruthub://hub/automation-test-hub/accessory/32",
+      "spruthub://hub/automation-test-hub/accessory/32/service/13",
+      "spruthub://hub/automation-test-hub/accessory/34",
+      "spruthub://hub/automation-test-hub/accessory/34/service/13",
+      "spruthub://hub/automation-test-hub/scenario/23",
     ],
     created_at: history.structuredContent.changes[0].created_at,
     updated_at: history.structuredContent.changes[0].updated_at,

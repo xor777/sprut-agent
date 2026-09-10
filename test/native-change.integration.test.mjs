@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,13 +18,19 @@ const homeRef = `spruthub://hub/${serial}`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
 
-function setAction({ aId = 34, sId = 13, cId = 15, value = "true" } = {}) {
+function setAction({
+  aId = 34,
+  sId = 13,
+  cId = 15,
+  hc = "On",
+  value = "true",
+} = {}) {
   return {
     type: "service",
     aId,
     sId,
     hs: "Lightbulb",
-    characteristics: [{ type: "set", cId, hc: "On", value }],
+    characteristics: [{ type: "set", cId, hc, value }],
   };
 }
 
@@ -183,6 +189,8 @@ async function startHub() {
     behavior: {
       closeAfterCreate: false,
       closeAfterCharacteristicUpdate: false,
+      failNextCharacteristicGet: false,
+      failNextScenarioGet: false,
       ignoreNextUpdate: false,
     },
   };
@@ -243,10 +251,25 @@ async function startHub() {
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       const request = JSON.parse(data.toString());
       requests.push(structuredClone(request.params));
       const params = request.params;
+      if (
+        (params.characteristic?.get &&
+          state.behavior.failNextCharacteristicGet) ||
+        (params.scenario?.get && state.behavior.failNextScenarioGet)
+      ) {
+        state.behavior.failNextCharacteristicGet = false;
+        state.behavior.failNextScenarioGet = false;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: { code: 500, message: "temporary read failure" },
+          }),
+        );
+        return;
+      }
       let result;
       if (params.characteristic?.get) {
         const selected = state.accessories
@@ -348,6 +371,11 @@ async function startHub() {
       } else {
         assert.fail(`unsupported test request: ${JSON.stringify(params)}`);
       }
+      if (params.scenario?.delete && state.behavior.afterDelete) {
+        const afterDelete = state.behavior.afterDelete;
+        state.behavior.afterDelete = undefined;
+        await afterDelete();
+      }
       socket.send(JSON.stringify({ id: request.id, result }));
     });
   });
@@ -394,6 +422,24 @@ async function setup(t) {
     await rm(stateDirectory, { recursive: true, force: true });
   });
   return { hub, stateDirectory };
+}
+
+async function blockStateDirectory(t, stateDirectory) {
+  const backupDirectory = `${stateDirectory}-backup`;
+  await rename(stateDirectory, backupDirectory);
+  await writeFile(stateDirectory, "local state storage unavailable\n");
+  let restored = false;
+  const restore = async () => {
+    if (restored) return;
+    await rm(stateDirectory, { force: true });
+    await rename(backupDirectory, stateDirectory);
+    restored = true;
+  };
+  t.after(async () => {
+    if (!restored) await rm(stateDirectory, { force: true });
+    await rm(backupDirectory, { recursive: true, force: true });
+  });
+  return restore;
 }
 
 test("a characteristic value uses one recoverable native change path", async (t) => {
@@ -508,6 +554,64 @@ test("a lost characteristic response is reconciled without another command", asy
   assert.equal(
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     1,
+  );
+});
+
+test("apply revalidates the current characteristic contract and BLOCK bindings", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const brightnessRef = `${homeRef}/accessory/34/service/13/characteristic/16`;
+  const characteristicChange = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: brightnessRef,
+      value: 30,
+      reason: "Изменить яркость",
+    },
+  });
+  hub.state.accessories[1].services[0].characteristics.find(
+    ({ cId }) => cId === 16,
+  ).control.maxValue = 25;
+
+  const rejectedCharacteristic = await client.callTool({
+    name: "apply_native_change",
+    arguments: {
+      change_ref: characteristicChange.structuredContent.change_ref,
+    },
+  });
+  assert.equal(rejectedCharacteristic.isError, true);
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const blockChange = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Проверка topology drift",
+      description: "Не применять при изменившейся привязке",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить свежую привязку",
+    },
+  });
+  hub.state.accessories[1].services[0].type = "Outlet";
+
+  const rejectedBlock = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: blockChange.structuredContent.change_ref },
+  });
+  assert.equal(rejectedBlock.isError, true);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create),
+    false,
   );
 });
 
@@ -743,6 +847,118 @@ test("BLOCK data update verifies readback and restores its complete baseline", a
   assert.deepEqual(restoredData.vendorConfiguration, { preserved: true });
 });
 
+test("restore preserves unknown vendor blockId and state fields", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const baseline = blockData();
+  baseline.vendorConfiguration = {
+    type: "if",
+    blockId: "vendor-baseline",
+    state: "configured",
+  };
+  hub.state.scenarios[0].data = JSON.stringify(baseline);
+  const requested = structuredClone(baseline);
+  requested.targets[0].then[1].time = 45_000;
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requested,
+      reason: "Сохранить vendor configuration",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const manuallyEdited = JSON.parse(hub.state.scenarios[0].data);
+  manuallyEdited.vendorConfiguration.blockId = "manual-change";
+  manuallyEdited.vendorConfiguration.state = "manual-state";
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+
+  const refused = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refused.structuredContent.status, "conflict");
+  assert.equal(refused.structuredContent.configuration_matches, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).vendorConfiguration.blockId,
+    "manual-change",
+  );
+});
+
+test("a restored BLOCK change is terminal and recovers a lost final save", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Временный BLOCK",
+      description: "Проверить восстановление журнала",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить терминальный restore",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  let restoreStateDirectory;
+  hub.state.behavior.afterDelete = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const restoredWithoutSave = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restoredWithoutSave.structuredContent.status, "restored");
+  assert.deepEqual(restoredWithoutSave.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_native_change",
+  });
+  await firstClient.close();
+  await restoreStateDirectory();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const recovered = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const repeatedApply = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const repeatedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "restored");
+  assert.equal(repeatedApply.structuredContent.status, "restored");
+  assert.equal(repeatedRestore.structuredContent.status, "restored");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
 test("ACK without the requested BLOCK result stays uncertain and is not resent", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -847,6 +1063,130 @@ test("history discovers changes by home and entity after restart", async (t) => 
     },
   ]);
   assert.equal(history.structuredContent.truncated, false);
+});
+
+test("history indexes created scenarios and BLOCK bindings before and after update", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const create = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Индексируемый BLOCK",
+      description: "Найти после рестарта",
+      active: false,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить историю",
+    },
+  });
+  const created = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  const requested = blockData();
+  requested.targets[0].then[0] = setAction({
+    cId: 16,
+    hc: "Brightness",
+    value: "30",
+  });
+  const update = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requested,
+      reason: "Сменить действие",
+    },
+  });
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+
+  for (const [entityRef, expectedChange] of [
+    [created.structuredContent.scenario_ref, create],
+    [`${homeRef}/accessory/32`, create],
+    [characteristicRef, update],
+    [`${homeRef}/accessory/34/service/13/characteristic/16`, update],
+  ]) {
+    const history = await secondClient.callTool({
+      name: "list_native_changes",
+      arguments: { home_ref: homeRef, entity_ref: entityRef },
+    });
+    assert.equal(history.isError, undefined, history.content[0]?.text);
+    assert.equal(
+      history.structuredContent.changes.some(
+        ({ change_ref }) =>
+          change_ref === expectedChange.structuredContent.change_ref,
+      ),
+      true,
+      entityRef,
+    );
+  }
+});
+
+test("status exposes failed fresh reads and clears stale configuration matches", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const block = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить freshness",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: block.structuredContent.change_ref },
+  });
+  hub.state.behavior.failNextScenarioGet = true;
+  const unavailable = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: block.structuredContent.change_ref },
+  });
+  assert.equal(unavailable.isError, undefined, unavailable.content[0]?.text);
+  assert.equal(unavailable.structuredContent.status, "applied");
+  assert.equal(unavailable.structuredContent.verification.fresh, false);
+  assert.equal("configuration_matches" in unavailable.structuredContent, false);
+
+  const manuallyEdited = JSON.parse(hub.state.scenarios[0].data);
+  manuallyEdited.manual = true;
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+  const conflict = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: block.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.configuration_matches, false);
+  assert.equal(conflict.structuredContent.verification.fresh, true);
+
+  const characteristic = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: characteristicRef,
+      value: true,
+      reason: "Проверить freshness значения",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: characteristic.structuredContent.change_ref },
+  });
+  hub.state.behavior.failNextCharacteristicGet = true;
+  const characteristicUnavailable = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: characteristic.structuredContent.change_ref },
+  });
+  assert.equal(
+    characteristicUnavailable.structuredContent.verification.fresh,
+    false,
+  );
 });
 
 test("native preparation rejects unsafe targets and values before send", async (t) => {
