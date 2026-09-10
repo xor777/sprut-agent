@@ -355,6 +355,7 @@ async function startHub() {
     delayWindowMs: 0,
     unsupportedScenarioGet: false,
     characteristicOptionsResult: null,
+    logicOptionsResult: null,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -535,6 +536,9 @@ function respond(states, request, behavior) {
     };
   }
   if (params.logic?.getOptions) {
+    if (behavior.logicOptionsResult !== null) {
+      return behavior.logicOptionsResult;
+    }
     return { logic: { getOptions: { options: [] } } };
   }
   if (params.link?.list) return { link: { list: {} } };
@@ -1040,6 +1044,40 @@ test("get_entity rejects incomplete option operations without turning them into 
     applied: ["options"],
     not_applied: [],
   });
+});
+
+test("an observed empty logic getOptions keeps the assigned logic readable", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const entityRef =
+    "spruthub://hub/home%2FA/accessory/32/service/13/logic/MotionDetectedFromCurrentMotionLevel";
+
+  hub.behavior.logicOptionsResult = { logic: { getOptions: {} } };
+  const empty = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: entityRef, include: ["options"] },
+  });
+  assert.equal(empty.isError, undefined, empty.content[0]?.text);
+  assert.equal(empty.structuredContent.entity.kind, "logic");
+  assert.deepEqual(empty.structuredContent.entity.options, []);
+  assert.deepEqual(empty.structuredContent.include_resolution, {
+    applied: ["options"],
+    not_applied: [],
+  });
+
+  for (const invalidResult of [
+    {},
+    { logic: { getOptions: null } },
+    { logic: { getOptions: { options: {} } } },
+  ]) {
+    hub.behavior.logicOptionsResult = invalidResult;
+    const invalid = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: entityRef, include: ["options"] },
+    });
+    assert.equal(invalid.isError, true);
+    assert.equal(invalid.structuredContent.error.code, "incompatible_response");
+  }
 });
 
 test("get_entity resolves every requested include at the common entity boundary", async (t) => {

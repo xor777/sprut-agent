@@ -72,6 +72,14 @@ function smoothLogicOptions() {
   ];
 }
 
+function logicOptionsKey(aId, sId, type) {
+  return `${aId}:${sId}:${type}`;
+}
+
+function configuredSmoothLogicOptions(state) {
+  return state.logicOptions[logicOptionsKey(34, 13, smoothLogicType)];
+}
+
 function assignedSmoothLogic({ active = false } = {}) {
   return {
     aId: 34,
@@ -307,7 +315,9 @@ async function startHub() {
       },
     ],
     logics: [],
-    logicOptions: { [smoothLogicType]: smoothLogicOptions() },
+    logicOptions: {
+      [logicOptionsKey(34, 13, smoothLogicType)]: smoothLogicOptions(),
+    },
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
@@ -525,7 +535,11 @@ async function startHub() {
         result = {
           logic: {
             getOptions: {
-              options: structuredClone(state.logicOptions[logic.type]),
+              options: structuredClone(
+                state.logicOptions[
+                  logicOptionsKey(logic.aId, logic.sId, logic.type)
+                ],
+              ),
             },
           },
         };
@@ -536,6 +550,9 @@ async function startHub() {
           optionsWindow: `Logic/${params.logic.create.type}/34/13`,
         };
         state.logics.push(created);
+        state.logicOptions[
+          logicOptionsKey(created.aId, created.sId, created.type)
+        ] = smoothLogicOptions();
         if (state.behavior.closeAfterLogicCreate) {
           state.behavior.closeAfterLogicCreate = false;
           socket.close();
@@ -543,7 +560,14 @@ async function startHub() {
         }
         result = { logic: { create: structuredClone(created) } };
       } else if (params.logic?.setOptions) {
-        const options = state.logicOptions[params.logic.setOptions.type];
+        const options =
+          state.logicOptions[
+            logicOptionsKey(
+              params.logic.setOptions.aId,
+              params.logic.setOptions.sId,
+              params.logic.setOptions.type,
+            )
+          ];
         for (const update of params.logic.setOptions.options) {
           const option = options.find(({ key }) => key === update.key);
           if (option) option.value = structuredClone(update.value);
@@ -570,7 +594,12 @@ async function startHub() {
             sId === params.logic.delete.sId &&
             type === params.logic.delete.type,
         );
-        if (index >= 0) state.logics.splice(index, 1);
+        if (index >= 0) {
+          const [deleted] = state.logics.splice(index, 1);
+          delete state.logicOptions[
+            logicOptionsKey(deleted.aId, deleted.sId, deleted.type)
+          ];
+        }
         result = { logic: { delete: {} } };
       } else if (params.accessory?.get) {
         result = {
@@ -3017,7 +3046,7 @@ test("a native logic assignment is configured without a duplicate and restored a
   changes.push(activation.structuredContent.change_ref);
   assert.equal(hub.state.logics[0].active, true);
   assert.deepEqual(
-    hub.state.logicOptions[smoothLogicType]
+    configuredSmoothLogicOptions(hub.state)
       .filter(({ value }) => value)
       .map(({ key, value }) => [key, value.intValue]),
     [
@@ -3029,6 +3058,32 @@ test("a native logic assignment is configured without a duplicate and restored a
 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
+  const observedAssignment = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(observedAssignment.structuredContent.status, "applied");
+  assert.equal(
+    observedAssignment.structuredContent.configuration_matches,
+    false,
+  );
+  assert.equal(
+    "conflict_reason" in observedAssignment.structuredContent,
+    false,
+  );
+  assert.deepEqual(
+    observedAssignment.structuredContent.configuration_differences,
+    {
+      active: { created: false, current: true },
+      option_keys: [smoothOptionKeys.duration, smoothOptionKeys.end],
+    },
+  );
+  const repeatedApply = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(repeatedApply.structuredContent.status, "applied");
+  assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
   const repeatedAssignment = await secondClient.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -3114,6 +3169,19 @@ test("an existing or manually assigned logic is not claimed for deletion", async
     },
   });
   hub.state.logics.push(assignedSmoothLogic());
+  const refusedApply = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedApply.structuredContent.status, "conflict");
+  assert.equal(
+    refusedApply.structuredContent.conflict_reason,
+    "baseline_changed",
+  );
+  assert.equal(
+    hub.requests.some(({ logic }) => logic?.create),
+    false,
+  );
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const restored = await secondClient.callTool({
@@ -3128,7 +3196,7 @@ test("an existing or manually assigned logic is not claimed for deletion", async
   );
 });
 
-test("an uncertain logic create is reconciled once and manual option edits block deletion", async (t) => {
+test("an uncertain logic create is reconciled once and configuration changes block deletion", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
   const prepared = await firstClient.callTool({
@@ -3148,9 +3216,23 @@ test("an uncertain logic create is reconciled once and manual option edits block
   assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
   assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
 
-  hub.state.logicOptions[smoothLogicType].find(
-    ({ key }) => key === smoothOptionKeys.end,
-  ).value = { intValue: 55 };
+  hub.state.logics[0].active = true;
+  const options = configuredSmoothLogicOptions(hub.state);
+  delete options.find(({ key }) => key === smoothOptionKeys.start).value;
+  options.find(({ key }) => key === smoothOptionKeys.end).value = {
+    intValue: 55,
+  };
+  options.find(({ key }) => key === smoothOptionKeys.duration).type =
+    "GenericDouble";
+  options.find(({ key }) => key === "Primary").value = { intValue: 1 };
+  options.push({
+    key: "AddedOption",
+    type: "GenericInteger",
+    inputType: "NUMBER",
+    read: true,
+    write: true,
+    value: { intValue: 7 },
+  });
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const restored = await secondClient.callTool({
@@ -3158,12 +3240,66 @@ test("an uncertain logic create is reconciled once and manual option edits block
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(restored.structuredContent.status, "conflict");
-  assert.equal(restored.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    restored.structuredContent.conflict_reason,
+    "configuration_changed_after_creation",
+  );
+  assert.deepEqual(restored.structuredContent.configuration_differences, {
+    active: { created: false, current: true },
+    option_keys: [
+      "AddedOption",
+      smoothOptionKeys.duration,
+      smoothOptionKeys.end,
+      "Primary",
+      smoothOptionKeys.start,
+    ],
+  });
   assert.equal(hub.state.logics.length, 1);
   assert.equal(
     hub.requests.some(({ logic }) => logic?.delete),
     false,
   );
+});
+
+test("cosmetic logic metadata does not block deletion of an owned assignment", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+      reason: "Назначить штатную logic",
+    },
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  Object.assign(hub.state.logics[0], {
+    name: "Локализованное название",
+    desc: "Локализованное описание",
+    locale: "ru-RU",
+    optionsWindow: "Logic/localized/window",
+  });
+  for (const option of configuredSmoothLogicOptions(hub.state)) {
+    option.name = `Локализовано: ${option.key}`;
+    option.desc = "Описание элемента управления";
+    option.locale = "ru-RU";
+    option.read = !option.read;
+    option.write = !option.write;
+    option.disabled = !option.disabled;
+  }
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(hub.state.logics, []);
+  assert.equal(hub.requests.filter(({ logic }) => logic?.delete).length, 1);
 });
 
 test("a lost logic option response keeps its apply direction and restores the baseline", async (t) => {
@@ -3189,7 +3325,7 @@ test("a lost logic option response keeps its apply direction and restores the ba
   assert.equal(applied.structuredContent.write_intent.direction, "apply");
   assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
   assert.equal(
-    hub.state.logicOptions[smoothLogicType].find(
+    configuredSmoothLogicOptions(hub.state).find(
       ({ key }) => key === smoothOptionKeys.duration,
     ).value.intValue,
     5,
@@ -3204,7 +3340,7 @@ test("a lost logic option response keeps its apply direction and restores the ba
   assert.equal(restored.structuredContent.status, "restored");
   assert.equal(restored.structuredContent.write_intent.direction, "restore");
   assert.equal(
-    hub.state.logicOptions[smoothLogicType].find(
+    configuredSmoothLogicOptions(hub.state).find(
       ({ key }) => key === smoothOptionKeys.duration,
     ).value.intValue,
     900,
@@ -3240,7 +3376,7 @@ test("logic writes require a catalogued type and a writable GenericInteger NUMBE
     desc: "Плавно меняет яркость при включении света",
   });
   hub.state.logics.push(assignedSmoothLogic());
-  hub.state.logicOptions[smoothLogicType].find(
+  configuredSmoothLogicOptions(hub.state).find(
     ({ key }) => key === smoothOptionKeys.duration,
   ).inputType = "SLIDER";
   const unsupported = await client.callTool({
@@ -3255,5 +3391,43 @@ test("logic writes require a catalogued type and a writable GenericInteger NUMBE
   assert.equal(
     unsupported.structuredContent.error.code,
     "unsupported_logic_option",
+  );
+
+  configuredSmoothLogicOptions(hub.state).find(
+    ({ key }) => key === smoothOptionKeys.duration,
+  ).inputType = "NUMBER";
+  delete configuredSmoothLogicOptions(hub.state).find(
+    ({ key }) => key === smoothOptionKeys.duration,
+  ).disabled;
+  hub.state.logicTypes[0].name = "api_token=logic-name-secret";
+  hub.state.logicTypes[0].desc =
+    "Authorization: Bearer logic-description-secret";
+  const supportedWithoutDisabled = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      option_key: smoothOptionKeys.duration,
+    },
+  });
+  assert.equal(
+    supportedWithoutDisabled.isError,
+    undefined,
+    supportedWithoutDisabled.content[0]?.text,
+  );
+  const assignmentContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: smoothLogicRef,
+    },
+  });
+  assert.equal(
+    assignmentContract.structuredContent.contract.name,
+    "[REDACTED]",
+  );
+  assert.equal(
+    assignmentContract.structuredContent.contract.description,
+    "[REDACTED]",
   );
 });
