@@ -1,0 +1,27 @@
+{
+  "name": "sprut-agent",
+  "version": "0.1.0",
+  "description": "Connect Codex to a SprutHub home with agent-first tools and guidance.",
+  "author": {
+    "name": "sprut-agent contributors",
+    "url": "https://github.com/xor777/sprut-agent"
+  },
+  "homepage": "https://github.com/xor777/sprut-agent#readme",
+  "repository": "https://github.com/xor777/sprut-agent",
+  "license": "MIT",
+  "keywords": ["spruthub", "smart-home", "mcp", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Sprut Agent",
+    "shortDescription": "Connect Codex to a SprutHub home.",
+    "longDescription": "Read a SprutHub home and make bounded native changes through one installed Codex plugin.",
+    "developerName": "sprut-agent contributors",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Какая сейчас температура в офисе?",
+      "Покажи комнаты и доступные устройства моего дома."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

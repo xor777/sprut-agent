@@ -43,9 +43,12 @@ const caseNames = [
   "contact-option",
   "empty-option-scopes",
 ];
-if (!caseNames.includes(caseName) || !["baseline", "treatment"].includes(arm)) {
+if (
+  !caseNames.includes(caseName) ||
+  !["baseline", "treatment", "plugin"].includes(arm)
+) {
   throw new Error(
-    `Usage: node research/evaluate-spruthub-master.mjs <${caseNames.join("|")}> <baseline|treatment>`,
+    `Usage: node research/evaluate-spruthub-master.mjs <${caseNames.join("|")}> <baseline|treatment|plugin>`,
   );
 }
 
@@ -76,6 +79,7 @@ async function main() {
     await mkdir(stateDir, { recursive: true });
     await symlink(codexAuth, path.join(codexHome, "auth.json"));
     let installedSkill = null;
+    let installedPlugin = null;
     if (arm === "treatment") {
       installedSkill = path.join(
         temporaryHome,
@@ -87,6 +91,29 @@ async function main() {
       await cp(skillRoot, installedSkill, {
         recursive: true,
       });
+    } else if (arm === "plugin") {
+      const pluginEnvironment = {
+        ...process.env,
+        HOME: temporaryHome,
+        CODEX_HOME: codexHome,
+      };
+      execFileSync(
+        codexBinary,
+        ["plugin", "marketplace", "add", repo, "--json"],
+        { encoding: "utf8", env: pluginEnvironment },
+      );
+      installedPlugin = JSON.parse(
+        execFileSync(
+          codexBinary,
+          ["plugin", "add", "sprut-agent@sprut-agent", "--json"],
+          { encoding: "utf8", env: pluginEnvironment },
+        ),
+      );
+      installedSkill = path.join(
+        installedPlugin.installedPath,
+        "skills",
+        "spruthub-master",
+      );
     }
 
     const testCase = makeCase(caseName);
@@ -99,9 +126,13 @@ async function main() {
       reasoning_effort: reasoningEffort,
       codex_version: codexVersion,
       ...runtime,
-      skill_installed: arm === "treatment",
-      skill_source: arm === "treatment" ? "skills/spruthub-master" : null,
-      skill_sha256: arm === "treatment" ? await hashDirectory(skillRoot) : null,
+      skill_installed: arm !== "baseline",
+      skill_source:
+        arm === "treatment"
+          ? "skills/spruthub-master"
+          : (installedPlugin?.installedPath ?? null),
+      skill_sha256: installedSkill ? await hashDirectory(installedSkill) : null,
+      plugin_id: installedPlugin?.pluginId ?? null,
     };
 
     const hubEnv = {
@@ -112,10 +143,26 @@ async function main() {
       SPRUTHUB_TIMEOUT_MS: "5000",
       SPRUT_AGENT_STATE_DIR: stateDir,
     };
+    if (arm === "plugin") {
+      const connectionDirectory = path.join(
+        temporaryHome,
+        ".config",
+        "sprut-agent",
+      );
+      await mkdir(connectionDirectory, { recursive: true });
+      await writeFile(
+        path.join(connectionDirectory, "connection.env"),
+        `${Object.entries(hubEnv)
+          .filter(([name]) => name !== "SPRUT_AGENT_STATE_DIR")
+          .map(([name, value]) => `${name}=${value}`)
+          .join("\n")}\n`,
+        { mode: 0o600 },
+      );
+    }
     const config = {
       model,
       model_reasoning_effort: reasoningEffort,
-      "features.plugins": false,
+      "features.plugins": arm === "plugin",
       "features.apps": false,
       "features.memories": false,
       "features.multi_agent": false,
@@ -125,21 +172,25 @@ async function main() {
       "features.tool_suggest": false,
       project_doc_max_bytes: 0,
       web_search: "disabled",
-      "mcp_servers.sprut.command": process.execPath,
-      "mcp_servers.sprut.args": [path.join(repo, "src/server.mjs")],
-      "mcp_servers.sprut.env": hubEnv,
-      "mcp_servers.sprut.required": true,
-      "mcp_servers.sprut.default_tools_approval_mode": "auto",
+      ...(arm === "plugin"
+        ? {}
+        : {
+            "mcp_servers.sprut.command": process.execPath,
+            "mcp_servers.sprut.args": [path.join(repo, "src/server.mjs")],
+            "mcp_servers.sprut.env": hubEnv,
+            "mcp_servers.sprut.required": true,
+            "mcp_servers.sprut.default_tools_approval_mode": "auto",
+          }),
     };
     const args = [
       "exec",
-      "--ignore-user-config",
       "--ephemeral",
       "--skip-git-repo-check",
       "--strict-config",
       "--approve-for-me",
       "--json",
     ];
+    if (arm !== "plugin") args.splice(1, 0, "--ignore-user-config");
     for (const [key, value] of Object.entries(config)) {
       args.push(
         "-c",
@@ -156,7 +207,8 @@ async function main() {
       hubEnv.SPRUTHUB_CID,
       ...args,
     ];
-    for (const forbidden of [caseName, arm]) {
+    const evaluatorLabels = [caseName, ...(arm === "plugin" ? [] : [arm])];
+    for (const forbidden of evaluatorLabels) {
       if (
         exposedProcessValues.some((value) => String(value).includes(forbidden))
       ) {
@@ -186,12 +238,15 @@ async function main() {
     const evidence = summarizeEvents(result.stdout, installedSkill);
     const syntheticWriteCount = hub.requests.filter(isWriteRequest).length;
     const validationErrors = [];
-    if (caseName === "contact-option" && arm === "treatment") {
+    if (caseName === "contact-option" && arm !== "baseline") {
       if (!evidence.skillReadObserved) {
         validationErrors.push("Codex did not read the installed SKILL.md");
       }
       if (evidence.toolCalls.length === 0) {
         validationErrors.push("Codex did not call the public Sprut MCP");
+      }
+      if (!evidence.toolCalls.some(({ status }) => status === "completed")) {
+        validationErrors.push("Codex did not complete a public Sprut MCP call");
       }
       if (syntheticWriteCount !== 0) {
         validationErrors.push("Read-only smoke attempted a hub write");

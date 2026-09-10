@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:plugin": "node scripts/build-plugin.mjs",
     "prepare": "husky",
-    "check": "biome check . && npm test",
+    "check": "npm run check:plugin-bundle && biome check . && npm test",
+    "check:plugin-bundle": "npm run build:plugin && git diff --exit-code -- dist/server.mjs",
     "format": "biome format --write .",
     "start": "node src/server.mjs",
     "eval:spruthub-master": "node research/evaluate-spruthub-master.mjs",
@@ -23,6 +25,7 @@
     "@commitlint/cli": "21.2.2",
     "@commitlint/config-conventional": "21.2.2",
     "@stryker-mutator/core": "10.0.0",
+    "esbuild": "0.28.2",
     "husky": "9.1.7",
     "ws": "8.21.3"
   },

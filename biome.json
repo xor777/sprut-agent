@@ -6,6 +6,7 @@
       "**",
       "!!research/snapshots",
       "!!research/captures",
+      "!!dist",
       "!!package-lock.json"
     ]
   },
