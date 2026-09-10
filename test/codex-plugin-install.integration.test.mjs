@@ -205,6 +205,7 @@ test("installation reports an occupied product MCP name and works after explicit
     "[mcp_servers.sprut-agent]",
     'command = "neighbor-command"',
     'args = ["--keep-me"]',
+    'env = { SPRUTHUB_PASSWORD = "occupied-secret-must-stay-local" }',
     "",
   ].join("\n");
   const configFile = path.join(codexHome, "config.toml");
@@ -238,6 +239,8 @@ test("installation reports an occupied product MCP name and works after explicit
       assert.equal(error.code, 2);
       assert.match(error.stderr, /MCP name "sprut-agent" is already occupied/);
       assert.match(error.stderr, /codex mcp remove sprut-agent/);
+      assert.doesNotMatch(error.stderr, /occupied-secret-must-stay-local/);
+      assert.doesNotMatch(error.stderr, /mcp get sprut-agent --json/);
       return true;
     },
   );
@@ -251,6 +254,28 @@ test("installation reports an occupied product MCP name and works after explicit
     cwd: workspace,
     env: environment,
   });
+
+  const installedRuntime = path.join(
+    installation.installedPath,
+    "dist",
+    "server.mjs",
+  );
+  await rm(installedRuntime);
+  await assert.rejects(
+    run(process.execPath, [checkScript, installation.installedPath], {
+      cwd: workspace,
+      env: environment,
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /runtime is incomplete/);
+      return true;
+    },
+  );
+  await cp(
+    path.join(marketplaceRoot, "dist", "plugin", "dist", "server.mjs"),
+    installedRuntime,
+  );
 
   const hub = await startHub(t);
   const connectionDirectory = path.join(userHome, ".config", "sprut-agent");
@@ -372,6 +397,40 @@ test("Codex completes the transition from the prior manual skill without removin
       assert.equal(error.stdout.includes('"status":"ready"'), false);
       return true;
     },
+  );
+
+  await assert.rejects(
+    run(
+      process.execPath,
+      [
+        checkScript,
+        installation.installedPath,
+        "--disable-legacy-skill",
+        productBefore.path,
+      ],
+      { cwd: workspace, env: environment },
+    ),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /selected path is not the prior manual/);
+      return true;
+    },
+  );
+  const unchangedAfterWrongSelection = await listCodexSkills(
+    environment,
+    workspace,
+  );
+  assert.equal(
+    unchangedAfterWrongSelection.find(
+      (skill) => skill.path === legacyBefore.path,
+    )?.enabled,
+    true,
+  );
+  assert.equal(
+    unchangedAfterWrongSelection.find(
+      (skill) => skill.path === productBefore.path,
+    )?.enabled,
+    true,
   );
 
   const recovery = await run(
