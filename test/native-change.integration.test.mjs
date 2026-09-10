@@ -3166,6 +3166,52 @@ test("an uncertain logic create is reconciled once and manual option edits block
   );
 });
 
+test("a lost logic option response keeps its apply direction and restores the baseline", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.logics.push(assignedSmoothLogic());
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      option_key: smoothOptionKeys.duration,
+      value: 5,
+      reason: "Установить длительность мягкого включения",
+    },
+  });
+  hub.state.behavior.closeAfterLogicSetOptions = true;
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.write_intent.direction, "apply");
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+  assert.equal(
+    hub.state.logicOptions[smoothLogicType].find(
+      ({ key }) => key === smoothOptionKeys.duration,
+    ).value.intValue,
+    5,
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.write_intent.direction, "restore");
+  assert.equal(
+    hub.state.logicOptions[smoothLogicType].find(
+      ({ key }) => key === smoothOptionKeys.duration,
+    ).value.intValue,
+    900,
+  );
+  assert.equal(hub.requests.filter(({ logic }) => logic?.setOptions).length, 2);
+});
+
 test("logic writes require a catalogued type and a writable GenericInteger NUMBER option", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

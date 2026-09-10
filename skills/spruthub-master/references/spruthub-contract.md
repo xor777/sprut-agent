@@ -9,7 +9,7 @@
 - `list_homes` возвращает доступные дома. Все дальнейшие refs содержат percent-encoded serial выбранного дома; локальные ID разных домов нельзя смешивать.
 - `inspect_home(home_ref)` даёт компактный каталог комнат, сценариев и extensions и честную `coverage`. Успешный list не доказывает, что соответствующий get также сработал.
 - `get_entity(entity_ref, include)` читает room, accessory, service, characteristic, scenario, extension, назначенную logic или окно физических настроек. Room даёт компактную иерархию физических accessory и вложенных service с их собственными ref/name/type без чтения значений; выбранный service затем раскрывается отдельно. `include` относится к указанной сущности и не является рекурсивным обходом её детей.
-- У настройки есть конкретный владелец. `include=options` раскрывает native options только для characteristic ref. Безопасная характеристика возвращает `option_scope`: native `true`/`false`/`null`, статус `not_read`/`found`/`checked_empty` и точный следующий вызов. Только совместимый `characteristic.getOptions` с явным массивом подтверждает `found` или `checked_empty`; отсутствующий или неверный operation container даёт `incompatible_response`. Container include не запускает рекурсивное чтение: `include_resolution.not_applied` возвращает причину и безопасный следующий вызов, когда его можно построить по возвращённой ссылке, иначе явное ограничение. Terminal redacted marker не раскрывает refs, availability или include metadata.
+- У настройки есть конкретный владелец. `include=options` раскрывает native options для characteristic или назначенной logic ref. Безопасная характеристика возвращает `option_scope`: native `true`/`false`/`null`, статус `not_read`/`found`/`checked_empty` и точный следующий вызов. Только совместимый `characteristic.getOptions` или `logic.getOptions` с явным массивом подтверждает прочитанную область; отсутствующий или неверный operation container даёт `incompatible_response`. Container include не запускает рекурсивное чтение: `include_resolution.not_applied` возвращает причину и безопасный следующий вызов, когда его можно построить по возвращённой ссылке, иначе явное ограничение. Terminal redacted marker не раскрывает refs, availability или include metadata.
 - Physical window и назначенная logic — отдельные области: читайте возвращённый window ref или logic ref самостоятельно. Пустой `physical_configuration.options` не означает, что у характеристики нет options; пустой результат характеристики не говорит о window или logic. В выводе различайте «найдено», «эта область проверена и пуста» и «область не исследована».
 - Запрашивайте только нужные `options`, `relations`, `physical_configuration`, `diagnostics`. Каждый requested include для принятой сущности перечисляется как `applied` или `not_applied`; успешный ответ без такого исхода не считается полным обследованием устройства.
 - `list_rooms` → `read_room` — компактный совместимый путь. Исходное имя остаётся рядом с показаниями; одинаковые значения разных комнат не объединяются.
@@ -62,6 +62,24 @@
   `not_owned`. Третье значение не затирается; conflict возвращает имена
   исходного, применённого и текущего вариантов и эффект нового изменения,
   которое можно подготовить только после решения владельца.
+- `logic_assignment` принимает logic ref из `available_logic_types` выбранного
+  service. Существующее назначение даёт no-op без владения; отсутствующий тип
+  даёт `logic_type_unavailable`. Новое назначение создаётся неактивным, а потеря
+  ответа сверяется по scoped service/type без второго create. Снимок созданной
+  logic включает options; удаление допустимо последним только после возврата
+  `active` и options к этому снимку. Чужое или вручную изменённое назначение не
+  удаляется.
+- `logic_active` использует boolean value-change, а `logic_option` — один
+  readable/writable/enabled `GenericInteger/NUMBER` option с `intValue`.
+  Значения не зашиты по имени logic или ключу option. Оба изменения используют
+  общий журнал направления apply/restore, отдельный readback и защиту ручной
+  правки; уже нужное значение не создаёт change.
+- На Sprut.hub `3.0.0b (20131)` для Lightbulb service подтверждён доступный тип
+  `SmoothBrightnessChange`: после назначения его options `StartValue`,
+  `EndValue` и `Duration` имеют `GenericInteger/NUMBER` и `intValue`, а
+  `Duration` задаётся в секундах; `Primary` является GROUP и не записывается.
+  Эти имена помогают выбрать наблюдённый контракт, но runtime всё равно читает
+  фактический каталог и options и не зашивает этот тип или ключи.
 - `block_create` требует явные `name`, `description`, `active`, `onStart`,
   `sync`, `type=BLOCK` и `data`. После неопределённого create маркер позволяет
   сверить хаб без повторной отправки.
@@ -98,8 +116,8 @@
 
 Для motion → light поддержан необязательный `auto_off_after_seconds`: native delay `RESET` переносит действие на полный срок при повторном входе в соответствующий delay-блок. Событие, после которого condition=false и delay не посещён, само по себе таймер не перезапускает. Это не доказательство времени последнего физического движения. [SprutHub Wiki о задержке, oldid 1333](https://wiki.spruthub.ru/index.php?title=%D0%97%D0%B0%D0%B4%D0%B5%D1%80%D0%B6%D0%BA%D0%B0_%D0%B2%D1%8B%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D1%8F&oldid=1333).
 
-Запись других options, logic, pairing, backup и произвольного кода/GLOBAL этим
-контрактом не поддерживается. `window_option` подтверждает настройку хаба, но не
+Запись других options, pairing, backup и произвольного кода/GLOBAL/LOGIC-сценария
+этим контрактом не поддерживается. `window_option` подтверждает настройку хаба, но не
 доставку до устройства и не физический результат после отключения питания.
 Первый login настраивается локальным credential-файлом и не является native
 change. Не подменяйте отсутствующие операции raw RPC или `write: true` в данных.

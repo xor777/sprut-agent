@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
@@ -44,6 +45,38 @@ export class AutomationService {
         contract: windowOptionContract(option),
       };
     }
+    if (input.operation === "logic_assignment") {
+      const target = parseLogicRef(input.target_ref, this.hubSerial);
+      const { assigned, type } = await this.#readLogicSelection(target);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: logicAssignmentContract(target, type, assigned !== null),
+      };
+    }
+    if (input.operation === "logic_active") {
+      const target = parseLogicRef(input.target_ref, this.hubSerial);
+      const logic = await this.client.getLogic(target);
+      if (!logic) throw logicNotFound();
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: logicActiveContract(),
+      };
+    }
+    if (input.operation === "logic_option") {
+      const target = parseLogicRef(input.target_ref, this.hubSerial);
+      const { option } = await this.#readLogicOption(target, input.option_key);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        contract: logicOptionContract(option),
+      };
+    }
     if (["block_create", "block_data_update"].includes(input.operation)) {
       return {
         status: "ok",
@@ -66,6 +99,12 @@ export class AutomationService {
     }
     if (input.operation === "window_option") {
       return this.#prepareWindowOptionChange(input);
+    }
+    if (input.operation === "logic_assignment") {
+      return this.#prepareLogicAssignment(input);
+    }
+    if (["logic_active", "logic_option"].includes(input.operation)) {
+      return this.#prepareLogicValueChange(input);
     }
     throw unsupportedNativeOperation();
   }
@@ -134,6 +173,96 @@ export class AutomationService {
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareLogicValueChange(input) {
+    const target = parseLogicRef(input.target_ref, this.hubSerial);
+    let option;
+    let contract;
+    let baselineValue;
+    if (input.operation === "logic_active") {
+      const logic = await this.client.getLogic(target);
+      if (!logic) throw logicNotFound();
+      contract = logicActiveContract();
+      baselineValue = logicActiveValue(logic);
+    } else {
+      ({ option } = await this.#readLogicOption(target, input.option_key));
+      contract = logicOptionContract(option);
+      baselineValue = typedNativeValue(option.value);
+    }
+    const requestedValue = validateCharacteristicValue(input.value, contract);
+    if (valuesEqual(baselineValue, requestedValue)) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        ...(input.operation === "logic_option"
+          ? { option_key: input.option_key }
+          : {}),
+        observed_value: baselineValue,
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: input.operation,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      target,
+      ...(input.operation === "logic_option"
+        ? { option_key: input.option_key }
+        : {}),
+      contract,
+      baseline_value: baselineValue,
+      requested_value: requestedValue,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareLogicAssignment(input) {
+    const target = parseLogicRef(input.target_ref, this.hubSerial);
+    const { assigned, type } = await this.#readLogicSelection(target);
+    if (assigned) {
+      return {
+        status: "already_desired",
+        operation: "logic_assignment",
+        target_ref: input.target_ref,
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "logic_assignment",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      target,
+      native_type: { type: type.type },
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline_absent"),
       created_at: now,
       updated_at: now,
       history: [{ status: "prepared", at: now }],
@@ -234,6 +363,9 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
+      if (change.kind === "logic_assignment") {
+        return this.#applyLogicAssignment(change);
+      }
       return isNativeValueChange(change)
         ? this.#applyValueChange(change)
         : this.#applyBlockChange(change);
@@ -250,7 +382,7 @@ export class AutomationService {
       const retryableApply =
         pending.direction === "apply" &&
         pending.outcome === "expected_missing" &&
-        change.kind === "window_option" &&
+        isReversibleNativeValueChange(change) &&
         valuesEqual(pending.current, change.baseline_value);
       if (!retryableApply) return pending.result;
       currentState = { value: pending.current, contract: pending.contract };
@@ -351,7 +483,7 @@ export class AutomationService {
       };
     }
     if (
-      change.kind === "window_option" &&
+      ["window_option", "logic_option"].includes(change.kind) &&
       !valuesEqual(current, change.baseline_value) &&
       !valuesEqual(current, change.requested_value)
     ) {
@@ -392,6 +524,9 @@ export class AutomationService {
   async getNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
     const change = await this.#requireNativeChange(id);
+    if (change.kind === "logic_assignment") {
+      return this.#getLogicAssignment(change);
+    }
     if (!isNativeValueChange(change)) {
       return this.#getBlockChange(change);
     }
@@ -435,7 +570,13 @@ export class AutomationService {
         );
       }
       if (change.kind === "window_option") {
-        return this.#restoreWindowOptionChange(change);
+        return this.#restoreValueChange(change);
+      }
+      if (["logic_active", "logic_option"].includes(change.kind)) {
+        return this.#restoreValueChange(change);
+      }
+      if (change.kind === "logic_assignment") {
+        return this.#restoreLogicAssignment(change);
       }
       return this.#restoreBlockChange(change);
     });
@@ -494,12 +635,326 @@ export class AutomationService {
     }
   }
 
+  async #readLogicSelection(target) {
+    const [types, logics] = await Promise.all([
+      this.client.listLogicTypes(target),
+      this.client.listLogics(target),
+    ]);
+    const typeMatches = types.filter(({ type }) => type === target.type);
+    const assignedMatches = logics.filter(({ type }) => type === target.type);
+    if (typeMatches.length > 1 || assignedMatches.length > 1) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned the selected logic type more than once.",
+      );
+    }
+    if (assignedMatches.length === 0 && typeMatches.length === 0) {
+      throw new SprutHubError(
+        "logic_type_unavailable",
+        "The selected native logic type is not available for this service.",
+        "get_entity",
+      );
+    }
+    return {
+      type: typeMatches[0] ?? { type: target.type },
+      assigned: assignedMatches[0] ?? null,
+    };
+  }
+
+  async #requireAvailableLogicType(target) {
+    const types = await this.client.listLogicTypes(target);
+    const matches = types.filter(({ type }) => type === target.type);
+    if (matches.length !== 1) {
+      throw new SprutHubError(
+        matches.length === 0
+          ? "logic_type_unavailable"
+          : "incompatible_response",
+        matches.length === 0
+          ? "The selected native logic type is no longer available for this service."
+          : "SprutHub returned the selected logic type more than once.",
+        "get_entity",
+      );
+    }
+    return matches[0];
+  }
+
+  async #observeLogicAssignment(change) {
+    const logics = await this.client.listLogics(change.target);
+    const matches = logics.filter(({ type }) => type === change.target.type);
+    if (matches.length > 1) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned the selected logic assignment more than once.",
+      );
+    }
+    if (matches.length === 0) return null;
+    const logic = await this.client.getLogic(change.target);
+    if (!logic) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "The selected logic disappeared between scoped reads.",
+        "get_native_change",
+      );
+    }
+    const options = await this.client.getLogicOptions(change.target);
+    return logicAssignmentSnapshot(logic, options);
+  }
+
+  async #applyLogicAssignment(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      const direction = nativeIntentDirection(change);
+      if (direction === "restore") {
+        return this.#reconcileLogicAssignmentRestore(change, false);
+      }
+      const pending = await this.#reconcileLogicAssignmentApply(change, false);
+      if (pending.status !== "uncertain") return pending;
+      const current = await this.#observeLogicAssignment(change);
+      if (current !== null) return pending;
+    }
+    if (change.status === "applied") {
+      const current = await this.#observeLogicAssignment(change);
+      if (logicSnapshotsEqual(current, change.applied_snapshot)) {
+        return this.#recordLogicAssignmentObservation(
+          change,
+          current,
+          "applied_configuration",
+        );
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("applied_configuration_missing"),
+      });
+    }
+    const current = await this.#observeLogicAssignment(change);
+    if (current !== null) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "baseline_changed",
+        configuration_matches: false,
+        last_verification: freshVerification("baseline_absent_missing"),
+      });
+    }
+    await this.#requireAvailableLogicType(change.target);
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.createLogic(change.target);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "not_applied", undefined, {
+          configuration_matches: true,
+        });
+        throw error;
+      }
+      return this.#reconcileLogicAssignmentApply(change, false);
+    }
+    return this.#reconcileLogicAssignmentApply(change, true);
+  }
+
+  async #reconcileLogicAssignmentApply(change, acknowledged) {
+    let current;
+    try {
+      current = await this.#observeLogicAssignment(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: false,
+        last_verification: freshVerification("requested_assignment_missing"),
+        ...(acknowledged
+          ? { conflict_reason: "ack_without_requested_result" }
+          : {}),
+      });
+    }
+    if (
+      change.applied_snapshot !== undefined &&
+      !logicSnapshotsEqual(current, change.applied_snapshot)
+    ) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("applied_configuration_missing"),
+      });
+    }
+    return this.#finishNative(change, "applied", undefined, {
+      applied_snapshot: current,
+      configuration_matches: true,
+      last_verification: freshVerification("applied_configuration"),
+      ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+    });
+  }
+
+  async #getLogicAssignment(change) {
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileLogicAssignmentRestore(change, false)
+        : this.#reconcileLogicAssignmentApply(change, false);
+    }
+    let current;
+    try {
+      current = await this.#observeLogicAssignment(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+        configurationMatches: undefined,
+      });
+    }
+    if (change.status === "restored") {
+      return this.#recordLogicAssignmentObservation(
+        change,
+        current,
+        current === null ? "baseline_absent" : "baseline_absent_missing",
+      );
+    }
+    if (change.status === "applied") {
+      if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+        return this.#finishNative(change, "conflict", undefined, {
+          conflict_reason: "manual_change",
+          configuration_matches: false,
+          last_verification: freshVerification("applied_configuration_missing"),
+        });
+      }
+      return this.#recordLogicAssignmentObservation(
+        change,
+        current,
+        "applied_configuration",
+      );
+    }
+    return this.#recordLogicAssignmentObservation(
+      change,
+      current,
+      current === null ? "baseline_absent" : "baseline_absent_missing",
+    );
+  }
+
+  async #restoreLogicAssignment(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      const direction = nativeIntentDirection(change);
+      if (direction === "apply") {
+        const reconciled = await this.#reconcileLogicAssignmentApply(
+          change,
+          false,
+        );
+        if (reconciled.status === "uncertain") {
+          const current = await this.#observeLogicAssignment(change);
+          if (current === null) {
+            return this.#finishNative(change, "restored", undefined, {
+              configuration_matches: true,
+              last_verification: freshVerification("baseline_absent"),
+            });
+          }
+          return reconciled;
+        }
+      } else {
+        const reconciled = await this.#reconcileLogicAssignmentRestore(
+          change,
+          false,
+        );
+        if (reconciled.status !== "uncertain") return reconciled;
+      }
+    }
+    const current = await this.#observeLogicAssignment(change);
+    if (change.applied_snapshot === undefined) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        configuration_matches: current === null,
+        last_verification: freshVerification(
+          current === null ? "baseline_absent" : "baseline_absent_missing",
+        ),
+      });
+    }
+    if (current === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        configuration_matches: true,
+        last_verification: freshVerification("baseline_absent"),
+      });
+    }
+    if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("applied_configuration_missing"),
+      });
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      await this.client.deleteLogic(change.target);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied", undefined, {
+          configuration_matches: true,
+        });
+        throw error;
+      }
+      return this.#reconcileLogicAssignmentRestore(change, false);
+    }
+    return this.#reconcileLogicAssignmentRestore(change, true);
+  }
+
+  async #reconcileLogicAssignmentRestore(change, acknowledged) {
+    let current;
+    try {
+      current = await this.#observeLogicAssignment(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        configuration_matches: true,
+        last_verification: freshVerification("baseline_absent"),
+        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+      });
+    }
+    if (!logicSnapshotsEqual(current, change.applied_snapshot)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_matches: false,
+        last_verification: freshVerification("applied_configuration_missing"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      configuration_matches: true,
+      last_verification: freshVerification("baseline_absent_missing"),
+      ...(acknowledged
+        ? { conflict_reason: "ack_without_requested_result" }
+        : {}),
+    });
+  }
+
+  async #recordLogicAssignmentObservation(change, _current, result) {
+    change.configuration_matches =
+      result === "applied_configuration" || result === "baseline_absent";
+    change.last_verification = freshVerification(result);
+    change.updated_at = new Date().toISOString();
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
+  }
+
   async #requireNativeChange(id) {
     const change = await this.store.get(id);
     if (
       ![
         "characteristic_value",
         "window_option",
+        "logic_active",
+        "logic_option",
+        "logic_assignment",
         "block_create",
         "block_data_update",
       ].includes(change?.kind)
@@ -582,10 +1037,69 @@ export class AutomationService {
     return { value: typedNativeValue(option.value), contract };
   }
 
+  async #readLogicOption(target, optionKey) {
+    if (typeof optionKey !== "string" || optionKey.length === 0) {
+      throw new SprutHubError(
+        "option_key_required",
+        "Select one logic option before reading its write contract.",
+        "get_entity",
+      );
+    }
+    const logic = await this.client.getLogic(target);
+    if (!logic) throw logicNotFound();
+    const options = await this.client.getLogicOptions(target);
+    const matches = options.filter(({ key }) => key === optionKey);
+    if (matches.length !== 1) {
+      throw new SprutHubError(
+        matches.length === 0
+          ? "logic_option_not_found"
+          : "incompatible_response",
+        matches.length === 0
+          ? "The selected logic option was not found."
+          : "SprutHub returned the selected logic option more than once.",
+        "get_entity",
+      );
+    }
+    return { logic, option: matches[0] };
+  }
+
+  async #readLogicValueState(change, { requireWrite = false } = {}) {
+    if (change.kind === "logic_active") {
+      const logic = await this.client.getLogic(change.target);
+      if (!logic) throw logicNotFound();
+      return {
+        value: logicActiveValue(logic),
+        contract: logicActiveContract({ requireWrite }),
+      };
+    }
+    const { option } = await this.#readLogicOption(
+      change.target,
+      change.option_key,
+    );
+    const contract = logicOptionContract(option, { requireWrite });
+    if (
+      contract.type !== change.contract.type ||
+      contract.input_type !== change.contract.input_type ||
+      contract.kind !== change.contract.kind
+    ) {
+      throw new SprutHubError(
+        "binding_changed",
+        "The selected logic option contract changed after preparation.",
+        "prepare_native_change",
+      );
+    }
+    change.contract = contract;
+    return { value: typedNativeValue(option.value), contract };
+  }
+
   async #readNativeValueState(change, options = {}) {
-    return change.kind === "window_option"
-      ? this.#readWindowOptionState(change, options)
-      : this.#readCharacteristicState(change, options);
+    if (change.kind === "window_option") {
+      return this.#readWindowOptionState(change, options);
+    }
+    if (["logic_active", "logic_option"].includes(change.kind)) {
+      return this.#readLogicValueState(change, options);
+    }
+    return this.#readCharacteristicState(change, options);
   }
 
   async #readNativeValue(change, options = {}) {
@@ -601,13 +1115,26 @@ export class AutomationService {
         value: nativeValue,
       });
     }
+    if (change.kind === "logic_option") {
+      return this.client.setLogicOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeValue,
+      });
+    }
+    if (change.kind === "logic_active") {
+      return this.client.updateLogicActive({
+        ...change.target,
+        active: value.value,
+      });
+    }
     return this.client.updateCharacteristic({
       ...change.target,
       value: nativeValue,
     });
   }
 
-  async #restoreWindowOptionChange(change) {
+  async #restoreValueChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
     let currentState;
     const pending = await this.#reconcilePendingValueChange(change, {
@@ -1553,6 +2080,35 @@ function parseWindowRef(ref, configuredSerial) {
   return { windowKey };
 }
 
+function parseLogicRef(ref, configuredSerial) {
+  const match =
+    /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/logic\/([^/]+)$/.exec(
+      ref,
+    );
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_logic_ref",
+      "Use a home-qualified logic reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  const type = decodeReferenceSegment(match[4]);
+  if (type.length === 0) {
+    throw new SprutHubError(
+      "invalid_logic_ref",
+      "Use a home-qualified logic reference returned by get_entity.",
+      "get_entity",
+    );
+  }
+  return {
+    aId: Number(match[2]),
+    sId: Number(match[3]),
+    type,
+  };
+}
+
 function requireEntityHome(ref, configuredSerial) {
   const match = /^spruthub:\/\/hub\/([^/]+)(?:\/|$)/.exec(ref);
   if (!match) {
@@ -1577,6 +2133,14 @@ function unsupportedScenarioType() {
   return new SprutHubError(
     "unsupported_scenario_type",
     "Only native BLOCK scenario data can be changed in this slice.",
+  );
+}
+
+function logicNotFound() {
+  return new SprutHubError(
+    "logic_not_found",
+    "The selected native logic assignment was not found.",
+    "get_entity",
   );
 }
 
@@ -2115,6 +2679,74 @@ function windowOptionContract(option, { requireWrite = true } = {}) {
   };
 }
 
+function logicAssignmentContract(target, type, assigned) {
+  return {
+    type: target.type,
+    name: typeof type.name === "string" ? type.name : target.type,
+    description: typeof type.desc === "string" ? type.desc : "",
+    assigned,
+    create_active: false,
+    confirmation: "scoped_logic_list_and_configuration_readback",
+  };
+}
+
+function logicActiveContract() {
+  return {
+    type: "LogicActive",
+    kind: "boolValue",
+    confirmation: "separate_logic_get_readback",
+  };
+}
+
+function logicOptionContract(option, { requireWrite = true } = {}) {
+  if (option?.type !== "GenericInteger" || option.inputType !== "NUMBER") {
+    throw new SprutHubError(
+      "unsupported_logic_option",
+      "Only GenericInteger/NUMBER logic options are supported.",
+      "get_entity",
+    );
+  }
+  if (
+    option.read !== true ||
+    (requireWrite && option.write !== true) ||
+    option.disabled !== false
+  ) {
+    throw new SprutHubError(
+      "insufficient_rights",
+      "The selected logic option must be readable, writable, and enabled.",
+      "get_entity",
+    );
+  }
+  const current = typedNativeValue(option.value);
+  if (current.kind !== "intValue") {
+    throw new SprutHubError(
+      "unsupported_logic_option",
+      "The selected logic option does not use intValue.",
+      "get_entity",
+    );
+  }
+  return {
+    type: option.type,
+    input_type: option.inputType,
+    kind: current.kind,
+    ...(typeof option.minValue === "number" ? { min: option.minValue } : {}),
+    ...(typeof option.maxValue === "number" ? { max: option.maxValue } : {}),
+    ...(typeof option.minStep === "number" ? { step: option.minStep } : {}),
+    confirmation: "separate_logic_get_options_readback",
+  };
+}
+
+function logicActiveValue(logic) {
+  if (typeof logic?.active !== "boolean") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned a logic assignment without an explicit active state.",
+      "get_entity",
+    );
+  }
+  return { value: logic.active, kind: "boolValue" };
+}
+
 function typedNativeValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new SprutHubError(
@@ -2213,7 +2845,18 @@ function valuesEqual(left, right) {
 }
 
 function isNativeValueChange(change) {
-  return ["characteristic_value", "window_option"].includes(change?.kind);
+  return [
+    "characteristic_value",
+    "window_option",
+    "logic_active",
+    "logic_option",
+  ].includes(change?.kind);
+}
+
+function isReversibleNativeValueChange(change) {
+  return ["window_option", "logic_active", "logic_option"].includes(
+    change?.kind,
+  );
 }
 
 function freshVerification(result) {
@@ -2272,6 +2915,53 @@ function scenarioSnapshot(scenario) {
     );
   }
   return { ...structuredClone(scenario), data };
+}
+
+function logicAssignmentSnapshot(logic, options) {
+  if (!isRecord(logic) || typeof logic.type !== "string") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned incomplete logic configuration.",
+    );
+  }
+  if (!Array.isArray(options)) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned incomplete logic options.",
+    );
+  }
+  return {
+    logic: {
+      type: logic.type,
+      active: logicActiveValue(logic).value,
+      options_window:
+        typeof logic.optionsWindow === "string" ? logic.optionsWindow : null,
+    },
+    options: options
+      .map((option) => nativeConfigurationFingerprint(option))
+      .sort((left, right) => left.localeCompare(right)),
+  };
+}
+
+function logicSnapshotsEqual(left, right) {
+  return isDeepStrictEqual(left, right);
+}
+
+function nativeConfigurationFingerprint(value) {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function blockCreateRequest(change) {
@@ -2405,6 +3095,43 @@ function publicNativeChange(
   const configurationMatches = Object.hasOwn(options, "configurationMatches")
     ? options.configurationMatches
     : change.configuration_matches;
+  if (change.kind === "logic_assignment") {
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      diff: {
+        assignment: {
+          changed: true,
+          from: "absent",
+          to: "present_inactive",
+        },
+      },
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.recovered_after_uncertain_write
+        ? { recovered_after_uncertain_write: true }
+        : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      restore_supported: true,
+      limitations: [
+        "Assignment creation, option updates, and activation are separate native operations, not one atomic transaction.",
+        "Deletion is allowed only after child changes restore the exact saved created configuration.",
+        "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+      ],
+    };
+  }
   if (!isNativeValueChange(change)) {
     const diff =
       change.kind === "block_create"
@@ -2460,27 +3187,29 @@ function publicNativeChange(
       ],
     };
   }
-  const valueChoices =
-    change.kind === "window_option"
-      ? {
-          baseline: namedWindowValue(change, change.baseline_value),
-          requested: namedWindowValue(change, change.requested_value),
-          ...(observedValue
-            ? { observed: namedWindowValue(change, observedValue) }
-            : {}),
-        }
-      : undefined;
+  const valueChoices = ["window_option", "logic_option"].includes(change.kind)
+    ? {
+        baseline: namedOptionValue(change, change.baseline_value),
+        requested: namedOptionValue(change, change.requested_value),
+        ...(observedValue
+          ? { observed: namedOptionValue(change, observedValue) }
+          : {}),
+      }
+    : undefined;
   const conflictResolution =
-    change.kind === "window_option" &&
+    ["window_option", "logic_option"].includes(change.kind) &&
     change.status === "conflict" &&
     change.applied_value_observed === true &&
     observedValue
       ? {
           requires_user_decision: true,
-          action_if_authorized: "prepare_new_window_option_change",
+          action_if_authorized:
+            change.kind === "window_option"
+              ? "prepare_new_window_option_change"
+              : "prepare_new_logic_option_change",
           effect: {
-            replace: namedWindowValue(change, observedValue),
-            with: namedWindowValue(change, change.baseline_value),
+            replace: namedOptionValue(change, observedValue),
+            with: namedOptionValue(change, change.baseline_value),
           },
         }
       : undefined;
@@ -2511,14 +3240,14 @@ function publicNativeChange(
     ...(change.recovered_after_uncertain_write
       ? { recovered_after_uncertain_write: true }
       : {}),
-    ...(change.kind === "window_option"
+    ...(["window_option", "logic_option"].includes(change.kind)
       ? {
           option_key: change.option_key,
           applied_value_observed: change.applied_value_observed === true,
         }
       : {}),
     ...(conflictResolution ? { conflict_resolution: conflictResolution } : {}),
-    restore_supported: change.kind === "window_option",
+    restore_supported: isReversibleNativeValueChange(change),
     ...(change.kind === "characteristic_value"
       ? { physical_effect_reversible: false }
       : {}),
@@ -2526,7 +3255,7 @@ function publicNativeChange(
     limitations: [
       "Readback observes the value but cannot prove this command caused it.",
       "SprutHub exposes no native compare-and-set for this operation.",
-      change.kind === "window_option"
+      isReversibleNativeValueChange(change)
         ? "Restoration is allowed only while the current setting still matches this change."
         : "A runtime command does not provide rollback of physical effects.",
       ...(change.kind === "window_option"
@@ -2538,7 +3267,7 @@ function publicNativeChange(
   };
 }
 
-function namedWindowValue(change, value) {
+function namedOptionValue(change, value) {
   const candidate = change.contract?.valid_values?.find((validValue) =>
     valuesEqual(validValue, value),
   );
@@ -2557,6 +3286,9 @@ function changeSummary(change, homeRef) {
     [
       "characteristic_value",
       "window_option",
+      "logic_active",
+      "logic_option",
+      "logic_assignment",
       "block_create",
       "block_data_update",
     ].includes(change.kind)
@@ -2607,7 +3339,14 @@ function changeSummary(change, homeRef) {
 
 function nativeAffectedRefs(change, homeRef) {
   const refs = [canonicalEntityRef(change.target_ref, homeRef)];
-  if (change.kind === "characteristic_value") {
+  if (
+    [
+      "characteristic_value",
+      "logic_active",
+      "logic_option",
+      "logic_assignment",
+    ].includes(change.kind)
+  ) {
     refs.push(...canonicalAncestors(refs[0]));
   } else if (!isNativeValueChange(change)) {
     if (change.scenario_index) {
@@ -2660,6 +3399,14 @@ function canonicalEntityRef(ref, homeRef) {
 }
 
 function canonicalAncestors(ref) {
+  const logic =
+    /^(spruthub:\/\/hub\/[^/]+\/accessory\/\d+\/service\/\d+)\/logic\/[^/]+$/.exec(
+      ref,
+    );
+  if (logic) {
+    const service = logic[1];
+    return [service.replace(/\/service\/\d+$/, ""), service];
+  }
   const characteristic =
     /^(spruthub:\/\/hub\/[^/]+\/accessory\/\d+\/service\/\d+)\/characteristic\/\d+$/.exec(
       ref,

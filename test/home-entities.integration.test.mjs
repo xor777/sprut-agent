@@ -506,6 +506,37 @@ function respond(states, request, behavior) {
       },
     };
   }
+  if (params.logic?.types) {
+    return {
+      logic: {
+        types: {
+          logicTypes: [
+            {
+              type: "MotionDetectedFromCurrentMotionLevel",
+              name: "Определение движения",
+              desc: "Определяет движение по текущему уровню",
+            },
+          ],
+        },
+      },
+    };
+  }
+  if (params.logic?.get) {
+    return {
+      logic: {
+        get: {
+          aId: params.logic.get.aId,
+          sId: params.logic.get.sId,
+          type: params.logic.get.type,
+          name: "Определение движения",
+          active: true,
+        },
+      },
+    };
+  }
+  if (params.logic?.getOptions) {
+    return { logic: { getOptions: { options: [] } } };
+  }
   if (params.link?.list) return { link: { list: {} } };
   if (params.window?.get) return { window: { get: state.window } };
   if (params.scenario?.list) {
@@ -1075,7 +1106,7 @@ test("get_entity resolves every requested include at the common entity boundary"
       kind: "logic",
       entity_ref:
         "spruthub://hub/home%2FA/accessory/32/service/13/logic/MotionDetectedFromCurrentMotionLevel",
-      expectedApplied: [],
+      expectedApplied: ["options"],
     },
     {
       kind: "window",

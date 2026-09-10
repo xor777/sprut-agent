@@ -584,6 +584,130 @@ export class SprutHubClient {
     }
   }
 
+  async listLogicTypes({ aId, sId }) {
+    const response = await this.#request(
+      { logic: { types: { aId, sId } } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractEntityArray(response, ["logic", "types", "logicTypes"], true);
+  }
+
+  async listLogics({ aId, sId }) {
+    const response = await this.#request(
+      { logic: { list: { aId, sId } } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractEntityArray(response, ["logic", "list", "logics"], true);
+  }
+
+  async getLogic({ aId, sId, type }) {
+    const deadline = Date.now() + this.timeoutMs;
+    let response;
+    try {
+      response = await this.#request(
+        { logic: { get: { aId, sId, type } } },
+        deadline,
+      );
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const logics = extractEntityArray(
+        await this.#request({ logic: { list: { aId, sId } } }, deadline),
+        ["logic", "list", "logics"],
+        true,
+      );
+      if (logics.some((logic) => logic?.type === type)) throw error;
+      return null;
+    }
+    const container = response.result?.logic;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible logic response.",
+      );
+    }
+    if (container.get === null) return null;
+    if (container.get.type !== type) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a different logic assignment than requested.",
+      );
+    }
+    return container.get;
+  }
+
+  async getLogicOptions({ aId, sId, type }) {
+    const response = await this.#request(
+      { logic: { getOptions: { aId, sId, type } } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractEntityArray(response, ["logic", "getOptions", "options"]);
+  }
+
+  async createLogic({ aId, sId, type }) {
+    const response = await this.#request(
+      { logic: { create: { aId, sId, type } } },
+      Date.now() + this.timeoutMs,
+    );
+    const logic = response.result?.logic?.create;
+    if (!logic || logic.type !== type) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not identify the created logic assignment.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+    return logic;
+  }
+
+  async updateLogicActive({ aId, sId, type, active }) {
+    const response = await this.#request(
+      { logic: { update: { aId, sId, type, active } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.logic;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the logic update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async setLogicOption({ aId, sId, type, key, value }) {
+    const response = await this.#request(
+      { logic: { setOptions: { aId, sId, type, options: [{ key, value }] } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.logic;
+    if (!container || !Object.hasOwn(container, "setOptions")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the logic option update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async deleteLogic({ aId, sId, type }) {
+    const response = await this.#request(
+      { logic: { delete: { aId, sId, type } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.logic;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not confirm logic deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async deleteScenario(index) {
     const response = await this.#request(
       { scenario: { delete: { index } } },
@@ -753,27 +877,63 @@ export class SprutHubClient {
     );
     if (!service) throw entityNotFound("service");
     if (parsed.kind === "service") {
-      return {
-        entity: normalizeServiceDetail(
+      const [logics, logicTypes] = await Promise.all([
+        this.#readLogics(parsed.serial, accessory.id, service.sId, deadline),
+        this.#readLogicTypes(
           parsed.serial,
-          accessory,
-          service,
-          observedAt,
+          accessory.id,
+          service.sId,
+          deadline,
         ),
+      ]);
+      return {
+        entity: {
+          ...normalizeServiceDetail(
+            parsed.serial,
+            accessory,
+            service,
+            observedAt,
+          ),
+          assigned_logics: logics.map((logic) =>
+            normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
+          ),
+          available_logic_types: normalizeLogicTypes(
+            parsed.serial,
+            accessory.id,
+            service.sId,
+            logicTypes,
+            logics,
+          ),
+        },
         ownerContext,
       };
     }
     if (parsed.kind === "logic") {
-      const logics = await this.#readLogics(
-        parsed.serial,
-        accessory.id,
-        service.sId,
-        deadline,
-      );
-      const logic = logics.find(({ type }) => type === parsed.logicType);
+      const logic = await this.getLogic({
+        aId: accessory.id,
+        sId: service.sId,
+        type: parsed.logicType,
+      });
       if (!logic) throw entityNotFound("logic");
+      const entity = {
+        kind: "logic",
+        ...normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
+        options_window:
+          typeof logic.optionsWindow === "string"
+            ? redactSensitiveText(logic.optionsWindow)
+            : null,
+      };
+      if (requested.has("options")) {
+        entity.options = (
+          await this.getLogicOptions({
+            aId: accessory.id,
+            sId: service.sId,
+            type: parsed.logicType,
+          })
+        ).map(normalizeLogicOption);
+      }
       return {
-        entity: normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
+        entity,
         ownerContext,
       };
     }
@@ -900,6 +1060,15 @@ export class SprutHubClient {
       { serial },
     );
     return extractEntityArray(response, ["logic", "list", "logics"], true);
+  }
+
+  async #readLogicTypes(serial, accessoryId, serviceId, deadline) {
+    const response = await this.#request(
+      { logic: { types: { aId: accessoryId, sId: serviceId } } },
+      deadline,
+      { serial },
+    );
+    return extractEntityArray(response, ["logic", "types", "logicTypes"], true);
   }
 
   async #readPhysicalConfiguration(serial, accessory, requested, deadline) {
@@ -1184,6 +1353,10 @@ function extractScenarioCatalog(response) {
 }
 
 function isScenarioNotFoundCandidate(error) {
+  return isNativeNotFoundCandidate(error);
+}
+
+function isNativeNotFoundCandidate(error) {
   return (
     error instanceof SprutHubError &&
     error.code === "request_rejected" &&
@@ -1655,7 +1828,10 @@ function includeWasApplied(entity, include) {
     return entity.kind === "scenario" && Object.hasOwn(entity, "configuration");
   }
   if (include === "options") {
-    return entity.kind === "characteristic" && Object.hasOwn(entity, "options");
+    return (
+      ["characteristic", "logic"].includes(entity.kind) &&
+      Object.hasOwn(entity, "options")
+    );
   }
   if (include === "relations") {
     return (
@@ -1783,7 +1959,9 @@ function ownerScopeReason(entity, include) {
   if (entity.kind === "home") return "catalog_required";
   if (entity.kind === "extension") return "window_scoped";
   if (include === "configuration") return "scenario_scoped";
-  if (include === "options") return "characteristic_scoped";
+  if (include === "options") {
+    return entity.kind === "logic" ? "logic_scoped" : "characteristic_scoped";
+  }
   if (["physical_configuration", "diagnostics"].includes(include)) {
     return "device_window_scoped";
   }
@@ -1975,6 +2153,66 @@ function normalizeLogic(serial, accessoryId, serviceId, logic) {
     type: logic.type,
     name: logic.name ?? logic.type,
     active: logic.active === true,
+  };
+}
+
+function normalizeLogicTypes(
+  serial,
+  accessoryId,
+  serviceId,
+  logicTypes,
+  assignedLogics,
+) {
+  const assigned = new Set(assignedLogics.map(({ type }) => type));
+  return logicTypes.map((logicType) => {
+    if (!logicType || typeof logicType.type !== "string") {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incomplete logic type data.",
+      );
+    }
+    return {
+      ref: logicRef(serial, accessoryId, serviceId, logicType.type),
+      type: logicType.type,
+      name:
+        typeof logicType.name === "string"
+          ? redactSensitiveText(logicType.name)
+          : logicType.type,
+      description:
+        typeof logicType.desc === "string"
+          ? redactSensitiveText(logicType.desc)
+          : "",
+      assigned: assigned.has(logicType.type),
+    };
+  });
+}
+
+function normalizeLogicOption(option) {
+  if (!option || typeof option.key !== "string") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned a logic option without a native key.",
+    );
+  }
+  if (isSensitiveNativeNode(option)) return redactedNode();
+  const configured = extractTypedValue(option.value);
+  return {
+    key: redactSensitiveText(option.key),
+    name:
+      typeof option.name === "string" ? redactSensitiveText(option.name) : "",
+    type:
+      typeof option.type === "string" ? redactSensitiveText(option.type) : null,
+    input_type: option.inputType ?? null,
+    value: configured.found ? sanitizeNativeData(configured.value) : null,
+    value_kind: configured.found ? configured.field : null,
+    capabilities: {
+      read: option.read === true,
+      write: option.write === true,
+      disabled: typeof option.disabled === "boolean" ? option.disabled : null,
+    },
+    ...(option.minValue !== undefined ? { min: option.minValue } : {}),
+    ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
+    ...(option.minStep !== undefined ? { step: option.minStep } : {}),
   };
 }
 
