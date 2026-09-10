@@ -609,6 +609,104 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
   }
 });
 
+test("compact room catalog preserves named services without reading their values", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.accessories = [
+    {
+      id: 70,
+      roomId: 1,
+      name: "Настенный контроллер",
+      online: true,
+      services: [
+        {
+          aId: 70,
+          sId: 21,
+          name: "Лампа письменного стола",
+          type: "Lightbulb",
+          characteristics: [
+            {
+              aId: 70,
+              sId: 21,
+              cId: 15,
+              control: {
+                name: "Включена",
+                type: "On",
+                read: true,
+                write: true,
+                value: { boolValue: false },
+              },
+            },
+          ],
+        },
+        {
+          aId: 70,
+          sId: 22,
+          name: "Вентилятор",
+          type: "Fan",
+          characteristics: [],
+        },
+      ],
+    },
+    {
+      id: 81,
+      roomId: 1,
+      name: "Лампа у окна",
+      online: true,
+      services: [
+        {
+          aId: 81,
+          sId: 4,
+          name: "Основной свет",
+          type: "Lightbulb",
+          characteristics: [],
+        },
+      ],
+    },
+  ];
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: "spruthub://hub/home%2FA/room/1" },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.deepEqual(result.structuredContent.entity.accessories, [
+    {
+      ref: "spruthub://hub/home%2FA/accessory/70",
+      name: "Настенный контроллер",
+      available: true,
+      services: [
+        {
+          ref: "spruthub://hub/home%2FA/accessory/70/service/21",
+          name: "Лампа письменного стола",
+          type: "Lightbulb",
+        },
+        {
+          ref: "spruthub://hub/home%2FA/accessory/70/service/22",
+          name: "Вентилятор",
+          type: "Fan",
+        },
+      ],
+    },
+    {
+      ref: "spruthub://hub/home%2FA/accessory/81",
+      name: "Лампа у окна",
+      available: true,
+      services: [
+        {
+          ref: "spruthub://hub/home%2FA/accessory/81/service/4",
+          name: "Основной свет",
+          type: "Lightbulb",
+        },
+      ],
+    },
+  ]);
+  const compact = JSON.stringify(result.structuredContent.entity.accessories);
+  assert.doesNotMatch(compact, /characteristics|readings|current_value/);
+});
+
 test("characteristic detail keeps configuration separate from unlinked diagnostics", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
