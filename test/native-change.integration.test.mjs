@@ -5253,7 +5253,10 @@ test("a LOGIC source update accepts derived metadata while preserving the manual
     arguments: { change_ref: update.structuredContent.change_ref },
   });
   assert.equal(protectedResult.structuredContent.status, "conflict");
-  assert.equal(protectedResult.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    protectedResult.structuredContent.conflict_reason,
+    "manual_change",
+  );
   assert.equal(
     hub.requests.filter(
       ({ scenario }) => scenario?.update?.index === "manual-logic",
@@ -5295,7 +5298,10 @@ test("a LOGIC source update accepts derived metadata while preserving the manual
   });
   assert.equal(persistedRestore.structuredContent.status, "restored");
   assert.equal(persistedRestore.structuredContent.configuration_matches, true);
-  assert.equal(persistedRestore.structuredContent.diff.source.exact_match, true);
+  assert.equal(
+    persistedRestore.structuredContent.diff.source.exact_match,
+    true,
+  );
   assert.deepEqual(
     persistedRestore.structuredContent.diff.editable_flags.observed,
     restored.structuredContent.diff.editable_flags.observed,

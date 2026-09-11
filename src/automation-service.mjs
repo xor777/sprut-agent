@@ -3602,7 +3602,7 @@ export class AutomationService {
     if (change.status === "restored") {
       return this.#recordScenarioObservation(
         change,
-        scenarioChangeObservation(change, current, "baseline"),
+        scenarioChangeObservation(change, current, "restored"),
       );
     }
     if (
@@ -3731,7 +3731,7 @@ export class AutomationService {
         last_verification: failedVerification(error),
       });
     }
-    const baseline = scenarioChangeObservation(change, current, "baseline");
+    const baseline = scenarioChangeObservation(change, current, "restored");
     if (baseline.matches) {
       return this.#finishNative(change, "restored", undefined, {
         candidate_logic_types: undefined,
@@ -5998,9 +5998,10 @@ function isBlockChange(change) {
 }
 
 function scenarioChangeObservation(change, current, snapshot) {
+  const expectedSnapshot = snapshot === "restored" ? "baseline" : snapshot;
   return isLogicSourceChange(change)
     ? logicSourceObservation(change, current, snapshot)
-    : blockSnapshotObservation(change, current.scenario, snapshot);
+    : blockSnapshotObservation(change, current.scenario, expectedSnapshot);
 }
 
 function scenarioChangeSnapshot(change, scenario) {
@@ -6118,24 +6119,10 @@ function logicSnapshotMatches(scenario, expected) {
   );
 }
 
-function logicSourceWriteMatches(change, scenario, expected) {
+function logicSourceWriteMatches(scenario, expected) {
   if (scenario === null) return false;
   const snapshot = logicScenarioSnapshot(scenario);
-  return (
-    snapshot.data === expected.data &&
-    (change.kind === "logic_source_create" ||
-      isDeepStrictEqual(logicStableFlags(snapshot), logicStableFlags(expected)))
-  );
-}
-
-function logicStableFlags(snapshot) {
-  return {
-    name: snapshot.name,
-    active: snapshot.active,
-    onStart: snapshot.onStart,
-    sync: snapshot.sync,
-    type: snapshot.type,
-  };
+  return snapshot.data === expected.data;
 }
 
 function logicEditableFlagsMatch(scenario, expected) {
@@ -6164,12 +6151,23 @@ function logicSourceObservation(change, current, snapshot) {
     }
   } else if (snapshot === "requested") {
     expected = logicSourceRequestedSnapshot(change);
-    matches = logicSourceWriteMatches(change, current.scenario, expected);
+    matches = logicSourceWriteMatches(current.scenario, expected);
   } else if (snapshot === "applied") {
     expected = change.applied_snapshot;
     matches =
       expected !== undefined &&
       logicSnapshotMatches(current.scenario, expected);
+  } else if (snapshot === "restored") {
+    if (change.kind === "logic_source_create") {
+      matches =
+        current.scenario === null &&
+        (change.native_logic_type
+          ? !current.logicTypes.includes(change.native_logic_type)
+          : isDeepStrictEqual(current.logicTypes, change.baseline_logic_types));
+    } else {
+      expected = change.baseline_snapshot;
+      matches = logicSourceWriteMatches(current.scenario, expected);
+    }
   } else {
     throw new TypeError(`Unknown LOGIC source snapshot ${snapshot}.`);
   }
@@ -6188,7 +6186,8 @@ function logicSourceObservation(change, current, snapshot) {
               expected !== undefined && observedSource === expected.data,
           }
         : {}),
-      ...(snapshot === "requested" && current.scenario !== null
+      ...(["requested", "restored"].includes(snapshot) &&
+      current.scenario !== null
         ? {
             editable_flags_exact_match: logicEditableFlagsMatch(
               current.scenario,
@@ -6860,7 +6859,7 @@ function publicNativeChange(
       limitations: [
         "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
         "LOGIC creation appends a unique JavaScript ownership comment to the source sent to SprutHub.",
-        "SprutHub-derived descriptions and normalized create flags are returned as observed values and become the applied snapshot.",
+        "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
