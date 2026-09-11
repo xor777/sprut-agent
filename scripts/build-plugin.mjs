@@ -9,7 +9,6 @@ await mkdir(path.dirname(outputPath), { recursive: true });
 await Promise.all([
   bundle("src/server.mjs", outputPath),
   bundle("src/read-api.mjs", path.join(pluginRoot, "dist", "read.mjs")),
-  bundle("scripts/dashboard.mjs", path.join(pluginRoot, "dashboard.mjs")),
 ]);
 await Promise.all([
   cp(path.resolve(".codex-plugin"), path.join(pluginRoot, ".codex-plugin"), {
@@ -24,10 +23,6 @@ await Promise.all([
   cp(
     path.resolve("scripts", "check-install.mjs"),
     path.join(pluginRoot, "check-install.mjs"),
-  ),
-  cp(
-    path.resolve("examples", "dashboard.json"),
-    path.join(pluginRoot, "examples", "dashboard.json"),
   ),
 ]);
 

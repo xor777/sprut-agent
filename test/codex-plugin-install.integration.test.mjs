@@ -90,8 +90,6 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     stat(path.join(installedRoot, ".mcp.json")),
     stat(path.join(installedRoot, "dist", "server.mjs")),
     stat(path.join(installedRoot, "dist", "read.mjs")),
-    stat(path.join(installedRoot, "dashboard.mjs")),
-    stat(path.join(installedRoot, "examples", "dashboard.json")),
     stat(path.join(installedRoot, "check-install.mjs")),
     stat(path.join(installedRoot, "skills", "spruthub-master", "SKILL.md")),
   ]);

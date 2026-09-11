@@ -174,8 +174,6 @@ async function checkRuntime(expectedRoot) {
       [
         path.join(expectedRoot, "dist", "server.mjs"),
         path.join(expectedRoot, "dist", "read.mjs"),
-        path.join(expectedRoot, "dashboard.mjs"),
-        path.join(expectedRoot, "examples", "dashboard.json"),
       ].map((runtime) => stat(runtime)),
     );
     if (runtimes.every((runtime) => runtime.isFile())) return true;

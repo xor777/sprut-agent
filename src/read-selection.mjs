@@ -47,9 +47,5 @@ export function validateReadSelection(selection) {
 }
 
 function invalidSelection(message) {
-  return new SprutHubError(
-    "invalid_selection",
-    message,
-    "fix_dashboard_selection",
-  );
+  return new SprutHubError("invalid_selection", message, "fix_read_selection");
 }
