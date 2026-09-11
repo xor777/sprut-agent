@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -108,6 +118,145 @@ test("the dashboard command leaves one independent poller and stops only that sc
   assert.equal(stopped.running, false);
   await assert.rejects(fetch(started.url));
   assert.equal(hub.connections.size, 0);
+});
+
+test("start returns ready owner actions that restart the screen without the agent", {
+  timeout: 20_000,
+}, async (t) => {
+  const scratch = await mkdtemp(
+    path.join(tmpdir(), "sprut dashboard $' actions; "),
+  );
+  const userHome = path.join(scratch, "owner home");
+  const configDirectory = path.join(scratch, "screen configs");
+  const configFile = path.join(configDirectory, "owner's $screen;.json");
+  const runtimeDirectory = path.join(scratch, "installed $bundle's; path");
+  const runtime = path.join(runtimeDirectory, "dashboard runtime.mjs");
+  const operatorDirectory = path.join(scratch, "operator elsewhere");
+  const openerDirectory = path.join(scratch, "minimal path");
+  const unrelatedAction = path.join(configDirectory, "open.command");
+  const port = await reservePort();
+  const hub = await startHub(t);
+  await Promise.all([
+    mkdir(path.join(userHome, ".config", "sprut-agent"), {
+      recursive: true,
+    }),
+    mkdir(configDirectory, { recursive: true }),
+    mkdir(runtimeDirectory, { recursive: true }),
+    mkdir(operatorDirectory, { recursive: true }),
+    mkdir(openerDirectory, { recursive: true }),
+  ]);
+  await cp(dashboardScript, runtime);
+  await writeFile(
+    path.join(userHome, ".config", "sprut-agent", "connection.env"),
+    [
+      "SPRUTHUB_TOKEN=local-action-secret",
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_SERIAL=home-1",
+      "SPRUTHUB_CID=dashboard-action-test",
+      "SPRUTHUB_TIMEOUT_MS=1000",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      title: "Мой дом",
+      home_ref: "spruthub://hub/home-1",
+      port,
+      readings: [
+        {
+          label: "Лампа",
+          ref: "spruthub://hub/home-1/accessory/11/service/21/characteristic/31",
+        },
+      ],
+    }),
+  );
+  await writeFile(unrelatedAction, "owner file\n");
+  const opener = path.join(openerDirectory, "xdg-open");
+  await writeFile(opener, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await chmod(opener, 0o700);
+  const environment = {
+    HOME: userHome,
+    PATH: openerDirectory,
+  };
+  const command = (action) =>
+    run(process.execPath, [runtime, action, configFile], {
+      cwd: operatorDirectory,
+      env: environment,
+    });
+  t.after(async () => {
+    await command("stop").catch(() => {});
+    await rm(scratch, { recursive: true });
+  });
+
+  const started = JSON.parse((await command("start")).stdout);
+  assert.equal(path.isAbsolute(started.actions.open_or_restart), true);
+  assert.equal(path.isAbsolute(started.actions.stop), true);
+  assert.equal(path.dirname(started.actions.open_or_restart), configDirectory);
+  assert.equal(path.dirname(started.actions.stop), configDirectory);
+  for (const action of Object.values(started.actions)) {
+    assert.notEqual((await stat(action)).mode & 0o111, 0);
+    const contents = await readFile(action, "utf8");
+    assert.equal(contents.includes("local-action-secret"), false);
+    assert.equal(contents.includes(hub.url), false);
+    assert.equal(contents.includes("SPRUTHUB_"), false);
+  }
+  assert.equal(await readFile(unrelatedAction, "utf8"), "owner file\n");
+  const actionFiles = (await readdir(configDirectory)).filter((name) =>
+    name.endsWith(".command"),
+  );
+  assert.equal(actionFiles.length, 3);
+
+  const stopped = JSON.parse(
+    (
+      await run(started.actions.stop, [], {
+        cwd: operatorDirectory,
+        env: environment,
+      })
+    ).stdout,
+  );
+  assert.equal(stopped.running, false);
+  await assert.rejects(fetch(started.url));
+  assert.equal(hub.connections.size, 0);
+
+  const restartOutput = (
+    await run(started.actions.open_or_restart, [], {
+      cwd: operatorDirectory,
+      env: environment,
+    })
+  ).stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(restartOutput[0].running, true);
+  assert.equal(restartOutput[0].already_running, false);
+  assert.deepEqual(restartOutput[0].actions, started.actions);
+  assert.equal(restartOutput[1].status, "opened");
+  assert.equal(
+    (await fetch(`${started.url}/api/readings`).then((response) => response.json()))
+      .readings[0].value,
+    false,
+  );
+
+  const repeatedOutput = (
+    await run(started.actions.open_or_restart, [], {
+      cwd: operatorDirectory,
+      env: environment,
+    })
+  ).stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(repeatedOutput[0].already_running, true);
+  assert.equal(repeatedOutput[0].pid, restartOutput[0].pid);
+  assert.deepEqual(repeatedOutput[0].actions, started.actions);
+  assert.deepEqual(
+    (await readdir(configDirectory)).filter((name) =>
+      name.endsWith(".command"),
+    ),
+    actionFiles,
+  );
 });
 
 test("the dashboard rejects a non-characteristic selection before spawning", async (t) => {
