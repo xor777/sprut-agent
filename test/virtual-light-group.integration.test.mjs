@@ -1201,6 +1201,157 @@ test("restore retries one uncertain removal only for the same owned link", async
   );
 });
 
+test("a retry starts fresh after a foreign consumer changed before its remove attempt", async (t) => {
+  for (const inspectAfterManualAccessoryRemoval of [false, true]) {
+    await t.test(
+      inspectAfterManualAccessoryRemoval
+        ? "later manual accessory removal does not preserve stale evidence"
+        : "the retry uses current physical links as its before evidence",
+      async (t) => {
+        const { hub, stateDirectory } = await setup(t);
+        const foreignConsumer = { aId: 80, sId: 1, cId: 1 };
+        hub.state.links.set("34.13.15", [
+          {
+            type: "OUT",
+            index: "Virtual/34.15",
+            characteristics: [foreignConsumer],
+          },
+        ]);
+        const firstClient = await startClient(t, hub, stateDirectory);
+        const prepared = await prepareGroup(firstClient);
+        const applied = await firstClient.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(applied.structuredContent.status, "applied");
+
+        hub.state.behavior.closeBeforeNextLinkRemove = true;
+        const uncertain = await firstClient.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(uncertain.structuredContent.status, "uncertain");
+        await firstClient.close();
+
+        hub.state.links.get("34.13.15")[0].characteristics = hub.state.links
+          .get("34.13.15")[0]
+          .characteristics.filter(({ aId }) => aId !== 80);
+        const secondClient = await startClient(t, hub, stateDirectory);
+        const retried = await secondClient.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+
+        if (inspectAfterManualAccessoryRemoval) {
+          hub.state.accessories = hub.state.accessories.filter(
+            ({ id }) => id !== 90,
+          );
+          for (const key of hub.state.links.keys()) {
+            if (key.startsWith("90.")) hub.state.links.delete(key);
+          }
+          const inspected = await secondClient.callTool({
+            name: "get_native_change",
+            arguments: { change_ref: prepared.structuredContent.change_ref },
+          });
+          assert.equal(inspected.structuredContent.status, "restored");
+          assert.equal(inspected.structuredContent.conflict_reason, undefined);
+        } else {
+          assert.equal(retried.isError, undefined, retried.content[0]?.text);
+          assert.equal(retried.structuredContent.status, "restored");
+          assert.equal(retried.structuredContent.conflict_reason, undefined);
+        }
+        assert.equal(
+          hub.state.accessories.some(({ id }) => id === 90),
+          false,
+        );
+      },
+    );
+  }
+});
+
+test("a rejected uncertain retry can be attempted again on the next restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  hub.state.behavior.closeBeforeNextLinkRemove = true;
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 1);
+  await firstClient.close();
+
+  hub.state.behavior.failLinkRemoveOnAttempt = 2;
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const rejected = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "request_rejected");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+  await secondClient.close();
+
+  hub.state.behavior.failLinkRemoveOnAttempt = undefined;
+  const thirdClient = await startClient(t, hub, stateDirectory);
+  const restored = await thirdClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 6);
+});
+
+test("two interrupted sends on one owned link allow a later restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  for (const expectedRemoveRequests of [1, 2]) {
+    hub.state.behavior.closeBeforeNextLinkRemove = true;
+    const client =
+      expectedRemoveRequests === 1
+        ? firstClient
+        : await startClient(t, hub, stateDirectory);
+    const uncertain = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+    assert.equal(uncertain.structuredContent.status, "uncertain");
+    assert.equal(
+      uncertain.structuredContent.conflict_reason,
+      "link_remove_outcome_unknown",
+    );
+    assert.equal(
+      hub.requests.filter(({ link }) => link?.remove).length,
+      expectedRemoveRequests,
+    );
+    await client.close();
+  }
+
+  const thirdClient = await startClient(t, hub, stateDirectory);
+  const restored = await thirdClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 6);
+});
+
 test("restore does not retry an uncertain removal after the link identity changed", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
