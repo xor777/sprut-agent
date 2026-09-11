@@ -890,9 +890,14 @@ async function startHub() {
           );
           if (scenario.type === "BLOCK") {
             const requestedData = JSON.parse(params.scenario.update.data);
-            scenario.data = JSON.stringify(withRuntimeBlockFields(requestedData));
+            scenario.data = JSON.stringify(
+              withRuntimeBlockFields(requestedData),
+            );
             if (state.behavior.recalculateBlockRooms) {
-              scenario.rooms = scenarioRoomIds(requestedData, state.accessories);
+              scenario.rooms = scenarioRoomIds(
+                requestedData,
+                state.accessories,
+              );
             }
           } else if (typeof params.scenario.update.data === "string") {
             scenario.desc =
@@ -2463,7 +2468,10 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(manualConflict.structuredContent.status, "conflict");
-  assert.equal(manualConflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    manualConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
     1,

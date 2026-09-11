@@ -6492,10 +6492,11 @@ function snapshotsEqual(left, right) {
 }
 
 function normalizeScenarioSnapshot(snapshot) {
-  return {
-    ...structuredClone(snapshot),
-    data: configurationData(snapshot.data),
-  };
+  const normalized = structuredClone(snapshot);
+  // SprutHub derives this projection from the BLOCK bindings after each write.
+  delete normalized.rooms;
+  normalized.data = configurationData(snapshot.data);
+  return normalized;
 }
 
 function parseNativeChangeRef(ref) {
