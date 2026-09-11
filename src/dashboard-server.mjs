@@ -1,7 +1,13 @@
 import { createServer } from "node:http";
+import { validateReadSelection } from "./read-selection.mjs";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_STALE_AFTER_MS = 30_000;
+const CONNECTION_ERROR_CODES = new Set([
+  "connection_closed",
+  "connection_failed",
+  "timeout",
+]);
 
 export async function createDashboardServer({
   reader,
@@ -100,7 +106,6 @@ export async function createDashboardServer({
     },
     async start() {
       if (url) return url;
-      await poll();
       await new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(port, host, () => {
@@ -110,6 +115,7 @@ export async function createDashboardServer({
       });
       const address = server.address();
       url = `http://${host}:${address.port}`;
+      void poll();
       return url;
     },
     async close() {
@@ -152,19 +158,58 @@ function mergeSnapshot(previous, result) {
 }
 
 function currentSnapshot(snapshot, currentTime, startedAt, staleAfterMs) {
+  const readings = snapshot.readings.map((reading) => ({
+    ...reading,
+    stale:
+      currentTime -
+        (reading.last_success_at
+          ? Date.parse(reading.last_success_at)
+          : startedAt) >
+      staleAfterMs,
+  }));
+  const connectionLost =
+    snapshot.status === "error" &&
+    readings.length > 0 &&
+    readings.every(
+      (reading) =>
+        reading.status === "error" &&
+        CONNECTION_ERROR_CODES.has(reading.error?.code),
+    );
   return {
     ...snapshot,
     served_at: new Date(currentTime).toISOString(),
-    readings: snapshot.readings.map((reading) => ({
+    connection_lost: connectionLost,
+    message:
+      snapshot.status === "pending"
+        ? "Подключение…"
+        : connectionLost
+          ? "Связь с домом потеряна"
+          : snapshot.status === "ok"
+            ? "Данные обновляются"
+            : "Есть недоступные данные",
+    readings: readings.map((reading) => ({
       ...reading,
-      stale:
-        currentTime -
-          (reading.last_success_at
-            ? Date.parse(reading.last_success_at)
-            : startedAt) >
-        staleAfterMs,
+      display_value: displayValue(reading),
+      display_unit: displayUnit(reading.unit),
+      display_status:
+        reading.status === "unavailable"
+          ? "Источник недоступен"
+          : reading.status === "error" && !connectionLost
+            ? "Не удалось прочитать источник"
+            : null,
     })),
   };
+}
+
+function displayValue(reading) {
+  if (reading.enum?.name) return reading.enum.name;
+  if (reading.value === null || reading.value === undefined) return "—";
+  if (typeof reading.value === "boolean") return reading.value ? "Да" : "Нет";
+  return String(reading.value);
+}
+
+function displayUnit(unit) {
+  return unit?.toLowerCase() === "celsius" ? "°C" : (unit ?? null);
 }
 
 function validateConfig(config) {
@@ -180,6 +225,10 @@ function validateConfig(config) {
       "Dashboard config needs title, home_ref, and readings.",
     );
   }
+  validateReadSelection({
+    homeRef: config.home_ref,
+    readings: config.readings,
+  });
 }
 
 function validateDuration(value, name) {
@@ -232,15 +281,13 @@ const PAGE = `<!doctype html>
       lastPayload = payload;
       title.textContent = payload.title;
       status.className = '';
-      status.textContent = payload.status === 'ok' ? 'Данные обновляются' : 'Есть недоступные данные';
+      status.textContent = payload.message;
       readings.replaceChildren();
       for (const reading of payload.readings) {
         const card = document.createElement('article');
         text(card, 'h2', reading.label);
-        const display = reading.enum?.name ?? (reading.value === null || reading.value === undefined ? '—' : String(reading.value));
-        text(card, 'p', display + (reading.unit ? ' ' + reading.unit : ''), 'value');
-        if (reading.status === 'unavailable') text(card, 'p', 'Источник недоступен', 'error');
-        else if (reading.status === 'error') text(card, 'p', reading.error?.message ?? 'Ошибка чтения', 'error');
+        text(card, 'p', reading.display_value + (reading.display_unit ? ' ' + reading.display_unit : ''), 'value');
+        if (reading.display_status) text(card, 'p', reading.display_status, 'error');
         if (reading.stale) text(card, 'p', 'Данные устарели', 'stale');
         text(card, 'p', reading.last_success_at ? 'Успешно прочитано: ' + new Date(reading.last_success_at).toLocaleString() : 'Успешных чтений ещё нет');
         readings.append(card);

@@ -111,7 +111,9 @@ test("the dashboard command leaves one independent poller and stops only that sc
 });
 
 test("the dashboard rejects a non-characteristic selection before spawning", async (t) => {
-  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-dashboard-invalid-"));
+  const scratch = await mkdtemp(
+    path.join(tmpdir(), "sprut-dashboard-invalid-"),
+  );
   const stateDirectory = path.join(scratch, "state");
   const configFile = path.join(scratch, "home.json");
   const port = await reservePort();
@@ -156,6 +158,59 @@ test("the dashboard rejects a non-characteristic selection before spawning", asy
   );
   assert.equal(hub.accessoryReads, 0);
   await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+});
+
+test("the dashboard serves immediately while SprutHub is not answering", async (t) => {
+  const scratch = await mkdtemp(
+    path.join(tmpdir(), "sprut-dashboard-pending-"),
+  );
+  const stateDirectory = path.join(scratch, "state");
+  const configFile = path.join(scratch, "home.json");
+  const port = await reservePort();
+  const hub = await startSilentHub(t);
+  await mkdir(stateDirectory);
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      title: "Мой дом",
+      home_ref: "spruthub://hub/home-1",
+      port,
+      readings: [
+        {
+          label: "Лампа",
+          ref: "spruthub://hub/home-1/accessory/11/service/21/characteristic/31",
+        },
+      ],
+    }),
+  );
+  const environment = {
+    ...process.env,
+    SPRUT_AGENT_DASHBOARD_STATE_DIR: stateDirectory,
+    SPRUTHUB_URL: hub.url,
+    SPRUTHUB_TOKEN: "local-token",
+    SPRUTHUB_SERIAL: "home-1",
+    SPRUTHUB_CID: "dashboard-test",
+    SPRUTHUB_TIMEOUT_MS: "10000",
+  };
+  const command = (action) =>
+    run(process.execPath, [dashboardScript, action, configFile], {
+      cwd: projectRoot,
+      env: environment,
+      timeout: 2_000,
+    });
+  t.after(async () => {
+    await command("stop").catch(() => {});
+    await rm(scratch, { recursive: true });
+  });
+
+  const startedAt = Date.now();
+  const started = JSON.parse((await command("start")).stdout);
+  assert.equal(started.running, true);
+  assert(Date.now() - startedAt < 1_000);
+  const state = await fetch(`${started.url}/api/readings`).then((response) =>
+    response.json(),
+  );
+  assert.equal(state.status, "pending");
 });
 
 async function startHub(t) {
@@ -243,6 +298,24 @@ async function startHub(t) {
       return state.accessoryReads;
     },
   };
+}
+
+async function startSilentHub(t) {
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(resolve);
+      }),
+  );
+  return { url: `ws://127.0.0.1:${server.address().port}` };
 }
 
 async function reservePort() {

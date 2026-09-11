@@ -1272,6 +1272,8 @@ export class SprutHubClient {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(timeoutError());
+        this.#handleConnectionLoss(socket);
+        socket.terminate();
       }, remainingMs);
       this.#pending.set(id, { resolve, reject, timer });
     });

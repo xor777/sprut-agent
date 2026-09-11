@@ -14,6 +14,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { createDashboardServer } from "../src/dashboard-server.mjs";
 import { createSprutHubReader } from "../src/read-api.mjs";
+import { validateReadSelection } from "../src/read-selection.mjs";
 
 const [command, configArgument] = process.argv.slice(2);
 const publicCommands = new Set(["start", "status", "open", "stop"]);
@@ -158,6 +159,7 @@ function parseConfig(text) {
   if (
     !config ||
     typeof config.title !== "string" ||
+    config.title.length === 0 ||
     typeof config.home_ref !== "string" ||
     !Array.isArray(config.readings) ||
     config.readings.length === 0 ||
@@ -171,6 +173,10 @@ function parseConfig(text) {
       "Dashboard config needs title, home_ref, readings, and an optional local port.",
     );
   }
+  validateReadSelection({
+    homeRef: config.home_ref,
+    readings: config.readings,
+  });
   return config;
 }
 
