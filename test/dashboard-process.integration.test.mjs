@@ -118,7 +118,40 @@ test("the dashboard rejects a non-characteristic selection before spawning", asy
   const configFile = path.join(scratch, "home.json");
   const port = await reservePort();
   const hub = await startHub(t);
+  const validConfig = {
+    title: "Мой дом",
+    home_ref: "spruthub://hub/home-1",
+    port,
+    readings: [
+      {
+        label: "Лампа",
+        ref: "spruthub://hub/home-1/accessory/11/service/21/characteristic/31",
+      },
+    ],
+  };
   await mkdir(stateDirectory);
+  await writeFile(configFile, JSON.stringify(validConfig));
+  const environment = {
+    ...process.env,
+    SPRUT_AGENT_DASHBOARD_STATE_DIR: stateDirectory,
+    SPRUTHUB_URL: hub.url,
+    SPRUTHUB_TOKEN: "local-token",
+    SPRUTHUB_SERIAL: "home-1",
+    SPRUTHUB_CID: "dashboard-test",
+    SPRUTHUB_TIMEOUT_MS: "1000",
+  };
+  const command = (action) =>
+    run(process.execPath, [dashboardScript, action, configFile], {
+      cwd: projectRoot,
+      env: environment,
+    });
+  t.after(async () => {
+    await writeFile(configFile, JSON.stringify(validConfig));
+    await command("stop").catch(() => {});
+    await rm(scratch, { recursive: true });
+  });
+
+  const started = JSON.parse((await command("start")).stdout);
   await writeFile(
     configFile,
     JSON.stringify({
@@ -133,31 +166,32 @@ test("the dashboard rejects a non-characteristic selection before spawning", asy
       ],
     }),
   );
-  const environment = {
-    ...process.env,
-    SPRUT_AGENT_DASHBOARD_STATE_DIR: stateDirectory,
-    SPRUTHUB_URL: hub.url,
-    SPRUTHUB_TOKEN: "local-token",
-    SPRUTHUB_SERIAL: "home-1",
-    SPRUTHUB_CID: "dashboard-test",
-    SPRUTHUB_TIMEOUT_MS: "1000",
-  };
-  t.after(async () => {
-    await rm(scratch, { recursive: true });
+
+  await assert.rejects(command("start"), (error) =>
+    error.stderr.includes(
+      "Every reading must be a characteristic reference in the selected home.",
+    ),
+  );
+  const status = JSON.parse((await command("status")).stdout);
+  assert.equal(status.running, true);
+  assert.equal(status.pid, started.pid);
+  assert.equal((await fetch(`${started.url}/health`)).status, 200);
+  const stopped = JSON.parse((await command("stop")).stdout);
+  assert.equal(stopped.running, false);
+});
+
+test("the installed dashboard exposes a compact operating contract", async () => {
+  const help = await run(process.execPath, [dashboardScript, "--help"], {
+    cwd: projectRoot,
   });
 
-  await assert.rejects(
-    run(process.execPath, [dashboardScript, "start", configFile], {
-      cwd: projectRoot,
-      env: environment,
-    }),
-    (error) =>
-      error.stderr.includes(
-        "Every reading must be a characteristic reference in the selected home.",
-      ),
-  );
-  assert.equal(hub.accessoryReads, 0);
-  await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+  assert.equal(help.stderr, "");
+  assert(help.stdout.length < 2_000);
+  assert.match(help.stdout, /home_ref/);
+  assert.match(help.stdout, /characteristic/);
+  for (const command of ["start", "open", "status", "stop"]) {
+    assert.match(help.stdout, new RegExp(`\\b${command}\\b`));
+  }
 });
 
 test("the dashboard serves immediately while SprutHub is not answering", async (t) => {

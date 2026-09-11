@@ -69,6 +69,8 @@ test("the public reader returns only selected safe readings and isolates a faile
   );
   assert.deepEqual(client.requested, [temperatureRef, lightRef, motionRef]);
   assert.deepEqual(result.readings[0].enum, { key: "zero", name: "Ноль" });
+  assert.equal(result.readings[0].type, "Temperature");
+  assert.equal(result.readings[1].type, "On");
   assert.equal(JSON.stringify(result).includes(secret), false);
   assert.equal(result.readings[2].error.retryable, true);
   await reader.close();
@@ -264,6 +266,7 @@ test("the local HTTP screen keeps polling, exposes staleness, and recovers witho
 
 test("the local screen presents household values and one shared connection failure", async (t) => {
   let connectionLost = false;
+  let sourceUnavailable = false;
   const reader = {
     async read({ readings }) {
       if (connectionLost) {
@@ -288,8 +291,14 @@ test("the local screen presents household values and one shared connection failu
         readings: readings.map(({ ref, label }) => ({
           ref,
           label,
-          status: "ok",
-          value: ref === temperatureRef ? 0 : false,
+          status: sourceUnavailable && ref === motionRef ? "unavailable" : "ok",
+          value: ref === temperatureRef ? 0 : ref === motionRef ? true : false,
+          type:
+            ref === temperatureRef
+              ? "CurrentTemperature"
+              : ref === motionRef
+                ? "MotionDetected"
+                : "On",
           unit: ref === temperatureRef ? "celsius" : null,
           enum: null,
           measured_at: null,
@@ -308,6 +317,7 @@ test("the local screen presents household values and one shared connection failu
       readings: [
         { ref: temperatureRef, label: "Температура" },
         { ref: lightRef, label: "Лампа" },
+        { ref: motionRef, label: "Движение" },
       ],
     },
     pollIntervalMs: 20,
@@ -328,9 +338,22 @@ test("the local screen presents household values and one shared connection failu
     })),
     [
       { display_value: "0", display_unit: "°C" },
-      { display_value: "Нет", display_unit: null },
+      { display_value: "Выключено", display_unit: null },
+      { display_value: "Есть движение", display_unit: null },
     ],
   );
+  assert.equal(fresh.readings[0].value, 0);
+  assert.equal(fresh.readings[0].unit, "celsius");
+  assert.equal(fresh.readings[1].value, false);
+  assert.equal(fresh.readings[1].type, "On");
+
+  sourceUnavailable = true;
+  const partial = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[2]?.status === "unavailable" ? state : null;
+  }, "partially unavailable readings");
+  assert.equal(partial.message, "Есть недоступные данные");
+  assert.equal(partial.readings[2].display_status, "Источник недоступен");
 
   connectionLost = true;
   const disconnected = await waitFor(async () => {
@@ -340,7 +363,7 @@ test("the local screen presents household values and one shared connection failu
   assert.equal(disconnected.message, "Связь с домом потеряна");
   assert.deepEqual(
     disconnected.readings.map(({ display_status }) => display_status),
-    [null, null],
+    [null, null, null],
   );
   assert.equal(
     JSON.stringify(disconnected).includes(
@@ -357,6 +380,7 @@ function characteristic(ref, name, value, unit, validValues = []) {
       kind: "characteristic",
       ref,
       name,
+      type: name,
       available: true,
       current_value: {
         value,
