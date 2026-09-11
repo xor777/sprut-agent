@@ -499,6 +499,148 @@ export class SprutHubClient {
     };
   }
 
+  async readServices(input) {
+    const selection = normalizeServiceSelection(input);
+    const deadline = Date.now() + this.timeoutMs;
+    if (this.serial === null || selection.serial !== this.serial) {
+      await this.#requireHome(selection.serial, deadline);
+    }
+
+    const snapshots = selection.room
+      ? [await this.#readServiceRoom(selection.room, deadline)]
+      : await this.#readServiceHome(selection.serial, deadline);
+    const allServices = snapshots.flatMap(({ room, accessories, observedAt }) =>
+      accessories.flatMap((accessory) =>
+        (accessory.services ?? []).map((service) =>
+          normalizeServiceReading(
+            selection.serial,
+            room,
+            accessory,
+            service,
+            observedAt,
+          ),
+        ),
+      ),
+    );
+    const observedServiceTypes = [
+      ...new Set(allServices.map(({ type }) => type)),
+    ];
+    const services = selection.serviceTypes
+      ? allServices.filter(({ type }) => selection.serviceTypes.includes(type))
+      : allServices;
+    const observedAt = latestObservedAt(
+      snapshots.map(({ observedAt: value }) => value),
+    );
+    const base = {
+      status: "ok",
+      scope: {
+        home_ref: selection.homeRef,
+        ...(selection.room
+          ? {
+              room: {
+                ref: roomRef(selection.serial, selection.room.roomId),
+                name: snapshots[0].room.name,
+              },
+            }
+          : {}),
+      },
+      scope_status: allServices.length === 0 ? "empty" : "non_empty",
+      match_status: selection.serviceTypes
+        ? services.length === 0
+          ? "no_matches"
+          : "matched"
+        : "not_filtered",
+      observed_service_types: observedServiceTypes,
+      freshness: freshness(observedAt),
+    };
+    return paginateServiceReadings(base, services, selection);
+  }
+
+  async #readServiceHome(serial, deadline) {
+    const roomsResponse = await this.#request(
+      { room: { list: {} } },
+      deadline,
+      { serial },
+    );
+    const rooms = extractEntityArray(roomsResponse, ["room", "list", "rooms"]);
+    rooms.forEach((room) => {
+      validateRoom(room);
+    });
+    if (rooms.length === 0) {
+      return [
+        {
+          room: null,
+          accessories: [],
+          observedAt: roomsResponse.responseReceivedAt,
+        },
+      ];
+    }
+    return Promise.all(
+      rooms.map((room) =>
+        this.#readServiceRoomForKnownRoom(serial, room, deadline),
+      ),
+    );
+  }
+
+  async #readServiceRoom(parsedRoom, deadline) {
+    const roomResponse = await this.#request(
+      { room: { get: { id: parsedRoom.roomId } } },
+      deadline,
+      { serial: parsedRoom.serial },
+    );
+    const roomContainer = roomResponse.result?.room;
+    if (!roomContainer || !Object.hasOwn(roomContainer, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible room response.",
+      );
+    }
+    if (roomContainer.get === null) {
+      throw new SprutHubError(
+        "room_not_found",
+        "The selected SprutHub room was not found.",
+        "inspect_home",
+      );
+    }
+    validateRoom(roomContainer.get, parsedRoom.roomId);
+    const snapshot = await this.#readServiceRoomForKnownRoom(
+      parsedRoom.serial,
+      roomContainer.get,
+      deadline,
+    );
+    snapshot.observedAt = latestObservedAt([
+      roomResponse.responseReceivedAt,
+      snapshot.observedAt,
+    ]);
+    return snapshot;
+  }
+
+  async #readServiceRoomForKnownRoom(serial, room, deadline) {
+    const accessoriesResponse = await this.#request(
+      {
+        accessory: {
+          list: {
+            roomId: room.id,
+            expand: "services,characteristics",
+          },
+        },
+      },
+      deadline,
+      { serial },
+    );
+    const accessories = extractEntityArray(accessoriesResponse, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    accessories.forEach(validateAccessory);
+    return {
+      room,
+      accessories: accessories.filter(({ roomId }) => roomId === room.id),
+      observedAt: accessoriesResponse.responseReceivedAt,
+    };
+  }
+
   async readRoom(roomReference) {
     let parsedRef;
     try {
@@ -2457,6 +2599,173 @@ function parseHomeRef(ref) {
   return parsed.serial;
 }
 
+function normalizeServiceSelection({
+  homeRef: selectedHomeRef,
+  roomRef: selectedRoomRef,
+  serviceTypes,
+  maxBytes,
+  cursor,
+}) {
+  const serial = parseHomeRef(selectedHomeRef);
+  let room = null;
+  if (selectedRoomRef !== undefined) {
+    try {
+      room = parseEntityRef(selectedRoomRef);
+    } catch {
+      throw invalidServiceScope();
+    }
+    if (room.kind !== "room" || room.serial !== serial) {
+      throw invalidServiceScope();
+    }
+  }
+  const normalizedServiceTypes = serviceTypes
+    ? [...new Set(serviceTypes)]
+    : null;
+  const cursorScope = JSON.stringify({
+    home_ref: selectedHomeRef,
+    room_ref: selectedRoomRef ?? null,
+    service_types: normalizedServiceTypes,
+  });
+  return {
+    homeRef: selectedHomeRef,
+    roomRef: selectedRoomRef ?? null,
+    serial,
+    room,
+    serviceTypes: normalizedServiceTypes,
+    maxBytes,
+    cursorScope,
+    offset: decodeServiceCursor(cursor, cursorScope),
+  };
+}
+
+function decodeServiceCursor(cursor, expectedScope) {
+  if (cursor === undefined) return 0;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    if (
+      parsed?.v !== 1 ||
+      !Number.isSafeInteger(parsed.offset) ||
+      parsed.offset < 0 ||
+      parsed.scope !== expectedScope
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return parsed.offset;
+  } catch {
+    throw invalidServiceCursor();
+  }
+}
+
+function encodeServiceCursor(offset, scope) {
+  return Buffer.from(JSON.stringify({ v: 1, offset, scope })).toString(
+    "base64url",
+  );
+}
+
+function paginateServiceReadings(base, services, selection) {
+  if (selection.offset > services.length) {
+    throw new SprutHubError(
+      "stale_cursor",
+      "The selected service set changed before this cursor could be read.",
+      "restart_read_services",
+    );
+  }
+  let end = selection.offset;
+  while (end < services.length) {
+    const candidate = servicePageResult(
+      base,
+      services.slice(selection.offset, end + 1),
+      services.length,
+      end + 1,
+      selection,
+    );
+    if (serializedResultBytes(candidate) > selection.maxBytes) break;
+    end += 1;
+  }
+
+  let selected = services.slice(selection.offset, end);
+  if (selected.length === 0 && selection.offset < services.length) {
+    selected = [oversizedServiceSummary(services[selection.offset])];
+    end = selection.offset + 1;
+  }
+  const result = servicePageResult(
+    base,
+    selected,
+    services.length,
+    end,
+    selection,
+  );
+  if (serializedResultBytes(result) > selection.maxBytes) {
+    throw new SprutHubError(
+      "result_too_large",
+      "The selected service cannot be represented inside max_bytes without truncation.",
+      "narrow_read_services_scope",
+      {
+        service_ref: services[selection.offset]?.ref,
+        required_bytes: serializedResultBytes(result),
+      },
+    );
+  }
+  return result;
+}
+
+function servicePageResult(base, selected, total, end, selection) {
+  const nextCursor =
+    end < total ? encodeServiceCursor(end, selection.cursorScope) : null;
+  const nextArguments = nextCursor
+    ? {
+        home_ref: selection.homeRef,
+        ...(selection.roomRef ? { room_ref: selection.roomRef } : {}),
+        ...(selection.serviceTypes
+          ? { service_types: selection.serviceTypes }
+          : {}),
+        max_bytes: selection.maxBytes,
+        cursor: nextCursor,
+      }
+    : null;
+  return {
+    ...base,
+    services: selected,
+    page: {
+      max_bytes: selection.maxBytes,
+      serialized_bytes: 0,
+      returned_services: selected.length,
+      remaining_services: total - end,
+      snapshot: false,
+      next_cursor: nextCursor,
+    },
+    next: nextArguments
+      ? { tool: "read_services", arguments: nextArguments }
+      : null,
+  };
+}
+
+function serializedResultBytes(result) {
+  let previous = -1;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const bytes = Buffer.byteLength(JSON.stringify(result, null, 2));
+    if (bytes === previous) return bytes;
+    result.page.serialized_bytes = bytes;
+    previous = bytes;
+  }
+  return Buffer.byteLength(JSON.stringify(result, null, 2));
+}
+
+function oversizedServiceSummary(service) {
+  const { readings: _readings, ...summary } = service;
+  return {
+    ...summary,
+    readings_status: "not_included",
+    reason: "service_exceeds_page_limit",
+    next: {
+      tool: "get_entity",
+      arguments: { entity_ref: service.ref },
+    },
+  };
+}
+
 function parseEntityRef(ref) {
   let url;
   try {
@@ -2539,6 +2848,22 @@ function invalidRoomRef() {
     "invalid_room_ref",
     "Use a home-qualified room reference returned by list_rooms or inspect_home.",
     "inspect_home",
+  );
+}
+
+function invalidServiceScope() {
+  return new SprutHubError(
+    "invalid_service_scope",
+    "room_ref must identify a room in the selected home_ref.",
+    "inspect_home",
+  );
+}
+
+function invalidServiceCursor() {
+  return new SprutHubError(
+    "invalid_cursor",
+    "Use the cursor returned by read_services for the same scope and filters.",
+    "restart_read_services",
   );
 }
 
@@ -3396,31 +3721,73 @@ function normalizeAccessory(serial, accessory) {
       ref: serviceRef(serial, accessory.id, service.sId),
       name: service.name,
       type: service.type,
-      readings: (service.characteristics ?? [])
-        .filter(({ control }) => control.read === true)
-        .map((characteristic) => {
-          const control = characteristic.control;
-          if (isSensitiveNativeNode(control)) return redactedNode();
-          const value = extractTypedValue(control.value);
-          return {
-            ref: characteristicRef(
-              serial,
-              accessory.id,
-              service.sId,
-              characteristic.cId,
-            ),
-            name: control.name,
-            type: control.type ?? control.key,
-            value: value.value,
-            ...(control.validValues
-              ? { enum: matchEnumValue(control.validValues, value) }
-              : {}),
-            unit: control.unit ?? null,
-            measuredAt: null,
-          };
-        }),
+      readings: normalizeReadableCharacteristics(
+        serial,
+        accessory,
+        service,
+        "room",
+      ),
     })),
   };
+}
+
+function normalizeServiceReading(serial, room, accessory, service, observedAt) {
+  return {
+    ref: serviceRef(serial, accessory.id, service.sId),
+    name: redactSensitiveText(service.name),
+    type: redactSensitiveText(service.type),
+    room: {
+      ref: roomRef(serial, room.id),
+      name: redactSensitiveText(room.name),
+    },
+    accessory: {
+      ref: accessoryRef(serial, accessory.id),
+      name: redactSensitiveText(accessory.name),
+      available: accessory.online,
+    },
+    observed_at: observedAt,
+    readings: normalizeReadableCharacteristics(
+      serial,
+      accessory,
+      service,
+      "services",
+    ),
+  };
+}
+
+function normalizeReadableCharacteristics(serial, accessory, service, view) {
+  return (service.characteristics ?? [])
+    .filter(({ control }) => control.read === true)
+    .map((characteristic) => {
+      const control = characteristic.control;
+      if (isSensitiveNativeNode(control)) return redactedNode();
+      const value = extractTypedValue(control.value);
+      const reading = {
+        ref: characteristicRef(
+          serial,
+          accessory.id,
+          service.sId,
+          characteristic.cId,
+        ),
+        name: redactSensitiveText(control.name),
+        type: redactSensitiveText(control.type ?? control.key),
+        value: value.found ? sanitizeNativeData(value.value) : null,
+        ...(control.validValues
+          ? { enum: matchEnumValue(control.validValues, value) }
+          : {}),
+        unit:
+          typeof control.unit === "string"
+            ? redactSensitiveText(control.unit)
+            : null,
+      };
+      return view === "services"
+        ? {
+            ...reading,
+            value_status: value.found ? "known" : "unknown",
+            measured_at: null,
+          }
+        : { ...reading, measuredAt: null };
+    });
 }
 
 function extractTypedValue(value) {

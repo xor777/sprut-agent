@@ -896,6 +896,81 @@ test("read_services byte-bounded cursors return every complete service without s
   );
 });
 
+test("read_services points oversized detail to its exact entity instead of truncating a value", async (t) => {
+  const hugeValue = "x".repeat(8_000);
+  const hub = await startHub({
+    rooms: [{ id: 10, name: "Офис" }],
+    accessories: [
+      {
+        id: 100,
+        roomId: 10,
+        name: "Большой сервис",
+        online: true,
+        services: [
+          {
+            aId: 100,
+            sId: 1,
+            name: "Диагностика",
+            type: "Diagnostics",
+            characteristics: [
+              {
+                aId: 100,
+                sId: 1,
+                cId: 1,
+                control: {
+                  read: true,
+                  key: "Report",
+                  name: "Отчёт",
+                  type: "Report",
+                  value: { stringValue: hugeValue },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const client = await startMcpClient(t, hub);
+
+  const result = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/10",
+      max_bytes: 2_048,
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert(Buffer.byteLength(result.content[0].text) <= 2_048);
+  assert.equal(result.content[0].text.includes(hugeValue), false);
+  assert.deepEqual(result.structuredContent.services[0], {
+    ref: "spruthub://hub/test-hub/accessory/100/service/1",
+    name: "Диагностика",
+    type: "Diagnostics",
+    room: {
+      ref: "spruthub://hub/test-hub/room/10",
+      name: "Офис",
+    },
+    accessory: {
+      ref: "spruthub://hub/test-hub/accessory/100",
+      name: "Большой сервис",
+      available: true,
+    },
+    observed_at: result.structuredContent.services[0].observed_at,
+    readings_status: "not_included",
+    reason: "service_exceeds_page_limit",
+    next: {
+      tool: "get_entity",
+      arguments: {
+        entity_ref: "spruthub://hub/test-hub/accessory/100/service/1",
+      },
+    },
+  });
+  assert.equal(result.structuredContent.page.next_cursor, null);
+});
+
 test("read_services rejects cross-home scope and invalid cursors before reading a room", async (t) => {
   const hub = await startHub();
   const client = await startMcpClient(t, hub);

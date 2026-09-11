@@ -520,6 +520,61 @@ server.registerTool(
 );
 
 server.registerTool(
+  "read_services",
+  {
+    title: "Read SprutHub services in one room or home",
+    description:
+      "Read a compact, byte-bounded page of native services and their readable current values in one explicitly selected home or room. Use this before opening individual entities when exploring an area. service_types are exact native type names and match with OR semantics; observed_service_types lists the native types actually present in the scope. Each service stays attached to its physical accessory and room. Values preserve false, zero, unknown, native enum meaning, units, availability, response freshness, and unknown measurement time. Follow page.next_cursor until null; each page is a fresh read, not an atomic home snapshot. Use get_entity only for the detailed contract or settings of a selected ref.",
+    inputSchema: {
+      home_ref: z
+        .string()
+        .min(1)
+        .describe("Explicit spruthub://hub/<percent-encoded-serial> reference"),
+      room_ref: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional room reference in home_ref"),
+      service_types: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Exact native service types; matches any listed type"),
+      max_bytes: z
+        .number()
+        .int()
+        .min(2_048)
+        .max(32_768)
+        .default(16_000)
+        .describe("Maximum UTF-8 bytes in the serialized result page"),
+      cursor: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Opaque continuation returned by the previous matching call"),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({
+    home_ref: homeRef,
+    room_ref: roomRef,
+    service_types: serviceTypes,
+    max_bytes: maxBytes,
+    cursor,
+  }) =>
+    runRoomTool(async () =>
+      (await getHubClient()).readServices({
+        homeRef,
+        roomRef,
+        serviceTypes,
+        maxBytes,
+        cursor,
+      }),
+    ),
+);
+
+server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",
@@ -603,6 +658,7 @@ function toToolError(error) {
 async function runRoomTool(operation) {
   try {
     const result = sanitizeAgentOutput(await operation(), connectionSecrets());
+    updateSerializedPageSize(result);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       structuredContent: result,
@@ -617,6 +673,17 @@ async function runRoomTool(operation) {
       structuredContent: result,
       isError: true,
     };
+  }
+}
+
+function updateSerializedPageSize(result) {
+  if (!result?.page || typeof result.page.serialized_bytes !== "number") return;
+  let previous = -1;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const bytes = Buffer.byteLength(JSON.stringify(result, null, 2));
+    if (bytes === previous) return;
+    result.page.serialized_bytes = bytes;
+    previous = bytes;
   }
 }
 
