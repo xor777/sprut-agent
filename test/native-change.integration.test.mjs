@@ -44,6 +44,7 @@ function trigger(source, value, variables, options, context) {
   variables.wasOn = value === true;
 }`;
 const secondLogicSource = firstLogicSource
+  .replace('name: "Bedside start level"', 'name: "Updated bedside level"')
   .replace(
     'description: "Set the initial brightness once"',
     'description: "Set the updated brightness once"',
@@ -5184,6 +5185,120 @@ test("a rejected LOGIC create remains not applied", async (t) => {
   assert.equal(
     hub.state.scenarios.some(({ type }) => type === "LOGIC"),
     false,
+  );
+});
+
+test("a LOGIC source update accepts derived metadata while preserving the manual-change guard", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push({
+    index: "manual-logic",
+    name: "Ручное имя до изменения",
+    desc: "Ручное описание до изменения",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: firstLogicSource,
+    predefined: false,
+  });
+  const client = await startClient(t, hub, stateDirectory);
+  const update = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: `${homeRef}/scenario/manual-logic`,
+      source: secondLogicSource,
+      reason: "Принять metadata, которые хаб выводит из точного source",
+    },
+  });
+  hub.state.behavior.afterUpdate = () => {
+    const scenario = hub.state.scenarios.find(
+      ({ index }) => index === "manual-logic",
+    );
+    scenario.name = "Имя из нового source";
+    scenario.desc = "Описание из нового source";
+  };
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  assert.equal(applied.structuredContent.diff.source.exact_match, true);
+  assert.deepEqual(applied.structuredContent.diff.editable_flags.observed, {
+    name: "Имя из нового source",
+    description: "Описание из нового source",
+    active: true,
+    on_start: false,
+    sync: false,
+    type: "LOGIC",
+  });
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "applied");
+  assert.equal(persisted.structuredContent.configuration_matches, true);
+  assert.equal(persisted.structuredContent.diff.source.exact_match, true);
+
+  const manualScenario = hub.state.scenarios.find(
+    ({ index }) => index === "manual-logic",
+  );
+  manualScenario.name = "Ручная правка после apply";
+  const protectedResult = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(protectedResult.structuredContent.status, "conflict");
+  assert.equal(protectedResult.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) => scenario?.update?.index === "manual-logic",
+    ).length,
+    1,
+  );
+
+  manualScenario.name = "Имя из нового source";
+  const recovered = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  hub.state.behavior.afterUpdate = () => {
+    manualScenario.name = "Имя из исходного source";
+    manualScenario.desc = "Описание из исходного source";
+  };
+  const restored = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.configuration_matches, true);
+  assert.equal(restored.structuredContent.diff.source.exact_match, true);
+  assert.deepEqual(restored.structuredContent.diff.editable_flags.observed, {
+    name: "Имя из исходного source",
+    description: "Описание из исходного source",
+    active: true,
+    on_start: false,
+    sync: false,
+    type: "LOGIC",
+  });
+  assert.equal(manualScenario.data, firstLogicSource);
+
+  const afterRestoreRestart = await startClient(t, hub, stateDirectory);
+  const persistedRestore = await afterRestoreRestart.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(persistedRestore.structuredContent.status, "restored");
+  assert.equal(persistedRestore.structuredContent.configuration_matches, true);
+  assert.equal(persistedRestore.structuredContent.diff.source.exact_match, true);
+  assert.deepEqual(
+    persistedRestore.structuredContent.diff.editable_flags.observed,
+    restored.structuredContent.diff.editable_flags.observed,
   );
 });
 
