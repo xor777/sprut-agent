@@ -4756,6 +4756,202 @@ test("a lost LOGIC create response is reconciled without creating a duplicate", 
   );
 });
 
+test("an owned LOGIC source remains editable and restorable while its type mapping is initially missing", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Исправляемый LOGIC",
+      description: "Сохранить владение отдельно от назначения",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Исправить source, если его тип пока не появился",
+    },
+  });
+  hub.state.behavior.afterCreate = () => {
+    hub.state.logicTypes = hub.state.logicTypes.filter(
+      ({ type }) => type === smoothLogicType,
+    );
+  };
+
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.scenario_ref, `${homeRef}/scenario/created-1`);
+  assert.equal(created.structuredContent.diff.source.exact_match, true);
+  assert.equal(created.structuredContent.logic_mapping_status, "missing");
+  assert.equal(created.structuredContent.logic_assignment_ready, false);
+  assert.equal(
+    created.structuredContent.logic_mapping_reason,
+    "logic_type_not_visible_after_create",
+  );
+  assert.equal(created.structuredContent.restore_supported, false);
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "applied");
+  assert.equal(persisted.structuredContent.logic_mapping_status, "missing");
+  assert.equal(
+    persisted.structuredContent.logic_mapping_reason,
+    "logic_type_not_visible_after_create",
+  );
+
+  const blockedRestore = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(blockedRestore.structuredContent.status, "applied");
+  assert.equal(blockedRestore.structuredContent.restore_supported, false);
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === "created-1",
+    ),
+    false,
+  );
+
+  const update = await restartedClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: created.structuredContent.scenario_ref,
+      source: secondLogicSource,
+      reason: "Исправить metadata исходника без нового сценария",
+    },
+  });
+  hub.state.behavior.afterUpdate = () => {
+    hub.state.logicTypes.push({
+      type: "GeneratedLogicType1",
+      name: "Исправляемый LOGIC",
+      desc: "Доступен после исправления source",
+    });
+  };
+  const updated = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(updated.structuredContent.status, "applied");
+  const sourceUpdates = hub.requests.filter(
+    ({ scenario }) => scenario?.update?.index === "created-1",
+  );
+  assert.deepEqual(Object.keys(sourceUpdates.at(-1).scenario.update).sort(), [
+    "data",
+    "index",
+  ]);
+
+  const mappingRecovered = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(mappingRecovered.structuredContent.logic_mapping_status, "mapped");
+  assert.equal(mappingRecovered.structuredContent.logic_assignment_ready, true);
+  assert.equal(
+    mappingRecovered.structuredContent.native_logic_type,
+    "GeneratedLogicType1",
+  );
+
+  const updateRestored = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(updateRestored.structuredContent.status, "restored");
+  delete hub.state.accessories[2].services;
+  const sourceRestored = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(sourceRestored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    false,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC")
+      .length,
+    1,
+  );
+});
+
+test("an ambiguous LOGIC type mapping survives restart and can be resolved without recreating the source", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Неоднозначный LOGIC",
+      description: "Не терять подтверждённый source",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Разделить source и выбор native type",
+    },
+  });
+  hub.state.behavior.afterCreate = () => {
+    hub.state.logicTypes.push({
+      type: "ConcurrentLogicType",
+      name: "Чужой одновременный LOGIC",
+      desc: "Не считать его своим",
+    });
+  };
+
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.logic_mapping_status, "ambiguous");
+  assert.equal(created.structuredContent.logic_assignment_ready, false);
+  assert.equal(created.structuredContent.logic_mapping_reason, "ambiguous_logic_type");
+  assert.deepEqual(created.structuredContent.candidate_logic_types.sort(), [
+    "ConcurrentLogicType",
+    "GeneratedLogicType1",
+  ]);
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "applied");
+  assert.equal(persisted.structuredContent.logic_mapping_status, "ambiguous");
+  assert.equal(persisted.structuredContent.logic_mapping_reason, "ambiguous_logic_type");
+
+  hub.state.logicTypes = hub.state.logicTypes.filter(
+    ({ type }) => type !== "ConcurrentLogicType",
+  );
+  const resolved = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(resolved.structuredContent.status, "applied");
+  assert.equal(resolved.structuredContent.logic_mapping_status, "mapped");
+  assert.equal(resolved.structuredContent.native_logic_type, "GeneratedLogicType1");
+  assert.equal(resolved.structuredContent.restore_supported, true);
+
+  const restored = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC")
+      .length,
+    1,
+  );
+});
+
 test("a rejected LOGIC create remains not applied", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
