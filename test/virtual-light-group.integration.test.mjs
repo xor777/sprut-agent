@@ -108,6 +108,7 @@ async function startHub() {
       closeAfterNextLinkRemove: false,
       normalizeNextAccessoryName: false,
       preservePhysicalOutOnIncomingRemove: false,
+      preserveEmptyPhysicalOutOnIncomingRemove: false,
     },
   };
   const server = new WebSocketServer({ port: 0 });
@@ -243,12 +244,22 @@ async function startHub() {
             cId: input.tCId,
           });
           const outgoingLinks = state.links.get(outgoingKey) ?? [];
-          outgoingLinks.push({
-            index: `Virtual/${input.tAId}.${input.tCId}`,
-            type: "OUT",
-            characteristics: [
-              { aId: input.aId, sId: input.sId, cId: input.cId },
-            ],
+          const outgoingIndex = `Virtual/${input.tAId}.${input.tCId}`;
+          let outgoing = outgoingLinks.find(
+            ({ index, type }) => type === "OUT" && index === outgoingIndex,
+          );
+          if (!outgoing) {
+            outgoing = {
+              index: outgoingIndex,
+              type: "OUT",
+              characteristics: [],
+            };
+            outgoingLinks.push(outgoing);
+          }
+          outgoing.characteristics.push({
+            aId: input.aId,
+            sId: input.sId,
+            cId: input.cId,
           });
           state.links.set(outgoingKey, outgoingLinks);
         }
@@ -273,21 +284,26 @@ async function startHub() {
           for (const target of removed.characteristics) {
             const outgoingKey = linkKey(target);
             if (!state.behavior.preservePhysicalOutOnIncomingRemove) {
-              state.links.set(
-                outgoingKey,
-                (state.links.get(outgoingKey) ?? []).filter(
-                  (link) =>
-                    !(
-                      link.type === "OUT" &&
-                      (link.characteristics ?? []).some(
-                        ({ aId, sId, cId }) =>
-                          aId === params.link.remove.aId &&
-                          sId === params.link.remove.sId &&
-                          cId === params.link.remove.cId,
-                      )
-                    ),
-                ),
-              );
+              const remaining = [];
+              for (const link of state.links.get(outgoingKey) ?? []) {
+                if (link.type !== "OUT") {
+                  remaining.push(link);
+                  continue;
+                }
+                const characteristics = (link.characteristics ?? []).filter(
+                  ({ aId, sId, cId }) =>
+                    aId !== params.link.remove.aId ||
+                    sId !== params.link.remove.sId ||
+                    cId !== params.link.remove.cId,
+                );
+                if (
+                  characteristics.length > 0 ||
+                  state.behavior.preserveEmptyPhysicalOutOnIncomingRemove
+                ) {
+                  remaining.push({ ...link, characteristics });
+                }
+              }
+              state.links.set(outgoingKey, remaining);
             }
           }
         }
@@ -668,6 +684,48 @@ test("create and restore tolerate omitted repeated fields without removing syste
     hub.state.accessories.map(({ id }) => id),
     [34, 35, 36],
   );
+});
+
+test("restore removes only its consumer from shared and pre-existing physical links", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const foreignConsumer = { aId: 80, sId: 1, cId: 2 };
+  const systemLink = {
+    type: "SYSTEM",
+    index: "native-source/example",
+    controller: "zigbee_1",
+  };
+  const sharedOut = {
+    type: "OUT",
+    index: "Virtual/34.16",
+    characteristics: [foreignConsumer],
+  };
+  const emptyOut = {
+    type: "OUT",
+    index: "Virtual/34.15",
+    characteristics: [],
+  };
+  hub.state.links.set("34.13.15", [systemLink, emptyOut]);
+  hub.state.links.set("34.13.16", [sharedOut]);
+  hub.state.behavior.preserveEmptyPhysicalOutOnIncomingRemove = true;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareGroup(client);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(hub.state.links.get("34.13.15"), [systemLink, emptyOut]);
+  assert.deepEqual(hub.state.links.get("34.13.16"), [sharedOut]);
+  assert.equal(hub.state.accessories.some(({ id }) => id === 90), false);
 });
 
 test("restore preserves a virtual group after a manual link was added", async (t) => {
