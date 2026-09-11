@@ -571,7 +571,7 @@ test("a lost accessory-create response is never retried or claimed", async (t) =
   assert.ok(hub.state.accessories.some(({ id }) => id === 90));
 });
 
-test("a lost link response is reconciled without adding that link twice", async (t) => {
+test("a lost link response is read back and completed without adding that link twice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
   const prepared = await prepareGroup(firstClient);
@@ -581,8 +581,10 @@ test("a lost link response is reconciled without adding that link twice", async 
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(applied.structuredContent.status, "uncertain");
-  assert.equal(hub.requests.filter(({ link }) => link?.addVirtual).length, 1);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.native_acknowledged, false);
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+  assert.equal(hub.requests.filter(({ link }) => link?.addVirtual).length, 4);
 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
@@ -590,8 +592,8 @@ test("a lost link response is reconciled without adding that link twice", async 
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(repeated.structuredContent.status, "uncertain");
-  assert.equal(hub.requests.filter(({ link }) => link?.addVirtual).length, 1);
+  assert.equal(repeated.structuredContent.status, "applied");
+  assert.equal(hub.requests.filter(({ link }) => link?.addVirtual).length, 4);
 });
 
 test("the group rejects a capability that is absent from one member", async (t) => {
