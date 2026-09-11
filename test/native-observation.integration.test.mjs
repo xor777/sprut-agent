@@ -12,60 +12,89 @@ const projectRoot = path.resolve(
   "..",
 );
 const homeRef = "spruthub://hub/home%2FA";
+const otherHomeRef = "spruthub://hub/home%2FB";
 const characteristicRef = `${homeRef}/accessory/34/service/13/characteristic/15`;
 const scenarioRef = `${homeRef}/scenario/23`;
 
-async function startHub() {
+async function startHub({ subscribeDelayMs = 0 } = {}) {
   const requests = [];
+  const connections = [];
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
+    const connectionId = connections.length + 1;
+    connections.push({ id: connectionId, socket });
     socket.on("message", (data) => {
       const request = JSON.parse(data.toString());
-      requests.push(request);
+      requests.push({ ...request, connectionId });
       let result;
       if (request.params?.hub?.list) {
         result = {
           hub: {
             list: {
-              hubs: [{ serial: "home/A", name: "Дом", online: true }],
+              hubs: [
+                { serial: "home/A", name: "Дом A", online: true },
+                { serial: "home/B", name: "Дом B", online: true },
+              ],
             },
           },
         };
       } else if (request.params?.accessory?.get) {
         result = {
           accessory: {
-            get: {
-              id: 34,
-              roomId: 1,
-              name: "Датчик",
-              online: true,
-              services: [
-                {
-                  aId: 34,
-                  sId: 13,
-                  name: "Движение",
-                  type: "MotionSensor",
-                  characteristics: [
-                    {
-                      aId: 34,
-                      sId: 13,
-                      cId: 15,
-                      control: {
+            get:
+              request.params.accessory.get.id === 34
+                ? {
+                    id: 34,
+                    roomId: 1,
+                    name: `Датчик ${request.serial}`,
+                    online: true,
+                    services: [
+                      {
+                        aId: 34,
+                        sId: 13,
                         name: "Движение",
-                        type: "MotionDetected",
-                        read: true,
-                        write: false,
-                        events: true,
-                        value: { boolValue: false },
+                        type: "MotionSensor",
+                        characteristics: [
+                          {
+                            aId: 34,
+                            sId: 13,
+                            cId: 15,
+                            control: {
+                              name: "Движение",
+                              type: "MotionDetected",
+                              read: true,
+                              write: false,
+                              events: true,
+                              value: { boolValue: false },
+                            },
+                          },
+                        ],
                       },
-                    },
-                  ],
-                },
-              ],
+                    ],
+                  }
+                : null,
+          },
+        };
+      } else if (request.params?.room?.get) {
+        result = {
+          room: {
+            get: {
+              id: request.params.room.get.id,
+              name: `Комната ${request.serial}`,
             },
           },
         };
+      } else if (request.params?.room?.list) {
+        result = {
+          room: { list: { rooms: [{ id: 1, name: "Комната" }] } },
+        };
+      } else if (request.params?.accessory?.list) {
+        result = { accessory: { list: { accessories: [] } } };
+      } else if (request.params?.scenario?.list) {
+        result = { scenario: { list: { scenarios: [] } } };
+      } else if (request.params?.extension?.list) {
+        result = { extension: { list: { extensions: [] } } };
       } else if (request.params?.scenario?.get) {
         result = {
           scenario: {
@@ -88,12 +117,22 @@ async function startHub() {
           `unsupported test request: ${JSON.stringify(request.params)}`,
         );
       }
-      socket.send(JSON.stringify({ id: request.id, result }));
+      const respond = () => {
+        if (socket.readyState === socket.OPEN) {
+          socket.send(JSON.stringify({ id: request.id, result }));
+        }
+      };
+      if (request.params?.scenario?.subscribe && subscribeDelayMs > 0) {
+        setTimeout(respond, subscribeDelayMs);
+      } else {
+        respond();
+      }
     });
   });
   const address = server.address();
   assert(address && typeof address === "object");
   return {
+    connections,
     requests,
     server,
     url: `ws://127.0.0.1:${address.port}`,
@@ -106,7 +145,7 @@ async function startHub() {
   };
 }
 
-async function startClient(t, hub) {
+async function startClient(t, hub, { serial = "home/A" } = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -115,7 +154,7 @@ async function startClient(t, hub) {
       PATH: process.env.PATH,
       SPRUTHUB_URL: hub.url,
       SPRUTHUB_TOKEN: "observation-secret-must-not-leak",
-      SPRUTHUB_SERIAL: "home/A",
+      ...(serial === null ? {} : { SPRUTHUB_SERIAL: serial }),
       SPRUTHUB_CID: "native-observation-test",
       SPRUTHUB_TIMEOUT_MS: "500",
     },
@@ -132,6 +171,14 @@ async function startClient(t, hub) {
   });
   await client.connect(transport);
   return client;
+}
+
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail("timed out waiting for test event");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function startObservation(client, overrides = {}) {
@@ -255,6 +302,139 @@ test("native observation preserves repeated partial events and filters its selec
       .map(({ params }) => params.scenario.unsubscribe),
     [{ uuid: "subscription-1" }],
   );
+});
+
+test("ordinary reads stay available without changing an active observation home", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub, { serial: null });
+  const started = await startObservation(client, { duration_seconds: 2 });
+
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.deepEqual(
+    homes.structuredContent.homes.map(({ ref }) => ref),
+    [homeRef, otherHomeRef],
+  );
+
+  for (const request of [
+    {
+      name: "get_entity",
+      arguments: { entity_ref: characteristicRef },
+    },
+    { name: "inspect_home", arguments: { home_ref: homeRef } },
+    {
+      name: "read_room",
+      arguments: { room_ref: `${homeRef}/room/1` },
+    },
+  ]) {
+    const result = await client.callTool(request);
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+  }
+
+  const otherCharacteristicRef = `${otherHomeRef}/accessory/34/service/13/characteristic/15`;
+  const other = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: otherCharacteristicRef },
+  });
+  assert.equal(other.isError, undefined, other.content[0]?.text);
+  assert.equal(other.structuredContent.entity.ref, otherCharacteristicRef);
+
+  const subscriptionRequest = hub.requests.find(
+    ({ params }) => params.scenario?.subscribe,
+  );
+  const otherHomeRead = hub.requests.find(
+    ({ params, serial }) => params.accessory?.get && serial === "home/B",
+  );
+  assert.notEqual(subscriptionRequest.connectionId, otherHomeRead.connectionId);
+
+  hub.send({ event: { scenario: { index: "23", type: "FIRE", blockId: 9 } } });
+  const completed = await getObservation(client, started.observation_ref, 3);
+  assert.equal(completed.status, "completed");
+  assert.deepEqual(
+    completed.events.map(({ ref }) => ref),
+    [scenarioRef],
+  );
+});
+
+test("stop during subscription startup cannot resurrect the observation", async (t) => {
+  const hub = await startHub({ subscribeDelayMs: 150 });
+  const client = await startClient(t, hub);
+  const startPromise = client.callTool({
+    name: "start_native_observation",
+    arguments: {
+      home_ref: homeRef,
+      characteristic_refs: [characteristicRef],
+      scenario_ref: scenarioRef,
+      duration_seconds: 10,
+      max_events: 20,
+    },
+  });
+  await waitFor(() =>
+    hub.requests.some(({ params }) => params.scenario?.subscribe),
+  );
+
+  const duplicate = await client.callTool({
+    name: "start_native_observation",
+    arguments: {
+      home_ref: homeRef,
+      characteristic_refs: [characteristicRef],
+      scenario_ref: scenarioRef,
+      duration_seconds: 10,
+      max_events: 20,
+    },
+  });
+  assert.equal(duplicate.isError, true);
+  assert.equal(
+    duplicate.structuredContent.error.code,
+    "observation_in_progress",
+  );
+
+  const stopped = await client.callTool({
+    name: "stop_native_observation",
+    arguments: { observation_ref: duplicate.structuredContent.observation_ref },
+  });
+  const started = await startPromise;
+  assert.equal(stopped.isError, undefined, stopped.content[0]?.text);
+  assert.equal(stopped.structuredContent.status, "canceled");
+  assert.equal(started.structuredContent.status, "canceled");
+  assert.equal(
+    hub.requests.filter(({ params }) => params.scenario?.unsubscribe).length,
+    1,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const retained = await getObservation(
+    client,
+    duplicate.structuredContent.observation_ref,
+  );
+  assert.equal(retained.status, "canceled");
+});
+
+test("a failed new start preserves the previous completed evidence", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const started = await startObservation(client);
+  const completed = await getObservation(client, started.observation_ref, 2);
+  assert.equal(completed.status, "completed");
+
+  const failed = await client.callTool({
+    name: "start_native_observation",
+    arguments: {
+      home_ref: homeRef,
+      characteristic_refs: [
+        `${homeRef}/accessory/999/service/13/characteristic/15`,
+      ],
+      scenario_ref: scenarioRef,
+      duration_seconds: 1,
+      max_events: 20,
+    },
+  });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.structuredContent.error.code, "entity_not_found");
+
+  const retained = await getObservation(client, started.observation_ref);
+  assert.equal(retained.status, "completed");
+  assert.equal(retained.observation_ref, started.observation_ref);
 });
 
 test("connection loss is an explicit terminal observation result", async (t) => {
