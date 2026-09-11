@@ -758,6 +758,7 @@ export class AutomationService {
     const baselineLogicTypes = await this.#readLogicTypeCatalog(target);
     const id = this.store.newId();
     const now = new Date().toISOString();
+    const marker = `sprut-agent:native:${id}`;
     const change = {
       id,
       kind: "logic_source_create",
@@ -766,7 +767,7 @@ export class AutomationService {
       target_ref: input.target_ref,
       target,
       reason: input.reason,
-      marker: `sprut-agent:native:${id}`,
+      marker,
       baseline_logic_types: baselineLogicTypes,
       requested_snapshot: {
         name: input.name,
@@ -775,7 +776,7 @@ export class AutomationService {
         onStart: input.on_start,
         sync: input.sync,
         type: "LOGIC",
-        data: source,
+        data: logicSourceWithOwnershipMarker(source, marker),
       },
       native_write_sent: false,
       native_acknowledged: false,
@@ -2774,10 +2775,12 @@ export class AutomationService {
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) return;
     for (const change of candidates) {
-      if (
-        typeof scenario.desc === "string" &&
-        scenario.desc.includes(`[${change.marker}]`)
-      ) {
+      const carriesMarker =
+        change.kind === "logic_source_create"
+          ? logicSourceCarriesOwnershipMarker(change, scenario)
+          : typeof scenario.desc === "string" &&
+            scenario.desc.includes(`[${change.marker}]`);
+      if (carriesMarker) {
         change.scenario_index = target.index;
         await this.#reconcileScenarioApply(change, false);
       }
@@ -3534,12 +3537,12 @@ export class AutomationService {
     }
     const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
-      if (change.kind === "logic_source_create") {
-        updateLogicTypeMapping(change, current.logicTypes);
-      }
+      this.#adoptRequestedLogicSource(change, current, requested);
       return this.#finishNative(change, "applied", undefined, {
         scenario_index: current.scenario.index,
-        applied_snapshot: scenarioChangeSnapshot(change, current.scenario),
+        applied_snapshot:
+          change.applied_snapshot ??
+          scenarioChangeSnapshot(change, current.scenario),
         logic_assignments: undefined,
         conflict_reason: undefined,
         ...requested.fields,
@@ -3561,6 +3564,26 @@ export class AutomationService {
     });
   }
 
+  #adoptRequestedLogicSource(change, current, requested) {
+    if (
+      !isLogicSourceChange(change) ||
+      change.applied_snapshot !== undefined ||
+      change.native_write_sent !== true ||
+      ["prepared", "not_applied", "restored"].includes(change.status) ||
+      !requested.matches
+    ) {
+      return false;
+    }
+    if (change.kind === "logic_source_create") {
+      change.scenario_index = current.scenario.index;
+      updateLogicTypeMapping(change, current.logicTypes);
+    }
+    change.applied_snapshot = scenarioChangeSnapshot(change, current.scenario);
+    change.logic_assignments = undefined;
+    change.conflict_reason = undefined;
+    return true;
+  }
+
   async #getScenarioChange(change) {
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
@@ -3576,14 +3599,18 @@ export class AutomationService {
         configurationMatches: undefined,
       });
     }
-    if (change.kind === "logic_source_create") {
-      updateLogicTypeMapping(change, current.logicTypes);
-    }
     if (change.status === "restored") {
       return this.#recordScenarioObservation(
         change,
         scenarioChangeObservation(change, current, "baseline"),
       );
+    }
+    if (
+      change.kind === "logic_source_create" &&
+      change.applied_snapshot !== undefined &&
+      current.scenario !== null
+    ) {
+      updateLogicTypeMapping(change, current.logicTypes);
     }
     const applied = scenarioChangeObservation(change, current, "applied");
     if (applied.matches) {
@@ -3594,16 +3621,8 @@ export class AutomationService {
           });
     }
     const requested = scenarioChangeObservation(change, current, "requested");
-    if (
-      change.kind === "logic_source_create" &&
-      change.applied_snapshot === undefined &&
-      requested.matches
-    ) {
+    if (this.#adoptRequestedLogicSource(change, current, requested)) {
       return this.#finishNative(change, "applied", undefined, {
-        scenario_index: current.scenario.index,
-        applied_snapshot: scenarioChangeSnapshot(change, current.scenario),
-        logic_assignments: undefined,
-        conflict_reason: undefined,
         ...requested.fields,
       });
     }
@@ -3630,17 +3649,18 @@ export class AutomationService {
         : this.#reconcileScenarioApply(change, false);
     }
     const current = await this.#observeScenarioChange(change);
-    if (change.kind === "logic_source_create") {
+    if (
+      change.kind === "logic_source_create" &&
+      change.applied_snapshot !== undefined &&
+      current.scenario !== null
+    ) {
       updateLogicTypeMapping(change, current.logicTypes);
-      const requested = scenarioChangeObservation(change, current, "requested");
-      if (change.applied_snapshot === undefined && requested.matches) {
-        change.status = "applied";
-        change.applied_snapshot = scenarioChangeSnapshot(
-          change,
-          current.scenario,
-        );
-      }
     }
+    this.#adoptRequestedLogicSource(
+      change,
+      current,
+      scenarioChangeObservation(change, current, "requested"),
+    );
     const applied = scenarioChangeObservation(change, current, "applied");
     if (!applied.matches) {
       return this.#finishNative(change, "conflict", undefined, {
@@ -3749,17 +3769,14 @@ export class AutomationService {
     } else if (change.scenario_index) {
       scenario = await this.client.getScenario(change.scenario_index);
     } else {
-      const scenarios = await this.client.listScenarioDetails({
-        descriptionIncludes: `[${change.marker}]`,
-      });
-      const matches = scenarios.filter(
-        ({ desc }) =>
-          typeof desc === "string" && desc.includes(`[${change.marker}]`),
+      const scenarios = await this.client.listScenarioDetails();
+      const matches = scenarios.filter((candidate) =>
+        logicSourceCarriesOwnershipMarker(change, candidate),
       );
       if (matches.length > 1) {
         throw new SprutHubError(
           "ambiguous_owned_scenario",
-          "More than one LOGIC scenario carries this native change marker.",
+          "More than one LOGIC source carries this native change marker.",
           "inspect_home",
         );
       }
@@ -6003,6 +6020,19 @@ function requiredLogicSource(value) {
   return value;
 }
 
+function logicSourceWithOwnershipMarker(source, marker) {
+  return `${source}\n\n/* [${marker}] */`;
+}
+
+function logicSourceCarriesOwnershipMarker(change, scenario) {
+  return (
+    isRecord(scenario) &&
+    scenario.type === "LOGIC" &&
+    typeof scenario.data === "string" &&
+    scenario.data.includes(`/* [${change.marker}] */`)
+  );
+}
+
 function sourceFingerprint(source) {
   return createHash("sha256").update(source).digest("hex");
 }
@@ -6088,13 +6118,24 @@ function logicSnapshotMatches(scenario, expected) {
   );
 }
 
-function logicSourceCreateMatches(change, scenario, expected) {
+function logicSourceWriteMatches(change, scenario, expected) {
   if (scenario === null) return false;
   const snapshot = logicScenarioSnapshot(scenario);
   return (
     snapshot.data === expected.data &&
-    snapshot.desc.includes(`[${change.marker}]`)
+    (change.kind === "logic_source_create" ||
+      isDeepStrictEqual(logicStableFlags(snapshot), logicStableFlags(expected)))
   );
+}
+
+function logicStableFlags(snapshot) {
+  return {
+    name: snapshot.name,
+    active: snapshot.active,
+    onStart: snapshot.onStart,
+    sync: snapshot.sync,
+    type: snapshot.type,
+  };
 }
 
 function logicEditableFlagsMatch(scenario, expected) {
@@ -6123,10 +6164,7 @@ function logicSourceObservation(change, current, snapshot) {
     }
   } else if (snapshot === "requested") {
     expected = logicSourceRequestedSnapshot(change);
-    matches =
-      change.kind === "logic_source_create"
-        ? logicSourceCreateMatches(change, current.scenario, expected)
-        : logicSnapshotMatches(current.scenario, expected);
+    matches = logicSourceWriteMatches(change, current.scenario, expected);
   } else if (snapshot === "applied") {
     expected = change.applied_snapshot;
     matches =
@@ -6150,9 +6188,7 @@ function logicSourceObservation(change, current, snapshot) {
               expected !== undefined && observedSource === expected.data,
           }
         : {}),
-      ...(snapshot === "requested" &&
-      change.kind === "logic_source_create" &&
-      current.scenario !== null
+      ...(snapshot === "requested" && current.scenario !== null
         ? {
             editable_flags_exact_match: logicEditableFlagsMatch(
               current.scenario,
@@ -6229,7 +6265,7 @@ function logicSourceContract(mode) {
     },
     restore: {
       update:
-        "restore the exact saved source and editable flags only while the applied snapshot is unchanged",
+        "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
         "delete only the owned unchanged scenario after its native type is mapped and every current assignment of that type is absent",
     },
@@ -6733,6 +6769,10 @@ function publicNativeChange(
   }
   if (isLogicSourceChange(change)) {
     const requested = logicSourceRequestedSnapshot(change);
+    const mappingVisible =
+      change.kind === "logic_source_create" &&
+      change.applied_snapshot !== undefined &&
+      change.status !== "restored";
     const scenarioRef = change.scenario_index
       ? `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`
       : change.kind === "logic_source_update"
@@ -6785,13 +6825,13 @@ function publicNativeChange(
       ...(change.native_logic_type
         ? { native_logic_type: change.native_logic_type }
         : {}),
-      ...(change.logic_mapping_status
+      ...(mappingVisible && change.logic_mapping_status
         ? { logic_mapping_status: change.logic_mapping_status }
         : {}),
-      ...(typeof change.logic_assignment_ready === "boolean"
+      ...(mappingVisible && typeof change.logic_assignment_ready === "boolean"
         ? { logic_assignment_ready: change.logic_assignment_ready }
         : {}),
-      ...(change.logic_mapping_reason
+      ...(mappingVisible && change.logic_mapping_reason
         ? { logic_mapping_reason: change.logic_mapping_reason }
         : {}),
       ...(logicRef ? { logic_ref: logicRef } : {}),
@@ -6808,7 +6848,7 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
-      ...(change.candidate_logic_types
+      ...(mappingVisible && change.candidate_logic_types
         ? { candidate_logic_types: [...change.candidate_logic_types] }
         : {}),
       ...(change.logic_assignments
@@ -6819,7 +6859,8 @@ function publicNativeChange(
         typeof change.native_logic_type === "string",
       limitations: [
         "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
-        "SprutHub-normalized create flags are returned as observed values and become the applied snapshot.",
+        "LOGIC creation appends a unique JavaScript ownership comment to the source sent to SprutHub.",
+        "SprutHub-derived descriptions and normalized create flags are returned as observed values and become the applied snapshot.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",

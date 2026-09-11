@@ -43,10 +43,12 @@ function trigger(source, value, variables, options, context) {
   }
   variables.wasOn = value === true;
 }`;
-const secondLogicSource = firstLogicSource.replace(
-  'description: "Set the initial brightness once"',
-  'description: "Set the updated brightness once"',
-).replace("setValue(15)", "setValue(25)");
+const secondLogicSource = firstLogicSource
+  .replace(
+    'description: "Set the initial brightness once"',
+    'description: "Set the updated brightness once"',
+  )
+  .replace("setValue(15)", "setValue(25)");
 const nativeLogicDescriptions = [
   {
     source: firstLogicSource,
@@ -5213,8 +5215,28 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
     arguments: { change_ref: update.structuredContent.change_ref },
   });
   assert.equal(appliedUpdate.structuredContent.status, "applied");
-  hub.state.scenarios.find(({ index }) => index === "manual-logic").data =
-    `${secondLogicSource}\n// manual edit`;
+  const manualScenario = hub.state.scenarios.find(
+    ({ index }) => index === "manual-logic",
+  );
+  manualScenario.desc = "Ручное описание после записи source";
+  const metadataConflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(metadataConflict.structuredContent.status, "conflict");
+  assert.equal(
+    metadataConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(
+      ({ scenario }) => scenario?.update?.index === "manual-logic",
+    ).length,
+    1,
+  );
+
+  manualScenario.desc = "Set the updated brightness once";
+  manualScenario.data = `${secondLogicSource}\n// manual edit`;
   const sourceConflict = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: update.structuredContent.change_ref },
