@@ -1071,23 +1071,6 @@ export class SprutHubClient {
     }
   }
 
-  async updateScenario(request) {
-    const response = await this.#request(
-      { scenario: { update: request } },
-      Date.now() + this.timeoutMs,
-    );
-    const scenario = response.result?.scenario?.update;
-    if (!scenario || scenario.index !== request.index) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub did not identify the updated scenario.",
-        "get_native_change",
-        { requestSent: true },
-      );
-    }
-    return scenario;
-  }
-
   async getCharacteristic({ aId, sId, cId }) {
     const response = await this.#request(
       { characteristic: { get: { aId, sId, cId } } },
@@ -1303,13 +1286,14 @@ export class SprutHubClient {
     const accessories = await this.listAccessories();
     const assignments = [];
     for (const accessory of accessories) {
-      if (!Array.isArray(accessory.services)) {
+      const services = accessory.services ?? [];
+      if (!Array.isArray(services)) {
         throw new SprutHubError(
           "incompatible_response",
           "SprutHub did not return services needed to check LOGIC assignments.",
         );
       }
-      for (const service of accessory.services) {
+      for (const service of services) {
         if (!Number.isInteger(service?.sId)) {
           throw new SprutHubError(
             "incompatible_response",

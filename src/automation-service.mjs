@@ -3505,11 +3505,9 @@ export class AutomationService {
           JSON.stringify(change.requested_snapshot.data),
         );
       } else {
-        await this.client.updateScenario(
-          logicSourceUpdateRequest(
-            change.target.index,
-            change.requested_snapshot,
-          ),
+        await this.client.updateScenarioData(
+          change.target.index,
+          change.requested_snapshot.data,
         );
       }
       change.native_acknowledged = true;
@@ -3537,29 +3535,13 @@ export class AutomationService {
     const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
       if (change.kind === "logic_source_create") {
-        const mapping = newLogicTypeMapping(change, current.logicTypes);
-        if (mapping.status === "missing") {
-          return this.#finishNative(change, "uncertain", undefined, {
-            ...requested.fields,
-            conflict_reason: acknowledged
-              ? "logic_type_not_visible_after_create"
-              : undefined,
-          });
-        }
-        if (mapping.status === "ambiguous") {
-          return this.#finishNative(change, "conflict", undefined, {
-            ...requested.fields,
-            conflict_reason: "ambiguous_logic_type",
-            candidate_logic_types: mapping.types,
-          });
-        }
-        change.native_logic_type = mapping.type;
+        updateLogicTypeMapping(change, current.logicTypes);
       }
       return this.#finishNative(change, "applied", undefined, {
         scenario_index: current.scenario.index,
         applied_snapshot: scenarioChangeSnapshot(change, current.scenario),
-        candidate_logic_types: undefined,
         logic_assignments: undefined,
+        conflict_reason: undefined,
         ...requested.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
@@ -3594,6 +3576,9 @@ export class AutomationService {
         configurationMatches: undefined,
       });
     }
+    if (change.kind === "logic_source_create") {
+      updateLogicTypeMapping(change, current.logicTypes);
+    }
     if (change.status === "restored") {
       return this.#recordScenarioObservation(
         change,
@@ -3607,6 +3592,20 @@ export class AutomationService {
         : this.#finishNative(change, "applied", undefined, {
             ...applied.fields,
           });
+    }
+    const requested = scenarioChangeObservation(change, current, "requested");
+    if (
+      change.kind === "logic_source_create" &&
+      change.applied_snapshot === undefined &&
+      requested.matches
+    ) {
+      return this.#finishNative(change, "applied", undefined, {
+        scenario_index: current.scenario.index,
+        applied_snapshot: scenarioChangeSnapshot(change, current.scenario),
+        logic_assignments: undefined,
+        conflict_reason: undefined,
+        ...requested.fields,
+      });
     }
     if (change.applied_snapshot !== undefined) {
       if (change.status === "conflict") {
@@ -3631,6 +3630,17 @@ export class AutomationService {
         : this.#reconcileScenarioApply(change, false);
     }
     const current = await this.#observeScenarioChange(change);
+    if (change.kind === "logic_source_create") {
+      updateLogicTypeMapping(change, current.logicTypes);
+      const requested = scenarioChangeObservation(change, current, "requested");
+      if (change.applied_snapshot === undefined && requested.matches) {
+        change.status = "applied";
+        change.applied_snapshot = scenarioChangeSnapshot(
+          change,
+          current.scenario,
+        );
+      }
+    }
     const applied = scenarioChangeObservation(change, current, "applied");
     if (!applied.matches) {
       return this.#finishNative(change, "conflict", undefined, {
@@ -3644,6 +3654,12 @@ export class AutomationService {
       });
     }
     if (change.kind === "logic_source_create") {
+      if (typeof change.native_logic_type !== "string") {
+        return this.#finishNative(change, "applied", undefined, {
+          conflict_reason: undefined,
+          ...applied.fields,
+        });
+      }
       const assignments = await this.client.findLogicAssignments(
         change.native_logic_type,
       );
@@ -3668,11 +3684,9 @@ export class AutomationService {
           JSON.stringify(change.baseline_snapshot.data),
         );
       } else {
-        await this.client.updateScenario(
-          logicSourceUpdateRequest(
-            change.target.index,
-            change.baseline_snapshot,
-          ),
+        await this.client.updateScenarioData(
+          change.target.index,
+          change.baseline_snapshot.data,
         );
       }
       change.native_acknowledged = true;
@@ -6036,20 +6050,6 @@ function logicSourceCreateRequest(change) {
   };
 }
 
-function logicSourceUpdateRequest(index, snapshot) {
-  return {
-    index,
-    name: snapshot.name,
-    desc: snapshot.desc,
-    active: snapshot.active,
-    onStart: snapshot.onStart,
-    sync: snapshot.sync,
-    type: "LOGIC",
-    data: snapshot.data,
-    expand: "data",
-  };
-}
-
 function logicSourceRequestedSnapshot(change) {
   if (change.kind === "logic_source_update") {
     return change.requested_snapshot;
@@ -6109,10 +6109,7 @@ function logicSourceObservation(change, current, snapshot) {
     expected = change.applied_snapshot;
     matches =
       expected !== undefined &&
-      logicSnapshotMatches(current.scenario, expected) &&
-      (change.kind !== "logic_source_create" ||
-        (typeof change.native_logic_type === "string" &&
-          current.logicTypes.includes(change.native_logic_type)));
+      logicSnapshotMatches(current.scenario, expected);
   } else {
     throw new TypeError(`Unknown LOGIC source snapshot ${snapshot}.`);
   }
@@ -6141,17 +6138,39 @@ function logicSourceObservation(change, current, snapshot) {
 }
 
 function newLogicTypeMapping(change, currentTypes) {
-  if (
-    typeof change.native_logic_type === "string" &&
-    currentTypes.includes(change.native_logic_type)
-  ) {
-    return { status: "found", type: change.native_logic_type };
+  if (typeof change.native_logic_type === "string") {
+    return {
+      status: "mapped",
+      type: change.native_logic_type,
+      assignmentReady: currentTypes.includes(change.native_logic_type),
+    };
   }
   const baseline = new Set(change.baseline_logic_types);
   const types = currentTypes.filter((type) => !baseline.has(type));
   if (types.length === 0) return { status: "missing", types: [] };
   if (types.length > 1) return { status: "ambiguous", types };
-  return { status: "found", type: types[0] };
+  return { status: "mapped", type: types[0], assignmentReady: true };
+}
+
+function updateLogicTypeMapping(change, currentTypes) {
+  const mapping = newLogicTypeMapping(change, currentTypes);
+  change.logic_mapping_status = mapping.status;
+  change.logic_assignment_ready =
+    mapping.status === "mapped" && mapping.assignmentReady;
+  if (mapping.status === "mapped") {
+    change.native_logic_type = mapping.type;
+    change.logic_mapping_reason = mapping.assignmentReady
+      ? undefined
+      : "logic_type_not_available_on_target";
+    change.candidate_logic_types = undefined;
+    return;
+  }
+  change.logic_mapping_reason =
+    mapping.status === "missing"
+      ? "logic_type_not_visible_after_create"
+      : "ambiguous_logic_type";
+  change.candidate_logic_types =
+    mapping.status === "ambiguous" ? mapping.types : undefined;
 }
 
 function logicSourceContract(mode) {
@@ -6169,14 +6188,15 @@ function logicSourceContract(mode) {
         ? ["name", "description", "active", "on_start", "sync", "source"]
         : ["source"],
     assignment: {
-      mapping: "new type observed from logic.types on the selected service",
+      mapping:
+        "stored source ownership is independent from a new type observed through logic.types on the selected service",
       separate_operation: "logic_assignment",
     },
     restore: {
       update:
         "restore the exact saved source and editable flags only while the applied snapshot is unchanged",
       create:
-        "delete only the owned unchanged scenario after every current assignment of its observed logic type is absent",
+        "delete only the owned unchanged scenario after its native type is mapped and every current assignment of that type is absent",
     },
     limitations: [
       "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
@@ -6723,6 +6743,15 @@ function publicNativeChange(
       ...(change.native_logic_type
         ? { native_logic_type: change.native_logic_type }
         : {}),
+      ...(change.logic_mapping_status
+        ? { logic_mapping_status: change.logic_mapping_status }
+        : {}),
+      ...(typeof change.logic_assignment_ready === "boolean"
+        ? { logic_assignment_ready: change.logic_assignment_ready }
+        : {}),
+      ...(change.logic_mapping_reason
+        ? { logic_mapping_reason: change.logic_mapping_reason }
+        : {}),
       ...(logicRef ? { logic_ref: logicRef } : {}),
       ...(configurationMatches !== undefined
         ? { configuration_matches: configurationMatches }
@@ -6743,12 +6772,14 @@ function publicNativeChange(
       ...(change.logic_assignments
         ? { logic_assignments: structuredClone(change.logic_assignments) }
         : {}),
-      restore_supported: true,
+      restore_supported:
+        change.kind !== "logic_source_create" ||
+        typeof change.native_logic_type === "string",
       limitations: [
         "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "Deletion scans current assignments of the observed native logic type, but SprutHub exposes no compare-and-set after that check.",
+        "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
       ],
     };
   }

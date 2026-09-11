@@ -856,15 +856,7 @@ async function startHub() {
         state.behavior.ignoreNextUpdate = false;
         result = {
           scenario: {
-            update: {
-              index: scenario.index,
-              name: scenario.name,
-              desc: scenario.desc,
-              active: scenario.active,
-              onStart: scenario.onStart,
-              sync: scenario.sync,
-              type: scenario.type,
-            },
+            update: {},
           },
         };
       } else if (params.scenario?.delete) {
@@ -4784,7 +4776,10 @@ test("an owned LOGIC source remains editable and restorable while its type mappi
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(created.structuredContent.status, "applied");
-  assert.equal(created.structuredContent.scenario_ref, `${homeRef}/scenario/created-1`);
+  assert.equal(
+    created.structuredContent.scenario_ref,
+    `${homeRef}/scenario/created-1`,
+  );
   assert.equal(created.structuredContent.diff.source.exact_match, true);
   assert.equal(created.structuredContent.logic_mapping_status, "missing");
   assert.equal(created.structuredContent.logic_assignment_ready, false);
@@ -4852,7 +4847,10 @@ test("an owned LOGIC source remains editable and restorable while its type mappi
     name: "get_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(mappingRecovered.structuredContent.logic_mapping_status, "mapped");
+  assert.equal(
+    mappingRecovered.structuredContent.logic_mapping_status,
+    "mapped",
+  );
   assert.equal(mappingRecovered.structuredContent.logic_assignment_ready, true);
   assert.equal(
     mappingRecovered.structuredContent.native_logic_type,
@@ -4913,7 +4911,10 @@ test("an ambiguous LOGIC type mapping survives restart and can be resolved witho
   assert.equal(created.structuredContent.status, "applied");
   assert.equal(created.structuredContent.logic_mapping_status, "ambiguous");
   assert.equal(created.structuredContent.logic_assignment_ready, false);
-  assert.equal(created.structuredContent.logic_mapping_reason, "ambiguous_logic_type");
+  assert.equal(
+    created.structuredContent.logic_mapping_reason,
+    "ambiguous_logic_type",
+  );
   assert.deepEqual(created.structuredContent.candidate_logic_types.sort(), [
     "ConcurrentLogicType",
     "GeneratedLogicType1",
@@ -4926,7 +4927,10 @@ test("an ambiguous LOGIC type mapping survives restart and can be resolved witho
   });
   assert.equal(persisted.structuredContent.status, "applied");
   assert.equal(persisted.structuredContent.logic_mapping_status, "ambiguous");
-  assert.equal(persisted.structuredContent.logic_mapping_reason, "ambiguous_logic_type");
+  assert.equal(
+    persisted.structuredContent.logic_mapping_reason,
+    "ambiguous_logic_type",
+  );
 
   hub.state.logicTypes = hub.state.logicTypes.filter(
     ({ type }) => type !== "ConcurrentLogicType",
@@ -4937,7 +4941,10 @@ test("an ambiguous LOGIC type mapping survives restart and can be resolved witho
   });
   assert.equal(resolved.structuredContent.status, "applied");
   assert.equal(resolved.structuredContent.logic_mapping_status, "mapped");
-  assert.equal(resolved.structuredContent.native_logic_type, "GeneratedLogicType1");
+  assert.equal(
+    resolved.structuredContent.native_logic_type,
+    "GeneratedLogicType1",
+  );
   assert.equal(resolved.structuredContent.restore_supported, true);
 
   const restored = await restartedClient.callTool({
@@ -4949,6 +4956,48 @@ test("an ambiguous LOGIC type mapping survives restart and can be resolved witho
     hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC")
       .length,
     1,
+  );
+});
+
+test("LOGIC restoration rejects malformed present services without deleting its source", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Защищённый LOGIC",
+      description: "Не удалять source при сломанном каталоге",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Отличить omitted repeated field от malformed",
+    },
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  hub.state.accessories[2].services = {};
+
+  const rejected = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /incompatible_response/);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === "created-1",
+    ),
+    false,
   );
 });
 
