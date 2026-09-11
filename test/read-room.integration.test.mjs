@@ -197,6 +197,7 @@ async function startHub(initialState = hubState) {
 
   server.on("connection", (socket) => {
     metrics.connections += 1;
+    const connectionNumber = metrics.connections;
     socket.on("message", async (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request);
@@ -217,7 +218,12 @@ async function startHub(initialState = hubState) {
         socket.close();
         return;
       }
-      if (state.ignoreRequests) return;
+      if (
+        state.ignoreRequests ||
+        (state.ignoreFirstConnection && connectionNumber === 1)
+      ) {
+        return;
+      }
 
       if (state.authorizationError) {
         socket.send(
@@ -1262,7 +1268,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   });
 
   const silentHub = await startHub();
-  silentHub.state.ignoreRequests = true;
+  silentHub.state.ignoreFirstConnection = true;
   const silentClient = await startMcpClient(t, silentHub);
   const timeoutStartedAt = performance.now();
   const timeout = await silentClient.callTool({
@@ -1280,13 +1286,13 @@ test("connection failures stay bounded and recover with a fresh reading in the s
       action: "retry",
     },
   });
-  silentHub.state.ignoreRequests = false;
   const afterTimeout = await silentClient.callTool({
     name: "read_room",
     arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
   });
   assert.equal(afterTimeout.isError, undefined);
   assert.equal(afterTimeout.structuredContent.status, "ok");
+  assert.equal(silentHub.metrics.connections, 2);
 
   const concurrentHub = await startHub();
   const concurrentClient = await startMcpClient(t, concurrentHub);

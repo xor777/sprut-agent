@@ -101,6 +101,56 @@ test("the reader rejects a mixed-home selection before contacting SprutHub", asy
   assert.deepEqual(client.requested, []);
 });
 
+test("the local screen starts while its first SprutHub read is still pending", async (t) => {
+  let finishRead;
+  const reader = {
+    read() {
+      return new Promise((resolve) => {
+        finishRead = resolve;
+      });
+    },
+    async close() {},
+  };
+  const app = await createDashboardServer({
+    reader,
+    config: {
+      title: "Дом",
+      home_ref: homeRef,
+      readings: [{ ref: lightRef, label: "Лампа" }],
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  t.after(() => app.close());
+
+  const firstStart = app.start();
+  const startedBeforeRead = await Promise.race([
+    firstStart,
+    new Promise((resolve) => setTimeout(() => resolve(null), 100)),
+  ]);
+  finishRead({
+    status: "ok",
+    readings: [
+      {
+        ref: lightRef,
+        label: "Лампа",
+        status: "ok",
+        value: false,
+        unit: null,
+        enum: null,
+        measured_at: null,
+        observed_at: new Date().toISOString(),
+        available: true,
+      },
+    ],
+  });
+  await firstStart;
+
+  assert.notEqual(startedBeforeRead, null);
+  const pending = await getJson(`${app.url}/api/readings`);
+  assert.equal(["pending", "ok"].includes(pending.status), true);
+});
+
 test("the local HTTP screen keeps polling, exposes staleness, and recovers without a login", async (t) => {
   let now = Date.parse("2026-09-11T01:00:00.000Z");
   let light = false;
@@ -210,6 +260,94 @@ test("the local HTTP screen keeps polling, exposes staleness, and recovers witho
 
   const page = await fetch(app.url).then((response) => response.text());
   assert.equal(page.includes("<script>bad()</script>"), false);
+});
+
+test("the local screen presents household values and one shared connection failure", async (t) => {
+  let connectionLost = false;
+  const reader = {
+    async read({ readings }) {
+      if (connectionLost) {
+        return {
+          status: "error",
+          readings: readings.map(({ ref, label }) => ({
+            ref,
+            label,
+            status: "error",
+            error: {
+              code: "connection_closed",
+              message:
+                "The SprutHub connection closed before the response arrived.",
+              retryable: true,
+              action: "retry",
+            },
+          })),
+        };
+      }
+      return {
+        status: "ok",
+        readings: readings.map(({ ref, label }) => ({
+          ref,
+          label,
+          status: "ok",
+          value: ref === temperatureRef ? 0 : false,
+          unit: ref === temperatureRef ? "celsius" : null,
+          enum: null,
+          measured_at: null,
+          observed_at: "2026-09-11T01:00:00.000Z",
+          available: true,
+        })),
+      };
+    },
+    async close() {},
+  };
+  const app = await createDashboardServer({
+    reader,
+    config: {
+      title: "Дом",
+      home_ref: homeRef,
+      readings: [
+        { ref: temperatureRef, label: "Температура" },
+        { ref: lightRef, label: "Лампа" },
+      ],
+    },
+    pollIntervalMs: 20,
+    host: "127.0.0.1",
+    port: 0,
+  });
+  t.after(() => app.close());
+  await app.start();
+
+  const fresh = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.status === "ok" ? state : null;
+  }, "presented readings");
+  assert.deepEqual(
+    fresh.readings.map(({ display_value, display_unit }) => ({
+      display_value,
+      display_unit,
+    })),
+    [
+      { display_value: "0", display_unit: "°C" },
+      { display_value: "Нет", display_unit: null },
+    ],
+  );
+
+  connectionLost = true;
+  const disconnected = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.connection_lost ? state : null;
+  }, "shared connection failure");
+  assert.equal(disconnected.message, "Связь с домом потеряна");
+  assert.deepEqual(
+    disconnected.readings.map(({ display_status }) => display_status),
+    [null, null],
+  );
+  assert.equal(
+    JSON.stringify(disconnected).includes(
+      "The SprutHub connection closed before the response arrived.",
+    ),
+    true,
+  );
 });
 
 function characteristic(ref, name, value, unit, validValues = []) {

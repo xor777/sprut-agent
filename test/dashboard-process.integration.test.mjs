@@ -110,6 +110,54 @@ test("the dashboard command leaves one independent poller and stops only that sc
   assert.equal(hub.connections.size, 0);
 });
 
+test("the dashboard rejects a non-characteristic selection before spawning", async (t) => {
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-dashboard-invalid-"));
+  const stateDirectory = path.join(scratch, "state");
+  const configFile = path.join(scratch, "home.json");
+  const port = await reservePort();
+  const hub = await startHub(t);
+  await mkdir(stateDirectory);
+  await writeFile(
+    configFile,
+    JSON.stringify({
+      title: "Мой дом",
+      home_ref: "spruthub://hub/home-1",
+      port,
+      readings: [
+        {
+          label: "Не характеристика",
+          ref: "spruthub://hub/home-1/accessory/11",
+        },
+      ],
+    }),
+  );
+  const environment = {
+    ...process.env,
+    SPRUT_AGENT_DASHBOARD_STATE_DIR: stateDirectory,
+    SPRUTHUB_URL: hub.url,
+    SPRUTHUB_TOKEN: "local-token",
+    SPRUTHUB_SERIAL: "home-1",
+    SPRUTHUB_CID: "dashboard-test",
+    SPRUTHUB_TIMEOUT_MS: "1000",
+  };
+  t.after(async () => {
+    await rm(scratch, { recursive: true });
+  });
+
+  await assert.rejects(
+    run(process.execPath, [dashboardScript, "start", configFile], {
+      cwd: projectRoot,
+      env: environment,
+    }),
+    (error) =>
+      error.stderr.includes(
+        "Every reading must be a characteristic reference in the selected home.",
+      ),
+  );
+  assert.equal(hub.accessoryReads, 0);
+  await assert.rejects(fetch(`http://127.0.0.1:${port}/health`));
+});
+
 async function startHub(t) {
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
