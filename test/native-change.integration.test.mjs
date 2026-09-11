@@ -4950,22 +4950,24 @@ test("an acknowledged LOGIC source delete that leaves the source stays uncertain
     uncertain.structuredContent.observed_source_sha256,
     createHash("sha256").update(createdScenario.data).digest("hex"),
   );
-  assert.deepEqual(
-    uncertain.structuredContent.diff.editable_flags.observed,
-    {
-      name: createdScenario.name,
-      description: createdScenario.desc,
-      active: createdScenario.active,
-      on_start: createdScenario.onStart,
-      sync: createdScenario.sync,
-      type: createdScenario.type,
-    },
-  );
-  assert.deepEqual(uncertain.structuredContent.write_intent, {
-    direction: "restore",
-    phase: "needs_reconciliation",
-    acknowledged: true,
+  assert.deepEqual(uncertain.structuredContent.diff.editable_flags.observed, {
+    name: createdScenario.name,
+    description: createdScenario.desc,
+    active: createdScenario.active,
+    on_start: createdScenario.onStart,
+    sync: createdScenario.sync,
+    type: createdScenario.type,
   });
+  assert.equal(uncertain.structuredContent.write_intent.direction, "restore");
+  assert.equal(
+    uncertain.structuredContent.write_intent.phase,
+    "needs_reconciliation",
+  );
+  assert.equal(uncertain.structuredContent.write_intent.acknowledged, true);
+  assert.match(
+    uncertain.structuredContent.write_intent.at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.delete).length,
     1,

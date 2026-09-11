@@ -6189,10 +6189,14 @@ function logicSourceObservation(change, current, snapshot) {
       ...(["requested", "restored"].includes(snapshot) &&
       current.scenario !== null
         ? {
-            editable_flags_exact_match: logicEditableFlagsMatch(
-              current.scenario,
-              expected,
-            ),
+            ...(expected !== undefined
+              ? {
+                  editable_flags_exact_match: logicEditableFlagsMatch(
+                    current.scenario,
+                    expected,
+                  ),
+                }
+              : {}),
             observed_editable_flags: publicLogicEditableFlags(
               logicScenarioSnapshot(current.scenario),
             ),
