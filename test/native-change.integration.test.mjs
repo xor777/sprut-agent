@@ -1777,6 +1777,7 @@ test("versioned BLOCK contract prepares different supported compositions", async
 
   const nestedData = blockData({ nested: true });
   delete nestedData.vendorConfiguration;
+  nestedData.targets[0].then[1].index = 2;
   const simpleData = blockData();
   delete simpleData.vendorConfiguration;
   for (const [name, data] of [

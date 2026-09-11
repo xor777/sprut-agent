@@ -3011,6 +3011,7 @@ function blockContract() {
       if_modes: ["EVERY"],
       action_types: ["set"],
       delay_modes: ["RESET"],
+      delay_index: { type: "integer", minimum: 1, unique: true },
       characteristic_conditions: {
         boolean: ["="],
         string_or_enum: ["=", "!="],
@@ -3223,7 +3224,7 @@ function validateBlockNode(node, kind, path, context) {
   if (kind === "delay") {
     if (
       !Number.isSafeInteger(node.index) ||
-      node.index < 0 ||
+      node.index <= 0 ||
       context.delayIndexes.has(node.index) ||
       node.mode !== "RESET" ||
       !Number.isSafeInteger(node.time) ||
@@ -3232,7 +3233,7 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       throw invalidBlock(
         path,
-        "RESET delay index/time is invalid or duplicated",
+        "RESET delay index must be a positive unique integer; time must be a positive integer",
       );
     }
     context.delayIndexes.add(node.index);
