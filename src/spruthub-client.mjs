@@ -786,20 +786,24 @@ export class SprutHubClient {
       Date.now() + this.timeoutMs,
     );
     const types = extractEntityArray(response, ["service", "types", "types"]);
-    for (const type of types) {
+    return types.map((type) => {
       if (
         !type ||
         typeof type.type !== "string" ||
-        !Array.isArray(type.required) ||
-        !Array.isArray(type.optional)
+        (type.required !== undefined && !Array.isArray(type.required)) ||
+        (type.optional !== undefined && !Array.isArray(type.optional))
       ) {
         throw new SprutHubError(
           "incompatible_response",
           "SprutHub returned an incompatible service type catalog.",
         );
       }
-    }
-    return types;
+      return {
+        ...type,
+        required: type.required ?? [],
+        optional: type.optional ?? [],
+      };
+    });
   }
 
   async createAccessory({ name, roomId, services }) {
@@ -848,8 +852,7 @@ export class SprutHubClient {
       Date.now() + this.timeoutMs,
     );
     const links = extractEntityArray(response, ["link", "list", "links"], true);
-    for (const link of links) validateLink(link);
-    return links;
+    return links.map(normalizeLink);
   }
 
   async addVirtualLink({ aId, sId, cId, tAId, tSId, tCId }) {
@@ -859,7 +862,7 @@ export class SprutHubClient {
     );
     const link = response.result?.link?.addVirtual;
     try {
-      validateLink(link);
+      return normalizeLink(link);
     } catch (error) {
       if (error instanceof SprutHubError) {
         error.requestSent = true;
@@ -867,7 +870,6 @@ export class SprutHubClient {
       }
       throw error;
     }
-    return link;
   }
 
   async removeLink({ aId, sId, cId, linkId }) {
@@ -3293,20 +3295,21 @@ function validateAccessory(accessory) {
   return accessory;
 }
 
-function validateLink(link) {
+function normalizeLink(link) {
   if (
     !link ||
     typeof link.index !== "string" ||
     link.index.length === 0 ||
     !["SYSTEM", "IN", "OUT"].includes(link.type) ||
-    !Array.isArray(link.characteristics)
+    (link.characteristics !== undefined && !Array.isArray(link.characteristics))
   ) {
     throw new SprutHubError(
       "incompatible_response",
       "SprutHub returned incomplete link data.",
     );
   }
-  for (const characteristic of link.characteristics) {
+  const characteristics = link.characteristics ?? [];
+  for (const characteristic of characteristics) {
     if (
       !isStableId(characteristic?.aId) ||
       !isStableId(characteristic?.sId) ||
@@ -3318,6 +3321,7 @@ function validateLink(link) {
       );
     }
   }
+  return { ...link, characteristics };
 }
 
 function incompleteAccessoryError() {
