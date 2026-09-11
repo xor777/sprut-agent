@@ -1822,6 +1822,67 @@ test("versioned BLOCK contract prepares different supported compositions", async
   );
 });
 
+test("BLOCK preparation rejects delay index zero before any scenario write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const results = [];
+
+  for (const operation of ["block_create", "block_data_update"]) {
+    const data = blockData();
+    if (operation === "block_create") delete data.vendorConfiguration;
+    data.targets[0].then[1].index = 0;
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation,
+        target_ref: operation === "block_create" ? homeRef : scenarioRef,
+        ...(operation === "block_create"
+          ? {
+              name: "BLOCK с неисполняемым таймером",
+              description: "Не записывать delay index=0",
+              active: false,
+              on_start: false,
+              sync: false,
+            }
+          : {}),
+        data,
+        reason: "Отклонить неисполняемый таймер до записи",
+      },
+    });
+    results.push({
+      operation,
+      isError: prepared.isError,
+      code: prepared.structuredContent?.error?.code,
+      message: prepared.structuredContent?.error?.message,
+    });
+  }
+
+  assert.deepEqual(
+    results,
+    ["block_create", "block_data_update"].map((operation) => ({
+      operation,
+      isError: true,
+      code: "invalid_block_data",
+      message:
+        "Unsupported BLOCK data at root.targets[0].then[1]: RESET delay index must be a positive unique integer; time must be a positive integer.",
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "block_create" },
+  });
+  assert.deepEqual(contract.structuredContent.contract.supported.delay_index, {
+    type: "integer",
+    minimum: 1,
+    unique: true,
+  });
+});
+
 test("BLOCK grammar rejects known nodes in unsupported child slots before send", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
