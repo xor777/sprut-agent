@@ -2005,7 +2005,15 @@ export class AutomationService {
         await this.#saveBeforeWrite(change);
         continue;
       }
-      if (removal.sent) {
+      // A lost send may not have reached the hub. Only the exact persisted IN
+      // is safe to retry, once; a target match alone does not preserve ownership.
+      const retryingUncertainRemoval =
+        removal.sent === true &&
+        removal.acknowledged !== true &&
+        removal.completed !== true &&
+        removal.uncertain_retry_sent !== true &&
+        removal.link_id === relation.linkId;
+      if (removal.sent && !retryingUncertainRemoval) {
         return this.#finishNative(change, "uncertain", undefined, {
           observed_snapshot: current,
           configuration_matches: undefined,
@@ -2013,14 +2021,22 @@ export class AutomationService {
           last_verification: freshVerification("owned_link_still_present"),
         });
       }
-      removal.link_id = relation.linkId;
-      removal.physical_links_before = normalizePhysicalLinks(
-        await this.client.listLinks(progress.target),
-      );
+      if (!retryingUncertainRemoval) {
+        removal.link_id = relation.linkId;
+        removal.physical_links_before = normalizePhysicalLinks(
+          await this.client.listLinks(progress.target),
+        );
+      } else {
+        removal.uncertain_retry_sent = true;
+      }
       await this.#persistVirtualLightStep(
         change,
         "removing_link",
-        { characteristic_type: removal.type, link_id: removal.link_id },
+        {
+          characteristic_type: removal.type,
+          link_id: removal.link_id,
+          ...(retryingUncertainRemoval ? { uncertain_retry: true } : {}),
+        },
         "restore",
       );
       removal.sent = true;
@@ -2030,7 +2046,7 @@ export class AutomationService {
         removal.acknowledged = true;
       } catch (error) {
         if (!isUncertainWriteError(error)) {
-          removal.sent = false;
+          if (!retryingUncertainRemoval) removal.sent = false;
           await this.#finishNative(change, "applied", undefined, {
             observed_snapshot: current,
           });
@@ -2304,10 +2320,7 @@ export class AutomationService {
         }
       }
       if (cleanup?.sent) {
-        if (
-          cleanup.physical_links_before === undefined ||
-          cleanup.physical_links_after === undefined
-        ) {
+        if (cleanup.physical_links_before === undefined) {
           preservationUnverified.push({
             member_ref: artifact.member_ref,
             characteristic_type: artifact.type,
@@ -2318,13 +2331,25 @@ export class AutomationService {
             baseline.links,
             artifact.source,
           );
+          const preservationEvidence =
+            cleanup.physical_links_after ?? observedLinks;
           const missingPreserved = expectedPreserved.filter(
             (expected) =>
-              !cleanup.physical_links_after.some((observed) =>
+              !preservationEvidence.some((observed) =>
                 physicalLinkContains(observed, expected),
               ),
           );
-          if (missingPreserved.length > 0) {
+          if (
+            cleanup.physical_links_after === undefined &&
+            missingPreserved.length > 0
+          ) {
+            // Late presence is sufficient to finish safely. Late absence cannot
+            // establish that this change removed a foreign link.
+            preservationUnverified.push({
+              member_ref: artifact.member_ref,
+              characteristic_type: artifact.type,
+            });
+          } else if (missingPreserved.length > 0) {
             preservationFailures.push({
               member_ref: artifact.member_ref,
               characteristic_type: artifact.type,

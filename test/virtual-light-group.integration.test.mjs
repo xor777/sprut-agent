@@ -1104,7 +1104,10 @@ test("restore finishes from sufficient current evidence after removal readback i
         arguments: { change_ref: prepared.structuredContent.change_ref },
       });
       assert.equal(interrupted.isError, true);
-      assert.equal(interrupted.structuredContent.error.code, "connection_closed");
+      assert.equal(
+        interrupted.structuredContent.error.code,
+        "connection_closed",
+      );
       await firstClient.close();
 
       if (scenario.accessoryRemovedManually) {
