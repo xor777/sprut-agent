@@ -4748,6 +4748,64 @@ test("a lost LOGIC create response is reconciled without creating a duplicate", 
   );
 });
 
+test("an exact owned LOGIC source remains applied when the hub normalizes a create flag", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Нормализованный LOGIC",
+      description: "Сохранить подтверждённый source",
+      active: true,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не смешивать source ownership с native-нормализацией",
+    },
+  });
+  hub.state.behavior.afterCreate = () => {
+    hub.state.scenarios.find(({ index }) => index === "created-1").active =
+      false;
+  };
+
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.diff.source.exact_match, true);
+  assert.equal(created.structuredContent.diff.editable_flags.exact_match, false);
+  assert.equal(created.structuredContent.diff.editable_flags.to.active, true);
+  assert.equal(
+    created.structuredContent.diff.editable_flags.observed.active,
+    false,
+  );
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "applied");
+  assert.equal(persisted.structuredContent.diff.source.exact_match, true);
+  assert.equal(
+    persisted.structuredContent.diff.editable_flags.observed.active,
+    false,
+  );
+
+  const restored = await restartedClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    false,
+  );
+});
+
 test("an owned LOGIC source remains editable and restorable while its type mapping is initially missing", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
