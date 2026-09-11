@@ -704,8 +704,8 @@ test("restore removes only its consumer from shared and pre-existing physical li
     index: "Virtual/34.15",
     characteristics: [],
   };
-  hub.state.links.set("34.13.15", [systemLink, emptyOut]);
-  hub.state.links.set("34.13.16", [sharedOut]);
+  hub.state.links.set("34.13.15", structuredClone([systemLink, emptyOut]));
+  hub.state.links.set("34.13.16", structuredClone([sharedOut]));
   hub.state.behavior.preserveEmptyPhysicalOutOnIncomingRemove = true;
   const client = await startClient(t, hub, stateDirectory);
 
@@ -723,9 +723,36 @@ test("restore removes only its consumer from shared and pre-existing physical li
   });
   assert.equal(restored.isError, undefined, restored.content[0]?.text);
   assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    restored.structuredContent.native_link_residues.map(
+      ({ member_ref, characteristic_type, link }) => ({
+        member_ref,
+        characteristic_type,
+        type: link.type,
+        characteristics: link.characteristics,
+      }),
+    ),
+    [
+      {
+        member_ref: memberServiceRefs[1],
+        characteristic_type: "On",
+        type: "OUT",
+        characteristics: [],
+      },
+      {
+        member_ref: memberServiceRefs[1],
+        characteristic_type: "Brightness",
+        type: "OUT",
+        characteristics: [],
+      },
+    ],
+  );
   assert.deepEqual(hub.state.links.get("34.13.15"), [systemLink, emptyOut]);
   assert.deepEqual(hub.state.links.get("34.13.16"), [sharedOut]);
-  assert.equal(hub.state.accessories.some(({ id }) => id === 90), false);
+  assert.equal(
+    hub.state.accessories.some(({ id }) => id === 90),
+    false,
+  );
 });
 
 test("restore preserves a virtual group after a manual link was added", async (t) => {

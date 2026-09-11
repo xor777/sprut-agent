@@ -531,6 +531,18 @@ export class AutomationService {
         conflict_reason: "matching_virtual_accessory_exists",
       };
     }
+    const physicalLinkBaselines = await Promise.all(
+      characteristicTypes.flatMap((type) =>
+        members.map(async (member) => ({
+          type,
+          member_ref: member.ref,
+          target: structuredClone(member.characteristics[type]),
+          links: normalizePhysicalLinks(
+            await this.client.listLinks(member.characteristics[type]),
+          ),
+        })),
+      ),
+    );
     const requiredTypes = new Set(
       lightbulbType.required.map(characteristicTypeName),
     );
@@ -561,6 +573,7 @@ export class AutomationService {
       baseline_accessory_ids: allAccessories.map(
         ({ id: accessoryId }) => accessoryId,
       ),
+      physical_link_baselines: physicalLinkBaselines,
       progress: {
         creation: { sent: false, acknowledged: false },
         links: characteristicTypes.flatMap((type) =>
@@ -1581,6 +1594,7 @@ export class AutomationService {
         });
       }
       await this.#validateVirtualLightPreparation(change);
+      await this.#validatePhysicalLinkBaselines(change);
       await this.#persistVirtualLightStep(change, "creating_accessory");
       change.progress.creation.sent = true;
       await this.#saveBeforeWrite(change);
@@ -1868,18 +1882,8 @@ export class AutomationService {
     }
     if (current.absent) {
       if (change.write_intent?.direction === "restore") {
-        const residues = await this.#observePhysicalVirtualLinkResidues(change);
-        if (residues.length > 0) {
-          return this.#finishNative(change, "uncertain", undefined, {
-            physical_link_residues: residues,
-            configuration_matches: undefined,
-            conflict_reason: "link_cleanup_incomplete",
-            last_verification: freshVerification(
-              "physical_link_residue_observed",
-            ),
-          });
-        }
-        change.physical_link_residues = undefined;
+        const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change);
+        if (cleanupFailure) return cleanupFailure;
         return this.#finishNative(change, "restored", undefined, {
           last_verification: freshVerification("created_accessory_absent"),
         });
@@ -1930,18 +1934,8 @@ export class AutomationService {
     }
     const current = await this.#observeVirtualLightGroup(change);
     if (current.absent) {
-      const residues = await this.#observePhysicalVirtualLinkResidues(change);
-      if (residues.length > 0) {
-        return this.#finishNative(change, "uncertain", undefined, {
-          physical_link_residues: residues,
-          configuration_matches: undefined,
-          conflict_reason: "link_cleanup_incomplete",
-          last_verification: freshVerification(
-            "physical_link_residue_observed",
-          ),
-        });
-      }
-      change.physical_link_residues = undefined;
+      const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change);
+      if (cleanupFailure) return cleanupFailure;
       return this.#finishNative(change, "restored", undefined, {
         last_verification: freshVerification("created_accessory_absent"),
       });
@@ -2101,16 +2095,8 @@ export class AutomationService {
       if (!setting.acknowledged) change.recovered_after_uncertain_write = true;
       await this.#saveBeforeWrite(change);
     }
-    const residues = await this.#observePhysicalVirtualLinkResidues(change);
-    if (residues.length > 0) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        physical_link_residues: residues,
-        configuration_matches: undefined,
-        conflict_reason: "link_cleanup_incomplete",
-        last_verification: freshVerification("physical_link_residue_observed"),
-      });
-    }
-    change.physical_link_residues = undefined;
+    const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change);
+    if (cleanupFailure) return cleanupFailure;
     if (change.progress.deletion?.sent === true) {
       return this.#finishNative(change, "uncertain", undefined, {
         observed_snapshot: current,
@@ -2143,6 +2129,8 @@ export class AutomationService {
       change.created_accessory_id,
     );
     if (after === null) {
+      const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change);
+      if (cleanupFailure) return cleanupFailure;
       if (change.progress.deletion.acknowledged !== true) {
         change.recovered_after_uncertain_write = true;
       }
@@ -2217,9 +2205,10 @@ export class AutomationService {
       (candidate) =>
         candidate.type === "OUT" &&
         candidate.index === link.link_id &&
-        candidate.characteristics.length === 1 &&
-        nativeTargetKey(candidate.characteristics[0]) ===
-          nativeTargetKey(source),
+        candidate.characteristics.some(
+          (characteristic) =>
+            nativeTargetKey(characteristic) === nativeTargetKey(source),
+        ),
     );
     if (matching.length !== 1) return false;
     const artifact = {
@@ -2242,31 +2231,78 @@ export class AutomationService {
     return true;
   }
 
-  async #observePhysicalVirtualLinkResidues(change) {
-    const residues = [];
+  async #observePhysicalVirtualLinkCleanup(change) {
+    const ownedResidues = [];
+    const baselineChanges = [];
+    const nativeResidues = [];
     for (const artifact of change.physical_link_artifacts ?? []) {
-      const links = normalizeVirtualLinks(
+      const links = normalizePhysicalLinks(
         await this.client.listLinks(artifact.target),
       );
+      const baseline = physicalLinkBaseline(change, artifact);
       for (const link of links) {
         if (
-          link.index === artifact.index ||
-          (link.type === "OUT" &&
-            link.characteristics.some(
-              (characteristic) =>
-                nativeTargetKey(characteristic) ===
-                nativeTargetKey(artifact.source),
-            ))
+          link.type === "OUT" &&
+          link.characteristics.some(
+            (characteristic) =>
+              nativeTargetKey(characteristic) ===
+              nativeTargetKey(artifact.source),
+          )
         ) {
-          residues.push({
+          ownedResidues.push({
             member_ref: artifact.member_ref,
             characteristic_type: artifact.type,
             link: structuredClone(link),
           });
         }
       }
+      const missing = baseline.links.filter(
+        (expected) =>
+          !links.some((observed) => physicalLinkContains(observed, expected)),
+      );
+      if (missing.length > 0) {
+        baselineChanges.push({
+          member_ref: artifact.member_ref,
+          characteristic_type: artifact.type,
+          missing_links: structuredClone(missing),
+        });
+      }
+      for (const link of links) {
+        const residue = physicalLinkAddition(link, baseline.links, artifact);
+        if (residue) {
+          nativeResidues.push({
+            member_ref: artifact.member_ref,
+            characteristic_type: artifact.type,
+            link: residue,
+          });
+        }
+      }
     }
-    return residues;
+    return { ownedResidues, baselineChanges, nativeResidues };
+  }
+
+  async #verifyPhysicalLinkCleanup(change) {
+    const physicalLinks = await this.#observePhysicalVirtualLinkCleanup(change);
+    if (physicalLinks.ownedResidues.length > 0) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        physical_link_residues: physicalLinks.ownedResidues,
+        configuration_matches: undefined,
+        conflict_reason: "link_cleanup_incomplete",
+        last_verification: freshVerification("physical_link_residue_observed"),
+      });
+    }
+    if (physicalLinks.baselineChanges.length > 0) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        physical_link_baseline_changes: physicalLinks.baselineChanges,
+        configuration_matches: undefined,
+        conflict_reason: "physical_link_baseline_changed",
+        last_verification: freshVerification("physical_link_baseline_changed"),
+      });
+    }
+    change.physical_link_residues = undefined;
+    change.physical_link_baseline_changes = undefined;
+    change.native_link_residues = physicalLinks.nativeResidues;
+    return null;
   }
 
   async #recordUnownedVirtualLightCandidates(change) {
@@ -2349,6 +2385,21 @@ export class AutomationService {
         "A selected virtual light member changed after preparation.",
         "prepare_native_change",
       );
+    }
+  }
+
+  async #validatePhysicalLinkBaselines(change) {
+    for (const baseline of change.physical_link_baselines) {
+      const current = normalizePhysicalLinks(
+        await this.client.listLinks(baseline.target),
+      );
+      if (!isDeepStrictEqual(current, baseline.links)) {
+        throw new SprutHubError(
+          "binding_changed",
+          "A selected virtual light member link changed after preparation.",
+          "prepare_native_change",
+        );
+      }
     }
   }
 
@@ -5102,6 +5153,71 @@ function normalizeVirtualLinks(links) {
     );
 }
 
+function normalizePhysicalLinks(links) {
+  return links
+    .map((link) => ({
+      index: link.index,
+      type: link.type,
+      ...(link.controller !== undefined ? { controller: link.controller } : {}),
+      characteristics: link.characteristics
+        .map(({ aId, sId, cId }) => ({ aId, sId, cId }))
+        .sort((left, right) =>
+          nativeTargetKey(left).localeCompare(nativeTargetKey(right)),
+        ),
+    }))
+    .sort((left, right) =>
+      `${left.type}:${left.index}`.localeCompare(
+        `${right.type}:${right.index}`,
+      ),
+    );
+}
+
+function physicalLinkBaseline(change, artifact) {
+  return change.physical_link_baselines.find(
+    (baseline) =>
+      baseline.type === artifact.type &&
+      baseline.member_ref === artifact.member_ref &&
+      nativeTargetKey(baseline.target) === nativeTargetKey(artifact.target),
+  );
+}
+
+function physicalLinkContains(observed, expected) {
+  if (
+    observed.type !== expected.type ||
+    observed.index !== expected.index ||
+    observed.controller !== expected.controller
+  ) {
+    return false;
+  }
+  const observedCharacteristics = new Set(
+    observed.characteristics.map(nativeTargetKey),
+  );
+  return expected.characteristics.every((characteristic) =>
+    observedCharacteristics.has(nativeTargetKey(characteristic)),
+  );
+}
+
+function physicalLinkAddition(link, baselineLinks, artifact) {
+  const baseline = baselineLinks.find(
+    (candidate) =>
+      candidate.type === link.type &&
+      candidate.index === link.index &&
+      candidate.controller === link.controller,
+  );
+  if (!baseline) return structuredClone(link);
+  const baselineCharacteristics = new Set(
+    baseline.characteristics.map(nativeTargetKey),
+  );
+  const additions = link.characteristics.filter(
+    (characteristic) =>
+      nativeTargetKey(characteristic) !== nativeTargetKey(artifact.source) &&
+      !baselineCharacteristics.has(nativeTargetKey(characteristic)),
+  );
+  return additions.length > 0
+    ? { ...structuredClone(link), characteristics: additions }
+    : null;
+}
+
 function virtualLinkRelation(links, target) {
   const key = nativeTargetKey(target);
   for (const link of links) {
@@ -5808,12 +5924,24 @@ function publicNativeChange(
             ),
           }
         : {}),
+      ...(change.physical_link_baseline_changes
+        ? {
+            physical_link_baseline_changes: structuredClone(
+              change.physical_link_baseline_changes,
+            ),
+          }
+        : {}),
+      ...(change.native_link_residues?.length > 0
+        ? {
+            native_link_residues: structuredClone(change.native_link_residues),
+          }
+        : {}),
       restore_supported: change.virtual_accessory_creation_owned === true,
       limitations: [
         "The group exposes only the explicitly validated common On and Brightness controls.",
         "Last-value feedback is configured; a manual member change is not synchronized to other members.",
         "Creation and link writes are sequential, and SprutHub exposes no native compare-and-set.",
-        "Create and addVirtual were replayed on hub 3.0.0; removal first follows the current native UI path and requires physical OUT readback before accessory deletion.",
+        "Create and addVirtual were replayed on hub 3.0.0; removal first follows the current native UI path, preserves the saved physical link baseline, and reports non-owned native OUT residues without claiming them.",
         "A same-valued command can be acknowledged without reaching every member; characteristic commands through an owned group report each member readback instead of inferring delivery from the virtual value.",
       ],
     };
