@@ -356,7 +356,12 @@ async function startHub() {
       failNextLogicList: false,
       closeAfterAccessoryUpdate: false,
       closeAfterRoomCreate: false,
+      failAccessoryGetAfterUpdate: false,
+      failNextAccessoryGet: false,
+      invalidNextRoomList: false,
+      missingRoomGetAsNotFoundError: false,
       normalizeNextAccessoryName: false,
+      rejectNextRoomGetAsInternalError: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -423,11 +428,13 @@ async function startHub() {
       if (
         (params.characteristic?.get &&
           state.behavior.failNextCharacteristicGet) ||
+        (params.accessory?.get && state.behavior.failNextAccessoryGet) ||
         (params.window?.get && state.behavior.failNextWindowGet) ||
         (params.scenario?.get && state.behavior.failNextScenarioGet) ||
         (params.logic?.list && state.behavior.failNextLogicList)
       ) {
         state.behavior.failNextCharacteristicGet = false;
+        state.behavior.failNextAccessoryGet = false;
         state.behavior.failNextWindowGet = false;
         state.behavior.failNextScenarioGet = false;
         state.behavior.failNextLogicList = false;
@@ -449,14 +456,33 @@ async function startHub() {
           },
         };
       } else if (params.room?.list) {
-        result = { room: { list: { rooms: structuredClone(state.rooms) } } };
+        if (state.behavior.invalidNextRoomList) {
+          state.behavior.invalidNextRoomList = false;
+          result = { room: { list: { rooms: {} } } };
+        } else {
+          result = { room: { list: { rooms: structuredClone(state.rooms) } } };
+        }
       } else if (params.room?.get) {
+        const room = state.rooms.find(({ id }) => id === params.room.get.id);
+        if (
+          state.behavior.rejectNextRoomGetAsInternalError ||
+          (!room && state.behavior.missingRoomGetAsNotFoundError)
+        ) {
+          state.behavior.rejectNextRoomGetAsInternalError = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: {
+                code: -32603,
+                message: "Not found: 'Комната уже не существует'",
+              },
+            }),
+          );
+          return;
+        }
         result = {
           room: {
-            get:
-              structuredClone(
-                state.rooms.find(({ id }) => id === params.room.get.id),
-              ) ?? null,
+            get: structuredClone(room) ?? null,
           },
         };
       } else if (params.room?.create) {
@@ -683,6 +709,10 @@ async function startHub() {
           accessory.roomId = params.accessory.update.roomId;
         }
         state.behavior.normalizeNextAccessoryName = false;
+        if (state.behavior.failAccessoryGetAfterUpdate) {
+          state.behavior.failAccessoryGetAfterUpdate = false;
+          state.behavior.failNextAccessoryGet = true;
+        }
         if (state.behavior.closeAfterAccessoryUpdate) {
           state.behavior.closeAfterAccessoryUpdate = false;
           socket.close();
@@ -4002,6 +4032,117 @@ test("a lost accessory response is reconciled without a second update", async (t
   );
 });
 
+test("an apply retry never uses a saved accessory snapshot after a fresh read fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: workshopRoomRef,
+      name: "Рабочая лампа",
+      reason: "Не повторять запись по устаревшему снимку",
+    },
+  });
+  await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.closeAfterAccessoryUpdate = true;
+  hub.state.behavior.failAccessoryGetAfterUpdate = true;
+  const firstAttempt = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    firstAttempt.structuredContent.status,
+    "uncertain",
+    firstAttempt.content[0]?.text,
+  );
+
+  hub.state.behavior.failNextAccessoryGet = true;
+  const failedFreshRead = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(failedFreshRead.structuredContent.status, "uncertain");
+  assert.equal(failedFreshRead.structuredContent.verification.fresh, false);
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    1,
+  );
+
+  const recovered = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    1,
+  );
+});
+
+test("a restore retry preserves a manual edit when its fresh read fails", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: workshopRoomRef,
+      name: "Рабочая лампа",
+      reason: "Не затирать ручную правку при повторе возврата",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.closeAfterAccessoryUpdate = true;
+  hub.state.behavior.failAccessoryGetAfterUpdate = true;
+  const firstRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    firstRestore.structuredContent.status,
+    "uncertain",
+    firstRestore.content[0]?.text,
+  );
+
+  hub.state.accessories.find(({ id }) => id === 34).name =
+    "Ручное имя владельца";
+  hub.state.behavior.failNextAccessoryGet = true;
+  const failedFreshRead = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(failedFreshRead.structuredContent.status, "uncertain");
+  assert.equal(failedFreshRead.structuredContent.verification.fresh, false);
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 34).name,
+    "Ручное имя владельца",
+  );
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    2,
+  );
+
+  const conflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 34).name,
+    "Ручное имя владельца",
+  );
+});
+
 test("an exact room ref selects one of two rooms with the same name", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   hub.state.rooms.push({
@@ -4080,6 +4221,47 @@ test("a normalized name after a lost accessory response stays uncertain and is n
   );
 });
 
+test("a normalized baseline name after an acknowledged restore stays uncertain without a rewrite", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.accessories.find(({ id }) => id === 34).name = "Лампа · стол";
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: workshopRoomRef,
+      name: "Рабочая лампа",
+      reason: "Вернуть наблюдённое имя без догадки о нормализации",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.normalizeNextAccessoryName = true;
+  const uncertain = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    uncertain.structuredContent.conflict_reason,
+    "possible_name_normalization_after_restore",
+  );
+  assert.equal(uncertain.structuredContent.observed.name, "Лампа стол");
+
+  const repeated = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    2,
+  );
+});
+
 test("an existing room name is a no-op without owned creation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -4101,6 +4283,73 @@ test("an existing room name is a no-op without owned creation", async (t) => {
     hub.requests.some(({ room }) => room?.create),
     false,
   );
+});
+
+test("room creation trims the name before matching an existing room", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const existing = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "  Мастерская  ",
+      reason: "Не создавать почти одинаковую комнату",
+    },
+  });
+  assert.equal(existing.structuredContent.status, "already_desired");
+  assert.deepEqual(existing.structuredContent.matching_rooms, [
+    { ref: workshopRoomRef, name: "Мастерская" },
+  ]);
+  assert.equal(
+    hub.requests.some(({ room }) => room?.create),
+    false,
+  );
+});
+
+test("room deletion requires catalog-confirmed absence after native not-found", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Архив",
+      reason: "Проверить возврат комнаты по реальному not-found контракту",
+    },
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  hub.state.behavior.rejectNextRoomGetAsInternalError = true;
+  const presentButRejected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(presentButRejected.structuredContent.status, "applied");
+  assert.equal(presentButRejected.structuredContent.verification.fresh, false);
+
+  hub.state.behavior.missingRoomGetAsNotFoundError = true;
+  hub.state.behavior.invalidNextRoomList = true;
+  const uncertain = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.verification.fresh, false);
+  assert.equal(hub.requests.filter(({ room }) => room?.delete).length, 1);
+
+  const recovered = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "restored");
+  assert.equal(recovered.structuredContent.verification.fresh, true);
+  assert.equal(hub.requests.filter(({ room }) => room?.delete).length, 1);
 });
 
 test("room creation rechecks all current names before writing", async (t) => {
