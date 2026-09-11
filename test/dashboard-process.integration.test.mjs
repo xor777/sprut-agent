@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
 import {
-  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -16,7 +15,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 
@@ -132,7 +131,9 @@ test("start returns ready owner actions that restart the screen without the agen
   const runtimeDirectory = path.join(scratch, "installed $bundle's; path");
   const runtime = path.join(runtimeDirectory, "dashboard runtime.mjs");
   const operatorDirectory = path.join(scratch, "operator elsewhere");
-  const openerDirectory = path.join(scratch, "minimal path");
+  const testSupportDirectory = path.join(scratch, "minimal path");
+  const openerPreload = path.join(testSupportDirectory, "intercept opener.mjs");
+  const openerLog = path.join(scratch, "opened $urls'.jsonl");
   const unrelatedAction = path.join(configDirectory, "open.command");
   const port = await reservePort();
   const hub = await startHub(t);
@@ -143,9 +144,35 @@ test("start returns ready owner actions that restart the screen without the agen
     mkdir(configDirectory, { recursive: true }),
     mkdir(runtimeDirectory, { recursive: true }),
     mkdir(operatorDirectory, { recursive: true }),
-    mkdir(openerDirectory, { recursive: true }),
+    mkdir(testSupportDirectory, { recursive: true }),
   ]);
   await cp(dashboardScript, runtime);
+  await writeFile(
+    openerPreload,
+    `import { appendFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+const spawn = childProcess.spawn;
+childProcess.spawn = function (command, args, options) {
+  if (command === "/usr/bin/open" || command === "xdg-open") {
+    appendFileSync(
+      process.env.SPRUT_AGENT_TEST_OPEN_LOG,
+      JSON.stringify({ opener: command, args }) + "\\n",
+    );
+    return spawn(process.execPath, ["-e", ""], options);
+  }
+  return spawn.call(this, command, args, options);
+};
+syncBuiltinESMExports();
+
+if (process.env.SPRUT_AGENT_TEST_PLATFORM) {
+  Object.defineProperty(process, "platform", {
+    value: process.env.SPRUT_AGENT_TEST_PLATFORM,
+  });
+}
+`,
+  );
   await writeFile(
     path.join(userHome, ".config", "sprut-agent", "connection.env"),
     [
@@ -173,13 +200,16 @@ test("start returns ready owner actions that restart the screen without the agen
     }),
   );
   await writeFile(unrelatedAction, "owner file\n");
-  const opener = path.join(openerDirectory, "xdg-open");
-  await writeFile(opener, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-  await chmod(opener, 0o700);
   const environment = {
     HOME: userHome,
-    PATH: openerDirectory,
+    NODE_OPTIONS: `--import=${pathToFileURL(openerPreload).href}`,
+    PATH: testSupportDirectory,
+    SPRUT_AGENT_TEST_OPEN_LOG: openerLog,
   };
+  const platformEnvironment = (platform) => ({
+    ...environment,
+    SPRUT_AGENT_TEST_PLATFORM: platform,
+  });
   const command = (action) =>
     run(process.execPath, [runtime, action, configFile], {
       cwd: operatorDirectory,
@@ -223,7 +253,7 @@ test("start returns ready owner actions that restart the screen without the agen
   const restartOutput = (
     await run(started.actions.open_or_restart, [], {
       cwd: operatorDirectory,
-      env: environment,
+      env: platformEnvironment("darwin"),
     })
   ).stdout
     .trim()
@@ -233,6 +263,9 @@ test("start returns ready owner actions that restart the screen without the agen
   assert.equal(restartOutput[0].already_running, false);
   assert.deepEqual(restartOutput[0].actions, started.actions);
   assert.equal(restartOutput[1].status, "opened");
+  assert.deepEqual(await readJsonLines(openerLog), [
+    { opener: "/usr/bin/open", args: [started.url] },
+  ]);
   assert.equal(
     (
       await fetch(`${started.url}/api/readings`).then((response) =>
@@ -245,7 +278,7 @@ test("start returns ready owner actions that restart the screen without the agen
   const repeatedOutput = (
     await run(started.actions.open_or_restart, [], {
       cwd: operatorDirectory,
-      env: environment,
+      env: platformEnvironment("linux"),
     })
   ).stdout
     .trim()
@@ -254,6 +287,10 @@ test("start returns ready owner actions that restart the screen without the agen
   assert.equal(repeatedOutput[0].already_running, true);
   assert.equal(repeatedOutput[0].pid, restartOutput[0].pid);
   assert.deepEqual(repeatedOutput[0].actions, started.actions);
+  assert.deepEqual(await readJsonLines(openerLog), [
+    { opener: "/usr/bin/open", args: [started.url] },
+    { opener: "xdg-open", args: [started.url] },
+  ]);
   assert.deepEqual(
     (await readdir(configDirectory))
       .filter((name) => name.endsWith(".command"))
@@ -412,6 +449,13 @@ test("the dashboard serves immediately while SprutHub is not answering", async (
   );
   assert.equal(state.status, "pending");
 });
+
+async function readJsonLines(file) {
+  return (await readFile(file, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
 
 async function startHub(t) {
   const server = new WebSocketServer({ port: 0 });
