@@ -235,6 +235,24 @@ async function startHub(initialState = hubState) {
         return;
       }
 
+      if (request.params?.hub?.list) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              hub: {
+                list: {
+                  hubs: state.homes ?? [
+                    { serial: "test-hub", name: "Test home", online: true },
+                  ],
+                },
+              },
+            },
+          }),
+        );
+        return;
+      }
+
       if (request.params?.room?.list) {
         socket.send(
           JSON.stringify({
@@ -798,7 +816,13 @@ test("read_services filters exact native types across the home and distinguishes
   );
   assert.equal(
     hub.requests.filter(({ params }) => params.accessory?.list).length,
-    state.rooms.length,
+    1,
+  );
+  assert.deepEqual(
+    hub.requests.find(({ params }) => params.accessory?.list).params,
+    {
+      accessory: { list: { expand: "services,characteristics" } },
+    },
   );
 
   const noMatch = await client.callTool({
@@ -860,12 +884,22 @@ test("read_services byte-bounded cursors return every complete service without s
     });
     assert.equal(page.isError, undefined, page.content[0]?.text);
     assert(Buffer.byteLength(page.content[0].text) <= argumentsBase.max_bytes);
+    assert.equal(page.content[0].text, JSON.stringify(page.structuredContent));
     assert.equal(
       Buffer.byteLength(page.content[0].text),
       page.structuredContent.page.serialized_bytes,
     );
     services.push(...page.structuredContent.services);
     cursor = page.structuredContent.page.next_cursor;
+    if (pageCount === 0) {
+      const removedAccessoryRef = page.structuredContent.services[0].accessory.ref;
+      hub.state.accessories = hub.state.accessories
+        .filter(
+          ({ id }) =>
+            `spruthub://hub/test-hub/accessory/${id}` !== removedAccessoryRef,
+        )
+        .reverse();
+    }
     if (cursor) {
       assert.deepEqual(page.structuredContent.next, {
         tool: "read_services",
@@ -893,6 +927,105 @@ test("read_services byte-bounded cursors return every complete service without s
         readings.find(({ type }) => type === "CurrentTemperature").value,
     ),
     Array.from({ length: 8 }, (_, index) => 20 + index),
+  );
+});
+
+test("read_services reports a stale cursor when its last returned service disappeared", async (t) => {
+  const state = structuredClone(hubState);
+  for (let id = 110; id < 118; id += 1) {
+    state.accessories.push(
+      thermostatAccessory({
+        id,
+        name: `Регулятор ${id}`,
+        currentMode: id % 3,
+        currentTemperature: 20 + (id - 110),
+        targetTemperature: 25,
+      }),
+    );
+  }
+  const hub = await startHub(state);
+  const client = await startMcpClient(t, hub);
+  const argumentsBase = {
+    home_ref: "spruthub://hub/test-hub",
+    room_ref: "spruthub://hub/test-hub/room/10",
+    service_types: ["Thermostat"],
+    max_bytes: 5_000,
+  };
+  const first = await client.callTool({
+    name: "read_services",
+    arguments: argumentsBase,
+  });
+  assert(first.structuredContent.page.next_cursor);
+  const anchor = first.structuredContent.services.at(-1);
+  hub.state.accessories = hub.state.accessories.filter(
+    ({ id }) =>
+      `spruthub://hub/test-hub/accessory/${id}` !== anchor.accessory.ref,
+  );
+
+  const next = await client.callTool({
+    name: "read_services",
+    arguments: {
+      ...argumentsBase,
+      cursor: first.structuredContent.page.next_cursor,
+    },
+  });
+
+  assert.equal(next.isError, true);
+  assert.equal(next.structuredContent.error.code, "stale_cursor");
+  assert.deepEqual(next.structuredContent.next, {
+    tool: "read_services",
+    arguments: argumentsBase,
+  });
+});
+
+test("read_services keeps the selected home and services whose room metadata is missing", async (t) => {
+  const state = structuredClone(hubState);
+  state.homes = [
+    { serial: "test-hub", name: "Configured home", online: true },
+    { serial: "neighbor-home", name: "Selected home", online: true },
+  ];
+  state.accessories = [
+    thermostatAccessory({
+      id: 900,
+      roomId: 999,
+      name: "Регулятор без комнаты",
+      currentMode: 1,
+      currentTemperature: 19,
+      targetTemperature: 21,
+    }),
+  ];
+  const hub = await startHub(state);
+  const client = await startMcpClient(t, hub);
+
+  const result = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/neighbor-home",
+      service_types: ["Thermostat"],
+      max_bytes: 32_768,
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.scope_status, "non_empty");
+  assert.equal(result.structuredContent.match_status, "matched");
+  assert.deepEqual(result.structuredContent.services[0].room, {
+    ref: "spruthub://hub/neighbor-home/room/999",
+    name: null,
+    metadata_status: "missing",
+  });
+  assert.deepEqual(
+    hub.requests.map(({ serial, params }) => ({ serial: serial ?? null, params })),
+    [
+      { serial: null, params: { hub: { list: {} } } },
+      { serial: "neighbor-home", params: { room: { list: {} } } },
+      {
+        serial: "neighbor-home",
+        params: {
+          accessory: { list: { expand: "services,characteristics" } },
+        },
+      },
+    ],
   );
 });
 
