@@ -4901,6 +4901,106 @@ test("an exact owned LOGIC source remains applied when the hub normalizes a crea
   );
 });
 
+test("an acknowledged LOGIC source delete that leaves the source stays uncertain across restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Неудалённый LOGIC",
+      description: "Сохранить наблюдаемый результат неудачного удаления",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не скрывать оставшийся source после ACK",
+    },
+  });
+  const created = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  const createdScenario = structuredClone(
+    hub.state.scenarios.find(({ index }) => index === "created-1"),
+  );
+  const createdLogicType = structuredClone(
+    hub.state.logicTypes.find(({ type }) => type === "GeneratedLogicType1"),
+  );
+  hub.state.behavior.afterDelete = () => {
+    hub.state.scenarios.push(createdScenario);
+    hub.state.scenarioLogicTypes[createdScenario.index] = createdLogicType.type;
+    hub.state.logicTypes.push(createdLogicType);
+  };
+
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined, uncertain.content[0]?.text);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    uncertain.structuredContent.conflict_reason,
+    "ack_without_requested_result",
+  );
+  assert.equal(uncertain.structuredContent.configuration_matches, false);
+  assert.equal(
+    uncertain.structuredContent.observed_source_sha256,
+    createHash("sha256").update(createdScenario.data).digest("hex"),
+  );
+  assert.deepEqual(
+    uncertain.structuredContent.diff.editable_flags.observed,
+    {
+      name: createdScenario.name,
+      description: createdScenario.desc,
+      active: createdScenario.active,
+      on_start: createdScenario.onStart,
+      sync: createdScenario.sync,
+      type: createdScenario.type,
+    },
+  );
+  assert.deepEqual(uncertain.structuredContent.write_intent, {
+    direction: "restore",
+    phase: "needs_reconciliation",
+    acknowledged: true,
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+  await firstClient.close();
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.isError, undefined, persisted.content[0]?.text);
+  assert.equal(persisted.structuredContent.status, "uncertain");
+  assert.equal(
+    persisted.structuredContent.conflict_reason,
+    "ack_without_requested_result",
+  );
+  assert.equal(
+    persisted.structuredContent.observed_source_sha256,
+    uncertain.structuredContent.observed_source_sha256,
+  );
+  assert.deepEqual(
+    persisted.structuredContent.diff.editable_flags.observed,
+    uncertain.structuredContent.diff.editable_flags.observed,
+  );
+  assert.deepEqual(
+    persisted.structuredContent.write_intent,
+    uncertain.structuredContent.write_intent,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.delete).length,
+    1,
+  );
+});
+
 test("an owned LOGIC source remains editable and restorable while its type mapping is initially missing", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
