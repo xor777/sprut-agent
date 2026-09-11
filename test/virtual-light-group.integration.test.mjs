@@ -1246,8 +1246,22 @@ test("a retry starts fresh after a foreign consumer changed before its remove at
           hub.state.accessories = hub.state.accessories.filter(
             ({ id }) => id !== 90,
           );
-          for (const key of hub.state.links.keys()) {
-            if (key.startsWith("90.")) hub.state.links.delete(key);
+          for (const [key, links] of hub.state.links) {
+            if (key.startsWith("90.")) {
+              hub.state.links.delete(key);
+              continue;
+            }
+            hub.state.links.set(
+              key,
+              links.flatMap((link) => {
+                const characteristics = (link.characteristics ?? []).filter(
+                  ({ aId }) => aId !== 90,
+                );
+                return link.type === "OUT" && characteristics.length === 0
+                  ? []
+                  : [{ ...link, characteristics }];
+              }),
+            );
           }
           const inspected = await secondClient.callTool({
             name: "get_native_change",

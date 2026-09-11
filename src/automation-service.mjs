@@ -2006,12 +2006,11 @@ export class AutomationService {
         continue;
       }
       // A lost send may not have reached the hub. Only the exact persisted IN
-      // is safe to retry, once; a target match alone does not preserve ownership.
+      // is safe to retry; a target match alone does not preserve ownership.
       const retryingUncertainRemoval =
         removal.sent === true &&
         removal.acknowledged !== true &&
         removal.completed !== true &&
-        removal.uncertain_retry_sent !== true &&
         removal.link_id === relation.linkId;
       if (removal.sent && !retryingUncertainRemoval) {
         return this.#finishNative(change, "uncertain", undefined, {
@@ -2021,14 +2020,15 @@ export class AutomationService {
           last_verification: freshVerification("owned_link_still_present"),
         });
       }
-      if (!retryingUncertainRemoval) {
-        removal.link_id = relation.linkId;
-        removal.physical_links_before = normalizePhysicalLinks(
-          await this.client.listLinks(progress.target),
-        );
-      } else {
-        removal.uncertain_retry_sent = true;
-      }
+      removal.link_id = relation.linkId;
+      removal.physical_links_before = normalizePhysicalLinks(
+        await this.client.listLinks(progress.target),
+      );
+      removal.physical_links_after = undefined;
+      removal.acknowledged = false;
+      removal.uncertain_retry_sent = retryingUncertainRemoval
+        ? true
+        : undefined;
       await this.#persistVirtualLightStep(
         change,
         "removing_link",
@@ -2046,7 +2046,11 @@ export class AutomationService {
         removal.acknowledged = true;
       } catch (error) {
         if (!isUncertainWriteError(error)) {
-          if (!retryingUncertainRemoval) removal.sent = false;
+          removal.sent = false;
+          removal.acknowledged = false;
+          removal.uncertain_retry_sent = undefined;
+          removal.physical_links_before = undefined;
+          removal.physical_links_after = undefined;
           await this.#finishNative(change, "applied", undefined, {
             observed_snapshot: current,
           });
