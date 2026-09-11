@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,6 +23,29 @@ const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
 const smoothLogicRef = `${serviceRef}/logic/${smoothLogicType}`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
+const scenarioSdk = "interface Characteristic { getValue(): any; setValue(value: any): void; }";
+const firstLogicSource = `info = {
+  name: "Bedside start level",
+  description: "Set the initial brightness once",
+  version: "1.0",
+  author: "sprut-agent",
+  onStart: false,
+  sourceServices: [HS.Lightbulb],
+  sourceCharacteristics: [HC.On],
+  options: [],
+  variables: { wasOn: false }
+};
+
+function trigger(source, value, variables, options, context) {
+  if (value === true && variables.wasOn === false) {
+    source.getService().getCharacteristic(HC.Brightness).setValue(15);
+  }
+  variables.wasOn = value === true;
+}`;
+const secondLogicSource = firstLogicSource.replace(
+  "variables.wasOn === false",
+  "!variables.wasOn",
+);
 const deviceWindowRef = `${homeRef}/window/Controller%2Fzigbee_demo%2FChild%2FDEVICE_A%2F`;
 const startupOptionKey = "/11/0006_OnOff/4003_StartUpOnOff/255";
 const smoothOptionKeys = {
@@ -335,9 +359,11 @@ async function startHub() {
     logicOptions: {
       [logicOptionsKey(34, 13, smoothLogicType)]: smoothLogicOptions(),
     },
+    scenarioLogicTypes: {},
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
+      rejectNextScenarioCreate: false,
       closeAfterCharacteristicUpdate: false,
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
@@ -736,6 +762,8 @@ async function startHub() {
             },
           };
         }
+      } else if (params.scenario?.sdk) {
+        result = { scenario: { sdk: { sdk: scenarioSdk } } };
       } else if (params.scenario?.get) {
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.get.index,
@@ -761,15 +789,39 @@ async function startHub() {
           },
         };
       } else if (params.scenario?.create) {
+        if (state.behavior.rejectNextScenarioCreate) {
+          state.behavior.rejectNextScenarioCreate = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: 400, message: "scenario compilation failed" },
+            }),
+          );
+          return;
+        }
+        const index = `created-${state.nextScenario++}`;
         const created = {
           ...structuredClone(params.scenario.create),
-          data: JSON.stringify(
-            withRuntimeBlockFields(JSON.parse(params.scenario.create.data)),
-          ),
-          index: `created-${state.nextScenario++}`,
+          data:
+            params.scenario.create.type === "BLOCK"
+              ? JSON.stringify(
+                  withRuntimeBlockFields(JSON.parse(params.scenario.create.data)),
+                )
+              : params.scenario.create.data,
+          index,
           predefined: false,
         };
         state.scenarios.push(created);
+        if (created.type === "LOGIC") {
+          const type = `GeneratedLogicType${state.nextScenario - 1}`;
+          state.scenarioLogicTypes[index] = type;
+          state.logicTypes.push({
+            type,
+            name: created.name,
+            desc: created.desc,
+          });
+          state.logicOptions[logicOptionsKey(34, 13, type)] = [];
+        }
         if (state.behavior.closeAfterCreate) {
           state.behavior.closeAfterCreate = false;
           socket.close();
@@ -781,9 +833,21 @@ async function startHub() {
           ({ index }) => index === params.scenario.update.index,
         );
         if (!state.behavior.ignoreNextUpdate) {
-          scenario.data = JSON.stringify(
-            withRuntimeBlockFields(JSON.parse(params.scenario.update.data)),
+          Object.assign(
+            scenario,
+            structuredClone(
+              Object.fromEntries(
+                Object.entries(params.scenario.update).filter(
+                  ([key]) => key !== "index" && key !== "expand",
+                ),
+              ),
+            ),
           );
+          if (scenario.type === "BLOCK") {
+            scenario.data = JSON.stringify(
+              withRuntimeBlockFields(JSON.parse(params.scenario.update.data)),
+            );
+          }
         }
         state.behavior.ignoreNextUpdate = false;
         result = {
@@ -803,7 +867,16 @@ async function startHub() {
         const index = state.scenarios.findIndex(
           (scenario) => scenario.index === params.scenario.delete.index,
         );
-        if (index >= 0) state.scenarios.splice(index, 1);
+        if (index >= 0) {
+          const [deleted] = state.scenarios.splice(index, 1);
+          const logicType = state.scenarioLogicTypes[deleted.index];
+          if (logicType) {
+            delete state.scenarioLogicTypes[deleted.index];
+            state.logicTypes = state.logicTypes.filter(
+              ({ type }) => type !== logicType,
+            );
+          }
+        }
         result = { scenario: { delete: {} } };
       } else {
         assert.fail(`unsupported test request: ${JSON.stringify(params)}`);
@@ -4480,6 +4553,280 @@ test("room creation rechecks all current names before writing", async (t) => {
   );
   assert.equal(
     hub.requests.some(({ room }) => room?.create),
+    false,
+  );
+});
+
+test("a native LOGIC source is created, assigned, updated, read back, and restored through public tools", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sdk = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+  assert.equal(sdk.isError, undefined, sdk.content[0]?.text);
+  assert.equal(sdk.structuredContent.sdk, scenarioSdk);
+  assert.equal(
+    sdk.structuredContent.sha256,
+    createHash("sha256").update(scenarioSdk).digest("hex"),
+  );
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Яркость при включении",
+      description: "Установить стартовый уровень один раз",
+      active: true,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Проверить нативную JS-логику без постоянного solver",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.equal(prepared.structuredContent.diff.source.exact_match, false);
+
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.native_logic_type, "GeneratedLogicType1");
+  assert.equal(
+    created.structuredContent.logic_ref,
+    `${serviceRef}/logic/GeneratedLogicType1`,
+  );
+  assert.notEqual(created.structuredContent.scenario_index, "GeneratedLogicType1");
+  assert.equal(created.structuredContent.diff.source.exact_match, true);
+  const createdScenarioRef = created.structuredContent.scenario_ref;
+
+  const assignment = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: created.structuredContent.logic_ref,
+      reason: "Назначить созданную логику выбранному свету",
+    },
+  });
+  const assigned = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(assigned.structuredContent.status, "applied");
+
+  const update = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: createdScenarioRef,
+      source: secondLogicSource,
+      reason: "Уточнить условие перехода без изменения metadata",
+    },
+  });
+  assert.equal(update.isError, undefined, update.content[0]?.text);
+  const updated = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(updated.structuredContent.status, "applied");
+  assert.equal(updated.structuredContent.diff.source.exact_match, true);
+  const readback = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: createdScenarioRef, include: ["configuration"] },
+  });
+  assert.equal(readback.structuredContent.entity.configuration.text, secondLogicSource);
+  assert.deepEqual(
+    hub.state.scenarios.find(({ index }) => index === "created-1"),
+    {
+      name: "Яркость при включении",
+      desc: `${"Установить стартовый уровень один раз"}\n\n[${created.structuredContent.ownership_marker}]`,
+      active: true,
+      onStart: false,
+      sync: false,
+      type: "LOGIC",
+      data: secondLogicSource,
+      index: "created-1",
+      predefined: false,
+    },
+  );
+
+  const sourceRestored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(sourceRestored.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios.find(({ index }) => index === "created-1").data, firstLogicSource);
+  const assignmentRestored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: assignment.structuredContent.change_ref },
+  });
+  assert.equal(assignmentRestored.structuredContent.status, "restored");
+  const sourceRemoved = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(sourceRemoved.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios.some(({ index }) => index === "created-1"), false);
+  assert.equal(
+    hub.state.logicTypes.some(({ type }) => type === "GeneratedLogicType1"),
+    false,
+  );
+});
+
+test("a lost LOGIC create response is reconciled without creating a duplicate", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Однократная яркость",
+      description: "Проверить потерянный ответ",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не дублировать уже созданный LOGIC",
+    },
+  });
+  hub.state.behavior.closeAfterCreate = true;
+  const recovered = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.recovered_after_uncertain_write, true);
+  const repeated = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC").length,
+    1,
+  );
+});
+
+test("a rejected LOGIC create remains not applied", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Ошибочный LOGIC",
+      description: "Проверить ошибку компиляции",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не считать отклонённый source применённым",
+    },
+  });
+  hub.state.behavior.rejectNextScenarioCreate = true;
+  const rejected = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  const status = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.structuredContent.status, "not_applied");
+  assert.equal(
+    hub.state.scenarios.some(({ type }) => type === "LOGIC"),
+    false,
+  );
+});
+
+test("LOGIC restoration preserves a manual source edit and an assigned created type", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push({
+    index: "manual-logic",
+    name: "Ручной LOGIC",
+    desc: "Существующий код",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: firstLogicSource,
+    predefined: false,
+  });
+  const client = await startClient(t, hub, stateDirectory);
+  const update = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: `${homeRef}/scenario/manual-logic`,
+      source: secondLogicSource,
+      reason: "Проверить сохранение ручной правки",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  hub.state.scenarios.find(({ index }) => index === "manual-logic").data =
+    `${secondLogicSource}\n// manual edit`;
+  const sourceConflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(sourceConflict.structuredContent.status, "conflict");
+  assert.equal(sourceConflict.structuredContent.conflict_reason, "manual_change");
+  assert.match(
+    hub.state.scenarios.find(({ index }) => index === "manual-logic").data,
+    /manual edit$/,
+  );
+
+  const create = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Новый LOGIC",
+      description: "Проверить чужое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не удалять используемый LOGIC",
+    },
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  hub.state.logics.push({
+    aId: 32,
+    sId: 13,
+    type: created.structuredContent.native_logic_type,
+    name: "Чужое назначение",
+    active: true,
+  });
+  const assignmentConflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: create.structuredContent.change_ref },
+  });
+  assert.equal(assignmentConflict.structuredContent.status, "conflict");
+  assert.equal(
+    assignmentConflict.structuredContent.conflict_reason,
+    "logic_assignments_present",
+  );
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete?.index === "created-1"),
     false,
   );
 });
