@@ -87,6 +87,18 @@ async function startHub() {
       memberAccessory({ id: 35, sId: 14, name: "Дашина" }),
       memberAccessory({ id: 36, sId: 15, name: "Чужая" }),
     ],
+    serviceTypes: [
+      {
+        type: "Lightbulb",
+        name: "Лампочка",
+        required: [{ type: "On" }],
+        optional: [
+          { type: "Brightness" },
+          { type: "ColorTemperature" },
+          { type: "StatusActive" },
+        ],
+      },
+    ],
     links: new Map(),
     nextAccessoryId: 90,
     behavior: {
@@ -148,18 +160,7 @@ async function startHub() {
         result = {
           service: {
             types: {
-              types: [
-                {
-                  type: "Lightbulb",
-                  name: "Лампочка",
-                  required: [{ type: "On" }],
-                  optional: [
-                    { type: "Brightness" },
-                    { type: "ColorTemperature" },
-                    { type: "StatusActive" },
-                  ],
-                },
-              ],
+              types: structuredClone(state.serviceTypes),
             },
           },
         };
@@ -278,7 +279,7 @@ async function startHub() {
                   (link) =>
                     !(
                       link.type === "OUT" &&
-                      link.characteristics.some(
+                      (link.characteristics ?? []).some(
                         ({ aId, sId, cId }) =>
                           aId === params.link.remove.aId &&
                           sId === params.link.remove.sId &&
@@ -619,6 +620,50 @@ test("restore deletes only an unchanged owned virtual accessory", async (t) => {
     [],
     "restore must not leave the empty physical OUT artifacts observed live",
   );
+  assert.deepEqual(
+    hub.state.accessories.map(({ id }) => id),
+    [34, 35, 36],
+  );
+});
+
+test("create and restore tolerate omitted repeated fields without removing system links", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.serviceTypes.unshift(
+    {
+      type: "GenericService",
+      name: "Неизвестный сервис",
+      optional: [{ type: "GenericBoolean" }],
+    },
+    {
+      type: "AudioStreamManagement",
+      name: "Управление аудио потоком",
+      required: [{ type: "SupportedAudioStreamConfiguration" }],
+    },
+  );
+  const systemLink = {
+    type: "SYSTEM",
+    index: "native-source/example",
+    controller: "zigbee_1",
+  };
+  hub.state.links.set("34.13.16", [structuredClone(systemLink)]);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareGroup(client);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(hub.state.links.get("34.13.16"), [systemLink]);
   assert.deepEqual(
     hub.state.accessories.map(({ id }) => id),
     [34, 35, 36],
