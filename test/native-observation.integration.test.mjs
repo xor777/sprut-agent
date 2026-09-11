@@ -16,9 +16,13 @@ const otherHomeRef = "spruthub://hub/home%2FB";
 const characteristicRef = `${homeRef}/accessory/34/service/13/characteristic/15`;
 const scenarioRef = `${homeRef}/scenario/23`;
 
-async function startHub({ subscribeDelayMs = 0 } = {}) {
+async function startHub({
+  subscribeDelayMs = 0,
+  logSubscribeErrorAt = null,
+} = {}) {
   const requests = [];
   const connections = [];
+  let logSubscribeCount = 0;
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
@@ -28,6 +32,7 @@ async function startHub({ subscribeDelayMs = 0 } = {}) {
       const request = JSON.parse(data.toString());
       requests.push({ ...request, connectionId });
       let result;
+      let error;
       if (request.params?.hub?.list) {
         result = {
           hub: {
@@ -110,6 +115,15 @@ async function startHub({ subscribeDelayMs = 0 } = {}) {
         result = { scenario: { subscribe: { uuid: "subscription-1" } } };
       } else if (request.params?.scenario?.unsubscribe) {
         result = { scenario: { unsubscribe: {} } };
+      } else if (request.params?.log?.subscribe) {
+        logSubscribeCount += 1;
+        if (logSubscribeCount === logSubscribeErrorAt) {
+          error = { code: -32000, message: "log subscribe failed" };
+        } else {
+          result = { log: { subscribe: { uuid: "log-subscription-1" } } };
+        }
+      } else if (request.params?.log?.unsubscribe) {
+        result = { log: { unsubscribe: {} } };
       } else if (request.params?.server?.ping) {
         result = { server: { ping: {} } };
       } else {
@@ -119,7 +133,12 @@ async function startHub({ subscribeDelayMs = 0 } = {}) {
       }
       const respond = () => {
         if (socket.readyState === socket.OPEN) {
-          socket.send(JSON.stringify({ id: request.id, result }));
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              ...(error ? { error } : { result }),
+            }),
+          );
         }
       };
       if (request.params?.scenario?.subscribe && subscribeDelayMs > 0) {
@@ -255,11 +274,60 @@ test("native observation preserves repeated partial events and filters its selec
     event: { scenario: { index: "other", type: "FIRE", blockId: 6 } },
   });
   hub.send({ event: { scenario: { index: "23", type: "FIRE", blockId: 7 } } });
+  hub.send({
+    event: {
+      log: {
+        log: [
+          {
+            time: 1789120490684,
+            level: "LOG_LEVEL_INFO",
+            path: "Scenario.ScenarioBlock.Target.jBlock",
+            message:
+              "Сценарий 23: jConditionCharacteristic_3 (TRIGGER: SCENARIO[23] <- CHARACTERISTIC[Characteristic/2.13.15/] <- CLOUD[0]_1789120490)",
+          },
+          {
+            time: 1789120490687,
+            level: "LOG_LEVEL_INFO",
+            path: "Scenario.ScenarioBlock.Target.jBlock",
+            message:
+              "Сценарий 23: jConditionCharacteristic_3 C[2.13.15 Lightbulb.On 'true'], cond='=', value='true'",
+          },
+          {
+            time: 1789120490692,
+            level: "LOG_LEVEL_INFO",
+            path: "Scenario.ScenarioBlock.Target.jBlock",
+            message:
+              "Сценарий 23: jTargetDelay_4 time=3000, mode=RESET, index=1",
+          },
+          {
+            time: 1789118635092,
+            level: "LOG_LEVEL_ERROR",
+            path: "Notifiers.Notifier",
+            message: "Сценарий 23 - No index from delay",
+          },
+          {
+            time: 1789120490700,
+            level: "LOG_LEVEL_INFO",
+            path: "Scenario.ScenarioBlock.Target.jBlock",
+            message:
+              "Сценарий 230: client_secret=neighbor-secret-must-not-leak",
+          },
+          {
+            time: 1789120490701,
+            level: "LOG_LEVEL_ERROR",
+            path: "API.Account",
+            message:
+              "Сценарий 23 - Authorization: Bearer account-secret-must-not-leak",
+          },
+        ],
+      },
+    },
+  });
 
   const completed = await getObservation(client, started.observation_ref, 2);
   assert.equal(completed.status, "completed");
   assert.equal(completed.scope.home_ref, homeRef);
-  assert.equal(completed.events.length, 3);
+  assert.equal(completed.events.length, 7);
   assert.deepEqual(
     completed.events.map(({ sequence, kind, ref }) => ({
       sequence,
@@ -270,9 +338,13 @@ test("native observation preserves repeated partial events and filters its selec
       { sequence: 1, kind: "characteristic", ref: characteristicRef },
       { sequence: 2, kind: "characteristic", ref: characteristicRef },
       { sequence: 3, kind: "scenario", ref: scenarioRef },
+      { sequence: 4, kind: "scenario_log", ref: scenarioRef },
+      { sequence: 5, kind: "scenario_log", ref: scenarioRef },
+      { sequence: 6, kind: "scenario_log", ref: scenarioRef },
+      { sequence: 7, kind: "scenario_log", ref: scenarioRef },
     ],
   );
-  for (const event of completed.events) {
+  for (const event of completed.events.slice(0, 3)) {
     assert.match(event.received_at, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(event.source_timestamp, null);
   }
@@ -290,17 +362,79 @@ test("native observation preserves repeated partial events and filters its selec
     type: "FIRE",
     block_id: 7,
   });
+  assert.deepEqual(
+    completed.events
+      .slice(3)
+      .map(({ message, source_timestamp, content_origin, native }) => ({
+        message,
+        source_timestamp,
+        content_origin,
+        native,
+      })),
+    [
+      {
+        message:
+          "Сценарий 23: jConditionCharacteristic_3 (TRIGGER: SCENARIO[23] <- CHARACTERISTIC[Characteristic/2.13.15/] <- CLOUD[0]_1789120490)",
+        source_timestamp: new Date(1789120490684).toISOString(),
+        content_origin: "spruthub_native_log",
+        native: {
+          time_ms: 1789120490684,
+          level: "LOG_LEVEL_INFO",
+          path: "Scenario.ScenarioBlock.Target.jBlock",
+        },
+      },
+      {
+        message:
+          "Сценарий 23: jConditionCharacteristic_3 C[2.13.15 Lightbulb.On 'true'], cond='=', value='true'",
+        source_timestamp: new Date(1789120490687).toISOString(),
+        content_origin: "spruthub_native_log",
+        native: {
+          time_ms: 1789120490687,
+          level: "LOG_LEVEL_INFO",
+          path: "Scenario.ScenarioBlock.Target.jBlock",
+        },
+      },
+      {
+        message: "Сценарий 23: jTargetDelay_4 time=3000, mode=RESET, index=1",
+        source_timestamp: new Date(1789120490692).toISOString(),
+        content_origin: "spruthub_native_log",
+        native: {
+          time_ms: 1789120490692,
+          level: "LOG_LEVEL_INFO",
+          path: "Scenario.ScenarioBlock.Target.jBlock",
+        },
+      },
+      {
+        message: "Сценарий 23 - No index from delay",
+        source_timestamp: new Date(1789118635092).toISOString(),
+        content_origin: "spruthub_native_log",
+        native: {
+          time_ms: 1789118635092,
+          level: "LOG_LEVEL_ERROR",
+          path: "Notifiers.Notifier",
+        },
+      },
+    ],
+  );
   assert.equal(completed.truncated, false);
   assert.match(completed.limitations.join(" "), /does not prove causality/i);
   assert.equal(
     JSON.stringify(completed).includes("observation-secret-must-not-leak"),
     false,
   );
+  assert.equal(JSON.stringify(completed).includes("neighbor-secret"), false);
+  assert.equal(JSON.stringify(completed).includes("account-secret"), false);
   assert.deepEqual(
     hub.requests
       .filter(({ params }) => params.scenario?.unsubscribe)
       .map(({ params }) => params.scenario.unsubscribe),
     [{ uuid: "subscription-1" }],
+  );
+  assert.deepEqual(
+    hub.requests
+      .filter(({ params }) => params.log?.unsubscribe)
+      .map(({ params }) => params.log.unsubscribe),
+    [{ uuid: "log-subscription-1" }],
   );
 });
 
@@ -411,7 +545,7 @@ test("stop during subscription startup cannot resurrect the observation", async 
 });
 
 test("a failed new start preserves the previous completed evidence", async (t) => {
-  const hub = await startHub();
+  const hub = await startHub({ logSubscribeErrorAt: 2 });
   const client = await startClient(t, hub);
   const started = await startObservation(client);
   const completed = await getObservation(client, started.observation_ref, 2);
@@ -421,16 +555,21 @@ test("a failed new start preserves the previous completed evidence", async (t) =
     name: "start_native_observation",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [
-        `${homeRef}/accessory/999/service/13/characteristic/15`,
-      ],
+      characteristic_refs: [characteristicRef],
       scenario_ref: scenarioRef,
       duration_seconds: 1,
       max_events: 20,
     },
   });
   assert.equal(failed.isError, true);
-  assert.equal(failed.structuredContent.error.code, "entity_not_found");
+  assert.equal(failed.structuredContent.error.code, "request_rejected");
+
+  assert.deepEqual(
+    hub.requests
+      .filter(({ params }) => params.scenario?.unsubscribe)
+      .map(({ params }) => params.scenario.unsubscribe),
+    [{ uuid: "subscription-1" }, { uuid: "subscription-1" }],
+  );
 
   const retained = await getObservation(client, started.observation_ref);
   assert.equal(retained.status, "completed");
@@ -499,6 +638,12 @@ test("explicit stop cancels observation and releases its native subscription", a
       .filter(({ params }) => params.scenario?.unsubscribe)
       .map(({ params }) => params.scenario.unsubscribe),
     [{ uuid: "subscription-1" }],
+  );
+  assert.deepEqual(
+    hub.requests
+      .filter(({ params }) => params.log?.unsubscribe)
+      .map(({ params }) => params.log.unsubscribe),
+    [{ uuid: "log-subscription-1" }],
   );
 });
 
