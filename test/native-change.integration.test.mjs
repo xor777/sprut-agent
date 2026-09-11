@@ -4776,7 +4776,10 @@ test("an exact owned LOGIC source remains applied when the hub normalizes a crea
   });
   assert.equal(created.structuredContent.status, "applied");
   assert.equal(created.structuredContent.diff.source.exact_match, true);
-  assert.equal(created.structuredContent.diff.editable_flags.exact_match, false);
+  assert.equal(
+    created.structuredContent.diff.editable_flags.exact_match,
+    false,
+  );
   assert.equal(created.structuredContent.diff.editable_flags.to.active, true);
   assert.equal(
     created.structuredContent.diff.editable_flags.observed.active,

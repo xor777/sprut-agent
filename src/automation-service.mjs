@@ -6088,6 +6088,25 @@ function logicSnapshotMatches(scenario, expected) {
   );
 }
 
+function logicSourceCreateMatches(change, scenario, expected) {
+  if (scenario === null) return false;
+  const snapshot = logicScenarioSnapshot(scenario);
+  return (
+    snapshot.data === expected.data &&
+    snapshot.desc.includes(`[${change.marker}]`)
+  );
+}
+
+function logicEditableFlagsMatch(scenario, expected) {
+  return (
+    scenario !== null &&
+    isDeepStrictEqual(
+      publicLogicEditableFlags(logicScenarioSnapshot(scenario)),
+      publicLogicEditableFlags(expected),
+    )
+  );
+}
+
 function logicSourceObservation(change, current, snapshot) {
   let matches;
   let expected;
@@ -6104,7 +6123,10 @@ function logicSourceObservation(change, current, snapshot) {
     }
   } else if (snapshot === "requested") {
     expected = logicSourceRequestedSnapshot(change);
-    matches = logicSnapshotMatches(current.scenario, expected);
+    matches =
+      change.kind === "logic_source_create"
+        ? logicSourceCreateMatches(change, current.scenario, expected)
+        : logicSnapshotMatches(current.scenario, expected);
   } else if (snapshot === "applied") {
     expected = change.applied_snapshot;
     matches =
@@ -6126,6 +6148,19 @@ function logicSourceObservation(change, current, snapshot) {
             observed_source_sha256: sourceFingerprint(observedSource),
             source_exact_match:
               expected !== undefined && observedSource === expected.data,
+          }
+        : {}),
+      ...(snapshot === "requested" &&
+      change.kind === "logic_source_create" &&
+      current.scenario !== null
+        ? {
+            editable_flags_exact_match: logicEditableFlagsMatch(
+              current.scenario,
+              expected,
+            ),
+            observed_editable_flags: publicLogicEditableFlags(
+              logicScenarioSnapshot(current.scenario),
+            ),
           }
         : {}),
       last_verification: freshVerification(
@@ -6200,6 +6235,7 @@ function logicSourceContract(mode) {
     },
     limitations: [
       "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
+      "SprutHub-normalized create flags are reported separately and become the saved applied snapshot.",
       "A successful source readback does not confirm callback behavior or physical effects.",
       "SprutHub exposes no compare-and-set; a race remains after the pre-write comparison.",
     ],
@@ -6729,6 +6765,12 @@ function publicNativeChange(
               ? publicLogicEditableFlags(change.baseline_snapshot)
               : null,
           to: publicLogicEditableFlags(requested),
+          ...(typeof change.editable_flags_exact_match === "boolean"
+            ? { exact_match: change.editable_flags_exact_match }
+            : {}),
+          ...(change.observed_editable_flags
+            ? { observed: structuredClone(change.observed_editable_flags) }
+            : {}),
         },
       },
       native_write_sent: change.native_write_sent,
@@ -6777,6 +6819,7 @@ function publicNativeChange(
         typeof change.native_logic_type === "string",
       limitations: [
         "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
+        "SprutHub-normalized create flags are returned as observed values and become the applied snapshot.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",

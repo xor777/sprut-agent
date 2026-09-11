@@ -108,6 +108,9 @@
   `type=LOGIC` и читает source обратно как точный текст. Подтверждённый source
   остаётся `applied` независимо от mapping: `logic_mapping_status` и
   `logic_assignment_ready` отдельно показывают возможность назначения.
+  Если хаб нормализовал create flags, change отдельно показывает запрошенные и
+  `observed` flags с `exact_match:false`; сохранённый наблюдённый снимок остаётся
+  границей защиты от последующей ручной правки.
   Назначаемый type устанавливается только по единственному новому значению
   свежего `logic.types`; `scenario.index`, имя и type не приравниваются. При
   `missing`/`ambiguous` source можно исправить через его `scenario_ref`, но
