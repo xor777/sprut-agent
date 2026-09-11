@@ -6,8 +6,8 @@ import {
   cp,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -203,9 +203,9 @@ test("start returns ready owner actions that restart the screen without the agen
     assert.equal(contents.includes("SPRUTHUB_"), false);
   }
   assert.equal(await readFile(unrelatedAction, "utf8"), "owner file\n");
-  const actionFiles = (await readdir(configDirectory)).filter((name) =>
-    name.endsWith(".command"),
-  );
+  const actionFiles = (await readdir(configDirectory))
+    .filter((name) => name.endsWith(".command"))
+    .sort();
   assert.equal(actionFiles.length, 3);
 
   const stopped = JSON.parse(
@@ -234,8 +234,11 @@ test("start returns ready owner actions that restart the screen without the agen
   assert.deepEqual(restartOutput[0].actions, started.actions);
   assert.equal(restartOutput[1].status, "opened");
   assert.equal(
-    (await fetch(`${started.url}/api/readings`).then((response) => response.json()))
-      .readings[0].value,
+    (
+      await fetch(`${started.url}/api/readings`).then((response) =>
+        response.json(),
+      )
+    ).readings[0].value,
     false,
   );
 
@@ -252,11 +255,25 @@ test("start returns ready owner actions that restart the screen without the agen
   assert.equal(repeatedOutput[0].pid, restartOutput[0].pid);
   assert.deepEqual(repeatedOutput[0].actions, started.actions);
   assert.deepEqual(
-    (await readdir(configDirectory)).filter((name) =>
-      name.endsWith(".command"),
-    ),
+    (await readdir(configDirectory))
+      .filter((name) => name.endsWith(".command"))
+      .sort(),
     actionFiles,
   );
+
+  await run(started.actions.stop, [], {
+    cwd: operatorDirectory,
+    env: environment,
+  });
+  await writeFile(started.actions.open_or_restart, "unrelated owner file\n");
+  await assert.rejects(command("start"), (error) =>
+    error.stderr.includes("is occupied by another file"),
+  );
+  assert.equal(
+    await readFile(started.actions.open_or_restart, "utf8"),
+    "unrelated owner file\n",
+  );
+  assert.equal(hub.connections.size, 0);
 });
 
 test("the dashboard rejects a non-characteristic selection before spawning", async (t) => {

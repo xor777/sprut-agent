@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmod,
+  lstat,
   mkdir,
   readFile,
   rename,
@@ -31,7 +33,7 @@ Config:
   }]
 }
 
-start   Start this screen, or replace it after a valid config change.
+start   Start this screen and create ready open/restart and stop actions.
 open    Open the running screen in the default browser.
 status  Print its current local URL and process id.
 stop    Stop only this screen.
@@ -106,6 +108,7 @@ async function main(action, configArgument) {
   }
 
   parseConfig(configText);
+  const actions = await ensureOwnerActions({ configPath, key });
   const instanceId = digest(`${configPath}\0${configText}`);
   if (isOwned && state.instance_id === instanceId) {
     print({
@@ -114,6 +117,7 @@ async function main(action, configArgument) {
       already_running: true,
       url: state.url,
       pid: state.pid,
+      actions,
     });
     return;
   }
@@ -134,7 +138,109 @@ async function main(action, configArgument) {
     already_running: false,
     url: started.url,
     pid: started.pid,
+    actions,
   });
+}
+
+async function ensureOwnerActions({ configPath, key }) {
+  const directory = path.dirname(configPath);
+  const prefix = `sprut-dashboard-${key}`;
+  const runtime = fileURLToPath(import.meta.url);
+  const actions = {
+    open_or_restart: path.join(directory, `${prefix}-open.command`),
+    stop: path.join(directory, `${prefix}-stop.command`),
+  };
+  const specifications = [
+    {
+      path: actions.open_or_restart,
+      marker: actionMarker(key, "open_or_restart"),
+      commands: ["start", "open"],
+    },
+    {
+      path: actions.stop,
+      marker: actionMarker(key, "stop"),
+      commands: ["stop"],
+    },
+  ].map((specification) => ({
+    ...specification,
+    contents: actionContents({
+      marker: specification.marker,
+      commands: specification.commands,
+      runtime,
+      configPath,
+    }),
+  }));
+
+  const existing = await Promise.all(
+    specifications.map((specification) =>
+      inspectAction(specification.path, specification.marker),
+    ),
+  );
+  await Promise.all(
+    specifications.map((specification, index) =>
+      writeAction(specification, existing[index]),
+    ),
+  );
+  return actions;
+}
+
+function actionMarker(key, action) {
+  return `# sprut-agent-dashboard-action:${key}:${action}`;
+}
+
+function actionContents({ marker, commands, runtime, configPath }) {
+  const invocation = (command) =>
+    `${shellQuote(process.execPath)} ${shellQuote(runtime)} ${command} ${shellQuote(configPath)}`;
+  return `#!/bin/sh\n${marker}\nset -eu\n${commands.map(invocation).join("\n")}\n`;
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function inspectAction(actionPath, marker) {
+  try {
+    const info = await lstat(actionPath);
+    if (!info.isFile()) throw occupiedAction(actionPath);
+    const contents = await readFile(actionPath, "utf8");
+    if (!contents.startsWith(`#!/bin/sh\n${marker}\n`)) {
+      throw occupiedAction(actionPath);
+    }
+    return contents;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function writeAction({ path: actionPath, contents }, existing) {
+  if (existing === contents) {
+    await chmod(actionPath, 0o700);
+    return;
+  }
+  if (existing === null) {
+    try {
+      await writeFile(actionPath, contents, { flag: "wx", mode: 0o700 });
+      return;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      throw occupiedAction(actionPath);
+    }
+  }
+  const temporary = `${actionPath}.${process.pid}.tmp`;
+  await writeFile(temporary, contents, { flag: "wx", mode: 0o700 });
+  try {
+    await rename(temporary, actionPath);
+  } catch (error) {
+    await unlink(temporary).catch(() => {});
+    throw error;
+  }
+}
+
+function occupiedAction(actionPath) {
+  return new Error(
+    `Dashboard action path is occupied by another file: ${actionPath}`,
+  );
 }
 
 async function serve({
@@ -274,7 +380,7 @@ async function removeState(stateFile) {
 }
 
 async function openBrowser(url) {
-  const opener = process.platform === "darwin" ? "open" : "xdg-open";
+  const opener = process.platform === "darwin" ? "/usr/bin/open" : "xdg-open";
   await new Promise((resolve, reject) => {
     const child = spawn(opener, [url], { detached: true, stdio: "ignore" });
     child.once("error", reject);
