@@ -104,6 +104,8 @@ async function startHub() {
     behavior: {
       closeAfterAccessoryCreate: false,
       closeAfterAccessoryDelete: false,
+      closeAccessoryGetAfterDelete: false,
+      closeBeforeNextAccessoryGet: false,
       closeAfterNextLinkAdd: false,
       closeAfterNextLinkAddReadback: false,
       closeBeforeNextLinkList: false,
@@ -112,7 +114,9 @@ async function startHub() {
       preservePhysicalOutOnIncomingRemove: false,
       preserveEmptyPhysicalOutOnIncomingRemove: false,
       dropForeignPhysicalConsumersOnIncomingRemove: false,
+      failLinkRemoveOnAttempt: undefined,
     },
+    linkRemoveAttempts: 0,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -136,6 +140,11 @@ async function startHub() {
           },
         };
       } else if (params.accessory?.get) {
+        if (state.behavior.closeBeforeNextAccessoryGet) {
+          state.behavior.closeBeforeNextAccessoryGet = false;
+          socket.close();
+          return;
+        }
         result = {
           accessory: {
             get:
@@ -196,6 +205,10 @@ async function startHub() {
           if (key.startsWith(`${params.accessory.delete.id}.`)) {
             state.links.delete(key);
           }
+        }
+        if (state.behavior.closeAccessoryGetAfterDelete) {
+          state.behavior.closeAccessoryGetAfterDelete = false;
+          state.behavior.closeBeforeNextAccessoryGet = true;
         }
         if (state.behavior.closeAfterAccessoryDelete) {
           state.behavior.closeAfterAccessoryDelete = false;
@@ -282,6 +295,19 @@ async function startHub() {
         }
         result = { link: { addVirtual: structuredClone(incoming) } };
       } else if (params.link?.remove) {
+        state.linkRemoveAttempts += 1;
+        if (
+          state.linkRemoveAttempts ===
+          state.behavior.failLinkRemoveOnAttempt
+        ) {
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: -32603, message: "Injected link.remove failure" },
+            }),
+          );
+          return;
+        }
         const key = linkKey(params.link.remove);
         const removed = (state.links.get(key) ?? []).find(
           ({ index }) => index === params.link.remove.linkId,
@@ -820,6 +846,103 @@ test("restore stops when its link removal drops a foreign consumer", async (t) =
     hub.requests.some(({ accessory }) => accessory?.delete),
     false,
   );
+});
+
+test("retry keeps proof that its completed removal preserved a later-removed foreign consumer", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const foreignConsumer = { aId: 80, sId: 1, cId: 1 };
+  hub.state.links.set("34.13.15", [
+    {
+      type: "OUT",
+      index: "Virtual/34.15",
+      characteristics: [foreignConsumer],
+    },
+  ]);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  hub.state.behavior.failLinkRemoveOnAttempt = 2;
+  const interrupted = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(interrupted.isError, true);
+  assert.deepEqual(hub.state.links.get("34.13.15"), [
+    {
+      type: "OUT",
+      index: "Virtual/34.15",
+      characteristics: [foreignConsumer],
+    },
+  ]);
+  await firstClient.close();
+
+  hub.state.links.set("34.13.15", []);
+  hub.state.behavior.failLinkRemoveOnAttempt = undefined;
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.conflict_reason, undefined);
+  assert.equal(
+    hub.state.accessories.some(({ id }) => id === 90),
+    false,
+  );
+});
+
+test("get keeps completed removal proof after a lost delete readback and later foreign removal", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const foreignConsumer = { aId: 80, sId: 1, cId: 1 };
+  hub.state.links.set("34.13.15", [
+    {
+      type: "OUT",
+      index: "Virtual/34.15",
+      characteristics: [foreignConsumer],
+    },
+  ]);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  hub.state.behavior.closeAfterAccessoryDelete = true;
+  hub.state.behavior.closeAccessoryGetAfterDelete = true;
+  const interrupted = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(interrupted.isError, true);
+  assert.equal(
+    hub.state.accessories.some(({ id }) => id === 90),
+    false,
+  );
+  await firstClient.close();
+
+  hub.state.links.set("34.13.15", []);
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const inspected = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.isError, undefined, inspected.content[0]?.text);
+  assert.equal(inspected.structuredContent.status, "restored");
+  assert.equal(inspected.structuredContent.conflict_reason, undefined);
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
 });
 
 test("restore preserves a virtual group after a manual link was added", async (t) => {
