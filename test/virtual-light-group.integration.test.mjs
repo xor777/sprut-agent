@@ -229,6 +229,20 @@ async function startHub() {
             sId: input.tSId,
             cId: input.tCId,
           });
+          const outgoingKey = linkKey({
+            aId: input.tAId,
+            sId: input.tSId,
+            cId: input.tCId,
+          });
+          const outgoingLinks = state.links.get(outgoingKey) ?? [];
+          outgoingLinks.push({
+            index: `Virtual/${input.tAId}.${input.tCId}`,
+            type: "OUT",
+            characteristics: [
+              { aId: input.aId, sId: input.sId, cId: input.cId },
+            ],
+          });
+          state.links.set(outgoingKey, outgoingLinks);
         }
         if (state.behavior.closeAfterNextLinkAdd) {
           state.behavior.closeAfterNextLinkAdd = false;
@@ -238,12 +252,35 @@ async function startHub() {
         result = { link: { addVirtual: structuredClone(incoming) } };
       } else if (params.link?.remove) {
         const key = linkKey(params.link.remove);
+        const removed = (state.links.get(key) ?? []).find(
+          ({ index }) => index === params.link.remove.linkId,
+        );
         state.links.set(
           key,
           (state.links.get(key) ?? []).filter(
             ({ index }) => index !== params.link.remove.linkId,
           ),
         );
+        if (removed?.type === "IN") {
+          for (const target of removed.characteristics) {
+            const outgoingKey = linkKey(target);
+            state.links.set(
+              outgoingKey,
+              (state.links.get(outgoingKey) ?? []).filter(
+                (link) =>
+                  !(
+                    link.type === "OUT" &&
+                    link.characteristics.some(
+                      ({ aId, sId, cId }) =>
+                        aId === params.link.remove.aId &&
+                        sId === params.link.remove.sId &&
+                        cId === params.link.remove.cId,
+                    )
+                  ),
+              ),
+            );
+          }
+        }
         result = { link: { remove: {} } };
       } else if (params.characteristic?.update) {
         const input = params.characteristic.update;
@@ -521,6 +558,26 @@ test("restore deletes only an unchanged owned virtual accessory", async (t) => {
   assert.deepEqual(
     hub.requests.filter(({ accessory }) => accessory?.delete),
     [{ accessory: { delete: { id: 90 } } }],
+  );
+  assert.deepEqual(
+    hub.requests
+      .filter(({ link }) => link?.remove)
+      .map(({ link }) => link.remove),
+    [
+      { aId: 90, sId: 1, cId: 1, linkId: "Virtual/90.1" },
+      { aId: 90, sId: 1, cId: 2, linkId: "Virtual/90.2" },
+    ],
+  );
+  assert.equal(
+    hub.requests.findIndex(({ link }) => link?.remove) <
+      hub.requests.findIndex(({ accessory }) => accessory?.delete),
+    true,
+    "the native UI removes the virtual IN link before deleting its accessory",
+  );
+  assert.deepEqual(
+    [...hub.state.links.entries()].filter(([, links]) => links.length > 0),
+    [],
+    "restore must not leave the empty physical OUT artifacts observed live",
   );
   assert.deepEqual(
     hub.state.accessories.map(({ id }) => id),
