@@ -44,9 +44,25 @@ function trigger(source, value, variables, options, context) {
   variables.wasOn = value === true;
 }`;
 const secondLogicSource = firstLogicSource.replace(
-  "variables.wasOn === false",
-  "!variables.wasOn",
-);
+  'description: "Set the initial brightness once"',
+  'description: "Set the updated brightness once"',
+).replace("setValue(15)", "setValue(25)");
+const nativeLogicDescriptions = [
+  {
+    source: firstLogicSource,
+    description: "Set the initial brightness once",
+  },
+  {
+    source: secondLogicSource,
+    description: "Set the updated brightness once",
+  },
+];
+
+function nativeLogicDescription(source) {
+  return nativeLogicDescriptions.find(({ source: snapshot }) =>
+    source.startsWith(snapshot),
+  )?.description;
+}
 const deviceWindowRef = `${homeRef}/window/Controller%2Fzigbee_demo%2FChild%2FDEVICE_A%2F`;
 const startupOptionKey = "/11/0006_OnOff/4003_StartUpOnOff/255";
 const smoothOptionKeys = {
@@ -815,6 +831,9 @@ async function startHub() {
           index,
           predefined: false,
         };
+        if (created.type === "LOGIC") {
+          created.desc = nativeLogicDescription(created.data) ?? created.desc;
+        }
         state.scenarios.push(created);
         if (created.type === "LOGIC") {
           const type = `GeneratedLogicType${state.nextScenario - 1}`;
@@ -851,6 +870,10 @@ async function startHub() {
             scenario.data = JSON.stringify(
               withRuntimeBlockFields(JSON.parse(params.scenario.update.data)),
             );
+          } else if (typeof params.scenario.update.data === "string") {
+            scenario.desc =
+              nativeLogicDescription(params.scenario.update.data) ??
+              scenario.desc;
           }
         }
         state.behavior.ignoreNextUpdate = false;
@@ -4585,6 +4608,13 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
   assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   assert.equal(prepared.structuredContent.status, "prepared");
   assert.equal(prepared.structuredContent.diff.source.exact_match, false);
+  const stillPrepared = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(stillPrepared.structuredContent.status, "prepared");
+  assert.equal(stillPrepared.structuredContent.logic_mapping_status, undefined);
+  assert.equal(stillPrepared.structuredContent.logic_mapping_reason, undefined);
 
   const created = await client.callTool({
     name: "apply_native_change",
@@ -4605,7 +4635,20 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     "GeneratedLogicType1",
   );
   assert.equal(created.structuredContent.diff.source.exact_match, true);
+  assert.equal(
+    created.structuredContent.diff.editable_flags.observed.description,
+    "Set the initial brightness once",
+  );
   const createdScenarioRef = created.structuredContent.scenario_ref;
+  const createdSource = hub.requests.find(
+    ({ scenario }) => scenario?.create?.type === "LOGIC",
+  ).scenario.create.data;
+  assert.match(
+    createdSource,
+    new RegExp(
+      `\\[${created.structuredContent.ownership_marker.replaceAll("-", "\\-")}\\]`,
+    ),
+  );
 
   const assignment = await client.callTool({
     name: "prepare_native_change",
@@ -4657,6 +4700,10 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
   });
   assert.equal(updated.structuredContent.status, "applied");
   assert.equal(updated.structuredContent.diff.source.exact_match, true);
+  assert.equal(
+    updated.structuredContent.diff.editable_flags.observed.description,
+    "Set the updated brightness once",
+  );
   const readback = await client.callTool({
     name: "get_entity",
     arguments: { entity_ref: createdScenarioRef, include: ["configuration"] },
@@ -4669,7 +4716,7 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     hub.state.scenarios.find(({ index }) => index === "created-1"),
     {
       name: "Яркость при включении",
-      desc: `${"Установить стартовый уровень один раз"}\n\n[${created.structuredContent.ownership_marker}]`,
+      desc: "Set the updated brightness once",
       active: true,
       onStart: false,
       sync: false,
@@ -4680,14 +4727,28 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     },
   );
 
-  const sourceRestored = await client.callTool({
+  const afterUpdateRestart = await startClient(t, hub, stateDirectory);
+  const persistedUpdate = await afterUpdateRestart.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(persistedUpdate.structuredContent.status, "applied");
+  assert.equal(
+    persistedUpdate.structuredContent.diff.editable_flags.observed.description,
+    "Set the updated brightness once",
+  );
+  const sourceRestored = await afterUpdateRestart.callTool({
     name: "restore_native_change",
     arguments: { change_ref: update.structuredContent.change_ref },
   });
   assert.equal(sourceRestored.structuredContent.status, "restored");
   assert.equal(
     hub.state.scenarios.find(({ index }) => index === "created-1").data,
-    firstLogicSource,
+    createdSource,
+  );
+  assert.equal(
+    hub.state.scenarios.find(({ index }) => index === "created-1").desc,
+    "Set the initial brightness once",
   );
   const assignmentRestored = await client.callTool({
     name: "restore_native_change",
@@ -4707,10 +4768,29 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     hub.state.logicTypes.some(({ type }) => type === "GeneratedLogicType1"),
     false,
   );
+  const afterCleanup = await afterUpdateRestart.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(afterCleanup.structuredContent.status, "restored");
+  assert.equal(afterCleanup.structuredContent.logic_mapping_status, undefined);
+  assert.equal(afterCleanup.structuredContent.logic_mapping_reason, undefined);
 });
 
 test("a lost LOGIC create response is reconciled without creating a duplicate", async (t) => {
   const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push({
+    index: "neighbor-logic",
+    name: "Соседний LOGIC",
+    desc: "Set the initial brightness once",
+    active: false,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: firstLogicSource,
+    predefined: false,
+  });
+  hub.state.nextScenario = 8;
   const client = await startClient(t, hub, stateDirectory);
   const prepared = await client.callTool({
     name: "prepare_native_change",
@@ -4735,6 +4815,15 @@ test("a lost LOGIC create response is reconciled without creating a duplicate", 
   assert.equal(
     recovered.structuredContent.recovered_after_uncertain_write,
     true,
+  );
+  assert.equal(recovered.structuredContent.scenario_index, "created-8");
+  assert.match(
+    hub.state.scenarios.find(({ index }) => index === "created-8").data,
+    new RegExp(recovered.structuredContent.ownership_marker),
+  );
+  assert.equal(
+    hub.state.scenarios.find(({ index }) => index === "neighbor-logic").data,
+    firstLogicSource,
   );
   const repeated = await client.callTool({
     name: "apply_native_change",
@@ -5119,10 +5208,11 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
       reason: "Проверить сохранение ручной правки",
     },
   });
-  await client.callTool({
+  const appliedUpdate = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: update.structuredContent.change_ref },
   });
+  assert.equal(appliedUpdate.structuredContent.status, "applied");
   hub.state.scenarios.find(({ index }) => index === "manual-logic").data =
     `${secondLogicSource}\n// manual edit`;
   const sourceConflict = await client.callTool({
