@@ -152,6 +152,7 @@ export class AutomationService {
     const contract = characteristicContract(characteristic.control);
     const requestedValue = validateCharacteristicValue(input.value, contract);
     const baselineValue = typedNativeValue(characteristic.control.value);
+    const virtualGroup = await this.#findOwnedVirtualGroupContext(target);
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -165,6 +166,13 @@ export class AutomationService {
       contract,
       baseline_value: baselineValue,
       requested_value: requestedValue,
+      ...(virtualGroup
+        ? {
+            virtual_group_change_ref: `spruthub-change://native/${virtualGroup.change_id}`,
+            group_characteristic_type: virtualGroup.characteristic_type,
+            group_member_targets: virtualGroup.members,
+          }
+        : {}),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -174,6 +182,43 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  async #findOwnedVirtualGroupContext(target) {
+    const matches = [];
+    for (const change of await this.store.list()) {
+      if (
+        change.kind !== "virtual_light_group" ||
+        change.status !== "applied" ||
+        change.virtual_accessory_creation_owned !== true
+      ) {
+        continue;
+      }
+      for (const type of change.characteristic_types) {
+        if (
+          nativeTargetKey(change.virtual_target?.characteristics?.[type]) !==
+          nativeTargetKey(target)
+        ) {
+          continue;
+        }
+        matches.push({
+          change_id: change.id,
+          characteristic_type: type,
+          members: change.members.map((member) => ({
+            member_ref: member.ref,
+            target: structuredClone(member.characteristics[type]),
+          })),
+        });
+      }
+    }
+    if (matches.length > 1) {
+      throw new SprutHubError(
+        "incompatible_local_state",
+        "More than one owned virtual-light journal claims this characteristic.",
+        "list_native_changes",
+      );
+    }
+    return matches[0] ?? null;
   }
 
   async #prepareWindowOptionChange(input) {
@@ -734,8 +779,16 @@ export class AutomationService {
     }
     const direction = nativeIntentDirection(change);
     let state;
+    let groupMemberObservations;
     try {
       state = await this.#readNativeValueState(change, { requireWrite });
+      if (
+        direction === "apply" &&
+        change.group_member_targets &&
+        valuesEqual(state.value, change.requested_value)
+      ) {
+        groupMemberObservations = await this.#readVirtualGroupMembers(change);
+      }
     } catch (error) {
       return {
         direction,
@@ -749,7 +802,12 @@ export class AutomationService {
     const { value: current, contract } = state;
     const expected =
       direction === "restore" ? change.baseline_value : change.requested_value;
-    if (valuesEqual(current, expected)) {
+    const groupDeliveryConfirmed = groupMemberObservations
+      ? groupMemberObservations.every(({ value }) =>
+          groupValuesEqual(value, change.requested_value),
+        )
+      : undefined;
+    if (valuesEqual(current, expected) && groupDeliveryConfirmed !== false) {
       const completedStatus = direction === "restore" ? "restored" : "applied";
       const verificationResult =
         direction === "restore"
@@ -762,6 +820,12 @@ export class AutomationService {
         contract,
         result: await this.#finishNative(change, completedStatus, current, {
           ...(direction === "apply" ? { applied_value_observed: true } : {}),
+          ...(groupMemberObservations
+            ? {
+                group_member_observations: groupMemberObservations,
+                group_delivery_confirmed: true,
+              }
+            : {}),
           last_verification: freshVerification(verificationResult),
           ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
         }),
@@ -793,17 +857,40 @@ export class AutomationService {
       current,
       contract,
       result: await this.#finishNative(change, "uncertain", current, {
-        last_verification: freshVerification(verificationResult),
-        ...(acknowledged
+        ...(groupMemberObservations
           ? {
-              conflict_reason:
-                direction === "restore"
-                  ? "ack_without_baseline_result"
-                  : "ack_without_requested_result",
+              group_member_observations: groupMemberObservations,
+              group_delivery_confirmed: false,
             }
           : {}),
+        last_verification: freshVerification(verificationResult),
+        ...(groupDeliveryConfirmed === false
+          ? { conflict_reason: "group_members_not_converged" }
+          : acknowledged
+            ? {
+                conflict_reason:
+                  direction === "restore"
+                    ? "ack_without_baseline_result"
+                    : "ack_without_requested_result",
+              }
+            : {}),
       }),
     };
+  }
+
+  async #readVirtualGroupMembers(change) {
+    return Promise.all(
+      change.group_member_targets.map(
+        async ({ member_ref: memberRef, target }) => {
+          const characteristic = await this.client.getCharacteristic(target);
+          return {
+            member_ref: memberRef,
+            characteristic_ref: `${memberRef}/characteristic/${target.cId}`,
+            value: typedNativeValue(characteristic.control.value),
+          };
+        },
+      ),
+    );
   }
 
   async getNativeChange(changeReference) {
@@ -1509,8 +1596,37 @@ export class AutomationService {
         }
         return this.#recordUnownedVirtualLightCandidates(change);
       }
-      const selected = selectCreatedVirtualLight(created, change);
       change.created_accessory_id = created.id;
+      change.virtual_accessory_creation_owned = true;
+      await this.#saveBeforeWrite(change);
+    }
+
+    if (!change.virtual_target) {
+      let created;
+      try {
+        created = await this.client.getAccessory(change.created_accessory_id);
+      } catch (error) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: "created_accessory_readback_failed",
+          last_verification: failedVerification(error),
+        });
+      }
+      let selected;
+      try {
+        selected = selectCreatedVirtualLight(created, change);
+      } catch {
+        return this.#finishNative(change, "conflict", undefined, {
+          observed_snapshot: {
+            accessory: virtualAccessoryStructure(created),
+          },
+          conflict_reason: "incompatible_created_accessory",
+          configuration_matches: false,
+          last_verification: freshVerification(
+            "created_accessory_incompatible",
+          ),
+        });
+      }
       change.virtual_target = selected.target;
       change.created_accessory_snapshot = virtualAccessoryStructure(created);
       change.created_link_settings = virtualLightSettingsSnapshot(
@@ -1518,7 +1634,6 @@ export class AutomationService {
         selected.target,
         change.characteristic_types,
       );
-      change.virtual_accessory_creation_owned = true;
       await this.#saveBeforeWrite(change);
     }
 
@@ -1582,6 +1697,21 @@ export class AutomationService {
         }
         link.completed = true;
         link.link_id = relation.linkId;
+        if (
+          !(await this.#capturePhysicalVirtualLinkArtifact(
+            change,
+            link,
+            source,
+          ))
+        ) {
+          return this.#finishNative(change, "uncertain", undefined, {
+            configuration_matches: undefined,
+            conflict_reason: "physical_link_counterpart_missing",
+            last_verification: freshVerification(
+              "group_configuration_incomplete",
+            ),
+          });
+        }
         if (!link.acknowledged) change.recovered_after_uncertain_write = true;
         await this.#saveBeforeWrite(change);
         continue;
@@ -1625,6 +1755,17 @@ export class AutomationService {
       }
       link.completed = true;
       link.link_id = observed.linkId;
+      if (
+        !(await this.#capturePhysicalVirtualLinkArtifact(change, link, source))
+      ) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: "physical_link_counterpart_missing",
+          last_verification: freshVerification(
+            "group_configuration_incomplete",
+          ),
+        });
+      }
       if (!link.acknowledged) change.recovered_after_uncertain_write = true;
       await this.#saveBeforeWrite(change);
     }
@@ -1691,6 +1832,16 @@ export class AutomationService {
         last_verification: freshVerification("group_configuration_incomplete"),
       });
     }
+    const physicalLinks = await this.#observePhysicalVirtualLinks(change);
+    if (!physicalLinks.complete) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        observed_snapshot: applied,
+        configuration_matches: undefined,
+        conflict_reason: "physical_link_counterpart_missing",
+        last_verification: freshVerification("group_configuration_incomplete"),
+      });
+    }
+    change.physical_link_artifacts = physicalLinks.artifacts;
     change.applied_snapshot = structuredClone(applied);
     change.native_acknowledged = virtualLightAllWritesAcknowledged(change);
     return this.#finishNative(change, "applied", undefined, {
@@ -1717,6 +1868,18 @@ export class AutomationService {
     }
     if (current.absent) {
       if (change.write_intent?.direction === "restore") {
+        const residues = await this.#observePhysicalVirtualLinkResidues(change);
+        if (residues.length > 0) {
+          return this.#finishNative(change, "uncertain", undefined, {
+            physical_link_residues: residues,
+            configuration_matches: undefined,
+            conflict_reason: "link_cleanup_incomplete",
+            last_verification: freshVerification(
+              "physical_link_residue_observed",
+            ),
+          });
+        }
+        change.physical_link_residues = undefined;
         return this.#finishNative(change, "restored", undefined, {
           last_verification: freshVerification("created_accessory_absent"),
         });
@@ -1736,7 +1899,10 @@ export class AutomationService {
         last_verification: freshVerification("group_configuration_observed"),
       });
     }
-    if (safeOwnedVirtualLightConfiguration(change, current)) {
+    if (
+      safeOwnedVirtualLightConfiguration(change, current) ||
+      safeRestoringVirtualLightConfiguration(change, current)
+    ) {
       return this.#finishNative(change, "uncertain", undefined, {
         observed_snapshot: current,
         configuration_matches: undefined,
@@ -1764,6 +1930,18 @@ export class AutomationService {
     }
     const current = await this.#observeVirtualLightGroup(change);
     if (current.absent) {
+      const residues = await this.#observePhysicalVirtualLinkResidues(change);
+      if (residues.length > 0) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          physical_link_residues: residues,
+          configuration_matches: undefined,
+          conflict_reason: "link_cleanup_incomplete",
+          last_verification: freshVerification(
+            "physical_link_residue_observed",
+          ),
+        });
+      }
+      change.physical_link_residues = undefined;
       return this.#finishNative(change, "restored", undefined, {
         last_verification: freshVerification("created_accessory_absent"),
       });
@@ -1773,7 +1951,8 @@ export class AutomationService {
       isDeepStrictEqual(current, change.applied_snapshot);
     if (
       !matchesApplied &&
-      !safeOwnedVirtualLightConfiguration(change, current)
+      !safeOwnedVirtualLightConfiguration(change, current) &&
+      !safeRestoringVirtualLightConfiguration(change, current)
     ) {
       return this.#finishNative(change, "conflict", undefined, {
         observed_snapshot: current,
@@ -1782,6 +1961,156 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
+    if (!change.progress.cleanup) {
+      change.progress.cleanup = {
+        links: change.progress.links.map((link) => ({
+          type: link.type,
+          member_ref: link.member_ref,
+          link_id: link.link_id,
+          sent: false,
+          acknowledged: false,
+          completed: false,
+        })),
+        settings: change.characteristic_types.map((type) => ({
+          type,
+          sent: false,
+          acknowledged: false,
+          completed: false,
+        })),
+      };
+      await this.#saveBeforeWrite(change);
+    }
+    for (const removal of change.progress.cleanup.links) {
+      const source = change.virtual_target.characteristics[removal.type];
+      const links = await this.client.listLinks(source);
+      const present = links.some(
+        (link) => link.type === "IN" && link.index === removal.link_id,
+      );
+      if (!present) {
+        removal.completed = true;
+        if (removal.sent && !removal.acknowledged) {
+          change.recovered_after_uncertain_write = true;
+        }
+        await this.#saveBeforeWrite(change);
+        continue;
+      }
+      if (removal.sent) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          observed_snapshot: current,
+          configuration_matches: undefined,
+          conflict_reason: "link_remove_outcome_unknown",
+          last_verification: freshVerification("owned_link_still_present"),
+        });
+      }
+      await this.#persistVirtualLightStep(
+        change,
+        "removing_link",
+        { characteristic_type: removal.type, link_id: removal.link_id },
+        "restore",
+      );
+      removal.sent = true;
+      await this.#saveBeforeWrite(change);
+      try {
+        await this.client.removeLink({ ...source, linkId: removal.link_id });
+        removal.acknowledged = true;
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          removal.sent = false;
+          await this.#finishNative(change, "applied", undefined, {
+            observed_snapshot: current,
+          });
+          throw error;
+        }
+      }
+      const after = await this.client.listLinks(source);
+      if (
+        after.some(
+          (link) => link.type === "IN" && link.index === removal.link_id,
+        )
+      ) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: removal.acknowledged
+            ? "ack_without_link_removal"
+            : "link_remove_outcome_unknown",
+          last_verification: freshVerification("owned_link_still_present"),
+        });
+      }
+      removal.completed = true;
+      if (!removal.acknowledged) change.recovered_after_uncertain_write = true;
+      await this.#saveBeforeWrite(change);
+    }
+    for (const setting of change.progress.cleanup.settings) {
+      const target = change.virtual_target.characteristics[setting.type];
+      const accessory = await this.client.getAccessory(
+        change.created_accessory_id,
+      );
+      const characteristic = findNativeCharacteristic(accessory, target);
+      if (
+        characteristic?.hasLinks !== true &&
+        (characteristic?.linkProcessing ?? 0) === 0
+      ) {
+        setting.completed = true;
+        if (setting.sent && !setting.acknowledged) {
+          change.recovered_after_uncertain_write = true;
+        }
+        await this.#saveBeforeWrite(change);
+        continue;
+      }
+      if (setting.sent) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: "link_settings_restore_outcome_unknown",
+          last_verification: freshVerification("link_settings_still_enabled"),
+        });
+      }
+      await this.#persistVirtualLightStep(
+        change,
+        "disabling_links",
+        { characteristic_type: setting.type },
+        "restore",
+      );
+      setting.sent = true;
+      await this.#saveBeforeWrite(change);
+      try {
+        await this.client.updateCharacteristicLinks({
+          ...target,
+          hasLinks: false,
+        });
+        setting.acknowledged = true;
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          setting.sent = false;
+          await this.#finishNative(change, "applied", undefined, {
+            observed_snapshot: current,
+          });
+          throw error;
+        }
+      }
+      const after = await this.client.getAccessory(change.created_accessory_id);
+      if (findNativeCharacteristic(after, target)?.hasLinks === true) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: setting.acknowledged
+            ? "ack_without_link_settings_restore"
+            : "link_settings_restore_outcome_unknown",
+          last_verification: freshVerification("link_settings_still_enabled"),
+        });
+      }
+      setting.completed = true;
+      if (!setting.acknowledged) change.recovered_after_uncertain_write = true;
+      await this.#saveBeforeWrite(change);
+    }
+    const residues = await this.#observePhysicalVirtualLinkResidues(change);
+    if (residues.length > 0) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        physical_link_residues: residues,
+        configuration_matches: undefined,
+        conflict_reason: "link_cleanup_incomplete",
+        last_verification: freshVerification("physical_link_residue_observed"),
+      });
+    }
+    change.physical_link_residues = undefined;
     if (change.progress.deletion?.sent === true) {
       return this.#finishNative(change, "uncertain", undefined, {
         observed_snapshot: current,
@@ -1851,6 +2180,93 @@ export class AutomationService {
         change.characteristic_types,
       ),
     };
+  }
+
+  async #observePhysicalVirtualLinks(change) {
+    const artifacts = [];
+    for (const link of change.progress.links) {
+      const source = change.virtual_target.characteristics[link.type];
+      const links = normalizeVirtualLinks(
+        await this.client.listLinks(link.target),
+      );
+      const matching = links.filter(
+        (candidate) =>
+          candidate.type === "OUT" &&
+          candidate.characteristics.some(
+            (characteristic) =>
+              nativeTargetKey(characteristic) === nativeTargetKey(source),
+          ),
+      );
+      if (matching.length !== 1) return { complete: false, artifacts };
+      artifacts.push({
+        type: link.type,
+        member_ref: link.member_ref,
+        target: structuredClone(link.target),
+        source: structuredClone(source),
+        index: matching[0].index,
+      });
+    }
+    return { complete: true, artifacts };
+  }
+
+  async #capturePhysicalVirtualLinkArtifact(change, link, source) {
+    const links = normalizeVirtualLinks(
+      await this.client.listLinks(link.target),
+    );
+    const matching = links.filter(
+      (candidate) =>
+        candidate.type === "OUT" &&
+        candidate.index === link.link_id &&
+        candidate.characteristics.length === 1 &&
+        nativeTargetKey(candidate.characteristics[0]) ===
+          nativeTargetKey(source),
+    );
+    if (matching.length !== 1) return false;
+    const artifact = {
+      type: link.type,
+      member_ref: link.member_ref,
+      target: structuredClone(link.target),
+      source: structuredClone(source),
+      index: matching[0].index,
+    };
+    change.physical_link_artifacts = [
+      ...(change.physical_link_artifacts ?? []).filter(
+        (candidate) =>
+          !(
+            candidate.type === artifact.type &&
+            candidate.member_ref === artifact.member_ref
+          ),
+      ),
+      artifact,
+    ];
+    return true;
+  }
+
+  async #observePhysicalVirtualLinkResidues(change) {
+    const residues = [];
+    for (const artifact of change.physical_link_artifacts ?? []) {
+      const links = normalizeVirtualLinks(
+        await this.client.listLinks(artifact.target),
+      );
+      for (const link of links) {
+        if (
+          link.index === artifact.index ||
+          (link.type === "OUT" &&
+            link.characteristics.some(
+              (characteristic) =>
+                nativeTargetKey(characteristic) ===
+                nativeTargetKey(artifact.source),
+            ))
+        ) {
+          residues.push({
+            member_ref: artifact.member_ref,
+            characteristic_type: artifact.type,
+            link: structuredClone(link),
+          });
+        }
+      }
+    }
+    return residues;
   }
 
   async #recordUnownedVirtualLightCandidates(change) {
@@ -3648,21 +4064,26 @@ function virtualLightGroupContract() {
       "accessory.create({name,roomId,services:[{type:'Lightbulb',name,optional:['Brightness']}]})",
       "link.addVirtual({aId,sId,cId,tAId,tSId,tCId})",
       "characteristic.update({aId,sId,cId,hasLinks:true})",
+      "link.remove({aId,sId,cId,linkId})",
+      "characteristic.update({aId,sId,cId,hasLinks:false})",
     ],
     scope: "one_created_virtual_light_and_explicit_member_services",
     characteristics: ["On", "Brightness"],
     feedback: "LAST_VALUE",
     restore:
-      "delete_only_the_confirmed_created_virtual_accessory_while_its_structure_and_links_match",
+      "remove_owned_in_links_disable_hasLinks_verify_physical_out_absence_then_delete_confirmed_created_accessory",
     evidence: {
       create_and_link_requests: "current_official_frontend",
       request_and_response_shapes: "current_bundled_official_protobuf_schema",
       existing_native_group_read: true,
-      live_create_and_link: false,
+      live_create_and_link: true,
+      live_same_value_repeat_delivery: false,
+      ui_ordered_link_cleanup_requires_live_recheck: true,
     },
     limitations: [
       "Creation and every link are sequential native writes, not one atomic transaction.",
       "A lost accessory-create response does not establish ownership from a matching candidate and is never retried blindly.",
+      "A same-valued virtual command can be acknowledged without reaching every member; member readback is required.",
       "SprutHub exposes no native compare-and-set; a race remains after each pre-write observation.",
     ],
   };
@@ -4377,6 +4798,14 @@ function valuesEqual(left, right) {
   return left?.kind === right?.kind && Object.is(left?.value, right?.value);
 }
 
+function groupValuesEqual(left, right) {
+  const numericKinds = new Set(["intValue", "longValue", "doubleValue"]);
+  if (numericKinds.has(left?.kind) && numericKinds.has(right?.kind)) {
+    return Object.is(Number(left.value), Number(right.value));
+  }
+  return valuesEqual(left, right);
+}
+
 function accessoryPlacementSnapshot(accessory, room) {
   return {
     name: accessory.name,
@@ -4698,15 +5127,16 @@ function unexpectedVirtualLinks(links, expectedTargets) {
   const expected = new Set(expectedTargets.map(nativeTargetKey));
   const seen = new Set();
   const unexpected = [];
-  let incomingCount = 0;
   for (const link of links) {
     if (link.type !== "IN") {
       unexpected.push({ type: link.type, index: link.index });
       continue;
     }
-    incomingCount += 1;
-    if (incomingCount > 1) {
-      unexpected.push({ type: "duplicate_incoming_link", index: link.index });
+    if (link.characteristics.length !== 1) {
+      unexpected.push({
+        type: "invalid_incoming_link_cardinality",
+        index: link.index,
+      });
     }
     for (const target of link.characteristics) {
       const key = nativeTargetKey(target);
@@ -4798,6 +5228,38 @@ function safeOwnedVirtualLightConfiguration(change, observation) {
   return true;
 }
 
+function safeRestoringVirtualLightConfiguration(change, observation) {
+  if (
+    !change.progress.cleanup ||
+    observation.absent ||
+    !isDeepStrictEqual(observation.accessory, change.created_accessory_snapshot)
+  ) {
+    return false;
+  }
+  for (const type of change.characteristic_types) {
+    if (
+      unexpectedVirtualLinks(
+        observation.links[type],
+        expectedTargetsForType(change, type),
+      ).length > 0
+    ) {
+      return false;
+    }
+    const cleanupSetting = change.progress.cleanup.settings.find(
+      (candidate) => candidate.type === type,
+    );
+    const observedSetting = observation.link_settings[type];
+    const expectedHasLinks = cleanupSetting?.sent !== true;
+    if (
+      observedSetting?.has_links !== expectedHasLinks ||
+      observedSetting?.link_processing !== 0
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function matchesVirtualLightCandidate(
   accessory,
   change,
@@ -4825,6 +5287,13 @@ function virtualLightAllWritesAcknowledged(change) {
     change.progress.settings.every(
       ({ acknowledged }) => acknowledged === true,
     ) &&
+    (change.progress.cleanup === undefined ||
+      (change.progress.cleanup.links.every(
+        ({ sent, acknowledged }) => !sent || acknowledged === true,
+      ) &&
+        change.progress.cleanup.settings.every(
+          ({ sent, acknowledged }) => !sent || acknowledged === true,
+        ))) &&
     (change.progress.deletion === undefined ||
       change.progress.deletion.acknowledged === true)
   );
@@ -5332,12 +5801,20 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
+      ...(change.physical_link_residues
+        ? {
+            physical_link_residues: structuredClone(
+              change.physical_link_residues,
+            ),
+          }
+        : {}),
       restore_supported: change.virtual_accessory_creation_owned === true,
       limitations: [
         "The group exposes only the explicitly validated common On and Brightness controls.",
         "Last-value feedback is configured; a manual member change is not synchronized to other members.",
         "Creation and link writes are sequential, and SprutHub exposes no native compare-and-set.",
-        "The create/link wire contract is confirmed by the current official frontend and schema but not yet replayed on hub 3.0.0.",
+        "Create and addVirtual were replayed on hub 3.0.0; removal first follows the current native UI path and requires physical OUT readback before accessory deletion.",
+        "A same-valued command can be acknowledged without reaching every member; characteristic commands through an owned group report each member readback instead of inferring delivery from the virtual value.",
       ],
     };
   }
@@ -5497,6 +5974,16 @@ function publicNativeChange(
     ...(change.recovered_after_uncertain_write
       ? { recovered_after_uncertain_write: true }
       : {}),
+    ...(change.group_member_observations
+      ? {
+          virtual_group_change_ref: change.virtual_group_change_ref,
+          group_characteristic_type: change.group_characteristic_type,
+          group_member_observations: structuredClone(
+            change.group_member_observations,
+          ),
+          group_delivery_confirmed: change.group_delivery_confirmed === true,
+        }
+      : {}),
     ...(["window_option", "logic_option"].includes(change.kind)
       ? {
           option_key: change.option_key,
@@ -5518,6 +6005,11 @@ function publicNativeChange(
       ...(change.kind === "window_option"
         ? [
             "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
+          ]
+        : []),
+      ...(change.group_member_targets
+        ? [
+            "Delivery is checked against every journal-known group member; a same-valued native virtual command may be suppressed by SprutHub.",
           ]
         : []),
     ],

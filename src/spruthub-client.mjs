@@ -810,10 +810,10 @@ export class SprutHubClient {
     const accessory = response.result?.accessory?.create;
     try {
       validateAccessory(accessory);
-      if (accessory.virtual !== true) {
+      if (accessory.virtual === false) {
         throw new SprutHubError(
           "incompatible_response",
-          "SprutHub did not identify the created accessory as virtual.",
+          "SprutHub identified the created accessory as non-virtual.",
         );
       }
     } catch (error) {
@@ -868,6 +868,22 @@ export class SprutHubClient {
       throw error;
     }
     return link;
+  }
+
+  async removeLink({ aId, sId, cId, linkId }) {
+    const response = await this.#request(
+      { link: { remove: { aId, sId, cId, linkId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.link;
+    if (!container || !Object.hasOwn(container, "remove")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the link removal.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
   }
 
   async updateCharacteristicLinks({ aId, sId, cId, hasLinks }) {

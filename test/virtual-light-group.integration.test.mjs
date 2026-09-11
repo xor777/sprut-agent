@@ -179,7 +179,9 @@ async function startHub() {
           socket.close();
           return;
         }
-        result = { accessory: { create: structuredClone(created) } };
+        const createResponse = structuredClone(created);
+        delete createResponse.virtual;
+        result = { accessory: { create: createResponse } };
       } else if (params.accessory?.delete) {
         const at = state.accessories.findIndex(
           ({ id }) => id === params.accessory.delete.id,
@@ -210,10 +212,13 @@ async function startHub() {
         const input = params.link.addVirtual;
         const key = linkKey(input);
         const links = state.links.get(key) ?? [];
-        let incoming = links.find(({ type }) => type === "IN");
+        const incomingIndex = `Virtual/${input.tAId}.${input.tCId}`;
+        let incoming = links.find(
+          ({ index, type }) => type === "IN" && index === incomingIndex,
+        );
         if (!incoming) {
           incoming = {
-            index: `Virtual/${input.aId}.${input.cId}`,
+            index: incomingIndex,
             type: "IN",
             characteristics: [],
           };
@@ -597,8 +602,10 @@ test("restore deletes only an unchanged owned virtual accessory", async (t) => {
       .filter(({ link }) => link?.remove)
       .map(({ link }) => link.remove),
     [
-      { aId: 90, sId: 1, cId: 1, linkId: "Virtual/90.1" },
-      { aId: 90, sId: 1, cId: 2, linkId: "Virtual/90.2" },
+      { aId: 90, sId: 1, cId: 1, linkId: "Virtual/34.15" },
+      { aId: 90, sId: 1, cId: 1, linkId: "Virtual/35.20" },
+      { aId: 90, sId: 1, cId: 2, linkId: "Virtual/34.16" },
+      { aId: 90, sId: 1, cId: 2, linkId: "Virtual/35.21" },
     ],
   );
   assert.equal(
@@ -701,14 +708,14 @@ test("a lost link-remove response is reconciled without removing that link twice
     restored.structuredContent.recovered_after_uncertain_write,
     true,
   );
-  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 4);
 
   const repeated = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(repeated.structuredContent.status, "restored");
-  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 4);
 });
 
 test("restore keeps the virtual accessory when native IN removal leaves physical OUT residue", async (t) => {
@@ -736,6 +743,16 @@ test("restore keeps the virtual accessory when native IN removal leaves physical
     false,
   );
   assert.ok(hub.state.accessories.some(({ id }) => id === 90));
+
+  const inspected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "uncertain");
+  assert.equal(
+    inspected.structuredContent.conflict_reason,
+    "link_cleanup_incomplete",
+  );
 });
 
 test("a repeated group command reports a member that did not receive the native write", async (t) => {
@@ -787,6 +804,34 @@ test("a repeated group command reports a member that did not receive the native 
       { member_ref: memberServiceRefs[0], value: 10 },
       { member_ref: memberServiceRefs[1], value: 70 },
     ],
+  );
+
+  const preparedDifferentCommand = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: brightnessRef,
+      value: 20,
+      reason: "Задать новое значение яркости всей группе",
+    },
+  });
+  const appliedDifferentCommand = await client.callTool({
+    name: "apply_native_change",
+    arguments: {
+      change_ref: preparedDifferentCommand.structuredContent.change_ref,
+    },
+  });
+  assert.equal(appliedDifferentCommand.structuredContent.status, "applied");
+  assert.equal(
+    appliedDifferentCommand.structuredContent.group_delivery_confirmed,
+    true,
+  );
+  assert.deepEqual(
+    [
+      findCharacteristic(hub.state, { aId: 34, sId: 13, cId: 16 }),
+      findCharacteristic(hub.state, { aId: 35, sId: 14, cId: 21 }),
+    ].map(({ control }) => control.value),
+    [{ intValue: 20 }, { intValue: 20 }],
   );
 });
 
