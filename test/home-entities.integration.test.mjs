@@ -1762,6 +1762,7 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
     sync: false,
     data: JSON.stringify({
       mode: "EVERY",
+      "target/a~b": "escaped pointer value",
       settings: Object.fromEntries(
         Array.from({ length: 120 }, (_, index) => [
           `setting-${index}`,
@@ -1782,9 +1783,21 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
     arguments: baseArguments,
   });
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
-  assert(Buffer.byteLength(overview.content[0].text) <= baseArguments.max_bytes);
-  assert.equal(overview.structuredContent.representation.entity_complete, false);
-  assert.equal(overview.structuredContent.representation.selected_complete, false);
+  assert(
+    Buffer.byteLength(overview.content[0].text) <= baseArguments.max_bytes,
+  );
+  assert.equal(
+    overview.structuredContent.page.serialized_bytes,
+    Buffer.byteLength(overview.content[0].text),
+  );
+  assert.equal(
+    overview.structuredContent.representation.entity_complete,
+    false,
+  );
+  assert.equal(
+    overview.structuredContent.representation.selected_complete,
+    false,
+  );
   assert.equal(overview.structuredContent.entity.ref, baseArguments.entity_ref);
 
   let detail = overview;
@@ -1804,13 +1817,79 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
       arguments: part.next.arguments,
     });
     assert.equal(detail.isError, undefined, detail.content[0]?.text);
-    assert(Buffer.byteLength(detail.content[0].text) <= baseArguments.max_bytes);
+    assert(
+      Buffer.byteLength(detail.content[0].text) <= baseArguments.max_bytes,
+    );
+    assert.equal(
+      detail.structuredContent.page.serialized_bytes,
+      Buffer.byteLength(detail.content[0].text),
+    );
   }
-  assert.equal(detail.structuredContent.selection.pointer, "/configuration/value/mode");
+  assert.equal(
+    detail.structuredContent.selection.pointer,
+    "/configuration/value/mode",
+  );
   assert.equal(detail.structuredContent.selection.status, "found");
   assert.equal(detail.structuredContent.selection.value, "EVERY");
   assert.equal(detail.structuredContent.representation.entity_complete, false);
   assert.equal(detail.structuredContent.representation.selected_complete, true);
+
+  const valueOverviewNext =
+    overview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/configuration",
+    ).next;
+  const configurationOverview = await client.callTool({
+    name: valueOverviewNext.tool,
+    arguments: valueOverviewNext.arguments,
+  });
+  const configurationValueNext =
+    configurationOverview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/configuration/value",
+    ).next;
+  const valueOverview = await client.callTool({
+    name: configurationValueNext.tool,
+    arguments: configurationValueNext.arguments,
+  });
+  const escapedNext =
+    valueOverview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/configuration/value/target~1a~0b",
+    ).next;
+  const escaped = await client.callTool({
+    name: escapedNext.tool,
+    arguments: escapedNext.arguments,
+  });
+  assert.equal(
+    escaped.structuredContent.selection.value,
+    "escaped pointer value",
+  );
+
+  const settingsNext =
+    valueOverview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/configuration/value/settings",
+    ).next;
+  let settingsMap = await client.callTool({
+    name: settingsNext.tool,
+    arguments: settingsNext.arguments,
+  });
+  const settingPointers = [];
+  while (true) {
+    assert.equal(settingsMap.isError, undefined, settingsMap.content[0]?.text);
+    assert(Buffer.byteLength(settingsMap.content[0].text) <= 2_048);
+    settingPointers.push(
+      ...settingsMap.structuredContent.representation.available_parts.map(
+        ({ pointer }) => pointer,
+      ),
+    );
+    const next = settingsMap.structuredContent.representation.next;
+    if (!next) break;
+    settingsMap = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+  }
+  assert.equal(settingPointers.length, 120);
+  assert.equal(new Set(settingPointers).size, 120);
+  assert(settingPointers.includes("/configuration/value/settings/setting-119"));
 });
 
 test("long Unicode source resumes exactly and refuses to mix changed versions", async (t) => {
@@ -1842,15 +1921,16 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
     },
   });
   assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert(Buffer.byteLength(result.content[0].text) <= 2_048);
   const firstNext = structuredClone(result.structuredContent.selection.next);
   const chunks = [];
   while (true) {
     const selected = result.structuredContent.selection;
-    chunks.push(selected.value.text);
     assert.equal(
       selected.value.start_character,
       Array.from(chunks.join("")).length,
     );
+    chunks.push(selected.value.text);
     if (!selected.next) break;
     result = await client.callTool({
       name: selected.next.tool,
@@ -1858,6 +1938,10 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
     });
     assert.equal(result.isError, undefined, result.content[0]?.text);
     assert(Buffer.byteLength(result.content[0].text) <= 2_048);
+    assert.equal(
+      result.structuredContent.page.serialized_bytes,
+      Buffer.byteLength(result.content[0].text),
+    );
   }
   assert.equal(chunks.join(""), source);
 
@@ -1870,7 +1954,10 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
   assert.equal(stale.isError, true);
   assert.equal(stale.structuredContent.error.code, "stale_entity_content");
   assert.equal(stale.structuredContent.next.tool, "get_entity");
-  assert.equal(stale.structuredContent.next.arguments.pointer, "/configuration/text");
+  assert.equal(
+    stale.structuredContent.next.arguments.pointer,
+    "/configuration/text",
+  );
   assert.equal(stale.structuredContent.next.arguments.offset, 0);
   assert.notEqual(
     stale.structuredContent.next.arguments.version,
@@ -1899,16 +1986,57 @@ test("entity projection preserves small values and cannot cross redacted nodes",
       pointer: "/current_value/value",
     },
   });
-  assert.equal(selectedFalse.isError, undefined, selectedFalse.content[0]?.text);
+  assert.equal(
+    selectedFalse.isError,
+    undefined,
+    selectedFalse.content[0]?.text,
+  );
   assert.equal(selectedFalse.structuredContent.selection.status, "found");
   assert.equal(selectedFalse.structuredContent.selection.value, false);
 
+  const selectedNull = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: characteristicRef,
+      pointer: "/current_value/source_timestamp",
+    },
+  });
+  assert.equal(selectedNull.isError, undefined, selectedNull.content[0]?.text);
+  assert.equal(selectedNull.structuredContent.selection.value, null);
+
+  const selectedZero = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/motion-block",
+      include: ["configuration"],
+      pointer: "/configuration/value/blockId",
+    },
+  });
+  assert.equal(selectedZero.isError, undefined, selectedZero.content[0]?.text);
+  assert.equal(selectedZero.structuredContent.selection.value, 0);
+
   const missing = await client.callTool({
     name: "get_entity",
-    arguments: { entity_ref: characteristicRef, pointer: "/current_value/missing" },
+    arguments: {
+      entity_ref: characteristicRef,
+      pointer: "/current_value/missing",
+    },
   });
   assert.equal(missing.isError, true);
-  assert.equal(missing.structuredContent.error.code, "entity_pointer_not_found");
+  assert.equal(
+    missing.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
+  const inherited = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef, pointer: "/constructor/name" },
+  });
+  assert.equal(inherited.isError, true);
+  assert.equal(
+    inherited.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
 
   const redacted = await client.callTool({
     name: "get_entity",
@@ -1919,7 +2047,10 @@ test("entity projection preserves small values and cannot cross redacted nodes",
     },
   });
   assert.equal(redacted.isError, true);
-  assert.equal(redacted.structuredContent.error.code, "entity_pointer_redacted");
+  assert.equal(
+    redacted.structuredContent.error.code,
+    "entity_pointer_redacted",
+  );
   assert.doesNotMatch(redacted.content[0].text, /block-secret-must-not-leak/);
 });
 
