@@ -109,6 +109,8 @@ async function startHub() {
       closeAfterNextLinkAdd: false,
       closeAfterNextLinkAddReadback: false,
       closeBeforeNextLinkList: false,
+      closeLinkListAfterRemoveAt: undefined,
+      closeBeforeNextLinkRemove: false,
       closeAfterNextLinkRemove: false,
       normalizeNextAccessoryName: false,
       preservePhysicalOutOnIncomingRemove: false,
@@ -117,6 +119,7 @@ async function startHub() {
       failLinkRemoveOnAttempt: undefined,
     },
     linkRemoveAttempts: 0,
+    linkListsUntilCloseAfterRemove: undefined,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -217,6 +220,14 @@ async function startHub() {
         }
         result = { accessory: { delete: {} } };
       } else if (params.link?.list) {
+        if (state.linkListsUntilCloseAfterRemove !== undefined) {
+          state.linkListsUntilCloseAfterRemove -= 1;
+          if (state.linkListsUntilCloseAfterRemove === 0) {
+            state.linkListsUntilCloseAfterRemove = undefined;
+            socket.close();
+            return;
+          }
+        }
         if (state.behavior.closeBeforeNextLinkList) {
           state.behavior.closeBeforeNextLinkList = false;
           socket.close();
@@ -296,6 +307,16 @@ async function startHub() {
         result = { link: { addVirtual: structuredClone(incoming) } };
       } else if (params.link?.remove) {
         state.linkRemoveAttempts += 1;
+        if (state.behavior.closeBeforeNextLinkRemove) {
+          state.behavior.closeBeforeNextLinkRemove = false;
+          socket.close();
+          return;
+        }
+        if (state.behavior.closeLinkListAfterRemoveAt !== undefined) {
+          state.linkListsUntilCloseAfterRemove =
+            state.behavior.closeLinkListAfterRemoveAt;
+          state.behavior.closeLinkListAfterRemoveAt = undefined;
+        }
         if (
           state.linkRemoveAttempts === state.behavior.failLinkRemoveOnAttempt
         ) {
@@ -1035,6 +1056,177 @@ test("a lost link-remove response is reconciled without removing that link twice
   });
   assert.equal(repeated.structuredContent.status, "restored");
   assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 4);
+});
+
+test("restore finishes from sufficient current evidence after removal readback is lost", async (t) => {
+  for (const scenario of [
+    {
+      name: "source readback lost with no foreign links",
+      closeAt: 1,
+      foreignConsumer: undefined,
+      accessoryRemovedManually: false,
+    },
+    {
+      name: "physical readback lost while the foreign link remains visible",
+      closeAt: 2,
+      foreignConsumer: { aId: 80, sId: 1, cId: 1 },
+      accessoryRemovedManually: false,
+    },
+    {
+      name: "the owned accessory and links were already removed manually",
+      closeAt: 1,
+      foreignConsumer: undefined,
+      accessoryRemovedManually: true,
+    },
+  ]) {
+    await t.test(scenario.name, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      if (scenario.foreignConsumer) {
+        hub.state.links.set("34.13.15", [
+          {
+            type: "OUT",
+            index: "Virtual/34.15",
+            characteristics: [scenario.foreignConsumer],
+          },
+        ]);
+      }
+      const firstClient = await startClient(t, hub, stateDirectory);
+      const prepared = await prepareGroup(firstClient);
+      const applied = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+
+      hub.state.behavior.closeLinkListAfterRemoveAt = scenario.closeAt;
+      const interrupted = await firstClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(interrupted.isError, true);
+      assert.equal(interrupted.structuredContent.error.code, "connection_closed");
+      await firstClient.close();
+
+      if (scenario.accessoryRemovedManually) {
+        hub.state.accessories = hub.state.accessories.filter(
+          ({ id }) => id !== 90,
+        );
+        for (const [key, links] of hub.state.links) {
+          if (key.startsWith("90.")) {
+            hub.state.links.delete(key);
+            continue;
+          }
+          hub.state.links.set(
+            key,
+            links.flatMap((link) => {
+              const characteristics = (link.characteristics ?? []).filter(
+                ({ aId }) => aId !== 90,
+              );
+              return link.type === "OUT" && characteristics.length === 0
+                ? []
+                : [{ ...link, characteristics }];
+            }),
+          );
+        }
+      }
+
+      const secondClient = await startClient(t, hub, stateDirectory);
+      const result = await secondClient.callTool({
+        name: scenario.accessoryRemovedManually
+          ? "get_native_change"
+          : "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(result.isError, undefined, result.content[0]?.text);
+      assert.equal(result.structuredContent.status, "restored");
+      assert.equal(result.structuredContent.conflict_reason, undefined);
+      assert.equal(
+        hub.state.accessories.some(({ id }) => id === 90),
+        false,
+      );
+      assert.equal(
+        [...hub.state.links.values()].some((links) =>
+          links.some((link) =>
+            link.characteristics?.some(({ aId }) => aId === 90),
+          ),
+        ),
+        false,
+      );
+      if (scenario.foreignConsumer) {
+        assert.deepEqual(
+          hub.state.links.get("34.13.15")?.[0]?.characteristics,
+          [scenario.foreignConsumer],
+        );
+      }
+    });
+  }
+});
+
+test("restore retries one uncertain removal only for the same owned link", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  hub.state.behavior.closeBeforeNextLinkRemove = true;
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    uncertain.structuredContent.conflict_reason,
+    "link_remove_outcome_unknown",
+  );
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 5);
+  assert.equal(
+    hub.state.accessories.some(({ id }) => id === 90),
+    false,
+  );
+});
+
+test("restore does not retry an uncertain removal after the link identity changed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.closeBeforeNextLinkRemove = true;
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  await firstClient.close();
+
+  hub.state.links.get("90.1.1")[0].index = "Manual/replacement";
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(
+    repeated.structuredContent.conflict_reason,
+    "link_remove_outcome_unknown",
+  );
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 1);
+  assert.ok(hub.state.accessories.some(({ id }) => id === 90));
 });
 
 test("restore keeps the virtual accessory when native IN removal leaves physical OUT residue", async (t) => {
