@@ -49,8 +49,10 @@ export class SprutHubClient {
   #connectingSocket;
   #nextRequestId = 1;
   #observation;
+  #observationClient;
   #pending = new Map();
   #socket;
+  #startingObservationClient;
 
   constructor({ url, token, serial, cid, timeoutMs = 10_000 }) {
     if (!url || !token || !cid) {
@@ -184,7 +186,47 @@ export class SprutHubClient {
     };
   }
 
-  async startNativeObservation({
+  async startNativeObservation(input) {
+    const activeClient =
+      this.#startingObservationClient ??
+      (this.#observationClient &&
+      !isTerminalObservation(this.#observationClient.#observation?.status)
+        ? this.#observationClient
+        : null);
+    if (activeClient) {
+      throw new SprutHubError(
+        "observation_in_progress",
+        "Another native observation is already running in this MCP process.",
+        "get_native_observation",
+        { observation_ref: activeClient.#observation?.ref },
+      );
+    }
+
+    const candidate = new SprutHubClient({
+      url: this.url,
+      token: this.token,
+      serial: this.serial,
+      cid: this.cid,
+      timeoutMs: this.timeoutMs,
+    });
+    this.#startingObservationClient = candidate;
+    try {
+      const result = await candidate.#startNativeObservation(input);
+      const previous = this.#observationClient;
+      this.#observationClient = candidate;
+      this.#startingObservationClient = undefined;
+      await previous?.close();
+      return result;
+    } catch (error) {
+      if (this.#startingObservationClient === candidate) {
+        this.#startingObservationClient = undefined;
+      }
+      await candidate.close();
+      throw error;
+    }
+  }
+
+  async #startNativeObservation({
     homeRef: selectedHomeRef,
     characteristicRefs,
     scenarioRef: selectedScenarioRef,
@@ -258,6 +300,7 @@ export class SprutHubClient {
       cleanup: { status: "not_needed" },
       timer: null,
       pingTimer: null,
+      cancelRequested: null,
       waiters: new Set(),
     };
     this.#observation = observation;
@@ -295,6 +338,14 @@ export class SprutHubClient {
       }
       observation.subscriptionUuid = uuid;
       observation.cleanup = { status: "pending" };
+      if (observation.cancelRequested) {
+        await this.#finishObservation(
+          observation,
+          observation.cancelRequested.status,
+          observation.cancelRequested.completionReason,
+        );
+        return this.#observationResult(observation);
+      }
       observation.status = "observing";
       observation.startedAt = new Date().toISOString();
       observation.endsAt = new Date(
@@ -312,12 +363,27 @@ export class SprutHubClient {
       }, 30_000);
       return this.#observationResult(observation);
     } catch (error) {
+      if (observation.cancelRequested) {
+        await this.#finishObservation(
+          observation,
+          observation.cancelRequested.status,
+          observation.cancelRequested.completionReason,
+        );
+        return this.#observationResult(observation);
+      }
       if (this.#observation === observation) this.#observation = undefined;
       throw error;
     }
   }
 
   async getNativeObservation(observationRef, waitSeconds = 0) {
+    return this.#observationClientFor(observationRef).#getNativeObservation(
+      observationRef,
+      waitSeconds,
+    );
+  }
+
+  async #getNativeObservation(observationRef, waitSeconds = 0) {
     const observation = this.#requireObservation(observationRef);
     if (
       ["observing", "finishing"].includes(observation.status) &&
@@ -339,11 +405,26 @@ export class SprutHubClient {
   }
 
   async stopNativeObservation(observationRef) {
+    return this.#observationClientFor(observationRef).#stopNativeObservation(
+      observationRef,
+    );
+  }
+
+  async #stopNativeObservation(
+    observationRef,
+    completionReason = "requested_stop",
+  ) {
     const observation = this.#requireObservation(observationRef);
-    if (observation.status === "finishing") {
+    if (observation.status === "starting") {
+      observation.cancelRequested = {
+        status: "canceled",
+        completionReason,
+      };
+      await new Promise((resolve) => observation.waiters.add(resolve));
+    } else if (observation.status === "finishing") {
       await new Promise((resolve) => observation.waiters.add(resolve));
     } else if (!isTerminalObservation(observation.status)) {
-      await this.#finishObservation(observation, "canceled", "requested_stop");
+      await this.#finishObservation(observation, "canceled", completionReason);
     }
     return this.#observationResult(observation);
   }
@@ -1421,7 +1502,20 @@ export class SprutHubClient {
   }
 
   async close() {
-    if (this.#observation?.status === "finishing") {
+    const startingObservationClient = this.#startingObservationClient;
+    await startingObservationClient?.close();
+    if (
+      this.#observationClient &&
+      this.#observationClient !== startingObservationClient
+    ) {
+      await this.#observationClient.close();
+    }
+    if (this.#observation?.status === "starting") {
+      await this.#stopNativeObservation(
+        this.#observation.ref,
+        "server_shutdown",
+      );
+    } else if (this.#observation?.status === "finishing") {
       await new Promise((resolve) => this.#observation.waiters.add(resolve));
     } else if (
       this.#observation &&
@@ -1442,17 +1536,6 @@ export class SprutHubClient {
   }
 
   async #request(params, deadline, { serial = this.serial } = {}) {
-    if (
-      this.#observation?.status === "observing" &&
-      serial !== this.#observation.serial
-    ) {
-      throw new SprutHubError(
-        "observation_connection_owned",
-        "The active native observation keeps this connection selected to one home.",
-        "get_native_observation",
-        { observation_ref: this.#observation.ref },
-      );
-    }
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -1785,6 +1868,21 @@ export class SprutHubClient {
     observation.endedAt = new Date().toISOString();
     for (const resolve of observation.waiters) resolve();
     observation.waiters.clear();
+    this.#socket?.close();
+  }
+
+  #observationClientFor(observationRef) {
+    for (const client of [
+      this.#startingObservationClient,
+      this.#observationClient,
+    ]) {
+      if (client?.#observation?.ref === observationRef) return client;
+    }
+    throw new SprutHubError(
+      "observation_not_found",
+      "The native observation is not available in this MCP process.",
+      "start_native_observation",
+    );
   }
 
   #requireObservation(observationRef) {
