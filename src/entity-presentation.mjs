@@ -19,6 +19,7 @@ export function presentEntityResult(
       {
         ...result,
         representation: {
+          kind: "complete_entity",
           entity_complete: true,
           selected_pointer: "",
           selected_complete: true,
@@ -27,7 +28,15 @@ export function presentEntityResult(
       maxBytes,
     );
     if (serializedBytes(complete) <= maxBytes) return complete;
-    return containerOverview(result, result.entity, "", selection, false, 0);
+    return containerOverview(
+      result,
+      result.entity,
+      "",
+      selection,
+      false,
+      0,
+      undefined,
+    );
   }
 
   const selected = resolveJsonPointer(result.entity, pointer);
@@ -57,6 +66,26 @@ export function presentEntityResult(
       version,
     );
   }
+  if (
+    selected.value !== null &&
+    typeof selected.value === "object" &&
+    (offset !== 0 || version !== undefined)
+  ) {
+    return containerOverview(
+      result,
+      selected.value,
+      pointer,
+      selection,
+      true,
+      offset,
+      version,
+    );
+  }
+  if (offset !== 0 || version !== undefined) {
+    throw invalidProjection(
+      "offset and version require a selected string or container map.",
+    );
+  }
 
   const exact = withPage(
     projectedResult(result, pointer, selected.value, true),
@@ -71,11 +100,7 @@ export function presentEntityResult(
       selection,
       true,
       offset,
-    );
-  }
-  if (offset !== 0) {
-    throw invalidProjection(
-      "offset is supported only for a selected string or container map.",
+      version,
     );
   }
   throw resultTooLarge(pointer, exact, maxBytes);
@@ -85,13 +110,14 @@ function projectedResult(result, pointer, value, selectedComplete) {
   return {
     status: result.status,
     home: result.home,
-    entity: entityIdentity(result.entity),
+    identity: entityIdentity(result.entity),
     selection: {
       pointer,
       status: "found",
       value,
     },
     representation: {
+      kind: "selected_value",
       entity_complete: false,
       selected_pointer: pointer,
       selected_complete: selectedComplete,
@@ -107,6 +133,7 @@ function containerOverview(
   selection,
   explicitlySelected,
   offset,
+  version,
 ) {
   const identity = entityIdentity(result.entity);
   const entries = Array.isArray(container)
@@ -114,6 +141,18 @@ function containerOverview(
     : Object.entries(container).filter(
         ([key]) => pointer !== "" || !Object.hasOwn(identity, key),
       );
+  const currentVersion = containerVersion(entries, pointer);
+  if (offset > 0 && version === undefined) {
+    throw continuationNeedsVersion(pointer, selection, currentVersion);
+  }
+  if (version !== undefined && version !== currentVersion) {
+    throw staleContent(
+      "The selected container map changed before its continuation was read.",
+      pointer,
+      selection,
+      currentVersion,
+    );
+  }
   if (offset > entries.length) {
     throw invalidProjection(
       "offset is past the end of the selected container map.",
@@ -124,7 +163,7 @@ function containerOverview(
     return {
       pointer: childPointer,
       kind: valueKind(value),
-      serialized_bytes: Buffer.byteLength(JSON.stringify(value)),
+      ...childIdentity(value),
       next: entityNext(selection, childPointer),
     };
   });
@@ -139,6 +178,7 @@ function containerOverview(
       offset,
       offset,
       availableParts,
+      currentVersion,
     );
   }
   let end = offset;
@@ -155,6 +195,7 @@ function containerOverview(
       offset,
       proposedEnd,
       availableParts,
+      currentVersion,
     );
     if (serializedBytes(candidate) > selection.maxBytes) break;
     overview = candidate;
@@ -176,13 +217,14 @@ function containerOverviewResult(
   offset,
   end,
   availableParts,
+  version,
 ) {
   const complete = end === availableParts.length;
   return withPage(
     {
       status: result.status,
       home: result.home,
-      entity: identity,
+      identity,
       ...(explicitlySelected
         ? {
             selection: {
@@ -193,6 +235,7 @@ function containerOverviewResult(
           }
         : {}),
       representation: {
+        kind: explicitlySelected ? "selected_value" : "entity_overview",
         entity_complete: false,
         selected_pointer: pointer,
         selected_complete: false,
@@ -200,7 +243,9 @@ function containerOverviewResult(
         available_parts: availableParts.slice(offset, end),
         available_parts_complete: complete,
         remaining_parts: availableParts.length - end,
-        next: complete ? null : entityNext(selection, pointer, { offset: end }),
+        next: complete
+          ? null
+          : entityNext(selection, pointer, { offset: end, version }),
       },
       freshness: result.freshness,
     },
@@ -210,23 +255,20 @@ function containerOverviewResult(
 
 function presentString(result, text, pointer, selection, offset, version) {
   const characters = Array.from(text);
+  const currentVersion = stringVersion(text);
+  if (offset > 0 && version === undefined) {
+    throw continuationNeedsVersion(pointer, selection, currentVersion);
+  }
+  if (version !== undefined && version !== currentVersion) {
+    throw staleContent(
+      "The selected string changed before its continuation was read.",
+      pointer,
+      selection,
+      currentVersion,
+    );
+  }
   if (offset > characters.length) {
     throw invalidProjection("offset is past the end of the selected string.");
-  }
-  const currentVersion = stringVersion(text);
-  if (version !== undefined && version !== currentVersion) {
-    throw new SprutHubError(
-      "stale_entity_content",
-      "The selected string changed before its continuation was read.",
-      "restart_get_entity_detail",
-      {
-        pointer,
-        next: entityNext(selection, pointer, {
-          offset: 0,
-          version: currentVersion,
-        }),
-      },
-    );
   }
 
   const exact = withPage(
@@ -275,7 +317,7 @@ function stringChunkResult(
   const complete = end === characters.length;
   return withPage(
     {
-      ...projectedResult(result, pointer, undefined, complete),
+      ...projectedResult(result, pointer, undefined, false),
       selection: {
         pointer,
         status: "found",
@@ -318,7 +360,9 @@ function resolveJsonPointer(root, pointer) {
     if (!Object.hasOwn(value, token)) return { status: "missing" };
     value = value[token];
   }
-  return { status: "found", value };
+  return value === undefined
+    ? { status: "missing" }
+    : { status: "found", value };
 }
 
 function decodePointerToken(token) {
@@ -339,6 +383,18 @@ function entityIdentity(entity) {
       ([key, value]) => IDENTITY_KEYS.includes(key) || isCompactScalar(value),
     ),
   );
+}
+
+function childIdentity(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const identity = Object.fromEntries(
+    IDENTITY_KEYS.filter((key) => Object.hasOwn(value, key))
+      .map((key) => [key, value[key]])
+      .filter(([, item]) => isCompactScalar(item)),
+  );
+  return Object.keys(identity).length > 0 ? { identity } : {};
 }
 
 function isCompactScalar(value) {
@@ -380,6 +436,16 @@ function stringVersion(text) {
   return `sha256:${createHash("sha256").update(text).digest("base64url")}`;
 }
 
+function containerVersion(entries, pointer) {
+  const mapIdentity = entries.map(([key, value]) => ({
+    pointer: `${pointer}/${escapePointerToken(key)}`,
+    identity: childIdentity(value).identity ?? null,
+  }));
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(mapIdentity))
+    .digest("base64url")}`;
+}
+
 function withPage(result, maxBytes) {
   result.page = { max_bytes: maxBytes, serialized_bytes: 0 };
   serializedBytes(result);
@@ -398,11 +464,34 @@ function serializedBytes(result) {
   return Buffer.byteLength(JSON.stringify(result));
 }
 
-function invalidProjection(message) {
+function invalidProjection(message, details) {
   return new SprutHubError(
     "invalid_entity_projection",
     message,
     "use_entity_overview",
+    details,
+  );
+}
+
+function continuationNeedsVersion(pointer, selection, version) {
+  return invalidProjection(
+    "A non-zero continuation offset requires the returned content version.",
+    {
+      pointer,
+      next: entityNext(selection, pointer, { offset: 0, version }),
+    },
+  );
+}
+
+function staleContent(message, pointer, selection, version) {
+  return new SprutHubError(
+    "stale_entity_content",
+    message,
+    "restart_get_entity_detail",
+    {
+      pointer,
+      next: entityNext(selection, pointer, { offset: 0, version }),
+    },
   );
 }
 

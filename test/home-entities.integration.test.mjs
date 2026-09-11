@@ -1802,7 +1802,10 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
     overview.structuredContent.representation.selected_complete,
     false,
   );
-  assert.equal(overview.structuredContent.identity.ref, baseArguments.entity_ref);
+  assert.equal(
+    overview.structuredContent.identity.ref,
+    baseArguments.entity_ref,
+  );
   assert.equal(Object.hasOwn(overview.structuredContent, "entity"), false);
 
   let detail = overview;
@@ -1951,6 +1954,11 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
     );
   }
   assert.equal(chunks.join(""), source);
+  assert.equal(result.structuredContent.selection.value.complete, true);
+  assert.equal(
+    result.structuredContent.representation.selected_complete,
+    false,
+  );
 
   state.scenarios.find(({ index }) => index === "large-code").data =
     `// новая версия\n${source}`;
@@ -2039,8 +2047,7 @@ test("entity projection preserves small values and cannot cross redacted nodes",
   const omitted = await client.callTool({
     name: "get_entity",
     arguments: {
-      entity_ref:
-        "spruthub://hub/home%2FA/window/window-A",
+      entity_ref: "spruthub://hub/home%2FA/window/window-A",
       pointer: "/commands/0/requires_confirmation",
     },
   });
