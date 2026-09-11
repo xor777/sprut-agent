@@ -241,6 +241,24 @@ function withRuntimeBlockFields(data) {
   return visit(data, "root");
 }
 
+function scenarioRoomIds(data, accessories) {
+  const roomIds = new Set();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    if (Number.isInteger(value.aId)) {
+      const roomId = accessories.find(({ id }) => id === value.aId)?.roomId;
+      if (Number.isInteger(roomId)) roomIds.add(roomId);
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(data);
+  return [...roomIds].sort((left, right) => left - right);
+}
+
 async function startHub() {
   const requests = [];
   const state = {
@@ -409,6 +427,7 @@ async function startHub() {
       missingRoomGetAsNotFoundError: false,
       normalizeNextAccessoryName: false,
       rejectNextRoomGetAsInternalError: false,
+      recalculateBlockRooms: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -870,9 +889,16 @@ async function startHub() {
             ),
           );
           if (scenario.type === "BLOCK") {
+            const requestedData = JSON.parse(params.scenario.update.data);
             scenario.data = JSON.stringify(
-              withRuntimeBlockFields(JSON.parse(params.scenario.update.data)),
+              withRuntimeBlockFields(requestedData),
             );
+            if (state.behavior.recalculateBlockRooms) {
+              scenario.rooms = scenarioRoomIds(
+                requestedData,
+                state.accessories,
+              );
+            }
           } else if (typeof params.scenario.update.data === "string") {
             scenario.desc =
               nativeLogicDescription(params.scenario.update.data) ??
@@ -2361,6 +2387,109 @@ test("BLOCK data update verifies readback and restores its complete baseline", a
   const restoredData = JSON.parse(hub.state.scenarios[0].data);
   assert.equal(restoredData.targets[0].then[1].time, 60_000);
   assert.deepEqual(restoredData.vendorConfiguration, { preserved: true });
+});
+
+test("BLOCK target move and restore accept rooms recalculated by SprutHub", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.rooms.push({ id: 3, order: 3, name: "Гостиная", visible: true });
+  for (const [id, roomId, name] of [
+    [36, 2, "Свет мастерской"],
+    [38, 3, "Свет гостиной"],
+  ]) {
+    hub.state.accessories.push({
+      id,
+      roomId,
+      name,
+      online: true,
+      services: [
+        {
+          aId: id,
+          sId: 13,
+          name: "Свет",
+          type: "Lightbulb",
+          characteristics: [
+            {
+              aId: id,
+              sId: 13,
+              cId: 15,
+              control: {
+                name: "Включена",
+                type: "On",
+                read: true,
+                write: true,
+                value: { boolValue: false },
+              },
+            },
+          ],
+        },
+      ],
+    });
+  }
+  const baselineData = blockData();
+  baselineData.targets[0].then[0].aId = 36;
+  baselineData.targets[0].then[1].targets[0].aId = 36;
+  hub.state.scenarios[0].data = JSON.stringify(baselineData);
+  hub.state.scenarios[0].rooms = [1, 2];
+  hub.state.behavior.recalculateBlockRooms = true;
+  const requestedData = structuredClone(baselineData);
+  requestedData.targets[0].then[0].aId = 38;
+  requestedData.targets[0].then[1].targets[0].aId = 38;
+
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requestedData,
+      reason: "Перенести правило на свет гостиной",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.deepEqual(hub.state.scenarios[0].rooms, [1, 3]);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(afterRestart.structuredContent.status, "applied");
+  assert.equal(afterRestart.structuredContent.configuration_matches, true);
+
+  hub.state.scenarios[0].active = true;
+  const manualConflict = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(manualConflict.structuredContent.status, "conflict");
+  assert.equal(
+    manualConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+
+  hub.state.scenarios[0].active = false;
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.configuration_matches, true);
+  assert.deepEqual(hub.state.scenarios[0].rooms, [1, 2]);
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[0].aId,
+    36,
+  );
 });
 
 test("restore preserves unknown vendor blockId and state fields", async (t) => {
