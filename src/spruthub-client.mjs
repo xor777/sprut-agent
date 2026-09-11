@@ -469,10 +469,20 @@ export class SprutHubClient {
   }
 
   async getRoom(id) {
-    const response = await this.#request(
-      { room: { get: { id } } },
-      Date.now() + this.timeoutMs,
-    );
+    const deadline = Date.now() + this.timeoutMs;
+    let response;
+    try {
+      response = await this.#request({ room: { get: { id } } }, deadline);
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const rooms = extractEntityArray(
+        await this.#request({ room: { list: {} } }, deadline),
+        ["room", "list", "rooms"],
+      );
+      for (const room of rooms) validateRoom(room);
+      if (rooms.some((room) => room.id === id)) throw error;
+      return null;
+    }
     const container = response.result?.room;
     if (!container || !Object.hasOwn(container, "get")) {
       throw new SprutHubError(

@@ -360,7 +360,7 @@ export class AutomationService {
 
   async #prepareRoomCreate(input) {
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
-    const name = requiredNativeName(input.name, "room creation");
+    const name = requiredNativeName(input.name, "room creation").trim();
     const rooms = await this.#listRoomRecords();
     const matching = rooms.filter((room) => room.name === name);
     if (matching.length > 0) {
@@ -729,22 +729,19 @@ export class AutomationService {
 
   async #applyAccessoryPlacement(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
+    let current;
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       if (nativeIntentDirection(change) === "restore") {
-        return this.#reconcileAccessoryRestore(change, false);
+        return (await this.#reconcileAccessoryRestore(change, false)).result;
       }
       const pending = await this.#reconcileAccessoryApply(change, false);
-      if (
-        pending.status !== "uncertain" ||
-        !accessoryPlacementMatches(
-          change.observed_snapshot,
-          change.baseline_snapshot,
-        )
-      ) {
-        return pending;
-      }
+      const retryableApply =
+        pending.outcome === "expected_missing" &&
+        accessoryPlacementMatches(pending.current, change.baseline_snapshot);
+      if (!retryableApply) return pending.result;
+      current = pending.current;
     }
-    const current = await this.#observeAccessoryPlacement(change);
+    current ??= await this.#observeAccessoryPlacement(change);
     if (change.status === "applied") {
       if (accessoryPlacementMatches(current, change.applied_snapshot)) {
         return this.#finishNative(change, "applied", undefined, {
@@ -791,9 +788,9 @@ export class AutomationService {
         });
         throw error;
       }
-      return this.#reconcileAccessoryApply(change, false);
+      return (await this.#reconcileAccessoryApply(change, false)).result;
     }
-    return this.#reconcileAccessoryApply(change, true);
+    return (await this.#reconcileAccessoryApply(change, true)).result;
   }
 
   async #reconcileAccessoryApply(change, acknowledged) {
@@ -801,31 +798,55 @@ export class AutomationService {
     try {
       current = await this.#observeAccessoryPlacement(change);
     } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "read_failed",
+        undefined,
+        "uncertain",
+        {
+          configuration_matches: undefined,
+          last_verification: failedVerification(error),
+        },
+      );
     }
     if (change.applied_snapshot !== undefined) {
       if (accessoryPlacementMatches(current, change.applied_snapshot)) {
-        return this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-          last_verification: freshVerification("applied_snapshot_observed"),
-          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-        });
+        return this.#finishAccessoryReconciliation(
+          change,
+          "expected_observed",
+          current,
+          "applied",
+          {
+            observed_snapshot: current,
+            last_verification: freshVerification("applied_snapshot_observed"),
+            ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+          },
+        );
       }
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "conflict",
+        current,
+        "conflict",
+        {
+          observed_snapshot: current,
+          conflict_reason: "manual_change",
+          last_verification: freshVerification("conflict"),
+        },
+      );
     }
     if (!isDeepStrictEqual(current.binding, change.baseline_snapshot.binding)) {
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "binding_changed",
-        last_verification: freshVerification("conflict"),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "conflict",
+        current,
+        "conflict",
+        {
+          observed_snapshot: current,
+          conflict_reason: "binding_changed",
+          last_verification: freshVerification("conflict"),
+        },
+      );
     }
     const requestedExactly = accessoryPlacementMatches(
       current,
@@ -835,41 +856,64 @@ export class AutomationService {
       current.room_id === change.requested_snapshot.room_id;
     if (acknowledged && requestedRoomObserved) {
       change.applied_snapshot = structuredClone(current);
-      return this.#finishNative(change, "applied", undefined, {
-        observed_snapshot: current,
-        applied_snapshot: structuredClone(current),
-        last_verification: freshVerification("requested_room_observed"),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "expected_observed",
+        current,
+        "applied",
+        {
+          observed_snapshot: current,
+          applied_snapshot: structuredClone(current),
+          last_verification: freshVerification("requested_room_observed"),
+        },
+      );
     }
     if (requestedExactly) {
       change.applied_snapshot = structuredClone(current);
-      return this.#finishNative(change, "applied", undefined, {
-        observed_snapshot: current,
-        applied_snapshot: structuredClone(current),
-        recovered_after_uncertain_write: true,
-        last_verification: freshVerification("requested_values_observed"),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "expected_observed",
+        current,
+        "applied",
+        {
+          observed_snapshot: current,
+          applied_snapshot: structuredClone(current),
+          recovered_after_uncertain_write: true,
+          last_verification: freshVerification("requested_values_observed"),
+        },
+      );
     }
-    return this.#finishNative(change, "uncertain", undefined, {
-      observed_snapshot: current,
-      configuration_matches: undefined,
-      conflict_reason: requestedRoomObserved
-        ? "possible_name_normalization_after_lost_response"
-        : undefined,
-      last_verification: freshVerification(
-        requestedRoomObserved
-          ? "requested_room_observed_name_unknown"
-          : "requested_values_missing",
-      ),
-    });
+    const possibleNormalization =
+      requestedRoomObserved &&
+      !accessoryPlacementMatches(current, change.baseline_snapshot);
+    return this.#finishAccessoryReconciliation(
+      change,
+      "expected_missing",
+      current,
+      "uncertain",
+      {
+        observed_snapshot: current,
+        configuration_matches: undefined,
+        conflict_reason: possibleNormalization
+          ? "possible_name_normalization_after_lost_response"
+          : undefined,
+        last_verification: freshVerification(
+          possibleNormalization
+            ? "requested_room_observed_name_unknown"
+            : "requested_values_missing",
+        ),
+      },
+    );
   }
 
   async #getAccessoryPlacement(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileAccessoryRestore(change, false)
-        : this.#reconcileAccessoryApply(change, false);
+      const pending =
+        nativeIntentDirection(change) === "restore"
+          ? await this.#reconcileAccessoryRestore(change, false)
+          : await this.#reconcileAccessoryApply(change, false);
+      return pending.result;
     }
     let current;
     try {
@@ -904,19 +948,16 @@ export class AutomationService {
         direction === "restore"
           ? await this.#reconcileAccessoryRestore(change, false)
           : await this.#reconcileAccessoryApply(change, false);
-      if (pending.status === "restored") return pending;
-      if (direction === "apply" && pending.status === "applied") {
-        current = change.observed_snapshot;
+      if (pending.result.status === "restored") return pending.result;
+      if (direction === "apply" && pending.result.status === "applied") {
+        current = pending.current;
       } else {
         const retryableRestore =
           direction === "restore" &&
-          pending.status === "uncertain" &&
-          accessoryPlacementMatches(
-            change.observed_snapshot,
-            change.applied_snapshot,
-          );
-        if (!retryableRestore) return pending;
-        current = change.observed_snapshot;
+          pending.outcome === "expected_missing" &&
+          accessoryPlacementMatches(pending.current, change.applied_snapshot);
+        if (!retryableRestore) return pending.result;
+        current = pending.current;
       }
     }
     if (change.applied_snapshot === undefined) {
@@ -965,9 +1006,9 @@ export class AutomationService {
         });
         throw error;
       }
-      return this.#reconcileAccessoryRestore(change, false);
+      return (await this.#reconcileAccessoryRestore(change, false)).result;
     }
-    return this.#reconcileAccessoryRestore(change, true);
+    return (await this.#reconcileAccessoryRestore(change, true)).result;
   }
 
   async #reconcileAccessoryRestore(change, acknowledged) {
@@ -975,31 +1016,90 @@ export class AutomationService {
     try {
       current = await this.#observeAccessoryPlacement(change);
     } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "read_failed",
+        undefined,
+        "uncertain",
+        {
+          configuration_matches: undefined,
+          last_verification: failedVerification(error),
+        },
+      );
     }
     if (accessoryPlacementMatches(current, change.baseline_snapshot)) {
-      return this.#finishNative(change, "restored", undefined, {
-        observed_snapshot: current,
-        last_verification: freshVerification("baseline_snapshot_observed"),
-        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-      });
+      return this.#finishAccessoryReconciliation(
+        change,
+        "expected_observed",
+        current,
+        "restored",
+        {
+          observed_snapshot: current,
+          last_verification: freshVerification("baseline_snapshot_observed"),
+          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+        },
+      );
     }
-    if (!accessoryPlacementMatches(current, change.applied_snapshot)) {
-      return this.#finishNative(change, "conflict", undefined, {
+    if (accessoryPlacementMatches(current, change.applied_snapshot)) {
+      return this.#finishAccessoryReconciliation(
+        change,
+        "expected_missing",
+        current,
+        "uncertain",
+        {
+          observed_snapshot: current,
+          configuration_matches: undefined,
+          conflict_reason: acknowledged
+            ? "ack_without_baseline_result"
+            : undefined,
+          last_verification: freshVerification("baseline_snapshot_missing"),
+        },
+      );
+    }
+    const possibleNormalization =
+      current.room_id === change.baseline_snapshot.room_id &&
+      isDeepStrictEqual(current.binding, change.baseline_snapshot.binding);
+    if (possibleNormalization) {
+      return this.#finishAccessoryReconciliation(
+        change,
+        "possible_normalization",
+        current,
+        "uncertain",
+        {
+          observed_snapshot: current,
+          configuration_matches: undefined,
+          conflict_reason: "possible_name_normalization_after_restore",
+          last_verification: freshVerification(
+            "baseline_room_observed_name_unknown",
+          ),
+        },
+      );
+    }
+    return this.#finishAccessoryReconciliation(
+      change,
+      "conflict",
+      current,
+      "conflict",
+      {
         observed_snapshot: current,
         conflict_reason: "manual_change",
         last_verification: freshVerification("conflict"),
-      });
-    }
-    return this.#finishNative(change, "uncertain", undefined, {
-      observed_snapshot: current,
-      configuration_matches: undefined,
-      conflict_reason: acknowledged ? "ack_without_baseline_result" : undefined,
-      last_verification: freshVerification("baseline_snapshot_missing"),
-    });
+      },
+    );
+  }
+
+  async #finishAccessoryReconciliation(
+    change,
+    outcome,
+    current,
+    status,
+    extra,
+  ) {
+    return {
+      outcome,
+      ...(current === undefined ? {} : { current }),
+      result: await this.#finishNative(change, status, undefined, extra),
+    };
   }
 
   async #observeAccessoryPlacement(change) {

@@ -356,6 +356,7 @@ async function startHub() {
       failNextLogicList: false,
       closeAfterAccessoryUpdate: false,
       closeAfterRoomCreate: false,
+      dropNextAccessoryUpdate: false,
       failAccessoryGetAfterUpdate: false,
       failNextAccessoryGet: false,
       invalidNextRoomList: false,
@@ -702,12 +703,13 @@ async function startHub() {
         const accessory = state.accessories.find(
           ({ id }) => id === params.accessory.update.id,
         );
-        if (accessory) {
+        if (accessory && !state.behavior.dropNextAccessoryUpdate) {
           accessory.name = state.behavior.normalizeNextAccessoryName
             ? params.accessory.update.name.replace(/\s*·\s*/g, " ")
             : params.accessory.update.name;
           accessory.roomId = params.accessory.update.roomId;
         }
+        state.behavior.dropNextAccessoryUpdate = false;
         state.behavior.normalizeNextAccessoryName = false;
         if (state.behavior.failAccessoryGetAfterUpdate) {
           state.behavior.failAccessoryGetAfterUpdate = false;
@@ -4084,6 +4086,43 @@ test("an apply retry never uses a saved accessory snapshot after a fresh read fa
   );
 });
 
+test("a lost rename response reports the unchanged baseline before a safe retry", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      room_ref: `${homeRef}/room/1`,
+      name: "Настольная лампа",
+      reason: "Переименовать без смены комнаты",
+    },
+  });
+  hub.state.behavior.dropNextAccessoryUpdate = true;
+  hub.state.behavior.closeAfterAccessoryUpdate = true;
+  const uncertain = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal("conflict_reason" in uncertain.structuredContent, false);
+  assert.equal(
+    uncertain.structuredContent.verification.result,
+    "requested_values_missing",
+  );
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.update).length,
+    2,
+  );
+});
+
 test("a restore retry preserves a manual edit when its fresh read fails", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -4131,12 +4170,15 @@ test("a restore retry preserves a manual edit when its fresh read fails", async 
     2,
   );
 
-  const conflict = await client.callTool({
+  const observedManualEdit = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(conflict.structuredContent.status, "conflict");
-  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(observedManualEdit.structuredContent.status, "uncertain");
+  assert.equal(
+    observedManualEdit.structuredContent.conflict_reason,
+    "possible_name_normalization_after_restore",
+  );
   assert.equal(
     hub.state.accessories.find(({ id }) => id === 34).name,
     "Ручное имя владельца",
