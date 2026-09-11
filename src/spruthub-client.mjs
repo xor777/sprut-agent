@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 
 const VALUE_FIELDS = [
@@ -47,6 +48,7 @@ export class SprutHubClient {
   #connectPromise;
   #connectingSocket;
   #nextRequestId = 1;
+  #observation;
   #pending = new Map();
   #socket;
 
@@ -156,7 +158,7 @@ export class SprutHubClient {
       ],
       unsupported_in_this_slice: [
         "pairing and controller actions",
-        "events and logs",
+        "historical events, logs, and unbounded monitoring",
         "dashboards",
         "backups",
       ],
@@ -180,6 +182,170 @@ export class SprutHubClient {
       entity,
       freshness: freshness(observedAt),
     };
+  }
+
+  async startNativeObservation({
+    homeRef: selectedHomeRef,
+    characteristicRefs,
+    scenarioRef: selectedScenarioRef,
+    durationSeconds,
+    maxEvents,
+  }) {
+    if (this.#observation && !isTerminalObservation(this.#observation.status)) {
+      throw new SprutHubError(
+        "observation_in_progress",
+        "Another native observation is already running in this MCP process.",
+        "get_native_observation",
+        { observation_ref: this.#observation.ref },
+      );
+    }
+
+    const serial = parseHomeRef(selectedHomeRef);
+    const parsedCharacteristics = characteristicRefs.map((ref) => {
+      const parsed = parseEntityRef(ref);
+      if (parsed.kind !== "characteristic" || parsed.serial !== serial) {
+        throw invalidObservationScope();
+      }
+      return { ref, parsed };
+    });
+    const parsedScenario = parseEntityRef(selectedScenarioRef);
+    if (
+      parsedScenario.kind !== "scenario" ||
+      parsedScenario.serial !== serial
+    ) {
+      throw invalidObservationScope();
+    }
+    if (
+      new Set(parsedCharacteristics.map(({ ref }) => ref)).size !==
+      parsedCharacteristics.length
+    ) {
+      throw new SprutHubError(
+        "invalid_observation_scope",
+        "Characteristic references in one observation must be unique.",
+        "start_native_observation",
+      );
+    }
+
+    const observation = {
+      ref: `native-observation:${randomUUID()}`,
+      status: "starting",
+      serial,
+      homeRef: selectedHomeRef,
+      characteristicRefs: parsedCharacteristics.map(({ ref }) => ref),
+      characteristicByNativeId: new Map(
+        parsedCharacteristics.map(({ ref, parsed }) => [
+          nativeCharacteristicKey({
+            aId: parsed.accessoryId,
+            sId: parsed.serviceId,
+            cId: parsed.characteristicId,
+          }),
+          ref,
+        ]),
+      ),
+      scenarioRef: selectedScenarioRef,
+      scenarioIndex: parsedScenario.scenarioIndex,
+      durationSeconds,
+      maxEvents,
+      events: [],
+      sequence: 0,
+      startedAt: null,
+      endsAt: null,
+      endedAt: null,
+      completionReason: null,
+      truncated: false,
+      connection: { status: "connected" },
+      subscriptionUuid: null,
+      cleanup: { status: "not_needed" },
+      timer: null,
+      pingTimer: null,
+      waiters: new Set(),
+    };
+    this.#observation = observation;
+
+    const deadline = Date.now() + this.timeoutMs;
+    try {
+      await this.#requireHome(serial, deadline);
+      for (const { parsed } of parsedCharacteristics) {
+        const characteristic = await this.#readEntity(
+          parsed,
+          new Set(),
+          deadline,
+        );
+        if (characteristic.capabilities?.events !== true) {
+          throw new SprutHubError(
+            "events_unavailable",
+            "A selected characteristic is not marked as event-capable by SprutHub.",
+            "get_entity",
+            { characteristic_ref: characteristic.ref },
+          );
+        }
+      }
+      await this.#readEntity(parsedScenario, new Set(), deadline);
+      const response = await this.#request(
+        { scenario: { subscribe: { index: parsedScenario.scenarioIndex } } },
+        deadline,
+        { serial },
+      );
+      const uuid = response.result?.scenario?.subscribe?.uuid;
+      if (typeof uuid !== "string" || uuid.length === 0) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub did not identify the native scenario subscription.",
+        );
+      }
+      observation.subscriptionUuid = uuid;
+      observation.cleanup = { status: "pending" };
+      observation.status = "observing";
+      observation.startedAt = new Date().toISOString();
+      observation.endsAt = new Date(
+        Date.now() + durationSeconds * 1_000,
+      ).toISOString();
+      observation.timer = setTimeout(() => {
+        void this.#finishObservation(
+          observation,
+          "completed",
+          "duration_elapsed",
+        );
+      }, durationSeconds * 1_000);
+      observation.pingTimer = setInterval(() => {
+        void this.#pingObservation(observation);
+      }, 30_000);
+      return this.#observationResult(observation);
+    } catch (error) {
+      if (this.#observation === observation) this.#observation = undefined;
+      throw error;
+    }
+  }
+
+  async getNativeObservation(observationRef, waitSeconds = 0) {
+    const observation = this.#requireObservation(observationRef);
+    if (
+      ["observing", "finishing"].includes(observation.status) &&
+      waitSeconds > 0
+    ) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          observation.waiters.delete(done);
+          resolve();
+        }, waitSeconds * 1_000);
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        observation.waiters.add(done);
+      });
+    }
+    return this.#observationResult(observation);
+  }
+
+  async stopNativeObservation(observationRef) {
+    const observation = this.#requireObservation(observationRef);
+    if (observation.status === "finishing") {
+      await new Promise((resolve) => observation.waiters.add(resolve));
+    } else if (!isTerminalObservation(observation.status)) {
+      await this.#finishObservation(observation, "canceled", "requested_stop");
+    }
+    return this.#observationResult(observation);
   }
 
   async listRooms() {
@@ -1255,6 +1421,18 @@ export class SprutHubClient {
   }
 
   async close() {
+    if (this.#observation?.status === "finishing") {
+      await new Promise((resolve) => this.#observation.waiters.add(resolve));
+    } else if (
+      this.#observation &&
+      !isTerminalObservation(this.#observation.status)
+    ) {
+      await this.#finishObservation(
+        this.#observation,
+        "canceled",
+        "server_shutdown",
+      );
+    }
     this.#connectingSocket?.terminate();
     if (!this.#socket) return;
     await new Promise((resolve) => {
@@ -1264,6 +1442,17 @@ export class SprutHubClient {
   }
 
   async #request(params, deadline, { serial = this.serial } = {}) {
+    if (
+      this.#observation?.status === "observing" &&
+      serial !== this.#observation.serial
+    ) {
+      throw new SprutHubError(
+        "observation_connection_owned",
+        "The active native observation keeps this connection selected to one home.",
+        "get_native_observation",
+        { observation_ref: this.#observation.ref },
+      );
+    }
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -1367,6 +1556,19 @@ export class SprutHubClient {
     try {
       message = parseSprutHubMessage(data);
     } catch (error) {
+      if (this.#observation?.status === "observing") {
+        this.#observation.connection = {
+          status: "unknown",
+          error_code: "invalid_message",
+        };
+        void this.#finishObservation(
+          this.#observation,
+          "truncated",
+          "invalid_message",
+          false,
+        );
+        this.#socket?.terminate();
+      }
       for (const { reject, timer } of this.#pending.values()) {
         clearTimeout(timer);
         reject(error);
@@ -1375,6 +1577,7 @@ export class SprutHubClient {
       return;
     }
 
+    this.#handleNativeEvent(message);
     const pending = this.#pending.get(message.id);
     if (!pending) return;
     clearTimeout(pending.timer);
@@ -1418,6 +1621,18 @@ export class SprutHubClient {
   #handleConnectionLoss(socket) {
     if (this.#socket !== socket) return;
     this.#socket = undefined;
+    if (this.#observation?.status === "observing") {
+      this.#observation.connection = {
+        status: "lost",
+        lost_at: new Date().toISOString(),
+      };
+      void this.#finishObservation(
+        this.#observation,
+        "connection_lost",
+        "connection_closed",
+        false,
+      );
+    }
     for (const { reject, timer } of this.#pending.values()) {
       clearTimeout(timer);
       reject(
@@ -1430,6 +1645,206 @@ export class SprutHubClient {
       );
     }
     this.#pending.clear();
+  }
+
+  #handleNativeEvent(message) {
+    const observation = this.#observation;
+    if (observation?.status !== "observing") return;
+    const receivedAt = new Date().toISOString();
+    const characteristicEvent = message.event?.characteristic;
+    if (characteristicEvent && typeof characteristicEvent === "object") {
+      for (const characteristic of characteristicEvent.characteristics ?? []) {
+        const ref = observation.characteristicByNativeId.get(
+          nativeCharacteristicKey(characteristic),
+        );
+        if (!ref) continue;
+        const typed = extractTypedValue(characteristic.control?.value);
+        this.#recordObservationEvent(observation, {
+          kind: "characteristic",
+          ref,
+          received_at: receivedAt,
+          source_timestamp: null,
+          value: normalizeEventValue(typed),
+          native: {
+            event_type:
+              typeof characteristicEvent.event === "string"
+                ? characteristicEvent.event
+                : null,
+            value_field: typed.field,
+            control_type:
+              typeof characteristic.control?.type === "string"
+                ? characteristic.control.type
+                : null,
+            partial: true,
+          },
+        });
+      }
+    }
+
+    const scenarioEvent = message.event?.scenario;
+    if (
+      scenarioEvent?.index === observation.scenarioIndex &&
+      observation.status === "observing"
+    ) {
+      this.#recordObservationEvent(observation, {
+        kind: "scenario",
+        ref: observation.scenarioRef,
+        received_at: receivedAt,
+        source_timestamp: null,
+        native: {
+          type:
+            typeof scenarioEvent.type === "string" ? scenarioEvent.type : null,
+          block_id: Number.isSafeInteger(scenarioEvent.blockId)
+            ? scenarioEvent.blockId
+            : null,
+        },
+      });
+    }
+  }
+
+  #recordObservationEvent(observation, event) {
+    if (observation.status !== "observing") return;
+    observation.sequence += 1;
+    observation.events.push({ sequence: observation.sequence, ...event });
+    if (observation.events.length >= observation.maxEvents) {
+      void this.#finishObservation(
+        observation,
+        "truncated",
+        "event_limit_reached",
+      );
+    }
+  }
+
+  async #pingObservation(observation) {
+    if (observation.status !== "observing") return;
+    try {
+      await this.#request(
+        { server: { ping: {} } },
+        Date.now() + this.timeoutMs,
+        { serial: observation.serial },
+      );
+    } catch (error) {
+      if (observation.status !== "observing") return;
+      observation.connection = {
+        status: "unknown",
+        error_code:
+          error instanceof SprutHubError ? error.code : "internal_error",
+      };
+      await this.#finishObservation(
+        observation,
+        "truncated",
+        "keepalive_failed",
+      );
+    }
+  }
+
+  async #finishObservation(
+    observation,
+    status,
+    completionReason,
+    unsubscribe = true,
+  ) {
+    if (!["starting", "observing"].includes(observation.status)) return;
+    observation.status = "finishing";
+    clearTimeout(observation.timer);
+    clearInterval(observation.pingTimer);
+    observation.timer = null;
+    observation.pingTimer = null;
+
+    if (unsubscribe && observation.subscriptionUuid) {
+      try {
+        await this.#request(
+          {
+            scenario: {
+              unsubscribe: { uuid: observation.subscriptionUuid },
+            },
+          },
+          Date.now() + this.timeoutMs,
+          { serial: observation.serial },
+        );
+        observation.cleanup = { status: "unsubscribed" };
+      } catch (error) {
+        observation.cleanup = {
+          status: "connection_closed",
+          error_code:
+            error instanceof SprutHubError ? error.code : "internal_error",
+        };
+        this.#socket?.terminate();
+      }
+    } else if (observation.subscriptionUuid) {
+      observation.cleanup = { status: "connection_closed" };
+    }
+
+    observation.status = status;
+    observation.completionReason = completionReason;
+    observation.truncated = [
+      "connection_lost",
+      "truncated",
+      "canceled",
+    ].includes(status);
+    observation.endedAt = new Date().toISOString();
+    for (const resolve of observation.waiters) resolve();
+    observation.waiters.clear();
+  }
+
+  #requireObservation(observationRef) {
+    if (!this.#observation || this.#observation.ref !== observationRef) {
+      throw new SprutHubError(
+        "observation_not_found",
+        "The native observation is not available in this MCP process.",
+        "start_native_observation",
+      );
+    }
+    return this.#observation;
+  }
+
+  #observationResult(observation) {
+    const publicStatus = ["starting", "finishing"].includes(observation.status)
+      ? "observing"
+      : observation.status;
+    return {
+      status: publicStatus,
+      observation_ref: observation.ref,
+      scope: {
+        home_ref: observation.homeRef,
+        characteristic_refs: observation.characteristicRefs,
+        scenario_ref: observation.scenarioRef,
+      },
+      timing: {
+        started_at: observation.startedAt,
+        planned_end_at: observation.endsAt,
+        ended_at: observation.endedAt,
+        source_timestamp: null,
+      },
+      limits: {
+        duration_seconds: observation.durationSeconds,
+        max_events: observation.maxEvents,
+        retention: "until_the_next_observation_or_process_exit",
+      },
+      connection: observation.connection,
+      cleanup: observation.cleanup,
+      truncated: observation.truncated,
+      completion_reason: observation.completionReason,
+      events: observation.events.map((event) => ({ ...event })),
+      limitations: [
+        "received_at is local receipt time; SprutHub event frames did not provide a source timestamp.",
+        "Characteristic frames are partial events, not complete saved characteristic state.",
+        "Event frames did not identify a home; scope comes from keeping this connection selected to the requested home.",
+        "Temporal proximity between scenario and characteristic events does not prove causality or physical effect.",
+      ],
+      ...(publicStatus === "observing"
+        ? {
+            next: {
+              tool: "get_native_observation",
+              arguments: { observation_ref: observation.ref },
+            },
+            stop: {
+              tool: "stop_native_observation",
+              arguments: { observation_ref: observation.ref },
+            },
+          }
+        : {}),
+    };
   }
 }
 
@@ -1708,6 +2123,20 @@ function invalidRoomRef() {
     "invalid_room_ref",
     "Use a home-qualified room reference returned by list_rooms or inspect_home.",
     "inspect_home",
+  );
+}
+
+function invalidObservationScope() {
+  return new SprutHubError(
+    "invalid_observation_scope",
+    "Use characteristic and scenario references from the same explicitly selected home.",
+    "start_native_observation",
+  );
+}
+
+function isTerminalObservation(status) {
+  return ["completed", "connection_lost", "truncated", "canceled"].includes(
+    status,
   );
 }
 
@@ -2557,6 +2986,24 @@ function extractTypedValue(value) {
     }
   }
   return { found: false, field: null, value: null };
+}
+
+function nativeCharacteristicKey({ aId, sId, cId } = {}) {
+  return [aId, sId, cId].every(isStableId) ? `${aId}:${sId}:${cId}` : null;
+}
+
+function normalizeEventValue(typed) {
+  const type = {
+    boolValue: "boolean",
+    intValue: "integer",
+    longValue: "integer",
+    doubleValue: "number",
+    stringValue: "string",
+  }[typed.field];
+  return {
+    type: type ?? "unknown",
+    value: typed.found ? typed.value : null,
+  };
 }
 
 function matchEnumValue(validValues, currentValue) {

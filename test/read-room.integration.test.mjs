@@ -431,6 +431,9 @@ test("MCP discovers every room before reading the selected stable reference", as
       "get_native_change",
       "get_automation_change",
       "rollback_automation_change",
+      "start_native_observation",
+      "get_native_observation",
+      "stop_native_observation",
       "read_room",
     ],
   );

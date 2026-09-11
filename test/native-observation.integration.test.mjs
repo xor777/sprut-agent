@@ -84,7 +84,9 @@ async function startHub() {
       } else if (request.params?.server?.ping) {
         result = { server: { ping: {} } };
       } else {
-        assert.fail(`unsupported test request: ${JSON.stringify(request.params)}`);
+        assert.fail(
+          `unsupported test request: ${JSON.stringify(request.params)}`,
+        );
       }
       socket.send(JSON.stringify({ id: request.id, result }));
     });
@@ -202,7 +204,9 @@ test("native observation preserves repeated partial events and filters its selec
       },
     },
   });
-  hub.send({ event: { scenario: { index: "other", type: "FIRE", blockId: 6 } } });
+  hub.send({
+    event: { scenario: { index: "other", type: "FIRE", blockId: 6 } },
+  });
   hub.send({ event: { scenario: { index: "23", type: "FIRE", blockId: 7 } } });
 
   const completed = await getObservation(client, started.observation_ref, 2);
@@ -210,7 +214,11 @@ test("native observation preserves repeated partial events and filters its selec
   assert.equal(completed.scope.home_ref, homeRef);
   assert.equal(completed.events.length, 3);
   assert.deepEqual(
-    completed.events.map(({ sequence, kind, ref }) => ({ sequence, kind, ref })),
+    completed.events.map(({ sequence, kind, ref }) => ({
+      sequence,
+      kind,
+      ref,
+    })),
     [
       { sequence: 1, kind: "characteristic", ref: characteristicRef },
       { sequence: 2, kind: "characteristic", ref: characteristicRef },
@@ -236,10 +244,7 @@ test("native observation preserves repeated partial events and filters its selec
     block_id: 7,
   });
   assert.equal(completed.truncated, false);
-  assert.match(
-    completed.limitations.join(" "),
-    /does not prove causality/i,
-  );
+  assert.match(completed.limitations.join(" "), /does not prove causality/i);
   assert.equal(
     JSON.stringify(completed).includes("observation-secret-must-not-leak"),
     false,
@@ -267,6 +272,34 @@ test("connection loss is an explicit terminal observation result", async (t) => 
   assert.equal(result.completion_reason, "connection_closed");
 });
 
+test("observation rejects characteristic references from another home", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "start_native_observation",
+    arguments: {
+      home_ref: homeRef,
+      characteristic_refs: [
+        "spruthub://hub/home%20B/accessory/34/service/13/characteristic/15",
+      ],
+      scenario_ref: scenarioRef,
+      duration_seconds: 1,
+      max_events: 20,
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.structuredContent.error.code,
+    "invalid_observation_scope",
+  );
+  assert.equal(
+    hub.requests.some(({ params }) => params.scenario?.subscribe),
+    false,
+  );
+});
+
 test("explicit stop cancels observation and releases its native subscription", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
@@ -280,6 +313,7 @@ test("explicit stop cancels observation and releases its native subscription", a
   assert.equal(stopped.isError, undefined, stopped.content[0]?.text);
   assert.equal(stopped.structuredContent.status, "canceled");
   assert.equal(stopped.structuredContent.completion_reason, "requested_stop");
+  assert.equal(stopped.structuredContent.truncated, true);
   assert.deepEqual(
     hub.requests
       .filter(({ params }) => params.scenario?.unsubscribe)

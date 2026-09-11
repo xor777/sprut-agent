@@ -395,6 +395,82 @@ server.registerTool(
 );
 
 server.registerTool(
+  "start_native_observation",
+  {
+    title: "Start a bounded SprutHub native event observation",
+    description:
+      "Start a temporary read-only observation of selected event-capable characteristics and one selected scenario in the same home. The observation owns this connection's home selection, keeps repeated native events, ends automatically, and does not change scenario configuration. This returns immediately so observations lasting several minutes do not depend on one MCP request timeout; poll get_native_observation with the returned observation_ref.",
+    inputSchema: {
+      home_ref: z.string().min(1),
+      characteristic_refs: z.array(z.string().min(1)).min(1).max(20),
+      scenario_ref: z.string().min(1),
+      duration_seconds: z.number().int().min(1).max(300).default(180),
+      max_events: z.number().int().min(1).max(500).default(200),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async ({
+    home_ref: homeRef,
+    characteristic_refs: characteristicRefs,
+    scenario_ref: scenarioRef,
+    duration_seconds: durationSeconds,
+    max_events: maxEvents,
+  }) =>
+    runRoomTool(async () =>
+      (await getHubClient()).startNativeObservation({
+        homeRef,
+        characteristicRefs,
+        scenarioRef,
+        durationSeconds,
+        maxEvents,
+      }),
+    ),
+);
+
+server.registerTool(
+  "get_native_observation",
+  {
+    title: "Read a SprutHub native event observation",
+    description:
+      "Return the selected native events, receipt order and current terminal or observing status. wait_seconds waits only for completion and is capped below common MCP request timeouts; the observation continues independently until its duration, event limit, connection loss, or explicit stop. Empty events while status=observing do not mean that no event occurred for the full requested interval.",
+    inputSchema: {
+      observation_ref: z.string().min(1),
+      wait_seconds: z.number().int().min(0).max(20).default(0),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ observation_ref: observationRef, wait_seconds: waitSeconds }) =>
+    runRoomTool(async () =>
+      (await getHubClient()).getNativeObservation(observationRef, waitSeconds),
+    ),
+);
+
+server.registerTool(
+  "stop_native_observation",
+  {
+    title: "Stop a SprutHub native event observation",
+    description:
+      "Cancel one observation in this MCP process and release its native scenario subscription. This does not change the scenario itself. The returned events are necessarily truncated at the requested stop time.",
+    inputSchema: { observation_ref: z.string().min(1) },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ observation_ref: observationRef }) =>
+    runRoomTool(async () =>
+      (await getHubClient()).stopNativeObservation(observationRef),
+    ),
+);
+
+server.registerTool(
   "read_room",
   {
     title: "Read a SprutHub room",
