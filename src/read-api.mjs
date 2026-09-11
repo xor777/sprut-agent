@@ -80,7 +80,8 @@ function normalizeReading(result, selected) {
   if (
     result?.status !== "ok" ||
     entity?.kind !== "characteristic" ||
-    entity.ref !== selected.ref
+    entity.ref !== selected.ref ||
+    typeof entity.type !== "string"
   ) {
     throw new SprutHubError(
       "incompatible_response",
@@ -120,6 +121,7 @@ function normalizeReading(result, selected) {
   return {
     ...selected,
     status: entity.available === false ? "unavailable" : "ok",
+    type: entity.type,
     value: current.value,
     unit: entity.capabilities.unit ?? null,
     enum: choice ? { key: choice.key, name: choice.name } : null,

@@ -18,8 +18,31 @@ import { validateReadSelection } from "../src/read-selection.mjs";
 
 const [command, configArgument] = process.argv.slice(2);
 const publicCommands = new Set(["start", "status", "open", "stop"]);
+const HELP = `Usage: node dashboard.mjs <start|open|status|stop> <dashboard.json>
 
-if ((!publicCommands.has(command) && command !== "serve") || !configArgument) {
+Config:
+{
+  "title": "Мой дом",
+  "home_ref": "spruthub://hub/<serial>",
+  "port": 4173,
+  "readings": [{
+    "label": "Температура в офисе",
+    "ref": "spruthub://hub/<serial>/accessory/<id>/service/<id>/characteristic/<id>"
+  }]
+}
+
+start   Start this screen, or replace it after a valid config change.
+open    Open the running screen in the default browser.
+status  Print its current local URL and process id.
+stop    Stop only this screen.
+`;
+
+if (command === "--help" || command === "help") {
+  process.stdout.write(HELP);
+} else if (
+  (!publicCommands.has(command) && command !== "serve") ||
+  !configArgument
+) {
   console.error(
     "Usage: node dashboard.mjs <start|status|open|stop> <dashboard.json>",
   );
@@ -36,15 +59,15 @@ if ((!publicCommands.has(command) && command !== "serve") || !configArgument) {
 async function main(action, configArgument) {
   const configPath = path.resolve(configArgument);
   const configText = await readFile(configPath, "utf8");
-  const config = parseConfig(configText);
   const key = digest(configPath);
-  const instanceId = digest(`${configPath}\0${configText}`);
   const stateDirectory =
     process.env.SPRUT_AGENT_DASHBOARD_STATE_DIR ??
     path.join(homedir(), ".config", "sprut-agent", "dashboards");
   const stateFile = path.join(stateDirectory, `${key}.json`);
 
   if (action === "serve") {
+    const config = parseConfig(configText);
+    const instanceId = digest(`${configPath}\0${configText}`);
     await serve({ config, configPath, instanceId, stateDirectory, stateFile });
     return;
   }
@@ -82,6 +105,8 @@ async function main(action, configArgument) {
     return;
   }
 
+  parseConfig(configText);
+  const instanceId = digest(`${configPath}\0${configText}`);
   if (isOwned && state.instance_id === instanceId) {
     print({
       status: "running",

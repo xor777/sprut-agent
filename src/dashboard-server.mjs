@@ -175,6 +175,9 @@ function currentSnapshot(snapshot, currentTime, startedAt, staleAfterMs) {
         reading.status === "error" &&
         CONNECTION_ERROR_CODES.has(reading.error?.code),
     );
+  const hasUnavailableReadings = readings.some(
+    (reading) => reading.status !== "ok",
+  );
   return {
     ...snapshot,
     served_at: new Date(currentTime).toISOString(),
@@ -184,7 +187,7 @@ function currentSnapshot(snapshot, currentTime, startedAt, staleAfterMs) {
         ? "Подключение…"
         : connectionLost
           ? "Связь с домом потеряна"
-          : snapshot.status === "ok"
+          : snapshot.status === "ok" && !hasUnavailableReadings
             ? "Данные обновляются"
             : "Есть недоступные данные",
     readings: readings.map((reading) => ({
@@ -204,7 +207,15 @@ function currentSnapshot(snapshot, currentTime, startedAt, staleAfterMs) {
 function displayValue(reading) {
   if (reading.enum?.name) return reading.enum.name;
   if (reading.value === null || reading.value === undefined) return "—";
-  if (typeof reading.value === "boolean") return reading.value ? "Да" : "Нет";
+  if (typeof reading.value === "boolean") {
+    if (reading.type === "On") {
+      return reading.value ? "Включено" : "Выключено";
+    }
+    if (reading.type === "MotionDetected") {
+      return reading.value ? "Есть движение" : "Движения нет";
+    }
+    return reading.value ? "Да" : "Нет";
+  }
   return String(reading.value);
 }
 

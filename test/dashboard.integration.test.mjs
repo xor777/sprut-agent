@@ -292,7 +292,7 @@ test("the local screen presents household values and one shared connection failu
           ref,
           label,
           status: sourceUnavailable && ref === motionRef ? "unavailable" : "ok",
-          value: ref === temperatureRef ? 0 : ref === motionRef ? true : false,
+          value: ref === temperatureRef ? 0 : ref === motionRef,
           type:
             ref === temperatureRef
               ? "CurrentTemperature"
