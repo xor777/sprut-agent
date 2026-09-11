@@ -563,14 +563,16 @@ server.registerTool(
     max_bytes: maxBytes,
     cursor,
   }) =>
-    runRoomTool(async () =>
-      (await getHubClient()).readServices({
-        homeRef,
-        roomRef,
-        serviceTypes,
-        maxBytes,
-        cursor,
-      }),
+    runRoomTool(
+      async () =>
+        (await getHubClient()).readServices({
+          homeRef,
+          roomRef,
+          serviceTypes,
+          maxBytes,
+          cursor,
+        }),
+      { compact: true },
     ),
 );
 
@@ -655,12 +657,17 @@ function toToolError(error) {
   };
 }
 
-async function runRoomTool(operation) {
+async function runRoomTool(operation, { compact = false } = {}) {
   try {
     const result = sanitizeAgentOutput(await operation(), connectionSecrets());
-    updateSerializedPageSize(result);
+    updateSerializedPageSize(result, compact);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(result, null, compact ? undefined : 2),
+        },
+      ],
       structuredContent: result,
     };
   } catch (error) {
@@ -676,11 +683,13 @@ async function runRoomTool(operation) {
   }
 }
 
-function updateSerializedPageSize(result) {
+function updateSerializedPageSize(result, compact) {
   if (!result?.page || typeof result.page.serialized_bytes !== "number") return;
   let previous = -1;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const bytes = Buffer.byteLength(JSON.stringify(result, null, 2));
+    const bytes = Buffer.byteLength(
+      JSON.stringify(result, null, compact ? undefined : 2),
+    );
     if (bytes === previous) return;
     result.page.serialized_bytes = bytes;
     previous = bytes;

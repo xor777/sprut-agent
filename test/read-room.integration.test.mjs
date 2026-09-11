@@ -892,7 +892,8 @@ test("read_services byte-bounded cursors return every complete service without s
     services.push(...page.structuredContent.services);
     cursor = page.structuredContent.page.next_cursor;
     if (pageCount === 0) {
-      const removedAccessoryRef = page.structuredContent.services[0].accessory.ref;
+      const removedAccessoryRef =
+        page.structuredContent.services[0].accessory.ref;
       hub.state.accessories = hub.state.accessories
         .filter(
           ({ id }) =>
@@ -1015,7 +1016,10 @@ test("read_services keeps the selected home and services whose room metadata is 
     metadata_status: "missing",
   });
   assert.deepEqual(
-    hub.requests.map(({ serial, params }) => ({ serial: serial ?? null, params })),
+    hub.requests.map(({ serial, params }) => ({
+      serial: serial ?? null,
+      params,
+    })),
     [
       { serial: null, params: { hub: { list: {} } } },
       { serial: "neighbor-home", params: { room: { list: {} } } },

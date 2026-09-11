@@ -509,19 +509,21 @@ export class SprutHubClient {
     const snapshots = selection.room
       ? [await this.#readServiceRoom(selection.room, deadline)]
       : await this.#readServiceHome(selection.serial, deadline);
-    const allServices = snapshots.flatMap(({ room, accessories, observedAt }) =>
-      accessories.flatMap((accessory) =>
-        (accessory.services ?? []).map((service) =>
-          normalizeServiceReading(
-            selection.serial,
-            room,
-            accessory,
-            service,
-            observedAt,
+    const allServices = snapshots
+      .flatMap(({ room, accessories, observedAt }) =>
+        accessories.flatMap((accessory) =>
+          (accessory.services ?? []).map((service) =>
+            normalizeServiceReading(
+              selection.serial,
+              room,
+              accessory,
+              service,
+              observedAt,
+            ),
           ),
         ),
-      ),
-    );
+      )
+      .sort(compareServiceRefs);
     const observedServiceTypes = [
       ...new Set(allServices.map(({ type }) => type)),
     ];
@@ -557,29 +559,47 @@ export class SprutHubClient {
   }
 
   async #readServiceHome(serial, deadline) {
-    const roomsResponse = await this.#request(
-      { room: { list: {} } },
-      deadline,
-      { serial },
-    );
+    const [roomsResponse, accessoriesResponse] = await Promise.all([
+      this.#request({ room: { list: {} } }, deadline, { serial }),
+      this.#request(
+        {
+          accessory: {
+            list: { expand: "services,characteristics" },
+          },
+        },
+        deadline,
+        { serial },
+      ),
+    ]);
     const rooms = extractEntityArray(roomsResponse, ["room", "list", "rooms"]);
     rooms.forEach((room) => {
       validateRoom(room);
     });
-    if (rooms.length === 0) {
+    const accessories = extractEntityArray(accessoriesResponse, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    accessories.forEach(validateAccessory);
+    const observedAt = latestObservedAt([
+      roomsResponse.responseReceivedAt,
+      accessoriesResponse.responseReceivedAt,
+    ]);
+    if (accessories.length === 0) {
       return [
         {
           room: null,
           accessories: [],
-          observedAt: roomsResponse.responseReceivedAt,
+          observedAt,
         },
       ];
     }
-    return Promise.all(
-      rooms.map((room) =>
-        this.#readServiceRoomForKnownRoom(serial, room, deadline),
-      ),
-    );
+    const roomsById = new Map(rooms.map((room) => [room.id, room]));
+    return accessories.map((accessory) => ({
+      room: roomsById.get(accessory.roomId) ?? null,
+      accessories: [accessory],
+      observedAt,
+    }));
   }
 
   async #readServiceRoom(parsedRoom, deadline) {
@@ -2634,49 +2654,54 @@ function normalizeServiceSelection({
     serviceTypes: normalizedServiceTypes,
     maxBytes,
     cursorScope,
-    offset: decodeServiceCursor(cursor, cursorScope),
+    afterRef: decodeServiceCursor(cursor, cursorScope),
   };
 }
 
 function decodeServiceCursor(cursor, expectedScope) {
-  if (cursor === undefined) return 0;
+  if (cursor === undefined) return null;
   try {
     const parsed = JSON.parse(
       Buffer.from(cursor, "base64url").toString("utf8"),
     );
     if (
-      parsed?.v !== 1 ||
-      !Number.isSafeInteger(parsed.offset) ||
-      parsed.offset < 0 ||
+      parsed?.v !== 2 ||
+      typeof parsed.after_ref !== "string" ||
+      parsed.after_ref.length === 0 ||
       parsed.scope !== expectedScope
     ) {
       throw new Error("invalid cursor");
     }
-    return parsed.offset;
+    return parsed.after_ref;
   } catch {
     throw invalidServiceCursor();
   }
 }
 
-function encodeServiceCursor(offset, scope) {
-  return Buffer.from(JSON.stringify({ v: 1, offset, scope })).toString(
-    "base64url",
-  );
+function encodeServiceCursor(afterRef, scope) {
+  return Buffer.from(
+    JSON.stringify({ v: 2, after_ref: afterRef, scope }),
+  ).toString("base64url");
 }
 
 function paginateServiceReadings(base, services, selection) {
-  if (selection.offset > services.length) {
+  const start =
+    selection.afterRef === null
+      ? 0
+      : services.findIndex(({ ref }) => ref === selection.afterRef) + 1;
+  if (start === 0 && selection.afterRef !== null) {
     throw new SprutHubError(
       "stale_cursor",
       "The selected service set changed before this cursor could be read.",
       "restart_read_services",
+      { next: serviceReadNext(selection, null) },
     );
   }
-  let end = selection.offset;
+  let end = start;
   while (end < services.length) {
     const candidate = servicePageResult(
       base,
-      services.slice(selection.offset, end + 1),
+      services.slice(start, end + 1),
       services.length,
       end + 1,
       selection,
@@ -2685,10 +2710,10 @@ function paginateServiceReadings(base, services, selection) {
     end += 1;
   }
 
-  let selected = services.slice(selection.offset, end);
-  if (selected.length === 0 && selection.offset < services.length) {
-    selected = [oversizedServiceSummary(services[selection.offset])];
-    end = selection.offset + 1;
+  let selected = services.slice(start, end);
+  if (selected.length === 0 && start < services.length) {
+    selected = [oversizedServiceSummary(services[start])];
+    end = start + 1;
   }
   const result = servicePageResult(
     base,
@@ -2703,7 +2728,7 @@ function paginateServiceReadings(base, services, selection) {
       "The selected service cannot be represented inside max_bytes without truncation.",
       "narrow_read_services_scope",
       {
-        service_ref: services[selection.offset]?.ref,
+        service_ref: services[start]?.ref,
         required_bytes: serializedResultBytes(result),
       },
     );
@@ -2713,18 +2738,9 @@ function paginateServiceReadings(base, services, selection) {
 
 function servicePageResult(base, selected, total, end, selection) {
   const nextCursor =
-    end < total ? encodeServiceCursor(end, selection.cursorScope) : null;
-  const nextArguments = nextCursor
-    ? {
-        home_ref: selection.homeRef,
-        ...(selection.roomRef ? { room_ref: selection.roomRef } : {}),
-        ...(selection.serviceTypes
-          ? { service_types: selection.serviceTypes }
-          : {}),
-        max_bytes: selection.maxBytes,
-        cursor: nextCursor,
-      }
-    : null;
+    end < total
+      ? encodeServiceCursor(selected.at(-1).ref, selection.cursorScope)
+      : null;
   return {
     ...base,
     services: selected,
@@ -2736,21 +2752,34 @@ function servicePageResult(base, selected, total, end, selection) {
       snapshot: false,
       next_cursor: nextCursor,
     },
-    next: nextArguments
-      ? { tool: "read_services", arguments: nextArguments }
-      : null,
+    next: nextCursor ? serviceReadNext(selection, nextCursor) : null,
+  };
+}
+
+function serviceReadNext(selection, cursor) {
+  return {
+    tool: "read_services",
+    arguments: {
+      home_ref: selection.homeRef,
+      ...(selection.roomRef ? { room_ref: selection.roomRef } : {}),
+      ...(selection.serviceTypes
+        ? { service_types: selection.serviceTypes }
+        : {}),
+      max_bytes: selection.maxBytes,
+      ...(cursor ? { cursor } : {}),
+    },
   };
 }
 
 function serializedResultBytes(result) {
   let previous = -1;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const bytes = Buffer.byteLength(JSON.stringify(result, null, 2));
+    const bytes = Buffer.byteLength(JSON.stringify(result));
     if (bytes === previous) return bytes;
     result.page.serialized_bytes = bytes;
     previous = bytes;
   }
-  return Buffer.byteLength(JSON.stringify(result, null, 2));
+  return Buffer.byteLength(JSON.stringify(result));
 }
 
 function oversizedServiceSummary(service) {
@@ -3736,10 +3765,16 @@ function normalizeServiceReading(serial, room, accessory, service, observedAt) {
     ref: serviceRef(serial, accessory.id, service.sId),
     name: redactSensitiveText(service.name),
     type: redactSensitiveText(service.type),
-    room: {
-      ref: roomRef(serial, room.id),
-      name: redactSensitiveText(room.name),
-    },
+    room: room
+      ? {
+          ref: roomRef(serial, room.id),
+          name: redactSensitiveText(room.name),
+        }
+      : {
+          ref: roomRef(serial, accessory.roomId),
+          name: null,
+          metadata_status: "missing",
+        },
     accessory: {
       ref: accessoryRef(serial, accessory.id),
       name: redactSensitiveText(accessory.name),
@@ -3753,6 +3788,12 @@ function normalizeServiceReading(serial, room, accessory, service, observedAt) {
       "services",
     ),
   };
+}
+
+function compareServiceRefs(left, right) {
+  if (left.ref < right.ref) return -1;
+  if (left.ref > right.ref) return 1;
+  return 0;
 }
 
 function normalizeReadableCharacteristics(serial, accessory, service, view) {
