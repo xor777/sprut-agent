@@ -93,7 +93,9 @@ async function startHub() {
       closeAfterAccessoryCreate: false,
       closeAfterAccessoryDelete: false,
       closeAfterNextLinkAdd: false,
+      closeAfterNextLinkRemove: false,
       normalizeNextAccessoryName: false,
+      preservePhysicalOutOnIncomingRemove: false,
     },
   };
   const server = new WebSocketServer({ port: 0 });
@@ -264,33 +266,64 @@ async function startHub() {
         if (removed?.type === "IN") {
           for (const target of removed.characteristics) {
             const outgoingKey = linkKey(target);
-            state.links.set(
-              outgoingKey,
-              (state.links.get(outgoingKey) ?? []).filter(
-                (link) =>
-                  !(
-                    link.type === "OUT" &&
-                    link.characteristics.some(
-                      ({ aId, sId, cId }) =>
-                        aId === params.link.remove.aId &&
-                        sId === params.link.remove.sId &&
-                        cId === params.link.remove.cId,
-                    )
-                  ),
-              ),
-            );
+            if (!state.behavior.preservePhysicalOutOnIncomingRemove) {
+              state.links.set(
+                outgoingKey,
+                (state.links.get(outgoingKey) ?? []).filter(
+                  (link) =>
+                    !(
+                      link.type === "OUT" &&
+                      link.characteristics.some(
+                        ({ aId, sId, cId }) =>
+                          aId === params.link.remove.aId &&
+                          sId === params.link.remove.sId &&
+                          cId === params.link.remove.cId,
+                      )
+                    ),
+                ),
+              );
+            }
           }
         }
+        if (state.behavior.closeAfterNextLinkRemove) {
+          state.behavior.closeAfterNextLinkRemove = false;
+          socket.close();
+          return;
+        }
         result = { link: { remove: {} } };
+      } else if (params.characteristic?.get) {
+        result = {
+          characteristic: {
+            get: structuredClone(
+              findCharacteristic(state, params.characteristic.get),
+            ),
+          },
+        };
       } else if (params.characteristic?.update) {
         const input = params.characteristic.update;
         const characteristic = findCharacteristic(state, input);
         if (characteristic) {
+          const previousValue = structuredClone(characteristic.control.value);
           if (Object.hasOwn(input, "hasLinks")) {
             characteristic.hasLinks = input.hasLinks;
           }
           if (Object.hasOwn(input, "linkProcessing")) {
             characteristic.linkProcessing = input.linkProcessing;
+          }
+          if (input.control?.value) {
+            characteristic.control.value = structuredClone(input.control.value);
+            if (
+              JSON.stringify(previousValue) !==
+              JSON.stringify(input.control.value)
+            ) {
+              for (const link of state.links.get(linkKey(input)) ?? []) {
+                if (link.type !== "IN") continue;
+                for (const target of link.characteristics) {
+                  findCharacteristic(state, target).control.value =
+                    structuredClone(input.control.value);
+                }
+              }
+            }
           }
         }
         result = { characteristic: { update: {} } };
@@ -645,6 +678,115 @@ test("a lost delete response is reconciled without deleting twice", async (t) =>
   assert.equal(
     hub.requests.filter(({ accessory }) => accessory?.delete).length,
     1,
+  );
+});
+
+test("a lost link-remove response is reconciled without removing that link twice", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(client);
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.closeAfterNextLinkRemove = true;
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.native_acknowledged, false);
+  assert.equal(
+    restored.structuredContent.recovered_after_uncertain_write,
+    true,
+  );
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+
+  const repeated = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+});
+
+test("restore keeps the virtual accessory when native IN removal leaves physical OUT residue", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(client);
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.preservePhysicalOutOnIncomingRemove = true;
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "uncertain");
+  assert.equal(
+    restored.structuredContent.conflict_reason,
+    "link_cleanup_incomplete",
+  );
+  assert.equal(restored.structuredContent.physical_link_residues.length, 4);
+  assert.equal(
+    hub.requests.some(({ accessory }) => accessory?.delete),
+    false,
+  );
+  assert.ok(hub.state.accessories.some(({ id }) => id === 90));
+});
+
+test("a repeated group command reports a member that did not receive the native write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const preparedGroup = await prepareGroup(client);
+  const appliedGroup = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedGroup.structuredContent.change_ref },
+  });
+  const brightnessRef = appliedGroup.structuredContent.characteristics.find(
+    ({ type }) => type === "Brightness",
+  ).ref;
+  findCharacteristic(hub.state, { aId: 34, sId: 13, cId: 16 }).control.value = {
+    intValue: 10,
+  };
+  findCharacteristic(hub.state, { aId: 90, sId: 1, cId: 2 }).control.value = {
+    intValue: 10,
+  };
+
+  const preparedCommand = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: brightnessRef,
+      value: 10,
+      reason: "Повторить яркость всей группы",
+    },
+  });
+  const appliedCommand = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedCommand.structuredContent.change_ref },
+  });
+
+  assert.equal(appliedCommand.structuredContent.status, "uncertain");
+  assert.equal(
+    appliedCommand.structuredContent.conflict_reason,
+    "group_members_not_converged",
+  );
+  assert.equal(
+    appliedCommand.structuredContent.group_delivery_confirmed,
+    false,
+  );
+  assert.deepEqual(
+    appliedCommand.structuredContent.group_member_observations.map(
+      ({ member_ref, value }) => ({ member_ref, value: value.value }),
+    ),
+    [
+      { member_ref: memberServiceRefs[0], value: 10 },
+      { member_ref: memberServiceRefs[1], value: 70 },
+    ],
   );
 });
 
