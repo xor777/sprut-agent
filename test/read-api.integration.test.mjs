@@ -85,7 +85,8 @@ test("an external Node consumer reads fresh selected values and closes the insta
     [10, 11, 12, 10, 11, 12],
   );
 
-  await reader.close();
+  const serverConnectionClosed = hub.waitForConnectionClose();
+  await Promise.all([reader.close(), serverConnectionClosed]);
   assert.equal(hub.connections(), 0);
 });
 
@@ -254,7 +255,34 @@ async function startReadHub(t) {
     },
     url: `ws://127.0.0.1:${address.port}`,
     connections: () => server.clients.size,
+    waitForConnectionClose() {
+      assert.equal(
+        server.clients.size,
+        1,
+        "expected one reader connection before close",
+      );
+      const [socket] = server.clients;
+      return waitForSocketClose(socket);
+    },
   };
+}
+
+function waitForSocketClose(socket, timeoutMs = 1_000) {
+  return new Promise((resolve, reject) => {
+    const onClose = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      socket.off("close", onClose);
+      reject(
+        new Error(
+          `reader connection did not close on the SprutHub side within ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+    socket.once("close", onClose);
+  });
 }
 
 function accessoryResult(accessoryId, serviceId, characteristicId, control) {
