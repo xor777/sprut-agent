@@ -91,7 +91,9 @@ async function startHub() {
     nextAccessoryId: 90,
     behavior: {
       closeAfterAccessoryCreate: false,
+      closeAfterAccessoryDelete: false,
       closeAfterNextLinkAdd: false,
+      normalizeNextAccessoryName: false,
     },
   };
   const server = new WebSocketServer({ port: 0 });
@@ -160,9 +162,14 @@ async function startHub() {
           },
         };
       } else if (params.accessory?.create) {
+        const createInput = structuredClone(params.accessory.create);
+        if (state.behavior.normalizeNextAccessoryName) {
+          createInput.name = createInput.name.slice(0, 30);
+          state.behavior.normalizeNextAccessoryName = false;
+        }
         const created = createVirtualAccessory(
           state.nextAccessoryId++,
-          params.accessory.create,
+          createInput,
         );
         state.accessories.push(created);
         if (state.behavior.closeAfterAccessoryCreate) {
@@ -180,6 +187,11 @@ async function startHub() {
           if (key.startsWith(`${params.accessory.delete.id}.`)) {
             state.links.delete(key);
           }
+        }
+        if (state.behavior.closeAfterAccessoryDelete) {
+          state.behavior.closeAfterAccessoryDelete = false;
+          socket.close();
+          return;
         }
         result = { accessory: { delete: {} } };
       } else if (params.link?.list) {
@@ -397,6 +409,16 @@ test("the public native path creates only the common light controls and is repea
   );
   assert.equal(applied.structuredContent.native_acknowledged, true);
   assert.equal(applied.structuredContent.configuration_matches, true);
+  assert.deepEqual(applied.structuredContent.characteristics, [
+    {
+      type: "On",
+      ref: `${homeRef}/accessory/90/service/1/characteristic/1`,
+    },
+    {
+      type: "Brightness",
+      ref: `${homeRef}/accessory/90/service/1/characteristic/2`,
+    },
+  ]);
 
   const createRequests = hub.requests.filter(
     ({ accessory }) => accessory?.create,
@@ -434,8 +456,8 @@ test("the public native path creates only the common light controls and is repea
       .filter(({ characteristic }) => characteristic?.update)
       .map(({ characteristic }) => characteristic.update),
     [
-      { aId: 90, sId: 1, cId: 1, hasLinks: true, linkProcessing: 0 },
-      { aId: 90, sId: 1, cId: 2, hasLinks: true, linkProcessing: 0 },
+      { aId: 90, sId: 1, cId: 1, hasLinks: true },
+      { aId: 90, sId: 1, cId: 2, hasLinks: true },
     ],
   );
   assert.deepEqual(
@@ -481,14 +503,16 @@ test("the public native path creates only the common light controls and is repea
 
 test("restore deletes only an unchanged owned virtual accessory", async (t) => {
   const { hub, stateDirectory } = await setup(t);
-  const client = await startClient(t, hub, stateDirectory);
-  const prepared = await prepareGroup(client);
-  await client.callTool({
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  await firstClient.callTool({
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
 
-  const restored = await client.callTool({
+  const restored = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
@@ -528,6 +552,42 @@ test("restore preserves a virtual group after a manual link was added", async (t
   assert.equal(
     hub.requests.some(({ accessory }) => accessory?.delete),
     false,
+  );
+});
+
+test("a lost delete response is reconciled without deleting twice", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(client);
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  hub.state.behavior.closeAfterAccessoryDelete = true;
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.native_acknowledged, false);
+  assert.equal(
+    restored.structuredContent.recovered_after_uncertain_write,
+    true,
+  );
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.delete).length,
+    1,
+  );
+
+  const repeated = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.delete).length,
+    1,
   );
 });
 
@@ -571,6 +631,30 @@ test("a lost accessory-create response is never retried or claimed", async (t) =
   assert.ok(hub.state.accessories.some(({ id }) => id === 90));
 });
 
+test("an acknowledged normalized accessory name keeps ownership and reports both names", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const requestedName = "Очень длинное имя общего света 123456789";
+  const prepared = await prepareGroup(client, { name: requestedName });
+  hub.state.behavior.normalizeNextAccessoryName = true;
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    applied.structuredContent.virtual_accessory_creation_owned,
+    true,
+  );
+  assert.equal(applied.structuredContent.requested_name, requestedName);
+  assert.equal(
+    applied.structuredContent.observed_name,
+    requestedName.slice(0, 30),
+  );
+  assert.equal(applied.structuredContent.name_normalized, true);
+});
+
 test("a lost link response is read back and completed without adding that link twice", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -606,6 +690,51 @@ test("the group rejects a capability that is absent from one member", async (t) 
   assert.equal(prepared.isError, true);
   assert.equal(
     prepared.structuredContent.error.code,
+    "unsupported_group_characteristics",
+  );
+  assert.equal(hub.requests.some(isGroupWrite), false);
+});
+
+test("a matching pre-existing virtual light is a conflict, not owned or duplicated", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.accessories.push(
+    createVirtualAccessory(80, {
+      name: "Общий свет",
+      roomId: 1,
+      services: [
+        { name: "Общий свет", type: "Lightbulb", optional: ["Brightness"] },
+      ],
+    }),
+  );
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareGroup(client);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "conflict");
+  assert.equal(
+    prepared.structuredContent.conflict_reason,
+    "matching_virtual_accessory_exists",
+  );
+  assert.equal(prepared.structuredContent.owned_change_created, false);
+  assert.equal(hub.requests.some(isGroupWrite), false);
+});
+
+test("apply revalidates member bindings before creating the group", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(client);
+  const dasha = hub.state.accessories.find(({ id }) => id === 35);
+  dasha.services[0].characteristics = dasha.services[0].characteristics.filter(
+    ({ control }) => control.type !== "Brightness",
+  );
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, true);
+  assert.equal(
+    applied.structuredContent.error.code,
     "unsupported_group_characteristics",
   );
   assert.equal(hub.requests.some(isGroupWrite), false);

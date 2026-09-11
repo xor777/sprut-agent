@@ -737,6 +737,159 @@ export class SprutHubClient {
     return accessory;
   }
 
+  async getAccessoryOrNull(id) {
+    const deadline = Date.now() + this.timeoutMs;
+    let response;
+    try {
+      response = await this.#request({ accessory: { get: { id } } }, deadline);
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const accessories = await this.listAccessories(deadline);
+      if (accessories.some((accessory) => accessory.id === id)) throw error;
+      return null;
+    }
+    const container = response.result?.accessory;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible accessory response.",
+      );
+    }
+    if (container.get === null) return null;
+    validateAccessory(container.get);
+    if (container.get.id !== id) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a different accessory than requested.",
+      );
+    }
+    return container.get;
+  }
+
+  async listAccessories(deadline = Date.now() + this.timeoutMs) {
+    const response = await this.#request(
+      { accessory: { list: { expand: "services,characteristics" } } },
+      deadline,
+    );
+    const accessories = extractEntityArray(response, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    accessories.forEach(validateAccessory);
+    return accessories;
+  }
+
+  async listServiceTypes() {
+    const response = await this.#request(
+      { service: { types: {} } },
+      Date.now() + this.timeoutMs,
+    );
+    const types = extractEntityArray(response, ["service", "types", "types"]);
+    for (const type of types) {
+      if (
+        !type ||
+        typeof type.type !== "string" ||
+        !Array.isArray(type.required) ||
+        !Array.isArray(type.optional)
+      ) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an incompatible service type catalog.",
+        );
+      }
+    }
+    return types;
+  }
+
+  async createAccessory({ name, roomId, services }) {
+    const response = await this.#request(
+      { accessory: { create: { name, roomId, services } } },
+      Date.now() + this.timeoutMs,
+    );
+    const accessory = response.result?.accessory?.create;
+    try {
+      validateAccessory(accessory);
+      if (accessory.virtual !== true) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub did not identify the created accessory as virtual.",
+        );
+      }
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return accessory;
+  }
+
+  async deleteAccessory(id) {
+    const response = await this.#request(
+      { accessory: { delete: { id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.accessory;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the accessory deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async listLinks({ aId, sId, cId }) {
+    const response = await this.#request(
+      { link: { list: { aId, sId, cId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const links = extractEntityArray(response, ["link", "list", "links"], true);
+    for (const link of links) validateLink(link);
+    return links;
+  }
+
+  async addVirtualLink({ aId, sId, cId, tAId, tSId, tCId }) {
+    const response = await this.#request(
+      { link: { addVirtual: { aId, sId, cId, tAId, tSId, tCId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const link = response.result?.link?.addVirtual;
+    try {
+      validateLink(link);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return link;
+  }
+
+  async updateCharacteristicLinks({ aId, sId, cId, hasLinks }) {
+    const response = await this.#request(
+      {
+        characteristic: {
+          update: { aId, sId, cId, hasLinks },
+        },
+      },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.characteristic;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the characteristic link settings.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async updateAccessory({ id, name, roomId }) {
     const response = await this.#request(
       { accessory: { update: { id, name, roomId } } },
@@ -3122,6 +3275,33 @@ function validateAccessory(accessory) {
     }
   }
   return accessory;
+}
+
+function validateLink(link) {
+  if (
+    !link ||
+    typeof link.index !== "string" ||
+    link.index.length === 0 ||
+    !["SYSTEM", "IN", "OUT"].includes(link.type) ||
+    !Array.isArray(link.characteristics)
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned incomplete link data.",
+    );
+  }
+  for (const characteristic of link.characteristics) {
+    if (
+      !isStableId(characteristic?.aId) ||
+      !isStableId(characteristic?.sId) ||
+      !isStableId(characteristic?.cId)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incomplete link data.",
+      );
+    }
+  }
 }
 
 function incompleteAccessoryError() {
