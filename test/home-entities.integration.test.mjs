@@ -2283,6 +2283,129 @@ test("entity continuations restart when strings or container identities change",
   assert.equal(identitiesChanged.structuredContent.next.arguments.offset, 0);
 });
 
+test("ambiguous container continuations restart without losing current entries", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const targets = Array.from({ length: 24 }, (_, index) => ({
+    type: "if",
+    blockId: index + 1,
+    marker: `target-${index + 1}-${"x".repeat(80)}`,
+  }));
+  const scenario = {
+    index: "ambiguous-detail",
+    name: "Неоднозначная карта",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({ targets }),
+  };
+  state.scenarios.push(scenario);
+  const client = await startClient(t, hub);
+  const baseArguments = {
+    entity_ref: "spruthub://hub/home%2FA/scenario/ambiguous-detail",
+    include: ["configuration"],
+    pointer: "/configuration/value/targets",
+    max_bytes: 2_048,
+  };
+  const firstPage = await client.callTool({
+    name: "get_entity",
+    arguments: baseArguments,
+  });
+  const replacedContinuation =
+    firstPage.structuredContent.representation.next;
+  assert(replacedContinuation?.arguments.version);
+
+  targets.shift();
+  targets.push({
+    type: "if",
+    blockId: 99,
+    marker: `replacement-${"y".repeat(80)}`,
+  });
+  scenario.data = JSON.stringify({ targets });
+  const replaced = await client.callTool({
+    name: replacedContinuation.tool,
+    arguments: replacedContinuation.arguments,
+  });
+  assert.equal(replaced.isError, true);
+  assert.equal(replaced.structuredContent.error.code, "stale_entity_content");
+  assert.equal(replaced.structuredContent.next.arguments.offset, 0);
+
+  let restarted = await client.callTool({
+    name: replaced.structuredContent.next.tool,
+    arguments: replaced.structuredContent.next.arguments,
+  });
+  const currentParts = [];
+  while (true) {
+    assert.equal(restarted.isError, undefined, restarted.content[0]?.text);
+    currentParts.push(
+      ...restarted.structuredContent.representation.available_parts,
+    );
+    const next = restarted.structuredContent.representation.next;
+    if (!next) break;
+    restarted = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+  }
+  const currentBlockIds = [];
+  for (const part of currentParts) {
+    const current = await client.callTool({
+      name: part.next.tool,
+      arguments: part.next.arguments,
+    });
+    assert.equal(current.isError, undefined, current.content[0]?.text);
+    currentBlockIds.push(current.structuredContent.selection.value.blockId);
+  }
+  assert.deepEqual(currentBlockIds, targets.map(({ blockId }) => blockId));
+
+  const beforeReorder = await client.callTool({
+    name: "get_entity",
+    arguments: baseArguments,
+  });
+  const reorderContinuation =
+    beforeReorder.structuredContent.representation.next;
+  assert(reorderContinuation?.arguments.version);
+  [targets[0], targets[1]] = [targets[1], targets[0]];
+  scenario.data = JSON.stringify({ targets });
+  const reordered = await client.callTool({
+    name: reorderContinuation.tool,
+    arguments: reorderContinuation.arguments,
+  });
+  assert.equal(reordered.isError, true);
+  assert.equal(reordered.structuredContent.error.code, "stale_entity_content");
+
+  const anonymous = Array.from({ length: 24 }, (_, index) => ({
+    blockId: index + 1,
+    marker: `anonymous-${index + 1}-${"z".repeat(80)}`,
+  }));
+  scenario.data = JSON.stringify({ anonymous });
+  const anonymousArguments = {
+    ...baseArguments,
+    pointer: "/configuration/value/anonymous",
+  };
+  const beforeAnonymousChange = await client.callTool({
+    name: "get_entity",
+    arguments: anonymousArguments,
+  });
+  const anonymousContinuation =
+    beforeAnonymousChange.structuredContent.representation.next;
+  assert(anonymousContinuation?.arguments.version);
+  anonymous.shift();
+  anonymous.push({ blockId: 99, marker: `new-anonymous-${"q".repeat(80)}` });
+  scenario.data = JSON.stringify({ anonymous });
+  const anonymousChanged = await client.callTool({
+    name: anonymousContinuation.tool,
+    arguments: anonymousContinuation.arguments,
+  });
+  assert.equal(anonymousChanged.isError, true);
+  assert.equal(
+    anonymousChanged.structuredContent.error.code,
+    "stale_entity_content",
+  );
+});
+
 test("automation preview rejects foreign-home references before any hub request", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
