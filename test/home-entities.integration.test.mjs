@@ -1749,6 +1749,180 @@ test("scenario detail returns native BLOCK data and redacted code instead of tru
   );
 });
 
+test("large entity detail stays byte bounded and exposes exact addressable parts", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.scenarios.push({
+    index: "large-block",
+    name: "Большой сценарий",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({
+      mode: "EVERY",
+      settings: Object.fromEntries(
+        Array.from({ length: 120 }, (_, index) => [
+          `setting-${index}`,
+          { enabled: index % 2 === 0, threshold: index },
+        ]),
+      ),
+    }),
+  });
+  const client = await startClient(t, hub);
+  const baseArguments = {
+    entity_ref: "spruthub://hub/home%2FA/scenario/large-block",
+    include: ["configuration"],
+    max_bytes: 2_048,
+  };
+
+  const overview = await client.callTool({
+    name: "get_entity",
+    arguments: baseArguments,
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  assert(Buffer.byteLength(overview.content[0].text) <= baseArguments.max_bytes);
+  assert.equal(overview.structuredContent.representation.entity_complete, false);
+  assert.equal(overview.structuredContent.representation.selected_complete, false);
+  assert.equal(overview.structuredContent.entity.ref, baseArguments.entity_ref);
+
+  let detail = overview;
+  for (const pointer of [
+    "/configuration",
+    "/configuration/value",
+    "/configuration/value/mode",
+  ]) {
+    const part = detail.structuredContent.representation.available_parts.find(
+      (candidate) => candidate.pointer === pointer,
+    );
+    assert(part?.next, `missing issued next for ${pointer}`);
+    assert.deepEqual(part.next.arguments.include, ["configuration"]);
+    assert.equal(part.next.arguments.entity_ref, baseArguments.entity_ref);
+    detail = await client.callTool({
+      name: part.next.tool,
+      arguments: part.next.arguments,
+    });
+    assert.equal(detail.isError, undefined, detail.content[0]?.text);
+    assert(Buffer.byteLength(detail.content[0].text) <= baseArguments.max_bytes);
+  }
+  assert.equal(detail.structuredContent.selection.pointer, "/configuration/value/mode");
+  assert.equal(detail.structuredContent.selection.status, "found");
+  assert.equal(detail.structuredContent.selection.value, "EVERY");
+  assert.equal(detail.structuredContent.representation.entity_complete, false);
+  assert.equal(detail.structuredContent.representation.selected_complete, true);
+});
+
+test("long Unicode source resumes exactly and refuses to mix changed versions", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const source = Array.from(
+    { length: 700 },
+    (_, index) => `// шаг ${index} 💡\nlog.info("значение-${index}");\n`,
+  ).join("");
+  state.scenarios.push({
+    index: "large-code",
+    name: "Большой код",
+    type: "JS",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: source,
+  });
+  const client = await startClient(t, hub);
+  const entityRef = "spruthub://hub/home%2FA/scenario/large-code";
+  let result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/text",
+      max_bytes: 2_048,
+    },
+  });
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const firstNext = structuredClone(result.structuredContent.selection.next);
+  const chunks = [];
+  while (true) {
+    const selected = result.structuredContent.selection;
+    chunks.push(selected.value.text);
+    assert.equal(
+      selected.value.start_character,
+      Array.from(chunks.join("")).length,
+    );
+    if (!selected.next) break;
+    result = await client.callTool({
+      name: selected.next.tool,
+      arguments: selected.next.arguments,
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert(Buffer.byteLength(result.content[0].text) <= 2_048);
+  }
+  assert.equal(chunks.join(""), source);
+
+  state.scenarios.find(({ index }) => index === "large-code").data =
+    `// новая версия\n${source}`;
+  const stale = await client.callTool({
+    name: firstNext.tool,
+    arguments: firstNext.arguments,
+  });
+  assert.equal(stale.isError, true);
+  assert.equal(stale.structuredContent.error.code, "stale_entity_content");
+  assert.equal(stale.structuredContent.next.tool, "get_entity");
+  assert.equal(stale.structuredContent.next.arguments.pointer, "/configuration/text");
+  assert.equal(stale.structuredContent.next.arguments.offset, 0);
+  assert.notEqual(
+    stale.structuredContent.next.arguments.version,
+    firstNext.arguments.version,
+  );
+});
+
+test("entity projection preserves small values and cannot cross redacted nodes", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+  const characteristicRef =
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15";
+  const small = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef },
+  });
+  assert.equal(small.isError, undefined, small.content[0]?.text);
+  assert.equal(small.structuredContent.entity.current_value.value, false);
+  assert.equal(small.structuredContent.representation.entity_complete, true);
+  assert.equal(small.structuredContent.representation.selected_complete, true);
+
+  const selectedFalse = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: characteristicRef,
+      pointer: "/current_value/value",
+    },
+  });
+  assert.equal(selectedFalse.isError, undefined, selectedFalse.content[0]?.text);
+  assert.equal(selectedFalse.structuredContent.selection.status, "found");
+  assert.equal(selectedFalse.structuredContent.selection.value, false);
+
+  const missing = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef, pointer: "/current_value/missing" },
+  });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.structuredContent.error.code, "entity_pointer_not_found");
+
+  const redacted = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/motion-block",
+      include: ["configuration"],
+      pointer: "/configuration/value/connection/value",
+    },
+  });
+  assert.equal(redacted.isError, true);
+  assert.equal(redacted.structuredContent.error.code, "entity_pointer_redacted");
+  assert.doesNotMatch(redacted.content[0].text, /block-secret-must-not-leak/);
+});
+
 test("automation preview rejects foreign-home references before any hub request", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
