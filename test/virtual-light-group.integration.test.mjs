@@ -105,6 +105,8 @@ async function startHub() {
       closeAfterAccessoryCreate: false,
       closeAfterAccessoryDelete: false,
       closeAfterNextLinkAdd: false,
+      closeAfterNextLinkAddReadback: false,
+      closeBeforeNextLinkList: false,
       closeAfterNextLinkRemove: false,
       normalizeNextAccessoryName: false,
       preservePhysicalOutOnIncomingRemove: false,
@@ -201,6 +203,11 @@ async function startHub() {
         }
         result = { accessory: { delete: {} } };
       } else if (params.link?.list) {
+        if (state.behavior.closeBeforeNextLinkList) {
+          state.behavior.closeBeforeNextLinkList = false;
+          socket.close();
+          return;
+        }
         result = {
           link: {
             list: {
@@ -267,6 +274,10 @@ async function startHub() {
           state.behavior.closeAfterNextLinkAdd = false;
           socket.close();
           return;
+        }
+        if (state.behavior.closeAfterNextLinkAddReadback) {
+          state.behavior.closeAfterNextLinkAddReadback = false;
+          state.behavior.closeBeforeNextLinkList = true;
         }
         result = { link: { addVirtual: structuredClone(incoming) } };
       } else if (params.link?.remove) {
@@ -1052,6 +1063,124 @@ test("a lost link response is read back and completed without adding that link t
   });
   assert.equal(repeated.structuredContent.status, "applied");
   assert.equal(hub.requests.filter(({ link }) => link?.addVirtual).length, 4);
+});
+
+test("restore reconstructs a link whose acknowledged add lost its readback", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(firstClient);
+  hub.state.behavior.closeAfterNextLinkAddReadback = true;
+  hub.state.behavior.preserveEmptyPhysicalOutOnIncomingRemove = true;
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, true);
+  assert.equal(applied.structuredContent.error.code, "connection_closed");
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const inspected = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "uncertain");
+  assert.equal(
+    inspected.structuredContent.verification.result,
+    "owned_partial_group_observed",
+  );
+
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    hub.requests
+      .filter(({ link }) => link?.remove)
+      .map(({ link }) => link.remove),
+    [{ aId: 90, sId: 1, cId: 1, linkId: "Virtual/34.15" }],
+  );
+  assert.equal(
+    hub.requests.findIndex(({ link }) => link?.remove) <
+      hub.requests.findIndex(({ accessory }) => accessory?.delete),
+    true,
+    "the observed IN must be removed before its virtual accessory",
+  );
+  assert.deepEqual(
+    restored.structuredContent.native_link_residues.map(
+      ({ member_ref, characteristic_type, link }) => ({
+        member_ref,
+        characteristic_type,
+        type: link.type,
+        characteristics: link.characteristics,
+      }),
+    ),
+    [
+      {
+        member_ref: memberServiceRefs[0],
+        characteristic_type: "On",
+        type: "OUT",
+        characteristics: [],
+      },
+    ],
+  );
+  assert.equal(
+    [...hub.state.links.values()].some((links) =>
+      links.some((link) => link.characteristics?.some(({ aId }) => aId === 90)),
+    ),
+    false,
+  );
+});
+
+test("restoring one owned group does not block restoring another shared group", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const first = await prepareGroup(client, { name: "Первый общий свет" });
+  const firstApplied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(firstApplied.structuredContent.status, "applied");
+  const second = await prepareGroup(client, { name: "Второй общий свет" });
+  const secondApplied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(secondApplied.structuredContent.status, "applied");
+
+  const firstRestored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(firstRestored.structuredContent.status, "restored");
+  const secondRestores = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    secondRestores.push(
+      await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: second.structuredContent.change_ref },
+      }),
+    );
+  }
+  assert.deepEqual(
+    secondRestores.map(({ structuredContent }) => structuredContent.status),
+    ["restored", "restored", "restored"],
+  );
+  assert.deepEqual(
+    hub.state.accessories.map(({ id }) => id),
+    [34, 35, 36],
+  );
+  assert.equal(
+    [...hub.state.links.values()].some((links) =>
+      links.some((link) =>
+        link.characteristics?.some(({ aId }) => aId === 90 || aId === 91),
+      ),
+    ),
+    false,
+  );
 });
 
 test("the group rejects a capability that is absent from one member", async (t) => {
