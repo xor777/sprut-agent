@@ -435,6 +435,7 @@ test("MCP discovers every room before reading the selected stable reference", as
       "start_native_observation",
       "get_native_observation",
       "stop_native_observation",
+      "read_services",
       "read_room",
     ],
   );
@@ -445,6 +446,7 @@ test("MCP discovers every room before reading the selected stable reference", as
       "get_entity",
       "list_rooms",
       "get_automation_change",
+      "read_services",
       "read_room",
     ].includes(name),
   )) {
@@ -570,6 +572,438 @@ test("MCP discovers every room before reading the selected stable reference", as
     },
   ]);
 });
+
+test("read_services returns one complete mixed-room view without per-service reads", async (t) => {
+  const state = structuredClone(hubState);
+  state.accessories.push(
+    thermostatAccessory({
+      id: 110,
+      name: "Кондиционер",
+      currentMode: 2,
+      currentTemperature: 25,
+      targetTemperature: 23,
+    }),
+    thermostatAccessory({
+      id: 111,
+      name: "Терморегулятор для радиатора",
+      currentMode: 1,
+      currentTemperature: 21,
+      targetTemperature: 30,
+      online: false,
+    }),
+  );
+  const hub = await startHub(state);
+  const client = await startMcpClient(t, hub);
+
+  const result = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/10",
+      max_bytes: 32_768,
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const view = result.structuredContent;
+  assert.equal(view.status, "ok");
+  assert.deepEqual(view.scope, {
+    home_ref: "spruthub://hub/test-hub",
+    room: { ref: "spruthub://hub/test-hub/room/10", name: " Кухня " },
+  });
+  assert.equal(view.scope_status, "non_empty");
+  assert.equal(view.match_status, "not_filtered");
+  assert.deepEqual(view.observed_service_types, [
+    "Lightbulb",
+    "TemperatureSensor",
+    "Diagnostics",
+    "Thermostat",
+  ]);
+  assert.equal(
+    view.services.filter(({ type }) => type === "Thermostat").length,
+    2,
+  );
+  const radiator = view.services.find(
+    ({ accessory }) => accessory.name === "Терморегулятор для радиатора",
+  );
+  assert.deepEqual(radiator.room, view.scope.room);
+  assert.equal(radiator.accessory.available, false);
+  assert.deepEqual(
+    radiator.readings.map(
+      ({ type, value, value_status, unit, enum: choice }) => ({
+        type,
+        value,
+        value_status,
+        unit,
+        enum: choice,
+      }),
+    ),
+    [
+      {
+        type: "CurrentHeatingCoolingState",
+        value: 1,
+        value_status: "known",
+        unit: null,
+        enum: { key: "HEAT", name: "Нагрев" },
+      },
+      {
+        type: "CurrentTemperature",
+        value: 21,
+        value_status: "known",
+        unit: "°C",
+        enum: undefined,
+      },
+      {
+        type: "TargetTemperature",
+        value: 30,
+        value_status: "known",
+        unit: "°C",
+        enum: undefined,
+      },
+    ],
+  );
+
+  const readingByType = (type) =>
+    view.services
+      .flatMap(({ readings = [] }) => readings)
+      .find((reading) => reading.type === type);
+  assert.deepEqual(
+    {
+      off: readingByType("On"),
+      zero: readingByType("CurrentHumidity"),
+      unknown: readingByType("AirQuality"),
+    },
+    {
+      off: {
+        ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
+        name: "Включена",
+        type: "On",
+        value: false,
+        value_status: "known",
+        unit: "boolean",
+        measured_at: null,
+      },
+      zero: {
+        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/2",
+        name: "Влажность",
+        type: "CurrentHumidity",
+        value: 0,
+        value_status: "known",
+        unit: "%",
+        measured_at: null,
+      },
+      unknown: {
+        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
+        name: "Качество воздуха",
+        type: "AirQuality",
+        value: null,
+        value_status: "unknown",
+        unit: null,
+        measured_at: null,
+      },
+    },
+  );
+  assert.deepEqual(
+    view.services
+      .flatMap(({ readings = [] }) => readings)
+      .find(({ redacted }) => redacted),
+    { redacted: true, reason: "sensitive_native_data" },
+  );
+  assert.equal(
+    Buffer.byteLength(result.content[0].text),
+    view.page.serialized_bytes,
+  );
+  assert(view.page.serialized_bytes <= view.page.max_bytes);
+  assert.equal(view.page.snapshot, false);
+  assert.equal(view.page.next_cursor, null);
+  assert.doesNotMatch(result.content[0].text, /legacy-secret-must-not-leak/);
+  assert.deepEqual(
+    hub.requests.map(({ params }) => params),
+    [
+      { room: { get: { id: 10 } } },
+      {
+        accessory: {
+          list: { roomId: 10, expand: "services,characteristics" },
+        },
+      },
+    ],
+  );
+});
+
+test("read_services filters exact native types across the home and distinguishes empty selection", async (t) => {
+  const state = structuredClone(hubState);
+  state.accessories.push(
+    thermostatAccessory({
+      id: 210,
+      roomId: 20,
+      name: "Гостиный радиатор",
+      currentMode: 0,
+      currentTemperature: 22,
+      targetTemperature: 22,
+    }),
+    {
+      id: 411,
+      online: true,
+      name: "Геркон",
+      roomId: 41,
+      services: [
+        {
+          aId: 411,
+          sId: 1,
+          name: "Дверь",
+          type: "ContactSensor",
+          characteristics: [
+            {
+              aId: 411,
+              sId: 1,
+              cId: 1,
+              control: {
+                read: true,
+                key: "ContactSensorState",
+                name: "Состояние",
+                type: "ContactSensorState",
+                value: { intValue: 0 },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  );
+  const hub = await startHub(state);
+  const client = await startMcpClient(t, hub);
+
+  const found = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      service_types: ["ContactSensor", "Thermostat"],
+      max_bytes: 32_768,
+    },
+  });
+  assert.equal(found.isError, undefined, found.content[0]?.text);
+  assert.equal(found.structuredContent.match_status, "matched");
+  assert.deepEqual(
+    found.structuredContent.services.map(({ type }) => type).sort(),
+    ["ContactSensor", "Thermostat"],
+  );
+  assert.deepEqual(
+    found.structuredContent.services.map(({ room }) => room.ref).sort(),
+    ["spruthub://hub/test-hub/room/20", "spruthub://hub/test-hub/room/41"],
+  );
+  assert.equal(hub.requests.filter(({ params }) => params.room?.get).length, 0);
+  assert.equal(
+    hub.requests.filter(({ params }) => params.room?.list).length,
+    1,
+  );
+  assert.equal(
+    hub.requests.filter(({ params }) => params.accessory?.list).length,
+    state.rooms.length,
+  );
+
+  const noMatch = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/10",
+      service_types: ["NotARealNativeType"],
+    },
+  });
+  assert.equal(noMatch.structuredContent.scope_status, "non_empty");
+  assert.equal(noMatch.structuredContent.match_status, "no_matches");
+  assert.deepEqual(noMatch.structuredContent.services, []);
+  assert(
+    noMatch.structuredContent.observed_service_types.includes("Lightbulb"),
+  );
+
+  const empty = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/40",
+    },
+  });
+  assert.equal(empty.structuredContent.scope_status, "empty");
+  assert.equal(empty.structuredContent.match_status, "not_filtered");
+  assert.deepEqual(empty.structuredContent.observed_service_types, []);
+  assert.deepEqual(empty.structuredContent.services, []);
+});
+
+test("read_services byte-bounded cursors return every complete service without substitution", async (t) => {
+  const state = structuredClone(hubState);
+  for (let id = 110; id < 118; id += 1) {
+    state.accessories.push(
+      thermostatAccessory({
+        id,
+        name: `Регулятор ${id}`,
+        currentMode: id % 3,
+        currentTemperature: 20 + (id - 110),
+        targetTemperature: 25,
+      }),
+    );
+  }
+  const hub = await startHub(state);
+  const client = await startMcpClient(t, hub);
+  const argumentsBase = {
+    home_ref: "spruthub://hub/test-hub",
+    room_ref: "spruthub://hub/test-hub/room/10",
+    service_types: ["Thermostat"],
+    max_bytes: 5_000,
+  };
+  const services = [];
+  let cursor;
+  let pageCount = 0;
+  do {
+    const page = await client.callTool({
+      name: "read_services",
+      arguments: { ...argumentsBase, ...(cursor ? { cursor } : {}) },
+    });
+    assert.equal(page.isError, undefined, page.content[0]?.text);
+    assert(Buffer.byteLength(page.content[0].text) <= argumentsBase.max_bytes);
+    assert.equal(
+      Buffer.byteLength(page.content[0].text),
+      page.structuredContent.page.serialized_bytes,
+    );
+    services.push(...page.structuredContent.services);
+    cursor = page.structuredContent.page.next_cursor;
+    if (cursor) {
+      assert.deepEqual(page.structuredContent.next, {
+        tool: "read_services",
+        arguments: { ...argumentsBase, cursor },
+      });
+    } else {
+      assert.equal(page.structuredContent.next, null);
+    }
+    pageCount += 1;
+    assert(pageCount < 20);
+  } while (cursor);
+
+  assert(pageCount > 1);
+  assert.deepEqual(
+    services.map(({ ref }) => ref),
+    Array.from(
+      { length: 8 },
+      (_, index) =>
+        `spruthub://hub/test-hub/accessory/${110 + index}/service/1`,
+    ),
+  );
+  assert.deepEqual(
+    services.map(
+      ({ readings }) =>
+        readings.find(({ type }) => type === "CurrentTemperature").value,
+    ),
+    Array.from({ length: 8 }, (_, index) => 20 + index),
+  );
+});
+
+test("read_services rejects cross-home scope and invalid cursors before reading a room", async (t) => {
+  const hub = await startHub();
+  const client = await startMcpClient(t, hub);
+
+  const crossHome = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/neighbor-home/room/10",
+    },
+  });
+  assert.equal(crossHome.isError, true);
+  assert.deepEqual(crossHome.structuredContent.error, {
+    code: "invalid_service_scope",
+    message: "room_ref must identify a room in the selected home_ref.",
+    retryable: false,
+    action: "inspect_home",
+  });
+  assert.equal(hub.requests.length, 0);
+
+  const invalidCursor = await client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/10",
+      cursor: "not-a-read-services-cursor",
+    },
+  });
+  assert.equal(invalidCursor.isError, true);
+  assert.deepEqual(invalidCursor.structuredContent.error, {
+    code: "invalid_cursor",
+    message:
+      "Use the cursor returned by read_services for the same scope and filters.",
+    retryable: false,
+    action: "restart_read_services",
+  });
+  assert.equal(hub.requests.length, 0);
+});
+
+function thermostatAccessory({
+  id,
+  roomId = 10,
+  name,
+  currentMode,
+  currentTemperature,
+  targetTemperature,
+  online = true,
+}) {
+  return {
+    id,
+    online,
+    name,
+    roomId,
+    services: [
+      {
+        aId: id,
+        sId: 1,
+        name: "Термостат",
+        type: "Thermostat",
+        characteristics: [
+          {
+            aId: id,
+            sId: 1,
+            cId: 1,
+            control: {
+              read: true,
+              key: "CurrentHeatingCoolingState",
+              name: "Текущий режим",
+              type: "CurrentHeatingCoolingState",
+              value: { intValue: currentMode },
+              validValues: [
+                { key: "OFF", name: "Выключен", value: { intValue: 0 } },
+                { key: "HEAT", name: "Нагрев", value: { intValue: 1 } },
+                { key: "COOL", name: "Охлаждение", value: { intValue: 2 } },
+              ],
+            },
+          },
+          {
+            aId: id,
+            sId: 1,
+            cId: 2,
+            control: {
+              read: true,
+              key: "CurrentTemperature",
+              name: "Температура",
+              type: "CurrentTemperature",
+              unit: "°C",
+              value: { doubleValue: currentTemperature },
+            },
+          },
+          {
+            aId: id,
+            sId: 1,
+            cId: 3,
+            control: {
+              read: true,
+              key: "TargetTemperature",
+              name: "Уставка",
+              type: "TargetTemperature",
+              unit: "°C",
+              value: { doubleValue: targetTemperature },
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
 
 test("observed real-hub projection keeps both temperature service contexts", async (t) => {
   const [roomExchange, accessoryExchange] = observedRoomReading.exchanges;
