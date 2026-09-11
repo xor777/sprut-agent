@@ -1795,10 +1795,15 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
     false,
   );
   assert.equal(
+    overview.structuredContent.representation.kind,
+    "entity_overview",
+  );
+  assert.equal(
     overview.structuredContent.representation.selected_complete,
     false,
   );
-  assert.equal(overview.structuredContent.entity.ref, baseArguments.entity_ref);
+  assert.equal(overview.structuredContent.identity.ref, baseArguments.entity_ref);
+  assert.equal(Object.hasOwn(overview.structuredContent, "entity"), false);
 
   let detail = overview;
   for (const pointer of [
@@ -1831,8 +1836,10 @@ test("large entity detail stays byte bounded and exposes exact addressable parts
   );
   assert.equal(detail.structuredContent.selection.status, "found");
   assert.equal(detail.structuredContent.selection.value, "EVERY");
+  assert.equal(detail.structuredContent.representation.kind, "selected_value");
   assert.equal(detail.structuredContent.representation.entity_complete, false);
   assert.equal(detail.structuredContent.representation.selected_complete, true);
+  assert.equal(Object.hasOwn(detail.structuredContent, "entity"), false);
 
   const valueOverviewNext =
     overview.structuredContent.representation.available_parts.find(
@@ -1976,6 +1983,7 @@ test("entity projection preserves small values and cannot cross redacted nodes",
   });
   assert.equal(small.isError, undefined, small.content[0]?.text);
   assert.equal(small.structuredContent.entity.current_value.value, false);
+  assert.equal(small.structuredContent.representation.kind, "complete_entity");
   assert.equal(small.structuredContent.representation.entity_complete, true);
   assert.equal(small.structuredContent.representation.selected_complete, true);
 
@@ -2028,6 +2036,20 @@ test("entity projection preserves small values and cannot cross redacted nodes",
     "entity_pointer_not_found",
   );
 
+  const omitted = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/window/window-A",
+      pointer: "/commands/0/requires_confirmation",
+    },
+  });
+  assert.equal(omitted.isError, true);
+  assert.equal(
+    omitted.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
   const inherited = await client.callTool({
     name: "get_entity",
     arguments: { entity_ref: characteristicRef, pointer: "/constructor/name" },
@@ -2052,6 +2074,206 @@ test("entity projection preserves small values and cannot cross redacted nodes",
     "entity_pointer_redacted",
   );
   assert.doesNotMatch(redacted.content[0].text, /block-secret-must-not-leak/);
+});
+
+test("large native arrays expose identities for addressable selection", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.window.options = Array.from({ length: 57 }, (_, index) => ({
+    key: `setting-${index}`,
+    name: index === 43 ? "Целевая настройка" : `Настройка ${index}`,
+    type: "GenericString",
+    inputType: "TEXT",
+    read: true,
+    write: true,
+    events: false,
+    value: { stringValue: `значение-${index}-${"x".repeat(220)}` },
+  }));
+  state.accessories[0].services = Array.from({ length: 60 }, (_, index) => ({
+    aId: 32,
+    sId: index + 1,
+    name: index === 37 ? "Климат" : `Сервис ${index}`,
+    type: index === 37 ? "Thermostat" : "Switch",
+    characteristics: Array.from({ length: 3 }, (_, characteristicIndex) => ({
+      aId: 32,
+      sId: index + 1,
+      cId: characteristicIndex + 1,
+      control: {
+        name: `Характеристика ${index}/${characteristicIndex}`,
+        type: `GenericValue${characteristicIndex}`,
+        read: true,
+        write: false,
+        events: true,
+        value: { intValue: index + characteristicIndex },
+      },
+    })),
+  }));
+  const client = await startClient(t, hub);
+
+  const windowOverview = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/window/window-A",
+    },
+  });
+  const optionsPart =
+    windowOverview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/options",
+    );
+  assert(optionsPart?.next);
+  const optionsMap = await client.callTool({
+    name: optionsPart.next.tool,
+    arguments: optionsPart.next.arguments,
+  });
+  const wantedOption =
+    optionsMap.structuredContent.representation.available_parts.find(
+      ({ identity }) => identity?.key === "setting-43",
+    );
+  assert.deepEqual(wantedOption.identity, {
+    key: "setting-43",
+    name: "Целевая настройка",
+    type: "GenericString",
+  });
+  const option = await client.callTool({
+    name: wantedOption.next.tool,
+    arguments: wantedOption.next.arguments,
+  });
+  assert.equal(option.structuredContent.selection.value.key, "setting-43");
+  assert.equal(
+    option.structuredContent.selection.value.configured_value,
+    `значение-43-${"x".repeat(220)}`,
+  );
+
+  const accessoryOverview = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32",
+    },
+  });
+  const servicesPart =
+    accessoryOverview.structuredContent.representation.available_parts.find(
+      ({ pointer }) => pointer === "/services",
+    );
+  const servicesMap = await client.callTool({
+    name: servicesPart.next.tool,
+    arguments: servicesPart.next.arguments,
+  });
+  const thermostat =
+    servicesMap.structuredContent.representation.available_parts.find(
+      ({ identity }) => identity?.type === "Thermostat",
+    );
+  assert.equal(thermostat.identity.name, "Климат");
+  assert.equal(
+    thermostat.identity.ref,
+    "spruthub://hub/home%2FA/accessory/32/service/38",
+  );
+  const service = await client.callTool({
+    name: thermostat.next.tool,
+    arguments: thermostat.next.arguments,
+  });
+  assert.equal(service.structuredContent.selection.value.type, "Thermostat");
+});
+
+test("entity continuations restart when strings or container identities change", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const settings = Array.from({ length: 90 }, (_, index) => ({
+    key: `setting-${index}`,
+    name: `Настройка ${index}`,
+    value: index,
+  }));
+  const scenario = {
+    index: "changing-detail",
+    name: "Меняющаяся деталь",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({ settings }),
+  };
+  state.scenarios.push(scenario);
+  const client = await startClient(t, hub);
+  const entityRef = "spruthub://hub/home%2FA/scenario/changing-detail";
+
+  const source = "💡 длинная строка ".repeat(500);
+  scenario.type = "JS";
+  scenario.data = source;
+  const firstString = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/text",
+      max_bytes: 2_048,
+    },
+  });
+  const stringNext = firstString.structuredContent.selection.next;
+  scenario.data = "коротко";
+  const shortened = await client.callTool({
+    name: stringNext.tool,
+    arguments: stringNext.arguments,
+  });
+  assert.equal(shortened.isError, true);
+  assert.equal(shortened.structuredContent.error.code, "stale_entity_content");
+  assert.equal(shortened.structuredContent.next.arguments.offset, 0);
+  scenario.data = "";
+  const emptied = await client.callTool({
+    name: stringNext.tool,
+    arguments: stringNext.arguments,
+  });
+  assert.equal(emptied.isError, true);
+  assert.equal(emptied.structuredContent.error.code, "stale_entity_content");
+  assert.equal(emptied.structuredContent.next.arguments.offset, 0);
+  const unversioned = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/text",
+      max_bytes: 2_048,
+      offset: 1,
+    },
+  });
+  assert.equal(unversioned.isError, true);
+  assert.equal(
+    unversioned.structuredContent.error.code,
+    "invalid_entity_projection",
+  );
+  assert.equal(unversioned.structuredContent.next.arguments.offset, 0);
+
+  scenario.type = "BLOCK";
+  scenario.data = JSON.stringify({ settings });
+  const firstMap = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/value/settings",
+      max_bytes: 2_048,
+    },
+  });
+  const mapNext = firstMap.structuredContent.representation.next;
+  assert(mapNext?.arguments.version);
+  settings[20].value = 999;
+  scenario.data = JSON.stringify({ settings });
+  const valueChanged = await client.callTool({
+    name: mapNext.tool,
+    arguments: mapNext.arguments,
+  });
+  assert.equal(valueChanged.isError, undefined, valueChanged.content[0]?.text);
+  settings.shift();
+  scenario.data = JSON.stringify({ settings });
+  const identitiesChanged = await client.callTool({
+    name: mapNext.tool,
+    arguments: mapNext.arguments,
+  });
+  assert.equal(identitiesChanged.isError, true);
+  assert.equal(
+    identitiesChanged.structuredContent.error.code,
+    "stale_entity_content",
+  );
+  assert.equal(identitiesChanged.structuredContent.next.arguments.offset, 0);
 });
 
 test("automation preview rejects foreign-home references before any hub request", async (t) => {
