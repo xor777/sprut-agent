@@ -111,6 +111,7 @@ async function startHub() {
       normalizeNextAccessoryName: false,
       preservePhysicalOutOnIncomingRemove: false,
       preserveEmptyPhysicalOutOnIncomingRemove: false,
+      dropForeignPhysicalConsumersOnIncomingRemove: false,
     },
   };
   const server = new WebSocketServer({ port: 0 });
@@ -301,12 +302,15 @@ async function startHub() {
                   remaining.push(link);
                   continue;
                 }
-                const characteristics = (link.characteristics ?? []).filter(
-                  ({ aId, sId, cId }) =>
-                    aId !== params.link.remove.aId ||
-                    sId !== params.link.remove.sId ||
-                    cId !== params.link.remove.cId,
-                );
+                const characteristics = state.behavior
+                  .dropForeignPhysicalConsumersOnIncomingRemove
+                  ? []
+                  : (link.characteristics ?? []).filter(
+                      ({ aId, sId, cId }) =>
+                        aId !== params.link.remove.aId ||
+                        sId !== params.link.remove.sId ||
+                        cId !== params.link.remove.cId,
+                    );
                 if (
                   characteristics.length > 0 ||
                   state.behavior.preserveEmptyPhysicalOutOnIncomingRemove
@@ -762,6 +766,58 @@ test("restore removes only its consumer from shared and pre-existing physical li
   assert.deepEqual(hub.state.links.get("34.13.16"), [sharedOut]);
   assert.equal(
     hub.state.accessories.some(({ id }) => id === 90),
+    false,
+  );
+});
+
+test("restore stops when its link removal drops a foreign consumer", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const foreignConsumer = { aId: 80, sId: 1, cId: 2 };
+  hub.state.links.set("34.13.16", [
+    {
+      type: "OUT",
+      index: "Virtual/34.16",
+      characteristics: [foreignConsumer],
+    },
+  ]);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareGroup(client);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  hub.state.behavior.dropForeignPhysicalConsumersOnIncomingRemove = true;
+  hub.state.behavior.preserveEmptyPhysicalOutOnIncomingRemove = true;
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "uncertain");
+  assert.equal(
+    restored.structuredContent.conflict_reason,
+    "foreign_link_changed_during_cleanup",
+  );
+  assert.deepEqual(
+    restored.structuredContent.physical_link_preservation_failures,
+    [
+      {
+        member_ref: memberServiceRefs[0],
+        characteristic_type: "Brightness",
+        missing_links: [
+          {
+            type: "OUT",
+            index: "Virtual/34.16",
+            characteristics: [foreignConsumer],
+          },
+        ],
+      },
+    ],
+  );
+  assert.ok(hub.state.accessories.some(({ id }) => id === 90));
+  assert.equal(
+    hub.requests.some(({ accessory }) => accessory?.delete),
     false,
   );
 });
