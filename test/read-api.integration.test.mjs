@@ -34,9 +34,10 @@ test("an external Node consumer reads fresh selected values and closes the insta
   const first = await reader.read(selection);
   assert.equal(first.status, "degraded");
   assert.deepEqual(
-    first.readings.map(({ label, status, value, unit }) => ({
+    first.readings.map(({ label, status, type, value, unit }) => ({
       label,
       status,
+      type,
       value,
       unit,
     })),
@@ -44,13 +45,21 @@ test("an external Node consumer reads fresh selected values and closes the insta
       {
         label: "Температура",
         status: "ok",
+        type: "CurrentTemperature",
         value: 0,
         unit: "celsius",
       },
-      { label: "Лампа", status: "ok", value: false, unit: null },
+      {
+        label: "Лампа",
+        status: "ok",
+        type: "On",
+        value: false,
+        unit: null,
+      },
       {
         label: "Недоступный датчик",
         status: "error",
+        type: undefined,
         value: undefined,
         unit: undefined,
       },
