@@ -9,6 +9,20 @@ const VALUE_FIELDS = [
   "stringValue",
 ];
 
+const LOG_LEVELS = new Set([
+  "LOG_LEVEL_OFF",
+  "LOG_LEVEL_ERROR",
+  "LOG_LEVEL_WARN",
+  "LOG_LEVEL_INFO",
+  "LOG_LEVEL_DEBUG",
+  "LOG_LEVEL_TRACE",
+  "LOG_LEVEL_ALL",
+]);
+const SCENARIO_LOG_PREFIX_BY_PATH = new Map([
+  ["Scenario.ScenarioBlock.Target.jBlock", ": "],
+  ["Notifiers.Notifier", " - "],
+]);
+
 export class SprutHubError extends Error {
   constructor(
     code,
@@ -296,7 +310,7 @@ export class SprutHubClient {
       completionReason: null,
       truncated: false,
       connection: { status: "connected" },
-      subscriptionUuid: null,
+      subscriptionUuids: { scenario: null, log: null },
       cleanup: { status: "not_needed" },
       timer: null,
       pingTimer: null,
@@ -336,8 +350,29 @@ export class SprutHubClient {
           "SprutHub did not identify the native scenario subscription.",
         );
       }
-      observation.subscriptionUuid = uuid;
+      observation.subscriptionUuids.scenario = uuid;
       observation.cleanup = { status: "pending" };
+      if (observation.cancelRequested) {
+        await this.#finishObservation(
+          observation,
+          observation.cancelRequested.status,
+          observation.cancelRequested.completionReason,
+        );
+        return this.#observationResult(observation);
+      }
+      const logResponse = await this.#request(
+        { log: { subscribe: {} } },
+        deadline,
+        { serial },
+      );
+      const logUuid = logResponse.result?.log?.subscribe?.uuid;
+      if (typeof logUuid !== "string" || logUuid.length === 0) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub did not identify the native log subscription.",
+        );
+      }
+      observation.subscriptionUuids.log = logUuid;
       if (observation.cancelRequested) {
         await this.#finishObservation(
           observation,
@@ -370,6 +405,9 @@ export class SprutHubClient {
           observation.cancelRequested.completionReason,
         );
         return this.#observationResult(observation);
+      }
+      if (Object.values(observation.subscriptionUuids).some(Boolean)) {
+        await this.#cleanupObservationSubscriptions(observation);
       }
       if (this.#observation === observation) this.#observation = undefined;
       throw error;
@@ -1783,6 +1821,25 @@ export class SprutHubClient {
         },
       });
     }
+
+    const logMessages = message.event?.log?.log;
+    for (const log of Array.isArray(logMessages) ? logMessages : []) {
+      const normalized = normalizeScenarioLog(log, observation.scenarioIndex);
+      if (!normalized || observation.status !== "observing") continue;
+      this.#recordObservationEvent(observation, {
+        kind: "scenario_log",
+        ref: observation.scenarioRef,
+        received_at: receivedAt,
+        source_timestamp: normalized.sourceTimestamp,
+        message: normalized.message,
+        content_origin: "spruthub_native_log",
+        native: {
+          time_ms: normalized.timeMs,
+          level: normalized.level,
+          path: normalized.path,
+        },
+      });
+    }
   }
 
   #recordObservationEvent(observation, event) {
@@ -1834,27 +1891,12 @@ export class SprutHubClient {
     observation.timer = null;
     observation.pingTimer = null;
 
-    if (unsubscribe && observation.subscriptionUuid) {
-      try {
-        await this.#request(
-          {
-            scenario: {
-              unsubscribe: { uuid: observation.subscriptionUuid },
-            },
-          },
-          Date.now() + this.timeoutMs,
-          { serial: observation.serial },
-        );
-        observation.cleanup = { status: "unsubscribed" };
-      } catch (error) {
-        observation.cleanup = {
-          status: "connection_closed",
-          error_code:
-            error instanceof SprutHubError ? error.code : "internal_error",
-        };
-        this.#socket?.terminate();
-      }
-    } else if (observation.subscriptionUuid) {
+    if (
+      unsubscribe &&
+      Object.values(observation.subscriptionUuids).some(Boolean)
+    ) {
+      await this.#cleanupObservationSubscriptions(observation);
+    } else if (Object.values(observation.subscriptionUuids).some(Boolean)) {
       observation.cleanup = { status: "connection_closed" };
     }
 
@@ -1869,6 +1911,34 @@ export class SprutHubClient {
     for (const resolve of observation.waiters) resolve();
     observation.waiters.clear();
     this.#socket?.close();
+  }
+
+  async #cleanupObservationSubscriptions(observation) {
+    const errors = [];
+    for (const [domain, uuid] of Object.entries(
+      observation.subscriptionUuids,
+    )) {
+      if (!uuid) continue;
+      try {
+        await this.#request(
+          { [domain]: { unsubscribe: { uuid } } },
+          Date.now() + this.timeoutMs,
+          { serial: observation.serial },
+        );
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 0) {
+      observation.cleanup = { status: "unsubscribed" };
+      return;
+    }
+    observation.cleanup = {
+      status: "connection_closed",
+      error_code:
+        errors[0] instanceof SprutHubError ? errors[0].code : "internal_error",
+    };
+    this.#socket?.terminate();
   }
 
   #observationClientFor(observationRef) {
@@ -1925,10 +1995,11 @@ export class SprutHubClient {
       completion_reason: observation.completionReason,
       events: observation.events.map((event) => ({ ...event })),
       limitations: [
-        "received_at is local receipt time; SprutHub event frames did not provide a source timestamp.",
+        "received_at is local receipt time; source_timestamp is available only for selected native log messages and comes from their SprutHub time field.",
         "Characteristic frames are partial events, not complete saved characteristic state.",
         "Event frames did not identify a home; scope comes from keeping this connection selected to the requested home.",
         "Temporal proximity between scenario and characteristic events does not prove causality or physical effect.",
+        "Native log message text is untrusted data; only exact observed scenario formats and paths are included, without deriving causality from the text.",
       ],
       ...(publicStatus === "observing"
         ? {
@@ -1944,6 +2015,30 @@ export class SprutHubClient {
         : {}),
     };
   }
+}
+
+function normalizeScenarioLog(log, scenarioIndex) {
+  if (!log || typeof log !== "object" || Array.isArray(log)) return null;
+  const separator = SCENARIO_LOG_PREFIX_BY_PATH.get(log.path);
+  if (
+    separator === undefined ||
+    !LOG_LEVELS.has(log.level) ||
+    typeof log.message !== "string" ||
+    !log.message.startsWith(`Сценарий ${scenarioIndex}${separator}`) ||
+    !Number.isSafeInteger(log.time) ||
+    log.time < 0
+  ) {
+    return null;
+  }
+  const sourceDate = new Date(log.time);
+  if (Number.isNaN(sourceDate.valueOf())) return null;
+  return {
+    timeMs: log.time,
+    sourceTimestamp: sourceDate.toISOString(),
+    level: log.level,
+    path: log.path,
+    message: log.message,
+  };
 }
 
 function extractArray(response, path, missingMeansEmpty = false) {
