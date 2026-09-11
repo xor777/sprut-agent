@@ -5,21 +5,12 @@ import { build } from "esbuild";
 const pluginRoot = path.resolve("dist/plugin");
 const outputPath = path.join(pluginRoot, "dist", "server.mjs");
 await rm(pluginRoot, { recursive: true, force: true });
-const result = await build({
-  entryPoints: ["src/server.mjs"],
-  bundle: true,
-  platform: "node",
-  target: "node24",
-  format: "esm",
-  minifyWhitespace: true,
-  banner: {
-    js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
-  },
-  write: false,
-});
-const bundled = result.outputFiles[0].text.replace(/[\t ]+$/gm, "");
 await mkdir(path.dirname(outputPath), { recursive: true });
-await writeFile(outputPath, bundled, { mode: 0o644 });
+await Promise.all([
+  bundle("src/server.mjs", outputPath),
+  bundle("src/read-api.mjs", path.join(pluginRoot, "dist", "read.mjs")),
+  bundle("scripts/dashboard.mjs", path.join(pluginRoot, "dashboard.mjs")),
+]);
 await Promise.all([
   cp(path.resolve(".codex-plugin"), path.join(pluginRoot, ".codex-plugin"), {
     recursive: true,
@@ -34,4 +25,26 @@ await Promise.all([
     path.resolve("scripts", "check-install.mjs"),
     path.join(pluginRoot, "check-install.mjs"),
   ),
+  cp(
+    path.resolve("examples", "dashboard.json"),
+    path.join(pluginRoot, "examples", "dashboard.json"),
+  ),
 ]);
+
+async function bundle(entryPoint, destination) {
+  const result = await build({
+    entryPoints: [entryPoint],
+    bundle: true,
+    platform: "node",
+    target: "node24",
+    format: "esm",
+    minifyWhitespace: true,
+    banner: {
+      js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
+    },
+    write: false,
+  });
+  const bundled = result.outputFiles[0].text.replace(/[\t ]+$/gm, "");
+  await mkdir(path.dirname(destination), { recursive: true });
+  await writeFile(destination, bundled, { mode: 0o644 });
+}

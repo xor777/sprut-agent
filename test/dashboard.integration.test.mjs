@@ -13,7 +13,12 @@ test("the public reader returns only selected safe readings and isolates a faile
   const secret = "local-only-password";
   const client = new FakeClient(
     new Map([
-      [temperatureRef, characteristic(temperatureRef, "Temperature", 0, "celsius")],
+      [
+        temperatureRef,
+        characteristic(temperatureRef, "Temperature", 0, "celsius", [
+          { key: "zero", name: "Ноль", value: 0 },
+        ]),
+      ],
       [lightRef, characteristic(lightRef, "On", false, null)],
       [
         motionRef,
@@ -63,6 +68,7 @@ test("the public reader returns only selected safe readings and isolates a faile
     ],
   );
   assert.deepEqual(client.requested, [temperatureRef, lightRef, motionRef]);
+  assert.deepEqual(result.readings[0].enum, { key: "zero", name: "Ноль" });
   assert.equal(JSON.stringify(result).includes(secret), false);
   assert.equal(result.readings[2].error.retryable, true);
   await reader.close();
@@ -152,61 +158,61 @@ test("the local HTTP screen keeps polling, exposes staleness, and recovers witho
   t.after(() => app.close());
 
   await app.start();
-  const first = await waitFor(
-    async () => {
-      const state = await getJson(`${app.url}/api/readings`);
-      return state.readings[0]?.value === false ? state : null;
-    },
-    "initial false reading",
-  );
+  const first = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[0]?.value === false ? state : null;
+  }, "initial false reading");
   assert.equal(first.readings[0].stale, false);
   assert.equal(first.readings[0].last_success_at, "2026-09-11T01:00:00.000Z");
 
   light = true;
   now += 5_000;
-  const changed = await waitFor(
-    async () => {
-      const state = await getJson(`${app.url}/api/readings`);
-      return state.readings[0]?.value === true ? state : null;
-    },
-    "changed reading",
-  );
+  const changed = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[0]?.value === true ? state : null;
+  }, "changed reading");
   assert.equal(changed.readings[0].last_success_at, "2026-09-11T01:00:05.000Z");
 
+  now += 1_000;
+  const unchanged = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[0]?.last_success_at === "2026-09-11T01:00:06.000Z"
+      ? state
+      : null;
+  }, "unchanged fresh reading");
+  assert.equal(unchanged.readings[0].value, true);
+
   failed = true;
-  const unavailable = await waitFor(
-    async () => {
-      const state = await getJson(`${app.url}/api/readings`);
-      return state.readings[0]?.status === "error" ? state : null;
-    },
-    "source failure",
-  );
+  const unavailable = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[0]?.status === "error" ? state : null;
+  }, "source failure");
   assert.equal(unavailable.readings[0].value, true);
   assert.equal(unavailable.readings[0].stale, false);
 
   now += 31_000;
   const stale = await getJson(`${app.url}/api/readings`);
   assert.equal(stale.readings[0].stale, true);
-  assert.equal(stale.readings[0].last_success_at, "2026-09-11T01:00:05.000Z");
+  assert.equal(stale.readings[0].last_success_at, "2026-09-11T01:00:06.000Z");
 
   failed = false;
   now += 1_000;
-  const recovered = await waitFor(
-    async () => {
-      const state = await getJson(`${app.url}/api/readings`);
-      return state.readings[0]?.status === "ok" ? state : null;
-    },
-    "recovered reading",
-  );
+  const recovered = await waitFor(async () => {
+    const state = await getJson(`${app.url}/api/readings`);
+    return state.readings[0]?.status === "ok" ? state : null;
+  }, "recovered reading");
   assert.equal(recovered.readings[0].stale, false);
-  assert.equal(recovered.readings[0].last_success_at, "2026-09-11T01:00:37.000Z");
+  assert.equal(
+    recovered.readings[0].last_success_at,
+    "2026-09-11T01:00:38.000Z",
+  );
   assert.equal(readCount >= 4, true);
 
   const page = await fetch(app.url).then((response) => response.text());
   assert.equal(page.includes("<script>bad()</script>"), false);
 });
 
-function characteristic(ref, name, value, unit) {
+function characteristic(ref, name, value, unit, validValues = []) {
   return {
     status: "ok",
     entity: {
@@ -214,8 +220,12 @@ function characteristic(ref, name, value, unit) {
       ref,
       name,
       available: true,
-      current_value: { value, source: "characteristic", source_timestamp: null },
-      capabilities: { read: true, unit, valid_values: [] },
+      current_value: {
+        value,
+        source: "characteristic",
+        source_timestamp: null,
+      },
+      capabilities: { read: true, unit, valid_values: validValues },
     },
     freshness: {
       hubResponseReceivedAt: "2026-09-11T01:00:00.000Z",

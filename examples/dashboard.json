@@ -1,0 +1,11 @@
+{
+  "title": "Дом",
+  "home_ref": "spruthub://hub/<serial-from-list_homes>",
+  "port": 4173,
+  "readings": [
+    {
+      "label": "Температура в офисе",
+      "ref": "spruthub://hub/<serial>/accessory/<aId>/service/<sId>/characteristic/<cId>"
+    }
+  ]
+}

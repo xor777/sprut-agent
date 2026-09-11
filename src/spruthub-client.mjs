@@ -1870,6 +1870,7 @@ function normalizeCharacteristicDetail(
     ref,
     name: control.name,
     type: control.type ?? control.key,
+    available: accessory.online,
     current_value: {
       value: value.value,
       source: "characteristic",

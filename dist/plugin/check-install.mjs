@@ -170,8 +170,15 @@ async function checkEffectiveTransport(expectedRoot) {
 
 async function checkRuntime(expectedRoot) {
   try {
-    const runtime = await stat(path.join(expectedRoot, "dist", "server.mjs"));
-    if (runtime.isFile()) return true;
+    const runtimes = await Promise.all(
+      [
+        path.join(expectedRoot, "dist", "server.mjs"),
+        path.join(expectedRoot, "dist", "read.mjs"),
+        path.join(expectedRoot, "dashboard.mjs"),
+        path.join(expectedRoot, "examples", "dashboard.json"),
+      ].map((runtime) => stat(runtime)),
+    );
+    if (runtimes.every((runtime) => runtime.isFile())) return true;
   } catch {}
   console.error(
     "The installed sprut-agent runtime is incomplete. Repeat `codex plugin add sprut-agent@sprut-agent`, then run this check again.",
