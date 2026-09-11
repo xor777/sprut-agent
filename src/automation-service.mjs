@@ -16,6 +16,24 @@ export class AutomationService {
     });
   }
 
+  async getScenarioSdk(homeReference) {
+    parseConfiguredHomeRef(homeReference, this.hubSerial);
+    const { sdk, responseReceivedAt } = await this.client.getScenarioSdk();
+    return {
+      status: "ok",
+      home_ref: homeReference,
+      sdk,
+      bytes: Buffer.byteLength(sdk),
+      sha256: createHash("sha256").update(sdk).digest("hex"),
+      freshness: { hub_response_received_at: responseReceivedAt },
+      content_origin: "spruthub_scenario_sdk",
+      limitations: [
+        "The declarations describe code executed by SprutHub; they are not a Node.js or browser API.",
+        "The SDK does not prove callback ordering, repeated-value delivery, or runtime behavior on a particular service.",
+      ],
+    };
+  }
+
   async getNativeChangeContract(input) {
     if (input.operation === "characteristic_value") {
       if (!input.target_ref) {
@@ -112,6 +130,28 @@ export class AutomationService {
         contract: blockContract(),
       };
     }
+    if (input.operation === "logic_source_create") {
+      const target = parseServiceRef(input.target_ref, this.hubSerial);
+      await this.#readLogicTypeCatalog(target);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: logicSourceContract("create"),
+      };
+    }
+    if (input.operation === "logic_source_update") {
+      const target = parseScenarioRef(input.target_ref, this.hubSerial);
+      const scenario = await this.client.getScenario(target.index);
+      if (!scenario) throw scenarioNotFound();
+      logicScenarioSnapshot(scenario);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: logicSourceContract("update"),
+      };
+    }
     throw unsupportedNativeOperation();
   }
 
@@ -124,6 +164,12 @@ export class AutomationService {
     }
     if (input.operation === "block_data_update") {
       return this.#prepareBlockUpdate(input);
+    }
+    if (input.operation === "logic_source_create") {
+      return this.#prepareLogicSourceCreate(input);
+    }
+    if (input.operation === "logic_source_update") {
+      return this.#prepareLogicSourceUpdate(input);
     }
     if (input.operation === "window_option") {
       return this.#prepareWindowOptionChange(input);
@@ -693,6 +739,131 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
+  async #prepareLogicSourceCreate(input) {
+    const source = requiredLogicSource(input.source);
+    if (
+      typeof input.name !== "string" ||
+      typeof input.description !== "string" ||
+      typeof input.active !== "boolean" ||
+      typeof input.on_start !== "boolean" ||
+      typeof input.sync !== "boolean"
+    ) {
+      throw new SprutHubError(
+        "invalid_native_change",
+        "LOGIC source creation requires name, description, explicit active/on_start/sync flags, and source.",
+        "get_native_change_contract",
+      );
+    }
+    const target = parseServiceRef(input.target_ref, this.hubSerial);
+    const baselineLogicTypes = await this.#readLogicTypeCatalog(target);
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "logic_source_create",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      marker: `sprut-agent:native:${id}`,
+      baseline_logic_types: baselineLogicTypes,
+      requested_snapshot: {
+        name: input.name,
+        desc: input.description,
+        active: input.active,
+        onStart: input.on_start,
+        sync: input.sync,
+        type: "LOGIC",
+        data: source,
+      },
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareLogicSourceUpdate(input) {
+    const source = requiredLogicSource(input.source);
+    const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    const baseline = logicScenarioSnapshot(scenario);
+    if (baseline.predefined === true) {
+      throw new SprutHubError(
+        "predefined_logic_read_only",
+        "Clone a predefined LOGIC into a new owned scenario instead of changing its source.",
+        "prepare_native_change",
+      );
+    }
+    if (baseline.data === source) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        source_sha256: sourceFingerprint(source),
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "logic_source_update",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      baseline_snapshot: baseline,
+      requested_snapshot: { ...structuredClone(baseline), data: source },
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #readLogicTypeCatalog(target) {
+    const [accessory, types] = await Promise.all([
+      this.client.getAccessory(target.aId),
+      this.client.listLogicTypes(target),
+    ]);
+    if (!accessory.services?.some(({ sId }) => sId === target.sId)) {
+      throw new SprutHubError(
+        "service_not_found",
+        "The selected service was not found on its accessory.",
+        "get_entity",
+      );
+    }
+    const values = types.map((entry) => {
+      if (!isRecord(entry) || typeof entry.type !== "string") {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned incomplete logic type data.",
+        );
+      }
+      return entry.type;
+    });
+    if (new Set(values).size !== values.length) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned the same logic type more than once.",
+      );
+    }
+    return values.sort((left, right) => left.localeCompare(right));
+  }
+
   async applyNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
@@ -709,9 +880,12 @@ export class AutomationService {
       if (change.kind === "logic_assignment") {
         return this.#applyLogicAssignment(change);
       }
+      if (isLogicSourceChange(change)) {
+        return this.#applyScenarioChange(change);
+      }
       return isNativeValueChange(change)
         ? this.#applyValueChange(change)
-        : this.#applyBlockChange(change);
+        : this.#applyScenarioChange(change);
     });
   }
 
@@ -921,8 +1095,11 @@ export class AutomationService {
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
+    if (isLogicSourceChange(change)) {
+      return this.#getScenarioChange(change);
+    }
     if (!isNativeValueChange(change)) {
-      return this.#getBlockChange(change);
+      return this.#getScenarioChange(change);
     }
     const pending = await this.#reconcilePendingValueChange(change);
     if (pending) return pending.result;
@@ -981,7 +1158,10 @@ export class AutomationService {
       if (change.kind === "logic_assignment") {
         return this.#restoreLogicAssignment(change);
       }
-      return this.#restoreBlockChange(change);
+      if (isLogicSourceChange(change)) {
+        return this.#restoreScenarioChange(change);
+      }
+      return this.#restoreScenarioChange(change);
     });
   }
 
@@ -2585,7 +2765,7 @@ export class AutomationService {
     }
     const candidates = changes.filter(
       (change) =>
-        change.kind === "block_create" &&
+        ["block_create", "logic_source_create"].includes(change.kind) &&
         !change.scenario_index &&
         ["applying", "uncertain"].includes(change.status) &&
         nativeIntentDirection(change) === "apply",
@@ -2598,7 +2778,8 @@ export class AutomationService {
         typeof scenario.desc === "string" &&
         scenario.desc.includes(`[${change.marker}]`)
       ) {
-        await this.#reconcileObservedBlockApply(change, scenario, false);
+        change.scenario_index = target.index;
+        await this.#reconcileScenarioApply(change, false);
       }
     }
   }
@@ -2968,6 +3149,8 @@ export class AutomationService {
         "virtual_light_group",
         "block_create",
         "block_data_update",
+        "logic_source_create",
+        "logic_source_update",
       ].includes(change?.kind)
     ) {
       throw new SprutHubError(
@@ -3273,46 +3456,60 @@ export class AutomationService {
     await this.#saveBeforeWrite(change);
   }
 
-  async #applyBlockChange(change) {
+  async #applyScenarioChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileBlockRestore(change, false)
-        : this.#reconcileBlockAfterWrite(change, false);
+        ? this.#reconcileScenarioRestore(change, false)
+        : this.#reconcileScenarioApply(change, false);
     }
-    const current = await this.#observeBlock(change);
+    const current = await this.#observeScenarioChange(change);
     if (change.status === "applied") {
-      const observation = blockSnapshotObservation(change, current, "applied");
+      const observation = scenarioChangeObservation(change, current, "applied");
       return observation.matches
-        ? this.#recordBlockObservation(change, observation)
+        ? this.#recordScenarioObservation(change, observation)
         : this.#finishNative(change, "conflict", undefined, {
             conflict_reason: "manual_change",
             ...observation.fields,
           });
     }
-    const baseline = blockSnapshotObservation(change, current, "baseline");
+    const baseline = scenarioChangeObservation(change, current, "baseline");
     if (!baseline.matches) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "baseline_changed",
         ...baseline.fields,
       });
     }
-    await validateBlockData(change.requested_snapshot.data, this.client, {
-      allowUnknownFrom:
-        change.kind === "block_create" ? null : scenarioSnapshot(current).data,
-    });
+
+    if (isBlockChange(change)) {
+      await validateBlockData(change.requested_snapshot.data, this.client, {
+        allowUnknownFrom:
+          change.kind === "block_create"
+            ? null
+            : scenarioSnapshot(current.scenario).data,
+      });
+    }
 
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
-      if (change.kind === "block_create") {
+      if (["block_create", "logic_source_create"].includes(change.kind)) {
         const created = await this.client.createScenario(
-          blockCreateRequest(change),
+          change.kind === "block_create"
+            ? blockCreateRequest(change)
+            : logicSourceCreateRequest(change),
         );
         change.scenario_index = created.index;
-      } else {
+      } else if (change.kind === "block_data_update") {
         await this.client.updateScenarioData(
           change.target.index,
           JSON.stringify(change.requested_snapshot.data),
+        );
+      } else {
+        await this.client.updateScenario(
+          logicSourceUpdateRequest(
+            change.target.index,
+            change.requested_snapshot,
+          ),
         );
       }
       change.native_acknowledged = true;
@@ -3322,132 +3519,52 @@ export class AutomationService {
         await this.#finishNative(change, "not_applied");
         throw error;
       }
-      return this.#reconcileBlockAfterWrite(change, false);
+      return this.#reconcileScenarioApply(change, false);
     }
-    return this.#reconcileBlockAfterWrite(change, true);
+    return this.#reconcileScenarioApply(change, true);
   }
 
-  async #reconcileBlockAfterWrite(change, acknowledged) {
-    try {
-      const current = await this.#observeBlock(change);
-      return this.#reconcileObservedBlockApply(change, current, acknowledged);
-    } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
-    }
-  }
-
-  async #getBlockChange(change) {
+  async #reconcileScenarioApply(change, acknowledged) {
     let current;
     try {
-      current = await this.#observeBlock(change);
-    } catch (error) {
-      return publicNativeChange(change, undefined, {
-        verification: failedVerification(error),
-        configurationMatches: undefined,
-      });
-    }
-    if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileObservedBlockRestore(change, current, false)
-        : this.#reconcileObservedBlockApply(change, current, false);
-    }
-    if (change.status === "restored") {
-      return this.#recordBlockObservation(
-        change,
-        blockSnapshotObservation(change, current, "baseline"),
-      );
-    }
-    const applied = blockSnapshotObservation(change, current, "applied");
-    if (applied.matches) {
-      return change.status === "applied"
-        ? this.#recordBlockObservation(change, applied)
-        : this.#finishNative(change, "applied", undefined, {
-            ...applied.fields,
-          });
-    }
-    if (change.applied_snapshot !== undefined) {
-      if (change.status === "conflict") {
-        return this.#recordBlockObservation(change, applied);
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        ...applied.fields,
-      });
-    }
-    return this.#recordBlockObservation(
-      change,
-      blockSnapshotObservation(change, current, "requested"),
-    );
-  }
-
-  async #restoreBlockChange(change) {
-    if (change.status === "restored") return publicStoredNativeChange(change);
-    if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileBlockRestore(change, false)
-        : this.#reconcileBlockAfterWrite(change, false);
-    }
-    const current = await this.#observeBlock(change);
-    const applied = blockSnapshotObservation(change, current, "applied");
-    if (!applied.matches) {
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        ...applied.fields,
-      });
-    }
-    if (change.kind === "block_data_update") {
-      await validateBlockData(change.baseline_snapshot.data, this.client, {
-        allowUnknownFrom: scenarioSnapshot(current).data,
-      });
-    }
-    await this.#persistNativeIntent(change, "restoring", "restore");
-    try {
-      if (change.kind === "block_create") {
-        await this.client.deleteScenario(change.scenario_index);
-      } else {
-        await this.client.updateScenarioData(
-          change.target.index,
-          JSON.stringify(change.baseline_snapshot.data),
-        );
-      }
-      change.native_acknowledged = true;
-      change.write_intent.acknowledged = true;
-    } catch (error) {
-      if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied");
-        throw error;
-      }
-      return this.#reconcileBlockRestore(change, false);
-    }
-    return this.#reconcileBlockRestore(change, true);
-  }
-
-  async #reconcileBlockRestore(change, acknowledged) {
-    try {
-      const current = await this.#observeBlock(change);
-      return this.#reconcileObservedBlockRestore(change, current, acknowledged);
+      current = await this.#observeScenarioChange(change);
     } catch (error) {
       return this.#finishNative(change, "uncertain", undefined, {
         configuration_matches: undefined,
         last_verification: failedVerification(error),
       });
     }
-  }
-
-  async #reconcileObservedBlockApply(change, current, acknowledged) {
-    const requested = blockSnapshotObservation(change, current, "requested");
+    const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
+      if (change.kind === "logic_source_create") {
+        const mapping = newLogicTypeMapping(change, current.logicTypes);
+        if (mapping.status === "missing") {
+          return this.#finishNative(change, "uncertain", undefined, {
+            ...requested.fields,
+            conflict_reason: acknowledged
+              ? "logic_type_not_visible_after_create"
+              : undefined,
+          });
+        }
+        if (mapping.status === "ambiguous") {
+          return this.#finishNative(change, "conflict", undefined, {
+            ...requested.fields,
+            conflict_reason: "ambiguous_logic_type",
+            candidate_logic_types: mapping.types,
+          });
+        }
+        change.native_logic_type = mapping.type;
+      }
       return this.#finishNative(change, "applied", undefined, {
-        scenario_index: current.index,
-        applied_snapshot: scenarioSnapshot(current),
+        scenario_index: current.scenario.index,
+        applied_snapshot: scenarioChangeSnapshot(change, current.scenario),
+        candidate_logic_types: undefined,
+        logic_assignments: undefined,
         ...requested.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
     }
-    const baseline = blockSnapshotObservation(change, current, "baseline");
+    const baseline = scenarioChangeObservation(change, current, "baseline");
     if (baseline.matches) {
       return this.#finishNative(change, "uncertain", undefined, {
         ...requested.fields,
@@ -3462,10 +3579,129 @@ export class AutomationService {
     });
   }
 
-  async #reconcileObservedBlockRestore(change, current, acknowledged) {
-    const baseline = blockSnapshotObservation(change, current, "baseline");
+  async #getScenarioChange(change) {
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileScenarioRestore(change, false)
+        : this.#reconcileScenarioApply(change, false);
+    }
+    let current;
+    try {
+      current = await this.#observeScenarioChange(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+        configurationMatches: undefined,
+      });
+    }
+    if (change.status === "restored") {
+      return this.#recordScenarioObservation(
+        change,
+        scenarioChangeObservation(change, current, "baseline"),
+      );
+    }
+    const applied = scenarioChangeObservation(change, current, "applied");
+    if (applied.matches) {
+      return change.status === "applied"
+        ? this.#recordScenarioObservation(change, applied)
+        : this.#finishNative(change, "applied", undefined, {
+            ...applied.fields,
+          });
+    }
+    if (change.applied_snapshot !== undefined) {
+      if (change.status === "conflict") {
+        return this.#recordScenarioObservation(change, applied);
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        ...applied.fields,
+      });
+    }
+    return this.#recordScenarioObservation(
+      change,
+      scenarioChangeObservation(change, current, "requested"),
+    );
+  }
+
+  async #restoreScenarioChange(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileScenarioRestore(change, false)
+        : this.#reconcileScenarioApply(change, false);
+    }
+    const current = await this.#observeScenarioChange(change);
+    const applied = scenarioChangeObservation(change, current, "applied");
+    if (!applied.matches) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        ...applied.fields,
+      });
+    }
+    if (change.kind === "block_data_update") {
+      await validateBlockData(change.baseline_snapshot.data, this.client, {
+        allowUnknownFrom: scenarioSnapshot(current.scenario).data,
+      });
+    }
+    if (change.kind === "logic_source_create") {
+      const assignments = await this.client.findLogicAssignments(
+        change.native_logic_type,
+      );
+      if (assignments.length > 0) {
+        return this.#finishNative(change, "conflict", undefined, {
+          conflict_reason: "logic_assignments_present",
+          logic_assignments: assignments.map(({ aId, sId, active }) => ({
+            ref: `${change.home_ref}/accessory/${aId}/service/${sId}/logic/${encodeURIComponent(change.native_logic_type)}`,
+            active,
+          })),
+          ...applied.fields,
+        });
+      }
+    }
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      if (["block_create", "logic_source_create"].includes(change.kind)) {
+        await this.client.deleteScenario(change.scenario_index);
+      } else if (change.kind === "block_data_update") {
+        await this.client.updateScenarioData(
+          change.target.index,
+          JSON.stringify(change.baseline_snapshot.data),
+        );
+      } else {
+        await this.client.updateScenario(
+          logicSourceUpdateRequest(
+            change.target.index,
+            change.baseline_snapshot,
+          ),
+        );
+      }
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied");
+        throw error;
+      }
+      return this.#reconcileScenarioRestore(change, false);
+    }
+    return this.#reconcileScenarioRestore(change, true);
+  }
+
+  async #reconcileScenarioRestore(change, acknowledged) {
+    let current;
+    try {
+      current = await this.#observeScenarioChange(change);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    const baseline = scenarioChangeObservation(change, current, "baseline");
     if (baseline.matches) {
       return this.#finishNative(change, "restored", undefined, {
+        candidate_logic_types: undefined,
+        logic_assignments: undefined,
         ...baseline.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
@@ -3478,7 +3714,7 @@ export class AutomationService {
     });
   }
 
-  async #recordBlockObservation(change, observation) {
+  async #recordScenarioObservation(change, observation) {
     Object.assign(change, observation.fields);
     change.updated_at = new Date().toISOString();
     const saved = await this.#trySave(change);
@@ -3487,6 +3723,39 @@ export class AutomationService {
       saved,
       "restore_state_storage_then_get_native_change",
     );
+  }
+
+  async #observeScenarioChange(change) {
+    if (isBlockChange(change)) {
+      return { scenario: await this.#observeBlock(change), logicTypes: [] };
+    }
+    let scenario;
+    if (change.kind === "logic_source_update") {
+      scenario = await this.client.getScenario(change.target.index);
+    } else if (change.scenario_index) {
+      scenario = await this.client.getScenario(change.scenario_index);
+    } else {
+      const scenarios = await this.client.listScenarioDetails({
+        descriptionIncludes: `[${change.marker}]`,
+      });
+      const matches = scenarios.filter(
+        ({ desc }) =>
+          typeof desc === "string" && desc.includes(`[${change.marker}]`),
+      );
+      if (matches.length > 1) {
+        throw new SprutHubError(
+          "ambiguous_owned_scenario",
+          "More than one LOGIC scenario carries this native change marker.",
+          "inspect_home",
+        );
+      }
+      scenario = matches[0] ?? null;
+    }
+    const logicTypes =
+      change.kind === "logic_source_create"
+        ? await this.#readLogicTypeCatalog(change.target)
+        : [];
+    return { scenario, logicTypes };
   }
 
   async #observeBlock(change) {
@@ -5689,6 +5958,234 @@ function scenarioSnapshot(scenario) {
   return { ...structuredClone(scenario), data };
 }
 
+function isLogicSourceChange(change) {
+  return ["logic_source_create", "logic_source_update"].includes(change.kind);
+}
+
+function isBlockChange(change) {
+  return ["block_create", "block_data_update"].includes(change.kind);
+}
+
+function scenarioChangeObservation(change, current, snapshot) {
+  return isLogicSourceChange(change)
+    ? logicSourceObservation(change, current, snapshot)
+    : blockSnapshotObservation(change, current.scenario, snapshot);
+}
+
+function scenarioChangeSnapshot(change, scenario) {
+  return isLogicSourceChange(change)
+    ? logicScenarioSnapshot(scenario)
+    : scenarioSnapshot(scenario);
+}
+
+function requiredLogicSource(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new SprutHubError(
+      "invalid_native_change",
+      "LOGIC source must be a non-empty string.",
+      "get_scenario_sdk",
+    );
+  }
+  return value;
+}
+
+function sourceFingerprint(source) {
+  return createHash("sha256").update(source).digest("hex");
+}
+
+function logicScenarioSnapshot(scenario) {
+  if (
+    !isRecord(scenario) ||
+    typeof scenario.index !== "string" ||
+    typeof scenario.name !== "string" ||
+    typeof scenario.desc !== "string" ||
+    typeof scenario.active !== "boolean" ||
+    typeof scenario.onStart !== "boolean" ||
+    typeof scenario.sync !== "boolean" ||
+    scenario.type !== "LOGIC" ||
+    typeof scenario.data !== "string"
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incomplete LOGIC source configuration.",
+    );
+  }
+  return {
+    index: scenario.index,
+    predefined: scenario.predefined === true,
+    name: scenario.name,
+    desc: scenario.desc,
+    active: scenario.active,
+    onStart: scenario.onStart,
+    sync: scenario.sync,
+    type: "LOGIC",
+    data: scenario.data,
+  };
+}
+
+function logicSourceCreateRequest(change) {
+  return {
+    name: change.requested_snapshot.name,
+    desc: `${change.requested_snapshot.desc}\n\n[${change.marker}]`,
+    active: change.requested_snapshot.active,
+    onStart: change.requested_snapshot.onStart,
+    sync: change.requested_snapshot.sync,
+    type: "LOGIC",
+    data: change.requested_snapshot.data,
+    expand: "data",
+  };
+}
+
+function logicSourceUpdateRequest(index, snapshot) {
+  return {
+    index,
+    name: snapshot.name,
+    desc: snapshot.desc,
+    active: snapshot.active,
+    onStart: snapshot.onStart,
+    sync: snapshot.sync,
+    type: "LOGIC",
+    data: snapshot.data,
+    expand: "data",
+  };
+}
+
+function logicSourceRequestedSnapshot(change) {
+  if (change.kind === "logic_source_update") {
+    return change.requested_snapshot;
+  }
+  const request = logicSourceCreateRequest(change);
+  return {
+    name: request.name,
+    desc: request.desc,
+    active: request.active,
+    onStart: request.onStart,
+    sync: request.sync,
+    type: request.type,
+    data: request.data,
+  };
+}
+
+function logicEditableSnapshot(snapshot) {
+  return {
+    name: snapshot.name,
+    desc: snapshot.desc,
+    active: snapshot.active,
+    onStart: snapshot.onStart,
+    sync: snapshot.sync,
+    type: snapshot.type,
+    data: snapshot.data,
+  };
+}
+
+function logicSnapshotMatches(scenario, expected) {
+  return (
+    scenario !== null &&
+    isDeepStrictEqual(
+      logicEditableSnapshot(logicScenarioSnapshot(scenario)),
+      logicEditableSnapshot(expected),
+    )
+  );
+}
+
+function logicSourceObservation(change, current, snapshot) {
+  let matches;
+  let expected;
+  if (snapshot === "baseline") {
+    if (change.kind === "logic_source_create") {
+      matches =
+        current.scenario === null &&
+        (change.native_logic_type
+          ? !current.logicTypes.includes(change.native_logic_type)
+          : isDeepStrictEqual(current.logicTypes, change.baseline_logic_types));
+    } else {
+      expected = change.baseline_snapshot;
+      matches = logicSnapshotMatches(current.scenario, expected);
+    }
+  } else if (snapshot === "requested") {
+    expected = logicSourceRequestedSnapshot(change);
+    matches = logicSnapshotMatches(current.scenario, expected);
+  } else if (snapshot === "applied") {
+    expected = change.applied_snapshot;
+    matches =
+      expected !== undefined &&
+      logicSnapshotMatches(current.scenario, expected) &&
+      (change.kind !== "logic_source_create" ||
+        (typeof change.native_logic_type === "string" &&
+          current.logicTypes.includes(change.native_logic_type)));
+  } else {
+    throw new TypeError(`Unknown LOGIC source snapshot ${snapshot}.`);
+  }
+  const observedSource =
+    current.scenario && typeof current.scenario.data === "string"
+      ? current.scenario.data
+      : undefined;
+  return {
+    matches,
+    fields: {
+      configuration_matches: matches,
+      ...(observedSource !== undefined
+        ? {
+            observed_source_sha256: sourceFingerprint(observedSource),
+            source_exact_match:
+              expected !== undefined && observedSource === expected.data,
+          }
+        : {}),
+      last_verification: freshVerification(
+        matches
+          ? `${snapshot}_logic_source`
+          : `${snapshot}_logic_source_missing`,
+      ),
+    },
+  };
+}
+
+function newLogicTypeMapping(change, currentTypes) {
+  if (
+    typeof change.native_logic_type === "string" &&
+    currentTypes.includes(change.native_logic_type)
+  ) {
+    return { status: "found", type: change.native_logic_type };
+  }
+  const baseline = new Set(change.baseline_logic_types);
+  const types = currentTypes.filter((type) => !baseline.has(type));
+  if (types.length === 0) return { status: "missing", types: [] };
+  if (types.length > 1) return { status: "ambiguous", types };
+  return { status: "found", type: types[0] };
+}
+
+function logicSourceContract(mode) {
+  return {
+    version: "2026-09-11",
+    scenario_type: "LOGIC",
+    mode,
+    source: {
+      format: "javascript",
+      execution_environment: "SprutHub scenario sandbox",
+      exact_readback: true,
+    },
+    editable_fields:
+      mode === "create"
+        ? ["name", "description", "active", "on_start", "sync", "source"]
+        : ["source"],
+    assignment: {
+      mapping: "new type observed from logic.types on the selected service",
+      separate_operation: "logic_assignment",
+    },
+    restore: {
+      update:
+        "restore the exact saved source and editable flags only while the applied snapshot is unchanged",
+      create:
+        "delete only the owned unchanged scenario after every current assignment of its observed logic type is absent",
+    },
+    limitations: [
+      "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
+      "A successful source readback does not confirm callback behavior or physical effects.",
+      "SprutHub exposes no compare-and-set; a race remains after the pre-write comparison.",
+    ],
+  };
+}
+
 function logicAssignmentSnapshot(logic, options) {
   if (!isRecord(logic) || typeof logic.type !== "string") {
     throw new SprutHubError(
@@ -6178,6 +6675,83 @@ function publicNativeChange(
       ],
     };
   }
+  if (isLogicSourceChange(change)) {
+    const requested = logicSourceRequestedSnapshot(change);
+    const scenarioRef = change.scenario_index
+      ? `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`
+      : change.kind === "logic_source_update"
+        ? change.target_ref
+        : undefined;
+    const logicRef =
+      change.kind === "logic_source_create" &&
+      typeof change.native_logic_type === "string"
+        ? `${change.target_ref}/logic/${encodeURIComponent(change.native_logic_type)}`
+        : undefined;
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      ...(change.marker ? { ownership_marker: change.marker } : {}),
+      diff: {
+        source: {
+          from_sha256:
+            change.kind === "logic_source_update"
+              ? sourceFingerprint(change.baseline_snapshot.data)
+              : null,
+          to_sha256: sourceFingerprint(requested.data),
+          exact_match: change.source_exact_match === true,
+        },
+        editable_flags: {
+          from:
+            change.kind === "logic_source_update"
+              ? publicLogicEditableFlags(change.baseline_snapshot)
+              : null,
+          to: publicLogicEditableFlags(requested),
+        },
+      },
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(change.scenario_index
+        ? { scenario_index: change.scenario_index }
+        : {}),
+      ...(scenarioRef ? { scenario_ref: scenarioRef } : {}),
+      ...(change.native_logic_type
+        ? { native_logic_type: change.native_logic_type }
+        : {}),
+      ...(logicRef ? { logic_ref: logicRef } : {}),
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
+        : {}),
+      ...(change.observed_source_sha256
+        ? { observed_source_sha256: change.observed_source_sha256 }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.recovered_after_uncertain_write
+        ? { recovered_after_uncertain_write: true }
+        : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      ...(change.candidate_logic_types
+        ? { candidate_logic_types: [...change.candidate_logic_types] }
+        : {}),
+      ...(change.logic_assignments
+        ? { logic_assignments: structuredClone(change.logic_assignments) }
+        : {}),
+      restore_supported: true,
+      limitations: [
+        "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
+        "Source readback confirms stored configuration, not execution or physical behavior.",
+        "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
+        "Deletion scans current assignments of the observed native logic type, but SprutHub exposes no compare-and-set after that check.",
+      ],
+    };
+  }
   if (!isNativeValueChange(change)) {
     const diff =
       change.kind === "block_create"
@@ -6342,6 +6916,17 @@ function namedOptionValue(change, value) {
   };
 }
 
+function publicLogicEditableFlags(snapshot) {
+  return {
+    name: snapshot.name,
+    description: snapshot.desc,
+    active: snapshot.active,
+    on_start: snapshot.onStart,
+    sync: snapshot.sync,
+    type: snapshot.type,
+  };
+}
+
 function changeSummary(change, homeRef) {
   if (
     [
@@ -6355,6 +6940,8 @@ function changeSummary(change, homeRef) {
       "virtual_light_group",
       "block_create",
       "block_data_update",
+      "logic_source_create",
+      "logic_source_update",
     ].includes(change.kind)
   ) {
     const reference = `spruthub-change://native/${change.id}`;
@@ -6449,6 +7036,20 @@ function nativeAffectedRefs(change, homeRef) {
         : [change.baseline_snapshot?.data, change.requested_snapshot?.data];
     for (const data of configurations) {
       refs.push(...blockAffectedRefs(data, homeRef));
+    }
+  } else if (isLogicSourceChange(change)) {
+    if (change.scenario_index) {
+      refs.push(
+        `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
+      );
+    }
+    if (
+      change.kind === "logic_source_create" &&
+      typeof change.native_logic_type === "string"
+    ) {
+      refs.push(
+        `${change.target_ref}/logic/${encodeURIComponent(change.native_logic_type)}`,
+      );
     }
   }
   return uniqueRefs(refs);

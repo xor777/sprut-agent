@@ -23,7 +23,8 @@ const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
 const smoothLogicRef = `${serviceRef}/logic/${smoothLogicType}`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
-const scenarioSdk = "interface Characteristic { getValue(): any; setValue(value: any): void; }";
+const scenarioSdk =
+  "interface Characteristic { getValue(): any; setValue(value: any): void; }";
 const firstLogicSource = `info = {
   name: "Bedside start level",
   description: "Set the initial brightness once",
@@ -800,12 +801,15 @@ async function startHub() {
           return;
         }
         const index = `created-${state.nextScenario++}`;
+        const { expand: _expand, ...createFields } = params.scenario.create;
         const created = {
-          ...structuredClone(params.scenario.create),
+          ...structuredClone(createFields),
           data:
             params.scenario.create.type === "BLOCK"
               ? JSON.stringify(
-                  withRuntimeBlockFields(JSON.parse(params.scenario.create.data)),
+                  withRuntimeBlockFields(
+                    JSON.parse(params.scenario.create.data),
+                  ),
                 )
               : params.scenario.create.data,
           index,
@@ -4596,12 +4600,18 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
   });
   assert.equal(created.isError, undefined, created.content[0]?.text);
   assert.equal(created.structuredContent.status, "applied");
-  assert.equal(created.structuredContent.native_logic_type, "GeneratedLogicType1");
+  assert.equal(
+    created.structuredContent.native_logic_type,
+    "GeneratedLogicType1",
+  );
   assert.equal(
     created.structuredContent.logic_ref,
     `${serviceRef}/logic/GeneratedLogicType1`,
   );
-  assert.notEqual(created.structuredContent.scenario_index, "GeneratedLogicType1");
+  assert.notEqual(
+    created.structuredContent.scenario_index,
+    "GeneratedLogicType1",
+  );
   assert.equal(created.structuredContent.diff.source.exact_match, true);
   const createdScenarioRef = created.structuredContent.scenario_ref;
 
@@ -4618,6 +4628,26 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     arguments: { change_ref: assignment.structuredContent.change_ref },
   });
   assert.equal(assigned.structuredContent.status, "applied");
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const history = await restartedClient.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: created.structuredContent.logic_ref,
+    },
+  });
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.deepEqual(
+    history.structuredContent.changes.map(({ operation }) => operation).sort(),
+    ["logic_assignment", "logic_source_create"],
+  );
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "applied");
+  assert.equal(persisted.structuredContent.diff.source.exact_match, true);
 
   const update = await client.callTool({
     name: "prepare_native_change",
@@ -4639,7 +4669,10 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     name: "get_entity",
     arguments: { entity_ref: createdScenarioRef, include: ["configuration"] },
   });
-  assert.equal(readback.structuredContent.entity.configuration.text, secondLogicSource);
+  assert.equal(
+    readback.structuredContent.entity.configuration.text,
+    secondLogicSource,
+  );
   assert.deepEqual(
     hub.state.scenarios.find(({ index }) => index === "created-1"),
     {
@@ -4660,7 +4693,10 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     arguments: { change_ref: update.structuredContent.change_ref },
   });
   assert.equal(sourceRestored.structuredContent.status, "restored");
-  assert.equal(hub.state.scenarios.find(({ index }) => index === "created-1").data, firstLogicSource);
+  assert.equal(
+    hub.state.scenarios.find(({ index }) => index === "created-1").data,
+    firstLogicSource,
+  );
   const assignmentRestored = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: assignment.structuredContent.change_ref },
@@ -4671,7 +4707,10 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(sourceRemoved.structuredContent.status, "restored");
-  assert.equal(hub.state.scenarios.some(({ index }) => index === "created-1"), false);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    false,
+  );
   assert.equal(
     hub.state.logicTypes.some(({ type }) => type === "GeneratedLogicType1"),
     false,
@@ -4701,14 +4740,18 @@ test("a lost LOGIC create response is reconciled without creating a duplicate", 
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(recovered.structuredContent.status, "applied");
-  assert.equal(recovered.structuredContent.recovered_after_uncertain_write, true);
+  assert.equal(
+    recovered.structuredContent.recovered_after_uncertain_write,
+    true,
+  );
   const repeated = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(repeated.structuredContent.status, "applied");
   assert.equal(
-    hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC").length,
+    hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC")
+      .length,
     1,
   );
 });
@@ -4781,7 +4824,10 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
     arguments: { change_ref: update.structuredContent.change_ref },
   });
   assert.equal(sourceConflict.structuredContent.status, "conflict");
-  assert.equal(sourceConflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    sourceConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
   assert.match(
     hub.state.scenarios.find(({ index }) => index === "manual-logic").data,
     /manual edit$/,
@@ -4826,7 +4872,9 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
     true,
   );
   assert.equal(
-    hub.requests.some(({ scenario }) => scenario?.delete?.index === "created-1"),
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === "created-1",
+    ),
     false,
   );
 });

@@ -201,11 +201,33 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_scenario_sdk",
+  {
+    title: "Read the native SprutHub scenario SDK",
+    description:
+      "Return the current complete scenario SDK declarations directly from the selected SprutHub, with byte length, SHA-256, and response freshness. Use this before authoring native LOGIC source. The declarations describe the hub sandbox, not Node.js or browser JavaScript, and do not prove runtime callback behavior.",
+    inputSchema: {
+      home_ref: z
+        .string()
+        .min(1)
+        .describe(
+          "Configured spruthub://hub/<percent-encoded-serial> reference",
+        ),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ home_ref: homeRef }) =>
+    runRoomTool(async () =>
+      (await getAutomationService()).getScenarioSdk(homeRef),
+    ),
+);
+
+server.registerTool(
   "get_native_change_contract",
   {
     title: "Read a supported native change contract",
     description:
-      "Return the limited contract for one supported native write without changing the hub. Accessory placement changes only one accessory name and room; room creation is a separate reversible change. A virtual_light_group creates one native Lightbulb with explicit common On/Brightness links and last-value feedback; create and link were replayed on hub 3.0.0, while same-valued repeat delivery remains a reported native limitation. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref; logic_option also requires its exact live option key and currently supports writable GenericInteger/NUMBER. Characteristic, device-window and BLOCK contracts remain separately bounded.",
+      "Return the limited contract for one supported native write without changing the hub. Accessory placement changes only one accessory name and room; room creation is a separate reversible change. A virtual_light_group creates one native Lightbulb with explicit common On/Brightness links and last-value feedback; create and link were replayed on hub 3.0.0, while same-valued repeat delivery remains a reported native limitation. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref; logic_option also requires its exact live option key and currently supports writable GenericInteger/NUMBER. LOGIC source creation targets one selected service, maps the created scenario to the fresh logic.types result, and source update preserves native metadata flags. Characteristic, device-window and BLOCK contracts remain separately bounded.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -218,6 +240,8 @@ server.registerTool(
         "virtual_light_group",
         "block_create",
         "block_data_update",
+        "logic_source_create",
+        "logic_source_update",
       ]),
       target_ref: z.string().min(1).optional(),
       option_key: z.string().min(1).optional(),
@@ -235,7 +259,7 @@ server.registerTool(
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Prepare one typed native change with its current baseline and concrete diff. Supported operations include one accessory name-and-room placement, creation of an absent room, one virtual Lightbulb group over explicit member service refs and common On/Brightness controls, a catalogued native logic assignment, its active flag, one writable GenericInteger/NUMBER option, characteristic_value, one GenericInteger/LIST window_option, and bounded BLOCK changes. Room creation and accessory placement are separate changes so they can be reconciled and restored in reverse order. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired setting creates no owned change.",
+      "Prepare one typed native change with its current baseline and concrete diff. Supported operations include one accessory name-and-room placement, creation of an absent room, one virtual Lightbulb group over explicit member service refs and common On/Brightness controls, a catalogued native logic assignment, its active flag, one writable GenericInteger/NUMBER option, creation or exact source update of a native LOGIC, characteristic_value, one GenericInteger/LIST window_option, and bounded BLOCK changes. Room creation and accessory placement are separate changes so they can be reconciled and restored in reverse order. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired setting creates no owned change.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -248,12 +272,14 @@ server.registerTool(
         "virtual_light_group",
         "block_create",
         "block_data_update",
+        "logic_source_create",
+        "logic_source_update",
       ]),
       target_ref: z
         .string()
         .min(1)
         .describe(
-          "Home-qualified accessory, characteristic, window, logic, scenario, or home reference for the selected operation",
+          "Home-qualified accessory, service, characteristic, window, logic, scenario, or home reference for the selected operation",
         ),
       value: z.union([z.boolean(), z.number(), z.string()]).optional(),
       option_key: z.string().min(1).optional(),
@@ -284,6 +310,13 @@ server.registerTool(
       on_start: z.boolean().optional(),
       sync: z.boolean().optional(),
       data: z.record(z.string(), z.unknown()).optional(),
+      source: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Exact SprutHub-sandbox JavaScript source for logic_source_create or logic_source_update",
+        ),
       reason: z.string().min(1),
     },
     annotations: {

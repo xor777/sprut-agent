@@ -714,11 +714,26 @@ export class SprutHubClient {
       throw new SprutHubError(
         "incompatible_response",
         "SprutHub did not identify the created scenario.",
-        "inspect_hub",
+        "get_native_change",
         { requestSent: true },
       );
     }
     return scenario;
+  }
+
+  async getScenarioSdk() {
+    const response = await this.#request(
+      { scenario: { sdk: {} } },
+      Date.now() + this.timeoutMs,
+    );
+    const sdk = response.result?.scenario?.sdk?.sdk;
+    if (typeof sdk !== "string" || sdk.length === 0) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incomplete scenario SDK.",
+      );
+    }
+    return { sdk, responseReceivedAt: response.responseReceivedAt };
   }
 
   async getAccessory(id) {
@@ -1056,6 +1071,23 @@ export class SprutHubClient {
     }
   }
 
+  async updateScenario(request) {
+    const response = await this.#request(
+      { scenario: { update: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const scenario = response.result?.scenario?.update;
+    if (!scenario || scenario.index !== request.index) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not identify the updated scenario.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+    return scenario;
+  }
+
   async getCharacteristic({ aId, sId, cId }) {
     const response = await this.#request(
       { characteristic: { get: { aId, sId, cId } } },
@@ -1265,6 +1297,42 @@ export class SprutHubClient {
         { requestSent: true },
       );
     }
+  }
+
+  async findLogicAssignments(type) {
+    const accessories = await this.listAccessories();
+    const assignments = [];
+    for (const accessory of accessories) {
+      if (!Array.isArray(accessory.services)) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub did not return services needed to check LOGIC assignments.",
+        );
+      }
+      for (const service of accessory.services) {
+        if (!Number.isInteger(service?.sId)) {
+          throw new SprutHubError(
+            "incompatible_response",
+            "SprutHub returned a service without its native ID.",
+          );
+        }
+        const logics = await this.listLogics({
+          aId: accessory.id,
+          sId: service.sId,
+        });
+        for (const logic of logics) {
+          if (logic?.type === type) {
+            assignments.push({
+              aId: accessory.id,
+              sId: service.sId,
+              type,
+              active: logic.active === true,
+            });
+          }
+        }
+      }
+    }
+    return assignments;
   }
 
   async deleteScenario(index) {

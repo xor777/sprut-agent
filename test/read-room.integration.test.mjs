@@ -423,6 +423,7 @@ test("MCP discovers every room before reading the selected stable reference", as
       "list_rooms",
       "preview_boolean_automation",
       "apply_automation_change",
+      "get_scenario_sdk",
       "get_native_change_contract",
       "prepare_native_change",
       "restore_native_change",
