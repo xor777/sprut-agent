@@ -297,8 +297,7 @@ async function startHub() {
       } else if (params.link?.remove) {
         state.linkRemoveAttempts += 1;
         if (
-          state.linkRemoveAttempts ===
-          state.behavior.failLinkRemoveOnAttempt
+          state.linkRemoveAttempts === state.behavior.failLinkRemoveOnAttempt
         ) {
           socket.send(
             JSON.stringify({

@@ -1990,9 +1990,14 @@ export class AutomationService {
       const links = await this.client.listLinks(source);
       const relation = virtualLinkRelation(links, progress.target);
       if (!relation.present) {
-        removal.physical_links_after = normalizePhysicalLinks(
-          await this.client.listLinks(progress.target),
-        );
+        if (
+          removal.physical_links_after === undefined &&
+          removal.sent !== true
+        ) {
+          removal.physical_links_after = normalizePhysicalLinks(
+            await this.client.listLinks(progress.target),
+          );
+        }
         removal.completed = true;
         if (removal.sent && !removal.acknowledged) {
           change.recovered_after_uncertain_write = true;
@@ -2259,6 +2264,7 @@ export class AutomationService {
   ) {
     const ownedResidues = [];
     const preservationFailures = [];
+    const preservationUnverified = [];
     const nativeResidues = [];
     for (const progress of change.progress.links) {
       if (
@@ -2274,14 +2280,14 @@ export class AutomationService {
           candidate.member_ref === progress.member_ref,
       );
       const artifact = physicalLinkArtifact(change, progress, cleanup);
-      const links =
+      const observedLinks =
         !fresh && cleanup?.physical_links_after
           ? cleanup.physical_links_after
           : normalizePhysicalLinks(
               await this.client.listLinks(artifact.target),
             );
       const baseline = physicalLinkBaseline(change, artifact);
-      for (const link of links) {
+      for (const link of observedLinks) {
         if (
           link.type === "OUT" &&
           link.characteristics.some(
@@ -2297,25 +2303,37 @@ export class AutomationService {
           });
         }
       }
-      const expectedPreserved = cleanup?.sent
-        ? physicalLinksPreservedAcrossOwnRemoval(
-            cleanup.physical_links_before ?? [],
+      if (cleanup?.sent) {
+        if (
+          cleanup.physical_links_before === undefined ||
+          cleanup.physical_links_after === undefined
+        ) {
+          preservationUnverified.push({
+            member_ref: artifact.member_ref,
+            characteristic_type: artifact.type,
+          });
+        } else {
+          const expectedPreserved = physicalLinksPreservedAcrossOwnRemoval(
+            cleanup.physical_links_before,
             baseline.links,
             artifact.source,
-          )
-        : [];
-      const missingPreserved = expectedPreserved.filter(
-        (expected) =>
-          !links.some((observed) => physicalLinkContains(observed, expected)),
-      );
-      if (missingPreserved.length > 0) {
-        preservationFailures.push({
-          member_ref: artifact.member_ref,
-          characteristic_type: artifact.type,
-          missing_links: structuredClone(missingPreserved),
-        });
+          );
+          const missingPreserved = expectedPreserved.filter(
+            (expected) =>
+              !cleanup.physical_links_after.some((observed) =>
+                physicalLinkContains(observed, expected),
+              ),
+          );
+          if (missingPreserved.length > 0) {
+            preservationFailures.push({
+              member_ref: artifact.member_ref,
+              characteristic_type: artifact.type,
+              missing_links: structuredClone(missingPreserved),
+            });
+          }
+        }
       }
-      for (const link of links) {
+      for (const link of observedLinks) {
         const residue = nativeEmptyPhysicalLinkResidue(
           link,
           baseline.links,
@@ -2330,7 +2348,12 @@ export class AutomationService {
         }
       }
     }
-    return { ownedResidues, preservationFailures, nativeResidues };
+    return {
+      ownedResidues,
+      preservationFailures,
+      preservationUnverified,
+      nativeResidues,
+    };
   }
 
   async #verifyPhysicalLinkCleanup(change, options = {}) {
@@ -2356,9 +2379,21 @@ export class AutomationService {
         ),
       });
     }
+    if (physicalLinks.preservationUnverified.length > 0) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        physical_link_preservation_unverified:
+          physicalLinks.preservationUnverified,
+        configuration_matches: undefined,
+        conflict_reason: "link_remove_preservation_outcome_unknown",
+        last_verification: freshVerification(
+          "physical_link_preservation_not_observed_after_own_removal",
+        ),
+      });
+    }
     change.physical_link_residues = undefined;
     change.physical_link_baseline_changes = undefined;
     change.physical_link_preservation_failures = undefined;
+    change.physical_link_preservation_unverified = undefined;
     change.native_link_residues = physicalLinks.nativeResidues;
     return null;
   }
@@ -6041,6 +6076,13 @@ function publicNativeChange(
         ? {
             physical_link_preservation_failures: structuredClone(
               change.physical_link_preservation_failures,
+            ),
+          }
+        : {}),
+      ...(change.physical_link_preservation_unverified
+        ? {
+            physical_link_preservation_unverified: structuredClone(
+              change.physical_link_preservation_unverified,
             ),
           }
         : {}),
