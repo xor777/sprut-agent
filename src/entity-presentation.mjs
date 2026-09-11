@@ -437,13 +437,38 @@ function stringVersion(text) {
 }
 
 function containerVersion(entries, pointer) {
-  const mapIdentity = entries.map(([key, value]) => ({
-    pointer: `${pointer}/${escapePointerToken(key)}`,
-    identity: childIdentity(value).identity ?? null,
-  }));
+  const candidates = entries.map(([, value]) => {
+    const identity = childIdentity(value).identity ?? null;
+    const stableKey = stableIdentityKey(identity);
+    return { identity, stableKey };
+  });
+  const stableKeyCounts = new Map();
+  for (const { stableKey } of candidates) {
+    if (stableKey === null) continue;
+    stableKeyCounts.set(stableKey, (stableKeyCounts.get(stableKey) ?? 0) + 1);
+  }
+  const mapIdentity = entries.map(([key, value], index) => {
+    const { identity, stableKey } = candidates[index];
+    const unambiguous =
+      stableKey !== null && stableKeyCounts.get(stableKey) === 1;
+    return {
+      pointer: `${pointer}/${escapePointerToken(key)}`,
+      ...(unambiguous ? { identity } : { value }),
+    };
+  });
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(mapIdentity))
     .digest("base64url")}`;
+}
+
+function stableIdentityKey(identity) {
+  if (typeof identity?.ref === "string" && identity.ref.length > 0) {
+    return JSON.stringify(["ref", identity.ref]);
+  }
+  if (typeof identity?.key === "string" && identity.key.length > 0) {
+    return JSON.stringify(["key", identity.key]);
+  }
+  return null;
 }
 
 function withPage(result, maxBytes) {

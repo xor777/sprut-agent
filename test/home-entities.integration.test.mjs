@@ -2313,8 +2313,7 @@ test("ambiguous container continuations restart without losing current entries",
     name: "get_entity",
     arguments: baseArguments,
   });
-  const replacedContinuation =
-    firstPage.structuredContent.representation.next;
+  const replacedContinuation = firstPage.structuredContent.representation.next;
   assert(replacedContinuation?.arguments.version);
 
   targets.shift();
@@ -2358,7 +2357,10 @@ test("ambiguous container continuations restart without losing current entries",
     assert.equal(current.isError, undefined, current.content[0]?.text);
     currentBlockIds.push(current.structuredContent.selection.value.blockId);
   }
-  assert.deepEqual(currentBlockIds, targets.map(({ blockId }) => blockId));
+  assert.deepEqual(
+    currentBlockIds,
+    targets.map(({ blockId }) => blockId),
+  );
 
   const beforeReorder = await client.callTool({
     name: "get_entity",
