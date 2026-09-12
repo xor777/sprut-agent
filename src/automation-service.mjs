@@ -1152,6 +1152,11 @@ export class AutomationService {
       current,
     );
     if (ownershipLoss) return ownershipLoss;
+    const sentWithoutOwnership = await this.#finishSentValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (sentWithoutOwnership) return sentWithoutOwnership;
     validateCharacteristicValue(change.requested_value.value, contract);
     if (!valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "conflict", current, {
@@ -1385,6 +1390,11 @@ export class AutomationService {
       current,
     );
     if (ownershipLoss) return ownershipLoss;
+    const sentWithoutOwnership = await this.#finishSentValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (sentWithoutOwnership) return sentWithoutOwnership;
     return this.#recordNativeObservation(
       change,
       current,
@@ -3686,6 +3696,11 @@ export class AutomationService {
       current,
     );
     if (ownershipLoss) return ownershipLoss;
+    const sentWithoutOwnership = await this.#finishSentValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (sentWithoutOwnership) return sentWithoutOwnership;
     if (change.applied_value_observed !== true) {
       return this.#finishNative(change, "not_owned", current, {
         conflict_reason: "change_was_not_applied",
@@ -3724,7 +3739,10 @@ export class AutomationService {
 
   async #finishObservedValueOwnershipLoss(change, current) {
     if (!manualValueChangeObserved(change)) return undefined;
-    if (valuesEqual(current, change.baseline_value)) {
+    if (
+      nativeValueRestoration(change).supported &&
+      valuesEqual(current, change.baseline_value)
+    ) {
       return this.#finishNative(change, "restored", current, {
         manual_change_observed: true,
         last_verification: freshVerification("baseline_value_observed"),
@@ -3734,9 +3752,27 @@ export class AutomationService {
       conflict_reason: "manual_change",
       manual_change_observed: true,
       last_verification: freshVerification(
-        valuesEqual(current, change.requested_value)
-          ? "requested_value_observed"
-          : "conflict",
+        valuesEqual(current, change.baseline_value)
+          ? "baseline_value_observed"
+          : valuesEqual(current, change.requested_value)
+            ? "requested_value_observed"
+            : "conflict",
+      ),
+    });
+  }
+
+  async #finishSentValueOwnershipLoss(change, current) {
+    if (change.status !== "not_owned" || change.native_write_sent !== true) {
+      return undefined;
+    }
+    return this.#finishNative(change, "not_owned", current, {
+      conflict_reason: undefined,
+      last_verification: freshVerification(
+        valuesEqual(current, change.baseline_value)
+          ? "baseline_value_observed"
+          : valuesEqual(current, change.requested_value)
+            ? "requested_value_observed"
+            : "current_value_observed",
       ),
     });
   }
@@ -7016,7 +7052,20 @@ function manualValueChangeObserved(change) {
     change?.manual_change_observed === true ||
     ["manual_change", "value_changed_after_apply"].includes(
       change?.conflict_reason,
-    )
+    ) ||
+    legacyManualValueChangeObserved(change)
+  );
+}
+
+function legacyManualValueChangeObserved(change) {
+  return (
+    change?.status === "not_owned" &&
+    change.native_write_sent === true &&
+    Array.isArray(change.history) &&
+    change.history.some(({ status }) => status === "conflict") &&
+    change.observed_value &&
+    !valuesEqual(change.observed_value, change.baseline_value) &&
+    !valuesEqual(change.observed_value, change.requested_value)
   );
 }
 
