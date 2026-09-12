@@ -18,7 +18,7 @@
     "test:mutations": "stryker run"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=24.11.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",

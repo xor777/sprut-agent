@@ -3,7 +3,7 @@
 **Agent-first интеграция для умного дома на SprutHub.**
 
 [![CI: GitHub Actions](https://img.shields.io/badge/CI-GitHub_Actions-24292F?logo=githubactions&logoColor=white)](https://github.com/xor777/sprut-agent/actions/workflows/check.yml)
-[![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-417E38?logo=nodedotjs&logoColor=white)](package.json)
+[![Node.js 24.11+](https://img.shields.io/badge/Node.js-24.11%2B-417E38?logo=nodedotjs&logoColor=white)](package.json)
 [![MIT License](https://img.shields.io/badge/License-MIT-2563EB)](LICENSE)
 
 sprut-agent создаётся, чтобы поручать ИИ работу с домом: понимать устройства,
@@ -27,7 +27,7 @@ sprut-agent создаётся, чтобы поручать ИИ работу с
 ## Установка в Codex
 
 Поддерживаемый путь рассчитан на установленный Codex CLI 0.154.0 или новее на
-macOS arm64. Нужны Node.js 24+, npm, Git, доступ к GitHub и своему SprutHub.
+macOS arm64. Нужны Node.js 24.11+, npm, Git, доступ к GitHub и своему SprutHub.
 Перед изменением профиля агент проверяет реальные предпосылки:
 
 ```sh
@@ -713,7 +713,7 @@ MCP-процесс на хаб: внутри него apply и rollback выпо
 
 ## Разработка
 
-Нужны Node.js 24+, npm, Git и Codex CLI 0.154.0 или новее:
+Нужны Node.js 24.11+, npm, Git и Codex CLI 0.154.0 или новее:
 
 ```sh
 git clone https://github.com/xor777/sprut-agent.git
