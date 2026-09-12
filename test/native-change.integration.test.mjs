@@ -2240,6 +2240,42 @@ test("sensitive LIST options stay redacted and cannot create history for any own
     arguments: { home_ref: homeRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
+
+  const historicalOption = {
+    ...sensitiveListOption(),
+    key: "VisibleMode",
+    name: "Visible mode",
+    sensitive: false,
+  };
+  hub.state.characteristicOptions.push(historicalOption);
+  const historical = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: historicalOption.key,
+      value: "SAFE",
+      reason: "Ранее обычная настройка стала чувствительной",
+    },
+  });
+  assert.equal(historical.isError, undefined, historical.content[0]?.text);
+  historicalOption.sensitive = true;
+
+  const hiddenHistory = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: historical.structuredContent.change_ref },
+  });
+  assert.equal(hiddenHistory.isError, true);
+  assert.equal(
+    hiddenHistory.structuredContent.error.code,
+    "sensitive_native_data",
+  );
+  assert.equal(JSON.stringify(hiddenHistory).includes("LEAK"), false);
+  const summaries = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.equal(JSON.stringify(summaries).includes("LEAK"), false);
   assert.equal(
     hub.requests.some(
       ({ characteristic, window, logic }) =>

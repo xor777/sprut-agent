@@ -6,8 +6,15 @@ import {
   blockAffectedRefs,
   visitKnownBlockNodes,
 } from "./block-model.mjs";
-import { inspectNativeOption } from "./native-option-contract.mjs";
-import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
+import {
+  inspectNativeOption,
+  validateNativeScalarValue,
+} from "./native-option-contract.mjs";
+import {
+  isSensitiveNativeNode,
+  SprutHubError,
+  sanitizeNativeData,
+} from "./spruthub-client.mjs";
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -1164,6 +1171,12 @@ export class AutomationService {
         groupMemberObservations = await this.#readVirtualGroupMembers(change);
       }
     } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        error.code === "sensitive_native_data"
+      ) {
+        throw error;
+      }
       return {
         direction,
         outcome: "read_failed",
@@ -1299,6 +1312,12 @@ export class AutomationService {
     try {
       current = await this.#readNativeValue(change);
     } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        error.code === "sensitive_native_data"
+      ) {
+        throw error;
+      }
       return publicNativeChange(change, undefined, {
         verification: failedVerification(error),
       });
@@ -6055,6 +6074,13 @@ function nativeOptionState(
   option,
   { requireWrite = true, owner, unsupportedCode, confirmation },
 ) {
+  if (isSensitiveNativeNode(option)) {
+    throw new SprutHubError(
+      "sensitive_native_data",
+      `The selected ${owner} setting contains sensitive native data.`,
+      "get_entity",
+    );
+  }
   const inspected = inspectNativeOption(option, { requireWrite });
   if (!inspected.supported) {
     throw new SprutHubError(
@@ -6122,73 +6148,11 @@ function typedNativeValue(value) {
 }
 
 function validateCharacteristicValue(value, contract) {
-  const expected = {
-    boolValue: "boolean",
-    intValue: "number",
-    longValue: "number",
-    doubleValue: "number",
-    stringValue: "string",
-  }[contract.kind];
-  if (
-    typeof value !== expected ||
-    (expected === "number" && !Number.isFinite(value)) ||
-    (["intValue", "longValue"].includes(contract.kind) &&
-      !Number.isSafeInteger(value))
-  ) {
-    throw new SprutHubError(
-      "invalid_native_value",
-      `The requested value must match ${contract.kind}.`,
-    );
+  const validated = validateNativeScalarValue(value, contract);
+  if (!validated.valid) {
+    throw new SprutHubError("invalid_native_value", validated.message);
   }
-  if (
-    contract.step !== undefined &&
-    typeof value === "number" &&
-    !isStepAligned(value, contract.min ?? 0, contract.step)
-  ) {
-    throw new SprutHubError(
-      "invalid_native_value",
-      "The requested value does not match the native step.",
-    );
-  }
-  if (
-    (contract.min !== undefined && value < contract.min) ||
-    (contract.max !== undefined && value > contract.max)
-  ) {
-    throw new SprutHubError(
-      "invalid_native_value",
-      "The requested value is outside the native range.",
-    );
-  }
-  if (
-    typeof value === "string" &&
-    ((contract.min_length !== undefined &&
-      value.length < contract.min_length) ||
-      (contract.max_length !== undefined && value.length > contract.max_length))
-  ) {
-    throw new SprutHubError(
-      "invalid_native_value",
-      "The requested value has an invalid native length.",
-    );
-  }
-  if (
-    contract.valid_values !== undefined &&
-    !contract.valid_values.some(
-      (candidate) =>
-        candidate.kind === contract.kind && Object.is(candidate.value, value),
-    )
-  ) {
-    throw new SprutHubError(
-      "invalid_native_value",
-      "The requested value is not in the native valid-values set.",
-    );
-  }
-  return { value, kind: contract.kind };
-}
-
-function isStepAligned(value, min, step) {
-  if (!Number.isFinite(step) || step <= 0) return false;
-  const steps = (value - min) / step;
-  return Math.abs(steps - Math.round(steps)) <= Number.EPSILON * 16;
+  return validated.value;
 }
 
 function valuesEqual(left, right) {

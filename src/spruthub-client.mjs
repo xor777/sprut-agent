@@ -3757,7 +3757,7 @@ function normalizeWindowControl(option) {
   };
 }
 
-function isSensitiveNativeNode(value, key = "") {
+export function isSensitiveNativeNode(value, key = "") {
   if (isSensitiveContainerKey(key)) return true;
   if (!value || typeof value !== "object") return false;
   return (

@@ -116,6 +116,21 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
         "The current setting is not in its explicit valid-values set.",
       );
     }
+    const constrainedListContract = {
+      kind: current.kind,
+      ...numericMetadata.contract,
+    };
+    if (
+      validValues.some(
+        ({ value }) =>
+          !validateNativeScalarValue(value, constrainedListContract).valid,
+      )
+    ) {
+      return incompatible(
+        "inconsistent_valid_values",
+        "The selected setting has valid values that contradict its native numeric constraints.",
+      );
+    }
   }
 
   return {
@@ -129,6 +144,70 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
       ...(validValues ? { valid_values: validValues } : {}),
     },
   };
+}
+
+export function validateNativeScalarValue(value, contract) {
+  const expected = {
+    boolValue: "boolean",
+    intValue: "number",
+    longValue: "number",
+    doubleValue: "number",
+    stringValue: "string",
+  }[contract.kind];
+  if (
+    typeof value !== expected ||
+    (expected === "number" && !Number.isFinite(value)) ||
+    (["intValue", "longValue"].includes(contract.kind) &&
+      !Number.isSafeInteger(value))
+  ) {
+    return invalidValue(
+      "kind_mismatch",
+      `The requested value must match ${contract.kind}.`,
+    );
+  }
+  if (
+    contract.step !== undefined &&
+    typeof value === "number" &&
+    !isStepAligned(value, contract.min ?? 0, contract.step)
+  ) {
+    return invalidValue(
+      "step_mismatch",
+      "The requested value does not match the native step.",
+    );
+  }
+  if (
+    (contract.min !== undefined && value < contract.min) ||
+    (contract.max !== undefined && value > contract.max)
+  ) {
+    return invalidValue(
+      "outside_range",
+      "The requested value is outside the native range.",
+    );
+  }
+  if (
+    typeof value === "string" &&
+    ((contract.min_length !== undefined &&
+      value.length < contract.min_length) ||
+      (contract.max_length !== undefined && value.length > contract.max_length))
+  ) {
+    return invalidValue(
+      "invalid_length",
+      "The requested value has an invalid native length.",
+    );
+  }
+  if (
+    contract.valid_values !== undefined &&
+    !contract.valid_values.some(
+      (candidate) =>
+        candidate.kind === contract.kind && Object.is(candidate.value, value),
+    )
+  ) {
+    return invalidValue(
+      "not_in_valid_values",
+      "The requested value is not in the native valid-values set.",
+    );
+  }
+  return { valid: true, value: { value, kind: contract.kind } };
 }
 
 function inspectNumericMetadata(option, current) {
@@ -182,6 +261,16 @@ function scalarValueMatchesKind(value, kind) {
 
 function sameScalar(left, right) {
   return left.kind === right.kind && Object.is(left.value, right.value);
+}
+
+function isStepAligned(value, min, step) {
+  if (!Number.isFinite(step) || step <= 0) return false;
+  const steps = (value - min) / step;
+  return Math.abs(steps - Math.round(steps)) <= Number.EPSILON * 16;
+}
+
+function invalidValue(reason, message) {
+  return { valid: false, reason, message };
 }
 
 function unsupported(reason, message) {
