@@ -2872,6 +2872,111 @@ test("an invalid climate baseline is reported as non-restorable before apply", a
   assert.equal(restore.structuredContent.error.code, "restore_unsupported");
 });
 
+test("unsupported native values do not report a manually observed baseline as restored", async (t) => {
+  const cases = [
+    {
+      name: "runtime command",
+      install() {},
+      ref: characteristicRef,
+      baseline: false,
+      requested: true,
+      setBaseline(hub) {
+        currentCharacteristicValue(hub, characteristicRef).boolValue = false;
+      },
+      limitation: undefined,
+    },
+    {
+      name: "climate setting with an invalid baseline",
+      install: installClimateFixture,
+      ref: climateSettings[0].ref,
+      baseline: 21.3,
+      requested: 22,
+      setBaseline(hub) {
+        currentCharacteristicValue(hub, climateSettings[0].ref).doubleValue =
+          21.3;
+      },
+      limitation: "baseline_not_writable",
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      testCase.install(hub);
+      testCase.setBaseline(hub);
+      const firstClient = await startClient(t, hub, stateDirectory);
+      const prepared = await firstClient.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "characteristic_value",
+          target_ref: testCase.ref,
+          value: testCase.requested,
+          reason: "Не объявлять неподдерживаемый возврат выполненным",
+        },
+      });
+      assert.equal(
+        prepared.structuredContent.diff.value.from,
+        testCase.baseline,
+      );
+      assert.equal(prepared.structuredContent.restore_supported, false);
+      assert.equal(
+        prepared.structuredContent.restore_limitation?.code,
+        testCase.limitation,
+      );
+      const applied = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+      testCase.setBaseline(hub);
+      const writesAfterManualChange = hub.requests.filter(
+        ({ characteristic }) => characteristic?.update,
+      ).length;
+      const firstObservation = await firstClient.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(firstObservation.structuredContent.status, "conflict");
+      assert.equal(
+        firstObservation.structuredContent.manual_change_observed,
+        true,
+      );
+      await firstClient.close();
+
+      const secondClient = await startClient(t, hub, stateDirectory);
+      for (const tool of ["get_native_change", "apply_native_change"]) {
+        const result = await secondClient.callTool({
+          name: tool,
+          arguments: { change_ref: prepared.structuredContent.change_ref },
+        });
+        assert.equal(result.isError, undefined, result.content[0]?.text);
+        assert.equal(result.structuredContent.status, "conflict", tool);
+        assert.equal(
+          result.structuredContent.conflict_reason,
+          "manual_change",
+          tool,
+        );
+        assert.equal(
+          result.structuredContent.manual_change_observed,
+          true,
+          tool,
+        );
+        assert.equal(
+          result.structuredContent.verification.result,
+          "baseline_value_observed",
+          tool,
+        );
+        assert.equal(result.structuredContent.restore_supported, false, tool);
+      }
+      assert.equal(
+        hub.requests.filter(({ characteristic }) => characteristic?.update)
+          .length,
+        writesAfterManualChange,
+      );
+    });
+  }
+});
+
 test("an interrupted climate mode restores only settings that were applied", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   installClimateFixture(hub);
@@ -3425,6 +3530,90 @@ test("a published manual option conflict remains unowned in the new runtime", as
       .length,
     writesBefore,
   );
+});
+
+test("a published sent option that became not-owned never regains write ownership", async (t) => {
+  const fixture = JSON.parse(
+    await readFile(
+      path.join(
+        projectRoot,
+        "test/fixtures/published-option-not-owned-after-restore.json",
+      ),
+      "utf8",
+    ),
+  );
+  for (const observed of [
+    { label: "third value", value: 99, status: "conflict" },
+    { label: "requested value", value: 10, status: "conflict" },
+    { label: "baseline value", value: 180, status: "restored" },
+  ]) {
+    await t.test(observed.label, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const fingerprint = createHash("sha256")
+        .update(`${hub.url}\0${serial}`)
+        .digest("hex");
+      const change = structuredClone(fixture.change);
+      await writeFile(
+        path.join(
+          stateDirectory,
+          `automation-changes-${fingerprint.slice(0, 24)}.json`,
+        ),
+        `${JSON.stringify(
+          {
+            version: 1,
+            hub_fingerprint: fingerprint,
+            changes: { [change.id]: change },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      const option = hub.state.characteristicOptions.find(
+        ({ key }) => key === characteristicOptionKeys.switchOffTime,
+      );
+      option.value = { doubleValue: observed.value };
+      const changeRef = `spruthub-change://native/${change.id}`;
+      const writesBefore = hub.requests.filter(
+        ({ characteristic }) => characteristic?.setOptions,
+      ).length;
+
+      for (let process = 0; process < 2; process += 1) {
+        const client = await startClient(t, hub, stateDirectory);
+        for (const tool of [
+          "get_native_change",
+          "restore_native_change",
+          "apply_native_change",
+        ]) {
+          const result = await client.callTool({
+            name: tool,
+            arguments: { change_ref: changeRef },
+          });
+          assert.equal(result.isError, undefined, result.content[0]?.text);
+          assert.equal(result.structuredContent.status, observed.status, tool);
+          assert.equal(result.structuredContent.native_write_sent, true, tool);
+          assert.equal(
+            result.structuredContent.manual_change_observed,
+            true,
+            tool,
+          );
+          if (observed.status === "conflict") {
+            assert.equal(
+              result.structuredContent.conflict_reason,
+              "manual_change",
+              tool,
+            );
+          }
+        }
+        await client.close();
+      }
+      assert.deepEqual(option.value, { doubleValue: observed.value });
+      assert.equal(
+        hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+          .length,
+        writesBefore,
+      );
+    });
+  }
 });
 
 test("a readable command stays non-restorable and is not retried after an unknown apply", async (t) => {
