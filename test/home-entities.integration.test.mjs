@@ -943,7 +943,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
               {
                 type: "code",
                 blockId: 7,
-                value: "return input.ready === true;",
+                code: "return input.ready === true;",
               },
               {
                 type: "condition",
@@ -953,7 +953,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
                   {
                     type: "code",
                     blockId: 9,
-                    value: "return state.allowed === true;",
+                    code: "return state.allowed === true;",
                   },
                   {
                     type: "characteristic",
@@ -1309,6 +1309,86 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     ),
     false,
   );
+});
+
+test("get_entity relations preserve an inactive BLOCK state", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const block = {
+    index: "inactive-device-block",
+    name: "Выключенное правило датчика",
+    type: "BLOCK",
+    predefined: false,
+    active: false,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({
+      blockId: 0,
+      targets: [
+        {
+          type: "if",
+          blockId: 1,
+          if: {
+            type: "characteristic",
+            blockId: 2,
+            aId: 32,
+            sId: 13,
+            cId: 15,
+            value: "false",
+            cond: "=",
+            trigger: false,
+            hs: "MotionSensor",
+            hc: "MotionDetected",
+            time: 0,
+            timeCond: "",
+          },
+          // biome-ignore lint/suspicious/noThenProperty: this is the native SprutHub BLOCK key.
+          then: [],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+          mode: "EVERY",
+        },
+      ],
+    }),
+  };
+  state.scenarios.push(block);
+  state.scenarioAssociations.set(32, [block]);
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      include: ["relations"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(
+    result.structuredContent.entity.relations.scenario_roles.length,
+    1,
+  );
+  const [role] = result.structuredContent.entity.relations.scenario_roles;
+  assert.deepEqual(
+    {
+      scenario_active: role.scenario_active,
+      role: role.role,
+      configuration_pointer: role.configuration_pointer,
+    },
+    {
+      scenario_active: false,
+      role: "condition",
+      configuration_pointer: "/configuration/value/targets/0/if",
+    },
+  );
+  const detail = await client.callTool({
+    name: role.next.tool,
+    arguments: role.next.arguments,
+  });
+  assert.equal(detail.isError, undefined, detail.content[0]?.text);
+  assert.equal(detail.structuredContent.selection.value.type, "characteristic");
 });
 
 test("empty accessory scenario index preserves unread code and BLOCK areas", async (t) => {
