@@ -3637,8 +3637,9 @@ function redactSensitiveText(text, role = "data") {
 }
 
 function containsSensitiveAssignment(text, role) {
-  // Every source range is data for redaction. The lexer is consulted only to
-  // distinguish real JavaScript case/ternary colons from colons inside data.
+  // Every source range is data for redaction. The lexer distinguishes syntax
+  // colons from credential assignments; declaration parameters stay visible
+  // only while they do not initialize a credential value.
   let javascriptTokens;
   const separators = /[:=]/g;
   for (const separator of text.matchAll(separators)) {
@@ -3650,7 +3651,25 @@ function containsSensitiveAssignment(text, role) {
       continue;
     }
     const candidate = assignmentCandidateBefore(text, separatorIndex);
-    if (!candidate || !isSensitiveAssignmentKey(candidate.value)) continue;
+    const hasSensitiveCandidate =
+      candidate && isSensitiveAssignmentKey(candidate.value);
+    if (
+      separator[0] === "=" &&
+      role === "typescript_declarations" &&
+      !hasSensitiveCandidate
+    ) {
+      javascriptTokens ??= indexedJavaScriptTokens(text);
+      if (
+        hasSensitiveTypeScriptParameterInitializer(
+          text,
+          javascriptTokens,
+          separatorIndex,
+        )
+      ) {
+        return true;
+      }
+    }
+    if (!hasSensitiveCandidate) continue;
     if (separator[0] === ":" && role !== "data") {
       javascriptTokens ??= indexedJavaScriptTokens(text);
       if (isKnownJavaScriptValueOrLabel(javascriptTokens, separatorIndex)) {
@@ -3664,6 +3683,45 @@ function containsSensitiveAssignment(text, role) {
       }
     }
     return true;
+  }
+  return false;
+}
+
+function hasSensitiveTypeScriptParameterInitializer(
+  text,
+  context,
+  separatorIndex,
+) {
+  const separatorTokenIndex = context.tokenIndexByStart.get(separatorIndex);
+  const separator = context.tokens[separatorTokenIndex];
+  if (separator?.type !== "Punctuator" || separator.value !== "=") return false;
+
+  const delimiterDepth = { ")": 0, "]": 0, "}": 0 };
+  const openerFor = { "(": ")", "[": "]", "{": "}" };
+  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+    const token = context.tokens[index];
+    if ([")", "]", "}"].includes(token.value)) {
+      delimiterDepth[token.value] += 1;
+      continue;
+    }
+    const closer = openerFor[token.value];
+    if (closer) {
+      if (delimiterDepth[closer] > 0) {
+        delimiterDepth[closer] -= 1;
+        continue;
+      }
+      if (token.value === "(") return false;
+    }
+    if (Object.values(delimiterDepth).some((depth) => depth > 0)) continue;
+    if (token.value === ",") return false;
+    if (token.value !== ":") continue;
+
+    const candidate = assignmentCandidateBefore(text, token.start);
+    return (
+      candidate !== null &&
+      isSensitiveAssignmentKey(candidate.value) &&
+      isTypeScriptParameterColon(context, token.start)
+    );
   }
   return false;
 }
