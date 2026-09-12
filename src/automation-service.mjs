@@ -111,20 +111,28 @@ export class AutomationService {
       };
     }
     if (input.operation === "room_create") {
-      parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+      if (input.target_ref !== undefined) {
+        parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+      }
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         contract: roomCreateContract(),
       };
     }
     if (input.operation === "virtual_light_group") {
-      parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+      if (input.target_ref !== undefined) {
+        parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+      }
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         contract: virtualLightGroupContract(),
       };
     }

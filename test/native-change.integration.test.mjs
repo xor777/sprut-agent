@@ -5141,19 +5141,22 @@ test("static room discovery does not relax target-dependent reads or preparation
       target_ref: characteristicRef,
     },
   });
-  assert.equal(entityContract.isError, undefined, entityContract.content[0]?.text);
+  assert.equal(
+    entityContract.isError,
+    undefined,
+    entityContract.content[0]?.text,
+  );
   assert.equal(entityContract.structuredContent.contract.type, "On");
 
-  await assert.rejects(
-    client.callTool({
-      name: "prepare_native_change",
-      arguments: {
-        operation: "room_create",
-        name: "Не создавать",
-        reason: "Отсутствует обязательная цель подготовки",
-      },
-    }),
-  );
+  const missingPreparationTarget = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      name: "Не создавать",
+      reason: "Отсутствует обязательная цель подготовки",
+    },
+  });
+  assert.equal(missingPreparationTarget.isError, true);
   assert.equal(
     hub.requests.some(({ room }) => room?.create),
     false,
