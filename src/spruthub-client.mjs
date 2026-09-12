@@ -101,7 +101,12 @@ export class SprutHubClient {
         required: homes.length !== 1,
         ...(homes.length === 1
           ? { default_home_ref: homeRef(homes[0].serial) }
-          : {}),
+          : {
+              options: homes.map((home) => ({
+                home_ref: homeRef(home.serial),
+                pin_value: home.serial,
+              })),
+            }),
       },
       freshness: freshness(observedAt),
     };
@@ -3129,8 +3134,9 @@ function invalidMessage() {
 function homeSelectionRequired() {
   return new SprutHubError(
     "home_selection_required",
-    "Select one SprutHub home before using an operation that is not home-qualified.",
-    "configure_home",
+    "Call list_homes, choose one exact home, follow selection.pin, restart the same MCP application, and retry this operation.",
+    "list_homes",
+    { next: { tool: "list_homes", arguments: {} } },
   );
 }
 

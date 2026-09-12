@@ -60,6 +60,16 @@ export class SprutHubConnection {
     return [...this.#secrets];
   }
 
+  homeSelectionSetup() {
+    const setup = credentialSetup(this.#env);
+    return {
+      file: setup.file,
+      field: "SPRUTHUB_SERIAL",
+      permissions: setup.permissions,
+      restart: setup.restart,
+    };
+  }
+
   getClient() {
     if (!this.#clientPromise) {
       const attempt = this.#createClient();

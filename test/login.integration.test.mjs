@@ -479,11 +479,7 @@ test("an installed multi-home profile explains and completes explicit home selec
   const directory = await mkdtemp(path.join(tmpdir(), "sprut multi-home-"));
   t.after(() => rm(directory, { recursive: true }));
   const configRoot = path.join(directory, "config");
-  const connectionFile = path.join(
-    configRoot,
-    "sprut-agent",
-    "connection.env",
-  );
+  const connectionFile = path.join(configRoot, "sprut-agent", "connection.env");
   await mkdir(path.dirname(connectionFile), { recursive: true });
   const baseProfile = [
     `SPRUTHUB_LOGIN=${login}`,

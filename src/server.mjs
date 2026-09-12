@@ -10,7 +10,13 @@ import {
   SprutHubConnection,
 } from "./spruthub-connection.mjs";
 
-const server = new McpServer({ name: "sprut-agent", version: "0.1.0" });
+const server = new McpServer(
+  { name: "sprut-agent", version: "0.1.4" },
+  {
+    instructions:
+      "Start with list_homes. Choose an exact returned home_ref for home-qualified reads such as inspect_home and read_services, and follow executable next tool calls from responses. If a tool requires a pinned home, follow list_homes selection.pin locally, restart the same MCP application, and retry. Keep SprutHub credentials only in the local connection.env described by credential_setup; never ask for or echo credential values. The optional spruthub-master skill provides deeper SprutHub advice beyond this basic MCP entry path.",
+  },
+);
 const connection = new SprutHubConnection({ env: process.env });
 let hubClient;
 let automationService;
@@ -28,6 +34,17 @@ const freshnessSchema = z.object({
   hubResponseReceivedAt: z.string(),
   measurementAt: z.string().nullable(),
 });
+const credentialSetupSchema = z.object({
+  file: z.string(),
+  required_fields: z.array(z.string()),
+  permissions: z.string(),
+  restart: z.string(),
+  secret_handling: z.string(),
+});
+const nextToolCallSchema = z.object({
+  tool: z.string(),
+  arguments: z.record(z.string(), z.unknown()),
+});
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -44,7 +61,14 @@ server.registerTool(
     inputSchema: {},
     annotations: readOnlyAnnotations,
   },
-  async () => runRoomTool(async () => (await getHubClient()).listHomes()),
+  async () =>
+    runRoomTool(async () => {
+      const result = await (await getHubClient()).listHomes();
+      if (result.selection.required) {
+        result.selection.pin = connection.homeSelectionSetup();
+      }
+      return result;
+    }),
 );
 
 server.registerTool(
@@ -160,6 +184,13 @@ server.registerTool(
       rooms: z.array(roomSchema).optional(),
       error: errorSchema,
       freshness: freshnessSchema.optional(),
+      credential_setup: credentialSetupSchema.optional(),
+      missing_field: z.string().optional(),
+      capability_status: z
+        .enum(["available", "insufficient_access", "unsupported", "unknown"])
+        .optional(),
+      requestSent: z.boolean().optional(),
+      next: nextToolCallSchema.optional(),
     },
     annotations: readOnlyAnnotations,
   },
@@ -669,8 +700,9 @@ async function getAutomationService() {
   if (client.serial === null) {
     throw new SprutHubError(
       "home_selection_required",
-      "Select one SprutHub home before preparing or applying an automation.",
-      "configure_home",
+      "Call list_homes, choose one exact home, follow selection.pin, restart the same MCP application, and retry this operation.",
+      "list_homes",
+      { next: { tool: "list_homes", arguments: {} } },
     );
   }
   automationService ??= new AutomationService({
