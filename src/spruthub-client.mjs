@@ -3538,13 +3538,13 @@ function normalizeScenarioConfiguration(scenario) {
     } catch {
       return {
         format: "invalid_json",
-        value: redactSensitiveText(scenario.data),
+        value: redactSensitiveText(scenario.data, false),
       };
     }
   }
   return {
     format: "code",
-    value: redactSensitiveText(scenario.data),
+    value: redactSensitiveText(scenario.data, true),
     content_origin: "spruthub_scenario_data",
   };
 }
@@ -3631,6 +3631,13 @@ function isSensitiveAssignmentKey(key) {
   ) {
     return true;
   }
+  if (
+    /^(?:apikey|apitoken|accesstoken|refreshtoken|clientsecret|wifipassword|privatekey)$/.test(
+      parts.join(""),
+    )
+  ) {
+    return true;
+  }
   return (
     last === "key" &&
     parts.some((part) => ["access", "api", "private", "secret"].includes(part))
@@ -3643,14 +3650,113 @@ function isSensitiveContainerKey(key) {
   );
 }
 
-function redactSensitiveText(text) {
+function redactSensitiveText(text, useJavaScriptContext = true) {
   const containsCredential =
-    /\bBearer\s+[^\s;"'<>]+/i.test(text) || containsSensitiveAssignment(text);
+    /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
+    containsSensitiveAssignment(text, useJavaScriptContext);
   return containsCredential ? "[REDACTED]" : text;
 }
 
-function containsSensitiveAssignment(text, inspectStringContents = true) {
-  const tokens = Array.from(jsTokens(text)).filter(
+function containsSensitiveAssignment(text, useJavaScriptContext) {
+  // Every source range is data for redaction. The lexer is consulted only to
+  // distinguish real JavaScript case/ternary colons from colons inside data.
+  let javascriptTokens;
+  const separators = /[:=]/g;
+  for (const separator of text.matchAll(separators)) {
+    const separatorIndex = separator.index;
+    if (
+      separator[0] === "=" &&
+      !isPlainAssignmentEquals(text, separatorIndex)
+    ) {
+      continue;
+    }
+    const candidate = assignmentCandidateBefore(text, separatorIndex);
+    if (!candidate || !isSensitiveAssignmentKey(candidate.value)) continue;
+    if (separator[0] === ":" && useJavaScriptContext) {
+      javascriptTokens ??= indexedJavaScriptTokens(text);
+      if (isKnownJavaScriptValueOrLabel(javascriptTokens, separatorIndex)) {
+        continue;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function assignmentCandidateBefore(text, separatorIndex) {
+  let end = skipWhitespaceBackward(text, separatorIndex);
+  let bracketed = false;
+  if (text[end - 1] === "]") {
+    bracketed = true;
+    end = skipWhitespaceBackward(text, end - 1);
+  }
+  const candidate =
+    quotedAssignmentCandidate(text, end) ?? bareAssignmentCandidate(text, end);
+  if (!candidate || !bracketed) return candidate;
+  const beforeCandidate = skipWhitespaceBackward(text, candidate.start);
+  return text[beforeCandidate - 1] === "[" ? candidate : null;
+}
+
+function quotedAssignmentCandidate(text, end) {
+  const quote = text[end - 1];
+  if (quote !== '"' && quote !== "'") return null;
+  const escapedDelimiter = countBackslashesBefore(text, end - 1) % 2 === 1;
+  const closeStart = escapedDelimiter ? end - 2 : end - 1;
+  for (let index = closeStart - 1; index >= 0; index -= 1) {
+    if (text[index] !== quote) continue;
+    const escaped = countBackslashesBefore(text, index) % 2 === 1;
+    if (escaped !== escapedDelimiter) continue;
+    const start = escapedDelimiter ? index - 1 : index;
+    if (start < 0) return null;
+    return {
+      start,
+      value: text
+        .slice(index + 1, closeStart)
+        .replace(/\\(?:\r\n|[\s\S])/g, (value) => value.slice(1)),
+    };
+  }
+  return null;
+}
+
+function bareAssignmentCandidate(text, end) {
+  let start = end;
+  while (start > 0 && /[\w$-]/u.test(text[start - 1])) {
+    start -= 1;
+  }
+  return start === end ? null : { start, value: text.slice(start, end) };
+}
+
+function skipWhitespaceBackward(text, end) {
+  while (end > 0 && /\s/u.test(text[end - 1])) end -= 1;
+  return end;
+}
+
+function countBackslashesBefore(text, index) {
+  let count = 0;
+  while (index - count - 1 >= 0 && text[index - count - 1] === "\\") {
+    count += 1;
+  }
+  return count;
+}
+
+function isPlainAssignmentEquals(text, index) {
+  return (
+    !/[=!<>+\-*/%&|^?]/u.test(text[index - 1] ?? "") &&
+    !/[=>]/u.test(text[index + 1] ?? "")
+  );
+}
+
+function indexedJavaScriptTokens(text) {
+  let offset = 0;
+  const tokens = Array.from(jsTokens(text), (token) => {
+    const indexed = {
+      ...token,
+      start: offset,
+      end: offset + token.value.length,
+    };
+    offset = indexed.end;
+    return indexed;
+  }).filter(
     ({ type }) =>
       ![
         "HashbangComment",
@@ -3660,79 +3766,69 @@ function containsSensitiveAssignment(text, inspectStringContents = true) {
         "WhiteSpace",
       ].includes(type),
   );
+  return {
+    tokens,
+    tokenIndexByStart: new Map(
+      tokens.map((token, index) => [token.start, index]),
+    ),
+  };
+}
 
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (
-      inspectStringContents &&
-      token.type === "StringLiteral" &&
-      containsSensitiveAssignment(stringTokenContents(token), false)
-    ) {
-      return true;
+function isKnownJavaScriptValueOrLabel(context, separatorIndex) {
+  const separatorTokenIndex = context.tokenIndexByStart.get(separatorIndex);
+  const separator = context.tokens[separatorTokenIndex];
+  if (separator?.type !== "Punctuator" || separator.value !== ":") return false;
+  return (
+    isJavaScriptTernaryColon(context.tokens, separatorTokenIndex) ||
+    isJavaScriptCaseLabel(context.tokens, separatorTokenIndex)
+  );
+}
+
+function isJavaScriptTernaryColon(tokens, separatorTokenIndex) {
+  let delimiterDepth = 0;
+  let nestedTernaries = 0;
+  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+    const value = tokens[index].value;
+    if ([")", "]", "}"].includes(value)) {
+      delimiterDepth += 1;
+      continue;
     }
-    if (token.type !== "Punctuator") continue;
-
-    if (token.value === ":") {
-      const candidate = assignmentCandidateBefore(tokens, index - 1);
-      if (
-        candidate &&
-        isSensitiveAssignmentKey(candidate.value) &&
-        !isKnownValueOrLabel(tokens[candidate.start - 1])
-      ) {
-        return true;
-      }
+    if (["(", "[", "{"].includes(value)) {
+      if (delimiterDepth === 0) return false;
+      delimiterDepth -= 1;
+      continue;
     }
-
-    if (token.value === "=") {
-      const candidate = assignmentCandidateBeforeEquals(tokens, index - 1);
-      if (candidate && isSensitiveAssignmentKey(candidate.value)) return true;
+    if (delimiterDepth > 0) continue;
+    if (value === ":") {
+      nestedTernaries += 1;
+    } else if (value === "?") {
+      if (nestedTernaries === 0) return true;
+      nestedTernaries -= 1;
+    } else if (value === ";") {
+      return false;
     }
   }
   return false;
 }
 
-function assignmentCandidateBeforeEquals(tokens, end) {
-  if (tokens[end]?.value !== "]") {
-    return assignmentCandidateBefore(tokens, end);
+function isJavaScriptCaseLabel(tokens, separatorTokenIndex) {
+  let delimiterDepth = 0;
+  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+    const value = tokens[index].value;
+    if ([")", "]", "}"].includes(value)) {
+      delimiterDepth += 1;
+      continue;
+    }
+    if (["(", "[", "{"].includes(value)) {
+      if (delimiterDepth === 0) return false;
+      delimiterDepth -= 1;
+      continue;
+    }
+    if (delimiterDepth > 0) continue;
+    if (value === "case") return true;
+    if ([":", ";", "?"].includes(value)) return false;
   }
-  const candidate = assignmentCandidateBefore(tokens, end - 1);
-  return candidate && tokens[candidate.start - 1]?.value === "["
-    ? candidate
-    : null;
-}
-
-function assignmentCandidateBefore(tokens, end) {
-  const token = tokens[end];
-  if (token?.type === "StringLiteral") {
-    return { start: end, value: stringTokenContents(token) };
-  }
-  if (token?.type !== "IdentifierName") return null;
-
-  let start = end;
-  while (
-    tokens[start - 1]?.value === "-" &&
-    tokens[start - 2]?.type === "IdentifierName"
-  ) {
-    start -= 2;
-  }
-  return {
-    start,
-    value: tokens
-      .slice(start, end + 1)
-      .map(({ value }) => value)
-      .join(""),
-  };
-}
-
-function stringTokenContents(token) {
-  const end = token.closed ? -1 : undefined;
-  return token.value
-    .slice(1, end)
-    .replace(/\\(?:\r\n|[\s\S])/g, (escaped) => escaped.slice(1));
-}
-
-function isKnownValueOrLabel(previousToken) {
-  return previousToken?.value === "?" || previousToken?.value === "case";
+  return false;
 }
 
 function timeoutError() {

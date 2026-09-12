@@ -2086,15 +2086,13 @@ test("scenario reads use lexical context for credential-shaped text", async (t) 
       secret: "collapsed-escaped-secret-must-not-leak",
       format: "code",
     },
-    ...["refreshtoken", "wifipassword", "privatekey"].map(
-      (name, index) => ({
-        index: `collapsed-published-credential-${index}`,
-        type: "GLOBAL",
-        data: `config.${name} = "collapsed-published-${index}-secret-must-not-leak";`,
-        secret: `collapsed-published-${index}-secret-must-not-leak`,
-        format: "code",
-      }),
-    ),
+    ...["refreshtoken", "wifipassword", "privatekey"].map((name, index) => ({
+      index: `collapsed-published-credential-${index}`,
+      type: "GLOBAL",
+      data: `config.${name} = "collapsed-published-${index}-secret-must-not-leak";`,
+      secret: `collapsed-published-${index}-secret-must-not-leak`,
+      format: "code",
+    })),
     ...["secret_key", "secretKey", "SECRET_KEY", "aws_secret_access_key"].map(
       (name, index) => ({
         index: `compound-credential-${index}`,
