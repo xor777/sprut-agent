@@ -5721,7 +5721,10 @@ test("get_scenario_sdk fails closed without exposing declaration parser errors",
   assert.equal(result.isError, undefined, result.content[0]?.text);
   assert.equal(result.structuredContent.sdk, "[REDACTED]");
   assert.equal(result.structuredContent.sdk_complete, false);
-  assert.doesNotMatch(result.content[0].text, /unexpected|parser|unterminated/i);
+  assert.doesNotMatch(
+    result.content[0].text,
+    /unexpected|parser|unterminated/i,
+  );
 });
 
 test("credential-like native text outside the SDK declaration role stays hidden", async (t) => {
