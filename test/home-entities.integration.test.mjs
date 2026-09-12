@@ -1928,6 +1928,88 @@ test("scenario reads keep sensitive words outside credential assignments", async
   assert.match(result.content[0].text, /secretary/);
 });
 
+test("scenario reads use lexical context for credential-shaped text", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const sensitiveScenarios = [
+    {
+      index: "credential-after-line-comment",
+      type: "GLOBAL",
+      data: 'const config = {\n  room: "kitchen", // credentials\n  token: "comment-secret-must-not-leak"\n};',
+      secret: "comment-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "quoted-credential-after-comment",
+      type: "BLOCK",
+      data: '{\n  // credentials\n  "api_key": "quoted-comment-secret-must-not-leak"',
+      secret: "quoted-comment-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "credential-on-later-native-line",
+      type: "BLOCK",
+      data: "name: kitchen\nAuthorization: Basic later-line-secret-must-not-leak",
+      secret: "later-line-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "credential-inside-string",
+      type: "GLOBAL",
+      data: 'const header = "Authorization: Basic string-secret-must-not-leak";',
+      secret: "string-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-inside-call-string",
+      type: "GLOBAL",
+      data: 'log.info("api_key: call-string-secret-must-not-leak");',
+      secret: "call-string-secret-must-not-leak",
+      format: "code",
+    },
+    ...["secret_key", "secretKey", "SECRET_KEY", "aws_secret_access_key"].map(
+      (name, index) => ({
+        index: `compound-credential-${index}`,
+        type: "GLOBAL",
+        data: `const ${name} = "compound-${index}-secret-must-not-leak";`,
+        secret: `compound-${index}-secret-must-not-leak`,
+        format: "code",
+      }),
+    ),
+  ];
+  state.scenarios.push(
+    ...sensitiveScenarios.map(({ index, type, data }) => ({
+      index,
+      name: index,
+      type,
+      predefined: false,
+      active: true,
+      data,
+    })),
+  );
+  const client = await startClient(t, hub);
+
+  for (const scenario of sensitiveScenarios) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/${scenario.index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(
+      result.structuredContent.entity.configuration.format,
+      scenario.format,
+    );
+    assert.equal(
+      result.structuredContent.entity.configuration.value,
+      "[REDACTED]",
+    );
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(scenario.secret));
+  }
+});
+
 test("scenario configuration keeps one useful value across native formats", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
