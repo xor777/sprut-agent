@@ -214,6 +214,28 @@ function blockData({ delay = 60_000, nested = false } = {}) {
   };
 }
 
+function blockNodeAtPointer(data, pointer) {
+  return pointer
+    .split("/")
+    .slice(1)
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .reduce((value, part) => value?.[part], data);
+}
+
+function independentlyEnabledPausedAction(data, pointer, now) {
+  const wrapper = blockNodeAtPointer(data, pointer);
+  assert.equal(wrapper.type, "if");
+  assert.equal(wrapper.if.type, "condition");
+  assert.equal(wrapper.if.conditions.length, 1);
+  const code = wrapper.if.conditions[0];
+  assert.equal(code.type, "code");
+  const match = /^return Date\.now\(\) >= (\d+);(?: \/\* [^*]+ \*\/)?$/.exec(
+    code.code,
+  );
+  assert.ok(match, `unexpected native deadline condition: ${code.code}`);
+  return now >= Number(match[1]) ? wrapper.then[0] : undefined;
+}
+
 function withRuntimeBlockFields(data) {
   let nextBlockId = 1;
   const childFields = {
@@ -402,6 +424,7 @@ async function startHub() {
     behavior: {
       closeAfterCreate: false,
       rejectNextScenarioCreate: false,
+      closeAfterScenarioUpdate: false,
       closeAfterCharacteristicUpdate: false,
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
@@ -906,6 +929,11 @@ async function startHub() {
           }
         }
         state.behavior.ignoreNextUpdate = false;
+        if (state.behavior.closeAfterScenarioUpdate) {
+          state.behavior.closeAfterScenarioUpdate = false;
+          socket.close();
+          return;
+        }
         result = {
           scenario: {
             update: {},
@@ -2319,6 +2347,243 @@ test("scenario get rejection needs a valid catalog absence before it changes lif
         scenario?.create || scenario?.update || scenario?.delete,
     ).length,
     writesBeforeReads,
+  );
+});
+
+test("a BLOCK action pause expires on the hub after the MCP client stops", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const actionPointer = "/targets/0/then/1";
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: actionPointer,
+      duration_seconds: 1,
+      reason: "Временно не выключать свет",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.pause_effect, {
+    status: "not_started",
+    action_pointer: actionPointer,
+    duration_seconds: 1,
+    starts_on_first_apply: true,
+  });
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.pause_effect.status, "active");
+  const deadline = Date.parse(applied.structuredContent.pause_effect.expires_at);
+  assert.ok(deadline > Date.now());
+
+  const nativeData = JSON.parse(hub.state.scenarios[0].data);
+  assert.deepEqual(nativeData.vendorConfiguration, { preserved: true });
+  assert.deepEqual(nativeData.targets[0].then[0], {
+    ...withRuntimeBlockFields({ targets: [setAction()] }).targets[0],
+  });
+  assert.equal(
+    independentlyEnabledPausedAction(nativeData, actionPointer, deadline - 1),
+    undefined,
+  );
+  assert.equal(
+    independentlyEnabledPausedAction(nativeData, actionPointer, deadline).time,
+    60_000,
+  );
+
+  await firstClient.close();
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.max(0, deadline - Date.now() + 25)),
+  );
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterDeadline = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(afterDeadline.structuredContent.status, "applied");
+  assert.equal(afterDeadline.structuredContent.pause_effect.status, "expired");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+    "read-only reconciliation must not clean the inert wrapper",
+  );
+
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: scenarioRef },
+  });
+  assert.equal(history.structuredContent.changes[0].recorded_status, "applied");
+  assert.equal(history.structuredContent.changes[0].effect_status, "expired");
+
+  const currentWithManualEdit = JSON.parse(hub.state.scenarios[0].data);
+  blockNodeAtPointer(currentWithManualEdit, actionPointer).then[0].time = 55_000;
+  const ordinary = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: currentWithManualEdit,
+      reason: "Изменить другое обычное значение BLOCK",
+    },
+  });
+  assert.equal(ordinary.isError, undefined, ordinary.content[0]?.text);
+  assert.equal(
+    blockNodeAtPointer(ordinary.structuredContent.diff.data.to, actionPointer)
+      .type,
+    "delay",
+  );
+  await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: ordinary.structuredContent.change_ref },
+  });
+  assert.equal(
+    blockNodeAtPointer(
+      JSON.parse(hub.state.scenarios[0].data),
+      actionPointer,
+    ).time,
+    55_000,
+  );
+});
+
+test("a repeated BLOCK action pause keeps one wrapper and one absolute window", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const actionPointer = "/targets/0/then/1";
+  const first = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: actionPointer,
+      duration_seconds: 120,
+      reason: "Первое временное исключение",
+    },
+  });
+  hub.state.behavior.closeAfterScenarioUpdate = true;
+  const recovered = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  const firstExpiry = recovered.structuredContent.pause_effect.expires_at;
+  assert.equal(recovered.structuredContent.status, "applied");
+  assert.equal(recovered.structuredContent.native_acknowledged, false);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeatedApply = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(repeatedApply.structuredContent.pause_effect.expires_at, firstExpiry);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+
+  const second = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: actionPointer,
+      duration_seconds: 180,
+      reason: "Продлить новым поручением",
+    },
+  });
+  const secondApplied = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(secondApplied.structuredContent.status, "applied");
+  const current = JSON.parse(hub.state.scenarios[0].data);
+  assert.equal(blockNodeAtPointer(current, actionPointer).type, "if");
+  assert.equal(
+    blockNodeAtPointer(current, `${actionPointer}/then/0`).type,
+    "delay",
+  );
+
+  const staleRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(staleRestore.structuredContent.status, "superseded");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    2,
+    "the older restore must not cancel the newer window",
+  );
+
+  const manuallyEdited = JSON.parse(hub.state.scenarios[0].data);
+  blockNodeAtPointer(manuallyEdited, `${actionPointer}/then/0`).time = 50_000;
+  hub.state.scenarios[0].data = JSON.stringify(manuallyEdited);
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    blockNodeAtPointer(
+      JSON.parse(hub.state.scenarios[0].data),
+      actionPointer,
+    ).time,
+    50_000,
+  );
+});
+
+test("BLOCK action pause rejects non-actions and preserves an edited controller", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  for (const actionPointer of [
+    "/targets/0/if/conditions/0",
+    "/targets/0/then/1/time",
+    "/targets/9",
+  ]) {
+    const refused = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_action_pause",
+        target_ref: scenarioRef,
+        action_pointer: actionPointer,
+        duration_seconds: 60,
+        reason: "Недопустимый указатель",
+      },
+    });
+    assert.equal(refused.isError, true);
+    assert.equal(refused.structuredContent.error.code, "invalid_action_pointer");
+  }
+
+  const pause = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/0/then/1",
+      duration_seconds: 60,
+      reason: "Проверить владение контейнером",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: pause.structuredContent.change_ref },
+  });
+  const edited = JSON.parse(hub.state.scenarios[0].data);
+  blockNodeAtPointer(edited, "/targets/0/then/1").else = [setAction()];
+  hub.state.scenarios[0].data = JSON.stringify(edited);
+  const refusedRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: pause.structuredContent.change_ref },
+  });
+  assert.equal(refusedRestore.structuredContent.status, "conflict");
+  assert.equal(refusedRestore.structuredContent.conflict_reason, "pause_controller_changed");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
   );
 });
 
