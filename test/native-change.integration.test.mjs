@@ -5708,6 +5708,22 @@ test("get_scenario_sdk hides credential initializers across TypeScript type synt
   assert.equal(ordinaryDefault.structuredContent.sdk_complete, true);
 });
 
+test("get_scenario_sdk fails closed without exposing declaration parser errors", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarioSdk = `${scenarioSdk}\ninterface Broken { password(password: String): Mail;`;
+
+  const result = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.sdk, "[REDACTED]");
+  assert.equal(result.structuredContent.sdk_complete, false);
+  assert.doesNotMatch(result.content[0].text, /unexpected|parser|unterminated/i);
+});
+
 test("credential-like native text outside the SDK declaration role stays hidden", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
