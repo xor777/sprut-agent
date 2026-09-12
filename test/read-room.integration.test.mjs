@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
-import { SprutHubClient } from "../src/spruthub-client.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -418,22 +417,6 @@ async function startMcpClient(t, hub, environment = {}) {
   });
 
   await client.connect(transport);
-  return client;
-}
-
-function startLegacyRoomClient(t, hub) {
-  const client = new SprutHubClient({
-    url: hub.url,
-    token: "synthetic-test-token",
-    serial: "test-hub",
-    cid: "sprut-agent-test",
-    timeoutMs: 250,
-  });
-  t.after(async () => {
-    await client.close();
-    for (const socket of hub.server.clients ?? []) socket.terminate();
-    await new Promise((resolve) => hub.server.close(resolve));
-  });
   return client;
 }
 
@@ -1326,14 +1309,12 @@ test("observed real-hub projection keeps both temperature service contexts", asy
     rooms: roomExchange.result.room.list.rooms,
     accessories: accessoryExchange.result.accessory.list.accessories,
   });
-  const client = startLegacyRoomClient(t, hub);
+  const client = await startMcpClient(t, hub);
+  const roomRef = `spruthub://hub/test-hub/room/${roomExchange.result.room.list.rooms[0].id}`;
+  const result = await readRoomServices(client, roomRef);
 
-  const catalog = await client.listRooms();
-  const selectedRef = catalog.rooms[0].ref;
-  const result = await client.readRoom(selectedRef);
-
-  assert.equal(result.devices.length, 1);
-  const services = result.devices[0].services;
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const services = result.structuredContent.services;
   assert.deepEqual(
     services.map(({ name, type, readings }) => ({
       name,
@@ -1360,7 +1341,7 @@ test("observed real-hub projection keeps both temperature service contexts", asy
     ],
   );
   assert.notEqual(services[0].readings[0].ref, services[1].readings[0].ref);
-  assert.deepEqual(hub.requests[2].params, accessoryExchange.params);
+  assert.deepEqual(hub.requests[1].params, accessoryExchange.params);
 });
 
 test("observed multisensor projection keeps readable native enum meaning", async (t) => {
@@ -1377,15 +1358,29 @@ test("observed multisensor projection keeps readable native enum meaning", async
     rooms: [roomExchange.result.room.get],
     accessories: [observedAccessory],
   });
-  const client = startLegacyRoomClient(t, hub);
+  const client = await startMcpClient(t, hub);
   const read = async () => {
-    const result = await client.readRoom("spruthub://hub/test-hub/room/20");
-    return result.devices[0];
+    const result = await readRoomServices(
+      client,
+      "spruthub://hub/test-hub/room/20",
+    );
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return result.structuredContent;
   };
-  const readingByType = (device, type) =>
-    device.services
+  const readingByType = (view, type) => {
+    const reading = view.services
       .flatMap(({ readings }) => readings)
       .find((reading) => reading.type === type);
+    return {
+      ref: reading.ref,
+      name: reading.name,
+      type: reading.type,
+      value: reading.value,
+      unit: reading.unit,
+      ...(Object.hasOwn(reading, "enum") ? { enum: reading.enum } : {}),
+      measured_at: reading.measured_at,
+    };
+  };
 
   const chargingControl = hub.state.accessories[0].services
     .flatMap(({ characteristics = [] }) => characteristics)
@@ -1557,7 +1552,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         type: "MotionDetected",
         value: false,
         unit: null,
-        measuredAt: null,
+        measured_at: null,
       },
       light: {
         ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/513",
@@ -1565,7 +1560,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         type: "CurrentAmbientLightLevel",
         value: 100,
         unit: "lux",
-        measuredAt: null,
+        measured_at: null,
       },
       batteryLevel: {
         ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/515",
@@ -1573,7 +1568,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         type: "BatteryLevel",
         value: 60,
         unit: "%",
-        measuredAt: null,
+        measured_at: null,
       },
       lowBattery: {
         ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/516",
@@ -1582,7 +1577,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         value: 0,
         unit: null,
         enum: { key: "BATTERY_LEVEL_NORMAL", name: "Нет" },
-        measuredAt: null,
+        measured_at: null,
       },
       charging: {
         ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
@@ -1591,7 +1586,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         value: 2,
         unit: null,
         enum: { key: "NOT_CHARGEABLE", name: "Не заряжаемый" },
-        measuredAt: null,
+        measured_at: null,
       },
       checkedMismatch: {
         ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
@@ -1600,7 +1595,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         value: 1,
         unit: null,
         enum: { key: "CHARGING", name: "Да" },
-        measuredAt: null,
+        measured_at: null,
       },
       unknown: {
         ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
@@ -1609,7 +1604,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         value: 99,
         unit: null,
         enum: null,
-        measuredAt: null,
+        measured_at: null,
       },
     },
   );

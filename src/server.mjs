@@ -561,7 +561,7 @@ server.registerTool(
   {
     title: "Read SprutHub services in one room or home",
     description:
-      "Read a compact, byte-bounded page of native services and their readable current values in one explicitly selected home or room. Use this before opening individual entities when exploring an area. service_types are exact native type names and match with OR semantics; observed_service_types lists the native types actually present in the scope. Each service stays attached to its physical accessory and room. Values preserve false, zero, unknown, native enum meaning, units, availability, response freshness, and unknown measurement time. Follow page.next_cursor until null; each page is a fresh read, not an atomic home snapshot. Use get_entity only for the detailed contract or settings of a selected ref.",
+      "Read a compact, byte-bounded page of native services and their readable current values in one explicitly selected home or room. Use this before opening individual entities when exploring an area. service_types are exact native type names and match with OR semantics; observed_service_types lists the native types actually present in the scope. Each service stays attached to its physical accessory and room. Values preserve false, zero, unknown, native enum meaning, units, availability, response freshness, and unknown measurement time. Execute the returned next action until it is null, including the safe restart returned for invalid_cursor or stale_cursor; each page is a fresh read, not an atomic home snapshot. Use get_entity only for the detailed contract or settings of a selected ref.",
     inputSchema: {
       home_ref: z
         .string()

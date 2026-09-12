@@ -662,78 +662,6 @@ export class SprutHubClient {
     };
   }
 
-  async readRoom(roomReference) {
-    let parsedRef;
-    try {
-      parsedRef = parseEntityRef(roomReference);
-    } catch {
-      throw invalidRoomRef();
-    }
-    if (parsedRef.kind !== "room") {
-      throw invalidRoomRef();
-    }
-    const roomId = parsedRef.roomId;
-    const deadline = Date.now() + this.timeoutMs;
-    if (this.serial === null || parsedRef.serial !== this.serial) {
-      await this.#requireHome(parsedRef.serial, deadline);
-    }
-    const roomResponse = await this.#request(
-      { room: { get: { id: roomId } } },
-      deadline,
-      { serial: parsedRef.serial },
-    );
-    const roomContainer = roomResponse.result?.room;
-    if (!roomContainer || !("get" in roomContainer)) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible room response.",
-      );
-    }
-    const room = roomContainer.get;
-    if (room === null) {
-      throw new SprutHubError(
-        "room_not_found",
-        "The selected SprutHub room was not found.",
-        "list_rooms",
-      );
-    }
-    validateRoom(room, roomId);
-
-    const accessoriesResponse = await this.#request(
-      {
-        accessory: {
-          list: { roomId, expand: "services,characteristics" },
-        },
-      },
-      deadline,
-      { serial: parsedRef.serial },
-    );
-    const accessories =
-      accessoriesResponse.result?.accessory?.list?.accessories;
-    if (!Array.isArray(accessories)) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible accessory list.",
-      );
-    }
-
-    return {
-      status: "ok",
-      room: {
-        ref: roomRef(parsedRef.serial, room.id),
-        name: room.name,
-      },
-      devices: accessories
-        .map(validateAccessory)
-        .filter(({ roomId }) => roomId === room.id)
-        .map((accessory) => normalizeAccessory(parsedRef.serial, accessory)),
-      freshness: {
-        hubResponseReceivedAt: new Date().toISOString(),
-        measurementAt: null,
-      },
-    };
-  }
-
   async inspectAutomation({ source, target }) {
     const deadline = Date.now() + this.timeoutMs;
     const selections = {};
@@ -2876,14 +2804,6 @@ function invalidEntityRef(action = "inspect_home") {
   );
 }
 
-function invalidRoomRef() {
-  return new SprutHubError(
-    "invalid_room_ref",
-    "Use a home-qualified room reference returned by list_rooms or inspect_home.",
-    "inspect_home",
-  );
-}
-
 function invalidServiceScope() {
   return new SprutHubError(
     "invalid_service_scope",
@@ -3989,25 +3909,6 @@ function isStableId(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function normalizeAccessory(serial, accessory) {
-  return {
-    ref: accessoryRef(serial, accessory.id),
-    name: accessory.name,
-    available: accessory.online,
-    services: (accessory.services ?? []).map((service) => ({
-      ref: serviceRef(serial, accessory.id, service.sId),
-      name: service.name,
-      type: service.type,
-      readings: normalizeReadableCharacteristics(
-        serial,
-        accessory,
-        service,
-        "room",
-      ),
-    })),
-  };
-}
-
 function normalizeServiceReading(serial, room, accessory, service, observedAt) {
   return {
     ref: serviceRef(serial, accessory.id, service.sId),
@@ -4029,12 +3930,7 @@ function normalizeServiceReading(serial, room, accessory, service, observedAt) {
       available: accessory.online,
     },
     observed_at: observedAt,
-    readings: normalizeReadableCharacteristics(
-      serial,
-      accessory,
-      service,
-      "services",
-    ),
+    readings: normalizeReadableCharacteristics(serial, accessory, service),
   };
 }
 
@@ -4044,7 +3940,7 @@ function compareServiceRefs(left, right) {
   return 0;
 }
 
-function normalizeReadableCharacteristics(serial, accessory, service, view) {
+function normalizeReadableCharacteristics(serial, accessory, service) {
   return (service.characteristics ?? [])
     .filter(({ control }) => control.read === true)
     .map((characteristic) => {
@@ -4069,13 +3965,11 @@ function normalizeReadableCharacteristics(serial, accessory, service, view) {
             ? redactSensitiveText(control.unit)
             : null,
       };
-      return view === "services"
-        ? {
-            ...reading,
-            value_status: value.found ? "known" : "unknown",
-            measured_at: null,
-          }
-        : { ...reading, measuredAt: null };
+      return {
+        ...reading,
+        value_status: value.found ? "known" : "unknown",
+        measured_at: null,
+      };
     });
 }
 
