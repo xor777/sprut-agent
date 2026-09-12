@@ -3030,6 +3030,18 @@ test("an explicit empty characteristic choice set remains restrictive", async (t
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.deepEqual(contract.structuredContent.contract.valid_values, []);
 
+  const unconstrained = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: climateSettings[0].ref,
+    },
+  });
+  assert.equal(
+    Object.hasOwn(unconstrained.structuredContent.contract, "valid_values"),
+    false,
+  );
+
   const rejected = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -3077,6 +3089,54 @@ test("apply rechecks native characteristic choice availability before writing", 
   );
 });
 
+test("restore rechecks native characteristic baseline availability before writing", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[1];
+  const control = climateControl(hub, setting.type);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 2,
+      reason: "Не возвращать ставший недоступным исходный режим",
+    },
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  control.validValues.find(({ value }) => value.intValue === 1).checked = false;
+
+  const observed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.isError, undefined, observed.content[0]?.text);
+  assert.equal(observed.structuredContent.restore_supported, false);
+  assert.equal(
+    observed.structuredContent.restore_limitation.code,
+    "baseline_not_writable",
+  );
+  const writesBeforeRestore = hub.requests.filter(
+    ({ characteristic }) => characteristic?.update,
+  ).length;
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, true);
+  assert.equal(restored.structuredContent.error.code, "restore_unsupported");
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesBeforeRestore,
+  );
+  assert.deepEqual(control.value, { intValue: 2 });
+});
+
 test("ordinary decimal native steps accept their represented values", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   installClimateFixture(hub);
@@ -3106,6 +3166,17 @@ test("ordinary decimal native steps accept their represented values", async (t) 
     to: 21.7,
     kind: "doubleValue",
   });
+  const offStep = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 21.75,
+      reason: "Не ослаблять нативный шаг",
+    },
+  });
+  assert.equal(offStep.isError, true);
+  assert.equal(offStep.structuredContent.error.code, "invalid_native_value");
 });
 
 test("an unchanged command is still delivered to resynchronize external state", async (t) => {

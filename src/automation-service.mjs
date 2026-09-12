@@ -8,6 +8,8 @@ import {
 } from "./block-model.mjs";
 import {
   inspectNativeOption,
+  isSelectableNativeValidValue,
+  nativeScalarContract,
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import {
@@ -87,23 +89,35 @@ export class AutomationService {
         target,
         input.option_key,
       );
+      const state = characteristicOptionState(option);
+      const restoration = scalarValueRestoration(state.contract, state.value);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
         option_key: input.option_key,
-        contract: characteristicOptionContract(option),
+        contract: state.contract,
+        restore_supported: restoration.supported,
+        ...(restoration.limitation
+          ? { restore_limitation: restoration.limitation }
+          : {}),
       };
     }
     if (input.operation === "window_option") {
       const target = parseWindowRef(input.target_ref, this.hubSerial);
       const { option } = await this.#readWindowOption(target, input.option_key);
+      const state = windowOptionState(option);
+      const restoration = scalarValueRestoration(state.contract, state.value);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
         option_key: input.option_key,
-        contract: windowOptionContract(option),
+        contract: state.contract,
+        restore_supported: restoration.supported,
+        ...(restoration.limitation
+          ? { restore_limitation: restoration.limitation }
+          : {}),
       };
     }
     if (input.operation === "logic_assignment") {
@@ -130,12 +144,18 @@ export class AutomationService {
     if (input.operation === "logic_option") {
       const target = parseLogicRef(input.target_ref, this.hubSerial);
       const { option } = await this.#readLogicOption(target, input.option_key);
+      const state = logicOptionState(option);
+      const restoration = scalarValueRestoration(state.contract, state.value);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
         option_key: input.option_key,
-        contract: logicOptionContract(option),
+        contract: state.contract,
+        restore_supported: restoration.supported,
+        ...(restoration.limitation
+          ? { restore_limitation: restoration.limitation }
+          : {}),
       };
     }
     if (input.operation === "accessory_placement") {
@@ -3492,6 +3512,7 @@ export class AutomationService {
         "prepare_native_change",
       );
     }
+    change.contract = contract;
     return {
       value: typedNativeValue(characteristic.control.value),
       contract,
@@ -3690,7 +3711,15 @@ export class AutomationService {
       (await this.#readNativeValueState(change, {
         requireWrite: true,
       }));
-    validateCharacteristicValue(change.baseline_value.value, contract);
+    const restoration = nativeValueRestoration({ ...change, contract });
+    if (!restoration.supported) {
+      throw new SprutHubError(
+        "restore_unsupported",
+        restoration.limitation?.message ??
+          "This native value cannot be restored automatically.",
+        "get_native_change",
+      );
+    }
     const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
       change,
       current,
@@ -6104,7 +6133,8 @@ function characteristicContract(control, { requireWrite = true } = {}) {
       "SprutHub returned invalid native valid values.",
     );
   }
-  const validValues = (control.validValues ?? []).map((validValue) => {
+  const scalarContract = nativeScalarContract(control, current.kind);
+  const validValues = (control.validValues ?? []).flatMap((validValue) => {
     const typed = typedNativeValue(validValue?.value);
     if (typed.kind !== current.kind) {
       throw new SprutHubError(
@@ -6112,30 +6142,20 @@ function characteristicContract(control, { requireWrite = true } = {}) {
         "The selected characteristic has incompatible native valid values.",
       );
     }
-    return {
+    const projected = {
       key: validValue.key,
       name: validValue.name,
       ...typed,
     };
+    return isSelectableNativeValidValue(validValue, typed, scalarContract)
+      ? [projected]
+      : [];
   });
   return {
     type: control.type,
-    kind: current.kind,
-    ...(typeof control.minValue === "number" ? { min: control.minValue } : {}),
-    ...(typeof control.maxValue === "number" ? { max: control.maxValue } : {}),
-    ...(typeof control.minStep === "number" ? { step: control.minStep } : {}),
-    ...(typeof control.minLen === "number"
-      ? { min_length: control.minLen }
-      : {}),
-    ...(typeof control.maxLen === "number"
-      ? { max_length: control.maxLen }
-      : {}),
-    ...(validValues.length > 0 ? { valid_values: validValues } : {}),
+    ...scalarContract,
+    ...(control.validValues !== undefined ? { valid_values: validValues } : {}),
   };
-}
-
-function windowOptionContract(option, { requireWrite = true } = {}) {
-  return windowOptionState(option, { requireWrite }).contract;
 }
 
 function logicAssignmentContract(target, type, assigned) {
@@ -6159,14 +6179,6 @@ function logicActiveContract() {
     kind: "boolValue",
     confirmation: "separate_logic_get_readback",
   };
-}
-
-function logicOptionContract(option, { requireWrite = true } = {}) {
-  return logicOptionState(option, { requireWrite }).contract;
-}
-
-function characteristicOptionContract(option, { requireWrite = true } = {}) {
-  return characteristicOptionState(option, { requireWrite }).contract;
 }
 
 function characteristicOptionState(option, options = {}) {
@@ -6964,7 +6976,9 @@ function hasKnownSettingSemantics(change) {
 }
 
 function nativeValueRestoration(change) {
-  if (isRetryableNativeValueChange(change)) return { supported: true };
+  if (isRetryableNativeValueChange(change)) {
+    return scalarValueRestoration(change.contract, change.baseline_value);
+  }
   if (change?.kind !== "characteristic_value") return { supported: false };
   return characteristicSettingRestoration(
     change.contract,
@@ -6976,6 +6990,10 @@ function characteristicSettingRestoration(contract, baseline) {
   if (!isKnownCharacteristicSetting(contract?.type)) {
     return { supported: false };
   }
+  return scalarValueRestoration(contract, baseline);
+}
+
+function scalarValueRestoration(contract, baseline) {
   const validation = validateNativeScalarValue(baseline?.value, contract);
   if (validation.valid) return { supported: true };
   return {

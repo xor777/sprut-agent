@@ -210,6 +210,25 @@ export function validateNativeScalarValue(value, contract) {
   return { valid: true, value: { value, kind: contract.kind } };
 }
 
+export function isSelectableNativeValidValue(candidate, typedValue, contract) {
+  return (
+    candidate?.checked !== false &&
+    typedValue?.kind === contract.kind &&
+    validateNativeScalarValue(typedValue.value, contract).valid
+  );
+}
+
+export function nativeScalarContract(source, kind) {
+  return {
+    kind,
+    ...(typeof source.minValue === "number" ? { min: source.minValue } : {}),
+    ...(typeof source.maxValue === "number" ? { max: source.maxValue } : {}),
+    ...(typeof source.minStep === "number" ? { step: source.minStep } : {}),
+    ...(typeof source.minLen === "number" ? { min_length: source.minLen } : {}),
+    ...(typeof source.maxLen === "number" ? { max_length: source.maxLen } : {}),
+  };
+}
+
 function inspectNumericMetadata(option, current) {
   const entries = [
     ["minValue", "min"],
@@ -266,7 +285,14 @@ function sameScalar(left, right) {
 function isStepAligned(value, min, step) {
   if (!Number.isFinite(step) || step <= 0) return false;
   const steps = (value - min) / step;
-  return Math.abs(steps - Math.round(steps)) <= Number.EPSILON * 16;
+  const nearestValue = min + Math.round(steps) * step;
+  const scale = Math.max(
+    1,
+    Math.abs(value),
+    Math.abs(min),
+    Math.abs(nearestValue),
+  );
+  return Math.abs(value - nearestValue) <= Number.EPSILON * scale * 16;
 }
 
 function invalidValue(reason, message) {

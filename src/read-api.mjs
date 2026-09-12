@@ -107,7 +107,10 @@ function normalizeReading(result, selected) {
     );
   }
   const choices = entity.capabilities.valid_values ?? [];
-  const choice = choices.find(({ value }) => Object.is(value, current.value));
+  const choice =
+    current.enum ??
+    choices.find(({ value }) => Object.is(value, current.value)) ??
+    null;
   const observedAt = result.freshness?.hubResponseReceivedAt;
   if (
     typeof observedAt !== "string" ||

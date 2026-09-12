@@ -114,7 +114,17 @@ token. По умолчанию она хранится вне Git; `SPRUT_AGENT_
   принадлежащие change links и
   неизменённый виртуальный accessory, не переписывая физические участники.
 - `characteristic_value` проверяет фактический native type, права, kind,
-  диапазон, шаг, длину и перечисление. Для подтверждённых постоянных настроек
+  диапазон, шаг, длину и перечисление. Если экземпляр характеристики возвращает
+  `validValues`, выбираемыми считаются только варианты с `checked != false`,
+  которые одновременно проходят числовые/строковые ограничения. Явное пустое
+  множество остаётся запретом на любой выбор, а отсутствие `validValues` не
+  создаёт такого запрета. `get_entity` сохраняет имя уже наблюдаемого enum даже
+  когда этот вариант больше нельзя выбрать, но не включает его в
+  `capabilities.valid_values`. Contract, prepare, apply и restore используют ту
+  же доступность; изменение списка после prepare останавливает запись.
+  Для options смысл `checked` пока подтверждён только на наблюдённых формах со
+  всеми `checked=true`, поэтому их доступность по этому признаку не выводится.
+  Для подтверждённых постоянных настроек
   `TargetTemperature`, `TargetHeatingCoolingState` и `C_FanSpeed` контракт и
   подготовленный change заранее показывают `restore_supported=true`, только если
   сохранённый baseline сам проходит тот же native validator. Иначе чтение и
@@ -166,7 +176,11 @@ token. По умолчанию она хранится вне Git; `SPRUT_AGENT_
   чтения `native_change` отдельно показывает native write, поддержку публичной
   операции, причину отказа и точный `get_native_change_contract` next.
   Текущее значение находится в `option.value`, а не в
-  `validValues[].checked`. Уже нужное значение не создаёт change. Запись
+  `validValues[].checked`. Контракт показывает `restore_supported` по тому же
+  scalar-validator сохранённого baseline. Если диапазон, шаг или явный список
+  допустимых значений изменился после prepare/apply, `get_native_change`
+  показывает `restore_limitation=baseline_not_writable`, а restore не
+  отправляет запись. Уже нужное значение не создаёт change. Запись
   отправляет только выбранные key и typed value; readback выполняется отдельным
   `characteristic.getOptions`, `logic.getOptions` или `window.get`.
   Restore возвращает сохранённый baseline только при совпадении текущего

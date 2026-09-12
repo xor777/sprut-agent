@@ -213,6 +213,13 @@ async function startReadHub(t) {
                 key: "freezing",
                 name: "Ноль",
                 value: { doubleValue: 0 },
+                checked: false,
+              },
+              {
+                key: "above-freezing",
+                name: "Выше нуля",
+                value: { doubleValue: 1 },
+                checked: true,
               },
             ],
           }),

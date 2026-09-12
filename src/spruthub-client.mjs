@@ -3,7 +3,11 @@ import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
 import { inspectBlockRelations } from "./block-model.mjs";
-import { inspectNativeOption } from "./native-option-contract.mjs";
+import {
+  inspectNativeOption,
+  isSelectableNativeValidValue,
+  nativeScalarContract,
+} from "./native-option-contract.mjs";
 
 const VALUE_FIELDS = [
   "boolValue",
@@ -3383,6 +3387,9 @@ function normalizeCharacteristicDetail(
   }
   if (isSensitiveNativeNode(control)) return redactedNode();
   const value = extractTypedValue(control.value);
+  const currentEnum = control.validValues
+    ? matchEnumValue(control.validValues, value)
+    : null;
   const ref = characteristicRef(
     serial,
     accessory.id,
@@ -3397,6 +3404,7 @@ function normalizeCharacteristicDetail(
     available: accessory.online,
     current_value: {
       value: value.value,
+      ...(currentEnum ? { enum: currentEnum } : {}),
       source: "characteristic",
       source_timestamp: null,
     },
@@ -3408,11 +3416,11 @@ function normalizeCharacteristicDetail(
       min: control.minValue ?? null,
       max: control.maxValue ?? null,
       step: control.minStep ?? null,
-      valid_values: (control.validValues ?? []).map((validValue) => ({
-        key: validValue.key,
-        name: validValue.name,
-        value: extractTypedValue(validValue.value).value,
-      })),
+      ...(control.validValues !== undefined
+        ? {
+            valid_values: selectableCharacteristicValues(control, value),
+          }
+        : {}),
     },
     option_scope: {
       native_has_options:
@@ -4557,4 +4565,24 @@ function matchEnumValue(validValues, currentValue) {
     );
   });
   return match ? { key: match.key, name: match.name } : null;
+}
+
+function selectableCharacteristicValues(control, currentValue) {
+  if (!currentValue.found) return [];
+  const scalarContract = nativeScalarContract(control, currentValue.field);
+  return control.validValues.flatMap((validValue) => {
+    const candidate = extractTypedValue(validValue.value);
+    const typed = candidate.found
+      ? { value: candidate.value, kind: candidate.field }
+      : null;
+    return isSelectableNativeValidValue(validValue, typed, scalarContract)
+      ? [
+          {
+            key: validValue.key,
+            name: validValue.name,
+            value: candidate.value,
+          },
+        ]
+      : [];
+  });
 }
