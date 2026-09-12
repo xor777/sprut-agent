@@ -1147,6 +1147,11 @@ export class AutomationService {
       (await this.#readNativeValueState(change, {
         requireWrite: true,
       }));
+    const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (ownershipLoss) return ownershipLoss;
     validateCharacteristicValue(change.requested_value.value, contract);
     if (!valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "conflict", current, {
@@ -1216,6 +1221,21 @@ export class AutomationService {
       };
     }
     const { value: current, contract } = state;
+    const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (ownershipLoss) {
+      return {
+        direction,
+        outcome: valuesEqual(current, change.baseline_value)
+          ? "baseline_observed_after_ownership_loss"
+          : "ownership_lost",
+        current,
+        contract,
+        result: ownershipLoss,
+      };
+    }
     const expected =
       direction === "restore" ? change.baseline_value : change.requested_value;
     const groupDeliveryConfirmed = groupMemberObservations
@@ -1259,6 +1279,7 @@ export class AutomationService {
         contract,
         result: await this.#finishNative(change, "conflict", current, {
           conflict_reason: "manual_change",
+          manual_change_observed: true,
           last_verification: freshVerification("conflict"),
         }),
       };
@@ -1355,9 +1376,15 @@ export class AutomationService {
     ) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "value_changed_after_apply",
+        manual_change_observed: true,
         last_verification: freshVerification("conflict"),
       });
     }
+    const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (ownershipLoss) return ownershipLoss;
     return this.#recordNativeObservation(
       change,
       current,
@@ -3654,6 +3681,11 @@ export class AutomationService {
         requireWrite: true,
       }));
     validateCharacteristicValue(change.baseline_value.value, contract);
+    const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
+      change,
+      current,
+    );
+    if (ownershipLoss) return ownershipLoss;
     if (change.applied_value_observed !== true) {
       return this.#finishNative(change, "not_owned", current, {
         conflict_reason: "change_was_not_applied",
@@ -3671,6 +3703,7 @@ export class AutomationService {
     if (!valuesEqual(current, change.requested_value)) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "manual_change",
+        manual_change_observed: true,
         last_verification: freshVerification("conflict"),
       });
     }
@@ -3687,6 +3720,25 @@ export class AutomationService {
       return this.#reconcileValueAfterWrite(change, "restore");
     }
     return this.#reconcileValueAfterWrite(change, "restore", true);
+  }
+
+  async #finishObservedValueOwnershipLoss(change, current) {
+    if (!manualValueChangeObserved(change)) return undefined;
+    if (valuesEqual(current, change.baseline_value)) {
+      return this.#finishNative(change, "restored", current, {
+        manual_change_observed: true,
+        last_verification: freshVerification("baseline_value_observed"),
+      });
+    }
+    return this.#finishNative(change, "conflict", current, {
+      conflict_reason: "manual_change",
+      manual_change_observed: true,
+      last_verification: freshVerification(
+        valuesEqual(current, change.requested_value)
+          ? "requested_value_observed"
+          : "conflict",
+      ),
+    });
   }
 
   async #finishNative(change, status, observedValue, extra = {}) {
@@ -6959,6 +7011,15 @@ function nativeValueIntentEvidence(change) {
   return { outcome: "resolved", unresolved: false };
 }
 
+function manualValueChangeObserved(change) {
+  return (
+    change?.manual_change_observed === true ||
+    ["manual_change", "value_changed_after_apply"].includes(
+      change?.conflict_reason,
+    )
+  );
+}
+
 function scenarioSnapshot(scenario) {
   if (
     !isRecord(scenario) ||
@@ -8046,6 +8107,9 @@ function publicNativeChange(
     ...(change.conflict_reason
       ? { conflict_reason: change.conflict_reason }
       : {}),
+    ...(manualValueChangeObserved(change)
+      ? { manual_change_observed: true }
+      : {}),
     ...(change.recovered_after_uncertain_write
       ? { recovered_after_uncertain_write: true }
       : {}),
@@ -8081,7 +8145,13 @@ function publicNativeChange(
         ? change.kind === "characteristic_value"
           ? "The saved setting can be restored only while its current value still matches this change; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
-        : "A runtime command does not provide rollback of physical effects.",
+        : (restoration.limitation?.message ??
+          "A runtime command does not provide rollback of physical effects."),
+      ...(hasKnownSettingSemantics(change)
+        ? [
+            "After an unknown write outcome or an observed manual change, inspect the current value and prepare a new change for any further authorized write; do not resend or restore the old change.",
+          ]
+        : []),
       ...(change.kind === "window_option"
         ? [
             "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",

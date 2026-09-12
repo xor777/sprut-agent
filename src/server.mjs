@@ -387,7 +387,7 @@ server.registerTool(
   {
     title: "Restore a native SprutHub configuration change",
     description:
-      "Restore one saved reversible setting or BLOCK/accessory baseline, or delete an assignment/BLOCK/room/virtual light created by this change, only while ownership and current configuration remain safe. An uncertain direct characteristic-value apply or restore is reconciled by readback without automatically resending it; a later manual value remains a conflict across repeat and restart. A block_action_pause finds its unchanged marked controller even after a position shift, removes only that controller, and preserves the action currently inside it; an older or completed pause cannot cancel a newer window or write again. Restore an accessory before deleting its owned destination room, and restore logic child changes before deleting an owned assignment. A room with contents and virtual light with manual or unknown edits are preserved. Restored is terminal for this change ref; physical characteristic commands remain non-reversible.",
+      "Restore one saved reversible setting or BLOCK/accessory baseline, or delete an assignment/BLOCK/room/virtual light created by this change, only while ownership and current configuration remain safe. An uncertain direct characteristic-value apply or restore is reconciled by readback without automatically resending it; once a later manual value is observed, this change remains a conflict across repeat and restart even if the current value later matches its request. Read the current value and prepare a new change for any further authorized write; observing the saved baseline completes restore without another write. A block_action_pause finds its unchanged marked controller even after a position shift, removes only that controller, and preserves the action currently inside it; an older or completed pause cannot cancel a newer window or write again. Restore an accessory before deleting its owned destination room, and restore logic child changes before deleting an owned assignment. A room with contents and virtual light with manual or unknown edits are preserved. Restored is terminal for this change ref; physical characteristic commands remain non-reversible.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
@@ -451,7 +451,7 @@ server.registerTool(
   {
     title: "Apply a prepared native SprutHub change",
     description:
-      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it.",
+      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it; after an observed manual value, prepare a new change for any further authorized write because the old change cannot reclaim that value.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,

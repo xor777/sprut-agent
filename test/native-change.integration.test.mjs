@@ -2840,6 +2840,17 @@ test("an invalid climate baseline is reported as non-restorable before apply", a
     prepared.structuredContent.restore_limitation.code,
     "baseline_not_writable",
   );
+  assert.ok(
+    prepared.structuredContent.limitations.includes(
+      prepared.structuredContent.restore_limitation.message,
+    ),
+  );
+  assert.equal(
+    prepared.structuredContent.limitations.some((limitation) =>
+      limitation.includes("runtime command"),
+    ),
+    false,
+  );
   assert.equal(prepared.structuredContent.diff.value.from, 21.3);
 
   await firstClient.close();
@@ -3136,7 +3147,11 @@ test("an observed manual climate change cannot regain restore ownership", async 
     });
     assert.equal(result.isError, undefined, result.content[0]?.text);
     assert.equal(result.structuredContent.status, "conflict", tool);
-    assert.equal(result.structuredContent.conflict_reason, "manual_change", tool);
+    assert.equal(
+      result.structuredContent.conflict_reason,
+      "manual_change",
+      tool,
+    );
     assert.equal(result.structuredContent.manual_change_observed, true, tool);
     assert.equal(
       result.structuredContent.verification.result,
@@ -3152,6 +3167,69 @@ test("an observed manual climate change cannot regain restore ownership", async 
   assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
     [setting.kind]: setting.requested,
   });
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesAfterManualChange,
+  );
+  currentCharacteristicValue(hub, setting.ref).doubleValue = setting.baseline;
+  const baselineObserved = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(baselineObserved.structuredContent.status, "restored");
+  assert.equal(
+    baselineObserved.structuredContent.verification.result,
+    "baseline_value_observed",
+  );
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesAfterManualChange,
+  );
+});
+
+test("a confirmed climate change loses restore ownership after an observed manual value", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[0];
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: setting.requested,
+      reason: "Сохранить ручной выбор после подтверждённого применения",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  currentCharacteristicValue(hub, setting.ref).doubleValue = 24;
+  const conflict = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.manual_change_observed, true);
+  currentCharacteristicValue(hub, setting.ref).doubleValue = setting.requested;
+  const writesAfterManualChange = hub.requests.filter(
+    ({ characteristic }) => characteristic?.update,
+  ).length;
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const refusedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedRestore.structuredContent.status, "conflict");
+  assert.equal(
+    refusedRestore.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(refusedRestore.structuredContent.manual_change_observed, true);
   assert.equal(
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     writesAfterManualChange,
@@ -3209,7 +3287,10 @@ test("an uncertain climate change cannot claim another applied change", async (t
     arguments: { change_ref: first.structuredContent.change_ref },
   });
   assert.equal(observedFirst.structuredContent.status, "conflict");
-  assert.equal(observedFirst.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    observedFirst.structuredContent.conflict_reason,
+    "manual_change",
+  );
   assert.equal(observedFirst.structuredContent.manual_change_observed, true);
   const refusedRestore = await secondClient.callTool({
     name: "restore_native_change",
@@ -3265,7 +3346,11 @@ test("an observed manual option change cannot regain restore ownership", async (
       arguments: { change_ref: prepared.structuredContent.change_ref },
     });
     assert.equal(result.structuredContent.status, "conflict", tool);
-    assert.equal(result.structuredContent.conflict_reason, "manual_change", tool);
+    assert.equal(
+      result.structuredContent.conflict_reason,
+      "manual_change",
+      tool,
+    );
     assert.equal(result.structuredContent.manual_change_observed, true, tool);
   }
   assert.deepEqual(option.value, { doubleValue: 10 });
@@ -3273,6 +3358,72 @@ test("an observed manual option change cannot regain restore ownership", async (
     hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
       .length,
     writesAfterManualChange,
+  );
+});
+
+test("a published manual option conflict remains unowned in the new runtime", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = JSON.parse(
+    await readFile(
+      path.join(
+        projectRoot,
+        "test/fixtures/published-option-manual-conflict.json",
+      ),
+      "utf8",
+    ),
+  );
+  const fingerprint = createHash("sha256")
+    .update(`${hub.url}\0${serial}`)
+    .digest("hex");
+  const change = fixture.change;
+  await writeFile(
+    path.join(
+      stateDirectory,
+      `automation-changes-${fingerprint.slice(0, 24)}.json`,
+    ),
+    `${JSON.stringify(
+      {
+        version: 1,
+        hub_fingerprint: fingerprint,
+        changes: { [change.id]: change },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const option = hub.state.characteristicOptions.find(
+    ({ key }) => key === characteristicOptionKeys.switchOffTime,
+  );
+  option.value = { doubleValue: 10 };
+  const client = await startClient(t, hub, stateDirectory);
+  const changeRef = `spruthub-change://native/${change.id}`;
+  const writesBefore = hub.requests.filter(
+    ({ characteristic }) => characteristic?.setOptions,
+  ).length;
+
+  for (const tool of [
+    "get_native_change",
+    "apply_native_change",
+    "restore_native_change",
+  ]) {
+    const result = await client.callTool({
+      name: tool,
+      arguments: { change_ref: changeRef },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(result.structuredContent.status, "conflict", tool);
+    assert.equal(
+      result.structuredContent.conflict_reason,
+      "manual_change",
+      tool,
+    );
+    assert.equal(result.structuredContent.manual_change_observed, true, tool);
+  }
+  assert.deepEqual(option.value, { doubleValue: 10 });
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+      .length,
+    writesBefore,
   );
 });
 
