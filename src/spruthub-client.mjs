@@ -3601,10 +3601,11 @@ function isRedactedNode(value) {
   );
 }
 
+const sensitiveKeyPattern =
+  /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i;
+
 function isSensitiveKey(key) {
-  return /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i.test(
-    key,
-  );
+  return sensitiveKeyPattern.test(key);
 }
 
 function isSensitiveContainerKey(key) {
@@ -3614,12 +3615,21 @@ function isSensitiveContainerKey(key) {
 }
 
 function redactSensitiveText(text) {
-  const credentialName =
-    "api[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|wifi[_-]?password|api[_-]?key|private[_-]?key|password|passwd|secret|credential|authorization|token";
   const containsCredential =
-    /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
-    new RegExp(`\\b(${credentialName})\\s*[:=]`, "i").test(text);
+    /\bBearer\s+[^\s;"'<>]+/i.test(text) || containsSensitiveAssignment(text);
   return containsCredential ? "[REDACTED]" : text;
+}
+
+function containsSensitiveAssignment(text) {
+  for (const match of text.matchAll(
+    /\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*[:=]/g,
+  )) {
+    if (isSensitiveKey(match[2])) return true;
+  }
+  for (const match of text.matchAll(/\b([A-Za-z_$][\w$-]*)\s*[:=]/g)) {
+    if (isSensitiveKey(match[1])) return true;
+  }
+  return false;
 }
 
 function timeoutError() {
