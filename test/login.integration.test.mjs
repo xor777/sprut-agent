@@ -337,15 +337,18 @@ function readRoomServices(client, roomRef) {
   });
 }
 
-test("an empty profile returns an executable local credential setup", async (t) => {
+test("the checkout MCP config returns credential setup and reads a configured home", async (t) => {
   const hub = await startHub(t);
   const directory = await mkdtemp(path.join(tmpdir(), "sprut empty profile-"));
   t.after(() => rm(directory, { recursive: true }));
   const configRoot = path.join(directory, "xdg config");
+  const checkoutConfig = JSON.parse(
+    await readFile(path.join(projectRoot, ".mcp.json"), "utf8"),
+  ).mcpServers["sprut-agent"];
   const launch = {
-    command: process.execPath,
-    args: [path.join(projectRoot, "src", "server.mjs")],
-    cwd: directory,
+    command: checkoutConfig.command,
+    args: checkoutConfig.args,
+    cwd: path.resolve(projectRoot, checkoutConfig.cwd),
     env: {
       PATH: process.env.PATH,
       HOME: directory,
