@@ -3898,6 +3898,76 @@ test("history finds one entity and continues through older pages without changin
   });
 });
 
+test("history continuation does not repeat a page after its boundary change is read", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  for (let index = 0; index < 4; index += 1) {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "window_option",
+        target_ref: deviceWindowRef,
+        option_key: startupOptionKey,
+        value: index % 2,
+        reason: `Запись истории ${index}`,
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  }
+
+  const complete = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.equal(complete.isError, undefined, complete.content[0]?.text);
+  const expectedNextRefs = complete.structuredContent.changes
+    .slice(2)
+    .map(({ change_ref: changeRef }) => changeRef);
+
+  const first = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 2 },
+  });
+  assert.equal(first.isError, undefined, first.content[0]?.text);
+  const firstRefs = first.structuredContent.changes.map(
+    ({ change_ref: changeRef }) => changeRef,
+  );
+  assert.deepEqual(
+    firstRefs,
+    complete.structuredContent.changes
+      .slice(0, 2)
+      .map(({ change_ref: changeRef }) => changeRef),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const boundary = first.structuredContent.changes.at(-1);
+  const current = await client.callTool({
+    name: boundary.next.tool,
+    arguments: boundary.next.arguments,
+  });
+  assert.equal(current.isError, undefined, current.content[0]?.text);
+
+  const next = await client.callTool({
+    name: first.structuredContent.next.tool,
+    arguments: first.structuredContent.next.arguments,
+  });
+  assert.equal(next.isError, undefined, next.content[0]?.text);
+  assert.deepEqual(
+    next.structuredContent.changes.map(
+      ({ change_ref: changeRef }) => changeRef,
+    ),
+    expectedNextRefs,
+  );
+  assert.equal(
+    next.structuredContent.changes.some(({ change_ref: changeRef }) =>
+      firstRefs.includes(changeRef),
+    ),
+    false,
+  );
+  assert.equal(next.structuredContent.next, null);
+});
+
 test("history labels a saved conflict before its next tool verifies current applied state", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
