@@ -2862,9 +2862,15 @@ export class AutomationService {
     await this.#saveBeforeWrite(change);
   }
 
-  async listNativeChanges({ home_ref: homeRef, entity_ref: entityRef, limit }) {
+  async listNativeChanges({
+    home_ref: homeRef,
+    entity_ref: entityRef,
+    limit,
+    cursor,
+  }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     if (entityRef !== undefined) requireEntityHome(entityRef, this.hubSerial);
+    const selection = historySelection(homeRef, entityRef, limit, cursor);
     const storedChanges = await this.store.list();
     await this.#reconcileHistoryScenario(storedChanges, entityRef);
     const all = storedChanges
@@ -2877,13 +2883,36 @@ export class AutomationService {
         (change) =>
           entityRef === undefined || change.target_refs.includes(entityRef),
       )
-      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+      .sort(compareChangeSummaries);
+    const start =
+      selection.afterRef === null
+        ? 0
+        : all.findIndex(
+            ({ change_ref: changeRef }) => changeRef === selection.afterRef,
+          ) + 1;
+    if (start === 0 && selection.afterRef !== null) {
+      throw staleHistoryCursor(selection);
+    }
+    const changes = all.slice(start, start + limit);
+    const end = start + changes.length;
+    const nextCursor =
+      end < all.length
+        ? encodeHistoryCursor(changes.at(-1).change_ref, selection.scope)
+        : null;
     return {
       status: "ok",
       home_ref: homeRef,
       ...(entityRef ? { entity_ref: entityRef } : {}),
-      changes: all.slice(0, limit),
-      truncated: all.length > limit,
+      changes,
+      page: {
+        limit,
+        returned_changes: changes.length,
+        remaining_changes: all.length - end,
+        snapshot: false,
+        next_cursor: nextCursor,
+      },
+      next: nextCursor ? historyNext(selection, nextCursor) : null,
+      truncated: nextCursor !== null,
     };
   }
 
@@ -8062,6 +8091,79 @@ function changeSummary(change, homeRef) {
       arguments: { change_ref: reference },
     },
   };
+}
+
+function compareChangeSummaries(left, right) {
+  const updated = right.updated_at.localeCompare(left.updated_at);
+  return updated || left.change_ref.localeCompare(right.change_ref);
+}
+
+function historySelection(homeRef, entityRef, limit, cursor) {
+  const scope = JSON.stringify({
+    home_ref: homeRef,
+    entity_ref: entityRef ?? null,
+  });
+  const selection = { homeRef, entityRef: entityRef ?? null, limit, scope };
+  return {
+    ...selection,
+    afterRef: decodeHistoryCursor(cursor, scope, selection),
+  };
+}
+
+function decodeHistoryCursor(cursor, expectedScope, selection) {
+  if (cursor === undefined) return null;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    if (
+      parsed?.v !== 1 ||
+      typeof parsed.after_ref !== "string" ||
+      parsed.after_ref.length === 0 ||
+      parsed.scope !== expectedScope
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return parsed.after_ref;
+  } catch {
+    throw invalidHistoryCursor(selection);
+  }
+}
+
+function encodeHistoryCursor(afterRef, scope) {
+  return Buffer.from(
+    JSON.stringify({ v: 1, after_ref: afterRef, scope }),
+  ).toString("base64url");
+}
+
+function historyNext(selection, cursor) {
+  return {
+    tool: "list_native_changes",
+    arguments: {
+      home_ref: selection.homeRef,
+      ...(selection.entityRef ? { entity_ref: selection.entityRef } : {}),
+      limit: selection.limit,
+      ...(cursor ? { cursor } : {}),
+    },
+  };
+}
+
+function invalidHistoryCursor(selection) {
+  return new SprutHubError(
+    "invalid_cursor",
+    "Use the cursor returned by list_native_changes for the same home and entity filter.",
+    "restart_list_native_changes",
+    { next: historyNext(selection, null) },
+  );
+}
+
+function staleHistoryCursor(selection) {
+  return new SprutHubError(
+    "stale_cursor",
+    "The last change from this history page is no longer available in the selected scope.",
+    "restart_list_native_changes",
+    { next: historyNext(selection, null) },
+  );
 }
 
 function nativeAffectedRefs(change, homeRef) {

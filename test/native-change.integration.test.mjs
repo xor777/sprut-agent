@@ -3872,7 +3872,10 @@ test("history finds one entity and continues through older pages without changin
   }
   assert.equal(new Set(collected).size, 6);
   assert.equal(collected.includes(selected.structuredContent.change_ref), true);
-  assert.equal(collected.includes(adjacent.structuredContent.change_ref), false);
+  assert.equal(
+    collected.includes(adjacent.structuredContent.change_ref),
+    false,
+  );
   assert.deepEqual(
     new Set(collected),
     new Set([selected.structuredContent.change_ref, ...foreignChangeRefs]),

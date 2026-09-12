@@ -405,20 +405,41 @@ server.registerTool(
   {
     title: "Find recorded SprutHub changes",
     description:
-      "Return a bounded saved history of native and legacy automation changes for the configured home, optionally filtered by one exact canonical affected entity ref. recorded_status is the locally stored configuration outcome at updated_at, not a current hub observation; a timed BLOCK pause separately reports effect_status from its absolute deadline plus replacement or cleanup refs. Accessory placement includes its accessory and rooms; room creation includes the identified or candidate room; virtual light groups include the created group and explicit member services. BLOCK history includes its scenario and known accessory, service and characteristic bindings. Follow each summary's next tool call for current reconciliation; listing does not poll the whole live home or authorize restoration.",
+      "Return one small page of saved native and legacy automation changes in an explicit home, optionally filtered by one exact canonical affected entity ref. Execute the returned next call to continue the same home and filter until next is null; pages use the current journal order, not an atomic snapshot. A cursor from another scope is rejected. recorded_status is the locally stored configuration outcome at updated_at, not a current hub observation; follow a change summary's get call for current reconciliation. A timed BLOCK pause separately reports effect_status from its absolute deadline plus replacement or cleanup refs. Accessory placement includes its accessory and rooms; room creation includes the identified or candidate room; virtual light groups include the created group and explicit member services. BLOCK history includes its scenario and known accessory, service and characteristic bindings. Listing does not poll the whole live home or authorize restoration.",
     inputSchema: {
-      home_ref: z.string().min(1),
-      entity_ref: z.string().min(1).optional(),
-      limit: z.number().int().min(1).max(50).default(20),
+      home_ref: z
+        .string()
+        .min(1)
+        .describe("Explicit configured spruthub://hub/<serial> reference"),
+      entity_ref: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional exact canonical affected entity ref; omit for all changes in the home",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .default(10)
+        .describe("Changes per page, from 1 through 50"),
+      cursor: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Opaque continuation returned by the previous matching call"),
     },
     annotations: readOnlyAnnotations,
   },
-  async ({ home_ref: homeRef, entity_ref: entityRef, limit }) =>
+  async ({ home_ref: homeRef, entity_ref: entityRef, limit, cursor }) =>
     runRoomTool(async () =>
       (await getAutomationService()).listNativeChanges({
         home_ref: homeRef,
         entity_ref: entityRef,
         limit,
+        cursor,
       }),
     ),
 );
