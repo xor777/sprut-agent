@@ -3562,7 +3562,7 @@ export function sanitizeNativeData(value, key = "") {
       ]),
     );
   }
-  return typeof value === "string" ? redactSensitiveText(value) : value;
+  return typeof value === "string" ? redactSensitiveText(value, false) : value;
 }
 
 export function sanitizeAgentOutput(value, sensitiveValues = []) {
@@ -3616,8 +3616,8 @@ function isSensitiveAssignmentKey(key) {
     .replace(/([a-z\d])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .split(/[_\s-]+/)
-    .filter(Boolean)
-    .map((part) => part.toLowerCase());
+    .map((part) => part.replace(/^\$+/u, "").toLowerCase())
+    .filter(Boolean);
   const last = parts.at(-1);
   if (
     [
@@ -3633,7 +3633,7 @@ function isSensitiveAssignmentKey(key) {
   }
   if (
     /^(?:apikey|apitoken|accesstoken|refreshtoken|clientsecret|wifipassword|privatekey)$/.test(
-      parts.join(""),
+      last,
     )
   ) {
     return true;
@@ -3784,10 +3784,17 @@ function isKnownJavaScriptValueOrLabel(context, separatorIndex) {
   );
 }
 
+const javascriptContextLookbehindTokenLimit = 256;
+
 function isJavaScriptTernaryColon(tokens, separatorTokenIndex) {
   let delimiterDepth = 0;
   let nestedTernaries = 0;
-  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+  let remaining = javascriptContextLookbehindTokenLimit;
+  for (
+    let index = separatorTokenIndex - 1;
+    index >= 0 && remaining > 0;
+    index -= 1, remaining -= 1
+  ) {
     const value = tokens[index].value;
     if ([")", "]", "}"].includes(value)) {
       delimiterDepth += 1;
@@ -3804,7 +3811,7 @@ function isJavaScriptTernaryColon(tokens, separatorTokenIndex) {
     } else if (value === "?") {
       if (nestedTernaries === 0) return true;
       nestedTernaries -= 1;
-    } else if (value === ";") {
+    } else if (value === ";" || value === "case") {
       return false;
     }
   }
@@ -3813,7 +3820,12 @@ function isJavaScriptTernaryColon(tokens, separatorTokenIndex) {
 
 function isJavaScriptCaseLabel(tokens, separatorTokenIndex) {
   let delimiterDepth = 0;
-  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+  let remaining = javascriptContextLookbehindTokenLimit;
+  for (
+    let index = separatorTokenIndex - 1;
+    index >= 0 && remaining > 0;
+    index -= 1, remaining -= 1
+  ) {
     const value = tokens[index].value;
     if ([")", "]", "}"].includes(value)) {
       delimiterDepth += 1;
