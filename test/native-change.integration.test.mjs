@@ -3877,6 +3877,7 @@ test("history finds one entity and continues through older pages without changin
     );
     next = page.structuredContent.next;
   }
+  assert.equal(collected.length, 6);
   assert.equal(new Set(collected).size, 6);
   assert.equal(collected.includes(selected.structuredContent.change_ref), true);
   assert.equal(
