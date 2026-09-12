@@ -3001,6 +3001,80 @@ test("a third climate value resolves an uncertain restore as a manual conflict",
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     writesBeforeReconciliation,
   );
+
+  const repeated = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "conflict");
+  assert.equal(repeated.structuredContent.conflict_reason, "manual_change");
+  assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
+    [setting.kind]: 24,
+  });
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesBeforeReconciliation,
+  );
+});
+
+test("a manual value after an unknown climate apply stays a conflict across restore and restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[0];
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: setting.requested,
+      reason: "Сохранить неизвестный исход климатической команды",
+    },
+  });
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  currentCharacteristicValue(hub, setting.ref).doubleValue = 24;
+  const writesAfterUnknownApply = hub.requests.filter(
+    ({ characteristic }) => characteristic?.update,
+  ).length;
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const conflict = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  const firstRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(firstRestore.structuredContent.status, "conflict");
+  assert.equal(firstRestore.structuredContent.conflict_reason, "manual_change");
+  await secondClient.close();
+
+  const thirdClient = await startClient(t, hub, stateDirectory);
+  const repeatedRestore = await thirdClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeatedRestore.structuredContent.status, "conflict");
+  assert.equal(
+    repeatedRestore.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
+    [setting.kind]: 24,
+  });
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesAfterUnknownApply,
+  );
 });
 
 test("a readable command stays non-restorable and is not retried after an unknown apply", async (t) => {
@@ -3086,6 +3160,53 @@ test("a climate setting is not resent after an unknown apply", async (t) => {
   assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
     [setting.kind]: setting.baseline,
   });
+});
+
+test("a climate baseline is not resent after an unknown restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[0];
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: setting.requested,
+      reason: "Не повторять возврат после потери ответа",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.write_intent.direction, "restore");
+  const writesAfterUnknownRestore = hub.requests.filter(
+    ({ characteristic }) => characteristic?.update,
+  ).length;
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(repeated.structuredContent.write_intent.direction, "restore");
+  assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
+    [setting.kind]: setting.requested,
+  });
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    writesAfterUnknownRestore,
+  );
 });
 
 test("a lost characteristic response is reconciled without another command", async (t) => {
