@@ -320,6 +320,27 @@ async function startClient(
   return client;
 }
 
+async function startInstalledProfileClient(t, configRoot) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(projectRoot, "dist", "plugin", "dist", "server.mjs")],
+    cwd: path.dirname(configRoot),
+    env: {
+      PATH: process.env.PATH,
+      XDG_CONFIG_HOME: configRoot,
+      SPRUTHUB_TIMEOUT_MS: "1000",
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({
+    name: "installed-profile-test",
+    version: "1.0.0",
+  });
+  await client.connect(transport);
+  t.after(() => client.close());
+  return client;
+}
+
 async function withSessionPath(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "sprut-login-test-"));
   t.after(() => rm(directory, { recursive: true }));
@@ -449,6 +470,73 @@ test("the checkout MCP config returns credential setup and reads a configured ho
   for (const secret of [login, password, token]) {
     assert.equal(publicResult.includes(secret), false);
   }
+});
+
+test("an installed multi-home profile explains and completes explicit home selection", async (t) => {
+  const hub = await startHub(t, {
+    homes: [home("home/A", "Дом A"), home("home B", "Дом B")],
+  });
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut multi-home-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const configRoot = path.join(directory, "config");
+  const connectionFile = path.join(
+    configRoot,
+    "sprut-agent",
+    "connection.env",
+  );
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  const baseProfile = [
+    `SPRUTHUB_LOGIN=${login}`,
+    `SPRUTHUB_PASSWORD=${password}`,
+    `SPRUTHUB_URL=${hub.url}`,
+  ];
+  await writeFile(connectionFile, `${baseProfile.join("\n")}\n`, {
+    mode: 0o600,
+  });
+
+  const client = await startInstalledProfileClient(t, configRoot);
+  await client.listTools();
+  const blocked = await client.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.structuredContent.error.code, "home_selection_required");
+  assert.equal(blocked.structuredContent.error.action, "list_homes");
+  assert.deepEqual(blocked.structuredContent.next, {
+    tool: "list_homes",
+    arguments: {},
+  });
+
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.deepEqual(homes.structuredContent.selection.options, [
+    { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
+    { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
+  ]);
+  assert.deepEqual(homes.structuredContent.selection.pin, {
+    file: connectionFile,
+    field: "SPRUTHUB_SERIAL",
+    permissions: "0600",
+    restart: "Restart the same MCP application after saving the file.",
+  });
+  await client.close();
+
+  await writeFile(
+    connectionFile,
+    `${[...baseProfile, "SPRUTHUB_SERIAL=home B"].join("\n")}\n`,
+    { mode: 0o600 },
+  );
+  const restarted = await startInstalledProfileClient(t, configRoot);
+  const rooms = await restarted.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  assert.equal(
+    rooms.structuredContent.rooms[0].ref,
+    "spruthub://hub/home%20B/room/1",
+  );
 });
 
 test("a partial profile preserves safe credential guidance without reflecting credentials", async (t) => {

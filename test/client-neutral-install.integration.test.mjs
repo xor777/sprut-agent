@@ -61,6 +61,11 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
     true,
   );
 
+  const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
+  assert.equal(rooms.isError, true);
+  assert.equal(rooms.structuredContent.error.action, "configure_credentials");
+  assert.equal(rooms.structuredContent.missing_field, "SPRUTHUB_LOGIN");
+
   const homes = await client.callTool({ name: "list_homes", arguments: {} });
   assert.equal(homes.isError, true);
   assert.equal(homes.structuredContent.error.action, "configure_credentials");
