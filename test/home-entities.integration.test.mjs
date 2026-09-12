@@ -241,6 +241,32 @@ function homeState(serial) {
         state: "LOADED",
       },
     ],
+    scenarioAssociations: new Map(),
+    links: new Map(),
+    logics: new Map([
+      [
+        "32.13",
+        [
+          {
+            type: "MotionDetectedFromCurrentMotionLevel",
+            name: "Определение движения",
+            active: true,
+          },
+        ],
+      ],
+    ]),
+    logicTypes: new Map([
+      [
+        "32.13",
+        [
+          {
+            type: "MotionDetectedFromCurrentMotionLevel",
+            name: "Определение движения",
+            desc: "Определяет движение по текущему уровню",
+          },
+        ],
+      ],
+    ]),
     window: {
       windowKey: `window-${suffix}`,
       label: { text: "Настройки устройства" },
@@ -356,6 +382,8 @@ async function startHub() {
     unsupportedScenarioGet: false,
     characteristicOptionsResult: null,
     logicOptionsResult: null,
+    scenarioGetErrors: new Map(),
+    missingScenarioGets: new Set(),
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -379,6 +407,18 @@ async function startHub() {
           JSON.stringify({
             id: request.id,
             error: { code: -32601, message: "Method not found" },
+          }),
+        );
+        return;
+      }
+      const scenarioGetIndex = request.params.scenario?.get?.index;
+      const scenarioGetError = behavior.scenarioGetErrors.get(scenarioGetIndex);
+      if (scenarioGetError) {
+        responseSentAt.push({ request, at: Date.now() });
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: scenarioGetError,
           }),
         );
         return;
@@ -496,13 +536,10 @@ function respond(states, request, behavior) {
     return {
       logic: {
         list: {
-          logics: [
-            {
-              type: "MotionDetectedFromCurrentMotionLevel",
-              name: "Определение движения",
-              active: true,
-            },
-          ],
+          logics:
+            state.logics.get(
+              `${params.logic.list.aId}.${params.logic.list.sId}`,
+            ) ?? [],
         },
       },
     };
@@ -511,13 +548,10 @@ function respond(states, request, behavior) {
     return {
       logic: {
         types: {
-          logicTypes: [
-            {
-              type: "MotionDetectedFromCurrentMotionLevel",
-              name: "Определение движения",
-              desc: "Определяет движение по текущему уровню",
-            },
-          ],
+          logicTypes:
+            state.logicTypes.get(
+              `${params.logic.types.aId}.${params.logic.types.sId}`,
+            ) ?? [],
         },
       },
     };
@@ -541,14 +575,26 @@ function respond(states, request, behavior) {
     }
     return { logic: { getOptions: { options: [] } } };
   }
-  if (params.link?.list) return { link: { list: {} } };
+  if (params.link?.list) {
+    const { aId, sId, cId } = params.link.list;
+    return {
+      link: {
+        list: {
+          links: state.links.get(`${aId}.${sId}.${cId}`) ?? [],
+        },
+      },
+    };
+  }
   if (params.window?.get) return { window: { get: state.window } };
   if (params.scenario?.list) {
     return {
       scenario: {
         list: {
           scenarios:
-            params.scenario.list.aId === undefined ? state.scenarios : [],
+            params.scenario.list.aId === undefined
+              ? state.scenarios
+              : (state.scenarioAssociations.get(params.scenario.list.aId) ??
+                []),
         },
       },
     };
@@ -556,10 +602,11 @@ function respond(states, request, behavior) {
   if (params.scenario?.get) {
     return {
       scenario: {
-        get:
-          state.scenarios.find(
-            ({ index }) => index === params.scenario.get.index,
-          ) ?? null,
+        get: behavior.missingScenarioGets.has(params.scenario.get.index)
+          ? null
+          : (state.scenarios.find(
+              ({ index }) => index === params.scenario.get.index,
+            ) ?? null),
       },
     };
   }
@@ -838,6 +885,382 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
   assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*31/);
   assert.equal(entity.diagnostics[1].text, "[REDACTED]");
   assert.equal(entity.freshness.source_timestamp, null);
+});
+
+test("get_entity relations separate proven BLOCK roles from bounded native scopes", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const block = {
+    index: "mixed-device-block",
+    name: "Датчик управляет лампой",
+    type: "BLOCK",
+    predefined: false,
+    active: false,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({
+      blockId: 0,
+      targets: [
+        { type: "notify", blockId: 90, message: "unsupported sibling" },
+        {
+          type: "if",
+          blockId: 1,
+          if: {
+            type: "condition",
+            blockId: 2,
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                blockId: 3,
+                aId: 32,
+                sId: 13,
+                cId: 15,
+                value: "true",
+                cond: "=",
+                trigger: true,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: this is the native SprutHub BLOCK key.
+          then: [
+            {
+              type: "service",
+              blockId: 4,
+              aId: 48,
+              sId: 21,
+              hs: "Lightbulb",
+              characteristics: [
+                {
+                  type: "set",
+                  blockId: 5,
+                  cId: 30,
+                  hc: "On",
+                  value: "true",
+                },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+          mode: "EVERY",
+        },
+      ],
+    }),
+  };
+  state.scenarios.push(block);
+  state.scenarioAssociations.set(32, [block]);
+  state.logics.set("32.13", [
+    { type: "AssignedSensorLogic", name: "Назначенная logic", active: true },
+  ]);
+  state.logicTypes.set("32.13", [
+    {
+      type: "AssignedSensorLogic",
+      name: "Назначенная logic",
+      desc: "Уже назначена сервису",
+    },
+    {
+      type: "AvailableOnlyLogic",
+      name: "Только доступный тип",
+      desc: "Не назначена сервису",
+    },
+  ]);
+  state.links.set("32.13.15", [
+    {
+      type: "SYSTEM",
+      index: "native-source/example",
+      controller: "zigbee_1",
+    },
+    {
+      type: "OUT",
+      index: "Virtual/32.15",
+      characteristics: [{ aId: 48, sId: 21, cId: 30 }],
+    },
+  ]);
+  const client = await startClient(t, hub);
+  const characteristicRef =
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15";
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef, include: ["relations"] },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const relations = result.structuredContent.entity.relations;
+  assert.deepEqual(relations.scenario_associations, [
+    {
+      ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      name: "Датчик управляет лампой",
+      type: "BLOCK",
+      predefined: false,
+      active: false,
+      on_start: false,
+      sync: false,
+      meaning: "accessory_index_association",
+      direction: "not_established",
+    },
+  ]);
+  assert.deepEqual(relations.scenario_roles, [
+    {
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      scenario_active: false,
+      runtime_status: "not_observed",
+      role: "trigger",
+      entity_ref: characteristicRef,
+      configuration_pointer: "/configuration/value/targets/1/if/conditions/0",
+    },
+    {
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      scenario_active: false,
+      runtime_status: "not_observed",
+      role: "action_target",
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
+      configuration_pointer:
+        "/configuration/value/targets/1/then/0/characteristics/0",
+      value_source: "literal",
+    },
+  ]);
+  assert.deepEqual(relations.assigned_logics, [
+    {
+      ref: "spruthub://hub/home%2FA/accessory/32/service/13/logic/AssignedSensorLogic",
+      type: "AssignedSensorLogic",
+      name: "Назначенная logic",
+      active: true,
+      role: "service_assignment",
+      service_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+    },
+  ]);
+  assert.deepEqual(relations.system_links, [
+    {
+      type: "SYSTEM",
+      index: "native-source/example",
+      controller: "zigbee_1",
+      role: "system",
+    },
+  ]);
+  assert.deepEqual(relations.characteristic_links, [
+    {
+      type: "OUT",
+      index: "Virtual/32.15",
+      role: "inter_entity",
+      related_characteristic_refs: [
+        "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
+      ],
+    },
+  ]);
+  assert.deepEqual(
+    relations.scopes.map(({ area, outcome, source_ref }) => ({
+      area,
+      outcome,
+      source_ref,
+    })),
+    [
+      {
+        area: "scenario_accessory_index",
+        outcome: "found",
+        source_ref: "spruthub://hub/home%2FA/accessory/32",
+      },
+      {
+        area: "scenario_catalog",
+        outcome: "found",
+        source_ref: "spruthub://hub/home%2FA",
+      },
+      {
+        area: "block_configuration",
+        outcome: "read",
+        source_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      },
+      {
+        area: "logic_assignments",
+        outcome: "found",
+        source_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      },
+      {
+        area: "characteristic_links",
+        outcome: "found",
+        source_ref: characteristicRef,
+      },
+    ],
+  );
+  for (const scope of relations.scopes) {
+    assert.match(scope.observed_at, /^\d{4}-\d{2}-\d{2}T/);
+  }
+  assert.deepEqual(
+    relations.unresolved_areas.find(({ area }) => area === "block_node"),
+    {
+      area: "block_node",
+      outcome: "unsupported",
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      configuration_pointer: "/configuration/value/targets/0",
+      native_type: "notify",
+    },
+  );
+  assert.equal(
+    relations.unresolved_areas.some(
+      ({ area, outcome }) =>
+        area === "runtime_execution" && outcome === "not_observed",
+    ),
+    true,
+  );
+  assert.equal(Object.hasOwn(relations, "direct_scenarios"), false);
+  assert.equal(Object.hasOwn(relations, "links"), false);
+
+  const service = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+    },
+  });
+  assert.deepEqual(
+    service.structuredContent.entity.available_logic_types.map(
+      ({ type, assigned }) => ({ type, assigned }),
+    ),
+    [
+      { type: "AssignedSensorLogic", assigned: true },
+      { type: "AvailableOnlyLogic", assigned: false },
+    ],
+  );
+  assert.equal(
+    relations.assigned_logics.some(({ type }) => type === "AvailableOnlyLogic"),
+    false,
+  );
+
+  const relationRequests = hub.requests.filter(
+    ({ params }) =>
+      params.scenario?.list ||
+      params.scenario?.get ||
+      params.logic?.list ||
+      params.link?.list,
+  );
+  assert.equal(
+    relationRequests.filter(({ params }) => params.scenario?.get).length,
+    1,
+  );
+  assert.equal(
+    relationRequests.some(
+      ({ params }) => params.scenario?.get?.index === "global-code",
+    ),
+    false,
+  );
+});
+
+test("empty accessory scenario index preserves unread code and BLOCK areas", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.scenarioAssociations.set(32, []);
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      include: ["relations"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const relations = result.structuredContent.entity.relations;
+  assert.deepEqual(relations.scenario_associations, []);
+  assert.equal(
+    relations.scopes.find(({ area }) => area === "scenario_accessory_index")
+      .outcome,
+    "checked_empty",
+  );
+  assert.deepEqual(
+    relations.unresolved_areas
+      .filter(({ area }) =>
+        ["scenario_code", "unindexed_block_scenarios"].includes(area),
+      )
+      .map(({ area, outcome, scenario_count, scenario_types }) => ({
+        area,
+        outcome,
+        scenario_count,
+        scenario_types,
+      })),
+    [
+      {
+        area: "scenario_code",
+        outcome: "not_read",
+        scenario_count: 1,
+        scenario_types: ["GLOBAL"],
+      },
+      {
+        area: "unindexed_block_scenarios",
+        outcome: "not_read",
+        scenario_count: 1,
+        scenario_types: ["BLOCK"],
+      },
+    ],
+  );
+  assert.equal(
+    hub.requests.some(({ params }) => params.scenario?.get),
+    false,
+  );
+});
+
+test("relation source failures stay scoped instead of becoming checked empty", async (t) => {
+  for (const testCase of [
+    {
+      name: "missing",
+      configure: (hub) => hub.behavior.missingScenarioGets.add("motion-block"),
+    },
+    {
+      name: "unsupported",
+      configure: (hub) =>
+        hub.behavior.scenarioGetErrors.set("motion-block", {
+          code: -32601,
+          message: "Method not found",
+        }),
+    },
+    {
+      name: "failed",
+      configure: (hub) =>
+        hub.behavior.scenarioGetErrors.set("motion-block", {
+          code: -32000,
+          message: "Native failure",
+        }),
+    },
+  ]) {
+    await t.test(testCase.name, async (t) => {
+      const hub = await startHub();
+      const state = hub.states.get("home/A");
+      state.scenarioAssociations.set(32, [state.scenarios[0]]);
+      testCase.configure(hub);
+      const client = await startClient(t, hub);
+
+      const result = await client.callTool({
+        name: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/accessory/32",
+          include: ["relations"],
+        },
+      });
+
+      assert.equal(result.isError, undefined, result.content[0]?.text);
+      const scope = result.structuredContent.entity.relations.scopes.find(
+        ({ area }) => area === "block_configuration",
+      );
+      assert.equal(scope.outcome, testCase.name);
+      assert.notEqual(scope.outcome, "checked_empty");
+      assert.equal(
+        result.structuredContent.entity.relations.unresolved_areas.some(
+          ({ area, scenario_ref, outcome }) =>
+            area === "block_configuration" &&
+            scenario_ref === "spruthub://hub/home%2FA/scenario/motion-block" &&
+            outcome === testCase.name,
+        ),
+        true,
+      );
+    });
+  }
 });
 
 test("get_entity distinguishes unread, found, empty, and unapplied option scopes", async (t) => {
