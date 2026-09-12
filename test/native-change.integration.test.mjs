@@ -2354,6 +2354,21 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
   const actionPointer = "/targets/0/then/1";
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.equal(contract.structuredContent.contract.duration.unit, "seconds");
+  assert.equal(
+    contract.structuredContent.contract.expiration.includes(
+      "next ordinary trigger",
+    ),
+    true,
+  );
   const prepared = await firstClient.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -2380,14 +2395,17 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   assert.equal(applied.isError, undefined, applied.content[0]?.text);
   assert.equal(applied.structuredContent.status, "applied");
   assert.equal(applied.structuredContent.pause_effect.status, "active");
-  const deadline = Date.parse(applied.structuredContent.pause_effect.expires_at);
+  const deadline = Date.parse(
+    applied.structuredContent.pause_effect.expires_at,
+  );
   assert.ok(deadline > Date.now());
 
   const nativeData = JSON.parse(hub.state.scenarios[0].data);
   assert.deepEqual(nativeData.vendorConfiguration, { preserved: true });
-  assert.deepEqual(nativeData.targets[0].then[0], {
-    ...withRuntimeBlockFields({ targets: [setAction()] }).targets[0],
-  });
+  const preservedOn = structuredClone(nativeData.targets[0].then[0]);
+  delete preservedOn.blockId;
+  delete preservedOn.characteristics[0].blockId;
+  assert.deepEqual(preservedOn, setAction());
   assert.equal(
     independentlyEnabledPausedAction(nativeData, actionPointer, deadline - 1),
     undefined,
@@ -2422,7 +2440,8 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   assert.equal(history.structuredContent.changes[0].effect_status, "expired");
 
   const currentWithManualEdit = JSON.parse(hub.state.scenarios[0].data);
-  blockNodeAtPointer(currentWithManualEdit, actionPointer).then[0].time = 55_000;
+  blockNodeAtPointer(currentWithManualEdit, actionPointer).then[0].time =
+    55_000;
   const ordinary = await secondClient.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -2443,10 +2462,8 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
     arguments: { change_ref: ordinary.structuredContent.change_ref },
   });
   assert.equal(
-    blockNodeAtPointer(
-      JSON.parse(hub.state.scenarios[0].data),
-      actionPointer,
-    ).time,
+    blockNodeAtPointer(JSON.parse(hub.state.scenarios[0].data), actionPointer)
+      .time,
     55_000,
   );
 });
@@ -2480,7 +2497,10 @@ test("a repeated BLOCK action pause keeps one wrapper and one absolute window", 
     name: "apply_native_change",
     arguments: { change_ref: first.structuredContent.change_ref },
   });
-  assert.equal(repeatedApply.structuredContent.pause_effect.expires_at, firstExpiry);
+  assert.equal(
+    repeatedApply.structuredContent.pause_effect.expires_at,
+    firstExpiry,
+  );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
     1,
@@ -2508,6 +2528,13 @@ test("a repeated BLOCK action pause keeps one wrapper and one absolute window", 
     "delay",
   );
 
+  const oldStatus = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(oldStatus.structuredContent.status, "superseded");
+  assert.equal(oldStatus.structuredContent.pause_effect.status, "superseded");
+
   const staleRestore = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: first.structuredContent.change_ref },
@@ -2528,10 +2555,8 @@ test("a repeated BLOCK action pause keeps one wrapper and one absolute window", 
   });
   assert.equal(restored.structuredContent.status, "restored");
   assert.equal(
-    blockNodeAtPointer(
-      JSON.parse(hub.state.scenarios[0].data),
-      actionPointer,
-    ).time,
+    blockNodeAtPointer(JSON.parse(hub.state.scenarios[0].data), actionPointer)
+      .time,
     50_000,
   );
 });
@@ -2555,7 +2580,10 @@ test("BLOCK action pause rejects non-actions and preserves an edited controller"
       },
     });
     assert.equal(refused.isError, true);
-    assert.equal(refused.structuredContent.error.code, "invalid_action_pointer");
+    assert.equal(
+      refused.structuredContent.error.code,
+      "invalid_action_pointer",
+    );
   }
 
   const pause = await client.callTool({
@@ -2572,6 +2600,25 @@ test("BLOCK action pause rejects non-actions and preserves an edited controller"
     name: "apply_native_change",
     arguments: { change_ref: pause.structuredContent.change_ref },
   });
+  const forged = JSON.parse(hub.state.scenarios[0].data);
+  const forgedController = blockNodeAtPointer(forged, "/targets/0/then/1");
+  forgedController.if.conditions[0].code =
+    forgedController.if.conditions[0].code.replace(
+      />= \d+;/,
+      ">= 9999999999999;",
+    );
+  const refusedCode = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: forged,
+      reason: "Не разрешать произвольный срок под старым маркером",
+    },
+  });
+  assert.equal(refusedCode.isError, true);
+  assert.equal(refusedCode.structuredContent.error.code, "invalid_block_data");
+
   const edited = JSON.parse(hub.state.scenarios[0].data);
   blockNodeAtPointer(edited, "/targets/0/then/1").else = [setAction()];
   hub.state.scenarios[0].data = JSON.stringify(edited);
@@ -2580,7 +2627,10 @@ test("BLOCK action pause rejects non-actions and preserves an edited controller"
     arguments: { change_ref: pause.structuredContent.change_ref },
   });
   assert.equal(refusedRestore.structuredContent.status, "conflict");
-  assert.equal(refusedRestore.structuredContent.conflict_reason, "pause_controller_changed");
+  assert.equal(
+    refusedRestore.structuredContent.conflict_reason,
+    "pause_controller_changed",
+  );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
     1,

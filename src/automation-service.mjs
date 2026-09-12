@@ -130,6 +130,19 @@ export class AutomationService {
         contract: blockContract(),
       };
     }
+    if (input.operation === "block_action_pause") {
+      const target = parseScenarioRef(input.target_ref, this.hubSerial);
+      const scenario = await this.client.getScenario(target.index);
+      if (!scenario) throw scenarioNotFound();
+      if (scenarioSnapshot(scenario).type !== "BLOCK")
+        throw unsupportedScenarioType();
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: blockActionPauseContract(),
+      };
+    }
     if (input.operation === "logic_source_create") {
       const target = parseServiceRef(input.target_ref, this.hubSerial);
       await this.#readLogicTypeCatalog(target);
@@ -164,6 +177,9 @@ export class AutomationService {
     }
     if (input.operation === "block_data_update") {
       return this.#prepareBlockUpdate(input);
+    }
+    if (input.operation === "block_action_pause") {
+      return this.#prepareBlockActionPause(input);
     }
     if (input.operation === "logic_source_create") {
       return this.#prepareLogicSourceCreate(input);
@@ -712,9 +728,15 @@ export class AutomationService {
     if (!scenario) throw scenarioNotFound();
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
-    const data = structuredClone(input.data);
+    const pauseChanges = await this.#knownBlockPauses(input.target_ref);
+    const data = collapseExpiredOwnedPauses(
+      structuredClone(input.data),
+      pauseChanges,
+      Date.now(),
+    );
     await validateBlockData(data, this.client, {
       allowUnknownFrom: baseline.data,
+      allowedPauses: pauseChanges,
     });
     const id = this.store.newId();
     const now = new Date().toISOString();
@@ -737,6 +759,72 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  async #prepareBlockActionPause(input) {
+    if (
+      typeof input.action_pointer !== "string" ||
+      !Number.isSafeInteger(input.duration_seconds) ||
+      input.duration_seconds <= 0 ||
+      input.duration_seconds > 31_536_000
+    ) {
+      throw new SprutHubError(
+        "invalid_native_change",
+        "BLOCK action pause requires one action_pointer and a positive duration_seconds not exceeding one year.",
+        "get_native_change_contract",
+      );
+    }
+    const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    const baseline = scenarioSnapshot(scenario);
+    if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
+    const pauseChanges = await this.#knownBlockPauses(input.target_ref);
+    await validateBlockData(baseline.data, this.client, {
+      allowUnknownFrom: baseline.data,
+      allowedPauses: pauseChanges,
+    });
+    const selected = selectBlockAction(
+      baseline.data,
+      input.action_pointer,
+      pauseChanges,
+    );
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "block_action_pause",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      action_pointer: input.action_pointer,
+      selected_action_type: selected.action.type,
+      selected_action_snapshot: structuredClone(selected.action),
+      duration_seconds: input.duration_seconds,
+      baseline_snapshot: baseline,
+      ...(selected.replacesChangeId
+        ? { replaces_pause_change_id: selected.replacesChangeId }
+        : {}),
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #knownBlockPauses(targetRef) {
+    return (await this.store.list()).filter(
+      (change) =>
+        change.kind === "block_action_pause" &&
+        change.target_ref === targetRef &&
+        typeof change.action_pointer === "string",
+    );
   }
 
   async #prepareLogicSourceCreate(input) {
@@ -1099,6 +1187,9 @@ export class AutomationService {
     if (isLogicSourceChange(change)) {
       return this.#getScenarioChange(change);
     }
+    if (change.kind === "block_action_pause") {
+      return this.#getBlockActionPause(change);
+    }
     if (!isNativeValueChange(change)) {
       return this.#getScenarioChange(change);
     }
@@ -1161,6 +1252,9 @@ export class AutomationService {
       }
       if (isLogicSourceChange(change)) {
         return this.#restoreScenarioChange(change);
+      }
+      if (change.kind === "block_action_pause") {
+        return this.#restoreBlockActionPause(change);
       }
       return this.#restoreScenarioChange(change);
     });
@@ -3152,6 +3246,7 @@ export class AutomationService {
         "virtual_light_group",
         "block_create",
         "block_data_update",
+        "block_action_pause",
         "logic_source_create",
         "logic_source_update",
       ].includes(change?.kind)
@@ -3460,7 +3555,8 @@ export class AutomationService {
   }
 
   async #applyScenarioChange(change) {
-    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (["restored", "superseded"].includes(change.status))
+      return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
         ? this.#reconcileScenarioRestore(change, false)
@@ -3484,12 +3580,27 @@ export class AutomationService {
       });
     }
 
+    if (
+      change.kind === "block_action_pause" &&
+      change.pause_expires_at_ms === undefined
+    ) {
+      const startedAt = Date.now();
+      change.pause_started_at = new Date(startedAt).toISOString();
+      change.pause_expires_at_ms = startedAt + change.duration_seconds * 1_000;
+      change.pause_expires_at = new Date(
+        change.pause_expires_at_ms,
+      ).toISOString();
+      change.requested_snapshot = buildPauseRequestedSnapshot(change);
+    }
+
     if (isBlockChange(change)) {
+      const pauseChanges = await this.#knownBlockPauses(change.target_ref);
       await validateBlockData(change.requested_snapshot.data, this.client, {
         allowUnknownFrom:
           change.kind === "block_create"
             ? null
             : scenarioSnapshot(current.scenario).data,
+        allowedPauses: [...pauseChanges, change],
       });
     }
 
@@ -3502,7 +3613,9 @@ export class AutomationService {
             : logicSourceCreateRequest(change),
         );
         change.scenario_index = created.index;
-      } else if (change.kind === "block_data_update") {
+      } else if (
+        ["block_data_update", "block_action_pause"].includes(change.kind)
+      ) {
         await this.client.updateScenarioData(
           change.target.index,
           JSON.stringify(change.requested_snapshot.data),
@@ -3639,6 +3752,142 @@ export class AutomationService {
       change,
       scenarioChangeObservation(change, current, "requested"),
     );
+  }
+
+  async #getBlockActionPause(change) {
+    if (
+      !Number.isSafeInteger(change.pause_expires_at_ms) ||
+      change.status === "restored"
+    ) {
+      return this.#getScenarioChange(change);
+    }
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileScenarioRestore(change, false)
+        : this.#reconcileScenarioApply(change, false);
+    }
+    let current;
+    try {
+      current = await this.#observeScenarioChange(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+        configurationMatches: undefined,
+      });
+    }
+    if (current.scenario === null) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "pause_controller_changed",
+        last_verification: freshVerification("scenario_missing"),
+      });
+    }
+    const selected = blockValueAtPointer(
+      scenarioSnapshot(current.scenario).data,
+      change.action_pointer,
+    );
+    if (pauseControllerMatches(selected, change)) {
+      const observation = scenarioChangeObservation(change, current, "applied");
+      return change.status === "applied"
+        ? this.#recordScenarioObservation(change, observation)
+        : this.#finishNative(change, "applied", undefined, observation.fields);
+    }
+    const ownerId = pauseControllerId(selected);
+    const newer = (await this.#knownBlockPauses(change.target_ref)).find(
+      (candidate) =>
+        candidate.id === ownerId &&
+        !["restored", "superseded"].includes(candidate.status) &&
+        candidate.action_pointer === change.action_pointer,
+    );
+    if (newer) {
+      return this.#finishNative(change, "superseded", undefined, {
+        configuration_matches: true,
+        conflict_reason: undefined,
+        superseded_by_change_ref: `spruthub-change://native/${newer.id}`,
+        last_verification: freshVerification("newer_pause_observed"),
+      });
+    }
+    return this.#finishNative(change, "conflict", undefined, {
+      conflict_reason: "pause_controller_changed",
+      last_verification: freshVerification("pause_controller_changed"),
+    });
+  }
+
+  async #restoreBlockActionPause(change) {
+    if (["restored", "superseded"].includes(change.status))
+      return publicStoredNativeChange(change);
+    if (["applying", "restoring", "uncertain"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#reconcileScenarioRestore(change, false)
+        : this.#reconcileScenarioApply(change, false);
+    }
+    const current = await this.#observeScenarioChange(change);
+    if (current.scenario === null) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "pause_controller_changed",
+        last_verification: freshVerification("scenario_missing"),
+      });
+    }
+    const currentSnapshot = scenarioSnapshot(current.scenario);
+    const selected = blockValueAtPointer(
+      currentSnapshot.data,
+      change.action_pointer,
+    );
+    const ownerId = pauseControllerId(selected);
+    if (ownerId !== change.id) {
+      const newer = (await this.#knownBlockPauses(change.target_ref)).find(
+        (candidate) =>
+          candidate.id === ownerId &&
+          !["restored", "superseded"].includes(candidate.status) &&
+          candidate.action_pointer === change.action_pointer,
+      );
+      if (newer) {
+        return this.#finishNative(change, "superseded", undefined, {
+          configuration_matches: true,
+          conflict_reason: undefined,
+          superseded_by_change_ref: `spruthub-change://native/${newer.id}`,
+          last_verification: freshVerification("newer_pause_observed"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "pause_controller_changed",
+        last_verification: freshVerification("pause_controller_missing"),
+      });
+    }
+    if (!pauseControllerMatches(selected, change)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "pause_controller_changed",
+        last_verification: freshVerification("pause_controller_changed"),
+      });
+    }
+
+    const restoreSnapshot = structuredClone(currentSnapshot);
+    replaceBlockValueAtPointer(
+      restoreSnapshot.data,
+      change.action_pointer,
+      structuredClone(selected.then[0]),
+    );
+    const pauseChanges = await this.#knownBlockPauses(change.target_ref);
+    await validateBlockData(restoreSnapshot.data, this.client, {
+      allowUnknownFrom: currentSnapshot.data,
+      allowedPauses: pauseChanges.filter(({ id }) => id !== change.id),
+    });
+    change.restore_snapshot = restoreSnapshot;
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      await this.client.updateScenarioData(
+        change.target.index,
+        JSON.stringify(restoreSnapshot.data),
+      );
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "applied");
+        throw error;
+      }
+      return this.#reconcileScenarioRestore(change, false);
+    }
+    return this.#reconcileScenarioRestore(change, true);
   }
 
   async #restoreScenarioChange(change) {
@@ -3790,7 +4039,7 @@ export class AutomationService {
   }
 
   async #observeBlock(change) {
-    if (change.kind === "block_data_update") {
+    if (["block_data_update", "block_action_pause"].includes(change.kind)) {
       return this.client.getScenario(change.target.index);
     }
     if (change.scenario_index) {
@@ -4609,7 +4858,45 @@ function blockContract() {
   };
 }
 
-async function validateBlockData(data, client, { allowUnknownFrom }) {
+function blockActionPauseContract() {
+  return {
+    version: "2026-09-12",
+    write: "scenario.update({index,data})",
+    scope: "one_existing_executable_BLOCK_action_selected_by_RFC_6901_pointer",
+    duration: {
+      unit: "seconds",
+      minimum: 1,
+      maximum: 31_536_000,
+      starts: "first_apply",
+    },
+    native_mechanism:
+      "if code-condition returning Date.now() >= one persisted absolute deadline",
+    expiration:
+      "the original action becomes eligible on the next ordinary trigger without a running client; missed triggers are not replayed",
+    cleanup:
+      "an unchanged owned expired controller is collapsed in the next planned write to the same BLOCK",
+    restore:
+      "remove_only_the_owned_unchanged_controller_and_keep_its_current_action",
+    evidence: {
+      live_hub_version: "3.0.0b (20131)",
+      code_condition_before_and_after_deadline: true,
+      client_closed_between_evaluations: true,
+      full_hub_restart: false,
+    },
+    limitations: [
+      "Updating BLOCK data can cancel an already running native delay in that scenario.",
+      "Expiration changes eligibility at the next trigger; it does not run the skipped action at the deadline.",
+      "An inert expired controller may remain until the next ordinary write to this BLOCK.",
+      "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+    ],
+  };
+}
+
+async function validateBlockData(
+  data,
+  client,
+  { allowUnknownFrom, allowedPauses = [] },
+) {
   if (
     !isRecord(data) ||
     !Array.isArray(data.targets) ||
@@ -4637,6 +4924,23 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
     actions: [],
     delayIndexes: new Set(),
     triggers: 0,
+    allowedPauses: new Map(
+      allowedPauses
+        .filter(
+          (pause) =>
+            !["restored", "superseded"].includes(pause.status) &&
+            typeof pause.action_pointer === "string" &&
+            Number.isSafeInteger(pause.pause_expires_at_ms),
+        )
+        .map((pause) => [
+          pause.id,
+          {
+            deadline: pause.pause_expires_at_ms,
+            pointer: pause.action_pointer,
+          },
+        ]),
+    ),
+    allowedPauseCodeNodes: new WeakSet(),
   };
   visitKnownBlockNodes(
     data,
@@ -4707,6 +5011,20 @@ async function validateBlockData(data, client, { allowUnknownFrom }) {
 function validateBlockNode(node, kind, path, context) {
   if (kind === "root") return;
   if (kind === "if") {
+    const pauseId = pauseControllerId(node);
+    if (pauseId !== null) {
+      const parsed = parsePauseCode(node.if?.conditions?.[0]?.code);
+      const owner = context.allowedPauses.get(pauseId);
+      if (
+        owner?.deadline !== parsed?.deadline ||
+        owner?.pointer !== blockPathToPointer(path) ||
+        !pauseControllerShapeMatches(node)
+      ) {
+        throw invalidBlock(path, "unowned or changed action-pause controller");
+      }
+      context.allowedPauseCodeNodes.add(node.if.conditions[0]);
+      return;
+    }
     if (
       node.mode !== "EVERY" ||
       node.then_delay !== 0 ||
@@ -4730,6 +5048,23 @@ function validateBlockNode(node, kind, path, context) {
       !blockNodeArray(node.conditions)
     ) {
       throw invalidBlock(path, "AND/OR condition must not be empty");
+    }
+    return;
+  }
+  if (kind === "code") {
+    const parsed = parsePauseCode(node.code);
+    if (
+      !parsed ||
+      !context.allowedPauses.has(parsed.id) ||
+      !context.allowedPauseCodeNodes.has(node) ||
+      Object.keys(node).some(
+        (key) => !["type", "blockId", "code"].includes(key),
+      )
+    ) {
+      throw invalidBlock(
+        path,
+        "only an owned absolute pause condition is supported",
+      );
     }
     return;
   }
@@ -4842,6 +5177,7 @@ const BLOCK_ALLOWED_KEYS = {
     "else_delay",
   ]),
   condition: new Set(["type", "blockId", "mode", "conditions"]),
+  code: new Set(["type", "blockId", "code"]),
   characteristic: new Set([
     "type",
     "blockId",
@@ -4877,7 +5213,7 @@ const BLOCK_CHILD_FIELDS = {
   condition: {
     conditions: {
       shape: "array",
-      kinds: new Set(["condition", "characteristic"]),
+      kinds: new Set(["condition", "characteristic", "code"]),
     },
   },
   service: {
@@ -4941,6 +5277,215 @@ function visitBlockChild(child, path, rule, visit, invalidChild) {
     return;
   }
   visit(child, child.type, path);
+}
+
+const PAUSE_CODE_PATTERN =
+  /^return Date\.now\(\) >= (\d+); \/\* sprut-agent:block-action-pause:([a-f0-9]{24}) \*\/$/;
+
+function parsePauseCode(code) {
+  if (typeof code !== "string") return null;
+  const match = PAUSE_CODE_PATTERN.exec(code);
+  if (!match) return null;
+  const deadline = Number(match[1]);
+  return Number.isSafeInteger(deadline) ? { deadline, id: match[2] } : null;
+}
+
+function pauseControllerId(node) {
+  if (!isRecord(node) || node.type !== "if") return null;
+  const conditions = node.if?.conditions;
+  if (!Array.isArray(conditions) || conditions.length !== 1) return null;
+  return parsePauseCode(conditions[0]?.code)?.id ?? null;
+}
+
+function pauseControllerShapeMatches(node) {
+  return (
+    isRecord(node) &&
+    node.type === "if" &&
+    node.mode === "EVERY" &&
+    node.then_delay === 0 &&
+    node.else_delay === 0 &&
+    isRecord(node.if) &&
+    node.if.type === "condition" &&
+    node.if.mode === "AND" &&
+    Array.isArray(node.if.conditions) &&
+    node.if.conditions.length === 1 &&
+    node.if.conditions[0]?.type === "code" &&
+    parsePauseCode(node.if.conditions[0]?.code) !== null &&
+    Object.keys(node.if.conditions[0]).every((key) =>
+      BLOCK_ALLOWED_KEYS.code.has(key),
+    ) &&
+    Array.isArray(node.then) &&
+    node.then.length === 1 &&
+    blockNode(node.then[0]) &&
+    Array.isArray(node.else) &&
+    node.else.length === 0 &&
+    Object.keys(node).every((key) => BLOCK_ALLOWED_KEYS.if.has(key)) &&
+    Object.keys(node.if).every((key) => BLOCK_ALLOWED_KEYS.condition.has(key))
+  );
+}
+
+function pauseControllerMatches(node, change) {
+  const parsed = parsePauseCode(node?.if?.conditions?.[0]?.code);
+  return (
+    pauseControllerShapeMatches(node) &&
+    parsed?.id === change.id &&
+    parsed.deadline === change.pause_expires_at_ms
+  );
+}
+
+function pauseController(change, action) {
+  return {
+    type: "if",
+    mode: "EVERY",
+    if: {
+      type: "condition",
+      mode: "AND",
+      conditions: [
+        {
+          type: "code",
+          code: `return Date.now() >= ${change.pause_expires_at_ms}; /* sprut-agent:block-action-pause:${change.id} */`,
+        },
+      ],
+    },
+    // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+    then: [structuredClone(action)],
+    else: [],
+    then_delay: 0,
+    else_delay: 0,
+  };
+}
+
+function buildPauseRequestedSnapshot(change) {
+  const requested = structuredClone(change.baseline_snapshot);
+  replaceBlockValueAtPointer(
+    requested.data,
+    change.action_pointer,
+    pauseController(change, change.selected_action_snapshot),
+  );
+  return requested;
+}
+
+function blockPathToPointer(path) {
+  return path
+    .replace(/^root/, "")
+    .replace(/\.([^.[\]]+)/g, "/$1")
+    .replace(/\[(\d+)\]/g, "/$1")
+    .split("/")
+    .map((part, index) =>
+      index === 0 ? part : part.replaceAll("~", "~0").replaceAll("/", "~1"),
+    )
+    .join("/");
+}
+
+function executableBlockActions(data) {
+  const actions = new Map();
+  visitKnownBlockNodes(data, (node, kind, path) => {
+    if (["if", "service", "delay"].includes(kind)) {
+      actions.set(blockPathToPointer(path), node);
+    }
+  });
+  return actions;
+}
+
+function selectBlockAction(data, pointer, pauseChanges) {
+  const node = executableBlockActions(data).get(pointer);
+  if (!node) throw invalidActionPointer(pointer);
+  const ownerId = pauseControllerId(node);
+  if (ownerId === null) return { action: node };
+  const owner = pauseChanges.find(
+    (change) =>
+      change.id === ownerId &&
+      !["restored", "superseded"].includes(change.status) &&
+      change.action_pointer === pointer,
+  );
+  if (!owner || !pauseControllerMatches(node, owner)) {
+    throw new SprutHubError(
+      "pause_controller_changed",
+      "The selected action-pause controller is not an unchanged owned controller.",
+      "get_native_change",
+    );
+  }
+  return { action: node.then[0], replacesChangeId: ownerId };
+}
+
+function decodeJsonPointer(pointer) {
+  if (
+    typeof pointer !== "string" ||
+    !pointer.startsWith("/") ||
+    /~(?:[^01]|$)/.test(pointer)
+  ) {
+    throw invalidActionPointer(pointer);
+  }
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+}
+
+function blockPointerLocation(data, pointer) {
+  const tokens = decodeJsonPointer(pointer);
+  let parent;
+  let key;
+  let value = data;
+  for (const token of tokens) {
+    parent = value;
+    key = Array.isArray(parent)
+      ? /^(?:0|[1-9]\d*)$/.test(token)
+        ? Number(token)
+        : token
+      : token;
+    if (
+      (Array.isArray(parent) && !Number.isSafeInteger(key)) ||
+      (!isRecord(parent) && !Array.isArray(parent)) ||
+      !Object.hasOwn(parent, key)
+    ) {
+      throw invalidActionPointer(pointer);
+    }
+    value = parent[key];
+  }
+  return { parent, key, value };
+}
+
+function blockValueAtPointer(data, pointer) {
+  try {
+    return blockPointerLocation(data, pointer).value;
+  } catch {
+    return undefined;
+  }
+}
+
+function replaceBlockValueAtPointer(data, pointer, replacement) {
+  const location = blockPointerLocation(data, pointer);
+  location.parent[location.key] = replacement;
+}
+
+function collapseExpiredOwnedPauses(data, pauseChanges, now) {
+  for (const change of pauseChanges) {
+    if (
+      ["restored", "superseded"].includes(change.status) ||
+      !Number.isSafeInteger(change.pause_expires_at_ms) ||
+      change.pause_expires_at_ms > now
+    ) {
+      continue;
+    }
+    const node = blockValueAtPointer(data, change.action_pointer);
+    if (pauseControllerMatches(node, change)) {
+      replaceBlockValueAtPointer(
+        data,
+        change.action_pointer,
+        structuredClone(node.then[0]),
+      );
+    }
+  }
+  return data;
+}
+
+function invalidActionPointer(pointer) {
+  return new SprutHubError(
+    "invalid_action_pointer",
+    `The BLOCK pointer ${JSON.stringify(pointer)} does not select one executable action or branch.`,
+    "get_entity",
+  );
 }
 
 function invalidBlock(path, message) {
@@ -5994,7 +6539,9 @@ function isLogicSourceChange(change) {
 }
 
 function isBlockChange(change) {
-  return ["block_create", "block_data_update"].includes(change.kind);
+  return ["block_create", "block_data_update", "block_action_pause"].includes(
+    change.kind,
+  );
 }
 
 function scenarioChangeObservation(change, current, snapshot) {
@@ -6419,7 +6966,8 @@ function blockCreateSnapshot(change) {
 function blockMatchesRequested(change, scenario) {
   if (!scenario) return false;
   const current = scenarioSnapshot(scenario);
-  if (change.kind === "block_data_update") {
+  if (["block_data_update", "block_action_pause"].includes(change.kind)) {
+    if (!change.requested_snapshot) return false;
     return snapshotsEqual(current, change.requested_snapshot);
   }
   const expected = blockCreateRequest(change);
@@ -6439,13 +6987,21 @@ function blockMatchesRequested(change, scenario) {
 
 function blockStillAtBaseline(change, scenario) {
   if (change.kind === "block_create") return scenario === null;
+  const baseline =
+    change.kind === "block_action_pause" && change.restore_snapshot
+      ? change.restore_snapshot
+      : change.baseline_snapshot;
   return (
-    scenario !== null &&
-    snapshotsEqual(scenarioSnapshot(scenario), change.baseline_snapshot)
+    scenario !== null && snapshotsEqual(scenarioSnapshot(scenario), baseline)
   );
 }
 
 function blockMatchesApplied(change, scenario) {
+  if (change.kind === "block_action_pause" && scenario !== null) {
+    const current = scenarioSnapshot(scenario);
+    const node = blockValueAtPointer(current.data, change.action_pointer);
+    return pauseControllerMatches(node, change);
+  }
   return (
     scenario !== null &&
     change.applied_snapshot !== undefined &&
@@ -6871,6 +7427,55 @@ function publicNativeChange(
       ],
     };
   }
+  if (change.kind === "block_action_pause") {
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      action_pointer: change.action_pointer,
+      diff: {
+        action: {
+          pointer: change.action_pointer,
+          selected_type: change.selected_action_type,
+          change: "paused_until_absolute_deadline",
+        },
+      },
+      pause_effect: publicPauseEffect(change),
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.recovered_after_uncertain_write
+        ? { recovered_after_uncertain_write: true }
+        : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      ...(change.replaces_pause_change_id
+        ? {
+            replaces_change_ref: `spruthub-change://native/${change.replaces_pause_change_id}`,
+          }
+        : {}),
+      ...(change.superseded_by_change_ref
+        ? { superseded_by_change_ref: change.superseded_by_change_ref }
+        : {}),
+      restore_supported: true,
+      limitations: [
+        "The hub evaluates an absolute deadline; no client, daemon, or delayed restore call is required.",
+        "Expiration makes the action eligible only on a later ordinary trigger and does not replay missed events.",
+        "Updating BLOCK data can cancel an already running native delay in this scenario.",
+        "An unchanged inert controller is removed with the next planned write to this BLOCK; read-only calls do not write.",
+        "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
+      ],
+    };
+  }
   if (!isNativeValueChange(change)) {
     const diff =
       change.kind === "block_create"
@@ -7046,6 +7651,34 @@ function publicLogicEditableFlags(snapshot) {
   };
 }
 
+function publicPauseEffect(change, now = Date.now()) {
+  const shared = {
+    action_pointer: change.action_pointer,
+    duration_seconds: change.duration_seconds,
+  };
+  if (!Number.isSafeInteger(change.pause_expires_at_ms)) {
+    return {
+      status: "not_started",
+      ...shared,
+      starts_on_first_apply: true,
+    };
+  }
+  let status;
+  if (change.status === "restored") status = "restored";
+  else if (change.status === "superseded") status = "superseded";
+  else if (["conflict", "not_applied", "uncertain"].includes(change.status))
+    status = "unknown";
+  else status = now < change.pause_expires_at_ms ? "active" : "expired";
+  return {
+    status,
+    ...shared,
+    started_at: change.pause_started_at,
+    expires_at: change.pause_expires_at,
+    hub_condition:
+      "the selected action runs when Date.now() is at or after expires_at",
+  };
+}
+
 function changeSummary(change, homeRef) {
   if (
     [
@@ -7059,6 +7692,7 @@ function changeSummary(change, homeRef) {
       "virtual_light_group",
       "block_create",
       "block_data_update",
+      "block_action_pause",
       "logic_source_create",
       "logic_source_update",
     ].includes(change.kind)
@@ -7068,6 +7702,9 @@ function changeSummary(change, homeRef) {
       change_ref: reference,
       operation: change.kind,
       recorded_status: change.status,
+      ...(change.kind === "block_action_pause"
+        ? { effect_status: publicPauseEffect(change).status }
+        : {}),
       target_refs: nativeAffectedRefs(change, homeRef),
       created_at: change.created_at,
       updated_at: change.updated_at,
@@ -7143,7 +7780,11 @@ function nativeAffectedRefs(change, homeRef) {
     ].includes(change.kind)
   ) {
     refs.push(...canonicalAncestors(refs[0]));
-  } else if (["block_create", "block_data_update"].includes(change.kind)) {
+  } else if (
+    ["block_create", "block_data_update", "block_action_pause"].includes(
+      change.kind,
+    )
+  ) {
     if (change.scenario_index) {
       refs.push(
         `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
@@ -7152,7 +7793,11 @@ function nativeAffectedRefs(change, homeRef) {
     const configurations =
       change.kind === "block_create"
         ? [change.requested_snapshot?.data]
-        : [change.baseline_snapshot?.data, change.requested_snapshot?.data];
+        : [
+            change.baseline_snapshot?.data,
+            change.requested_snapshot?.data,
+            change.restore_snapshot?.data,
+          ];
     for (const data of configurations) {
       refs.push(...blockAffectedRefs(data, homeRef));
     }
