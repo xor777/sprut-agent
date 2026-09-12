@@ -2406,6 +2406,100 @@ test("scenario configuration keeps one useful value across native formats", asyn
   );
 });
 
+test("only normalized scenario code keeps JavaScript context across presentations", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const source =
+    "const selected = ready ? config.token : fallback;\n" +
+    "switch (mode) { case token: log.info(selected); }\n" +
+    "// exact source padding 💡\n".repeat(250);
+  const nestedSecret = "nested-format-secret-must-not-leak";
+  state.scenarios.push(
+    {
+      index: "contextual-code",
+      name: "Контекстный код",
+      type: "JS",
+      predefined: false,
+      active: true,
+      data: source,
+    },
+    {
+      index: "nested-code-lookalike",
+      name: "Данные с похожим форматом",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      data: JSON.stringify({
+        configuration: {
+          format: "code",
+          value: `use case token: ${nestedSecret}`,
+        },
+      }),
+    },
+  );
+  const client = await startClient(t, hub);
+  const entityRef = "spruthub://hub/home%2FA/scenario/contextual-code";
+
+  const full = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      max_bytes: 32_768,
+    },
+  });
+  assert.equal(full.isError, undefined, full.content[0]?.text);
+  assert.equal(full.structuredContent.entity.configuration.value, source);
+
+  const pointer = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/value",
+      max_bytes: 32_768,
+    },
+  });
+  assert.equal(pointer.isError, undefined, pointer.content[0]?.text);
+  assert.equal(pointer.structuredContent.selection.value, source);
+
+  let chunk = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      include: ["configuration"],
+      pointer: "/configuration/value",
+      max_bytes: 2_048,
+    },
+  });
+  const chunks = [];
+  while (true) {
+    assert.equal(chunk.isError, undefined, chunk.content[0]?.text);
+    chunks.push(chunk.structuredContent.selection.value.text);
+    const next = chunk.structuredContent.selection.next;
+    if (!next) break;
+    chunk = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+  }
+  assert.equal(chunks.join(""), source);
+
+  const native = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/nested-code-lookalike",
+      include: ["configuration"],
+    },
+  });
+  assert.equal(native.isError, undefined, native.content[0]?.text);
+  assert.equal(
+    native.structuredContent.entity.configuration.value.configuration.value,
+    "[REDACTED]",
+  );
+  assert.doesNotMatch(JSON.stringify(native), new RegExp(nestedSecret));
+});
+
 test("large entity detail stays byte bounded and exposes exact addressable parts", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");

@@ -3566,9 +3566,16 @@ export function sanitizeNativeData(value, key = "") {
 }
 
 export function sanitizeAgentOutput(value, sensitiveValues = []) {
+  const codeConfiguration = scenarioCodeConfiguration(value);
+  return sanitizeAgentValue(value, sensitiveValues, codeConfiguration);
+}
+
+function sanitizeAgentValue(value, sensitiveValues, codeConfiguration) {
   if (isRedactedNode(value)) return redactedNode();
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeAgentOutput(item, sensitiveValues));
+    return value.map((item) =>
+      sanitizeAgentValue(item, sensitiveValues, codeConfiguration),
+    );
   }
   if (value && typeof value === "object") {
     if (
@@ -3581,15 +3588,31 @@ export function sanitizeAgentOutput(value, sensitiveValues = []) {
     return Object.fromEntries(
       Object.entries(value).map(([key, childValue]) => [
         key,
-        sanitizeAgentOutput(childValue, sensitiveValues),
+        typeof childValue === "string" &&
+        value === codeConfiguration &&
+        key === "value"
+          ? redactAgentString(childValue, sensitiveValues, true)
+          : sanitizeAgentValue(childValue, sensitiveValues, codeConfiguration),
       ]),
     );
   }
   if (typeof value !== "string") return value;
+  return redactAgentString(value, sensitiveValues, false);
+}
+
+function redactAgentString(value, sensitiveValues, useJavaScriptContext) {
   if (sensitiveValues.some((secret) => value.includes(secret))) {
     return "[REDACTED]";
   }
-  return redactSensitiveText(value);
+  return redactSensitiveText(value, useJavaScriptContext);
+}
+
+function scenarioCodeConfiguration(result) {
+  const entity = result?.entity;
+  const configuration = entity?.configuration;
+  return entity?.kind === "scenario" && configuration?.format === "code"
+    ? configuration
+    : null;
 }
 
 function isRedactedNode(value) {
@@ -3650,7 +3673,7 @@ function isSensitiveContainerKey(key) {
   );
 }
 
-function redactSensitiveText(text, useJavaScriptContext = true) {
+function redactSensitiveText(text, useJavaScriptContext = false) {
   const containsCredential =
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
     containsSensitiveAssignment(text, useJavaScriptContext);
