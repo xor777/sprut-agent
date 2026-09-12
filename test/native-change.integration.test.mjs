@@ -5671,29 +5671,35 @@ test("get_scenario_sdk identifies a hidden credential without claiming complete 
   assert.doesNotMatch(knownSecret.content[0].text, /native-change-test-token/);
 });
 
-test("get_scenario_sdk hides a credential initializer after a parameter type", async (t) => {
+test("get_scenario_sdk hides credential initializers across TypeScript type syntax", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
-  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function connect(password: String = "typed-default-secret-must-not-leak"): void;`;
 
-  const hiddenCredential = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
-  });
+  const credentialDeclarations = [
+    'declare function connect(password: String = "typed-default-secret-must-not-leak"): void;',
+    'declare function connect(password: Record<string, string> = "generic-default-secret-must-not-leak"): void;',
+    'declare function connect(password: string extends infer T ? T : never = "conditional-default-secret-must-not-leak"): void;',
+    'declare function connect(password: Array<String>= "adjacent-default-secret-must-not-leak"): void;',
+    'declare function connect(password?: String = "optional-default-secret-must-not-leak"): void;',
+  ];
+  for (const declaration of credentialDeclarations) {
+    hub.state.scenarioSdk = `${scenarioSdk}\n${declaration}`;
+    const hiddenCredential = await client.callTool({
+      name: "get_scenario_sdk",
+      arguments: { home_ref: homeRef },
+    });
 
-  assert.equal(
-    hiddenCredential.isError,
-    undefined,
-    hiddenCredential.content[0]?.text,
-  );
-  assert.equal(hiddenCredential.structuredContent.sdk, "[REDACTED]");
-  assert.equal(hiddenCredential.structuredContent.sdk_complete, false);
-  assert.doesNotMatch(
-    hiddenCredential.content[0].text,
-    /typed-default-secret-must-not-leak/,
-  );
+    assert.equal(
+      hiddenCredential.isError,
+      undefined,
+      hiddenCredential.content[0]?.text,
+    );
+    assert.equal(hiddenCredential.structuredContent.sdk, "[REDACTED]");
+    assert.equal(hiddenCredential.structuredContent.sdk_complete, false);
+    assert.doesNotMatch(hiddenCredential.content[0].text, /must-not-leak/);
+  }
 
-  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function delay(timeout: number = 1000): Task;`;
+  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function login(password: String, retries = 3): Mail;`;
   const ordinaryDefault = await client.callTool({
     name: "get_scenario_sdk",
     arguments: { home_ref: homeRef },
