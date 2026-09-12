@@ -3603,9 +3603,23 @@ function isRedactedNode(value) {
 
 const sensitiveKeyPattern =
   /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i;
+const sensitiveAssignmentKeyPattern =
+  /^(?:(?:[A-Za-z_$][\w$-]*[_-])?(?:api[_-]?key|api[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|wifi[_-]?password|password|passwd|secret|credential|authorization|token))$/i;
+const camelCaseSensitiveAssignmentKeyPattern =
+  /^[A-Za-z_$][\w$]*(?:ApiKey|Token|Password|Passwd|Secret|Credential|Authorization)$/;
 
 function isSensitiveKey(key) {
   return sensitiveKeyPattern.test(key);
+}
+
+function isSensitiveAssignmentKey(key) {
+  const candidate = key.trim();
+  // A text match hides the whole source, while a structural match only hides
+  // one node, so text requires a complete credential-shaped name.
+  return (
+    sensitiveAssignmentKeyPattern.test(candidate) ||
+    camelCaseSensitiveAssignmentKeyPattern.test(candidate)
+  );
 }
 
 function isSensitiveContainerKey(key) {
@@ -3622,14 +3636,55 @@ function redactSensitiveText(text) {
 
 function containsSensitiveAssignment(text) {
   for (const match of text.matchAll(
-    /\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*[:=]/g,
+    /\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*:/g,
   )) {
-    if (isSensitiveKey(match[2])) return true;
+    const before = previousNonWhitespaceIndex(text, match.index - 1);
+    if (
+      isObjectKeyPosition(text, before) &&
+      isSensitiveAssignmentKey(match[2])
+    ) {
+      return true;
+    }
   }
-  for (const match of text.matchAll(/\b([A-Za-z_$][\w$-]*)\s*[:=]/g)) {
-    if (isSensitiveKey(match[1])) return true;
+  for (const match of text.matchAll(
+    /\[\s*\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*\]\s*=(?!=|>)/g,
+  )) {
+    if (isSensitiveAssignmentKey(match[2])) return true;
+  }
+  for (const match of text.matchAll(/(?<![\w$-])([A-Za-z_$][\w$-]*)/g)) {
+    if (!isSensitiveAssignmentKey(match[1])) continue;
+    const before = previousNonWhitespaceIndex(text, match.index - 1);
+    const after = nextNonWhitespaceIndex(text, match.index + match[0].length);
+    if (isPlainAssignmentAt(text, after)) return true;
+    if (text[after] === ":" && isObjectKeyPosition(text, before)) return true;
   }
   return false;
+}
+
+function previousNonWhitespaceIndex(text, start) {
+  let index = start;
+  while (index >= 0 && /\s/.test(text[index])) index -= 1;
+  return index;
+}
+
+function nextNonWhitespaceIndex(text, start) {
+  let index = start;
+  while (index < text.length && /\s/.test(text[index])) index += 1;
+  return index;
+}
+
+function isObjectKeyPosition(text, previousIndex) {
+  return (
+    previousIndex < 0 ||
+    text[previousIndex] === "{" ||
+    text[previousIndex] === ","
+  );
+}
+
+function isPlainAssignmentAt(text, index) {
+  return (
+    text[index] === "=" && text[index + 1] !== "=" && text[index + 1] !== ">"
+  );
 }
 
 function timeoutError() {
