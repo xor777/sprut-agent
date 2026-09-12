@@ -3050,12 +3050,20 @@ test("a manual value after an unknown climate apply stays a conflict across rest
   });
   assert.equal(conflict.structuredContent.status, "conflict");
   assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    conflict.structuredContent.write_intent.phase,
+    "needs_reconciliation",
+  );
   const firstRestore = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(firstRestore.structuredContent.status, "conflict");
   assert.equal(firstRestore.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    firstRestore.structuredContent.write_intent.phase,
+    "needs_reconciliation",
+  );
   await secondClient.close();
 
   const thirdClient = await startClient(t, hub, stateDirectory);
@@ -3067,6 +3075,10 @@ test("a manual value after an unknown climate apply stays a conflict across rest
   assert.equal(
     repeatedRestore.structuredContent.conflict_reason,
     "manual_change",
+  );
+  assert.equal(
+    repeatedRestore.structuredContent.write_intent.phase,
+    "needs_reconciliation",
   );
   assert.deepEqual(currentCharacteristicValue(hub, setting.ref), {
     [setting.kind]: 24,
