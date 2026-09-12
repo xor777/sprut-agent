@@ -30,6 +30,7 @@
     "ws": "8.21.3"
   },
   "dependencies": {
+    "@babel/parser": "8.0.4",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@noble/curves": "2.4.0",
     "hash-wasm": "4.12.0",

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
 
@@ -3637,9 +3638,19 @@ function redactSensitiveText(text, role = "data") {
 }
 
 function containsSensitiveAssignment(text, role) {
-  // Every source range is data for redaction. The lexer distinguishes syntax
-  // colons from credential assignments; declaration parameters stay visible
-  // only while they do not initialize a credential value.
+  // Every source range is data for redaction. TypeScript syntax is parsed once
+  // so parameter types cannot be confused with credential assignments, while
+  // the existing policy still decides which names are sensitive.
+  let typeScriptDeclarations;
+  if (role === "typescript_declarations") {
+    typeScriptDeclarations = inspectTypeScriptDeclarations(text);
+    if (
+      typeScriptDeclarations === null ||
+      typeScriptDeclarations.hasSensitiveParameterInitializer
+    ) {
+      return true;
+    }
+  }
   let javascriptTokens;
   const separators = /[:=]/g;
   for (const separator of text.matchAll(separators)) {
@@ -3653,22 +3664,6 @@ function containsSensitiveAssignment(text, role) {
     const candidate = assignmentCandidateBefore(text, separatorIndex);
     const hasSensitiveCandidate =
       candidate && isSensitiveAssignmentKey(candidate.value);
-    if (
-      separator[0] === "=" &&
-      role === "typescript_declarations" &&
-      !hasSensitiveCandidate
-    ) {
-      javascriptTokens ??= indexedJavaScriptTokens(text);
-      if (
-        hasSensitiveTypeScriptParameterInitializer(
-          text,
-          javascriptTokens,
-          separatorIndex,
-        )
-      ) {
-        return true;
-      }
-    }
     if (!hasSensitiveCandidate) continue;
     if (separator[0] === ":" && role !== "data") {
       javascriptTokens ??= indexedJavaScriptTokens(text);
@@ -3677,7 +3672,7 @@ function containsSensitiveAssignment(text, role) {
       }
       if (
         role === "typescript_declarations" &&
-        isTypeScriptParameterColon(javascriptTokens, separatorIndex)
+        typeScriptDeclarations.parameterTypeColons.has(separatorIndex)
       ) {
         continue;
       }
@@ -3687,43 +3682,69 @@ function containsSensitiveAssignment(text, role) {
   return false;
 }
 
-function hasSensitiveTypeScriptParameterInitializer(
-  text,
-  context,
-  separatorIndex,
-) {
-  const separatorTokenIndex = context.tokenIndexByStart.get(separatorIndex);
-  const separator = context.tokens[separatorTokenIndex];
-  if (separator?.type !== "Punctuator" || separator.value !== "=") return false;
-
-  const delimiterDepth = { ")": 0, "]": 0, "}": 0 };
-  const openerFor = { "(": ")", "[": "]", "{": "}" };
-  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
-    const token = context.tokens[index];
-    if ([")", "]", "}"].includes(token.value)) {
-      delimiterDepth[token.value] += 1;
-      continue;
-    }
-    const closer = openerFor[token.value];
-    if (closer) {
-      if (delimiterDepth[closer] > 0) {
-        delimiterDepth[closer] -= 1;
-        continue;
-      }
-      if (token.value === "(") return false;
-    }
-    if (Object.values(delimiterDepth).some((depth) => depth > 0)) continue;
-    if (token.value === ",") return false;
-    if (token.value !== ":") continue;
-
-    const candidate = assignmentCandidateBefore(text, token.start);
-    return (
-      candidate !== null &&
-      isSensitiveAssignmentKey(candidate.value) &&
-      isTypeScriptParameterColon(context, token.start)
-    );
+function inspectTypeScriptDeclarations(text) {
+  let program;
+  try {
+    program = parse(text, {
+      sourceType: "unambiguous",
+      plugins: ["typescript"],
+      errorRecovery: true,
+    }).program;
+  } catch {
+    return null;
   }
-  return false;
+
+  const inspection = {
+    hasSensitiveParameterInitializer: false,
+    parameterTypeColons: new Set(),
+  };
+  visitTypeScriptNodes(program, (node) => {
+    if (!Array.isArray(node.params)) return;
+    for (const parameter of node.params) {
+      inspectTypeScriptParameter(parameter, inspection);
+    }
+  });
+  return inspection;
+}
+
+function visitTypeScriptNodes(node, visitor) {
+  if (!node || typeof node !== "object" || typeof node.type !== "string") {
+    return;
+  }
+  visitor(node);
+  for (const [key, value] of Object.entries(node)) {
+    if (["comments", "errors", "loc", "tokens"].includes(key)) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) visitTypeScriptNodes(item, visitor);
+    } else {
+      visitTypeScriptNodes(value, visitor);
+    }
+  }
+}
+
+function inspectTypeScriptParameter(parameter, inspection) {
+  const unwrapped =
+    parameter.type === "TSParameterProperty" ? parameter.parameter : parameter;
+  const binding =
+    unwrapped.type === "AssignmentPattern" ? unwrapped.left : unwrapped;
+  const typeAnnotation = binding.typeAnnotation;
+  if (Number.isInteger(typeAnnotation?.start)) {
+    inspection.parameterTypeColons.add(typeAnnotation.start);
+  }
+  if (
+    unwrapped.type === "AssignmentPattern" &&
+    isSensitiveAssignmentKey(typeScriptParameterName(binding) ?? "")
+  ) {
+    inspection.hasSensitiveParameterInitializer = true;
+  }
+}
+
+function typeScriptParameterName(parameter) {
+  if (parameter.type === "Identifier") return parameter.name;
+  if (parameter.type === "RestElement") {
+    return typeScriptParameterName(parameter.argument);
+  }
+  return null;
 }
 
 function assignmentCandidateBefore(text, separatorIndex) {
@@ -3825,30 +3846,6 @@ function isKnownJavaScriptValueOrLabel(context, separatorIndex) {
     isJavaScriptTernaryColon(context.tokens, separatorTokenIndex) ||
     isJavaScriptCaseLabel(context.tokens, separatorTokenIndex)
   );
-}
-
-function isTypeScriptParameterColon(context, separatorIndex) {
-  const separatorTokenIndex = context.tokenIndexByStart.get(separatorIndex);
-  const separator = context.tokens[separatorTokenIndex];
-  if (separator?.type !== "Punctuator" || separator.value !== ":") return false;
-
-  let parenthesisDepth = 0;
-  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
-    const value = context.tokens[index].value;
-    if (value === ")") {
-      parenthesisDepth += 1;
-      continue;
-    }
-    if (value === "(") {
-      if (parenthesisDepth === 0) return true;
-      parenthesisDepth -= 1;
-      continue;
-    }
-    if (parenthesisDepth === 0 && ["{", "[", ";"].includes(value)) {
-      return false;
-    }
-  }
-  return false;
 }
 
 const javascriptContextLookbehindTokenLimit = 256;
