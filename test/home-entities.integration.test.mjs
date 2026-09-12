@@ -2136,6 +2136,146 @@ test("scenario reads use lexical context for credential-shaped text", async (t) 
   }
 });
 
+test("scenario reads hide credential components after separators and leading dollars", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const scenarios = [
+    {
+      index: "suffixed-bare-credential",
+      type: "GLOBAL",
+      data: 'my-apikey = "suffixed-bare-secret-must-not-leak";',
+      secret: "suffixed-bare-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "suffixed-quoted-credential",
+      type: "GLOBAL",
+      data: '{ "x-apikey": "suffixed-quoted-secret-must-not-leak" };',
+      secret: "suffixed-quoted-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "suffixed-bracket-credential",
+      type: "GLOBAL",
+      data: 'headers["X-APIKEY"] = "suffixed-bracket-secret-must-not-leak";',
+      secret: "suffixed-bracket-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "suffixed-native-credential",
+      type: "BLOCK",
+      data: "name: kitchen\nx-apikey: suffixed-native-secret-must-not-leak",
+      secret: "suffixed-native-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "dollar-prefixed-credential",
+      type: "GLOBAL",
+      data: 'const $token = "dollar-prefixed-secret-must-not-leak";',
+      secret: "dollar-prefixed-secret-must-not-leak",
+      format: "code",
+    },
+  ];
+  state.scenarios.push(
+    ...scenarios.map(({ index, type, data }) => ({
+      index,
+      name: index,
+      type,
+      predefined: false,
+      active: true,
+      data,
+    })),
+  );
+  const client = await startClient(t, hub);
+
+  for (const scenario of scenarios) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/${scenario.index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(
+      result.structuredContent.entity.configuration.format,
+      scenario.format,
+    );
+    assert.equal(
+      result.structuredContent.entity.configuration.value,
+      "[REDACTED]",
+    );
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(scenario.secret));
+  }
+});
+
+test("scenario reads treat native JSON strings as data while preserving code context", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const nativeSecrets = [
+    "Забыл пароль? password: native-question-secret-must-not-leak",
+    "use case token: native-case-secret-must-not-leak",
+  ];
+  state.scenarios.push(
+    ...nativeSecrets.map((note, index) => ({
+      index: `native-string-data-${index}`,
+      name: `native-string-data-${index}`,
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      data: JSON.stringify({ note, retry: 3 }),
+    })),
+  );
+  const client = await startClient(t, hub);
+
+  for (const [index, note] of nativeSecrets.entries()) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/native-string-data-${index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.deepEqual(result.structuredContent.entity.configuration, {
+      format: "json",
+      value: { note: "[REDACTED]", retry: 3 },
+    });
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(note));
+  }
+});
+
+test("scenario reads redact when JavaScript context exceeds the local lookbehind", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const secret = "distant-context-secret-must-not-leak";
+  state.scenarios.push({
+    index: "distant-javascript-context",
+    name: "distant-javascript-context",
+    type: "GLOBAL",
+    predefined: false,
+    active: true,
+    data: `condition ? ${"value + ".repeat(2_000)}token: "${secret}"`,
+  });
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/distant-javascript-context",
+      include: ["configuration"],
+      max_bytes: 32_768,
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(
+    result.structuredContent.entity.configuration.value,
+    "[REDACTED]",
+  );
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
+});
+
 test("scenario configuration keeps one useful value across native formats", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
