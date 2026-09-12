@@ -3537,13 +3537,13 @@ function normalizeScenarioConfiguration(scenario) {
     } catch {
       return {
         format: "invalid_json",
-        text: redactSensitiveText(scenario.data),
+        value: redactSensitiveText(scenario.data),
       };
     }
   }
   return {
     format: "code",
-    text: redactSensitiveText(scenario.data),
+    value: redactSensitiveText(scenario.data),
     content_origin: "spruthub_scenario_data",
   };
 }

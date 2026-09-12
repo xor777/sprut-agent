@@ -1740,11 +1740,11 @@ test("scenario detail returns native BLOCK data and redacted code instead of tru
   assert.equal(code.structuredContent.entity.type, "GLOBAL");
   assert.equal(code.structuredContent.entity.configuration.format, "code");
   assert.match(
-    code.structuredContent.entity.configuration.text,
+    code.structuredContent.entity.configuration.value,
     /\[REDACTED\]/,
   );
   assert.doesNotMatch(
-    code.structuredContent.entity.configuration.text,
+    code.structuredContent.entity.configuration.value,
     /must-not-leak/,
   );
 });
@@ -2009,7 +2009,7 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
     arguments: {
       entity_ref: entityRef,
       include: ["configuration"],
-      pointer: "/configuration/text",
+      pointer: "/configuration/value",
       max_bytes: 2_048,
     },
   });
@@ -2054,7 +2054,7 @@ test("long Unicode source resumes exactly and refuses to mix changed versions", 
   assert.equal(stale.structuredContent.next.tool, "get_entity");
   assert.equal(
     stale.structuredContent.next.arguments.pointer,
-    "/configuration/text",
+    "/configuration/value",
   );
   assert.equal(stale.structuredContent.next.arguments.offset, 0);
   assert.notEqual(
@@ -2294,7 +2294,7 @@ test("entity continuations restart when strings or container identities change",
     arguments: {
       entity_ref: entityRef,
       include: ["configuration"],
-      pointer: "/configuration/text",
+      pointer: "/configuration/value",
       max_bytes: 2_048,
     },
   });
@@ -2320,7 +2320,7 @@ test("entity continuations restart when strings or container identities change",
     arguments: {
       entity_ref: entityRef,
       include: ["configuration"],
-      pointer: "/configuration/text",
+      pointer: "/configuration/value",
       max_bytes: 2_048,
       offset: 1,
     },

@@ -4841,7 +4841,7 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
     arguments: { entity_ref: createdScenarioRef, include: ["configuration"] },
   });
   assert.equal(
-    readback.structuredContent.entity.configuration.text,
+    readback.structuredContent.entity.configuration.value,
     secondLogicSource,
   );
   assert.deepEqual(

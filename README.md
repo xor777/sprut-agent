@@ -259,6 +259,12 @@ Terminal redacted marker не получает `include_resolution` и не ра
 redacted marker остаётся терминальным, а отсутствующий или несериализуемый
 pointer даёт отдельную ошибку.
 
+У сценария `include=configuration` всегда один payload в `configuration.value`.
+`format=json` означает декодированное и санитизированное native JSON-значение,
+`code` — точный redacted source с `content_origin`, `invalid_json` — точный
+redacted native-текст, а `not_returned` — `null`. Формат отличает отсутствующие
+данные от пустой строки и возвращённых JSON `false`, `0` или `null`.
+
 `read_services` принимает обязательный `home_ref`, необязательные `room_ref` и
 точные native `service_types`, а также лимит сериализованных UTF-8 байтов. Ответ
 сохраняет исходные room/accessory/service refs и имена, доступность, читаемые
