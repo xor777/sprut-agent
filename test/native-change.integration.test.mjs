@@ -5671,11 +5671,11 @@ test("get_scenario_sdk identifies a hidden credential without claiming complete 
   assert.doesNotMatch(knownSecret.content[0].text, /native-change-test-token/);
 });
 
-test("typed credential-like text outside the SDK declaration role stays hidden", async (t) => {
+test("credential-like native text outside the SDK declaration role stays hidden", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   hub.state.characteristic.control.value = {
-    stringValue: "password(password: String): Mail;",
+    stringValue: "ok? token:synthetic-secret-must-not-leak",
   };
 
   const result = await client.callTool({
@@ -5688,6 +5688,7 @@ test("typed credential-like text outside the SDK declaration role stays hidden",
     result.structuredContent.entity.current_value.value,
     "[REDACTED]",
   );
+  assert.doesNotMatch(result.content[0].text, /synthetic-secret-must-not-leak/);
 });
 
 test("an incomplete native SDK response stays an error instead of becoming a complete declaration", async (t) => {
