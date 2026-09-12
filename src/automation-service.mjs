@@ -1184,7 +1184,7 @@ export class AutomationService {
     change,
     { requireWrite = false, acknowledged = false } = {},
   ) {
-    if (!["applying", "restoring", "uncertain"].includes(change.status)) {
+    if (!nativeValueIntentEvidence(change).unresolved) {
       return undefined;
     }
     const direction = nativeIntentDirection(change);
@@ -3641,6 +3641,7 @@ export class AutomationService {
       const retryableRestore =
         pending.direction === "restore" &&
         pending.outcome === "expected_missing" &&
+        isRetryableNativeValueChange(change) &&
         valuesEqual(pending.current, change.requested_value);
       if (!completedApply && !retryableRestore) {
         return pending.result;
@@ -3690,6 +3691,7 @@ export class AutomationService {
 
   async #finishNative(change, status, observedValue, extra = {}) {
     const now = new Date().toISOString();
+    const unresolvedIntent = nativeValueIntentEvidence(change).unresolved;
     if (
       ["applied", "restored"].includes(status) &&
       !Object.hasOwn(extra, "conflict_reason")
@@ -3704,7 +3706,11 @@ export class AutomationService {
     change.write_intent = change.write_intent
       ? {
           ...change.write_intent,
-          phase: status === "uncertain" ? "needs_reconciliation" : "reconciled",
+          phase:
+            status === "uncertain" ||
+            (status === "conflict" && unresolvedIntent)
+              ? "needs_reconciliation"
+              : "reconciled",
         }
       : change.write_intent;
     if (status === "conflict") change.configuration_matches = false;
@@ -6925,6 +6931,32 @@ function nativeIntentDirection(change) {
     change.write_intent?.direction ??
     (change.status === "restoring" ? "restore" : "apply")
   );
+}
+
+function nativeValueIntentEvidence(change) {
+  if (!isNativeValueChange(change)) {
+    return { outcome: "not_applicable", unresolved: false };
+  }
+  const intent = change.write_intent;
+  if (!intent || change.native_write_sent !== true) {
+    return { outcome: "not_sent", unresolved: false };
+  }
+  if (
+    ["sending", "needs_reconciliation"].includes(intent.phase) ||
+    ["applying", "restoring", "uncertain"].includes(change.status)
+  ) {
+    return { outcome: "unknown", unresolved: true };
+  }
+  if (change.status === "not_applied") {
+    return { outcome: "rejected", unresolved: false };
+  }
+  if (intent.direction === "apply" && change.applied_value_observed === true) {
+    return { outcome: "requested_value_observed", unresolved: false };
+  }
+  if (intent.direction === "restore" && change.status === "restored") {
+    return { outcome: "baseline_value_observed", unresolved: false };
+  }
+  return { outcome: "resolved", unresolved: false };
 }
 
 function scenarioSnapshot(scenario) {
