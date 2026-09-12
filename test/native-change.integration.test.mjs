@@ -5671,6 +5671,37 @@ test("get_scenario_sdk identifies a hidden credential without claiming complete 
   assert.doesNotMatch(knownSecret.content[0].text, /native-change-test-token/);
 });
 
+test("get_scenario_sdk hides a credential initializer after a parameter type", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function connect(password: String = "typed-default-secret-must-not-leak"): void;`;
+
+  const hiddenCredential = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+
+  assert.equal(
+    hiddenCredential.isError,
+    undefined,
+    hiddenCredential.content[0]?.text,
+  );
+  assert.equal(hiddenCredential.structuredContent.sdk, "[REDACTED]");
+  assert.equal(hiddenCredential.structuredContent.sdk_complete, false);
+  assert.doesNotMatch(
+    hiddenCredential.content[0].text,
+    /typed-default-secret-must-not-leak/,
+  );
+
+  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function delay(timeout: number = 1000): Task;`;
+  const ordinaryDefault = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+  assert.equal(ordinaryDefault.structuredContent.sdk, hub.state.scenarioSdk);
+  assert.equal(ordinaryDefault.structuredContent.sdk_complete, true);
+});
+
 test("credential-like native text outside the SDK declaration role stays hidden", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
