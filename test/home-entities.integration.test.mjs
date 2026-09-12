@@ -1903,7 +1903,11 @@ test("scenario reads keep sensitive words outside credential assignments", async
     'switch (kind) { case "token": log.info("label"); break; }\n' +
     'const visibility = ok ? "secret" : "public";\n' +
     'const secretary = "Anna";\n' +
-    "const tokens = [1, 2, 3];";
+    "const tokens = [1, 2, 3];\n" +
+    "const tokenCount = tokens.length;\n" +
+    'const passwordField = "visible";\n' +
+    'const endpoint = "http://hub.invalid/api"; // ordinary URL\n' +
+    'log.info("Password changed");';
   state.scenarios.push({
     index: "ordinary-sensitive-words",
     name: "ordinary-sensitive-words",
@@ -1947,10 +1951,24 @@ test("scenario reads use lexical context for credential-shaped text", async (t) 
       format: "invalid_json",
     },
     {
+      index: "credential-after-block-comment",
+      type: "GLOBAL",
+      data: 'const config = { room: "kitchen", /* credentials */ password: "block-comment-secret-must-not-leak" };',
+      secret: "block-comment-secret-must-not-leak",
+      format: "code",
+    },
+    {
       index: "credential-on-later-native-line",
       type: "BLOCK",
       data: "name: kitchen\nAuthorization: Basic later-line-secret-must-not-leak",
       secret: "later-line-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "hyphenated-credential-on-later-native-line",
+      type: "BLOCK",
+      data: "name: kitchen\napi-key: hyphen-secret-must-not-leak",
+      secret: "hyphen-secret-must-not-leak",
       format: "invalid_json",
     },
     {

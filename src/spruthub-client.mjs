@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
 
 const VALUE_FIELDS = [
@@ -3603,22 +3604,36 @@ function isRedactedNode(value) {
 
 const sensitiveKeyPattern =
   /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i;
-const sensitiveAssignmentKeyPattern =
-  /^(?:(?:[A-Za-z_$][\w$-]*[_-])?(?:api[_-]?key|api[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|wifi[_-]?password|password|passwd|secret|credential|authorization|token))$/i;
-const camelCaseSensitiveAssignmentKeyPattern =
-  /^[A-Za-z_$][\w$]*(?:ApiKey|Token|Password|Passwd|Secret|Credential|Authorization)$/;
-
 function isSensitiveKey(key) {
   return sensitiveKeyPattern.test(key);
 }
 
 function isSensitiveAssignmentKey(key) {
-  const candidate = key.trim();
   // A text match hides the whole source, while a structural match only hides
   // one node, so text requires a complete credential-shaped name.
+  const parts = key
+    .trim()
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.toLowerCase());
+  const last = parts.at(-1);
+  if (
+    [
+      "authorization",
+      "credential",
+      "passwd",
+      "password",
+      "secret",
+      "token",
+    ].includes(last)
+  ) {
+    return true;
+  }
   return (
-    sensitiveAssignmentKeyPattern.test(candidate) ||
-    camelCaseSensitiveAssignmentKeyPattern.test(candidate)
+    last === "key" &&
+    parts.some((part) => ["access", "api", "private", "secret"].includes(part))
   );
 }
 
@@ -3634,57 +3649,90 @@ function redactSensitiveText(text) {
   return containsCredential ? "[REDACTED]" : text;
 }
 
-function containsSensitiveAssignment(text) {
-  for (const match of text.matchAll(
-    /\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*:/g,
-  )) {
-    const before = previousNonWhitespaceIndex(text, match.index - 1);
+function containsSensitiveAssignment(text, inspectStringContents = true) {
+  const tokens = Array.from(jsTokens(text)).filter(
+    ({ type }) =>
+      ![
+        "HashbangComment",
+        "LineTerminatorSequence",
+        "MultiLineComment",
+        "SingleLineComment",
+        "WhiteSpace",
+      ].includes(type),
+  );
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
     if (
-      isObjectKeyPosition(text, before) &&
-      isSensitiveAssignmentKey(match[2])
+      inspectStringContents &&
+      token.type === "StringLiteral" &&
+      containsSensitiveAssignment(stringTokenContents(token), false)
     ) {
       return true;
     }
-  }
-  for (const match of text.matchAll(
-    /\[\s*\\?(["'])([^"'\\\r\n]{1,256})\\?\1\s*\]\s*=(?!=|>)/g,
-  )) {
-    if (isSensitiveAssignmentKey(match[2])) return true;
-  }
-  for (const match of text.matchAll(/(?<![\w$-])([A-Za-z_$][\w$-]*)/g)) {
-    if (!isSensitiveAssignmentKey(match[1])) continue;
-    const before = previousNonWhitespaceIndex(text, match.index - 1);
-    const after = nextNonWhitespaceIndex(text, match.index + match[0].length);
-    if (isPlainAssignmentAt(text, after)) return true;
-    if (text[after] === ":" && isObjectKeyPosition(text, before)) return true;
+    if (token.type !== "Punctuator") continue;
+
+    if (token.value === ":") {
+      const candidate = assignmentCandidateBefore(tokens, index - 1);
+      if (
+        candidate &&
+        isSensitiveAssignmentKey(candidate.value) &&
+        !isKnownValueOrLabel(tokens[candidate.start - 1])
+      ) {
+        return true;
+      }
+    }
+
+    if (token.value === "=") {
+      const candidate = assignmentCandidateBeforeEquals(tokens, index - 1);
+      if (candidate && isSensitiveAssignmentKey(candidate.value)) return true;
+    }
   }
   return false;
 }
 
-function previousNonWhitespaceIndex(text, start) {
-  let index = start;
-  while (index >= 0 && /\s/.test(text[index])) index -= 1;
-  return index;
+function assignmentCandidateBeforeEquals(tokens, end) {
+  if (tokens[end]?.value !== "]") {
+    return assignmentCandidateBefore(tokens, end);
+  }
+  const candidate = assignmentCandidateBefore(tokens, end - 1);
+  return candidate && tokens[candidate.start - 1]?.value === "["
+    ? candidate
+    : null;
 }
 
-function nextNonWhitespaceIndex(text, start) {
-  let index = start;
-  while (index < text.length && /\s/.test(text[index])) index += 1;
-  return index;
+function assignmentCandidateBefore(tokens, end) {
+  const token = tokens[end];
+  if (token?.type === "StringLiteral") {
+    return { start: end, value: stringTokenContents(token) };
+  }
+  if (token?.type !== "IdentifierName") return null;
+
+  let start = end;
+  while (
+    tokens[start - 1]?.value === "-" &&
+    tokens[start - 2]?.type === "IdentifierName"
+  ) {
+    start -= 2;
+  }
+  return {
+    start,
+    value: tokens
+      .slice(start, end + 1)
+      .map(({ value }) => value)
+      .join(""),
+  };
 }
 
-function isObjectKeyPosition(text, previousIndex) {
-  return (
-    previousIndex < 0 ||
-    text[previousIndex] === "{" ||
-    text[previousIndex] === ","
-  );
+function stringTokenContents(token) {
+  const end = token.closed ? -1 : undefined;
+  return token.value
+    .slice(1, end)
+    .replace(/\\(?:\r\n|[\s\S])/g, (escaped) => escaped.slice(1));
 }
 
-function isPlainAssignmentAt(text, index) {
-  return (
-    text[index] === "=" && text[index + 1] !== "=" && text[index + 1] !== ">"
-  );
+function isKnownValueOrLabel(previousToken) {
+  return previousToken?.value === "?" || previousToken?.value === "case";
 }
 
 function timeoutError() {
