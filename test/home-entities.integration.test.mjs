@@ -1602,6 +1602,53 @@ test("native secrets are redacted from structured and text output", async (t) =>
   assert.match(visible, /\[REDACTED\]/);
 });
 
+test("native entity names stay data when they resemble JavaScript contexts", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const cases = [
+    {
+      entityRef: "spruthub://hub/home%2FA/room/1",
+      entity: state.rooms[0],
+      name: "Комната? password: room-name-secret-must-not-leak",
+      secret: "room-name-secret-must-not-leak",
+    },
+    {
+      entityRef: "spruthub://hub/home%2FA/accessory/32",
+      entity: state.accessories[0],
+      name: "Датчик use case token: accessory-name-secret-must-not-leak",
+      secret: "accessory-name-secret-must-not-leak",
+    },
+    {
+      entityRef: "spruthub://hub/home%2FA/scenario/motion-block",
+      entity: state.scenarios[0],
+      name: "Сценарий? password: scenario-name-secret-must-not-leak",
+      secret: "scenario-name-secret-must-not-leak",
+    },
+  ];
+  for (const item of cases) item.entity.name = item.name;
+  const client = await startClient(t, hub);
+
+  const results = await Promise.all(
+    cases.map(({ entityRef }) =>
+      client.callTool({
+        name: "get_entity",
+        arguments: { entity_ref: entityRef },
+      }),
+    ),
+  );
+  for (const result of results) {
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+  }
+  assert.deepEqual(
+    results.map(({ structuredContent }) => structuredContent.entity.name),
+    cases.map(() => "[REDACTED]"),
+  );
+  const visible = JSON.stringify(results);
+  for (const { secret } of cases) {
+    assert.doesNotMatch(visible, new RegExp(secret));
+  }
+});
+
 test("sensitive characteristic marker is terminal for every include", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
