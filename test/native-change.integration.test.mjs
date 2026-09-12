@@ -102,6 +102,23 @@ const characteristicOptionKeys = {
   mode: "Mode",
 };
 
+function sensitiveListOption() {
+  return {
+    key: "AccessToken",
+    name: "Access token",
+    type: "GenericString",
+    inputType: "LIST",
+    read: true,
+    write: true,
+    disabled: false,
+    value: { stringValue: "LEAK" },
+    validValues: [
+      { name: "Current", value: { stringValue: "LEAK" } },
+      { name: "Replacement", value: { stringValue: "SAFE" } },
+    ],
+  };
+}
+
 function motionCharacteristicOptions() {
   return [
     {
@@ -521,6 +538,7 @@ async function startHub() {
       closeAfterScenarioUpdate: false,
       closeAfterCharacteristicUpdate: false,
       closeAfterCharacteristicSetOptions: false,
+      dropNextCharacteristicSetOptions: false,
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
       holdNextWindowUpdate: false,
@@ -712,6 +730,11 @@ async function startHub() {
           },
         };
       } else if (params.characteristic?.setOptions) {
+        if (state.behavior.dropNextCharacteristicSetOptions) {
+          state.behavior.dropNextCharacteristicSetOptions = false;
+          socket.close();
+          return;
+        }
         for (const update of params.characteristic.setOptions.options) {
           const option = state.characteristicOptions.find(
             ({ key }) => key === update.key,
@@ -2010,6 +2033,219 @@ test("a read-only characteristic exposes writable options through the shared typ
       ({ key }) => key === characteristicOptionKeys.switchOffTime,
     ).value,
     { doubleValue: 180 },
+  );
+});
+
+test("an unexecuted characteristic option write can retry once and still restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.switchOffTime,
+      value: 10,
+      reason: "Повторить только невыполненную запись настройки",
+    },
+  });
+
+  hub.state.behavior.dropNextCharacteristicSetOptions = true;
+  const uncertain = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined, uncertain.content[0]?.text);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.restore_supported, true);
+  assert.deepEqual(
+    hub.state.characteristicOptions.find(
+      ({ key }) => key === characteristicOptionKeys.switchOffTime,
+    ).value,
+    { doubleValue: 180 },
+  );
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.restore_supported, true);
+  assert.deepEqual(
+    hub.state.characteristicOptions.find(
+      ({ key }) => key === characteristicOptionKeys.switchOffTime,
+    ).value,
+    { doubleValue: 10 },
+  );
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+      .length,
+    2,
+  );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    hub.state.characteristicOptions.find(
+      ({ key }) => key === characteristicOptionKeys.switchOffTime,
+    ).value,
+    { doubleValue: 180 },
+  );
+});
+
+test("LIST discovery and writes reject native choices that contradict numeric constraints", async (t) => {
+  for (const { name, mutate } of [
+    {
+      name: "range",
+      mutate: (option) => Object.assign(option, { minValue: 0, maxValue: 100 }),
+    },
+    {
+      name: "step",
+      mutate: (option) => Object.assign(option, { minValue: 0, minStep: 2 }),
+    },
+  ]) {
+    await t.test(name, async (scenario) => {
+      const { hub, stateDirectory } = await setup(scenario);
+      const client = await startClient(scenario, hub, stateDirectory);
+      mutate(hub.state.window.options[0]);
+
+      const detail = await client.callTool({
+        name: "get_entity",
+        arguments: { entity_ref: deviceWindowRef },
+      });
+      const option = detail.structuredContent.entity.options.find(
+        ({ key }) => key === startupOptionKey,
+      );
+      assert.deepEqual(option.native_change, {
+        native_write: true,
+        supported: false,
+        reason: "inconsistent_valid_values",
+      });
+
+      for (const request of [
+        {
+          name: "get_native_change_contract",
+          arguments: {
+            operation: "window_option",
+            target_ref: deviceWindowRef,
+            option_key: startupOptionKey,
+          },
+        },
+        {
+          name: "prepare_native_change",
+          arguments: {
+            operation: "window_option",
+            target_ref: deviceWindowRef,
+            option_key: startupOptionKey,
+            value: 0,
+            reason: "Не обещать противоречащий native contract",
+          },
+        },
+      ]) {
+        const rejected = await client.callTool(request);
+        assert.equal(rejected.isError, true);
+        assert.equal(
+          rejected.structuredContent.error.code,
+          "incompatible_response",
+        );
+      }
+      assert.equal(
+        hub.requests.some(({ window }) => window?.update),
+        false,
+      );
+    });
+  }
+});
+
+test("sensitive LIST options stay redacted and cannot create history for any owner", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.logics.push(assignedSmoothLogic());
+  hub.state.characteristicOptions.push(sensitiveListOption());
+  hub.state.window.options.push(sensitiveListOption());
+  configuredSmoothLogicOptions(hub.state).push(sensitiveListOption());
+  const client = await startClient(t, hub, stateDirectory);
+
+  const owners = [
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      read: {
+        entity_ref: motionCharacteristicRef,
+        include: ["options"],
+      },
+    },
+    {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      read: { entity_ref: deviceWindowRef },
+    },
+    {
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      read: { entity_ref: smoothLogicRef, include: ["options"] },
+    },
+  ];
+  for (const owner of owners) {
+    const detail = await client.callTool({
+      name: "get_entity",
+      arguments: owner.read,
+    });
+    assert.equal(detail.isError, undefined, detail.content[0]?.text);
+    assert.equal(JSON.stringify(detail).includes("LEAK"), false);
+    assert.equal(
+      detail.structuredContent.entity.options.some(
+        ({ redacted, reason }) =>
+          redacted === true && reason === "sensitive_native_data",
+      ),
+      true,
+    );
+
+    for (const request of [
+      {
+        name: "get_native_change_contract",
+        arguments: {
+          operation: owner.operation,
+          target_ref: owner.target_ref,
+          option_key: "AccessToken",
+        },
+      },
+      {
+        name: "prepare_native_change",
+        arguments: {
+          operation: owner.operation,
+          target_ref: owner.target_ref,
+          option_key: "AccessToken",
+          value: "SAFE",
+          reason: "Секретная настройка не становится публичной записью",
+        },
+      },
+    ]) {
+      const rejected = await client.callTool(request);
+      assert.equal(rejected.isError, true);
+      assert.equal(
+        rejected.structuredContent.error.code,
+        "sensitive_native_data",
+      );
+      assert.equal(JSON.stringify(rejected).includes("LEAK"), false);
+    }
+  }
+
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  assert.equal(
+    hub.requests.some(
+      ({ characteristic, window, logic }) =>
+        characteristic?.setOptions || window?.update || logic?.setOptions,
+    ),
+    false,
   );
 });
 
