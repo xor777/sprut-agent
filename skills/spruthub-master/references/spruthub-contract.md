@@ -116,11 +116,20 @@ token. По умолчанию она хранится вне Git; `SPRUT_AGENT_
 - `characteristic_value` проверяет фактический native type, права, kind,
   диапазон, шаг, длину и перечисление. Readback — наблюдение значения, а не
   доказательство физической причинности; автоматического отката нет.
-- `window_option` принимает существующий window ref и точный option key. В этом
-  срезе поддержан только readable/writable/enabled `GenericInteger/LIST` с
-  `intValue` и непустыми `validValues`; текущее значение находится в
-  `option.value`, а не в `validValues[].checked`. Уже нужное значение не создаёт
-  change. Запись отправляет один option и подтверждается отдельным `window.get`.
+- `characteristic_option`, `logic_option` и `window_option` принимают точный ref
+  владельца и один option key. Общий контракт допускает только
+  readable/writable/enabled `NUMBER` с `intValue`/`longValue`/`doubleValue`,
+  `CHECKBOX` с `boolValue` или `LIST` с непустыми scalar `validValues` того же
+  kind. Известный `GenericBoolean`/`GenericInteger`/`GenericLong`/`GenericDouble`
+  обязан совпадать с envelope. Явные min/max/step и список сохраняются и
+  проверяются; отсутствующие ограничения не выводятся из имени. GROUP, кнопки,
+  PASSWORD, произвольный текст и составные значения не записываются. В ответе
+  чтения `native_change` отдельно показывает native write, поддержку публичной
+  операции, причину отказа и точный `get_native_change_contract` next.
+  Текущее значение находится в `option.value`, а не в
+  `validValues[].checked`. Уже нужное значение не создаёт change. Запись
+  отправляет только выбранные key и typed value; readback выполняется отдельным
+  `characteristic.getOptions`, `logic.getOptions` или `window.get`.
   Restore возвращает сохранённый baseline только при совпадении текущего
   значения с доказанно применённым; подготовленный или подтверждённо
   отклонённый change не присваивает совпавшую ручную настройку и возвращает
@@ -149,9 +158,8 @@ token. По умолчанию она хранится вне Git; `SPRUT_AGENT_
   удали созданное назначение.
   Исчезновение и пересоздание между успешными чтениями неразличимы; сохранение
   утраты владения между процессами требует успешной записи журнала.
-- `logic_active` использует boolean value-change, а `logic_option` — один
-  readable/writable/enabled `GenericInteger/NUMBER` option с `intValue`.
-  Значения не зашиты по имени logic или ключу option. Оба изменения используют
+- `logic_active` использует boolean value-change. Значения option не зашиты по
+  имени владельца, модели или ключу. Все три option-операции используют
   общий журнал направления apply/restore, отдельный readback и защиту ручной
   правки; уже нужное значение не создаёт change.
   Options сохраняются по service/type после удаления и пересоздания назначения.
@@ -284,8 +292,9 @@ token. По умолчанию она хранится вне Git; `SPRUT_AGENT_
 физического движения. Источник — [SprutHub Wiki о задержке, oldid
 1333](https://wiki.spruthub.ru/index.php?title=%D0%97%D0%B0%D0%B4%D0%B5%D1%80%D0%B6%D0%BA%D0%B0_%D0%B2%D1%8B%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D1%8F&oldid=1333).
 
-Запись других options, pairing, backup, GLOBAL и иных видов произвольного кода
-этим контрактом не поддерживается. `window_option` подтверждает настройку хаба, но не
-доставку до устройства и не физический результат после отключения питания.
+Options других владельцев и форм, pairing, backup, GLOBAL и иные виды
+произвольного кода этим контрактом не поддерживаются. `window_option`
+подтверждает настройку хаба, но не доставку до устройства и не физический
+результат после отключения питания.
 Первый login настраивается локальным credential-файлом и не является native
 change. Не подменяй отсутствующие операции raw RPC или `write: true` в данных.

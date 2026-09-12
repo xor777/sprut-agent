@@ -1947,9 +1947,7 @@ test("a read-only characteristic exposes writable options through the shared typ
   assert.equal(applied.structuredContent.status, "applied");
   assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
   assert.deepEqual(
-    hub.requests.filter(
-      ({ characteristic }) => characteristic?.setOptions,
-    ),
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions),
     [
       {
         characteristic: {
@@ -2087,6 +2085,27 @@ test("the option contract preserves scalar envelopes and rejects unsafe forms fo
     assert.deepEqual(result.structuredContent.contract, expected);
   }
 
+  const checkboxOption = hub.state.characteristicOptions.find(
+    ({ key }) => key === characteristicOptionKeys.showAllEvents,
+  );
+  for (const unavailable of [
+    { write: false, disabled: false },
+    { write: true, disabled: true },
+  ]) {
+    Object.assign(checkboxOption, unavailable);
+    const contract = await client.callTool({
+      name: "get_native_change_contract",
+      arguments: {
+        operation: "characteristic_option",
+        target_ref: motionCharacteristicRef,
+        option_key: characteristicOptionKeys.showAllEvents,
+      },
+    });
+    assert.equal(contract.isError, true);
+    assert.equal(contract.structuredContent.error.code, "insufficient_rights");
+  }
+  Object.assign(checkboxOption, { write: true, disabled: false });
+
   const zero = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -2136,6 +2155,13 @@ test("the option contract preserves scalar envelopes and rejects unsafe forms fo
       option_key: characteristicOptionKeys.retryCount,
       value: 5,
       reason: "Значение вне явного диапазона",
+    },
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.retryCount,
+      value: 1.5,
+      reason: "longValue не смешивается с дробным значением",
     },
     {
       operation: "characteristic_option",

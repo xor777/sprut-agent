@@ -830,6 +830,11 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
       read: true,
       write: true,
       events: true,
+      native_change: {
+        native_write: true,
+        supported: false,
+        reason: "unsupported_input_type",
+      },
     },
     { redacted: true, reason: "sensitive_native_data" },
   ]);

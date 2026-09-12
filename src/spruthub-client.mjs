@@ -3,6 +3,7 @@ import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
 import { inspectBlockRelations } from "./block-model.mjs";
+import { inspectNativeOption } from "./native-option-contract.mjs";
 
 const VALUE_FIELDS = [
   "boolValue",
@@ -1189,6 +1190,38 @@ export class SprutHubClient {
     };
   }
 
+  async getCharacteristicOptions({ aId, sId, cId }) {
+    const response = await this.#request(
+      { characteristic: { getOptions: { aId, sId, cId } } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractEntityArray(
+      response,
+      ["characteristic", "getOptions", "options"],
+      true,
+    );
+  }
+
+  async setCharacteristicOption({ aId, sId, cId, key, value }) {
+    const response = await this.#request(
+      {
+        characteristic: {
+          setOptions: { aId, sId, cId, options: [{ key, value }] },
+        },
+      },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.characteristic;
+    if (!container || !Object.hasOwn(container, "setOptions")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the characteristic option update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async updateCharacteristic({ aId, sId, cId, value }) {
     const response = await this.#request(
       {
@@ -1634,7 +1667,12 @@ export class SprutHubClient {
             sId: service.sId,
             type: parsed.logicType,
           })
-        ).map(normalizeLogicOption);
+        ).map((option) =>
+          normalizeLogicOption(option, {
+            operation: "logic_option",
+            targetRef: entity.ref,
+          }),
+        );
       }
       return {
         entity,
@@ -1671,7 +1709,12 @@ export class SprutHubClient {
         "characteristic",
         "getOptions",
         "options",
-      ]).map(normalizeOption);
+      ]).map((option) =>
+        normalizeOption(option, {
+          operation: "characteristic_option",
+          targetRef: entity.ref,
+        }),
+      );
       entity.option_scope.status =
         entity.options.length === 0 ? "checked_empty" : "found";
     }
@@ -3553,7 +3596,7 @@ function ownerScopeReason(entity, include) {
   return "related_entity_scoped";
 }
 
-function normalizeOption(option) {
+function normalizeOption(option, changeContext) {
   if (!option || typeof option.key !== "string") {
     throw new SprutHubError(
       "incompatible_response",
@@ -3591,6 +3634,9 @@ function normalizeOption(option) {
           })),
         }
       : {}),
+    ...(changeContext
+      ? { native_change: publicNativeOptionChange(option, changeContext) }
+      : {}),
   };
 }
 
@@ -3622,7 +3668,10 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
         !commandOptions.includes(option),
     )
     .map((option) => {
-      const normalized = normalizeOption(option);
+      const normalized = normalizeOption(option, {
+        operation: "window_option",
+        targetRef: windowRef(serial, window.windowKey),
+      });
       if (normalized.redacted) return normalized;
       const property = propertyFromNativeOptionKey(option.key);
       return {
@@ -3775,7 +3824,7 @@ function normalizeLogicTypes(
   });
 }
 
-function normalizeLogicOption(option) {
+function normalizeLogicOption(option, changeContext) {
   if (!option || typeof option.key !== "string") {
     throw new SprutHubError(
       "incompatible_response",
@@ -3801,6 +3850,31 @@ function normalizeLogicOption(option) {
     ...(option.minValue !== undefined ? { min: option.minValue } : {}),
     ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
     ...(option.minStep !== undefined ? { step: option.minStep } : {}),
+    native_change: publicNativeOptionChange(option, changeContext),
+  };
+}
+
+function publicNativeOptionChange(option, { operation, targetRef }) {
+  const inspected = inspectNativeOption(option);
+  if (!inspected.supported) {
+    return {
+      native_write: option?.write === true,
+      supported: false,
+      reason: inspected.reason,
+    };
+  }
+  return {
+    native_write: option.write === true,
+    supported: true,
+    operation,
+    next: {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation,
+        target_ref: targetRef,
+        option_key: option.key,
+      },
+    },
   };
 }
 

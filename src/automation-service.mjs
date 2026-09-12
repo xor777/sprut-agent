@@ -6,6 +6,7 @@ import {
   blockAffectedRefs,
   visitKnownBlockNodes,
 } from "./block-model.mjs";
+import { inspectNativeOption } from "./native-option-contract.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 
 export class AutomationService {
@@ -55,6 +56,20 @@ export class AutomationService {
         operation: input.operation,
         target_ref: input.target_ref,
         contract: characteristicContract(characteristic.control),
+      };
+    }
+    if (input.operation === "characteristic_option") {
+      const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
+      const { option } = await this.#readCharacteristicOption(
+        target,
+        input.option_key,
+      );
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        contract: characteristicOptionContract(option),
       };
     }
     if (input.operation === "window_option") {
@@ -185,6 +200,9 @@ export class AutomationService {
     if (input.operation === "characteristic_value") {
       return this.#prepareCharacteristicChange(input);
     }
+    if (input.operation === "characteristic_option") {
+      return this.#prepareCharacteristicOptionChange(input);
+    }
     if (input.operation === "block_create") {
       return this.#prepareBlockCreate(input);
     }
@@ -296,12 +314,56 @@ export class AutomationService {
     return matches[0] ?? null;
   }
 
+  async #prepareCharacteristicOptionChange(input) {
+    const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
+    const { option } = await this.#readCharacteristicOption(
+      target,
+      input.option_key,
+    );
+    const { contract, value: baselineValue } =
+      characteristicOptionState(option);
+    const requestedValue = validateCharacteristicValue(input.value, contract);
+    if (valuesEqual(baselineValue, requestedValue)) {
+      return {
+        status: "already_desired",
+        operation: "characteristic_option",
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        observed_value: baselineValue,
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "characteristic_option",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      option_key: input.option_key,
+      target,
+      contract,
+      baseline_value: baselineValue,
+      requested_value: requestedValue,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
   async #prepareWindowOptionChange(input) {
     const target = parseWindowRef(input.target_ref, this.hubSerial);
     const { option } = await this.#readWindowOption(target, input.option_key);
-    const contract = windowOptionContract(option);
+    const { contract, value: baselineValue } = windowOptionState(option);
     const requestedValue = validateCharacteristicValue(input.value, contract);
-    const baselineValue = typedNativeValue(option.value);
     if (valuesEqual(baselineValue, requestedValue)) {
       return {
         status: "already_desired",
@@ -350,8 +412,7 @@ export class AutomationService {
       baselineValue = logicActiveValue(logic);
     } else {
       ({ option } = await this.#readLogicOption(target, input.option_key));
-      contract = logicOptionContract(option);
-      baselineValue = typedNativeValue(option.value);
+      ({ contract, value: baselineValue } = logicOptionState(option));
     }
     const requestedValue = validateCharacteristicValue(input.value, contract);
     if (valuesEqual(baselineValue, requestedValue)) {
@@ -1145,7 +1206,9 @@ export class AutomationService {
       };
     }
     if (
-      ["window_option", "logic_option"].includes(change.kind) &&
+      ["characteristic_option", "window_option", "logic_option"].includes(
+        change.kind,
+      ) &&
       !valuesEqual(current, change.baseline_value) &&
       !valuesEqual(current, change.requested_value)
     ) {
@@ -1278,7 +1341,7 @@ export class AutomationService {
           "get_native_change",
         );
       }
-      if (change.kind === "window_option") {
+      if (["characteristic_option", "window_option"].includes(change.kind)) {
         return this.#restoreValueChange(change);
       }
       if (["logic_active", "logic_option"].includes(change.kind)) {
@@ -3299,6 +3362,7 @@ export class AutomationService {
     if (
       ![
         "characteristic_value",
+        "characteristic_option",
         "window_option",
         "logic_active",
         "logic_option",
@@ -3346,6 +3410,41 @@ export class AutomationService {
     };
   }
 
+  async #readCharacteristicOption(target, optionKey) {
+    if (typeof optionKey !== "string" || optionKey.length === 0) {
+      throw new SprutHubError(
+        "option_key_required",
+        "Select one characteristic option before reading its write contract.",
+        "get_entity",
+      );
+    }
+    const options = await this.client.getCharacteristicOptions(target);
+    const matches = options.filter(({ key }) => key === optionKey);
+    if (matches.length !== 1) {
+      throw new SprutHubError(
+        matches.length === 0
+          ? "characteristic_option_not_found"
+          : "incompatible_response",
+        matches.length === 0
+          ? "The selected characteristic option was not found."
+          : "SprutHub returned the selected characteristic option more than once.",
+        "get_entity",
+      );
+    }
+    return { option: matches[0] };
+  }
+
+  async #readCharacteristicOptionState(change, { requireWrite = false } = {}) {
+    const { option } = await this.#readCharacteristicOption(
+      change.target,
+      change.option_key,
+    );
+    const state = characteristicOptionState(option, { requireWrite });
+    assertOptionBinding(change, state.contract, "characteristic");
+    change.contract = state.contract;
+    return state;
+  }
+
   async #readWindowOption(target, optionKey) {
     if (typeof optionKey !== "string" || optionKey.length === 0) {
       throw new SprutHubError(
@@ -3375,20 +3474,10 @@ export class AutomationService {
       change.target,
       change.option_key,
     );
-    const contract = windowOptionContract(option, { requireWrite });
-    if (
-      contract.type !== change.contract.type ||
-      contract.input_type !== change.contract.input_type ||
-      contract.kind !== change.contract.kind
-    ) {
-      throw new SprutHubError(
-        "binding_changed",
-        "The selected window option contract changed after preparation.",
-        "prepare_native_change",
-      );
-    }
-    change.contract = contract;
-    return { value: typedNativeValue(option.value), contract };
+    const state = windowOptionState(option, { requireWrite });
+    assertOptionBinding(change, state.contract, "window");
+    change.contract = state.contract;
+    return state;
   }
 
   async #readLogicOption(target, optionKey) {
@@ -3430,23 +3519,16 @@ export class AutomationService {
       change.target,
       change.option_key,
     );
-    const contract = logicOptionContract(option, { requireWrite });
-    if (
-      contract.type !== change.contract.type ||
-      contract.input_type !== change.contract.input_type ||
-      contract.kind !== change.contract.kind
-    ) {
-      throw new SprutHubError(
-        "binding_changed",
-        "The selected logic option contract changed after preparation.",
-        "prepare_native_change",
-      );
-    }
-    change.contract = contract;
-    return { value: typedNativeValue(option.value), contract };
+    const state = logicOptionState(option, { requireWrite });
+    assertOptionBinding(change, state.contract, "logic");
+    change.contract = state.contract;
+    return state;
   }
 
   async #readNativeValueState(change, options = {}) {
+    if (change.kind === "characteristic_option") {
+      return this.#readCharacteristicOptionState(change, options);
+    }
     if (change.kind === "window_option") {
       return this.#readWindowOptionState(change, options);
     }
@@ -3462,6 +3544,13 @@ export class AutomationService {
 
   async #writeNativeValue(change, value) {
     const nativeValue = { [value.kind]: value.value };
+    if (change.kind === "characteristic_option") {
+      return this.client.setCharacteristicOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeValue,
+      });
+    }
     if (change.kind === "window_option") {
       return this.client.updateWindowOption({
         ...change.target,
@@ -5901,69 +5990,7 @@ function characteristicContract(control, { requireWrite = true } = {}) {
 }
 
 function windowOptionContract(option, { requireWrite = true } = {}) {
-  if (option?.type !== "GenericInteger" || option.inputType !== "LIST") {
-    throw new SprutHubError(
-      "unsupported_window_option",
-      "Only GenericInteger/LIST window settings are supported.",
-      "get_entity",
-    );
-  }
-  if (
-    option.read !== true ||
-    (requireWrite && option.write !== true) ||
-    option.disabled === true
-  ) {
-    throw new SprutHubError(
-      "insufficient_rights",
-      "The selected window setting must be readable, writable, and enabled.",
-      "get_entity",
-    );
-  }
-  const current = typedNativeValue(option.value);
-  if (current.kind !== "intValue") {
-    throw new SprutHubError(
-      "unsupported_window_option",
-      "The selected window setting does not use intValue.",
-      "get_entity",
-    );
-  }
-  if (!Array.isArray(option.validValues) || option.validValues.length === 0) {
-    throw new SprutHubError(
-      "unsupported_window_option",
-      "The selected window setting has no explicit valid values.",
-      "get_entity",
-    );
-  }
-  const validValues = option.validValues.map((candidate) => {
-    const typed = typedNativeValue(candidate?.value);
-    if (typed.kind !== "intValue") {
-      throw new SprutHubError(
-        "unsupported_window_option",
-        "The selected window setting has incompatible valid values.",
-        "get_entity",
-      );
-    }
-    return {
-      ...(typeof candidate.name === "string" && candidate.name.length > 0
-        ? { name: candidate.name }
-        : {}),
-      ...typed,
-    };
-  });
-  if (!validValues.some((candidate) => valuesEqual(candidate, current))) {
-    throw new SprutHubError(
-      "incompatible_response",
-      "The current window setting is not in its explicit valid-values set.",
-      "get_entity",
-    );
-  }
-  return {
-    type: option.type,
-    input_type: option.inputType,
-    kind: current.kind,
-    valid_values: validValues,
-    confirmation: "separate_window_get_readback",
-  };
+  return windowOptionState(option, { requireWrite }).contract;
 }
 
 function logicAssignmentContract(target, type, assigned) {
@@ -5990,41 +6017,74 @@ function logicActiveContract() {
 }
 
 function logicOptionContract(option, { requireWrite = true } = {}) {
-  if (option?.type !== "GenericInteger" || option.inputType !== "NUMBER") {
+  return logicOptionState(option, { requireWrite }).contract;
+}
+
+function characteristicOptionContract(option, { requireWrite = true } = {}) {
+  return characteristicOptionState(option, { requireWrite }).contract;
+}
+
+function characteristicOptionState(option, options = {}) {
+  return nativeOptionState(option, {
+    ...options,
+    owner: "characteristic",
+    unsupportedCode: "unsupported_characteristic_option",
+    confirmation: "separate_characteristic_get_options_readback",
+  });
+}
+
+function windowOptionState(option, options = {}) {
+  return nativeOptionState(option, {
+    ...options,
+    owner: "window",
+    unsupportedCode: "unsupported_window_option",
+    confirmation: "separate_window_get_readback",
+  });
+}
+
+function logicOptionState(option, options = {}) {
+  return nativeOptionState(option, {
+    ...options,
+    owner: "logic",
+    unsupportedCode: "unsupported_logic_option",
+    confirmation: "separate_logic_get_options_readback",
+  });
+}
+
+function nativeOptionState(
+  option,
+  { requireWrite = true, owner, unsupportedCode, confirmation },
+) {
+  const inspected = inspectNativeOption(option, { requireWrite });
+  if (!inspected.supported) {
     throw new SprutHubError(
-      "unsupported_logic_option",
-      "Only GenericInteger/NUMBER logic options are supported.",
-      "get_entity",
-    );
-  }
-  if (
-    option.read !== true ||
-    (requireWrite && option.write !== true) ||
-    option.disabled === true
-  ) {
-    throw new SprutHubError(
-      "insufficient_rights",
-      "The selected logic option must be readable, writable, and enabled.",
-      "get_entity",
-    );
-  }
-  const current = typedNativeValue(option.value);
-  if (current.kind !== "intValue") {
-    throw new SprutHubError(
-      "unsupported_logic_option",
-      "The selected logic option does not use intValue.",
+      inspected.category === "rights"
+        ? "insufficient_rights"
+        : inspected.category === "incompatible"
+          ? "incompatible_response"
+          : unsupportedCode,
+      `The selected ${owner} setting is unavailable: ${inspected.message}`,
       "get_entity",
     );
   }
   return {
-    type: option.type,
-    input_type: option.inputType,
-    kind: current.kind,
-    ...(typeof option.minValue === "number" ? { min: option.minValue } : {}),
-    ...(typeof option.maxValue === "number" ? { max: option.maxValue } : {}),
-    ...(typeof option.minStep === "number" ? { step: option.minStep } : {}),
-    confirmation: "separate_logic_get_options_readback",
+    value: inspected.current,
+    contract: { ...inspected.contract, confirmation },
   };
+}
+
+function assertOptionBinding(change, contract, owner) {
+  if (
+    contract.type !== change.contract.type ||
+    contract.input_type !== change.contract.input_type ||
+    contract.kind !== change.contract.kind
+  ) {
+    throw new SprutHubError(
+      "binding_changed",
+      `The selected ${owner} option contract changed after preparation.`,
+      "prepare_native_change",
+    );
+  }
 }
 
 function logicActiveValue(logic) {
@@ -6783,6 +6843,7 @@ function publicAccessoryPlacement(snapshot, serial) {
 function isNativeValueChange(change) {
   return [
     "characteristic_value",
+    "characteristic_option",
     "window_option",
     "logic_active",
     "logic_option",
@@ -6790,9 +6851,12 @@ function isNativeValueChange(change) {
 }
 
 function isReversibleNativeValueChange(change) {
-  return ["window_option", "logic_active", "logic_option"].includes(
-    change?.kind,
-  );
+  return [
+    "characteristic_option",
+    "window_option",
+    "logic_active",
+    "logic_option",
+  ].includes(change?.kind);
 }
 
 function freshVerification(result) {
@@ -7858,7 +7922,12 @@ function publicNativeChange(
       ],
     };
   }
-  const valueChoices = ["window_option", "logic_option"].includes(change.kind)
+  const optionChange = [
+    "characteristic_option",
+    "window_option",
+    "logic_option",
+  ].includes(change.kind);
+  const valueChoices = optionChange
     ? {
         baseline: namedOptionValue(change, change.baseline_value),
         requested: namedOptionValue(change, change.requested_value),
@@ -7868,16 +7937,18 @@ function publicNativeChange(
       }
     : undefined;
   const conflictResolution =
-    ["window_option", "logic_option"].includes(change.kind) &&
+    optionChange &&
     change.status === "conflict" &&
     change.applied_value_observed === true &&
     observedValue
       ? {
           requires_user_decision: true,
           action_if_authorized:
-            change.kind === "window_option"
-              ? "prepare_new_window_option_change"
-              : "prepare_new_logic_option_change",
+            change.kind === "characteristic_option"
+              ? "prepare_new_characteristic_option_change"
+              : change.kind === "window_option"
+                ? "prepare_new_window_option_change"
+                : "prepare_new_logic_option_change",
           effect: {
             replace: namedOptionValue(change, observedValue),
             with: namedOptionValue(change, change.baseline_value),
@@ -7921,7 +7992,7 @@ function publicNativeChange(
           group_delivery_confirmed: change.group_delivery_confirmed === true,
         }
       : {}),
-    ...(["window_option", "logic_option"].includes(change.kind)
+    ...(optionChange
       ? {
           option_key: change.option_key,
           applied_value_observed: change.applied_value_observed === true,
@@ -8012,6 +8083,7 @@ function changeSummary(change, homeRef) {
   if (
     [
       "characteristic_value",
+      "characteristic_option",
       "window_option",
       "logic_active",
       "logic_option",
@@ -8193,6 +8265,7 @@ function nativeAffectedRefs(change, homeRef) {
   if (
     [
       "characteristic_value",
+      "characteristic_option",
       "logic_active",
       "logic_option",
       "logic_assignment",
