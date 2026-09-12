@@ -595,7 +595,7 @@ server.registerTool(
   {
     title: "Read SprutHub services in one room or home",
     description:
-      "Read a compact, byte-bounded page of native services and their readable current values in one explicitly selected home or room. Use this before opening individual entities when exploring an area. service_types are exact native type names and match with OR semantics; observed_service_types lists the native types actually present in the scope. Each service stays attached to its physical accessory and room. Values preserve false, zero, unknown, native enum meaning, units, availability, response freshness, and unknown measurement time. Execute the returned next action until it is null, including the safe restart returned for invalid_cursor or stale_cursor; each page is a fresh read, not an atomic home snapshot. Use get_entity only for the detailed contract or settings of a selected ref.",
+      "Read a compact, byte-bounded page of native services in one explicitly selected home or room. Use representation=catalog to select by original service/accessory/room names, exact native type, availability, and stable refs without returning current values for every match; readings_status=not_requested does not mean a service has no readings or is in a normal state. After selecting one service, use get_entity for its characteristics and then read only relevant options or relations. Omit representation, or use readings, when current values of every matched service are actually needed. service_types use exact native names and OR semantics; observed_service_types lists the types present in the scope. Execute next until null, including the safe restart for invalid_cursor or stale_cursor; each page is a fresh read, not an atomic home snapshot.",
     inputSchema: {
       home_ref: z
         .string()
@@ -612,6 +612,12 @@ server.registerTool(
         .max(50)
         .optional()
         .describe("Exact native service types; matches any listed type"),
+      representation: z
+        .enum(["catalog", "readings"])
+        .optional()
+        .describe(
+          "catalog returns service identity without current values; omitted means readings",
+        ),
       max_bytes: z
         .number()
         .int()
@@ -631,6 +637,7 @@ server.registerTool(
     home_ref: homeRef,
     room_ref: roomRef,
     service_types: serviceTypes,
+    representation,
     max_bytes: maxBytes,
     cursor,
   }) =>
@@ -640,6 +647,7 @@ server.registerTool(
           homeRef,
           roomRef,
           serviceTypes,
+          representation,
           maxBytes,
           cursor,
         }),

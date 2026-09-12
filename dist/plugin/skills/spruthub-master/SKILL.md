@@ -19,7 +19,7 @@ description: Проектируй, исследуй, выполняй и про�
 
 ## Раскрывай знания по задаче
 
-Выбери дом через `list_homes`, получи компактный контекст через `inspect_home`, а область комнаты или известного native-типа — через `read_services`. Выполняй возвращённый `next` до `null`, включая предложенный restart после `invalid_cursor` или `stale_cursor`. Через `get_entity` раскрывай только выбранные сущности, настройки и зависимости.
+Выбери дом через `list_homes` и получи компактный контекст через `inspect_home`. Если комната известна, её именованные services уже доступны через `get_entity(room_ref)` без значений. Если комната не указана или нужен состав native-типа по всему дому, начни с `read_services(..., representation="catalog")` и выполни `next` до `null`: выбирай по исходным именам service/accessory/room, точному native type и ref, сохраняя одинаковые имена как разные кандидаты. `readings_status=not_requested` не означает отсутствие показаний или нормальное состояние. После выбора вызови `get_entity(service_ref)`, затем раскрывай `options` и `relations` только у характеристик, влияющих на решение. Используй `representation="readings"` лишь когда нужны текущие значения всех выбранных services. При `invalid_cursor` или `stale_cursor` выполни предложенный restart.
 
 Только `representation.kind=complete_entity` содержит полный `entity`; для остальных представлений сохраняй `identity`, `available_parts`, `selection`, `selected_complete` и `entity_complete`. Пустой список доказывает лишь прочитанную область. При `stale_entity_content` начни чтение изменившейся сущности заново.
 

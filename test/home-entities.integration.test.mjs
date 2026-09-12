@@ -846,7 +846,7 @@ test("home service catalog finds one target before reading only its values and r
   });
   state.accessories = Array.from({ length: 53 }, (_, index) => {
     const id = 100 + index;
-    const roomId = (index % 3) + 1;
+    const roomId = id === 100 ? 2 : id === 101 ? 3 : (index % 3) + 1;
     const name = id === 100 || id === 101 ? "Димина лампа" : undefined;
     return light(id, roomId, name);
   });
@@ -867,6 +867,7 @@ test("home service catalog finds one target before reading only its values and r
   const readAll = async (representation, afterFirstPage) => {
     const services = [];
     let serializedBytes = 0;
+    let firstCursor;
     let next = {
       tool: "read_services",
       arguments: { ...argumentsBase, representation },
@@ -886,12 +887,15 @@ test("home service catalog finds one target before reading only its values and r
       services.push(...result.structuredContent.services);
       serializedBytes += result.structuredContent.page.serialized_bytes;
       pages += 1;
-      if (pages === 1) afterFirstPage?.();
+      if (pages === 1) {
+        firstCursor = result.structuredContent.page.next_cursor;
+        afterFirstPage?.();
+      }
       next = result.structuredContent.next;
       if (next) assert.equal(next.arguments.representation, representation);
       assert(pages < 20);
     }
-    return { services, serializedBytes, pages };
+    return { services, serializedBytes, pages, firstCursor };
   };
 
   const catalog = await readAll("catalog", () => {
@@ -920,9 +924,30 @@ test("home service catalog finds one target before reading only its values and r
   );
 
   const readings = await readAll("readings");
+  t.diagnostic(
+    `catalog ${catalog.serializedBytes} bytes/${catalog.pages} pages; readings ${readings.serializedBytes} bytes/${readings.pages} pages`,
+  );
   assert.equal(readings.services.length, catalog.services.length);
   assert(catalog.serializedBytes < readings.serializedBytes);
   assert(catalog.pages < readings.pages);
+
+  const wrongRepresentation = await client.callTool({
+    name: "read_services",
+    arguments: {
+      ...argumentsBase,
+      representation: "readings",
+      cursor: catalog.firstCursor,
+    },
+  });
+  assert.equal(wrongRepresentation.isError, true);
+  assert.equal(
+    wrongRepresentation.structuredContent.error.code,
+    "invalid_cursor",
+  );
+  assert.deepEqual(wrongRepresentation.structuredContent.next.arguments, {
+    ...argumentsBase,
+    representation: "readings",
+  });
 
   const detail = await client.callTool({
     name: "get_entity",

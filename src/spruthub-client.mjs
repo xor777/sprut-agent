@@ -520,15 +520,25 @@ export class SprutHubClient {
     const allServices = snapshots
       .flatMap(({ room, accessories, observedAt }) =>
         accessories.flatMap((accessory) =>
-          (accessory.services ?? []).map((service) =>
-            normalizeServiceReading(
+          (accessory.services ?? []).map((service) => {
+            const identity = normalizeServiceIdentity(
               selection.serial,
               room,
               accessory,
               service,
               observedAt,
-            ),
-          ),
+            );
+            return selection.representation === "catalog"
+              ? { ...identity, readings_status: "not_requested" }
+              : {
+                  ...identity,
+                  readings: normalizeReadableCharacteristics(
+                    selection.serial,
+                    accessory,
+                    service,
+                  ),
+                };
+          }),
         ),
       )
       .sort(compareServiceRefs);
@@ -543,6 +553,7 @@ export class SprutHubClient {
     );
     const base = {
       status: "ok",
+      representation: selection.representation,
       scope: {
         home_ref: selection.homeRef,
         ...(selection.room
@@ -563,12 +574,15 @@ export class SprutHubClient {
       observed_service_types: observedServiceTypes,
       freshness: freshness(observedAt),
     };
-    return paginateServiceReadings(base, services, selection);
+    return paginateServices(base, services, selection);
   }
 
   async #readServiceHome(serial, deadline) {
     const [roomsResponse, accessoriesResponse] = await Promise.all([
       this.#request({ room: { list: {} } }, deadline, { serial }),
+      // A narrower native expand has not been observed on the target hub. The
+      // catalog representation is therefore a safe MCP projection of this
+      // confirmed response rather than a guessed transport contract.
       this.#request(
         {
           accessory: {
@@ -2810,6 +2824,7 @@ function normalizeServiceSelection({
   homeRef: selectedHomeRef,
   roomRef: selectedRoomRef,
   serviceTypes,
+  representation,
   maxBytes,
   cursor,
 }) {
@@ -2828,10 +2843,14 @@ function normalizeServiceSelection({
   const normalizedServiceTypes = serviceTypes
     ? [...new Set(serviceTypes)]
     : null;
+  const selectedRepresentation = representation ?? "readings";
   const cursorScope = JSON.stringify({
     home_ref: selectedHomeRef,
     room_ref: selectedRoomRef ?? null,
     service_types: normalizedServiceTypes,
+    ...(selectedRepresentation === "catalog"
+      ? { representation: selectedRepresentation }
+      : {}),
   });
   const selection = {
     homeRef: selectedHomeRef,
@@ -2839,6 +2858,8 @@ function normalizeServiceSelection({
     serial,
     room,
     serviceTypes: normalizedServiceTypes,
+    representation: selectedRepresentation,
+    representationArgument: representation,
     maxBytes,
     cursorScope,
   };
@@ -2874,7 +2895,7 @@ function encodeServiceCursor(afterRef, scope) {
   ).toString("base64url");
 }
 
-function paginateServiceReadings(base, services, selection) {
+function paginateServices(base, services, selection) {
   const start =
     selection.afterRef === null
       ? 0
@@ -2954,6 +2975,9 @@ function serviceReadNext(selection, cursor) {
       ...(selection.roomRef ? { room_ref: selection.roomRef } : {}),
       ...(selection.serviceTypes
         ? { service_types: selection.serviceTypes }
+        : {}),
+      ...(selection.representationArgument
+        ? { representation: selection.representationArgument }
         : {}),
       max_bytes: selection.maxBytes,
       ...(cursor ? { cursor } : {}),
@@ -4462,7 +4486,13 @@ function isStableId(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function normalizeServiceReading(serial, room, accessory, service, observedAt) {
+function normalizeServiceIdentity(
+  serial,
+  room,
+  accessory,
+  service,
+  observedAt,
+) {
   return {
     ref: serviceRef(serial, accessory.id, service.sId),
     name: redactSensitiveText(service.name),
@@ -4483,7 +4513,6 @@ function normalizeServiceReading(serial, room, accessory, service, observedAt) {
       available: accessory.online,
     },
     observed_at: observedAt,
-    readings: normalizeReadableCharacteristics(serial, accessory, service),
   };
 }
 

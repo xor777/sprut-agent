@@ -137,6 +137,24 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   assert.deepEqual(rooms.structuredContent.rooms, [
     { ref: "spruthub://hub/installed-home/room/1", name: "Офис" },
   ]);
+  const catalog = await firstClient.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: homes.structuredContent.homes[0].ref,
+      representation: "catalog",
+    },
+  });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.equal(catalog.structuredContent.representation, "catalog");
+  assert.equal(catalog.structuredContent.services[0].name, "Климат");
+  assert.equal(
+    catalog.structuredContent.services[0].readings_status,
+    "not_requested",
+  );
+  assert.equal(
+    Object.hasOwn(catalog.structuredContent.services[0], "readings"),
+    false,
+  );
   const office = await firstClient.callTool({
     name: "read_services",
     arguments: {
