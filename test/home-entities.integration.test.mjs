@@ -897,7 +897,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     name: "Датчик управляет лампой",
     type: "BLOCK",
     predefined: false,
-    active: false,
+    active: true,
     onStart: false,
     sync: false,
     data: JSON.stringify({
@@ -925,6 +925,51 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
                 hc: "MotionDetected",
                 time: 0,
                 timeCond: "",
+              },
+              {
+                type: "characteristic",
+                blockId: 6,
+                aId: 32,
+                sId: 13,
+                cId: 15,
+                value: "false",
+                cond: "=",
+                trigger: false,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                time: 0,
+                timeCond: "",
+              },
+              {
+                type: "code",
+                blockId: 7,
+                value: "return input.ready === true;",
+              },
+              {
+                type: "condition",
+                blockId: 8,
+                mode: "OR",
+                conditions: [
+                  {
+                    type: "code",
+                    blockId: 9,
+                    value: "return state.allowed === true;",
+                  },
+                  {
+                    type: "characteristic",
+                    blockId: 10,
+                    aId: 32,
+                    sId: 13,
+                    cId: 15,
+                    value: "true",
+                    cond: "=",
+                    trigger: false,
+                    hs: "MotionSensor",
+                    hc: "MotionDetected",
+                    time: 0,
+                    timeCond: "",
+                  },
+                ],
               },
             ],
           },
@@ -1001,7 +1046,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       name: "Датчик управляет лампой",
       type: "BLOCK",
       predefined: false,
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       meaning: "accessory_index_association",
@@ -1011,15 +1056,57 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   assert.deepEqual(relations.scenario_roles, [
     {
       scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: false,
+      scenario_active: true,
       runtime_status: "not_observed",
       role: "trigger",
       entity_ref: characteristicRef,
       configuration_pointer: "/configuration/value/targets/1/if/conditions/0",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer: "/configuration/value/targets/1/if/conditions/0",
+        },
+      },
     },
     {
       scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: false,
+      scenario_active: true,
+      runtime_status: "not_observed",
+      role: "condition",
+      entity_ref: characteristicRef,
+      configuration_pointer: "/configuration/value/targets/1/if/conditions/1",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer: "/configuration/value/targets/1/if/conditions/1",
+        },
+      },
+    },
+    {
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      scenario_active: true,
+      runtime_status: "not_observed",
+      role: "condition",
+      entity_ref: characteristicRef,
+      configuration_pointer:
+        "/configuration/value/targets/1/if/conditions/3/conditions/1",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer:
+            "/configuration/value/targets/1/if/conditions/3/conditions/1",
+        },
+      },
+    },
+    {
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      scenario_active: true,
       runtime_status: "not_observed",
       role: "action_target",
       entity_ref:
@@ -1027,8 +1114,70 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       configuration_pointer:
         "/configuration/value/targets/1/then/0/characteristics/0",
       value_source: "literal",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer: "/configuration/value/targets/1/then/0/characteristics/0",
+        },
+      },
     },
   ]);
+  const codeConditions = relations.unresolved_areas.filter(
+    ({ area }) => area === "block_code_condition",
+  );
+  assert.deepEqual(codeConditions, [
+    {
+      area: "block_code_condition",
+      outcome: "not_analyzed",
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      configuration_pointer: "/configuration/value/targets/1/if/conditions/2",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer: "/configuration/value/targets/1/if/conditions/2",
+        },
+      },
+    },
+    {
+      area: "block_code_condition",
+      outcome: "not_analyzed",
+      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      configuration_pointer:
+        "/configuration/value/targets/1/if/conditions/3/conditions/0",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer:
+            "/configuration/value/targets/1/if/conditions/3/conditions/0",
+        },
+      },
+    },
+  ]);
+  for (const evidence of [...relations.scenario_roles, ...codeConditions]) {
+    const detail = await client.callTool({
+      name: evidence.next.tool,
+      arguments: evidence.next.arguments,
+    });
+    assert.equal(detail.isError, undefined, detail.content[0]?.text);
+    assert.equal(
+      detail.structuredContent.selection.pointer,
+      evidence.configuration_pointer,
+    );
+    assert.equal(
+      detail.structuredContent.selection.value.type,
+      evidence.area === "block_code_condition"
+        ? "code"
+        : evidence.role === "action_target"
+          ? "set"
+          : "characteristic",
+    );
+  }
   assert.deepEqual(relations.assigned_logics, [
     {
       ref: "spruthub://hub/home%2FA/accessory/32/service/13/logic/AssignedSensorLogic",
@@ -1244,6 +1393,14 @@ test("accessory relations keep BLOCK evidence and defer recursive link reads", a
   assert.equal(
     unresolved.next.candidates[0].entity_ref,
     "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+  );
+  assert.equal(
+    unresolved.next.candidates.some(
+      ({ entity_ref }) =>
+        entity_ref ===
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/16",
+    ),
+    false,
   );
   assert.equal(
     hub.requests.some(({ params }) => params.link?.list),

@@ -108,6 +108,7 @@ async function startHub() {
         active: true,
       },
     ],
+    scenarioAssociations: new Map(),
     nextScenario: 1,
   };
   const server = new WebSocketServer({ port: 0 });
@@ -227,7 +228,15 @@ function respond(state, params) {
   if (params.scenario?.list) {
     return params.scenario.list.aId === undefined
       ? { scenario: { list: { scenarios: state.scenarios } } }
-      : { scenario: { list: {} } };
+      : {
+          scenario: {
+            list: {
+              scenarios: state.scenarioAssociations.get(
+                params.scenario.list.aId,
+              ),
+            },
+          },
+        };
   }
   if (params.scenario?.get) {
     const scenario = state.scenarios.find(
@@ -426,6 +435,7 @@ async function preview(client) {
 
 test("automation preview explains current mechanisms without writing to the hub", async (t) => {
   const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarioAssociations.set(32, [hub.state.scenarios[0]]);
   const client = await startClient(t, hub, stateDirectory);
 
   const result = await preview(client);
@@ -503,7 +513,19 @@ test("automation preview explains current mechanisms without writing to the hub"
   ]);
   assert.deepEqual(
     result.structuredContent.context.source.scenario_associations,
-    [],
+    [
+      {
+        ref: "spruthub://hub/automation-test-hub/scenario/existing-block",
+        name: "Существующий сценарий",
+        type: "BLOCK",
+        predefined: false,
+        active: true,
+        on_start: false,
+        sync: false,
+        meaning: "accessory_index_association",
+        direction: "not_established",
+      },
+    ],
   );
   assert.equal(
     Object.hasOwn(result.structuredContent.context.source, "direct_scenarios"),
