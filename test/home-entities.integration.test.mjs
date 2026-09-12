@@ -1039,6 +1039,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
+  const relationRequestSnapshot = [...hub.requests];
   const relations = result.structuredContent.entity.relations;
   assert.deepEqual(relations.scenario_associations, [
     {
@@ -1250,6 +1251,14 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       outcome: "unsupported",
       scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
       configuration_pointer: "/configuration/value/targets/0",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+          include: ["configuration"],
+          pointer: "/configuration/value/targets/0",
+        },
+      },
       native_type: "notify",
     },
   );
@@ -1283,7 +1292,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     false,
   );
 
-  const relationRequests = hub.requests.filter(
+  const relationRequests = relationRequestSnapshot.filter(
     ({ params }) =>
       params.scenario?.list ||
       params.scenario?.get ||

@@ -87,8 +87,7 @@ export function inspectBlockRelations(
         {
           area: "block_node",
           outcome: "invalid",
-          scenario_ref: scenarioRef,
-          configuration_pointer: "/configuration/value",
+          ...blockRelationLocation(scenarioRef, "root"),
         },
       ],
     };
@@ -96,6 +95,14 @@ export function inspectBlockRelations(
   visitKnownBlockNodes(
     data,
     (node, kind, path) => {
+      if (kind === "code") {
+        unresolved.push({
+          area: "block_code_condition",
+          outcome: "not_analyzed",
+          ...blockRelationLocation(scenarioRef, path),
+        });
+        return;
+      }
       if (kind === "characteristic") {
         const entityRef = characteristicRef(
           homeRef,
@@ -113,7 +120,7 @@ export function inspectBlockRelations(
           runtime_status: "not_observed",
           role: node.trigger === true ? "trigger" : "condition",
           entity_ref: entityRef,
-          configuration_pointer: blockConfigurationPointer(path),
+          ...blockRelationLocation(scenarioRef, path),
         });
       }
       if (kind !== "service") return;
@@ -136,7 +143,7 @@ export function inspectBlockRelations(
           runtime_status: "not_observed",
           role: "action_target",
           entity_ref: entityRef,
-          configuration_pointer: blockConfigurationPointer(actionPath),
+          ...blockRelationLocation(scenarioRef, actionPath),
           ...(typeof action.value === "string"
             ? { value_source: "literal" }
             : {}),
@@ -145,8 +152,7 @@ export function inspectBlockRelations(
           unresolved.push({
             area: "action_value_source",
             outcome: "unknown",
-            scenario_ref: scenarioRef,
-            configuration_pointer: blockConfigurationPointer(actionPath),
+            ...blockRelationLocation(scenarioRef, actionPath),
           });
         }
       }
@@ -155,8 +161,7 @@ export function inspectBlockRelations(
       unresolved.push({
         area: "block_node",
         outcome: "unsupported",
-        scenario_ref: scenarioRef,
-        configuration_pointer: blockConfigurationPointer(path),
+        ...blockRelationLocation(scenarioRef, path),
         ...(typeof node?.type === "string" ? { native_type: node.type } : {}),
       });
     },
@@ -180,8 +185,23 @@ function invalidReference(scenarioRef, path) {
   return {
     area: "block_reference",
     outcome: "invalid",
+    ...blockRelationLocation(scenarioRef, path),
+  };
+}
+
+function blockRelationLocation(scenarioRef, path) {
+  const configurationPointer = blockConfigurationPointer(path);
+  return {
     scenario_ref: scenarioRef,
-    configuration_pointer: blockConfigurationPointer(path),
+    configuration_pointer: configurationPointer,
+    next: {
+      tool: "get_entity",
+      arguments: {
+        entity_ref: scenarioRef,
+        include: ["configuration"],
+        pointer: configurationPointer,
+      },
+    },
   };
 }
 
@@ -190,7 +210,9 @@ function blockConfigurationPointer(path) {
   for (const match of path.matchAll(/\.([^.[\]]+)|\[(\d+)\]/g)) {
     tokens.push(match[1] ?? match[2]);
   }
-  return `/configuration/value/${tokens.join("/")}`;
+  return tokens.length === 0
+    ? "/configuration/value"
+    : `/configuration/value/${tokens.join("/")}`;
 }
 
 function characteristicRef(homeRef, aId, sId, cId) {

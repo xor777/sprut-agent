@@ -1858,6 +1858,14 @@ export class SprutHubClient {
       serial,
       accessory,
       services,
+      characteristicCandidates: services.flatMap((service) =>
+        normalizeServiceDetail(
+          serial,
+          accessory,
+          service,
+          null,
+        ).characteristics.filter((candidate) => !isRedactedNode(candidate)),
+      ),
     });
     return {
       scenario_associations: associations.map((summary) => ({
@@ -3128,6 +3136,7 @@ function relationUnresolvedAreas({
   serial,
   accessory,
   services,
+  characteristicCandidates,
 }) {
   const unresolved = blockReads.flatMap(({ unresolved: items }) => items);
   if (!associationRead.ok) {
@@ -3197,19 +3206,10 @@ function relationUnresolvedAreas({
         "Accessory relations do not recursively read every characteristic link.",
       next: {
         tool: "get_entity",
-        candidates: services.flatMap((service) =>
-          (service.characteristics ?? [])
-            .filter((candidate) => !isSensitiveNativeNode(candidate))
-            .map((candidate) => ({
-              entity_ref: characteristicRef(
-                serial,
-                accessory.id,
-                service.sId,
-                candidate.cId,
-              ),
-              include: ["relations"],
-            })),
-        ),
+        candidates: characteristicCandidates.map(({ ref }) => ({
+          entity_ref: ref,
+          include: ["relations"],
+        })),
       },
     });
   }

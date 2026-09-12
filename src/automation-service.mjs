@@ -4324,7 +4324,7 @@ export class AutomationService {
         sync: false,
         else_actions: [],
       },
-      context: normalizeContext(context),
+      context: normalizeContext(context, change.home_ref),
       limitations: [
         "Preview does not change the hub and is not an atomic reservation.",
         "Scenario associations come from the accessory index and do not establish a direction or cover arbitrary code and bridges.",
@@ -8352,7 +8352,7 @@ function buildNativeData(condition, action, autoOff) {
   };
 }
 
-function normalizeContext(context) {
+function normalizeContext(context, homeReference) {
   return {
     scenarios: context.scenarios.map(
       ({ index, name, type, predefined, active }) => ({
@@ -8363,8 +8363,8 @@ function normalizeContext(context) {
         active,
       }),
     ),
-    source: normalizeSelectionContext(context.source),
-    target: normalizeSelectionContext(context.target),
+    source: normalizeSelectionContext(context.source, homeReference),
+    target: normalizeSelectionContext(context.target, homeReference),
     extensions: context.extensions.map(
       ({ type, bundleType, name, enabled, state }) => ({
         type,
@@ -8377,14 +8377,16 @@ function normalizeContext(context) {
   };
 }
 
-function normalizeSelectionContext(selection) {
+function normalizeSelectionContext(selection, homeReference) {
   return {
     scenario_associations: selection.directScenarios.map((scenario) => ({
-      index: scenario.index,
+      ref: `${homeReference}/scenario/${encodeURIComponent(scenario.index)}`,
       name: scenario.name,
       type: scenario.type,
       predefined: scenario.predefined === true,
       active: scenario.active === true,
+      on_start: scenario.onStart === true,
+      sync: scenario.sync === true,
       meaning: "accessory_index_association",
       direction: "not_established",
     })),
