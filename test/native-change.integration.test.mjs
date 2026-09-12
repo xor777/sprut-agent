@@ -2453,6 +2453,7 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   const currentWithManualEdit = JSON.parse(hub.state.scenarios[0].data);
   blockNodeAtPointer(currentWithManualEdit, actionPointer).then[0].time =
     55_000;
+  currentWithManualEdit.targets[0].then.unshift(setAction());
   const ordinary = await secondClient.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -2464,8 +2465,10 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   });
   assert.equal(ordinary.isError, undefined, ordinary.content[0]?.text);
   assert.equal(
-    blockNodeAtPointer(ordinary.structuredContent.diff.data.to, actionPointer)
-      .type,
+    blockNodeAtPointer(
+      ordinary.structuredContent.diff.data.to,
+      "/targets/0/then/2",
+    ).type,
     "delay",
   );
   await secondClient.callTool({
@@ -2473,8 +2476,10 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
     arguments: { change_ref: ordinary.structuredContent.change_ref },
   });
   assert.equal(
-    blockNodeAtPointer(JSON.parse(hub.state.scenarios[0].data), actionPointer)
-      .time,
+    blockNodeAtPointer(
+      JSON.parse(hub.state.scenarios[0].data),
+      "/targets/0/then/2",
+    ).time,
     55_000,
   );
 
@@ -2484,6 +2489,20 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   });
   assert.equal(completed.structuredContent.status, "completed");
   assert.equal(completed.structuredContent.pause_effect.status, "expired");
+  const completedHistory = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 20 },
+  });
+  const completedSummary = completedHistory.structuredContent.changes.find(
+    ({ change_ref: changeRef }) =>
+      changeRef === prepared.structuredContent.change_ref,
+  );
+  assert.equal(completedSummary.recorded_status, "completed");
+  assert.equal(completedSummary.effect_status, "expired");
+  assert.equal(
+    completedSummary.completed_by_change_ref,
+    ordinary.structuredContent.change_ref,
+  );
   const completedRestore = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -2608,6 +2627,29 @@ test("a repeated pause through its visible action keeps ownership after an ordin
     arguments: { change_ref: first.structuredContent.change_ref },
   });
 
+  for (const overlappingPointer of [
+    "/targets/0",
+    `${actionPointer}/then/0/targets/0`,
+  ]) {
+    const overlap = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_action_pause",
+        target_ref: scenarioRef,
+        action_pointer: overlappingPointer,
+        duration_seconds: 180,
+        reason: "Не расширять пересекающуюся временную область",
+      },
+    });
+    assert.equal(overlap.isError, true);
+    assert.equal(overlap.structuredContent.error.code, "pause_scope_overlap");
+    assert.equal(overlap.structuredContent.owned_pause_pointer, actionPointer);
+    assert.equal(
+      overlap.structuredContent.owned_action_pointer,
+      `${actionPointer}/then/0`,
+    );
+  }
+
   const equivalentScenarioRef =
     "spruthub://hub/%6Eative-change-test-hub/scenario/existing%2Dblock";
   const second = await client.callTool({
@@ -2626,19 +2668,39 @@ test("a repeated pause through its visible action keeps ownership after an ordin
     second.structuredContent.replaces_change_ref,
     first.structuredContent.change_ref,
   );
+  let restoreStateDirectory;
+  hub.state.behavior.afterUpdate = async () => {
+    restoreStateDirectory = await blockStateDirectory(t, stateDirectory);
+  };
   const secondApplied = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: second.structuredContent.change_ref },
   });
   assert.equal(secondApplied.structuredContent.status, "applied");
+  assert.deepEqual(secondApplied.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_native_change",
+  });
   assert.equal(
     JSON.stringify(hub.state.scenarios[0].data).match(
       /sprut-agent:block-action-pause/g,
     )?.length,
     1,
   );
+  await client.close();
+  await restoreStateDirectory();
+  const recoveredClient = await startClient(t, hub, stateDirectory);
+  const recoveredSecond = await recoveredClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(recoveredSecond.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    2,
+  );
 
-  const history = await client.callTool({
+  const history = await recoveredClient.callTool({
     name: "list_native_changes",
     arguments: { home_ref: homeRef, limit: 20 },
   });
@@ -2660,7 +2722,7 @@ test("a repeated pause through its visible action keeps ownership after an ordin
   const shifted = JSON.parse(hub.state.scenarios[0].data);
   shifted.targets[0].then.unshift(setAction());
   blockNodeAtPointer(shifted, "/targets/0/then/2/then/0").time = 50_000;
-  const ordinary = await client.callTool({
+  const ordinary = await recoveredClient.callTool({
     name: "prepare_native_change",
     arguments: {
       operation: "block_data_update",
@@ -2670,13 +2732,23 @@ test("a repeated pause through its visible action keeps ownership after an ordin
     },
   });
   assert.equal(ordinary.isError, undefined, ordinary.content[0]?.text);
-  const ordinaryApplied = await client.callTool({
+  const ordinaryApplied = await recoveredClient.callTool({
     name: "apply_native_change",
     arguments: { change_ref: ordinary.structuredContent.change_ref },
   });
   assert.equal(ordinaryApplied.structuredContent.status, "applied");
 
-  const restored = await client.callTool({
+  const shiftedPause = await recoveredClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(shiftedPause.structuredContent.status, "applied");
+  assert.equal(
+    shiftedPause.structuredContent.action_pointer,
+    "/targets/0/then/2",
+  );
+
+  const restored = await recoveredClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: second.structuredContent.change_ref },
   });
@@ -2690,7 +2762,7 @@ test("a repeated pause through its visible action keeps ownership after an ordin
     JSON.stringify(restoredData).includes("sprut-agent:block-action-pause"),
     false,
   );
-  const oldAfterRestore = await client.callTool({
+  const oldAfterRestore = await recoveredClient.callTool({
     name: "get_native_change",
     arguments: { change_ref: first.structuredContent.change_ref },
   });
@@ -2722,6 +2794,16 @@ test("a rejected pause remains not applied and cannot write an expired controlle
   });
   assert.equal(status.structuredContent.status, "not_applied");
   assert.equal(status.structuredContent.pause_effect.status, "not_applied");
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 20 },
+  });
+  const summary = history.structuredContent.changes.find(
+    ({ change_ref: changeRef }) =>
+      changeRef === prepared.structuredContent.change_ref,
+  );
+  assert.equal(summary.recorded_status, "not_applied");
+  assert.equal(summary.effect_status, "not_applied");
   await new Promise((resolve) => setTimeout(resolve, 1_025));
   const expiredRetry = await client.callTool({
     name: "apply_native_change",
@@ -2832,6 +2914,25 @@ test("BLOCK action pause rejects non-actions and preserves an edited controller"
   });
   assert.equal(refusedCode.isError, true);
   assert.equal(refusedCode.structuredContent.error.code, "invalid_block_data");
+
+  const duplicated = JSON.parse(hub.state.scenarios[0].data);
+  duplicated.targets.push(
+    structuredClone(blockNodeAtPointer(duplicated, "/targets/0/then/1")),
+  );
+  const refusedDuplicate = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: duplicated,
+      reason: "Не принимать дублированный маркер за владение",
+    },
+  });
+  assert.equal(refusedDuplicate.isError, true);
+  assert.equal(
+    refusedDuplicate.structuredContent.error.code,
+    "invalid_block_data",
+  );
 
   const edited = JSON.parse(hub.state.scenarios[0].data);
   blockNodeAtPointer(edited, "/targets/0/then/1").else = [setAction()];
