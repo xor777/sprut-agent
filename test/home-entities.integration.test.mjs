@@ -796,6 +796,156 @@ test("compact room catalog preserves named services without reading their values
   assert.doesNotMatch(compact, /characteristics|readings|current_value/);
 });
 
+test("home service catalog finds one target before reading only its values and relations", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.rooms = [
+    { id: 1, name: "Кухня" },
+    { id: 2, name: "Спальня" },
+    { id: 3, name: "Кабинет" },
+  ];
+  const light = (id, roomId, name = `Лампа ${id}`) => ({
+    id,
+    roomId,
+    name: `Светильник ${id}`,
+    online: true,
+    services: [
+      {
+        aId: id,
+        sId: 1,
+        name,
+        type: "Lightbulb",
+        characteristics: [
+          {
+            aId: id,
+            sId: 1,
+            cId: 1,
+            control: {
+              name: "Включена",
+              type: "On",
+              read: true,
+              write: true,
+              value: { boolValue: id % 2 === 0 },
+            },
+          },
+          {
+            aId: id,
+            sId: 1,
+            cId: 2,
+            control: {
+              name: "Отчёт",
+              type: "Report",
+              read: true,
+              write: false,
+              value: { stringValue: `${id}:`.padEnd(1_000, "x") },
+            },
+          },
+        ],
+      },
+    ],
+  });
+  state.accessories = Array.from({ length: 53 }, (_, index) => {
+    const id = 100 + index;
+    const roomId = (index % 3) + 1;
+    const name = id === 100 || id === 101 ? "Димина лампа" : undefined;
+    return light(id, roomId, name);
+  });
+  state.links.set("100.1.1", [
+    {
+      index: "desk-light-link",
+      type: "IN",
+      characteristics: [{ aId: 102, sId: 1, cId: 1 }],
+    },
+  ]);
+  const client = await startClient(t, hub);
+  const argumentsBase = {
+    home_ref: "spruthub://hub/home%2FA",
+    service_types: ["Lightbulb"],
+    max_bytes: 16_000,
+  };
+
+  const readAll = async (representation, afterFirstPage) => {
+    const services = [];
+    let serializedBytes = 0;
+    let next = {
+      tool: "read_services",
+      arguments: { ...argumentsBase, representation },
+    };
+    let pages = 0;
+    while (next) {
+      const result = await client.callTool({
+        name: next.tool,
+        arguments: next.arguments,
+      });
+      assert.equal(result.isError, undefined, result.content[0]?.text);
+      assert.equal(result.structuredContent.representation, representation);
+      assert.equal(
+        Buffer.byteLength(result.content[0].text),
+        result.structuredContent.page.serialized_bytes,
+      );
+      services.push(...result.structuredContent.services);
+      serializedBytes += result.structuredContent.page.serialized_bytes;
+      pages += 1;
+      if (pages === 1) afterFirstPage?.();
+      next = result.structuredContent.next;
+      if (next) assert.equal(next.arguments.representation, representation);
+      assert(pages < 20);
+    }
+    return { services, serializedBytes, pages };
+  };
+
+  const catalog = await readAll("catalog", () => {
+    state.accessories.push(light(200, 3));
+  });
+  assert.equal(catalog.services.length, 54);
+  assert.equal(
+    catalog.services.filter(({ name }) => name === "Димина лампа").length,
+    2,
+  );
+  assert(
+    catalog.services.every(
+      (service) =>
+        service.readings_status === "not_requested" &&
+        !Object.hasOwn(service, "readings"),
+    ),
+  );
+  const selected = catalog.services.find(
+    ({ name, room }) => name === "Димина лампа" && room.name === "Спальня",
+  );
+  assert(selected);
+  assert.equal(selected.ref, "spruthub://hub/home%2FA/accessory/100/service/1");
+  assert.equal(
+    catalog.services.at(-1).ref,
+    "spruthub://hub/home%2FA/accessory/200/service/1",
+  );
+
+  const readings = await readAll("readings");
+  assert.equal(readings.services.length, catalog.services.length);
+  assert(catalog.serializedBytes < readings.serializedBytes);
+  assert(catalog.pages < readings.pages);
+
+  const detail = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: selected.ref },
+  });
+  assert.equal(detail.isError, undefined, detail.content[0]?.text);
+  const on = detail.structuredContent.entity.characteristics.find(
+    ({ type }) => type === "On",
+  );
+  assert.equal(on.current_value.value, true);
+
+  const relations = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: on.ref, include: ["relations"] },
+  });
+  assert.equal(relations.isError, undefined, relations.content[0]?.text);
+  assert.deepEqual(
+    relations.structuredContent.entity.relations.characteristic_links[0]
+      .related_characteristic_refs,
+    ["spruthub://hub/home%2FA/accessory/102/service/1/characteristic/1"],
+  );
+});
+
 test("characteristic detail keeps configuration separate from unlinked diagnostics", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
