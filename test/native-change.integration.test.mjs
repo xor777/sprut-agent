@@ -23,8 +23,21 @@ const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
 const smoothLogicRef = `${serviceRef}/logic/${smoothLogicType}`;
 const scenarioRef = `spruthub://hub/${serial}/scenario/existing-block`;
-const scenarioSdk =
-  "interface Characteristic { getValue(): any; setValue(value: any): void; }";
+const scenarioSdk = `interface Hub {
+  getCharacteristic(aId: number, sId: number, cId: number): Characteristic;
+}
+interface Cron {
+  schedule(expression: String, handler: Function): Task;
+}
+interface Mail {
+  /** @param password Пароль пользователя */
+  password(password: String): Mail;
+}
+interface SSH {
+  /** @param password Пароль пользователя */
+  password(password: String): SSH;
+}
+declare function setTimeout(handler: Function, timeout?: number, ...arguments: any[]): Task;`;
 const firstLogicSource = `info = {
   name: "Bedside start level",
   description: "Set the initial brightness once",
@@ -420,6 +433,7 @@ async function startHub() {
       [logicOptionsKey(34, 13, smoothLogicType)]: smoothLogicOptions(),
     },
     scenarioLogicTypes: {},
+    scenarioSdk,
     nextScenario: 1,
     behavior: {
       closeAfterCreate: false,
@@ -826,7 +840,7 @@ async function startHub() {
           };
         }
       } else if (params.scenario?.sdk) {
-        result = { scenario: { sdk: { sdk: scenarioSdk } } };
+        result = { scenario: { sdk: { sdk: state.scenarioSdk } } };
       } else if (params.scenario?.get) {
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.get.index,
@@ -5600,6 +5614,77 @@ test("room creation rechecks all current names before writing", async (t) => {
     hub.requests.some(({ room }) => room?.create),
     false,
   );
+});
+
+test("get_scenario_sdk returns native typed declarations with matching public metadata", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const result = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.sdk, scenarioSdk);
+  assert.equal(result.structuredContent.sdk_complete, true);
+  assert.equal(
+    result.structuredContent.bytes,
+    Buffer.byteLength(result.structuredContent.sdk),
+  );
+  assert.equal(
+    result.structuredContent.sha256,
+    createHash("sha256").update(result.structuredContent.sdk).digest("hex"),
+  );
+});
+
+test("get_scenario_sdk identifies a hidden credential without claiming complete metadata", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarioSdk = `${scenarioSdk}\nconst defaults = { password: "sdk-secret-must-not-leak" };`;
+
+  const result = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.sdk, "[REDACTED]");
+  assert.equal(result.structuredContent.sdk_complete, false);
+  assert.equal(
+    result.structuredContent.bytes,
+    Buffer.byteLength(result.structuredContent.sdk),
+  );
+  assert.equal(
+    result.structuredContent.sha256,
+    createHash("sha256").update(result.structuredContent.sdk).digest("hex"),
+  );
+  assert.doesNotMatch(result.content[0].text, /sdk-secret-must-not-leak/);
+
+  hub.state.scenarioSdk = `${scenarioSdk}\ndeclare const embeddedValue = "native-change-test-token";`;
+  const knownSecret = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+  assert.equal(knownSecret.structuredContent.sdk, "[REDACTED]");
+  assert.equal(knownSecret.structuredContent.sdk_complete, false);
+  assert.doesNotMatch(knownSecret.content[0].text, /native-change-test-token/);
+});
+
+test("typed credential-like text outside the SDK declaration role stays hidden", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.characteristic.control.value = {
+    stringValue: "password(password: String): Mail;",
+  };
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.entity.current_value.value, "[REDACTED]");
 });
 
 test("a native LOGIC source is created, assigned, updated, read back, and restored through public tools", async (t) => {
