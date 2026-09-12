@@ -1,0 +1,81 @@
+{
+  "source_commit": "01c398a8dd6010766f22c37a5d9dd6abdad05391",
+  "captured_via": [
+    "prepare_native_change",
+    "apply_native_change",
+    "get_native_change",
+    "get_native_change",
+    "restore_native_change"
+  ],
+  "change": {
+    "id": "6ce9f739fc3bcf9862a1c856",
+    "kind": "characteristic_option",
+    "status": "not_owned",
+    "home_ref": "spruthub://hub/native-change-test-hub",
+    "reason": "Сохранить неизвестный исход настройки после ручного выбора",
+    "target_ref": "spruthub://hub/native-change-test-hub/accessory/32/service/13/characteristic/15",
+    "option_key": "SwitchOffTime",
+    "target": {
+      "aId": 32,
+      "sId": 13,
+      "cId": 15
+    },
+    "contract": {
+      "type": "GenericDouble",
+      "input_type": "NUMBER",
+      "kind": "doubleValue",
+      "confirmation": "separate_characteristic_get_options_readback"
+    },
+    "baseline_value": {
+      "value": 180,
+      "kind": "doubleValue"
+    },
+    "requested_value": {
+      "value": 10,
+      "kind": "doubleValue"
+    },
+    "native_write_sent": true,
+    "native_acknowledged": false,
+    "last_verification": {
+      "fresh": true,
+      "checked_at": "2026-09-12T21:05:08.812Z",
+      "result": "current_value_observed"
+    },
+    "created_at": "2026-09-12T21:05:08.798Z",
+    "updated_at": "2026-09-12T21:05:08.812Z",
+    "history": [
+      {
+        "status": "prepared",
+        "at": "2026-09-12T21:05:08.798Z"
+      },
+      {
+        "status": "applying",
+        "at": "2026-09-12T21:05:08.804Z"
+      },
+      {
+        "status": "uncertain",
+        "at": "2026-09-12T21:05:08.807Z"
+      },
+      {
+        "status": "conflict",
+        "at": "2026-09-12T21:05:08.810Z"
+      },
+      {
+        "status": "not_owned",
+        "at": "2026-09-12T21:05:08.812Z"
+      }
+    ],
+    "write_intent": {
+      "direction": "apply",
+      "phase": "reconciled",
+      "acknowledged": false,
+      "at": "2026-09-12T21:05:08.804Z"
+    },
+    "observed_value": {
+      "value": 180,
+      "kind": "doubleValue"
+    },
+    "conflict_reason": "change_was_not_applied",
+    "configuration_matches": false
+  }
+}

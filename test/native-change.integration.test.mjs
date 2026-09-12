@@ -3616,6 +3616,87 @@ test("a published sent option that became not-owned never regains write ownershi
   }
 });
 
+test("a published sent option without manual evidence remains not-owned", async (t) => {
+  const fixture = JSON.parse(
+    await readFile(
+      path.join(
+        projectRoot,
+        "test/fixtures/published-option-not-owned-without-manual-evidence.json",
+      ),
+      "utf8",
+    ),
+  );
+  for (const observed of [
+    { label: "requested value", value: 10 },
+    { label: "baseline value", value: 180 },
+  ]) {
+    await t.test(observed.label, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const fingerprint = createHash("sha256")
+        .update(`${hub.url}\0${serial}`)
+        .digest("hex");
+      const change = structuredClone(fixture.change);
+      await writeFile(
+        path.join(
+          stateDirectory,
+          `automation-changes-${fingerprint.slice(0, 24)}.json`,
+        ),
+        `${JSON.stringify(
+          {
+            version: 1,
+            hub_fingerprint: fingerprint,
+            changes: { [change.id]: change },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      const option = hub.state.characteristicOptions.find(
+        ({ key }) => key === characteristicOptionKeys.switchOffTime,
+      );
+      option.value = { doubleValue: observed.value };
+      const changeRef = `spruthub-change://native/${change.id}`;
+      const writesBefore = hub.requests.filter(
+        ({ characteristic }) => characteristic?.setOptions,
+      ).length;
+      const results = [];
+
+      for (let process = 0; process < 2; process += 1) {
+        const client = await startClient(t, hub, stateDirectory);
+        for (const tool of [
+          "get_native_change",
+          "restore_native_change",
+          "apply_native_change",
+        ]) {
+          const result = await client.callTool({
+            name: tool,
+            arguments: { change_ref: changeRef },
+          });
+          results.push({ tool, result });
+        }
+        await client.close();
+      }
+      assert.deepEqual(option.value, { doubleValue: observed.value });
+      assert.equal(
+        hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+          .length,
+        writesBefore,
+      );
+      for (const { tool, result } of results) {
+        assert.equal(result.isError, undefined, result.content[0]?.text);
+        assert.equal(result.structuredContent.status, "not_owned", tool);
+        assert.equal(result.structuredContent.native_write_sent, true, tool);
+        assert.equal(result.structuredContent.conflict_reason, undefined, tool);
+        assert.equal(
+          result.structuredContent.manual_change_observed,
+          undefined,
+          tool,
+        );
+      }
+    });
+  }
+});
+
 test("a readable command stays non-restorable and is not retried after an unknown apply", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);

@@ -8196,11 +8196,7 @@ function publicNativeChange(
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
-      ...(hasKnownSettingSemantics(change)
-        ? [
-            "After an unknown write outcome or an observed manual change, inspect the current value and prepare a new change for any further authorized write; do not resend or restore the old change.",
-          ]
-        : []),
+      "An option or logic-active write with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
       ...(change.kind === "window_option"
         ? [
             "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
