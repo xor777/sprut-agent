@@ -3771,6 +3771,130 @@ test("history discovers changes by home and entity after restart", async (t) => 
   assert.equal(history.structuredContent.truncated, false);
 });
 
+test("history finds one entity and continues through older pages without changing scope", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const catalog = await client.listTools();
+  const historyTool = catalog.tools.find(
+    ({ name }) => name === "list_native_changes",
+  );
+  assert.equal(historyTool.inputSchema.properties.limit.default, 10);
+  assert.equal(historyTool.inputSchema.properties.limit.maximum, 50);
+  assert.deepEqual(historyTool.inputSchema.properties.cursor, {
+    type: "string",
+    minLength: 1,
+    description: "Opaque continuation returned by the previous matching call",
+  });
+
+  const selected = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Сохранить старое изменение выбранного сценария",
+    },
+  });
+  assert.equal(selected.isError, undefined, selected.content[0]?.text);
+
+  const foreignChangeRefs = [];
+  for (let index = 0; index < 5; index += 1) {
+    const foreign = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "window_option",
+        target_ref: deviceWindowRef,
+        option_key: startupOptionKey,
+        value: index % 2,
+        reason: `Соседнее изменение окна ${index}`,
+      },
+    });
+    assert.equal(foreign.isError, undefined, foreign.content[0]?.text);
+    foreignChangeRefs.push(foreign.structuredContent.change_ref);
+  }
+
+  const exact = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: scenarioRef },
+  });
+  assert.equal(exact.isError, undefined, exact.content[0]?.text);
+  assert.deepEqual(
+    exact.structuredContent.changes.map(({ change_ref }) => change_ref),
+    [selected.structuredContent.change_ref],
+  );
+  assert.equal(exact.structuredContent.page.next_cursor, null);
+  assert.equal(exact.structuredContent.next, null);
+
+  const first = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 2 },
+  });
+  assert.equal(first.isError, undefined, first.content[0]?.text);
+  assert.equal(first.structuredContent.changes.length, 2);
+  assert.equal(first.structuredContent.page.snapshot, false);
+  assert.equal(first.structuredContent.page.remaining_changes, 4);
+  assert.ok(first.structuredContent.page.next_cursor);
+  assert.deepEqual(first.structuredContent.next, {
+    tool: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      limit: 2,
+      cursor: first.structuredContent.page.next_cursor,
+    },
+  });
+
+  const adjacent = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      value: 1,
+      reason: "Более новое изменение после первой страницы",
+    },
+  });
+  assert.equal(adjacent.isError, undefined, adjacent.content[0]?.text);
+
+  const collected = first.structuredContent.changes.map(
+    ({ change_ref }) => change_ref,
+  );
+  let next = first.structuredContent.next;
+  while (next) {
+    const page = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+    assert.equal(page.isError, undefined, page.content[0]?.text);
+    collected.push(
+      ...page.structuredContent.changes.map(({ change_ref }) => change_ref),
+    );
+    next = page.structuredContent.next;
+  }
+  assert.equal(new Set(collected).size, 6);
+  assert.equal(collected.includes(selected.structuredContent.change_ref), true);
+  assert.equal(collected.includes(adjacent.structuredContent.change_ref), false);
+  assert.deepEqual(
+    new Set(collected),
+    new Set([selected.structuredContent.change_ref, ...foreignChangeRefs]),
+  );
+
+  const changedScope = await client.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: scenarioRef,
+      limit: 2,
+      cursor: first.structuredContent.page.next_cursor,
+    },
+  });
+  assert.equal(changedScope.isError, true);
+  assert.equal(changedScope.structuredContent.error.code, "invalid_cursor");
+  assert.deepEqual(changedScope.structuredContent.next, {
+    tool: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: scenarioRef, limit: 2 },
+  });
+});
+
 test("history labels a saved conflict before its next tool verifies current applied state", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
