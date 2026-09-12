@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -3941,6 +3948,13 @@ test("history continuation does not repeat a page after its boundary change is r
   );
 
   await new Promise((resolve) => setTimeout(resolve, 5));
+  const otherCurrent = await client.callTool({
+    name: first.structuredContent.changes[0].next.tool,
+    arguments: first.structuredContent.changes[0].next.arguments,
+  });
+  assert.equal(otherCurrent.isError, undefined, otherCurrent.content[0]?.text);
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
   const boundary = first.structuredContent.changes.at(-1);
   const current = await client.callTool({
     name: boundary.next.tool,
@@ -3964,6 +3978,76 @@ test("history continuation does not repeat a page after its boundary change is r
       firstRefs.includes(changeRef),
     ),
     false,
+  );
+  assert.equal(next.structuredContent.next, null);
+});
+
+test("history cursor keeps its exact ordering boundary after the anchor is removed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  for (let index = 0; index < 4; index += 1) {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "window_option",
+        target_ref: deviceWindowRef,
+        option_key: startupOptionKey,
+        value: index % 2,
+        reason: `Одинаковое время истории ${index}`,
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  }
+
+  const journalName = (await readdir(stateDirectory)).find((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  assert.ok(journalName);
+  const journalPath = path.join(stateDirectory, journalName);
+  const journal = JSON.parse(await readFile(journalPath, "utf8"));
+  for (const change of Object.values(journal.changes)) {
+    change.updated_at = "2026-09-12T12:00:00.000Z";
+  }
+  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  const complete = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
+  });
+  assert.equal(complete.isError, undefined, complete.content[0]?.text);
+  const completeRefs = complete.structuredContent.changes.map(
+    ({ change_ref: changeRef }) => changeRef,
+  );
+
+  const first = await client.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: deviceWindowRef,
+      limit: 2,
+    },
+  });
+  assert.equal(first.isError, undefined, first.content[0]?.text);
+  assert.equal(
+    first.structuredContent.next.arguments.entity_ref,
+    deviceWindowRef,
+  );
+  const boundaryRef = first.structuredContent.changes.at(-1).change_ref;
+  const boundaryId = boundaryRef.slice("spruthub-change://native/".length);
+  delete journal.changes[boundaryId];
+  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  const next = await client.callTool({
+    name: first.structuredContent.next.tool,
+    arguments: first.structuredContent.next.arguments,
+  });
+  assert.equal(next.isError, undefined, next.content[0]?.text);
+  assert.deepEqual(
+    next.structuredContent.changes.map(
+      ({ change_ref: changeRef }) => changeRef,
+    ),
+    completeRefs.slice(2),
   );
   assert.equal(next.structuredContent.next, null);
 });

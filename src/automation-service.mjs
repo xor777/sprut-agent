@@ -2884,20 +2884,16 @@ export class AutomationService {
           entityRef === undefined || change.target_refs.includes(entityRef),
       )
       .sort(compareChangeSummaries);
-    const start =
-      selection.afterRef === null
-        ? 0
-        : all.findIndex(
-            ({ change_ref: changeRef }) => changeRef === selection.afterRef,
-          ) + 1;
-    if (start === 0 && selection.afterRef !== null) {
-      throw staleHistoryCursor(selection);
-    }
-    const changes = all.slice(start, start + limit);
-    const end = start + changes.length;
+    const remaining =
+      selection.after === null
+        ? all
+        : all.filter(
+            (change) => compareChangeSummaries(change, selection.after) > 0,
+          );
+    const changes = remaining.slice(0, limit);
     const nextCursor =
-      end < all.length
-        ? encodeHistoryCursor(changes.at(-1).change_ref, selection.scope)
+      changes.length < remaining.length
+        ? encodeHistoryCursor(changes.at(-1), selection.scope)
         : null;
     return {
       status: "ok",
@@ -2907,7 +2903,7 @@ export class AutomationService {
       page: {
         limit,
         returned_changes: changes.length,
-        remaining_changes: all.length - end,
+        remaining_changes: remaining.length - changes.length,
         snapshot: false,
         next_cursor: nextCursor,
       },
@@ -8106,7 +8102,7 @@ function historySelection(homeRef, entityRef, limit, cursor) {
   const selection = { homeRef, entityRef: entityRef ?? null, limit, scope };
   return {
     ...selection,
-    afterRef: decodeHistoryCursor(cursor, scope, selection),
+    after: decodeHistoryCursor(cursor, scope, selection),
   };
 }
 
@@ -8117,22 +8113,32 @@ function decodeHistoryCursor(cursor, expectedScope, selection) {
       Buffer.from(cursor, "base64url").toString("utf8"),
     );
     if (
-      parsed?.v !== 1 ||
+      parsed?.v !== 2 ||
       typeof parsed.after_ref !== "string" ||
       parsed.after_ref.length === 0 ||
+      typeof parsed.after_updated_at !== "string" ||
+      parsed.after_updated_at.length === 0 ||
       parsed.scope !== expectedScope
     ) {
       throw new Error("invalid cursor");
     }
-    return parsed.after_ref;
+    return {
+      change_ref: parsed.after_ref,
+      updated_at: parsed.after_updated_at,
+    };
   } catch {
     throw invalidHistoryCursor(selection);
   }
 }
 
-function encodeHistoryCursor(afterRef, scope) {
+function encodeHistoryCursor(after, scope) {
   return Buffer.from(
-    JSON.stringify({ v: 1, after_ref: afterRef, scope }),
+    JSON.stringify({
+      v: 2,
+      after_ref: after.change_ref,
+      after_updated_at: after.updated_at,
+      scope,
+    }),
   ).toString("base64url");
 }
 
@@ -8152,15 +8158,6 @@ function invalidHistoryCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
     "Use the cursor returned by list_native_changes for the same home and entity filter.",
-    "restart_list_native_changes",
-    { next: historyNext(selection, null) },
-  );
-}
-
-function staleHistoryCursor(selection) {
-  return new SprutHubError(
-    "stale_cursor",
-    "The last change from this history page is no longer available in the selected scope.",
     "restart_list_native_changes",
     { next: historyNext(selection, null) },
   );
