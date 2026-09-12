@@ -2845,7 +2845,7 @@ test("a rejected pause retries the same absolute window before it expires", asyn
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   const originalDeadline =
-    rejectedStatus.structuredContent.pause_effect.ends_at;
+    rejectedStatus.structuredContent.pause_effect.expires_at;
 
   const retried = await client.callTool({
     name: "apply_native_change",
@@ -2855,7 +2855,7 @@ test("a rejected pause retries the same absolute window before it expires", asyn
   assert.equal(retried.isError, undefined, retried.content[0]?.text);
   assert.equal(retried.structuredContent.status, "applied");
   assert.equal(
-    retried.structuredContent.pause_effect.ends_at,
+    retried.structuredContent.pause_effect.expires_at,
     originalDeadline,
   );
   const updates = hub.requests.filter(({ scenario }) => scenario?.update);
@@ -2945,6 +2945,24 @@ test("BLOCK update restore preserves an active pause and records its explicit re
   });
   assert.equal(removed.structuredContent.status, "restored");
   assert.equal(removed.structuredContent.pause_effect.status, "restored");
+  assert.equal(
+    removed.structuredContent.restored_by_change_ref,
+    removal.structuredContent.change_ref,
+  );
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 20 },
+  });
+  const removedSummary = history.structuredContent.changes.find(
+    ({ change_ref: changeRef }) =>
+      changeRef === pause.structuredContent.change_ref,
+  );
+  assert.equal(removedSummary.recorded_status, "restored");
+  assert.equal(removedSummary.effect_status, "restored");
+  assert.equal(
+    removedSummary.restored_by_change_ref,
+    removal.structuredContent.change_ref,
+  );
   assert.equal(
     JSON.stringify(hub.state.scenarios[0].data).includes(
       "sprut-agent:block-action-pause",

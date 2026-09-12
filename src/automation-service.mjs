@@ -729,12 +729,13 @@ export class AutomationService {
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
     const pauseChanges = await this.#knownBlockPauses(input.target_ref);
-    const collapsed = collapseExpiredOwnedPauses(
-      structuredClone(input.data),
+    const prepared = prepareBlockUpdateSource(
+      baseline.data,
+      input.data,
       pauseChanges,
       Date.now(),
     );
-    const data = collapsed.data;
+    const data = prepared.data;
     await validateBlockData(data, this.client, {
       allowUnknownFrom: baseline.data,
       allowedPauses: pauseChanges,
@@ -751,8 +752,8 @@ export class AutomationService {
       reason: input.reason,
       baseline_snapshot: baseline,
       requested_snapshot: { ...structuredClone(baseline), data },
-      ...(collapsed.changeIds.length > 0
-        ? { collapsed_pause_change_ids: collapsed.changeIds }
+      ...(prepared.pauseOutcomes.length > 0
+        ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
       native_write_sent: false,
       native_acknowledged: false,
@@ -3632,6 +3633,8 @@ export class AutomationService {
             ? null
             : scenarioSnapshot(current.scenario).data,
         allowedPauses: [...pauseChanges, change],
+        allowedPauseIntentId:
+          change.kind === "block_action_pause" ? change.id : undefined,
       });
     }
 
@@ -3685,7 +3688,7 @@ export class AutomationService {
       if (change.kind === "block_action_pause") {
         await this.#markReplacedPauseSuperseded(change);
       } else if (change.kind === "block_data_update") {
-        await this.#markCollapsedPausesCompleted(change);
+        await this.#markPauseOutcomes(change, "apply");
       }
       return this.#finishNative(change, "applied", undefined, {
         scenario_index: current.scenario.index,
@@ -3943,12 +3946,14 @@ export class AutomationService {
     });
   }
 
-  async #markCollapsedPausesCompleted(change) {
-    for (const id of change.collapsed_pause_change_ids ?? []) {
+  async #markPauseOutcomes(change, direction) {
+    for (const outcome of nativePauseOutcomes(change).filter(
+      (candidate) => candidate.direction === direction,
+    )) {
       let pause;
       try {
         pause = (await this.store.list()).find(
-          (candidate) => candidate.id === id,
+          (candidate) => candidate.id === outcome.change_id,
         );
       } catch {
         return;
@@ -3958,11 +3963,21 @@ export class AutomationService {
         ["completed", "restored", "superseded"].includes(pause.status)
       )
         continue;
-      await this.#finishNative(pause, "completed", undefined, {
+      await this.#finishNative(pause, outcome.status, undefined, {
         configuration_matches: true,
         conflict_reason: undefined,
-        completed_by_change_ref: `spruthub-change://native/${change.id}`,
-        last_verification: freshVerification("owned_pause_cleanup_observed"),
+        ...(outcome.status === "completed"
+          ? {
+              completed_by_change_ref: `spruthub-change://native/${change.id}`,
+            }
+          : {
+              restored_by_change_ref: `spruthub-change://native/${change.id}`,
+            }),
+        last_verification: freshVerification(
+          outcome.status === "completed"
+            ? "owned_pause_cleanup_observed"
+            : "owned_pause_removal_observed",
+        ),
       });
     }
   }
@@ -3991,23 +4006,45 @@ export class AutomationService {
         },
       };
     }
-    const cleanup = (await this.#knownScenarioChanges(change.target_ref)).find(
-      (candidate) =>
-        candidate.kind === "block_data_update" &&
-        candidate.collapsed_pause_change_ids?.includes(change.id) &&
-        (candidate.applied_snapshot !== undefined ||
-          (["applying", "uncertain"].includes(candidate.status) &&
-            nativeIntentDirection(candidate) === "apply" &&
-            blockMatchesRequested(candidate, scenario))),
-    );
-    if (!cleanup) return null;
+    const settlement = (await this.#knownScenarioChanges(change.target_ref))
+      .filter((candidate) => candidate.kind === "block_data_update")
+      .flatMap((candidate) =>
+        nativePauseOutcomes(candidate).map((outcome) => ({
+          candidate,
+          outcome,
+        })),
+      )
+      .find(
+        ({ candidate, outcome }) =>
+          outcome.change_id === change.id &&
+          (outcome.direction === "apply"
+            ? candidate.applied_snapshot !== undefined ||
+              (["applying", "uncertain"].includes(candidate.status) &&
+                nativeIntentDirection(candidate) === "apply" &&
+                blockMatchesRequested(candidate, scenario))
+            : candidate.status === "restored" ||
+              (["restoring", "uncertain"].includes(candidate.status) &&
+                nativeIntentDirection(candidate) === "restore" &&
+                blockStillAtBaseline(candidate, scenario))),
+      );
+    if (!settlement) return null;
     return {
-      status: "completed",
+      status: settlement.outcome.status,
       fields: {
         configuration_matches: true,
         conflict_reason: undefined,
-        completed_by_change_ref: `spruthub-change://native/${cleanup.id}`,
-        last_verification: freshVerification("owned_pause_cleanup_observed"),
+        ...(settlement.outcome.status === "completed"
+          ? {
+              completed_by_change_ref: `spruthub-change://native/${settlement.candidate.id}`,
+            }
+          : {
+              restored_by_change_ref: `spruthub-change://native/${settlement.candidate.id}`,
+            }),
+        last_verification: freshVerification(
+          settlement.outcome.status === "completed"
+            ? "owned_pause_cleanup_observed"
+            : "owned_pause_removal_observed",
+        ),
       },
     };
   }
@@ -4040,9 +4077,35 @@ export class AutomationService {
       });
     }
     if (change.kind === "block_data_update") {
-      await validateBlockData(change.baseline_snapshot.data, this.client, {
+      const pauseChanges = await this.#knownBlockPauses(change.target_ref);
+      let prepared = prepareBlockWriteSource(
+        change.baseline_snapshot.data,
+        pauseChanges,
+        Date.now(),
+      );
+      await validateBlockData(prepared.data, this.client, {
         allowUnknownFrom: scenarioSnapshot(current.scenario).data,
+        allowedPauses: pauseChanges,
       });
+      // Validation reads current bindings and can outlast a short pause. Rebuild
+      // from the immutable baseline immediately afterwards so that such a pause
+      // is not revived by the restore write.
+      prepared = prepareBlockWriteSource(
+        change.baseline_snapshot.data,
+        pauseChanges,
+        Date.now(),
+      );
+      change.restore_snapshot = {
+        ...structuredClone(change.baseline_snapshot),
+        data: prepared.data,
+      };
+      change.pause_outcomes = mergePauseOutcomes(
+        nativePauseOutcomes(change),
+        prepared.pauseOutcomes.map((outcome) => ({
+          ...outcome,
+          direction: "restore",
+        })),
+      );
     }
     if (change.kind === "logic_source_create") {
       if (typeof change.native_logic_type !== "string") {
@@ -4072,7 +4135,7 @@ export class AutomationService {
       } else if (change.kind === "block_data_update") {
         await this.client.updateScenarioData(
           change.target.index,
-          JSON.stringify(change.baseline_snapshot.data),
+          JSON.stringify(change.restore_snapshot.data),
         );
       } else {
         await this.client.updateScenarioData(
@@ -4104,6 +4167,9 @@ export class AutomationService {
     }
     const baseline = scenarioChangeObservation(change, current, "restored");
     if (baseline.matches) {
+      if (change.kind === "block_data_update") {
+        await this.#markPauseOutcomes(change, "restore");
+      }
       return this.#finishNative(change, "restored", undefined, {
         candidate_logic_types: undefined,
         logic_assignments: undefined,
@@ -5021,7 +5087,7 @@ function blockActionPauseContract() {
 async function validateBlockData(
   data,
   client,
-  { allowUnknownFrom, allowedPauses = [] },
+  { allowUnknownFrom, allowedPauses = [], allowedPauseIntentId },
 ) {
   if (
     !isRecord(data) ||
@@ -5050,7 +5116,9 @@ async function validateBlockData(
     actions: [],
     delayIndexes: new Set(),
     triggers: 0,
-    pauseOwnership: inspectPauseOwnership(data, allowedPauses),
+    pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
+      allowedIntentId: allowedPauseIntentId,
+    }),
     allowedPauseCodeNodes: new WeakSet(),
   };
   visitKnownBlockNodes(
@@ -5530,14 +5598,26 @@ function selectBlockAction(data, pointer, pauseChanges) {
   return { action: node, pointer };
 }
 
-function inspectPauseOwnership(data, pauseChanges) {
+const INACTIVE_PAUSE_STATUSES = new Set([
+  "restored",
+  "superseded",
+  "completed",
+  "not_applied",
+]);
+
+function inspectPauseOwnership(
+  data,
+  pauseChanges,
+  { allowedIntentId, includeInactive = false } = {},
+) {
   const candidates = new Map(
     pauseChanges
       .filter(
         (change) =>
-          !["restored", "superseded", "completed", "not_applied"].includes(
-            change.status,
-          ) && Number.isSafeInteger(change.pause_expires_at_ms),
+          Number.isSafeInteger(change.pause_expires_at_ms) &&
+          (includeInactive ||
+            !INACTIVE_PAUSE_STATUSES.has(change.status) ||
+            (change.status === "not_applied" && change.id === allowedIntentId)),
       )
       .map((change) => [change.id, change]),
   );
@@ -5665,11 +5745,18 @@ function replaceBlockValueAtPointer(data, pointer, replacement) {
   location.parent[location.key] = replacement;
 }
 
-function collapseExpiredOwnedPauses(data, pauseChanges, now) {
-  const owned = [...inspectPauseOwnership(data, pauseChanges).values()]
+function prepareBlockWriteSource(input, pauseChanges, now) {
+  const data = structuredClone(input);
+  const owned = [
+    ...inspectPauseOwnership(data, pauseChanges, {
+      includeInactive: true,
+    }).values(),
+  ]
     .filter(
       (owner) =>
-        owner.state === "owned" && owner.change.pause_expires_at_ms <= now,
+        owner.state === "owned" &&
+        (INACTIVE_PAUSE_STATUSES.has(owner.change.status) ||
+          owner.change.pause_expires_at_ms <= now),
     )
     .sort(
       (left, right) =>
@@ -5683,7 +5770,66 @@ function collapseExpiredOwnedPauses(data, pauseChanges, now) {
       structuredClone(owner.node.then[0]),
     );
   }
-  return { data, changeIds: owned.map(({ change }) => change.id) };
+  return {
+    data,
+    pauseOutcomes: owned
+      .filter(({ change }) => !INACTIVE_PAUSE_STATUSES.has(change.status))
+      .map(({ change }) => ({
+        change_id: change.id,
+        direction: "apply",
+        status: "completed",
+      })),
+  };
+}
+
+function prepareBlockUpdateSource(baseline, requested, pauseChanges, now) {
+  const prepared = prepareBlockWriteSource(requested, pauseChanges, now);
+  const baselineOwnership = inspectPauseOwnership(baseline, pauseChanges, {
+    includeInactive: true,
+  });
+  const requestedOwnership = inspectPauseOwnership(
+    prepared.data,
+    pauseChanges,
+    { includeInactive: true },
+  );
+  const explicitOutcomes = [...baselineOwnership.values()]
+    .filter(
+      (owner) =>
+        owner.state === "owned" &&
+        requestedOwnership.get(owner.change.id)?.state !== "owned" &&
+        !INACTIVE_PAUSE_STATUSES.has(owner.change.status),
+    )
+    .map(({ change }) => ({
+      change_id: change.id,
+      direction: "apply",
+      status: change.pause_expires_at_ms <= now ? "completed" : "restored",
+    }));
+  return {
+    data: prepared.data,
+    pauseOutcomes: mergePauseOutcomes(prepared.pauseOutcomes, explicitOutcomes),
+  };
+}
+
+function mergePauseOutcomes(current, additions) {
+  const outcomes = new Map(
+    current.map((outcome) => [
+      `${outcome.direction}:${outcome.change_id}`,
+      outcome,
+    ]),
+  );
+  for (const outcome of additions) {
+    outcomes.set(`${outcome.direction}:${outcome.change_id}`, outcome);
+  }
+  return [...outcomes.values()];
+}
+
+function nativePauseOutcomes(change) {
+  if (Array.isArray(change.pause_outcomes)) return change.pause_outcomes;
+  return (change.collapsed_pause_change_ids ?? []).map((changeId) => ({
+    change_id: changeId,
+    direction: "apply",
+    status: "completed",
+  }));
 }
 
 function invalidActionPointer(pointer) {
@@ -7193,10 +7339,7 @@ function blockMatchesRequested(change, scenario) {
 
 function blockStillAtBaseline(change, scenario) {
   if (change.kind === "block_create") return scenario === null;
-  const baseline =
-    change.kind === "block_action_pause" && change.restore_snapshot
-      ? change.restore_snapshot
-      : change.baseline_snapshot;
+  const baseline = change.restore_snapshot ?? change.baseline_snapshot;
   return (
     scenario !== null && snapshotsEqual(scenarioSnapshot(scenario), baseline)
   );
@@ -7679,6 +7822,9 @@ function publicNativeChange(
       ...(change.completed_by_change_ref
         ? { completed_by_change_ref: change.completed_by_change_ref }
         : {}),
+      ...(change.restored_by_change_ref
+        ? { restored_by_change_ref: change.restored_by_change_ref }
+        : {}),
       restore_supported: true,
       limitations: [
         "The hub evaluates an absolute deadline; no client, daemon, or delayed restore call is required.",
@@ -7931,6 +8077,9 @@ function changeSummary(change, homeRef) {
               : {}),
             ...(change.completed_by_change_ref
               ? { completed_by_change_ref: change.completed_by_change_ref }
+              : {}),
+            ...(change.restored_by_change_ref
+              ? { restored_by_change_ref: change.restored_by_change_ref }
               : {}),
           }
         : {}),
