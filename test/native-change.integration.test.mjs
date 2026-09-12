@@ -424,6 +424,7 @@ async function startHub() {
     behavior: {
       closeAfterCreate: false,
       rejectNextScenarioCreate: false,
+      rejectNextScenarioUpdate: false,
       closeAfterScenarioUpdate: false,
       closeAfterCharacteristicUpdate: false,
       closeAfterWindowUpdate: false,
@@ -897,6 +898,16 @@ async function startHub() {
         }
         result = { scenario: { create: structuredClone(created) } };
       } else if (params.scenario?.update) {
+        if (state.behavior.rejectNextScenarioUpdate) {
+          state.behavior.rejectNextScenarioUpdate = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: 400, message: "scenario update rejected" },
+            }),
+          );
+          return;
+        }
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.update.index,
         );
@@ -2466,6 +2477,23 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
       .time,
     55_000,
   );
+
+  const completed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(completed.structuredContent.status, "completed");
+  assert.equal(completed.structuredContent.pause_effect.status, "expired");
+  const completedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(completedRestore.structuredContent.status, "completed");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    2,
+    "restoring a pause already removed by owned cleanup must not write",
+  );
 });
 
 test("a repeated BLOCK action pause keeps one wrapper and one absolute window", async (t) => {
@@ -2561,9 +2589,195 @@ test("a repeated BLOCK action pause keeps one wrapper and one absolute window", 
   );
 });
 
+test("a repeated pause through its visible action keeps ownership after an ordinary position shift", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const actionPointer = "/targets/0/then/1";
+  const first = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: actionPointer,
+      duration_seconds: 120,
+      reason: "Первое временное исключение",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+
+  const equivalentScenarioRef =
+    "spruthub://hub/%6Eative-change-test-hub/scenario/existing%2Dblock";
+  const second = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: equivalentScenarioRef,
+      action_pointer: `${actionPointer}/then/0`,
+      duration_seconds: 180,
+      reason: "Повторить просьбу из нового диалога",
+    },
+  });
+  assert.equal(second.isError, undefined, second.content[0]?.text);
+  assert.equal(second.structuredContent.action_pointer, actionPointer);
+  assert.equal(
+    second.structuredContent.replaces_change_ref,
+    first.structuredContent.change_ref,
+  );
+  const secondApplied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(secondApplied.structuredContent.status, "applied");
+  assert.equal(
+    JSON.stringify(hub.state.scenarios[0].data).match(
+      /sprut-agent:block-action-pause/g,
+    )?.length,
+    1,
+  );
+
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 20 },
+  });
+  const firstHistory = history.structuredContent.changes.find(
+    ({ change_ref: changeRef }) =>
+      changeRef === first.structuredContent.change_ref,
+  );
+  const secondHistory = history.structuredContent.changes.find(
+    ({ change_ref: changeRef }) =>
+      changeRef === second.structuredContent.change_ref,
+  );
+  assert.equal(firstHistory.recorded_status, "superseded");
+  assert.equal(firstHistory.effect_status, "superseded");
+  assert.equal(
+    secondHistory.replaces_change_ref,
+    first.structuredContent.change_ref,
+  );
+
+  const shifted = JSON.parse(hub.state.scenarios[0].data);
+  shifted.targets[0].then.unshift(setAction());
+  blockNodeAtPointer(shifted, "/targets/0/then/2/then/0").time = 50_000;
+  const ordinary = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: shifted,
+      reason: "Добавить соседнее действие и изменить исходную задержку",
+    },
+  });
+  assert.equal(ordinary.isError, undefined, ordinary.content[0]?.text);
+  const ordinaryApplied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: ordinary.structuredContent.change_ref },
+  });
+  assert.equal(ordinaryApplied.structuredContent.status, "applied");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: second.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  const restoredData = JSON.parse(hub.state.scenarios[0].data);
+  assert.equal(
+    blockNodeAtPointer(restoredData, "/targets/0/then/2").time,
+    50_000,
+  );
+  assert.equal(
+    JSON.stringify(restoredData).includes("sprut-agent:block-action-pause"),
+    false,
+  );
+  const oldAfterRestore = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: first.structuredContent.change_ref },
+  });
+  assert.equal(oldAfterRestore.structuredContent.status, "superseded");
+});
+
+test("a rejected pause remains not applied and cannot write an expired controller", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/0/then/1",
+      duration_seconds: 1,
+      reason: "Не принимать отказ за применённую паузу",
+    },
+  });
+  hub.state.behavior.rejectNextScenarioUpdate = true;
+  const rejected = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  const status = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.structuredContent.status, "not_applied");
+  assert.equal(status.structuredContent.pause_effect.status, "not_applied");
+  await new Promise((resolve) => setTimeout(resolve, 1_025));
+  const expiredRetry = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(expiredRetry.isError, undefined, expiredRetry.content[0]?.text);
+  assert.equal(expiredRetry.structuredContent.status, "not_applied");
+  assert.equal(
+    expiredRetry.structuredContent.pause_effect.status,
+    "not_applied",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+});
+
 test("BLOCK action pause rejects non-actions and preserves an edited controller", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
+  const triggerSubgraph = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/0",
+      duration_seconds: 60,
+      reason: "Не переносить регистрацию триггера внутрь паузы",
+    },
+  });
+  assert.equal(triggerSubgraph.isError, true);
+  assert.equal(
+    triggerSubgraph.structuredContent.error.code,
+    "unsupported_pause_trigger_scope",
+  );
+  assert.deepEqual(
+    triggerSubgraph.structuredContent.suggested_action_pointers,
+    ["/targets/0/then/0", "/targets/0/then/1"],
+  );
+
+  const rootActionData = blockData();
+  rootActionData.targets.push(setAction());
+  hub.state.scenarios[0].data = JSON.stringify(rootActionData);
+  const rootAction = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/1",
+      duration_seconds: 60,
+      reason: "Разрешить самостоятельное действие без вложенного триггера",
+    },
+  });
+  assert.equal(rootAction.isError, undefined, rootAction.content[0]?.text);
+  hub.state.scenarios[0].data = JSON.stringify(blockData());
+
   for (const actionPointer of [
     "/targets/0/if/conditions/0",
     "/targets/0/then/1/time",
