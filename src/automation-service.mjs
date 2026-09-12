@@ -16,6 +16,12 @@ import {
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
 
+const RESTORABLE_CHARACTERISTIC_SETTING_TYPES = new Set([
+  "TargetTemperature",
+  "TargetHeatingCoolingState",
+  "C_FanSpeed",
+]);
+
 export class AutomationService {
   #writeSequence = Promise.resolve();
 
@@ -58,11 +64,14 @@ export class AutomationService {
       }
       const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
       const characteristic = await this.client.getCharacteristic(target);
+      const contract = characteristicContract(characteristic.control);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
-        contract: characteristicContract(characteristic.control),
+        contract,
+        restore_supported: isRestorableCharacteristicSetting(contract.type),
+        physical_effect_reversible: false,
       };
     }
     if (input.operation === "characteristic_option") {
@@ -253,6 +262,15 @@ export class AutomationService {
     const requestedValue = validateCharacteristicValue(input.value, contract);
     const baselineValue = typedNativeValue(characteristic.control.value);
     const virtualGroup = await this.#findOwnedVirtualGroupContext(target);
+    if (!virtualGroup && valuesEqual(baselineValue, requestedValue)) {
+      return {
+        status: "already_desired",
+        operation: "characteristic_value",
+        target_ref: input.target_ref,
+        observed_value: baselineValue,
+        native_write_sent: false,
+      };
+    }
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -1093,7 +1111,7 @@ export class AutomationService {
       const retryableApply =
         pending.direction === "apply" &&
         pending.outcome === "expected_missing" &&
-        isReversibleNativeValueChange(change) &&
+        isRetryableNativeValueChange(change) &&
         valuesEqual(pending.current, change.baseline_value);
       if (!retryableApply) return pending.result;
       currentState = { value: pending.current, contract: pending.contract };
@@ -1354,11 +1372,14 @@ export class AutomationService {
         return this.#restoreVirtualLightGroup(change);
       }
       if (change.kind === "characteristic_value") {
-        throw new SprutHubError(
-          "restore_unsupported",
-          "A characteristic command does not provide rollback of physical effects.",
-          "get_native_change",
-        );
+        if (!isRestorableNativeValueChange(change)) {
+          throw new SprutHubError(
+            "restore_unsupported",
+            "This characteristic is not a supported restorable setting.",
+            "get_native_change",
+          );
+        }
+        return this.#restoreValueChange(change);
       }
       if (["characteristic_option", "window_option"].includes(change.kind)) {
         return this.#restoreValueChange(change);
@@ -6814,13 +6835,25 @@ function isNativeValueChange(change) {
   ].includes(change?.kind);
 }
 
-function isReversibleNativeValueChange(change) {
+function isRestorableCharacteristicSetting(type) {
+  return RESTORABLE_CHARACTERISTIC_SETTING_TYPES.has(type);
+}
+
+function isRetryableNativeValueChange(change) {
   return [
     "characteristic_option",
     "window_option",
     "logic_active",
     "logic_option",
   ].includes(change?.kind);
+}
+
+function isRestorableNativeValueChange(change) {
+  return (
+    isRetryableNativeValueChange(change) ||
+    (change?.kind === "characteristic_value" &&
+      isRestorableCharacteristicSetting(change.contract?.type))
+  );
 }
 
 function freshVerification(result) {
@@ -7963,7 +7996,7 @@ function publicNativeChange(
         }
       : {}),
     ...(conflictResolution ? { conflict_resolution: conflictResolution } : {}),
-    restore_supported: isReversibleNativeValueChange(change),
+    restore_supported: isRestorableNativeValueChange(change),
     ...(change.kind === "characteristic_value"
       ? { physical_effect_reversible: false }
       : {}),
@@ -7971,8 +8004,10 @@ function publicNativeChange(
     limitations: [
       "Readback observes the value but cannot prove this command caused it.",
       "SprutHub exposes no native compare-and-set for this operation.",
-      isReversibleNativeValueChange(change)
-        ? "Restoration is allowed only while the current setting still matches this change."
+      isRestorableNativeValueChange(change)
+        ? change.kind === "characteristic_value"
+          ? "The saved setting can be restored only while its current value still matches this change; past physical effects are not reversed."
+          : "Restoration is allowed only while the current setting still matches this change."
         : "A runtime command does not provide rollback of physical effects.",
       ...(change.kind === "window_option"
         ? [

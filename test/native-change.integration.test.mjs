@@ -2709,6 +2709,19 @@ test("a prepared climate mode is restorable through history after restart", asyn
       arguments: { change_ref: change.structuredContent.change_ref },
     });
     assert.equal(applied.structuredContent.status, "applied");
+    const writesAfterApply = hub.requests.filter(
+      ({ characteristic }) => characteristic?.update,
+    ).length;
+    const repeated = await firstClient.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: change.structuredContent.change_ref },
+    });
+    assert.equal(repeated.structuredContent.status, "applied");
+    assert.equal(
+      hub.requests.filter(({ characteristic }) => characteristic?.update)
+        .length,
+      writesAfterApply,
+    );
     assert.deepEqual(
       currentCharacteristicValue(hub, climateSettings[index].ref),
       {
@@ -2739,6 +2752,61 @@ test("a prepared climate mode is restorable through history after restart", asyn
       arguments: { change_ref: change.structuredContent.change_ref },
     });
     assert.equal(restored.isError, undefined, restored.content[0]?.text);
+    assert.equal(restored.structuredContent.status, "restored");
+    assert.deepEqual(
+      currentCharacteristicValue(hub, climateSettings[index].ref),
+      {
+        [climateSettings[index].kind]: climateSettings[index].baseline,
+      },
+    );
+  }
+});
+
+test("an interrupted climate mode restores only settings that were applied", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = [];
+  for (const setting of climateSettings) {
+    prepared.push(
+      await firstClient.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "characteristic_value",
+          target_ref: setting.ref,
+          value: setting.requested,
+          reason: "Подготовить прерываемый климатический режим",
+        },
+      }),
+    );
+  }
+  for (const change of prepared.slice(0, 2)) {
+    const applied = await firstClient.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: change.structuredContent.change_ref },
+    });
+    assert.equal(applied.structuredContent.status, "applied");
+  }
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const untouched = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared[2].structuredContent.change_ref },
+  });
+  assert.equal(untouched.structuredContent.status, "not_owned");
+  assert.equal(
+    untouched.structuredContent.conflict_reason,
+    "change_was_not_applied",
+  );
+  assert.deepEqual(currentCharacteristicValue(hub, climateSettings[2].ref), {
+    [climateSettings[2].kind]: climateSettings[2].baseline,
+  });
+  for (const index of [1, 0]) {
+    const restored = await secondClient.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: prepared[index].structuredContent.change_ref },
+    });
     assert.equal(restored.structuredContent.status, "restored");
     assert.deepEqual(
       currentCharacteristicValue(hub, climateSettings[index].ref),

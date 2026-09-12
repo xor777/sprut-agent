@@ -1,8 +1,28 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { build } from "esbuild";
 
 const pluginRoot = path.resolve("dist/plugin");
+const packageMetadata = JSON.parse(await readFile("package.json", "utf8"));
+const deliveryVersion = packageMetadata.version;
+if (typeof deliveryVersion !== "string" || deliveryVersion.length === 0) {
+  throw new Error("package.json must define the plugin delivery version.");
+}
+const codexPluginPath = path.resolve(".codex-plugin", "plugin.json");
+const claudeMarketplacePath = path.resolve(
+  ".claude-plugin",
+  "marketplace.json",
+);
+const codexPluginSource = withDeliveryVersion(
+  await readFile(codexPluginPath, "utf8"),
+  ({ version }) => version,
+  deliveryVersion,
+);
+const claudeMarketplaceSource = withDeliveryVersion(
+  await readFile(claudeMarketplacePath, "utf8"),
+  ({ plugins }) => plugins.find(({ name }) => name === "sprut-agent")?.version,
+  deliveryVersion,
+);
 const outputPath = path.join(pluginRoot, "dist", "server.mjs");
 const pluginMcpConfig = {
   mcpServers: {
@@ -15,7 +35,7 @@ const pluginMcpConfig = {
 };
 const claudePluginManifest = {
   name: "sprut-agent",
-  version: "0.1.0",
+  version: deliveryVersion,
   description:
     "Connect an agent to a SprutHub home with agent-first tools and guidance.",
   author: {
@@ -34,6 +54,10 @@ const claudePluginManifest = {
     },
   },
 };
+await Promise.all([
+  writeFile(codexPluginPath, codexPluginSource),
+  writeFile(claudeMarketplacePath, claudeMarketplaceSource),
+]);
 await rm(pluginRoot, { recursive: true, force: true });
 await Promise.all([
   mkdir(path.dirname(outputPath), { recursive: true }),
@@ -82,4 +106,17 @@ async function bundle(entryPoint, destination) {
   const bundled = result.outputFiles[0].text.replace(/[\t ]+$/gm, "");
   await mkdir(path.dirname(destination), { recursive: true });
   await writeFile(destination, bundled, { mode: 0o644 });
+}
+
+function withDeliveryVersion(source, selectCurrentVersion, version) {
+  const currentVersion = selectCurrentVersion(JSON.parse(source));
+  if (typeof currentVersion !== "string") {
+    throw new Error("Plugin manifest must define a version.");
+  }
+  const current = `"version": ${JSON.stringify(currentVersion)}`;
+  const occurrences = source.split(current).length - 1;
+  if (occurrences !== 1) {
+    throw new Error("Plugin manifest version must occur exactly once.");
+  }
+  return source.replace(current, `"version": ${JSON.stringify(version)}`);
 }
