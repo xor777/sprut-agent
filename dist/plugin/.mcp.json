@@ -2,7 +2,9 @@
   "mcpServers": {
     "sprut-agent": {
       "command": "node",
-      "args": ["./dist/server.mjs"],
+      "args": [
+        "./dist/server.mjs"
+      ],
       "cwd": "."
     }
   }

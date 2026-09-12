@@ -4,6 +4,15 @@ import { build } from "esbuild";
 
 const pluginRoot = path.resolve("dist/plugin");
 const outputPath = path.join(pluginRoot, "dist", "server.mjs");
+const pluginMcpConfig = {
+  mcpServers: {
+    "sprut-agent": {
+      command: "node",
+      args: ["./dist/server.mjs"],
+      cwd: ".",
+    },
+  },
+};
 await rm(pluginRoot, { recursive: true, force: true });
 await mkdir(path.dirname(outputPath), { recursive: true });
 await Promise.all([
@@ -14,7 +23,10 @@ await Promise.all([
   cp(path.resolve(".codex-plugin"), path.join(pluginRoot, ".codex-plugin"), {
     recursive: true,
   }),
-  cp(path.resolve(".mcp.json"), path.join(pluginRoot, ".mcp.json")),
+  writeFile(
+    path.join(pluginRoot, ".mcp.json"),
+    `${JSON.stringify(pluginMcpConfig, null, 2)}\n`,
+  ),
   cp(
     path.resolve("skills", "spruthub-master"),
     path.join(pluginRoot, "skills", "spruthub-master"),
