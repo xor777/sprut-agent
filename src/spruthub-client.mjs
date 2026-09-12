@@ -2647,7 +2647,7 @@ function normalizeServiceSelection({
     room_ref: selectedRoomRef ?? null,
     service_types: normalizedServiceTypes,
   });
-  return {
+  const selection = {
     homeRef: selectedHomeRef,
     roomRef: selectedRoomRef ?? null,
     serial,
@@ -2655,11 +2655,14 @@ function normalizeServiceSelection({
     serviceTypes: normalizedServiceTypes,
     maxBytes,
     cursorScope,
-    afterRef: decodeServiceCursor(cursor, cursorScope),
+  };
+  return {
+    ...selection,
+    afterRef: decodeServiceCursor(cursor, cursorScope, selection),
   };
 }
 
-function decodeServiceCursor(cursor, expectedScope) {
+function decodeServiceCursor(cursor, expectedScope, selection) {
   if (cursor === undefined) return null;
   try {
     const parsed = JSON.parse(
@@ -2675,7 +2678,7 @@ function decodeServiceCursor(cursor, expectedScope) {
     }
     return parsed.after_ref;
   } catch {
-    throw invalidServiceCursor();
+    throw invalidServiceCursor(selection);
   }
 }
 
@@ -2889,11 +2892,12 @@ function invalidServiceScope() {
   );
 }
 
-function invalidServiceCursor() {
+function invalidServiceCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
     "Use the cursor returned by read_services for the same scope and filters.",
     "restart_read_services",
+    { next: serviceReadNext(selection, null) },
   );
 }
 

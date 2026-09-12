@@ -14,36 +14,6 @@ const connection = new SprutHubConnection({ env: process.env });
 let hubClient;
 let automationService;
 
-const redactedNodeSchema = z.object({
-  redacted: z.literal(true),
-  reason: z.literal("sensitive_native_data"),
-});
-
-const ordinaryReadingSchema = z.object({
-  ref: z.string(),
-  name: z.string(),
-  type: z.string(),
-  value: z.union([z.boolean(), z.number(), z.string(), z.null()]),
-  enum: z.object({ key: z.string(), name: z.string() }).nullable().optional(),
-  unit: z.string().nullable(),
-  measuredAt: z.string().nullable(),
-});
-const readingSchema = z.union([ordinaryReadingSchema, redactedNodeSchema]);
-
-const serviceSchema = z.object({
-  ref: z.string(),
-  name: z.string(),
-  type: z.string(),
-  readings: z.array(readingSchema),
-});
-
-const deviceSchema = z.object({
-  ref: z.string(),
-  name: z.string(),
-  available: z.boolean(),
-  services: z.array(serviceSchema),
-});
-
 const roomSchema = z.object({ ref: z.string(), name: z.string() });
 const errorSchema = z
   .object({
@@ -182,7 +152,7 @@ server.registerTool(
   {
     title: "List SprutHub rooms",
     description:
-      "List every room on the configured SprutHub with its original name and stable reference. Use this before read_room. If several rooms plausibly match the user's words, ask which one they mean or read and report each room separately by its original name. Never merge distinct rooms because their readings are equal.",
+      "List every room on the configured SprutHub with its original name and stable reference. Use the selected room_ref with read_services for a bounded current overview or get_entity for its compact native catalog. If several rooms plausibly match the user's words, ask which one they mean or read and report each room separately by its original name. Never merge distinct rooms because their readings are equal.",
     inputSchema: {},
     outputSchema: {
       status: z.enum(["ok", "error"]),
@@ -641,31 +611,6 @@ server.registerTool(
         }),
       { compact: true },
     ),
-);
-
-server.registerTool(
-  "read_room",
-  {
-    title: "Read a SprutHub room",
-    description:
-      "Read devices and current characteristics in one SprutHub room selected by a stable reference returned by list_rooms. Readings include only controls explicitly marked readable; a recognized credential control becomes a redacted marker while safe neighboring readings remain available. Enum gives the hub's native meaning of the raw value, while enum null means no known match. Keep the returned room name attached to its readings in the answer. If several candidate rooms are read, ask the user to choose or label each result by its original room name; never merge identical readings from distinct rooms.",
-    inputSchema: {
-      room_ref: z
-        .string()
-        .min(1)
-        .describe("Home-qualified room reference returned by list_rooms"),
-    },
-    outputSchema: {
-      status: z.enum(["ok", "error"]),
-      room: roomSchema.optional(),
-      devices: z.array(deviceSchema).optional(),
-      error: errorSchema,
-      freshness: freshnessSchema.optional(),
-    },
-    annotations: readOnlyAnnotations,
-  },
-  async ({ room_ref: roomRef }) =>
-    runRoomTool(async () => (await getHubClient()).readRoom(roomRef)),
 );
 
 await server.connect(new StdioServerTransport());

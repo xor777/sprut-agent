@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { SprutHubClient } from "../src/spruthub-client.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -420,9 +421,35 @@ async function startMcpClient(t, hub, environment = {}) {
   return client;
 }
 
+function startLegacyRoomClient(t, hub) {
+  const client = new SprutHubClient({
+    url: hub.url,
+    token: "synthetic-test-token",
+    serial: "test-hub",
+    cid: "sprut-agent-test",
+    timeoutMs: 250,
+  });
+  t.after(async () => {
+    await client.close();
+    for (const socket of hub.server.clients ?? []) socket.terminate();
+    await new Promise((resolve) => hub.server.close(resolve));
+  });
+  return client;
+}
+
+function readRoomServices(client, roomRef) {
+  return client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: roomRef.replace(/\/room\/\d+$/, ""),
+      room_ref: roomRef,
+      max_bytes: 32_768,
+    },
+  });
+}
+
 function findReading(room, ref) {
-  return room.devices
-    .flatMap(({ services }) => services)
+  return (room.services ?? room.devices.flatMap(({ services }) => services))
     .flatMap(({ readings }) => readings)
     .find((reading) => reading.ref === ref);
 }
@@ -454,7 +481,6 @@ test("MCP discovers every room before reading the selected stable reference", as
       "get_native_observation",
       "stop_native_observation",
       "read_services",
-      "read_room",
     ],
   );
   for (const tool of tools.tools.filter(({ name }) =>
@@ -465,7 +491,6 @@ test("MCP discovers every room before reading the selected stable reference", as
       "list_rooms",
       "get_automation_change",
       "read_services",
-      "read_room",
     ].includes(name),
   )) {
     assert.deepEqual(tool.annotations, {
@@ -491,8 +516,12 @@ test("MCP discovers every room before reading the selected stable reference", as
   ]);
 
   const result = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
+    name: "read_services",
+    arguments: {
+      home_ref: "spruthub://hub/test-hub",
+      room_ref: "spruthub://hub/test-hub/room/10",
+      max_bytes: 32_768,
+    },
   });
   assert.equal(
     result.isError,
@@ -503,59 +532,53 @@ test("MCP discovers every room before reading the selected stable reference", as
   const reading = result.structuredContent;
   assert.deepEqual(JSON.parse(result.content[0].text), reading);
   assert.equal(reading.status, "ok");
-  assert.deepEqual(reading.room, {
+  assert.deepEqual(reading.scope.room, {
     ref: "spruthub://hub/test-hub/room/10",
     name: " Кухня ",
   });
-  assert.equal(reading.devices.length, 3);
-
-  const lamp = reading.devices.find(
-    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/100",
+  const lamp = reading.services.find(
+    ({ accessory }) =>
+      accessory.ref === "spruthub://hub/test-hub/accessory/100",
   );
-  assert.equal(lamp.name, "Лампа");
-  assert.equal(lamp.available, true);
-  assert.deepEqual(
-    lamp.services[0].ref,
-    "spruthub://hub/test-hub/accessory/100/service/1",
-  );
-  assert.deepEqual(lamp.services[0].readings[0], {
+  assert.equal(lamp.accessory.name, "Лампа");
+  assert.equal(lamp.accessory.available, true);
+  assert.equal(lamp.ref, "spruthub://hub/test-hub/accessory/100/service/1");
+  assert.deepEqual(lamp.readings[0], {
     ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
     name: "Включена",
     type: "On",
     value: false,
+    value_status: "known",
     unit: "boolean",
-    measuredAt: null,
+    measured_at: null,
   });
 
-  const thermometer = reading.devices.find(
-    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/101",
+  const thermometer = reading.services.find(
+    ({ accessory, type }) =>
+      accessory.ref === "spruthub://hub/test-hub/accessory/101" &&
+      type === "TemperatureSensor",
   );
-  assert.deepEqual(thermometer.services[0].readings[0].value, 23.5);
-  assert.deepEqual(thermometer.services[0].readings[0].unit, "°C");
-  assert.equal(thermometer.services[0].readings[0].type, "CurrentTemperature");
-  assert.deepEqual(thermometer.services[0].readings[3], {
+  assert.equal(thermometer.readings[0].value, 23.5);
+  assert.equal(thermometer.readings[0].unit, "°C");
+  assert.equal(thermometer.readings[0].type, "CurrentTemperature");
+  assert.deepEqual(thermometer.readings[3], {
     ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/4",
     name: "Уставка температуры",
     type: "TargetTemperature",
     value: 22,
+    value_status: "known",
     unit: "°C",
-    measuredAt: null,
+    measured_at: null,
   });
-  assert.deepEqual(thermometer.services[0].readings[4], {
+  assert.deepEqual(thermometer.readings[4], {
     redacted: true,
     reason: "sensitive_native_data",
   });
   assert.doesNotMatch(result.content[0].text, /legacy-secret-must-not-leak/);
-  assert.deepEqual(thermometer.services[1].readings, []);
-  assert.deepEqual(
-    reading.devices.find(
-      ({ ref }) => ref === "spruthub://hub/test-hub/accessory/102",
-    ).services,
-    [],
-  );
   assert.equal(
-    reading.devices.some(
-      ({ ref }) => ref === "spruthub://hub/test-hub/accessory/200",
+    reading.services.some(
+      ({ accessory }) =>
+        accessory.ref === "spruthub://hub/test-hub/accessory/200",
     ),
     false,
   );
@@ -1182,7 +1205,9 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
       arguments: next.arguments,
     });
     assert.equal(page.isError, undefined, page.content[0]?.text);
-    assert(Buffer.byteLength(page.content[0].text) <= restartArguments.max_bytes);
+    assert(
+      Buffer.byteLength(page.content[0].text) <= restartArguments.max_bytes,
+    );
     services.push(...page.structuredContent.services);
     next = page.structuredContent.next;
   } while (next);
@@ -1301,21 +1326,14 @@ test("observed real-hub projection keeps both temperature service contexts", asy
     rooms: roomExchange.result.room.list.rooms,
     accessories: accessoryExchange.result.accessory.list.accessories,
   });
-  const client = await startMcpClient(t, hub);
+  const client = startLegacyRoomClient(t, hub);
 
-  const catalog = await client.callTool({
-    name: "list_rooms",
-    arguments: {},
-  });
-  const selectedRef = catalog.structuredContent.rooms[0].ref;
-  const result = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: selectedRef },
-  });
+  const catalog = await client.listRooms();
+  const selectedRef = catalog.rooms[0].ref;
+  const result = await client.readRoom(selectedRef);
 
-  assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.devices.length, 1);
-  const services = result.structuredContent.devices[0].services;
+  assert.equal(result.devices.length, 1);
+  const services = result.devices[0].services;
   assert.deepEqual(
     services.map(({ name, type, readings }) => ({
       name,
@@ -1359,14 +1377,10 @@ test("observed multisensor projection keeps readable native enum meaning", async
     rooms: [roomExchange.result.room.get],
     accessories: [observedAccessory],
   });
-  const client = await startMcpClient(t, hub);
+  const client = startLegacyRoomClient(t, hub);
   const read = async () => {
-    const result = await client.callTool({
-      name: "read_room",
-      arguments: { room_ref: "spruthub://hub/test-hub/room/20" },
-    });
-    assert.equal(result.isError, undefined);
-    return result.structuredContent.devices[0];
+    const result = await client.readRoom("spruthub://hub/test-hub/room/20");
+    return result.devices[0];
   };
   const readingByType = (device, type) =>
     device.services
@@ -1607,10 +1621,10 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   const temperatureRef =
     "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
 
-  const firstResult = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const firstResult = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(firstResult.isError, undefined);
   const firstTemperature = findReading(
     firstResult.structuredContent,
@@ -1622,10 +1636,10 @@ test("repeated MCP reads return the latest hub values without losing false, zero
     doubleValue: 24.75,
   };
 
-  const secondResult = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const secondResult = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(secondResult.isError, undefined);
   const secondRoom = secondResult.structuredContent;
   const secondTemperature = findReading(secondRoom, temperatureRef);
@@ -1656,8 +1670,9 @@ test("repeated MCP reads return the latest hub values without losing false, zero
       name: "Качество воздуха",
       type: "AirQuality",
       value: null,
+      value_status: "unknown",
       unit: null,
-      measuredAt: null,
+      measured_at: null,
     },
   );
   assert.equal(secondRoom.freshness.measurementAt, null);
@@ -1680,16 +1695,17 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
   ]);
 
   const selected = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/41" },
+    name: "get_entity",
+    arguments: { entity_ref: "spruthub://hub/test-hub/room/41" },
   });
   assert.equal(selected.isError, undefined);
-  assert.deepEqual(selected.structuredContent.room, {
-    ref: "spruthub://hub/test-hub/room/41",
-    name: "Кладовая",
-  });
+  assert.equal(
+    selected.structuredContent.entity.ref,
+    "spruthub://hub/test-hub/room/41",
+  );
+  assert.equal(selected.structuredContent.entity.name, "Кладовая");
   assert.deepEqual(
-    selected.structuredContent.devices.map(({ ref }) => ref),
+    selected.structuredContent.entity.accessories.map(({ ref }) => ref),
     ["spruthub://hub/test-hub/accessory/410"],
   );
 
@@ -1697,15 +1713,12 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     "prefixspruthub://hub/test-hub/room/41",
     "spruthub://hub/test-hub/room/41/suffix",
   ]) {
-    const invalid = await client.callTool({
-      name: "read_room",
-      arguments: { room_ref: invalidRef },
-    });
+    const invalid = await readRoomServices(client, invalidRef);
     assert.equal(invalid.isError, true);
     assert.deepEqual(invalid.structuredContent.error, {
-      code: "invalid_room_ref",
+      code: "invalid_entity_ref",
       message:
-        "Use a home-qualified room reference returned by list_rooms or inspect_home.",
+        "Use a home-qualified reference returned by list_homes, inspect_home, or get_entity.",
       retryable: false,
       action: "inspect_home",
     });
@@ -1751,18 +1764,19 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   });
   const client = await startMcpClient(t, hub);
 
-  const empty = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/50" },
-  });
+  const empty = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/50",
+  );
   assert.equal(empty.isError, undefined);
   assert.equal(empty.structuredContent.status, "ok");
-  assert.deepEqual(empty.structuredContent.devices, []);
+  assert.equal(empty.structuredContent.scope_status, "empty");
+  assert.deepEqual(empty.structuredContent.services, []);
 
-  const missing = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/999" },
-  });
+  const missing = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/999",
+  );
   assert.equal(missing.isError, true);
   assert.deepEqual(missing.structuredContent, {
     status: "error",
@@ -1770,7 +1784,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
       code: "room_not_found",
       message: "The selected SprutHub room was not found.",
       retryable: false,
-      action: "list_rooms",
+      action: "inspect_home",
     },
   });
   assert.deepEqual(
@@ -1778,27 +1792,28 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
     missing.structuredContent,
   );
 
-  const kitchen = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
-  const unavailable = kitchen.structuredContent.devices.find(
-    ({ ref }) => ref === "spruthub://hub/test-hub/accessory/103",
+  const kitchen = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
   );
-  assert.equal(unavailable.available, false);
-  assert.equal(unavailable.services[0].readings[0].value, false);
+  const unavailable = kitchen.structuredContent.services.find(
+    ({ accessory }) =>
+      accessory.ref === "spruthub://hub/test-hub/accessory/103",
+  );
+  assert.equal(unavailable.accessory.available, false);
+  assert.equal(unavailable.readings[0].value, false);
 
   hub.state.accessories = null;
-  const incompatible = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const incompatible = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(incompatible.isError, true);
   assert.deepEqual(incompatible.structuredContent, {
     status: "error",
     error: {
       code: "incompatible_response",
-      message: "SprutHub returned an incompatible accessory list.",
+      message: "SprutHub returned an incompatible entity list.",
       retryable: false,
     },
   });
@@ -1810,10 +1825,10 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   const invalidClient = await startMcpClient(t, hub, {
     SPRUTHUB_URL: "not-a-websocket-url",
   });
-  const internal = await invalidClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const internal = await readRoomServices(
+    invalidClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(internal.isError, true);
   assert.deepEqual(internal.structuredContent, {
     status: "error",
@@ -1875,10 +1890,10 @@ test("incomplete room and service identifiers never become stable references", a
     t,
     incompleteSelectedRoomHub,
   );
-  const incompleteSelectedRoom = await incompleteSelectedRoomClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const incompleteSelectedRoom = await readRoomServices(
+    incompleteSelectedRoomClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(incompleteSelectedRoom.isError, true);
   assert.deepEqual(incompleteSelectedRoom.structuredContent.error, {
     code: "incompatible_response",
@@ -1890,10 +1905,10 @@ test("incomplete room and service identifiers never become stable references", a
     id: 11,
     name: "Different room",
   };
-  const mismatchedSelectedRoom = await incompleteSelectedRoomClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const mismatchedSelectedRoom = await readRoomServices(
+    incompleteSelectedRoomClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.deepEqual(mismatchedSelectedRoom.structuredContent.error, {
     code: "incompatible_response",
     message: "SprutHub returned incomplete room data.",
@@ -1903,10 +1918,10 @@ test("incomplete room and service identifiers never become stable references", a
   const incompleteServiceHub = await startHub();
   delete incompleteServiceHub.state.accessories[0].services[0].sId;
   const incompleteServiceClient = await startMcpClient(t, incompleteServiceHub);
-  const incompleteService = await incompleteServiceClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const incompleteService = await readRoomServices(
+    incompleteServiceClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(incompleteService.isError, true);
   assert.deepEqual(incompleteService.structuredContent, {
     status: "error",
@@ -1930,10 +1945,10 @@ test("authorization failures identify credential repair without leaking the reje
   };
   const client = await startMcpClient(t, hub);
 
-  const result = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const result = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
     status: "error",
@@ -1950,10 +1965,10 @@ test("authorization failures identify credential repair without leaking the reje
     code: 500,
     message: "request failed near synthetic-test-token",
   };
-  const rejected = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const rejected = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(rejected.isError, true);
   assert.deepEqual(rejected.structuredContent, {
     status: "error",
@@ -1979,10 +1994,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   });
 
   const unavailableStartedAt = performance.now();
-  const unavailable = await unavailableClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const unavailable = await readRoomServices(
+    unavailableClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert(performance.now() - unavailableStartedAt < 1_000);
   assert.deepEqual(unavailable.structuredContent, {
     status: "error",
@@ -1999,10 +2014,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   silentHub.state.ignoreFirstConnection = true;
   const silentClient = await startMcpClient(t, silentHub);
   const timeoutStartedAt = performance.now();
-  const timeout = await silentClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const timeout = await readRoomServices(
+    silentClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert(performance.now() - timeoutStartedAt < 1_000);
   assert.deepEqual(timeout.structuredContent, {
     status: "error",
@@ -2014,10 +2029,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
       action: "retry",
     },
   });
-  const afterTimeout = await silentClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const afterTimeout = await readRoomServices(
+    silentClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(afterTimeout.isError, undefined);
   assert.equal(afterTimeout.structuredContent.status, "ok");
   assert.equal(silentHub.metrics.connections, 2);
@@ -2025,14 +2040,8 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const concurrentHub = await startHub();
   const concurrentClient = await startMcpClient(t, concurrentHub);
   const concurrentReads = await Promise.all([
-    concurrentClient.callTool({
-      name: "read_room",
-      arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-    }),
-    concurrentClient.callTool({
-      name: "read_room",
-      arguments: { room_ref: "spruthub://hub/test-hub/room/20" },
-    }),
+    readRoomServices(concurrentClient, "spruthub://hub/test-hub/room/10"),
+    readRoomServices(concurrentClient, "spruthub://hub/test-hub/room/20"),
   ]);
   assert.deepEqual(
     concurrentReads.map(({ structuredContent }) => structuredContent.status),
@@ -2042,10 +2051,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
 
   const recoveringHub = await startHub();
   const recoveringClient = await startMcpClient(t, recoveringHub);
-  const first = await recoveringClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const first = await readRoomServices(
+    recoveringClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(first.isError, undefined);
   const temperatureRef =
     "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
@@ -2055,10 +2064,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   );
 
   recoveringHub.state.closeOnRequest = true;
-  const interrupted = await recoveringClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const interrupted = await readRoomServices(
+    recoveringClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
     capability_status: "unknown",
@@ -2074,10 +2083,10 @@ test("connection failures stay bounded and recover with a fresh reading in the s
     {
       doubleValue: 26.25,
     };
-  const recovered = await recoveringClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const recovered = await readRoomServices(
+    recoveringClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(recovered.isError, undefined);
   assert.equal(
     findReading(recovered.structuredContent, temperatureRef).value,
@@ -2090,10 +2099,10 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   const handshakeHub = await startSilentHandshakeHub();
   const handshakeClient = await startMcpClient(t, handshakeHub);
   const handshakeStartedAt = performance.now();
-  const handshakeTimeout = await handshakeClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const handshakeTimeout = await readRoomServices(
+    handshakeClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert(performance.now() - handshakeStartedAt < 1_000);
   assert.deepEqual(handshakeTimeout.structuredContent, {
     status: "error",
@@ -2113,10 +2122,10 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   slowHub.state.responseDelays = [160, 160];
   const slowClient = await startMcpClient(t, slowHub);
   const slowStartedAt = performance.now();
-  const sequenceTimeout = await slowClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const sequenceTimeout = await readRoomServices(
+    slowClient,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert(performance.now() - slowStartedAt < 1_000);
   assert.deepEqual(sequenceTimeout.structuredContent, {
     status: "error",
@@ -2136,20 +2145,20 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   const temperatureRef =
     "spruthub://hub/test-hub/accessory/101/service/1/characteristic/1";
 
-  const first = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const first = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(
     findReading(first.structuredContent, temperatureRef).value,
     23.5,
   );
 
   hub.state.invalidFrameOnRequest = true;
-  const interrupted = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const interrupted = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
     capability_status: "unknown",
@@ -2164,10 +2173,10 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   hub.state.accessories[1].services[0].characteristics[0].control.value = {
     doubleValue: 27.5,
   };
-  const recovered = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/test-hub/room/10" },
-  });
+  const recovered = await readRoomServices(
+    client,
+    "spruthub://hub/test-hub/room/10",
+  );
   assert.equal(
     findReading(recovered.structuredContent, temperatureRef).value,
     27.5,

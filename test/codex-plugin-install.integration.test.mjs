@@ -138,16 +138,17 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     { ref: "spruthub://hub/installed-home/room/1", name: "Офис" },
   ]);
   const office = await firstClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: rooms.structuredContent.rooms[0].ref },
+    name: "read_services",
+    arguments: {
+      home_ref: homes.structuredContent.homes[0].ref,
+      room_ref: rooms.structuredContent.rooms[0].ref,
+      max_bytes: 32_768,
+    },
   });
   assert.equal(office.isError, undefined, office.content[0]?.text);
+  assert.equal(office.structuredContent.services[0].readings[0].value, 22.5);
   assert.equal(
-    office.structuredContent.devices[0].services[0].readings[0].value,
-    22.5,
-  );
-  assert.equal(
-    office.structuredContent.devices[0].services[0].readings[0].unit,
+    office.structuredContent.services[0].readings[0].unit,
     "celsius",
   );
   await firstClient.close();

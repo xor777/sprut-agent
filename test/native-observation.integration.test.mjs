@@ -457,8 +457,12 @@ test("ordinary reads stay available without changing an active observation home"
     },
     { name: "inspect_home", arguments: { home_ref: homeRef } },
     {
-      name: "read_room",
-      arguments: { room_ref: `${homeRef}/room/1` },
+      name: "read_services",
+      arguments: {
+        home_ref: homeRef,
+        room_ref: `${homeRef}/room/1`,
+        max_bytes: 32_768,
+      },
     },
   ]) {
     const result = await client.callTool(request);

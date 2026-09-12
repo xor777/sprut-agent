@@ -326,6 +326,17 @@ async function withSessionPath(t) {
   return path.join(directory, "session.json");
 }
 
+function readRoomServices(client, roomRef) {
+  return client.callTool({
+    name: "read_services",
+    arguments: {
+      home_ref: roomRef.replace(/\/room\/\d+$/, ""),
+      room_ref: roomRef,
+      max_bytes: 32_768,
+    },
+  });
+}
+
 test("an empty profile returns an executable local credential setup", async (t) => {
   const hub = await startHub(t);
   const directory = await mkdtemp(path.join(tmpdir(), "sprut empty profile-"));
@@ -386,16 +397,13 @@ test("an empty profile returns an executable local credential setup", async (t) 
   });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
-  const room = await configuredClient.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
-  });
-  assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(room.structuredContent.devices[0].name, "Термометр");
-  assert.equal(
-    room.structuredContent.devices[0].services[0].readings[0].value,
-    22.5,
+  const room = await readRoomServices(
+    configuredClient,
+    "spruthub://hub/home%2FA/room/1",
   );
+  assert.equal(room.isError, undefined, room.content[0]?.text);
+  assert.equal(room.structuredContent.services[0].accessory.name, "Термометр");
+  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
   assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
   assert.equal(
     result.structuredContent.error.message,
@@ -607,15 +615,9 @@ test("explicit connection environment wins over conflicting file values", async 
 
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
-  const room = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
-  });
+  const room = await readRoomServices(client, "spruthub://hub/home%2FA/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(
-    room.structuredContent.devices[0].services[0].readings[0].value,
-    22.5,
-  );
+  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
 });
 
 test("complete explicit credentials ignore an unsafe default file", async (t) => {
@@ -697,15 +699,12 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
         arguments: {},
       });
       assert.equal(homes.isError, undefined, homes.content[0]?.text);
-      const room = await client.callTool({
-        name: "read_room",
-        arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
-      });
-      assert.equal(room.isError, undefined, room.content[0]?.text);
-      assert.equal(
-        room.structuredContent.devices[0].services[0].readings[0].value,
-        22.5,
+      const room = await readRoomServices(
+        client,
+        "spruthub://hub/home%2FA/room/1",
       );
+      assert.equal(room.isError, undefined, room.content[0]?.text);
+      assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
     });
   }
 });
@@ -867,15 +866,9 @@ test("challenge login serves concurrent public reads and a restart reuses the se
   ]);
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
-  const room = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/home%2FA/room/1" },
-  });
+  const room = await readRoomServices(client, "spruthub://hub/home%2FA/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(
-    room.structuredContent.devices[0].services[0].readings[0].value,
-    22.5,
-  );
+  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
 
   const authRequests = hub.requests.filter(({ params }) => params.account);
   assert.equal(
@@ -1007,13 +1000,10 @@ test("a write-bound home does not restrict explicit reads or follow their select
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.equal(catalog.structuredContent.selection.required, true);
 
-  const room = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/home%20B/room/1" },
-  });
+  const room = await readRoomServices(client, "spruthub://hub/home%20B/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
   assert.equal(
-    room.structuredContent.room.ref,
+    room.structuredContent.scope.room.ref,
     "spruthub://hub/home%20B/room/1",
   );
   assert.deepEqual(
@@ -1035,10 +1025,10 @@ test("a write-bound home does not restrict explicit reads or follow their select
     "spruthub://hub/home%2FA/room/1",
   );
 
-  const inaccessible = await client.callTool({
-    name: "read_room",
-    arguments: { room_ref: "spruthub://hub/home%20C/room/1" },
-  });
+  const inaccessible = await readRoomServices(
+    client,
+    "spruthub://hub/home%20C/room/1",
+  );
   assert.equal(inaccessible.isError, true);
   assert.equal(inaccessible.structuredContent.error.code, "home_not_found");
   assert.equal(
