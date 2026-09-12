@@ -1749,6 +1749,89 @@ test("scenario detail returns native BLOCK data and redacted code instead of tru
   );
 });
 
+test("scenario configuration keeps one useful value across native formats", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.scenarios.push(
+    {
+      index: "plain-code",
+      name: "Точный код",
+      type: "GLOBAL",
+      predefined: false,
+      active: true,
+      data: 'log.info("уют 💡");\n',
+    },
+    {
+      index: "empty-code",
+      name: "Пустой код",
+      type: "JS",
+      predefined: false,
+      active: false,
+      data: "",
+    },
+    {
+      index: "invalid-block",
+      name: "Повреждённый BLOCK",
+      type: "BLOCK",
+      predefined: false,
+      active: false,
+      data: "{сломано 💡}",
+    },
+    ...[
+      ["false", false],
+      ["0", 0],
+      ["null", null],
+    ].map(([nativeData, value]) => ({
+      index: `primitive-${String(value)}`,
+      name: `BLOCK ${nativeData}`,
+      type: "BLOCK",
+      predefined: false,
+      active: false,
+      data: nativeData,
+    })),
+    {
+      index: "missing-data",
+      name: "Без возвращённой конфигурации",
+      type: "GLOBAL",
+      predefined: false,
+      active: false,
+    },
+  );
+  const client = await startClient(t, hub);
+
+  const cases = [
+    ["plain-code", "code", 'log.info("уют 💡");\n'],
+    ["empty-code", "code", ""],
+    ["invalid-block", "invalid_json", "{сломано 💡}"],
+    ["primitive-false", "json", false],
+    ["primitive-0", "json", 0],
+    ["primitive-null", "json", null],
+    ["missing-data", "not_returned", null],
+  ];
+  const configurations = await Promise.all(
+    cases.map(async ([index]) => {
+      const result = await client.callTool({
+        name: "get_entity",
+        arguments: {
+          entity_ref: `spruthub://hub/home%2FA/scenario/${index}`,
+          include: ["configuration"],
+        },
+      });
+      assert.equal(result.isError, undefined, result.content[0]?.text);
+      return result.structuredContent.entity.configuration;
+    }),
+  );
+
+  assert.deepEqual(
+    configurations.map(({ format, value }) => ({ format, value })),
+    cases.map(([, format, value]) => ({ format, value })),
+  );
+  assert.deepEqual(
+    configurations.slice(0, 2).map(({ content_origin }) => content_origin),
+    ["spruthub_scenario_data", "spruthub_scenario_data"],
+  );
+});
+
 test("large entity detail stays byte bounded and exposes exact addressable parts", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
