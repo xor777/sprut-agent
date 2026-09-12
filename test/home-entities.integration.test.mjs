@@ -1749,6 +1749,108 @@ test("scenario detail returns native BLOCK data and redacted code instead of tru
   );
 });
 
+test("scenario reads hide quoted credential assignments without hiding ordinary source", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const scenarios = [
+    {
+      index: "quoted-json-code",
+      type: "GLOBAL",
+      data: 'const config = {\n  "api_key" : "quoted-code-secret-must-not-leak"\n};',
+      format: "code",
+      secret: "quoted-code-secret-must-not-leak",
+    },
+    {
+      index: "single-quoted-js-code",
+      type: "JS",
+      data: "const config = {\n  'password'\n  : 'single-quoted-code-secret-must-not-leak'\n};",
+      format: "code",
+      secret: "single-quoted-code-secret-must-not-leak",
+    },
+    {
+      index: "escaped-json-code",
+      type: "GLOBAL",
+      data: 'const payload = "{\\"refresh_token\\" : \\"escaped-code-secret-must-not-leak\\"}";',
+      format: "code",
+      secret: "escaped-code-secret-must-not-leak",
+    },
+    {
+      index: "quoted-invalid-block",
+      type: "BLOCK",
+      data: '{\n  "token" : "invalid-block-secret-must-not-leak"',
+      format: "invalid_json",
+      secret: "invalid-block-secret-must-not-leak",
+    },
+  ];
+  const ordinaryCode =
+    'const config = {"theme":"night","retry_count":3};\nlog.info("ready");';
+  const ordinaryInvalidBlock = '{\n  "theme": "night"';
+  state.scenarios.push(
+    ...scenarios.map(({ index, type, data }) => ({
+      index,
+      name: index,
+      type,
+      predefined: false,
+      active: true,
+      data,
+    })),
+    {
+      index: "ordinary-json-code",
+      name: "ordinary-json-code",
+      type: "GLOBAL",
+      predefined: false,
+      active: true,
+      data: ordinaryCode,
+    },
+    {
+      index: "ordinary-invalid-block",
+      name: "ordinary-invalid-block",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      data: ordinaryInvalidBlock,
+    },
+  );
+  const client = await startClient(t, hub);
+
+  for (const scenario of scenarios) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/${scenario.index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(
+      result.structuredContent.entity.configuration.format,
+      scenario.format,
+    );
+    assert.equal(
+      result.structuredContent.entity.configuration.value,
+      "[REDACTED]",
+    );
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(scenario.secret));
+  }
+
+  for (const [index, format, source] of [
+    ["ordinary-json-code", "code", ordinaryCode],
+    ["ordinary-invalid-block", "invalid_json", ordinaryInvalidBlock],
+  ]) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/${index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(result.structuredContent.entity.configuration.format, format);
+    assert.equal(result.structuredContent.entity.configuration.value, source);
+    assert.match(result.content[0].text, /night/);
+  }
+});
+
 test("scenario configuration keeps one useful value across native formats", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
