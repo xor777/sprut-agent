@@ -1,0 +1,26 @@
+{
+  "name": "sprut-agent",
+  "version": "0.1.0",
+  "description": "Connect an agent to a SprutHub home with agent-first tools and guidance.",
+  "author": {
+    "name": "sprut-agent contributors",
+    "url": "https://github.com/xor777/sprut-agent"
+  },
+  "homepage": "https://github.com/xor777/sprut-agent#readme",
+  "repository": "https://github.com/xor777/sprut-agent",
+  "license": "MIT",
+  "keywords": [
+    "spruthub",
+    "smart-home",
+    "mcp",
+    "agent-skill"
+  ],
+  "mcpServers": {
+    "sprut-agent": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/server.mjs"
+      ]
+    }
+  }
+}

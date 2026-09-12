@@ -13,8 +13,32 @@ const pluginMcpConfig = {
     },
   },
 };
+const claudePluginManifest = {
+  name: "sprut-agent",
+  version: "0.1.0",
+  description:
+    "Connect an agent to a SprutHub home with agent-first tools and guidance.",
+  author: {
+    name: "sprut-agent contributors",
+    url: "https://github.com/xor777/sprut-agent",
+  },
+  homepage: "https://github.com/xor777/sprut-agent#readme",
+  repository: "https://github.com/xor777/sprut-agent",
+  license: "MIT",
+  keywords: ["spruthub", "smart-home", "mcp", "agent-skill"],
+  mcpServers: {
+    "sprut-agent": {
+      command: "node",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands this plugin path.
+      args: ["${CLAUDE_PLUGIN_ROOT}/dist/server.mjs"],
+    },
+  },
+};
 await rm(pluginRoot, { recursive: true, force: true });
-await mkdir(path.dirname(outputPath), { recursive: true });
+await Promise.all([
+  mkdir(path.dirname(outputPath), { recursive: true }),
+  mkdir(path.join(pluginRoot, ".claude-plugin"), { recursive: true }),
+]);
 await Promise.all([
   bundle("src/server.mjs", outputPath),
   bundle("src/read-api.mjs", path.join(pluginRoot, "dist", "read.mjs")),
@@ -26,6 +50,10 @@ await Promise.all([
   writeFile(
     path.join(pluginRoot, ".mcp.json"),
     `${JSON.stringify(pluginMcpConfig, null, 2)}\n`,
+  ),
+  writeFile(
+    path.join(pluginRoot, ".claude-plugin", "plugin.json"),
+    `${JSON.stringify(claudePluginManifest, null, 2)}\n`,
   ),
   cp(
     path.resolve("skills", "spruthub-master"),

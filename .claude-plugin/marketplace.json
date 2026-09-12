@@ -1,0 +1,24 @@
+{
+  "name": "sprut-agent",
+  "owner": {
+    "name": "sprut-agent contributors",
+    "url": "https://github.com/xor777/sprut-agent"
+  },
+  "description": "Agent-first tools and guidance for a SprutHub home",
+  "plugins": [
+    {
+      "name": "sprut-agent",
+      "source": "./dist/plugin",
+      "version": "0.1.0",
+      "description": "Connect an agent to a SprutHub home with agent-first tools and guidance",
+      "author": {
+        "name": "sprut-agent contributors",
+        "url": "https://github.com/xor777/sprut-agent"
+      },
+      "homepage": "https://github.com/xor777/sprut-agent#readme",
+      "repository": "https://github.com/xor777/sprut-agent",
+      "license": "MIT",
+      "keywords": ["spruthub", "smart-home", "mcp", "agent-skill"]
+    }
+  ]
+}

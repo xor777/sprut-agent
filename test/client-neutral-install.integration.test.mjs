@@ -34,6 +34,7 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
   );
   const configured = manifest.mcpServers["sprut-agent"];
   const args = configured.args.map((argument) =>
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the client placeholder under test.
     argument.replaceAll("${CLAUDE_PLUGIN_ROOT}", installedRoot),
   );
   const transport = new StdioClientTransport({
@@ -55,7 +56,10 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
 
   const tools = await client.listTools();
   assert.equal(tools.tools.length, 19);
-  assert.equal(tools.tools.some(({ name }) => name === "list_homes"), true);
+  assert.equal(
+    tools.tools.some(({ name }) => name === "list_homes"),
+    true,
+  );
 
   const homes = await client.callTool({ name: "list_homes", arguments: {} });
   assert.equal(homes.isError, true);
