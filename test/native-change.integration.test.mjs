@@ -26,6 +26,30 @@ const homeRef = `spruthub://hub/${serial}`;
 const accessoryRef = `${homeRef}/accessory/34`;
 const workshopRoomRef = `${homeRef}/room/2`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
+const climateServiceRef = `spruthub://hub/${serial}/accessory/34/service/14`;
+const climateSettings = [
+  {
+    ref: `${climateServiceRef}/characteristic/30`,
+    type: "TargetTemperature",
+    baseline: 21,
+    requested: 23,
+    kind: "doubleValue",
+  },
+  {
+    ref: `${climateServiceRef}/characteristic/31`,
+    type: "TargetHeatingCoolingState",
+    baseline: 1,
+    requested: 2,
+    kind: "intValue",
+  },
+  {
+    ref: `${climateServiceRef}/characteristic/32`,
+    type: "C_FanSpeed",
+    baseline: 30,
+    requested: 60,
+    kind: "intValue",
+  },
+];
 const motionCharacteristicRef = `spruthub://hub/${serial}/accessory/32/service/13/characteristic/15`;
 const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
@@ -232,6 +256,50 @@ function logicOptionsKey(aId, sId, type) {
 
 function configuredSmoothLogicOptions(state) {
   return state.logicOptions[logicOptionsKey(34, 13, smoothLogicType)];
+}
+
+function installClimateFixture(hub) {
+  hub.state.accessories[1].services.push({
+    aId: 34,
+    sId: 14,
+    name: "Климат офиса",
+    type: "HeaterCooler",
+    characteristics: climateSettings.map(({ type, baseline, kind }, index) => ({
+      aId: 34,
+      sId: 14,
+      cId: 30 + index,
+      control: {
+        name: type,
+        type,
+        read: true,
+        write: true,
+        ...(type === "TargetTemperature"
+          ? { minValue: 10, maxValue: 30, minStep: 0.5 }
+          : type === "TargetHeatingCoolingState"
+            ? {
+                validValues: [
+                  { name: "Выключено", value: { intValue: 0 } },
+                  { name: "Нагрев", value: { intValue: 1 } },
+                  { name: "Охлаждение", value: { intValue: 2 } },
+                ],
+              }
+            : { minValue: 0, maxValue: 100, minStep: 10 }),
+        value: { [kind]: baseline },
+      },
+    })),
+  });
+}
+
+function currentCharacteristicValue(hub, ref) {
+  const match =
+    /\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(ref);
+  assert.ok(match, `unexpected characteristic ref: ${ref}`);
+  const [, aId, sId, cId] = match.map(Number);
+  return hub.state.accessories
+    .find(({ id }) => id === aId)
+    ?.services.find((service) => service.sId === sId)
+    ?.characteristics.find((characteristic) => characteristic.cId === cId)
+    ?.control.value;
 }
 
 function assignedSmoothLogic({ active = false } = {}) {
@@ -537,6 +605,7 @@ async function startHub() {
       rejectNextScenarioUpdate: false,
       closeAfterScenarioUpdate: false,
       closeAfterCharacteristicUpdate: false,
+      dropNextCharacteristicUpdate: false,
       closeAfterCharacteristicSetOptions: false,
       dropNextCharacteristicSetOptions: false,
       closeAfterWindowUpdate: false,
@@ -784,9 +853,22 @@ async function startHub() {
         }
         result = { window: { update: {} } };
       } else if (params.characteristic?.update) {
-        state.characteristic.control.value = structuredClone(
-          params.characteristic.update.control.value,
-        );
+        const selected = state.accessories
+          .find(({ id }) => id === params.characteristic.update.aId)
+          ?.services.find(({ sId }) => sId === params.characteristic.update.sId)
+          ?.characteristics.find(
+            ({ cId }) => cId === params.characteristic.update.cId,
+          );
+        if (!state.behavior.dropNextCharacteristicUpdate && selected) {
+          selected.control.value = structuredClone(
+            params.characteristic.update.control.value,
+          );
+        }
+        if (state.behavior.dropNextCharacteristicUpdate) {
+          state.behavior.dropNextCharacteristicUpdate = false;
+          socket.close();
+          return;
+        }
         if (state.behavior.closeAfterCharacteristicUpdate) {
           state.behavior.closeAfterCharacteristicUpdate = false;
           socket.close();
@@ -2565,6 +2647,187 @@ test("a characteristic value uses one recoverable native change path", async (t)
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     1,
   );
+});
+
+test("a prepared climate mode is restorable through history after restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const noOp = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: climateSettings[0].ref,
+      value: climateSettings[0].baseline,
+      reason: "Не создавать изменение для уже выбранной температуры",
+    },
+  });
+  assert.deepEqual(noOp.structuredContent, {
+    status: "already_desired",
+    operation: "characteristic_value",
+    target_ref: climateSettings[0].ref,
+    observed_value: {
+      value: climateSettings[0].baseline,
+      kind: climateSettings[0].kind,
+    },
+    native_write_sent: false,
+  });
+
+  const prepared = [];
+  for (const setting of climateSettings) {
+    const contract = await firstClient.callTool({
+      name: "get_native_change_contract",
+      arguments: {
+        operation: "characteristic_value",
+        target_ref: setting.ref,
+      },
+    });
+    assert.equal(contract.isError, undefined, contract.content[0]?.text);
+    assert.equal(contract.structuredContent.contract.type, setting.type);
+    assert.equal(contract.structuredContent.restore_supported, true);
+    assert.equal(contract.structuredContent.physical_effect_reversible, false);
+
+    const change = await firstClient.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "characteristic_value",
+        target_ref: setting.ref,
+        value: setting.requested,
+        reason: "Подготовить согласованный климат офиса",
+      },
+    });
+    assert.equal(change.isError, undefined, change.content[0]?.text);
+    assert.equal(change.structuredContent.restore_supported, true);
+    assert.equal(change.structuredContent.physical_effect_reversible, false);
+    prepared.push(change);
+  }
+
+  for (const [index, change] of prepared.entries()) {
+    const applied = await firstClient.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: change.structuredContent.change_ref },
+    });
+    assert.equal(applied.structuredContent.status, "applied");
+    assert.deepEqual(
+      currentCharacteristicValue(hub, climateSettings[index].ref),
+      {
+        [climateSettings[index].kind]: climateSettings[index].requested,
+      },
+    );
+  }
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: climateServiceRef },
+  });
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.deepEqual(
+    new Set(
+      history.structuredContent.changes.map(({ change_ref }) => change_ref),
+    ),
+    new Set(
+      prepared.map(({ structuredContent }) => structuredContent.change_ref),
+    ),
+  );
+
+  for (const [index, change] of [...prepared.entries()].reverse()) {
+    const restored = await secondClient.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: change.structuredContent.change_ref },
+    });
+    assert.equal(restored.isError, undefined, restored.content[0]?.text);
+    assert.equal(restored.structuredContent.status, "restored");
+    assert.deepEqual(
+      currentCharacteristicValue(hub, climateSettings[index].ref),
+      {
+        [climateSettings[index].kind]: climateSettings[index].baseline,
+      },
+    );
+  }
+});
+
+test("climate restore preserves a later manual setting", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const setting = climateSettings[0];
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: setting.requested,
+      reason: "Настроить температуру офиса",
+    },
+  });
+  await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  const manualValue = { doubleValue: 24 };
+  const stored = currentCharacteristicValue(hub, setting.ref);
+  Object.assign(stored, manualValue);
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const conflict = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.deepEqual(currentCharacteristicValue(hub, setting.ref), manualValue);
+});
+
+test("a readable command stays non-restorable and is not retried after an unknown apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: characteristicRef,
+    },
+  });
+  assert.equal(contract.structuredContent.contract.type, "On");
+  assert.equal(contract.structuredContent.restore_supported, false);
+  assert.equal(contract.structuredContent.physical_effect_reversible, false);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: characteristicRef,
+      value: true,
+      reason: "Проверить неизвестный исход команды",
+    },
+  });
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    1,
+  );
+  const restore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restore.isError, true);
+  assert.equal(restore.structuredContent.error.code, "restore_unsupported");
 });
 
 test("a lost characteristic response is reconciled without another command", async (t) => {
