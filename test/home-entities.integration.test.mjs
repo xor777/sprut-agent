@@ -1851,6 +1851,83 @@ test("scenario reads hide quoted credential assignments without hiding ordinary 
   }
 });
 
+test("scenario reads hide bracket credential assignments", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const scenarios = [
+    {
+      index: "double-quoted-bracket-code",
+      data: 'const headers = {};\nheaders["X-Api-Key"] = "double-bracket-secret-must-not-leak";',
+      secret: "double-bracket-secret-must-not-leak",
+    },
+    {
+      index: "single-quoted-bracket-code",
+      data: "const headers = {};\nheaders[\n  'api_token'\n] = 'single-bracket-secret-must-not-leak';",
+      secret: "single-bracket-secret-must-not-leak",
+    },
+  ];
+  state.scenarios.push(
+    ...scenarios.map(({ index, data }) => ({
+      index,
+      name: index,
+      type: "GLOBAL",
+      predefined: false,
+      active: true,
+      data,
+    })),
+  );
+  const client = await startClient(t, hub);
+
+  for (const scenario of scenarios) {
+    const result = await client.callTool({
+      name: "get_entity",
+      arguments: {
+        entity_ref: `spruthub://hub/home%2FA/scenario/${scenario.index}`,
+        include: ["configuration"],
+      },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(result.structuredContent.entity.configuration.format, "code");
+    assert.equal(
+      result.structuredContent.entity.configuration.value,
+      "[REDACTED]",
+    );
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(scenario.secret));
+  }
+});
+
+test("scenario reads keep sensitive words outside credential assignments", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const source =
+    'switch (kind) { case "token": log.info("label"); break; }\n' +
+    'const visibility = ok ? "secret" : "public";\n' +
+    'const secretary = "Anna";\n' +
+    "const tokens = [1, 2, 3];";
+  state.scenarios.push({
+    index: "ordinary-sensitive-words",
+    name: "ordinary-sensitive-words",
+    type: "GLOBAL",
+    predefined: false,
+    active: true,
+    data: source,
+  });
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/ordinary-sensitive-words",
+      include: ["configuration"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.entity.configuration.format, "code");
+  assert.equal(result.structuredContent.entity.configuration.value, source);
+  assert.match(result.content[0].text, /secretary/);
+});
+
 test("scenario configuration keeps one useful value across native formats", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
