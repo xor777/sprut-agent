@@ -1902,10 +1902,13 @@ test("scenario reads keep sensitive words outside credential assignments", async
   const source =
     'switch (kind) { case "token": log.info("label"); break; }\n' +
     'const visibility = ok ? "secret" : "public";\n' +
+    "const selected = ok ? config.token : fallback;\n" +
     'const secretary = "Anna";\n' +
     "const tokens = [1, 2, 3];\n" +
     "const tokenCount = tokens.length;\n" +
+    "const apiKeyCount = 2;\n" +
     'const passwordField = "visible";\n' +
+    'const keyboard = "visible";\n' +
     'const endpoint = "http://hub.invalid/api"; // ordinary URL\n' +
     'log.info("Password changed");';
   state.scenarios.push({
@@ -1985,6 +1988,113 @@ test("scenario reads use lexical context for credential-shaped text", async (t) 
       secret: "call-string-secret-must-not-leak",
       format: "code",
     },
+    {
+      index: "credential-inside-url-query",
+      type: "GLOBAL",
+      data: 'fetch("https://api.host.invalid/v1/data?x=1&api_key=url-query-secret-must-not-leak");',
+      secret: "url-query-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-inside-relative-url",
+      type: "GLOBAL",
+      data: 'fetch("/api?token=relative-url-secret-must-not-leak");',
+      secret: "relative-url-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-inside-template",
+      type: "GLOBAL",
+      data: "const header = `Authorization: Basic template-secret-must-not-leak`;",
+      secret: "template-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-after-question-mark-in-string",
+      type: "GLOBAL",
+      data: 'log.info("x?token: question-mark-secret-must-not-leak");',
+      secret: "question-mark-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-after-case-word-in-string",
+      type: "GLOBAL",
+      data: 'log.info("use case token: case-word-secret-must-not-leak");',
+      secret: "case-word-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-inside-line-comment",
+      type: "GLOBAL",
+      data: '// old token: line-comment-secret-must-not-leak\nlog.info("ready");',
+      secret: "line-comment-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-inside-block-comment",
+      type: "GLOBAL",
+      data: '/* password: block-body-secret-must-not-leak */\nlog.info("ready");',
+      secret: "block-body-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "credential-after-native-url",
+      type: "BLOCK",
+      data: "url: http://hub.invalid/api token: native-url-secret-must-not-leak",
+      secret: "native-url-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "credential-after-unclosed-native-comment",
+      type: "BLOCK",
+      data: "path: /*\ntoken: unclosed-comment-secret-must-not-leak",
+      secret: "unclosed-comment-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "collapsed-bare-credential",
+      type: "GLOBAL",
+      data: 'const apikey = "collapsed-bare-secret-must-not-leak";',
+      secret: "collapsed-bare-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "collapsed-quoted-credential",
+      type: "GLOBAL",
+      data: '{ "APIKEY": "collapsed-quoted-secret-must-not-leak" };',
+      secret: "collapsed-quoted-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "collapsed-bracket-credential",
+      type: "GLOBAL",
+      data: 'headers["apitoken"] = "collapsed-bracket-secret-must-not-leak";',
+      secret: "collapsed-bracket-secret-must-not-leak",
+      format: "code",
+    },
+    {
+      index: "collapsed-native-credential",
+      type: "BLOCK",
+      data: "name: kitchen\naccesstoken: collapsed-native-secret-must-not-leak",
+      secret: "collapsed-native-secret-must-not-leak",
+      format: "invalid_json",
+    },
+    {
+      index: "collapsed-escaped-credential",
+      type: "GLOBAL",
+      data: 'const payload = "{\\"clientsecret\\":\\"collapsed-escaped-secret-must-not-leak\\"}";',
+      secret: "collapsed-escaped-secret-must-not-leak",
+      format: "code",
+    },
+    ...["refreshtoken", "wifipassword", "privatekey"].map(
+      (name, index) => ({
+        index: `collapsed-published-credential-${index}`,
+        type: "GLOBAL",
+        data: `config.${name} = "collapsed-published-${index}-secret-must-not-leak";`,
+        secret: `collapsed-published-${index}-secret-must-not-leak`,
+        format: "code",
+      }),
+    ),
     ...["secret_key", "secretKey", "SECRET_KEY", "aws_secret_access_key"].map(
       (name, index) => ({
         index: `compound-credential-${index}`,
