@@ -527,6 +527,54 @@ async function prepareGroup(client, extra = {}) {
   });
 }
 
+test("the virtual light contract is discoverable without guessing a target", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const requestsBeforeContracts = hub.requests.length;
+
+  const general = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "virtual_light_group" },
+  });
+  assert.equal(general.isError, undefined, general.content[0]?.text);
+  assert.deepEqual(general.structuredContent.contract.characteristics, [
+    "On",
+    "Brightness",
+  ]);
+  assert.equal(general.structuredContent.contract.feedback, "LAST_VALUE");
+  assert.equal(
+    general.structuredContent.contract.limitations.some((limitation) =>
+      limitation.includes("same-valued virtual command"),
+    ),
+    true,
+  );
+
+  const selectedHome = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "virtual_light_group", target_ref: homeRef },
+  });
+  assert.equal(selectedHome.isError, undefined, selectedHome.content[0]?.text);
+  assert.deepEqual(
+    selectedHome.structuredContent.contract,
+    general.structuredContent.contract,
+  );
+
+  for (const targetRef of [
+    `${homeRef}/room/1`,
+    "spruthub://hub/another-home",
+  ]) {
+    const refused = await client.callTool({
+      name: "get_native_change_contract",
+      arguments: {
+        operation: "virtual_light_group",
+        target_ref: targetRef,
+      },
+    });
+    assert.equal(refused.isError, true);
+  }
+  assert.equal(hub.requests.length, requestsBeforeContracts);
+});
+
 test("the public native path creates only the common light controls and is repeat-safe", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

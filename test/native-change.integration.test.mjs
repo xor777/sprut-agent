@@ -5096,6 +5096,70 @@ test("a created room is reused after restart and removed only after its accessor
   );
 });
 
+test("static room discovery does not relax target-dependent reads or preparation", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const general = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "room_create" },
+  });
+  assert.equal(general.isError, undefined, general.content[0]?.text);
+  assert.equal(general.structuredContent.contract.write, "room.create({name})");
+
+  const selectedHome = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "room_create", target_ref: homeRef },
+  });
+  assert.equal(selectedHome.isError, undefined, selectedHome.content[0]?.text);
+  assert.deepEqual(
+    selectedHome.structuredContent.contract,
+    general.structuredContent.contract,
+  );
+
+  for (const targetRef of [accessoryRef, "spruthub://hub/another-home"]) {
+    const refused = await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "room_create", target_ref: targetRef },
+    });
+    assert.equal(refused.isError, true);
+  }
+
+  const missingEntityTarget = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "characteristic_value" },
+  });
+  assert.equal(missingEntityTarget.isError, true);
+  assert.equal(
+    missingEntityTarget.structuredContent.error.code,
+    "target_required",
+  );
+  const entityContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: characteristicRef,
+    },
+  });
+  assert.equal(entityContract.isError, undefined, entityContract.content[0]?.text);
+  assert.equal(entityContract.structuredContent.contract.type, "On");
+
+  await assert.rejects(
+    client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "room_create",
+        name: "Не создавать",
+        reason: "Отсутствует обязательная цель подготовки",
+      },
+    }),
+  );
+  assert.equal(
+    hub.requests.some(({ room }) => room?.create),
+    false,
+  );
+});
+
 test("a lost room-create response exposes one candidate and never repeats creation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
