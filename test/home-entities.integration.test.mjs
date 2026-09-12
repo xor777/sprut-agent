@@ -879,6 +879,8 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
       type: "MotionDetectedFromCurrentMotionLevel",
       name: "Определение движения",
       active: true,
+      role: "service_assignment",
+      service_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
     },
   ]);
   assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*61/);
@@ -1202,6 +1204,49 @@ test("empty accessory scenario index preserves unread code and BLOCK areas", asy
   );
   assert.equal(
     hub.requests.some(({ params }) => params.scenario?.get),
+    false,
+  );
+});
+
+test("accessory relations keep BLOCK evidence and defer recursive link reads", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  state.scenarioAssociations.set(32, [state.scenarios[0]]);
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32",
+      include: ["relations"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const entity = result.structuredContent.entity;
+  assert.deepEqual(entity.include_resolution.applied, ["relations"]);
+  assert.equal(entity.relations.scenario_roles[0].role, "trigger");
+  assert.equal(entity.relations.assigned_logics[0].role, "service_assignment");
+  assert.deepEqual(
+    entity.relations.scopes.find(({ area }) => area === "characteristic_links"),
+    {
+      area: "characteristic_links",
+      outcome: "not_read",
+      source_ref: "spruthub://hub/home%2FA/accessory/32",
+      observed_at: null,
+    },
+  );
+  const unresolved = entity.relations.unresolved_areas.find(
+    ({ area }) => area === "characteristic_links",
+  );
+  assert.equal(unresolved.outcome, "not_read");
+  assert.equal(unresolved.next.tool, "get_entity");
+  assert.equal(
+    unresolved.next.candidates[0].entity_ref,
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+  );
+  assert.equal(
+    hub.requests.some(({ params }) => params.link?.list),
     false,
   );
 });

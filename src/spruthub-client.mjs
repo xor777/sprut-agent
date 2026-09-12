@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
+import { inspectBlockRelations } from "./block-model.mjs";
 
 const VALUE_FIELDS = [
   "boolValue",
@@ -1675,43 +1676,13 @@ export class SprutHubClient {
         entity.options.length === 0 ? "checked_empty" : "found";
     }
     if (requested.has("relations")) {
-      const [logics, linksResponse, scenariosResponse] = await Promise.all([
-        this.#readLogics(parsed.serial, accessory.id, service.sId, deadline),
-        this.#request(
-          {
-            link: {
-              list: {
-                aId: accessory.id,
-                sId: service.sId,
-                cId: characteristic.cId,
-              },
-            },
-          },
-          deadline,
-          { serial: parsed.serial },
-        ),
-        this.#request({ scenario: { list: { aId: accessory.id } } }, deadline, {
-          serial: parsed.serial,
-        }),
-      ]);
-      entity.relations = {
-        assigned_logics: logics.map((logic) =>
-          normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
-        ),
-        links: extractEntityArray(
-          linksResponse,
-          ["link", "list", "links"],
-          true,
-        ).map((link) => sanitizeNativeData(link)),
-        direct_scenarios: extractEntityArray(
-          scenariosResponse,
-          ["scenario", "list", "scenarios"],
-          true,
-        ).map((scenario) => normalizeScenarioSummary(parsed.serial, scenario)),
-        limitations: [
-          "An empty direct scenario list does not prove that no BLOCK or code scenario refers to this characteristic.",
-        ],
-      };
+      entity.relations = await this.#readRelations(
+        parsed.serial,
+        accessory,
+        [service],
+        characteristic,
+        deadline,
+      );
     }
     if (
       requested.has("physical_configuration") ||
@@ -1731,29 +1702,260 @@ export class SprutHubClient {
   }
 
   async #readAccessoryRelations(serial, accessory, deadline) {
-    const directScenariosResponse = await this.#request(
+    return this.#readRelations(
+      serial,
+      accessory,
+      accessory.services ?? [],
+      null,
+      deadline,
+    );
+  }
+
+  async #readRelations(serial, accessory, services, characteristic, deadline) {
+    const homeReference = homeRef(serial);
+    const accessoryReference = accessoryRef(serial, accessory.id);
+    const associationPromise = this.#readRelationSource(
       { scenario: { list: { aId: accessory.id } } },
       deadline,
-      { serial },
-    );
-    const assignedLogics = [];
-    for (const service of accessory.services ?? []) {
-      assignedLogics.push(
-        ...(
-          await this.#readLogics(serial, accessory.id, service.sId, deadline)
-        ).map((logic) =>
-          normalizeLogic(serial, accessory.id, service.sId, logic),
+      serial,
+      (response) =>
+        uniqueByRef(
+          extractEntityArray(
+            response,
+            ["scenario", "list", "scenarios"],
+            true,
+          ).map((scenario) => normalizeScenarioSummary(serial, scenario)),
         ),
+    );
+    const catalogPromise = this.#readRelationSource(
+      { scenario: { list: {} } },
+      deadline,
+      serial,
+      (response) =>
+        uniqueByRef(
+          extractEntityArray(response, ["scenario", "list", "scenarios"]).map(
+            (scenario) => normalizeScenarioSummary(serial, scenario),
+          ),
+        ),
+    );
+    const logicPromises = services.map((service) =>
+      this.#readRelationSource(
+        { logic: { list: { aId: accessory.id, sId: service.sId } } },
+        deadline,
+        serial,
+        (response) =>
+          extractEntityArray(response, ["logic", "list", "logics"], true).map(
+            (logic) => normalizeLogic(serial, accessory.id, service.sId, logic),
+          ),
+      ),
+    );
+    const linkPromise = characteristic
+      ? this.#readRelationSource(
+          {
+            link: {
+              list: {
+                aId: accessory.id,
+                sId: services[0].sId,
+                cId: characteristic.cId,
+              },
+            },
+          },
+          deadline,
+          serial,
+          (response) =>
+            extractEntityArray(response, ["link", "list", "links"], true).map(
+              normalizeLink,
+            ),
+        )
+      : null;
+    const [associationRead, catalogRead, logicReads, linkRead] =
+      await Promise.all([
+        associationPromise,
+        catalogPromise,
+        Promise.all(logicPromises),
+        linkPromise,
+      ]);
+
+    const associations = associationRead.ok ? associationRead.value : [];
+    const blockReads = await Promise.all(
+      associations
+        .filter(({ type }) => type === "BLOCK")
+        .map((summary) => this.#readRelationBlock(serial, summary, deadline)),
+    );
+    const scopes = [
+      relationListScope(
+        "scenario_accessory_index",
+        accessoryReference,
+        associationRead,
+      ),
+      relationListScope("scenario_catalog", homeReference, catalogRead),
+      ...blockReads.map(({ scope }) => scope),
+      ...logicReads.map((read, index) =>
+        relationListScope(
+          "logic_assignments",
+          serviceRef(serial, accessory.id, services[index].sId),
+          read,
+        ),
+      ),
+    ];
+    const assignedLogics = logicReads.flatMap((read, index) => {
+      if (!read.ok) return [];
+      const ownerRef = serviceRef(serial, accessory.id, services[index].sId);
+      return read.value.map((logic) => ({
+        ...logic,
+        role: "service_assignment",
+        service_ref: ownerRef,
+      }));
+    });
+    const characteristicLinks = [];
+    const systemLinks = [];
+    if (characteristic) {
+      const sourceRef = characteristicRef(
+        serial,
+        accessory.id,
+        services[0].sId,
+        characteristic.cId,
       );
+      scopes.push(
+        relationListScope("characteristic_links", sourceRef, linkRead),
+      );
+      if (linkRead.ok) {
+        for (const link of linkRead.value) {
+          const { characteristics, ...identity } = link;
+          if (link.type === "SYSTEM") {
+            systemLinks.push(
+              sanitizeNativeData({ ...identity, role: "system" }),
+            );
+            continue;
+          }
+          characteristicLinks.push({
+            type: link.type,
+            index: sanitizeNativeData(link.index),
+            role: "inter_entity",
+            related_characteristic_refs: characteristics.map(
+              ({ aId, sId, cId }) => characteristicRef(serial, aId, sId, cId),
+            ),
+          });
+        }
+      }
+    } else {
+      scopes.push({
+        area: "characteristic_links",
+        outcome: "not_read",
+        source_ref: accessoryReference,
+        observed_at: null,
+      });
     }
+
+    const unresolvedAreas = relationUnresolvedAreas({
+      associationRead,
+      associations,
+      catalogRead,
+      blockReads,
+      logicReads,
+      linkRead,
+      characteristic,
+      serial,
+      accessory,
+      services,
+    });
     return {
-      direct_scenarios: extractEntityArray(
-        directScenariosResponse,
-        ["scenario", "list", "scenarios"],
-        true,
-      ).map((scenario) => normalizeScenarioSummary(serial, scenario)),
+      scenario_associations: associations.map((summary) => ({
+        ...summary,
+        meaning: "accessory_index_association",
+        direction: "not_established",
+      })),
+      scenario_roles: blockReads.flatMap(({ roles }) => roles),
       assigned_logics: assignedLogics,
+      characteristic_links: characteristicLinks,
+      system_links: systemLinks,
+      scopes,
+      unresolved_areas: unresolvedAreas,
     };
+  }
+
+  async #readRelationBlock(serial, summary, deadline) {
+    const read = await this.#readRelationSource(
+      {
+        scenario: {
+          get: {
+            index: parseEntityRef(summary.ref).scenarioIndex,
+            expand: "data",
+          },
+        },
+      },
+      deadline,
+      serial,
+      (response) => {
+        const scenario = extractEntity(
+          response,
+          ["scenario", "get"],
+          "scenario",
+        );
+        const normalized = normalizeScenarioSummary(serial, scenario);
+        if (scenario.type !== "BLOCK" || typeof scenario.data !== "string") {
+          throw new SprutHubError(
+            "incompatible_response",
+            "SprutHub returned an incomplete BLOCK scenario configuration.",
+          );
+        }
+        return { scenario, normalized };
+      },
+    );
+    const sourceRef = summary.ref;
+    if (!read.ok) {
+      return {
+        scope: relationReadScope("block_configuration", sourceRef, read),
+        roles: [],
+        unresolved: [
+          {
+            area: "block_configuration",
+            outcome: read.outcome,
+            scenario_ref: sourceRef,
+          },
+        ],
+      };
+    }
+    const scope = relationReadScope("block_configuration", sourceRef, read);
+    let data;
+    try {
+      data = JSON.parse(read.value.scenario.data);
+    } catch {
+      return {
+        scope,
+        roles: [],
+        unresolved: [
+          {
+            area: "block_configuration",
+            outcome: "invalid_json",
+            scenario_ref: sourceRef,
+          },
+        ],
+      };
+    }
+    const inspected = inspectBlockRelations(data, {
+      homeRef: homeRef(serial),
+      scenarioRef: sourceRef,
+      scenarioActive: read.value.normalized.active,
+    });
+    return { scope, roles: inspected.roles, unresolved: inspected.unresolved };
+  }
+
+  async #readRelationSource(params, deadline, serial, extract) {
+    let observedAt = null;
+    try {
+      const response = await this.#request(params, deadline, { serial });
+      observedAt = response.responseReceivedAt;
+      return { ok: true, value: extract(response), observedAt };
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+      return {
+        ok: false,
+        outcome: relationFailureOutcome(error),
+        errorCode: error.code,
+        observedAt,
+      };
+    }
   }
 
   async #readLogics(serial, accessoryId, serviceId, deadline) {
@@ -2874,6 +3076,158 @@ function normalizeScenarioSummary(serial, scenario) {
     on_start: scenario.onStart === true,
     sync: scenario.sync === true,
   };
+}
+
+function uniqueByRef(values) {
+  const seen = new Set();
+  return values.filter(({ ref }) => {
+    if (seen.has(ref)) return false;
+    seen.add(ref);
+    return true;
+  });
+}
+
+function relationFailureOutcome(error) {
+  if (error.code === "entity_not_found") return "missing";
+  if (error.code === "unsupported") return "unsupported";
+  return "failed";
+}
+
+function relationListScope(area, sourceRef, read) {
+  return {
+    area,
+    outcome: read.ok
+      ? read.value.length === 0
+        ? "checked_empty"
+        : "found"
+      : read.outcome,
+    source_ref: sourceRef,
+    observed_at: read.observedAt,
+    ...(!read.ok ? { error_code: read.errorCode } : {}),
+  };
+}
+
+function relationReadScope(area, sourceRef, read) {
+  return {
+    area,
+    outcome: read.ok ? "read" : read.outcome,
+    source_ref: sourceRef,
+    observed_at: read.observedAt,
+    ...(!read.ok ? { error_code: read.errorCode } : {}),
+  };
+}
+
+function relationUnresolvedAreas({
+  associationRead,
+  associations,
+  catalogRead,
+  blockReads,
+  logicReads,
+  linkRead,
+  characteristic,
+  serial,
+  accessory,
+  services,
+}) {
+  const unresolved = blockReads.flatMap(({ unresolved: items }) => items);
+  if (!associationRead.ok) {
+    unresolved.push({
+      area: "scenario_accessory_index",
+      outcome: associationRead.outcome,
+      source_ref: accessoryRef(serial, accessory.id),
+    });
+  }
+  if (!catalogRead.ok) {
+    unresolved.push({
+      area: "scenario_catalog",
+      outcome: catalogRead.outcome,
+      source_ref: homeRef(serial),
+    });
+  } else {
+    const associatedRefs = new Set(associations.map(({ ref }) => ref));
+    const codeScenarios = catalogRead.value.filter(
+      ({ type }) => type !== "BLOCK",
+    );
+    if (codeScenarios.length > 0) {
+      unresolved.push({
+        area: "scenario_code",
+        outcome: "not_read",
+        scenario_count: codeScenarios.length,
+        scenario_types: [...new Set(codeScenarios.map(({ type }) => type))],
+      });
+    }
+    const unindexedBlocks = catalogRead.value.filter(
+      ({ type, ref }) => type === "BLOCK" && !associatedRefs.has(ref),
+    );
+    if (unindexedBlocks.length > 0) {
+      unresolved.push({
+        area: "unindexed_block_scenarios",
+        outcome: "not_read",
+        scenario_count: unindexedBlocks.length,
+        scenario_types: ["BLOCK"],
+      });
+    }
+  }
+  logicReads.forEach((read, index) => {
+    if (read.ok) return;
+    unresolved.push({
+      area: "logic_assignments",
+      outcome: read.outcome,
+      source_ref: serviceRef(serial, accessory.id, services[index].sId),
+    });
+  });
+  if (characteristic && !linkRead.ok) {
+    unresolved.push({
+      area: "characteristic_links",
+      outcome: linkRead.outcome,
+      source_ref: characteristicRef(
+        serial,
+        accessory.id,
+        services[0].sId,
+        characteristic.cId,
+      ),
+    });
+  }
+  if (!characteristic) {
+    unresolved.push({
+      area: "characteristic_links",
+      outcome: "not_read",
+      source_ref: accessoryRef(serial, accessory.id),
+      limitation:
+        "Accessory relations do not recursively read every characteristic link.",
+      next: {
+        tool: "get_entity",
+        candidates: services.flatMap((service) =>
+          (service.characteristics ?? [])
+            .filter((candidate) => !isSensitiveNativeNode(candidate))
+            .map((candidate) => ({
+              entity_ref: characteristicRef(
+                serial,
+                accessory.id,
+                service.sId,
+                candidate.cId,
+              ),
+              include: ["relations"],
+            })),
+        ),
+      },
+    });
+  }
+  unresolved.push(
+    {
+      area: "extensions",
+      outcome: "not_read",
+      limitation:
+        "Extension code and controller behavior are outside this entity-scoped read.",
+    },
+    {
+      area: "runtime_execution",
+      outcome: "not_observed",
+      limitation:
+        "Stored configuration does not prove that a command ran or caused a past event.",
+    },
+  );
+  return unresolved;
 }
 
 function extensionKey(extension) {

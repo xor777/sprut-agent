@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
+import {
+  BLOCK_CHILD_FIELDS,
+  blockAffectedRefs,
+  visitKnownBlockNodes,
+} from "./block-model.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 
 export class AutomationService {
@@ -4322,7 +4327,7 @@ export class AutomationService {
       context: normalizeContext(context),
       limitations: [
         "Preview does not change the hub and is not an atomic reservation.",
-        "An empty direct scenario list does not rule out dependencies inside arbitrary code or bridges.",
+        "Scenario associations come from the accessory index and do not establish a direction or cover arbitrary code and bridges.",
         ...(autoOff
           ? [
               "The native RESET delay counts from the latest trigger; it does not determine whether a person is still present.",
@@ -5376,33 +5381,6 @@ const BLOCK_ALLOWED_KEYS = {
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
 };
 
-const BLOCK_CHILD_FIELDS = {
-  root: {
-    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
-  },
-  if: {
-    if: {
-      shape: "single",
-      kinds: new Set(["condition", "characteristic"]),
-    },
-    // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
-    then: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
-    else: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
-  },
-  condition: {
-    conditions: {
-      shape: "array",
-      kinds: new Set(["condition", "characteristic", "code"]),
-    },
-  },
-  service: {
-    characteristics: { shape: "array", kinds: new Set(["set"]) },
-  },
-  delay: {
-    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
-  },
-};
-
 function collectUnknownBlockFields(data) {
   const unknown = [];
   visitKnownBlockNodes(data, (node, kind, path) => {
@@ -5412,50 +5390,6 @@ function collectUnknownBlockFields(data) {
     }
   });
   return unknown.sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function visitKnownBlockNodes(data, visitor, invalidChild) {
-  const visit = (node, kind, path) => {
-    if (!isRecord(node)) return;
-    visitor(node, kind, path);
-    for (const [key, rule] of Object.entries(BLOCK_CHILD_FIELDS[kind] ?? {})) {
-      const value = node[key];
-      const childPath = `${path}.${key}`;
-      if (rule.shape === "array") {
-        if (!Array.isArray(value)) {
-          invalidChild?.(childPath, "child field must be an array");
-          continue;
-        }
-        value.forEach((child, index) => {
-          visitBlockChild(
-            child,
-            `${childPath}[${index}]`,
-            rule,
-            visit,
-            invalidChild,
-          );
-        });
-        continue;
-      }
-      if (Array.isArray(value) || !isRecord(value)) {
-        invalidChild?.(childPath, "child field must be one object");
-        continue;
-      }
-      visitBlockChild(value, childPath, rule, visit, invalidChild);
-    }
-  };
-  visit(data, "root", "root");
-}
-
-function visitBlockChild(child, path, rule, visit, invalidChild) {
-  if (!isRecord(child) || !rule.kinds.has(child.type)) {
-    invalidChild?.(
-      path,
-      `child type must be one of ${[...rule.kinds].join(", ")}`,
-    );
-    return;
-  }
-  visit(child, child.type, path);
 }
 
 const PAUSE_CODE_PATTERN =
@@ -8197,22 +8131,6 @@ function nativeAffectedRefs(change, homeRef) {
   return uniqueRefs(refs);
 }
 
-function blockAffectedRefs(data, homeRef) {
-  const refs = [];
-  visitKnownBlockNodes(data, (node, kind) => {
-    if (kind === "characteristic") {
-      refs.push(...bindingRefs(homeRef, node.aId, node.sId, node.cId));
-    }
-    if (kind === "service") {
-      refs.push(...bindingRefs(homeRef, node.aId, node.sId));
-      for (const action of node.characteristics ?? []) {
-        refs.push(...bindingRefs(homeRef, node.aId, node.sId, action?.cId));
-      }
-    }
-  });
-  return uniqueRefs(refs);
-}
-
 function bindingRefs(homeRef, aId, sId, cId) {
   if (!stableNativeId(aId)) return [];
   const accessory = `${homeRef}/accessory/${aId}`;
@@ -8461,7 +8379,15 @@ function normalizeContext(context) {
 
 function normalizeSelectionContext(selection) {
   return {
-    direct_scenarios: selection.directScenarios,
+    scenario_associations: selection.directScenarios.map((scenario) => ({
+      index: scenario.index,
+      name: scenario.name,
+      type: scenario.type,
+      predefined: scenario.predefined === true,
+      active: scenario.active === true,
+      meaning: "accessory_index_association",
+      direction: "not_established",
+    })),
     assigned_logics: selection.assignedLogics,
     available_logic_types: selection.logicTypes,
     links: selection.links.map(({ type }) => ({ type })),

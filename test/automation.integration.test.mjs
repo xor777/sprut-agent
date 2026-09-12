@@ -501,6 +501,14 @@ test("automation preview explains current mechanisms without writing to the hub"
       active: true,
     },
   ]);
+  assert.deepEqual(
+    result.structuredContent.context.source.scenario_associations,
+    [],
+  );
+  assert.equal(
+    Object.hasOwn(result.structuredContent.context.source, "direct_scenarios"),
+    false,
+  );
   assert.deepEqual(result.structuredContent.context.source.options, [
     {
       key: "SwitchOffTime",
