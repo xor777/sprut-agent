@@ -26,6 +26,7 @@ const homeRef = `spruthub://hub/${serial}`;
 const accessoryRef = `${homeRef}/accessory/34`;
 const workshopRoomRef = `${homeRef}/room/2`;
 const characteristicRef = `spruthub://hub/${serial}/accessory/34/service/13/characteristic/15`;
+const motionCharacteristicRef = `spruthub://hub/${serial}/accessory/32/service/13/characteristic/15`;
 const serviceRef = `spruthub://hub/${serial}/accessory/34/service/13`;
 const smoothLogicType = "SmoothBrightnessChange";
 const smoothLogicRef = `${serviceRef}/logic/${smoothLogicType}`;
@@ -93,6 +94,76 @@ const smoothOptionKeys = {
   end: "EndValue",
   duration: "Duration",
 };
+const characteristicOptionKeys = {
+  primary: "primary",
+  switchOffTime: "SwitchOffTime",
+  showAllEvents: "ShowAllEvents",
+  retryCount: "RetryCount",
+  mode: "Mode",
+};
+
+function motionCharacteristicOptions() {
+  return [
+    {
+      key: characteristicOptionKeys.primary,
+      name: "Основное",
+      type: "GenericInteger",
+      inputType: "GROUP",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 0 },
+    },
+    {
+      key: characteristicOptionKeys.switchOffTime,
+      name: "Выключить через (сек.)",
+      type: "GenericDouble",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { doubleValue: 180 },
+    },
+    {
+      key: characteristicOptionKeys.showAllEvents,
+      name: "Выводить все события в лог",
+      type: "GenericBoolean",
+      inputType: "CHECKBOX",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { boolValue: false },
+    },
+    {
+      key: characteristicOptionKeys.retryCount,
+      name: "Число повторов",
+      type: "GenericLong",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      minValue: 0,
+      maxValue: 4,
+      minStep: 1,
+      value: { longValue: 0 },
+    },
+    {
+      key: characteristicOptionKeys.mode,
+      name: "Режим",
+      type: "GenericInteger",
+      inputType: "LIST",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 0 },
+      validValues: [
+        { name: "Обычный", value: { intValue: 0 } },
+        { name: "Подробный", value: { intValue: 1 } },
+        { name: "Ручной", value: { intValue: 2 } },
+      ],
+    },
+  ];
+}
 
 function smoothLogicOptions() {
   return [
@@ -439,6 +510,7 @@ async function startHub() {
     logicOptions: {
       [logicOptionsKey(34, 13, smoothLogicType)]: smoothLogicOptions(),
     },
+    characteristicOptions: motionCharacteristicOptions(),
     scenarioLogicTypes: {},
     scenarioSdk,
     nextScenario: 1,
@@ -448,6 +520,7 @@ async function startHub() {
       rejectNextScenarioUpdate: false,
       closeAfterScenarioUpdate: false,
       closeAfterCharacteristicUpdate: false,
+      closeAfterCharacteristicSetOptions: false,
       closeAfterWindowUpdate: false,
       dropNextWindowUpdate: false,
       holdNextWindowUpdate: false,
@@ -626,6 +699,31 @@ async function startHub() {
         result = {
           characteristic: { get: structuredClone(selected) ?? null },
         };
+      } else if (params.characteristic?.getOptions) {
+        const { aId, sId, cId } = params.characteristic.getOptions;
+        result = {
+          characteristic: {
+            getOptions: {
+              options:
+                aId === 32 && sId === 13 && cId === 15
+                  ? structuredClone(state.characteristicOptions)
+                  : [],
+            },
+          },
+        };
+      } else if (params.characteristic?.setOptions) {
+        for (const update of params.characteristic.setOptions.options) {
+          const option = state.characteristicOptions.find(
+            ({ key }) => key === update.key,
+          );
+          if (option) option.value = structuredClone(update.value);
+        }
+        if (state.behavior.closeAfterCharacteristicSetOptions) {
+          state.behavior.closeAfterCharacteristicSetOptions = false;
+          socket.close();
+          return;
+        }
+        result = { characteristic: { setOptions: {} } };
       } else if (params.window?.get) {
         result = { window: { get: structuredClone(state.window) } };
       } else if (params.window?.update) {
@@ -1761,6 +1859,336 @@ async function blockStateDirectory(t, stateDirectory) {
   });
   return restore;
 }
+
+test("a read-only characteristic exposes writable options through the shared typed history", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const detail = await firstClient.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: motionCharacteristicRef,
+      include: ["options"],
+    },
+  });
+  assert.equal(detail.isError, undefined, detail.content[0]?.text);
+  assert.equal(detail.structuredContent.entity.capabilities.write, false);
+  const switchOffTime = detail.structuredContent.entity.options.find(
+    ({ key }) => key === characteristicOptionKeys.switchOffTime,
+  );
+  assert.deepEqual(switchOffTime.native_change, {
+    native_write: true,
+    supported: true,
+    operation: "characteristic_option",
+    next: {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "characteristic_option",
+        target_ref: motionCharacteristicRef,
+        option_key: characteristicOptionKeys.switchOffTime,
+      },
+    },
+  });
+  assert.deepEqual(
+    detail.structuredContent.entity.options.find(
+      ({ key }) => key === characteristicOptionKeys.primary,
+    ).native_change,
+    {
+      native_write: true,
+      supported: false,
+      reason: "unsupported_input_type",
+    },
+  );
+
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.switchOffTime,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.deepEqual(contract.structuredContent.contract, {
+    type: "GenericDouble",
+    input_type: "NUMBER",
+    kind: "doubleValue",
+    confirmation: "separate_characteristic_get_options_readback",
+  });
+
+  const writesBeforePrepare = hub.requests.filter(
+    ({ characteristic }) => characteristic?.setOptions,
+  ).length;
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.switchOffTime,
+      value: 10,
+      reason: "Вернуть минутной автоматике согласованную задержку",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.equal(prepared.structuredContent.native_write_sent, false);
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+      .length,
+    writesBeforePrepare,
+  );
+
+  hub.state.behavior.closeAfterCharacteristicSetOptions = true;
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+  assert.deepEqual(
+    hub.requests.filter(
+      ({ characteristic }) => characteristic?.setOptions,
+    ),
+    [
+      {
+        characteristic: {
+          setOptions: {
+            aId: 32,
+            sId: 13,
+            cId: 15,
+            options: [
+              {
+                key: characteristicOptionKeys.switchOffTime,
+                value: { doubleValue: 10 },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  );
+  assert.deepEqual(
+    hub.state.characteristicOptions.map(({ key, value }) => ({ key, value })),
+    motionCharacteristicOptions().map(({ key, value }) => ({
+      key,
+      value:
+        key === characteristicOptionKeys.switchOffTime
+          ? { doubleValue: 10 }
+          : value,
+    })),
+  );
+
+  const repeated = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.switchOffTime,
+      value: 10,
+      reason: "Не создавать лишнее владение",
+    },
+  });
+  assert.equal(repeated.structuredContent.status, "already_desired");
+  assert.equal(repeated.structuredContent.owned_change_created, false);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: motionCharacteristicRef },
+  });
+  assert.deepEqual(
+    history.structuredContent.changes.map(({ change_ref }) => change_ref),
+    [prepared.structuredContent.change_ref],
+  );
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    hub.state.characteristicOptions.find(
+      ({ key }) => key === characteristicOptionKeys.switchOffTime,
+    ).value,
+    { doubleValue: 180 },
+  );
+});
+
+test("the option contract preserves scalar envelopes and rejects unsafe forms for every owner", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.logics.push(assignedSmoothLogic());
+  const client = await startClient(t, hub, stateDirectory);
+
+  const cases = [
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.retryCount,
+      expected: {
+        type: "GenericLong",
+        input_type: "NUMBER",
+        kind: "longValue",
+        min: 0,
+        max: 4,
+        step: 1,
+        confirmation: "separate_characteristic_get_options_readback",
+      },
+    },
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.showAllEvents,
+      expected: {
+        type: "GenericBoolean",
+        input_type: "CHECKBOX",
+        kind: "boolValue",
+        confirmation: "separate_characteristic_get_options_readback",
+      },
+    },
+    {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      expected: {
+        type: "GenericInteger",
+        input_type: "LIST",
+        kind: "intValue",
+        valid_values: [
+          { name: "Выключена", value: 0, kind: "intValue" },
+          { name: "Включена", value: 1, kind: "intValue" },
+          {
+            name: "Предыдущее состояние",
+            value: 255,
+            kind: "intValue",
+          },
+        ],
+        confirmation: "separate_window_get_readback",
+      },
+    },
+    {
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      option_key: smoothOptionKeys.duration,
+      expected: {
+        type: "GenericInteger",
+        input_type: "NUMBER",
+        kind: "intValue",
+        confirmation: "separate_logic_get_options_readback",
+      },
+    },
+  ];
+  for (const { expected, ...arguments_ } of cases) {
+    const result = await client.callTool({
+      name: "get_native_change_contract",
+      arguments: arguments_,
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.deepEqual(result.structuredContent.contract, expected);
+  }
+
+  const zero = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.retryCount,
+      value: 0,
+      reason: "Нулевое значение не теряется",
+    },
+  });
+  assert.equal(zero.structuredContent.status, "already_desired");
+  const checkbox = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.showAllEvents,
+      value: true,
+      reason: "Булево значение остаётся boolValue",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: checkbox.structuredContent.change_ref },
+  });
+  assert.deepEqual(
+    hub.state.characteristicOptions.find(
+      ({ key }) => key === characteristicOptionKeys.showAllEvents,
+    ).value,
+    { boolValue: true },
+  );
+
+  const writesBeforeRejections = hub.requests.filter(
+    ({ characteristic }) => characteristic?.setOptions,
+  ).length;
+  for (const arguments_ of [
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.primary,
+      value: 1,
+      reason: "GROUP не является значением",
+    },
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.retryCount,
+      value: 5,
+      reason: "Значение вне явного диапазона",
+    },
+    {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.mode,
+      value: 3,
+      reason: "Значение вне явного списка",
+    },
+  ]) {
+    const rejected = await client.callTool({
+      name: "prepare_native_change",
+      arguments: arguments_,
+    });
+    assert.equal(rejected.isError, true);
+  }
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+      .length,
+    writesBeforeRejections,
+  );
+
+  const mode = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.mode,
+      value: 1,
+      reason: "Проверить защиту ручного значения",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: mode.structuredContent.change_ref },
+  });
+  hub.state.characteristicOptions.find(
+    ({ key }) => key === characteristicOptionKeys.mode,
+  ).value = { intValue: 2 };
+  const writesBeforeRestore = hub.requests.filter(
+    ({ characteristic }) => characteristic?.setOptions,
+  ).length;
+  const conflict = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: mode.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "manual_change");
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.setOptions)
+      .length,
+    writesBeforeRestore,
+  );
+});
 
 test("a characteristic value uses one recoverable native change path", async (t) => {
   const { hub, stateDirectory } = await setup(t);
