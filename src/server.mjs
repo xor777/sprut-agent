@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -225,7 +226,7 @@ server.registerTool(
   {
     title: "Read the native SprutHub scenario SDK",
     description:
-      "Return the current complete scenario SDK declarations directly from the selected SprutHub, with byte length, SHA-256, and response freshness. Use this before authoring native LOGIC source. The declarations describe the hub sandbox, not Node.js or browser JavaScript, and do not prove runtime callback behavior.",
+      "Return the current scenario SDK declarations directly from the selected SprutHub, with sdk_complete, byte length and SHA-256 for the returned sdk text, plus response freshness. sdk_complete=false means credential protection replaced the source and it must not be treated as a complete SDK. Use this before authoring native LOGIC source. The declarations describe the hub sandbox, not Node.js or browser JavaScript, and do not prove runtime callback behavior.",
     inputSchema: {
       home_ref: z
         .string()
@@ -237,8 +238,12 @@ server.registerTool(
     annotations: readOnlyAnnotations,
   },
   async ({ home_ref: homeRef }) =>
-    runRoomTool(async () =>
-      (await getAutomationService()).getScenarioSdk(homeRef),
+    runRoomTool(
+      async () => (await getAutomationService()).getScenarioSdk(homeRef),
+      {
+        present: presentScenarioSdk,
+        stringRoles: { "/sdk": "typescript_declarations" },
+      },
     ),
 );
 
@@ -671,11 +676,13 @@ function toToolError(error) {
 
 async function runRoomTool(
   operation,
-  { compact = false, present = (result) => result } = {},
+  { compact = false, present = (result) => result, stringRoles = {} } = {},
 ) {
   try {
     const result = present(
-      sanitizeAgentOutput(await operation(), connectionSecrets()),
+      sanitizeAgentOutput(await operation(), connectionSecrets(), {
+        stringRoles,
+      }),
     );
     updateSerializedPageSize(result, compact);
     return {
@@ -698,6 +705,17 @@ async function runRoomTool(
       isError: true,
     };
   }
+}
+
+function presentScenarioSdk(result) {
+  const bytes = Buffer.byteLength(result.sdk);
+  const sha256 = createHash("sha256").update(result.sdk).digest("hex");
+  return {
+    ...result,
+    sdk_complete: result.bytes === bytes && result.sha256 === sha256,
+    bytes,
+    sha256,
+  };
 }
 
 function updateSerializedPageSize(result, compact) {

@@ -3462,13 +3462,13 @@ function normalizeScenarioConfiguration(scenario) {
     } catch {
       return {
         format: "invalid_json",
-        value: redactSensitiveText(scenario.data, false),
+        value: redactSensitiveText(scenario.data),
       };
     }
   }
   return {
     format: "code",
-    value: redactSensitiveText(scenario.data, true),
+    value: redactSensitiveText(scenario.data, "javascript_source"),
     content_origin: "spruthub_scenario_data",
   };
 }
@@ -3486,19 +3486,41 @@ export function sanitizeNativeData(value, key = "") {
       ]),
     );
   }
-  return typeof value === "string" ? redactSensitiveText(value, false) : value;
+  return typeof value === "string" ? redactSensitiveText(value) : value;
 }
 
-export function sanitizeAgentOutput(value, sensitiveValues = []) {
+export function sanitizeAgentOutput(
+  value,
+  sensitiveValues = [],
+  { stringRoles = {} } = {},
+) {
   const codeConfiguration = scenarioCodeConfiguration(value);
-  return sanitizeAgentValue(value, sensitiveValues, codeConfiguration);
+  return sanitizeAgentValue(
+    value,
+    sensitiveValues,
+    codeConfiguration,
+    stringRoles,
+    "",
+  );
 }
 
-function sanitizeAgentValue(value, sensitiveValues, codeConfiguration) {
+function sanitizeAgentValue(
+  value,
+  sensitiveValues,
+  codeConfiguration,
+  stringRoles,
+  path,
+) {
   if (isRedactedNode(value)) return redactedNode();
   if (Array.isArray(value)) {
-    return value.map((item) =>
-      sanitizeAgentValue(item, sensitiveValues, codeConfiguration),
+    return value.map((item, index) =>
+      sanitizeAgentValue(
+        item,
+        sensitiveValues,
+        codeConfiguration,
+        stringRoles,
+        `${path}/${index}`,
+      ),
     );
   }
   if (value && typeof value === "object") {
@@ -3512,23 +3534,33 @@ function sanitizeAgentValue(value, sensitiveValues, codeConfiguration) {
     return Object.fromEntries(
       Object.entries(value).map(([key, childValue]) => [
         key,
-        typeof childValue === "string" &&
-        value === codeConfiguration &&
-        key === "value"
-          ? redactAgentString(childValue, sensitiveValues, true)
-          : sanitizeAgentValue(childValue, sensitiveValues, codeConfiguration),
+        sanitizeAgentValue(
+          childValue,
+          sensitiveValues,
+          codeConfiguration,
+          stringRoles,
+          `${path}/${escapeJsonPointerToken(key)}`,
+        ),
       ]),
     );
   }
   if (typeof value !== "string") return value;
-  return redactAgentString(value, sensitiveValues, false);
+  const role =
+    path === "/entity/configuration/value" && codeConfiguration !== null
+      ? "javascript_source"
+      : (stringRoles[path] ?? "data");
+  return redactAgentString(value, sensitiveValues, role);
 }
 
-function redactAgentString(value, sensitiveValues, useJavaScriptContext) {
+function redactAgentString(value, sensitiveValues, role) {
   if (sensitiveValues.some((secret) => value.includes(secret))) {
     return "[REDACTED]";
   }
-  return redactSensitiveText(value, useJavaScriptContext);
+  return redactSensitiveText(value, role);
+}
+
+function escapeJsonPointerToken(value) {
+  return value.replaceAll("~", "~0").replaceAll("/", "~1");
 }
 
 function scenarioCodeConfiguration(result) {
@@ -3597,14 +3629,14 @@ function isSensitiveContainerKey(key) {
   );
 }
 
-function redactSensitiveText(text, useJavaScriptContext = false) {
+function redactSensitiveText(text, role = "data") {
   const containsCredential =
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
-    containsSensitiveAssignment(text, useJavaScriptContext);
+    containsSensitiveAssignment(text, role);
   return containsCredential ? "[REDACTED]" : text;
 }
 
-function containsSensitiveAssignment(text, useJavaScriptContext) {
+function containsSensitiveAssignment(text, role) {
   // Every source range is data for redaction. The lexer is consulted only to
   // distinguish real JavaScript case/ternary colons from colons inside data.
   let javascriptTokens;
@@ -3619,9 +3651,15 @@ function containsSensitiveAssignment(text, useJavaScriptContext) {
     }
     const candidate = assignmentCandidateBefore(text, separatorIndex);
     if (!candidate || !isSensitiveAssignmentKey(candidate.value)) continue;
-    if (separator[0] === ":" && useJavaScriptContext) {
+    if (separator[0] === ":" && role !== "data") {
       javascriptTokens ??= indexedJavaScriptTokens(text);
       if (isKnownJavaScriptValueOrLabel(javascriptTokens, separatorIndex)) {
+        continue;
+      }
+      if (
+        role === "typescript_declarations" &&
+        isTypeScriptParameterColon(javascriptTokens, separatorIndex)
+      ) {
         continue;
       }
     }
@@ -3729,6 +3767,30 @@ function isKnownJavaScriptValueOrLabel(context, separatorIndex) {
     isJavaScriptTernaryColon(context.tokens, separatorTokenIndex) ||
     isJavaScriptCaseLabel(context.tokens, separatorTokenIndex)
   );
+}
+
+function isTypeScriptParameterColon(context, separatorIndex) {
+  const separatorTokenIndex = context.tokenIndexByStart.get(separatorIndex);
+  const separator = context.tokens[separatorTokenIndex];
+  if (separator?.type !== "Punctuator" || separator.value !== ":") return false;
+
+  let parenthesisDepth = 0;
+  for (let index = separatorTokenIndex - 1; index >= 0; index -= 1) {
+    const value = context.tokens[index].value;
+    if (value === ")") {
+      parenthesisDepth += 1;
+      continue;
+    }
+    if (value === "(") {
+      if (parenthesisDepth === 0) return true;
+      parenthesisDepth -= 1;
+      continue;
+    }
+    if (parenthesisDepth === 0 && ["{", "[", ";"].includes(value)) {
+      return false;
+    }
+  }
+  return false;
 }
 
 const javascriptContextLookbehindTokenLimit = 256;

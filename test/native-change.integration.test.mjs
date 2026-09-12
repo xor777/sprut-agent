@@ -5684,7 +5684,27 @@ test("typed credential-like text outside the SDK declaration role stays hidden",
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.equal(result.structuredContent.entity.current_value.value, "[REDACTED]");
+  assert.equal(
+    result.structuredContent.entity.current_value.value,
+    "[REDACTED]",
+  );
+});
+
+test("an incomplete native SDK response stays an error instead of becoming a complete declaration", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarioSdk = null;
+
+  const result = await client.callTool({
+    name: "get_scenario_sdk",
+    arguments: { home_ref: homeRef },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.status, "error");
+  assert.equal(result.structuredContent.error.code, "incompatible_response");
+  assert.equal(result.structuredContent.sdk, undefined);
+  assert.equal(result.structuredContent.sdk_complete, undefined);
 });
 
 test("a native LOGIC source is created, assigned, updated, read back, and restored through public tools", async (t) => {
