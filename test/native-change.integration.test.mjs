@@ -869,7 +869,8 @@ async function startHub() {
           selected?.control.type === "On" &&
           Object.hasOwn(params.characteristic.update.control.value, "boolValue")
         ) {
-          state.externalOn = params.characteristic.update.control.value.boolValue;
+          state.externalOn =
+            params.characteristic.update.control.value.boolValue;
         }
         if (state.behavior.dropNextCharacteristicUpdate) {
           state.behavior.dropNextCharacteristicUpdate = false;

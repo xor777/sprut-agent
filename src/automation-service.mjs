@@ -16,7 +16,7 @@ import {
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
 
-const RESTORABLE_CHARACTERISTIC_SETTING_TYPES = new Set([
+const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
   "TargetTemperature",
   "TargetHeatingCoolingState",
   "C_FanSpeed",
@@ -65,12 +65,19 @@ export class AutomationService {
       const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
       const characteristic = await this.client.getCharacteristic(target);
       const contract = characteristicContract(characteristic.control);
+      const restoration = characteristicSettingRestoration(
+        contract,
+        typedNativeValue(characteristic.control.value),
+      );
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
         contract,
-        restore_supported: isRestorableCharacteristicSetting(contract.type),
+        restore_supported: restoration.supported,
+        ...(restoration.limitation
+          ? { restore_limitation: restoration.limitation }
+          : {}),
         physical_effect_reversible: false,
       };
     }
@@ -262,7 +269,11 @@ export class AutomationService {
     const requestedValue = validateCharacteristicValue(input.value, contract);
     const baselineValue = typedNativeValue(characteristic.control.value);
     const virtualGroup = await this.#findOwnedVirtualGroupContext(target);
-    if (!virtualGroup && valuesEqual(baselineValue, requestedValue)) {
+    if (
+      !virtualGroup &&
+      isKnownCharacteristicSetting(contract.type) &&
+      valuesEqual(baselineValue, requestedValue)
+    ) {
       return {
         status: "already_desired",
         operation: "characteristic_value",
@@ -1237,9 +1248,7 @@ export class AutomationService {
       };
     }
     if (
-      ["characteristic_option", "window_option", "logic_option"].includes(
-        change.kind,
-      ) &&
+      hasKnownSettingSemantics(change) &&
       !valuesEqual(current, change.baseline_value) &&
       !valuesEqual(current, change.requested_value)
     ) {
@@ -1372,10 +1381,12 @@ export class AutomationService {
         return this.#restoreVirtualLightGroup(change);
       }
       if (change.kind === "characteristic_value") {
-        if (!isRestorableNativeValueChange(change)) {
+        const restoration = nativeValueRestoration(change);
+        if (!restoration.supported) {
           throw new SprutHubError(
             "restore_unsupported",
-            "This characteristic is not a supported restorable setting.",
+            restoration.limitation?.message ??
+              "This characteristic is not a supported restorable setting.",
             "get_native_change",
           );
         }
@@ -6835,8 +6846,8 @@ function isNativeValueChange(change) {
   ].includes(change?.kind);
 }
 
-function isRestorableCharacteristicSetting(type) {
-  return RESTORABLE_CHARACTERISTIC_SETTING_TYPES.has(type);
+function isKnownCharacteristicSetting(type) {
+  return STATEFUL_CHARACTERISTIC_SETTING_TYPES.has(type);
 }
 
 function isRetryableNativeValueChange(change) {
@@ -6848,12 +6859,38 @@ function isRetryableNativeValueChange(change) {
   ].includes(change?.kind);
 }
 
-function isRestorableNativeValueChange(change) {
+function hasKnownSettingSemantics(change) {
   return (
-    isRetryableNativeValueChange(change) ||
+    ["characteristic_option", "window_option", "logic_option"].includes(
+      change?.kind,
+    ) ||
     (change?.kind === "characteristic_value" &&
-      isRestorableCharacteristicSetting(change.contract?.type))
+      isKnownCharacteristicSetting(change.contract?.type))
   );
+}
+
+function nativeValueRestoration(change) {
+  if (isRetryableNativeValueChange(change)) return { supported: true };
+  if (change?.kind !== "characteristic_value") return { supported: false };
+  return characteristicSettingRestoration(
+    change.contract,
+    change.baseline_value,
+  );
+}
+
+function characteristicSettingRestoration(contract, baseline) {
+  if (!isKnownCharacteristicSetting(contract?.type)) {
+    return { supported: false };
+  }
+  const validation = validateNativeScalarValue(baseline?.value, contract);
+  if (validation.valid) return { supported: true };
+  return {
+    supported: false,
+    limitation: {
+      code: "baseline_not_writable",
+      message: `The saved baseline cannot be restored automatically: ${validation.message}`,
+    },
+  };
 }
 
 function freshVerification(result) {
@@ -7952,6 +7989,7 @@ function publicNativeChange(
           },
         }
       : undefined;
+  const restoration = nativeValueRestoration(change);
   return {
     status: change.status,
     change_ref: `spruthub-change://native/${change.id}`,
@@ -7996,7 +8034,10 @@ function publicNativeChange(
         }
       : {}),
     ...(conflictResolution ? { conflict_resolution: conflictResolution } : {}),
-    restore_supported: isRestorableNativeValueChange(change),
+    restore_supported: restoration.supported,
+    ...(restoration.limitation
+      ? { restore_limitation: restoration.limitation }
+      : {}),
     ...(change.kind === "characteristic_value"
       ? { physical_effect_reversible: false }
       : {}),
@@ -8004,7 +8045,7 @@ function publicNativeChange(
     limitations: [
       "Readback observes the value but cannot prove this command caused it.",
       "SprutHub exposes no native compare-and-set for this operation.",
-      isRestorableNativeValueChange(change)
+      restoration.supported
         ? change.kind === "characteristic_value"
           ? "The saved setting can be restored only while its current value still matches this change; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
