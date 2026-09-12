@@ -302,6 +302,13 @@ function currentCharacteristicValue(hub, ref) {
     ?.control.value;
 }
 
+function climateControl(hub, type) {
+  return hub.state.accessories
+    .flatMap(({ services = [] }) => services)
+    .flatMap(({ characteristics = [] }) => characteristics)
+    .find(({ control }) => control.type === type).control;
+}
+
 function assignedSmoothLogic({ active = false } = {}) {
   return {
     aId: 34,
@@ -2252,6 +2259,140 @@ test("LIST discovery and writes reject native choices that contradict numeric co
   }
 });
 
+test("option changes stop promising restore when their baseline is no longer valid", async (t) => {
+  const cases = [
+    {
+      name: "characteristic option",
+      operation: "characteristic_option",
+      target_ref: motionCharacteristicRef,
+      option_key: characteristicOptionKeys.mode,
+      install() {},
+      option(hub) {
+        return hub.state.characteristicOptions.find(
+          ({ key }) => key === characteristicOptionKeys.mode,
+        );
+      },
+    },
+    {
+      name: "window option",
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: startupOptionKey,
+      install() {},
+      option(hub) {
+        return hub.state.window.options.find(
+          ({ key }) => key === startupOptionKey,
+        );
+      },
+    },
+    {
+      name: "logic option",
+      operation: "logic_option",
+      target_ref: smoothLogicRef,
+      option_key: "Mode",
+      install(hub) {
+        hub.state.logics.push(assignedSmoothLogic());
+        configuredSmoothLogicOptions(hub.state).push({
+          key: "Mode",
+          name: "Режим",
+          type: "GenericInteger",
+          inputType: "LIST",
+          read: true,
+          write: true,
+          disabled: false,
+          value: { intValue: 0 },
+          validValues: [
+            { name: "Обычный", value: { intValue: 0 } },
+            { name: "Подробный", value: { intValue: 1 } },
+          ],
+        });
+      },
+      option(hub) {
+        return configuredSmoothLogicOptions(hub.state).find(
+          ({ key }) => key === "Mode",
+        );
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (scenario) => {
+      const { hub, stateDirectory } = await setup(scenario);
+      testCase.install(hub);
+      const client = await startClient(scenario, hub, stateDirectory);
+      const contract = await client.callTool({
+        name: "get_native_change_contract",
+        arguments: {
+          operation: testCase.operation,
+          target_ref: testCase.target_ref,
+          option_key: testCase.option_key,
+        },
+      });
+      assert.equal(contract.isError, undefined, contract.content[0]?.text);
+      assert.equal(contract.structuredContent.restore_supported, true);
+
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: testCase.operation,
+          target_ref: testCase.target_ref,
+          option_key: testCase.option_key,
+          value: 1,
+          reason: "Не обещать возврат исчезнувшего исходного значения",
+        },
+      });
+      const applied = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+      const option = testCase.option(hub);
+      option.validValues = option.validValues.filter(
+        ({ value }) =>
+          value.intValue !== prepared.structuredContent.diff.value.from,
+      );
+
+      const observed = await client.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(observed.isError, undefined, observed.content[0]?.text);
+      assert.equal(observed.structuredContent.restore_supported, false);
+      assert.equal(
+        observed.structuredContent.restore_limitation.code,
+        "baseline_not_writable",
+      );
+      const writesBeforeRestore = hub.requests.filter((request) =>
+        testCase.operation === "characteristic_option"
+          ? request.characteristic?.setOptions
+          : testCase.operation === "window_option"
+            ? request.window?.update
+            : request.logic?.setOptions,
+      ).length;
+      const restored = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(restored.isError, true);
+      assert.equal(
+        restored.structuredContent.error.code,
+        "restore_unsupported",
+      );
+      assert.equal(
+        hub.requests.filter((request) =>
+          testCase.operation === "characteristic_option"
+            ? request.characteristic?.setOptions
+            : testCase.operation === "window_option"
+              ? request.window?.update
+              : request.logic?.setOptions,
+        ).length,
+        writesBeforeRestore,
+      );
+      assert.deepEqual(option.value, { intValue: 1 });
+    });
+  }
+});
+
 test("sensitive LIST options stay redacted and cannot create history for any owner", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   hub.state.logics.push(assignedSmoothLogic());
@@ -2768,6 +2909,203 @@ test("a prepared climate mode is restorable through history after restart", asyn
       },
     );
   }
+});
+
+test("native characteristic choices expose only values that can be prepared", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[1];
+  const control = climateControl(hub, setting.type);
+  Object.assign(control, {
+    minValue: 0,
+    maxValue: 2,
+    minStep: 1,
+    value: { intValue: 0 },
+    validValues: [
+      {
+        key: "AUTO",
+        name: "Авто",
+        value: { intValue: 0 },
+        checked: false,
+      },
+      { key: "HEAT", name: "Нагрев", value: { intValue: 1 } },
+      {
+        key: "COOL",
+        name: "Охлаждение",
+        value: { intValue: 2 },
+        checked: true,
+      },
+      {
+        key: "LAST_VALUE",
+        name: "Последний режим",
+        value: { intValue: -666666 },
+        checked: true,
+      },
+    ],
+  });
+  const client = await startClient(t, hub, stateDirectory);
+
+  const detail = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: setting.ref },
+  });
+  assert.equal(detail.isError, undefined, detail.content[0]?.text);
+  assert.deepEqual(detail.structuredContent.entity.current_value, {
+    value: 0,
+    enum: { key: "AUTO", name: "Авто" },
+    source: "characteristic",
+    source_timestamp: null,
+  });
+  assert.deepEqual(detail.structuredContent.entity.capabilities.valid_values, [
+    { key: "HEAT", name: "Нагрев", value: 1 },
+    { key: "COOL", name: "Охлаждение", value: 2 },
+  ]);
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.deepEqual(contract.structuredContent.contract.valid_values, [
+    { key: "HEAT", name: "Нагрев", value: 1, kind: "intValue" },
+    { key: "COOL", name: "Охлаждение", value: 2, kind: "intValue" },
+  ]);
+  assert.equal(contract.structuredContent.restore_supported, false);
+  assert.equal(
+    contract.structuredContent.restore_limitation.code,
+    "baseline_not_writable",
+  );
+
+  for (const value of [0, -666666]) {
+    const rejected = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "characteristic_value",
+        target_ref: setting.ref,
+        value,
+        reason: "Не подготавливать недоступный нативный режим",
+      },
+    });
+    assert.equal(rejected.isError, true);
+    assert.equal(rejected.structuredContent.error.code, "invalid_native_value");
+  }
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 2,
+      reason: "Подготовить доступный нативный режим",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.equal(prepared.structuredContent.restore_supported, false);
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("an explicit empty characteristic choice set remains restrictive", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[1];
+  const control = climateControl(hub, setting.type);
+  control.validValues.forEach((candidate) => {
+    candidate.checked = false;
+  });
+  const client = await startClient(t, hub, stateDirectory);
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.deepEqual(contract.structuredContent.contract.valid_values, []);
+
+  const rejected = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 2,
+      reason: "Не снимать явное пустое ограничение",
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "invalid_native_value");
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("apply rechecks native characteristic choice availability before writing", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[1];
+  const control = climateControl(hub, setting.type);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 2,
+      reason: "Проверить доступность режима перед записью",
+    },
+  });
+  control.validValues.find(({ value }) => value.intValue === 2).checked = false;
+
+  const rejected = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "invalid_native_value");
+  assert.deepEqual(control.value, { intValue: 1 });
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("ordinary decimal native steps accept their represented values", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const setting = climateSettings[0];
+  const control = climateControl(hub, setting.type);
+  Object.assign(control, {
+    minValue: 10,
+    maxValue: 30,
+    minStep: 0.1,
+    value: { doubleValue: 21.6 },
+  });
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: setting.ref,
+      value: 21.7,
+      reason: "Подготовить обычную дробную уставку",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.diff.value, {
+    from: 21.6,
+    to: 21.7,
+    kind: "doubleValue",
+  });
 });
 
 test("an unchanged command is still delivered to resynchronize external state", async (t) => {
