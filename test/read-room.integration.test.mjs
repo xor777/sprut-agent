@@ -1108,8 +1108,24 @@ test("read_services points oversized detail to its exact entity instead of trunc
   assert.equal(result.structuredContent.page.next_cursor, null);
 });
 
-test("read_services rejects cross-home scope and invalid cursors before reading a room", async (t) => {
-  const hub = await startHub();
+test("read_services rejects cross-home scope and restarts an invalid bounded room cursor without losing late services", async (t) => {
+  const state = structuredClone(hubState);
+  for (let id = 110; id < 118; id += 1) {
+    state.accessories.push(
+      thermostatAccessory({
+        id,
+        name: `Регулятор ${id}`,
+        currentMode: id % 3,
+        currentTemperature: 20 + (id - 110),
+        targetTemperature: 25,
+      }),
+    );
+  }
+  state.accessories.push(
+    lightAccessory({ id: 118, name: "Дашина лампа" }),
+    lightAccessory({ id: 119, name: "Свет" }),
+  );
+  const hub = await startHub(state);
   const client = await startMcpClient(t, hub);
 
   const crossHome = await client.callTool({
@@ -1128,23 +1144,53 @@ test("read_services rejects cross-home scope and invalid cursors before reading 
   });
   assert.equal(hub.requests.length, 0);
 
+  const restartArguments = {
+    home_ref: "spruthub://hub/test-hub",
+    room_ref: "spruthub://hub/test-hub/room/10",
+    service_types: ["Lightbulb"],
+    max_bytes: 2_048,
+  };
   const invalidCursor = await client.callTool({
     name: "read_services",
     arguments: {
-      home_ref: "spruthub://hub/test-hub",
-      room_ref: "spruthub://hub/test-hub/room/10",
+      ...restartArguments,
       cursor: "not-a-read-services-cursor",
     },
   });
   assert.equal(invalidCursor.isError, true);
-  assert.deepEqual(invalidCursor.structuredContent.error, {
-    code: "invalid_cursor",
-    message:
-      "Use the cursor returned by read_services for the same scope and filters.",
-    retryable: false,
-    action: "restart_read_services",
+  assert.deepEqual(invalidCursor.structuredContent, {
+    status: "error",
+    next: {
+      tool: "read_services",
+      arguments: restartArguments,
+    },
+    error: {
+      code: "invalid_cursor",
+      message:
+        "Use the cursor returned by read_services for the same scope and filters.",
+      retryable: false,
+      action: "restart_read_services",
+    },
   });
   assert.equal(hub.requests.length, 0);
+
+  const services = [];
+  let next = invalidCursor.structuredContent.next;
+  do {
+    const page = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+    assert.equal(page.isError, undefined, page.content[0]?.text);
+    assert(Buffer.byteLength(page.content[0].text) <= restartArguments.max_bytes);
+    services.push(...page.structuredContent.services);
+    next = page.structuredContent.next;
+  } while (next);
+
+  assert.deepEqual(
+    services.map(({ accessory }) => accessory.name),
+    ["Лампа", "Дашина лампа", "Свет"],
+  );
 });
 
 function thermostatAccessory({
@@ -1209,6 +1255,38 @@ function thermostatAccessory({
               type: "TargetTemperature",
               unit: "°C",
               value: { doubleValue: targetTemperature },
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function lightAccessory({ id, name }) {
+  return {
+    id,
+    online: true,
+    name,
+    roomId: 10,
+    services: [
+      {
+        aId: id,
+        sId: 1,
+        name,
+        type: "Lightbulb",
+        characteristics: [
+          {
+            aId: id,
+            sId: 1,
+            cId: 1,
+            control: {
+              read: true,
+              key: "On",
+              name: "Включена",
+              type: "On",
+              unit: "boolean",
+              value: { boolValue: false },
             },
           },
         ],
