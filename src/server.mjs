@@ -45,6 +45,17 @@ const nextToolCallSchema = z.object({
   tool: z.string(),
   arguments: z.record(z.string(), z.unknown()),
 });
+const toolErrorResultSchema = {
+  error: errorSchema,
+  credential_setup: credentialSetupSchema.optional(),
+  missing_field: z.string().optional(),
+  capability_status: z
+    .enum(["available", "insufficient_access", "unsupported", "unknown"])
+    .optional(),
+  requestSent: z.boolean().optional(),
+  retry_after_seconds: z.number().int().nullable().optional(),
+  next: nextToolCallSchema.optional(),
+};
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -182,15 +193,8 @@ server.registerTool(
     outputSchema: {
       status: z.enum(["ok", "error"]),
       rooms: z.array(roomSchema).optional(),
-      error: errorSchema,
       freshness: freshnessSchema.optional(),
-      credential_setup: credentialSetupSchema.optional(),
-      missing_field: z.string().optional(),
-      capability_status: z
-        .enum(["available", "insufficient_access", "unsupported", "unknown"])
-        .optional(),
-      requestSent: z.boolean().optional(),
-      next: nextToolCallSchema.optional(),
+      ...toolErrorResultSchema,
     },
     annotations: readOnlyAnnotations,
   },

@@ -45,10 +45,14 @@ export function isLocalCredentialConfigurationError(error) {
 export class SprutHubConnection {
   #clientPromise;
   #env;
+  #homeSelectionSource;
   #secrets = new Set();
 
   constructor({ env = process.env } = {}) {
     this.#env = env;
+    this.#homeSelectionSource = hasCompleteExplicitConnection(env)
+      ? "environment"
+      : "file";
     this.#remember(
       env.SPRUTHUB_LOGIN,
       env.SPRUTHUB_PASSWORD,
@@ -61,6 +65,14 @@ export class SprutHubConnection {
   }
 
   homeSelectionSetup() {
+    if (this.#homeSelectionSource === "environment") {
+      return {
+        source: "environment",
+        field: "SPRUTHUB_SERIAL",
+        restart:
+          "Set SPRUTHUB_SERIAL in the same MCP launch environment, then restart the MCP application.",
+      };
+    }
     const setup = credentialSetup(this.#env);
     return {
       file: setup.file,
@@ -102,6 +114,7 @@ export class SprutHubConnection {
         url: this.#env.SPRUTHUB_URL,
         token: this.#env.SPRUTHUB_TOKEN,
         serial: this.#env.SPRUTHUB_SERIAL,
+        configuredSerial: this.#env.SPRUTHUB_SERIAL,
         cid: this.#env.SPRUTHUB_CID,
         timeoutMs,
       });
@@ -127,6 +140,7 @@ export class SprutHubConnection {
         url,
         token: saved.token,
         serial: null,
+        configuredSerial: this.#env.SPRUTHUB_SERIAL,
         cid: saved.cid,
         timeoutMs,
       });
@@ -164,6 +178,8 @@ export class SprutHubConnection {
       url,
       token: authenticated.token,
       serial,
+      configuredSerial: this.#env.SPRUTHUB_SERIAL,
+      availableHomeCount: authenticated.homes.length,
       cid: authenticated.cid,
       timeoutMs,
     });
@@ -737,14 +753,7 @@ function selectSerial(homes, requestedSerial) {
     return decodeHomeRef(home.ref);
   });
   if (requestedSerial) {
-    if (!serials.includes(requestedSerial)) {
-      throw new SprutHubError(
-        "home_not_found",
-        "SPRUTHUB_SERIAL is not available to this account.",
-        "list_homes",
-      );
-    }
-    return requestedSerial;
+    return serials.includes(requestedSerial) ? requestedSerial : null;
   }
   return serials.length === 1 ? serials[0] : null;
 }

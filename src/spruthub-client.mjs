@@ -67,7 +67,9 @@ export function parseSprutHubMessage(data) {
 }
 
 export class SprutHubClient {
+  #availableHomeCount;
   #connectPromise;
+  #configuredSerial;
   #connectingSocket;
   #nextRequestId = 1;
   #observation;
@@ -76,7 +78,15 @@ export class SprutHubClient {
   #socket;
   #startingObservationClient;
 
-  constructor({ url, token, serial, cid, timeoutMs = 10_000 }) {
+  constructor({
+    url,
+    token,
+    serial,
+    configuredSerial = serial,
+    availableHomeCount = null,
+    cid,
+    timeoutMs = 10_000,
+  }) {
     if (!url || !token || !cid) {
       throw new SprutHubError(
         "configuration",
@@ -87,6 +97,8 @@ export class SprutHubClient {
     this.url = url;
     this.token = token;
     this.serial = serial ?? null;
+    this.#configuredSerial = configuredSerial ?? null;
+    this.#availableHomeCount = availableHomeCount;
     this.cid = cid;
     this.timeoutMs = timeoutMs;
   }
@@ -94,20 +106,31 @@ export class SprutHubClient {
   async listHomes() {
     const deadline = Date.now() + this.timeoutMs;
     const { homes, observedAt } = await this.#listHomes(deadline);
+    this.#availableHomeCount = homes.length;
+    const configuredHomeUnavailable =
+      this.#configuredSerial !== null &&
+      !homes.some((home) => home.serial === this.#configuredSerial);
     return {
       status: "ok",
       homes: homes.map((home) => normalizeHome(home, observedAt)),
-      selection: {
-        required: homes.length !== 1,
-        ...(homes.length === 1
-          ? { default_home_ref: homeRef(homes[0].serial) }
-          : {
-              options: homes.map((home) => ({
-                home_ref: homeRef(home.serial),
-                pin_value: home.serial,
-              })),
-            }),
-      },
+      selection:
+        homes.length === 0
+          ? { required: false, reason: "no_available_homes" }
+          : homes.length === 1 && !configuredHomeUnavailable
+            ? {
+                required: false,
+                default_home_ref: homeRef(homes[0].serial),
+              }
+            : {
+                required: true,
+                ...(configuredHomeUnavailable
+                  ? { reason: "configured_home_unavailable" }
+                  : {}),
+                options: homes.map((home) => ({
+                  home_ref: homeRef(home.serial),
+                  pin_value: home.serial,
+                })),
+              },
       freshness: freshness(observedAt),
     };
   }
@@ -481,7 +504,10 @@ export class SprutHubClient {
   }
 
   async listRooms() {
-    if (this.serial === null) throw homeSelectionRequired();
+    if (this.serial === null) {
+      if (this.#availableHomeCount === 0) throw noHomesAvailable();
+      throw homeSelectionRequired();
+    }
     const deadline = Date.now() + this.timeoutMs;
     const roomsResponse = await this.#request(
       { room: { list: {} } },
@@ -3137,6 +3163,15 @@ function homeSelectionRequired() {
     "Call list_homes, choose one exact home, follow selection.pin, restart the same MCP application, and retry this operation.",
     "list_homes",
     { next: { tool: "list_homes", arguments: {} } },
+  );
+}
+
+function noHomesAvailable() {
+  return new SprutHubError(
+    "no_homes_available",
+    "This SprutHub account has no available homes.",
+    "check_home_access",
+    { capability_status: "insufficient_access" },
   );
 }
 

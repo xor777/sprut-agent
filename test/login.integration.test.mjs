@@ -646,9 +646,7 @@ test("an invalid pin for one home still exposes the exact replacement", async (t
   assert.deepEqual(catalog.structuredContent.selection, {
     required: true,
     reason: "configured_home_unavailable",
-    options: [
-      { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
-    ],
+    options: [{ home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" }],
     pin: {
       source: "environment",
       field: "SPRUTHUB_SERIAL",
@@ -687,7 +685,11 @@ test("a complete MCP environment points home selection back to that environment"
     SPRUTHUB_URL: hub.url,
   };
 
-  const client = await startInstalledProfileClient(t, configRoot, connectionEnv);
+  const client = await startInstalledProfileClient(
+    t,
+    configRoot,
+    connectionEnv,
+  );
   const catalog = await client.callTool({ name: "list_homes", arguments: {} });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.deepEqual(catalog.structuredContent.selection.pin, {
