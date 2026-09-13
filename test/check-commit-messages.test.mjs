@@ -48,8 +48,10 @@ test("first push still rejects an invalid new commit message", async (t) => {
     DEFAULT_BRANCH: "main",
   });
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.output, /not a conventional new commit/);
+  assertRejectedByConventionalCommits(
+    result,
+    /not a conventional new commit/,
+  );
 });
 
 test("a later valid commit does not hide an invalid new commit in the same range", async (t) => {
@@ -65,12 +67,10 @@ test("a later valid commit does not hide an invalid new commit in the same range
     DEFAULT_BRANCH: "main",
   });
 
-  assert.notEqual(
-    result.status,
-    0,
-    `concatenated stdin would accept this range:\n${result.output}`,
+  assertRejectedByConventionalCommits(
+    result,
+    /not a conventional middle commit/,
   );
-  assert.match(result.output, /not a conventional middle commit/);
 });
 
 test("push of an existing branch lints only commits after the previous tip", async (t) => {
@@ -93,8 +93,7 @@ test("push of an existing branch lints only commits after the previous tip", asy
     HEAD_SHA: await sha(repo),
     DEFAULT_BRANCH: "main",
   });
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.output, /still not conventional/);
+  assertRejectedByConventionalCommits(rejected, /still not conventional/);
 });
 
 test("pull request range lints commits after the base tip", async (t) => {
@@ -116,8 +115,7 @@ test("pull request range lints commits after the base tip", async (t) => {
     HEAD_SHA: await sha(repo),
     DEFAULT_BRANCH: "main",
   });
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.output, /pr body without type/);
+  assertRejectedByConventionalCommits(rejected, /pr body without type/);
 });
 
 test("manual run with empty before SHA uses the default branch as the range base", async (t) => {
@@ -151,8 +149,7 @@ test("without an available base, an invalid head message is still rejected", asy
     DEFAULT_BRANCH: "main",
   });
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.output, /head without a type/);
+  assertRejectedByConventionalCommits(result, /head without a type/);
 });
 
 test("empty new range is accepted without treating from and to as one commit", async (t) => {
@@ -210,6 +207,17 @@ function git(repo, ...args) {
       GIT_TERMINAL_PROMPT: "0",
     },
   });
+}
+
+function assertRejectedByConventionalCommits(result, message) {
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, message);
+  // Empty-rules still echoes the input and exits 9; rule names prove the conventional config loaded.
+  assert.match(
+    result.output,
+    /\[(?:type-empty|subject-empty|type-enum)\]/,
+    `rejection must come from Conventional Commits rules:\n${result.output}`,
+  );
 }
 
 async function check(repo, env) {
