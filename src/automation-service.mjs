@@ -3990,7 +3990,9 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
+        const rejection = confirmedScenarioRunRejection(error);
         await this.#finishNative(change, "not_applied", undefined, {
+          ...(rejection ? { run_rejection: rejection } : {}),
           last_verification: failedVerification(error),
         });
         throw error;
@@ -4007,9 +4009,7 @@ export class AutomationService {
       target_observations: observations,
       configuration_matches: true,
       last_verification: freshVerification(
-        observations.every(({ matches }) => matches === true)
-          ? "command_acknowledged_and_target_values_observed"
-          : "command_acknowledged_with_target_value_difference",
+        scenarioRunObservationResult(observations),
       ),
     });
   }
@@ -5573,6 +5573,8 @@ function scenarioRunContract() {
       "one send per prepared change; prepare a new change for each explicit run",
     delivery: {
       acknowledged: "native scenario.run ACK received",
+      rejected:
+        "SprutHub returned an explicit rejection; its code remains available in history",
       unknown: "request may have run but ACK was lost; never retry this change",
       target_readback:
         "fresh values are reported separately and do not prove physical or atomic delivery",
@@ -7378,6 +7380,40 @@ function failedVerification(error) {
   };
 }
 
+function confirmedScenarioRunRejection(error) {
+  if (
+    !(error instanceof SprutHubError) ||
+    !["authentication_failed", "request_rejected", "unsupported"].includes(
+      error.code,
+    )
+  ) {
+    return null;
+  }
+  return {
+    code: error.code,
+    ...(error.protocolErrorCode !== undefined
+      ? { protocol_code: error.protocolErrorCode }
+      : {}),
+    ...(error.action ? { action: error.action } : {}),
+  };
+}
+
+function scenarioRunObservationResult(observations) {
+  if (observations.every(({ matches }) => matches === true)) {
+    return "command_acknowledged_and_target_values_observed";
+  }
+  const hasDifference = observations.some(({ matches }) => matches === false);
+  const hasIncompleteReadback = observations.some(
+    ({ matches }) => matches === null,
+  );
+  if (hasDifference && hasIncompleteReadback) {
+    return "command_acknowledged_with_target_value_difference_and_incomplete_readback";
+  }
+  return hasDifference
+    ? "command_acknowledged_with_target_value_difference"
+    : "command_acknowledged_with_incomplete_target_readback";
+}
+
 function savedVerification(verification) {
   return verification
     ? { ...structuredClone(verification), fresh: false }
@@ -8439,13 +8475,17 @@ function publicNativeChange(
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       command_delivery: {
-        status:
-          change.native_acknowledged === true
+        status: change.run_rejection
+          ? "rejected"
+          : change.native_acknowledged === true
             ? "acknowledged"
             : change.native_write_sent === true
               ? "unknown"
               : "not_sent",
         native_acknowledged: change.native_acknowledged === true,
+        ...(change.run_rejection
+          ? { rejection: structuredClone(change.run_rejection) }
+          : {}),
         physical_delivery: "not_proven",
         atomic: false,
       },
