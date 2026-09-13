@@ -1,3 +1,4 @@
+// Kept outside test/ so `npm test` stays Node/npm-only. Run with `npm run test:codex-install`.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
