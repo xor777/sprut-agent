@@ -5239,7 +5239,7 @@ test("versioned BLOCK contract prepares different supported compositions", async
   });
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.equal(contract.structuredContent.status, "ok");
-  assert.equal(contract.structuredContent.contract.version, "2026-09-10");
+  assert.equal(contract.structuredContent.contract.version, "2026-09-13");
   assert.equal(
     contract.structuredContent.contract.source.frontend_sha256,
     "81c1ef74ce21eb5ccff583255ba82fe766ff4cf6bc251c0566b7bd67436647f8",
@@ -5309,17 +5309,20 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   });
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.equal(contract.structuredContent.contract.version, "2026-09-13");
-  assert.deepEqual(contract.structuredContent.contract.supported.daily_interval, {
-    local_time: "HH:mm",
-    start_and_end: "distinct",
-    crosses_midnight: true,
-    native_trigger: true,
-    cron: {
-      seconds: 0,
-      mode: "NONE",
-      offset: 0,
+  assert.deepEqual(
+    contract.structuredContent.contract.supported.daily_interval,
+    {
+      local_time: "HH:mm",
+      start_and_end: "distinct",
+      crosses_midnight: true,
+      native_trigger: true,
+      cron: {
+        seconds: 0,
+        mode: "NONE",
+        offset: 0,
+      },
     },
-  });
+  );
 
   const preparedCreate = await firstClient.callTool({
     name: "prepare_native_change",
@@ -5327,7 +5330,8 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
       operation: "block_create",
       target_ref: homeRef,
       name: "Ночной режим света",
-      description: "Снижать освещение ночью и возвращать дневное значение утром",
+      description:
+        "Снижать освещение ночью и возвращать дневное значение утром",
       active: true,
       on_start: false,
       sync: false,
@@ -5387,6 +5391,27 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   });
   assert.equal(observed.structuredContent.status, "applied");
   assert.equal(observed.structuredContent.configuration_matches, true);
+  const unrelatedSourceHistory = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: motionCharacteristicRef },
+  });
+  assert.deepEqual(unrelatedSourceHistory.structuredContent.changes, []);
+
+  const unsafePause = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: created.structuredContent.scenario_ref,
+      action_pointer: "/targets/0",
+      duration_seconds: 60,
+      reason: "Не прятать регистрацию временного триггера в паузу",
+    },
+  });
+  assert.equal(unsafePause.isError, true);
+  assert.equal(
+    unsafePause.structuredContent.error.code,
+    "unsupported_pause_trigger_scope",
+  );
 
   const daytimeData = dailyIntervalBlockData({
     start: [6, 15],
@@ -5414,6 +5439,27 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   });
   assert.equal(updated.structuredContent.status, "applied");
   assert.equal(updated.structuredContent.configuration_matches, true);
+
+  const appliedDaytimeData = hub.state.scenarios.find(
+    ({ index }) => index === created.structuredContent.scenario_index,
+  ).data;
+  const manualEdit = JSON.parse(appliedDaytimeData);
+  manualEdit.targets[0].if.conditions[0].end.cron = "0 45 22 ? * * *";
+  hub.state.scenarios.find(
+    ({ index }) => index === created.structuredContent.scenario_index,
+  ).data = JSON.stringify(manualEdit);
+  const protectedManualEdit = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: preparedUpdate.structuredContent.change_ref },
+  });
+  assert.equal(protectedManualEdit.structuredContent.status, "conflict");
+  assert.equal(
+    protectedManualEdit.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  hub.state.scenarios.find(
+    ({ index }) => index === created.structuredContent.scenario_index,
+  ).data = appliedDaytimeData;
 
   const restoredUpdate = await secondClient.callTool({
     name: "restore_native_change",
@@ -5444,6 +5490,11 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
     hub.requests.some(({ characteristic }) => characteristic?.update),
     false,
     "removing the schedule must not write a prior physical value",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create).length,
+    1,
+    "the next dialog must update the found owned scenario, not create a duplicate",
   );
 });
 
@@ -5479,6 +5530,17 @@ test("daily interval BLOCK rejects ambiguous or unsupported schedules before sen
       name: "not a trigger",
       mutate: (data) => {
         data.targets[0].if.conditions[0].trigger = false;
+      },
+    },
+    {
+      name: "second interval",
+      mutate: (data) => {
+        data.targets[0].if.conditions.push({
+          type: "interval",
+          start: dailyCron(8, 0),
+          end: dailyCron(9, 0),
+          trigger: false,
+        });
       },
     },
   ];

@@ -5532,7 +5532,7 @@ function requiredNativeName(value, operation) {
 
 function blockContract() {
   return {
-    version: "2026-09-10",
+    version: "2026-09-13",
     source: {
       frontend_sha256:
         "81c1ef74ce21eb5ccff583255ba82fe766ff4cf6bc251c0566b7bd67436647f8",
@@ -5554,11 +5554,31 @@ function blockContract() {
         time: 0,
         time_condition: "",
       },
-      nesting: ["if.then", "if.else", "delay.targets", "condition.conditions"],
+      daily_interval: {
+        local_time: "HH:mm",
+        start_and_end: "distinct",
+        crosses_midnight: true,
+        native_trigger: true,
+        cron: {
+          seconds: 0,
+          mode: "NONE",
+          offset: 0,
+        },
+      },
+      nesting: [
+        "if.then",
+        "if.else",
+        "delay.targets",
+        "condition.conditions",
+        "interval.start",
+        "interval.end",
+      ],
     },
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
-      "A conditional BLOCK requires at least one characteristic condition with trigger=true; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
+      "A conditional BLOCK requires at least one characteristic or daily interval condition with trigger=true; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
+      "Daily interval HH:mm values use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
+      "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
       "Only full data replacement is supported for an existing BLOCK; top-level rename and flag updates are not supported.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
@@ -5681,6 +5701,7 @@ async function validateBlockData(
     conditions: [],
     actions: [],
     delayIndexes: new Set(),
+    intervals: 0,
     triggers: 0,
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
       allowedIntentId: allowedPauseIntentId,
@@ -5944,6 +5965,30 @@ function validateBlockNode(node, kind, path, context) {
     });
     return;
   }
+  if (kind === "interval") {
+    if (
+      typeof node.trigger !== "boolean" ||
+      !isRecord(node.start) ||
+      !isRecord(node.end)
+    ) {
+      throw invalidBlock(path, "daily interval condition is incomplete");
+    }
+    context.intervals += 1;
+    if (context.intervals > 1) {
+      throw invalidBlock(path, "only one daily interval is supported");
+    }
+    const start = parseDailyCron(node.start, `${path}.start`);
+    const end = parseDailyCron(node.end, `${path}.end`);
+    if (start.hour === end.hour && start.minute === end.minute) {
+      throw invalidBlock(path, "daily interval start and end must differ");
+    }
+    if (node.trigger) context.triggers += 1;
+    return;
+  }
+  if (kind === "cron") {
+    parseDailyCron(node, path);
+    return;
+  }
   if (kind === "service") {
     if (
       !stableNativeId(node.aId) ||
@@ -6001,6 +6046,29 @@ function validateBlockNode(node, kind, path, context) {
   throw invalidBlock(path, `node type ${kind ?? "missing"} is not supported`);
 }
 
+function parseDailyCron(node, path) {
+  if (
+    !isRecord(node) ||
+    node.type !== "cron" ||
+    node.mode !== "NONE" ||
+    node.offset !== 0 ||
+    typeof node.cron !== "string"
+  ) {
+    throw invalidBlock(
+      path,
+      "daily cron requires mode NONE, offset 0, and a cron string",
+    );
+  }
+  const match = /^0 ([0-5]?\d) ([01]?\d|2[0-3]) \? \* \* \*$/.exec(node.cron);
+  if (!match) {
+    throw invalidBlock(
+      path,
+      "daily cron must contain zero seconds and one local HH:mm every day",
+    );
+  }
+  return { minute: Number(match[1]), hour: Number(match[2]) };
+}
+
 function blockNode(value) {
   return isRecord(value) && typeof value.type === "string";
 }
@@ -6038,6 +6106,8 @@ const BLOCK_ALLOWED_KEYS = {
     "timeCond",
     "time",
   ]),
+  interval: new Set(["type", "blockId", "start", "end", "trigger"]),
+  cron: new Set(["type", "blockId", "mode", "cron", "offset"]),
   service: new Set(["type", "blockId", "aId", "sId", "hs", "characteristics"]),
   set: new Set(["type", "blockId", "cId", "hc", "value"]),
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
@@ -6248,7 +6318,10 @@ function inspectPauseOwnership(
 function ensurePauseableTriggerScope(data, node, pointer) {
   let containsTrigger = false;
   visitKnownBlockNodes({ targets: [node] }, (candidate, kind) => {
-    if (kind === "characteristic" && candidate.trigger === true) {
+    if (
+      ["characteristic", "interval"].includes(kind) &&
+      candidate.trigger === true
+    ) {
       containsTrigger = true;
     }
   });
@@ -6278,7 +6351,10 @@ function ensurePauseableTriggerScope(data, node, pointer) {
 function blockSubgraphContainsTrigger(node) {
   let containsTrigger = false;
   visitKnownBlockNodes({ targets: [node] }, (candidate, kind) => {
-    if (kind === "characteristic" && candidate.trigger === true) {
+    if (
+      ["characteristic", "interval"].includes(kind) &&
+      candidate.trigger === true
+    ) {
       containsTrigger = true;
     }
   });

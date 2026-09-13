@@ -14,8 +14,12 @@ export const BLOCK_CHILD_FIELDS = {
   condition: {
     conditions: {
       shape: "array",
-      kinds: new Set(["condition", "characteristic", "code"]),
+      kinds: new Set(["condition", "characteristic", "interval", "code"]),
     },
+  },
+  interval: {
+    start: { shape: "single", kinds: new Set(["cron"]) },
+    end: { shape: "single", kinds: new Set(["cron"]) },
   },
   service: {
     characteristics: { shape: "array", kinds: new Set(["set"]) },
