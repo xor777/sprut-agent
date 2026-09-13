@@ -999,9 +999,10 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
 
   assert.deepEqual(entity.current_value, {
     value: false,
-    source: "characteristic",
     source_timestamp: null,
   });
+  assert.equal(entity.capabilities.unit, "boolean");
+  assert.equal(typeof entity.freshness.observed_at, "string");
   assert.deepEqual(entity.options, [
     {
       key: "SwitchOffTime",
@@ -1098,7 +1099,6 @@ test("raw device-window diagnostics preserve text without claiming a device repo
   assert.equal(direct.isError, undefined, direct.content[0]?.text);
   assert.deepEqual(direct.structuredContent.entity.current_value, {
     value: false,
-    source: "characteristic",
     source_timestamp: null,
   });
   assert.equal(

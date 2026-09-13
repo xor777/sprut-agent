@@ -3616,6 +3616,15 @@ test("a characteristic value uses one recoverable native change path", async (t)
     15,
     "a separate readback must follow the native ACK",
   );
+  const readback = await firstClient.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef },
+  });
+  assert.equal(readback.isError, undefined, readback.content[0]?.text);
+  assert.deepEqual(readback.structuredContent.entity.current_value, {
+    value: true,
+    source_timestamp: null,
+  });
 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
@@ -3757,6 +3766,7 @@ test("native characteristic choices expose only values that can be prepared", as
     minValue: 0,
     maxValue: 2,
     minStep: 1,
+    unit: "mode",
     value: { intValue: 0 },
     validValues: [
       {
@@ -3790,9 +3800,17 @@ test("native characteristic choices expose only values that can be prepared", as
   assert.deepEqual(detail.structuredContent.entity.current_value, {
     value: 0,
     enum: { key: "AUTO", name: "Авто" },
-    source: "characteristic",
     source_timestamp: null,
   });
+  assert.equal(detail.structuredContent.entity.capabilities.unit, "mode");
+  assert.equal(
+    detail.structuredContent.entity.freshness.source_timestamp,
+    null,
+  );
+  assert.equal(
+    typeof detail.structuredContent.entity.freshness.observed_at,
+    "string",
+  );
   assert.deepEqual(detail.structuredContent.entity.capabilities.valid_values, [
     { key: "HEAT", name: "Нагрев", value: 1 },
     { key: "COOL", name: "Охлаждение", value: 2 },
