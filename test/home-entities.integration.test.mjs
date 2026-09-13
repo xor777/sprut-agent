@@ -2950,10 +2950,7 @@ test("pairing PIN codes stay redacted while ordinary window settings remain read
     },
   });
   assert.equal(child.isError, true);
-  assert.equal(
-    child.structuredContent.error.code,
-    "entity_pointer_redacted",
-  );
+  assert.equal(child.structuredContent.error.code, "entity_pointer_redacted");
   assert.doesNotMatch(
     JSON.stringify(child),
     /pairing-code-secret-must-not-leak/,

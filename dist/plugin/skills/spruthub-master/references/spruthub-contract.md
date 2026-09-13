@@ -54,7 +54,7 @@
 - `freshness.hubResponseReceivedAt` — время получения ответа. `measurementAt: null` или `source_timestamp: null` означает, что время источника неизвестно.
 - Configured value, диагностический report и `pending: unknown` не выводятся друг из друга.
 - GROUP layout, BUTTON command и NUMBER setting — разные классы данных. Нельзя объявлять команду текущей конфигурацией.
-- Диагностика и код раскрываются только по явному include. Каждый возвращённый raw diagnostics fragment имеет `content_origin: spruthub_device_window_diagnostics`, `semantic_status: uninterpreted`, `source_timestamp: null` и `direct_device_report: not_established`: это непротрактованный redacted-текст окна устройства в хабе, а не typed reading или подтверждённое прямое сообщение прибора. Время получения ответа клиентом не является временем источника. Sensitive native entity возвращается терминальным redacted marker; не пытайся восстановить скрытых потомков или identifiers.
+- Диагностика и код раскрываются только по явному include. Каждый возвращённый raw diagnostics fragment имеет `content_origin: spruthub_device_window_diagnostics`, `semantic_status: uninterpreted`, `source_timestamp: null` и `direct_device_report: not_established`: это непротрактованный redacted-текст окна устройства в хабе, а не typed reading или подтверждённое прямое сообщение прибора. Время получения ответа клиентом не является временем источника. Sensitive native entity возвращается терминальным redacted marker; не пытайся восстановить скрытых потомков или identifiers. Код привязки клиента (pairing PIN/code, включая `PinCode`) скрывается даже при `input_type=STATUS`; обычные числа и hardware pin остаются видимыми.
 
 
 ## Поддержанная запись

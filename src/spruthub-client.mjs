@@ -4111,19 +4111,38 @@ function isRedactedNode(value) {
 const sensitiveKeyPattern =
   /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i;
 function isSensitiveKey(key) {
-  return sensitiveKeyPattern.test(key);
+  return sensitiveKeyPattern.test(key) || isPairingCodeKey(key);
 }
 
-function isSensitiveAssignmentKey(key) {
-  // A text match hides the whole source, while a structural match only hides
-  // one node, so text requires a complete credential-shaped name.
-  const parts = key
+function credentialKeyParts(key) {
+  return key
     .trim()
     .replace(/([a-z\d])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .split(/[_\s-]+/)
     .map((part) => part.replace(/^\$+/u, "").toLowerCase())
     .filter(Boolean);
+}
+
+function isPairingCodeKey(key) {
+  // Pairing PIN/code adds a client. The hub may expose it as STATUS, so
+  // PASSWORD inputType is not enough. Hardware pin numbers stay visible.
+  const parts = credentialKeyParts(key);
+  const last = parts.at(-1);
+  if (last == null) return false;
+  if (["pincode", "paircode", "pairingcode"].includes(last)) return true;
+  if (last === "code") {
+    return parts.some((part) => ["pin", "pair", "pairing"].includes(part));
+  }
+  return (
+    last === "pin" && parts.some((part) => ["pair", "pairing"].includes(part))
+  );
+}
+
+function isSensitiveAssignmentKey(key) {
+  // A text match hides the whole source, while a structural match only hides
+  // one node, so text requires a complete credential-shaped name.
+  const parts = credentialKeyParts(key);
   const last = parts.at(-1);
   if (
     [
@@ -4144,6 +4163,7 @@ function isSensitiveAssignmentKey(key) {
   ) {
     return true;
   }
+  if (isPairingCodeKey(key)) return true;
   return (
     last === "key" &&
     parts.some((part) => ["access", "api", "private", "secret"].includes(part))
