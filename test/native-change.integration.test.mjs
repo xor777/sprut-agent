@@ -5464,8 +5464,7 @@ test("prepared BLOCK changes preserve typed branch commands and their preparatio
         comparison_to_observation: "equal",
       },
       {
-        configuration_pointer:
-          "/targets/0/then/1/targets/0/characteristics/0",
+        configuration_pointer: "/targets/0/then/1/targets/0/characteristics/0",
         command: {
           kind: "boolValue",
           value: false,

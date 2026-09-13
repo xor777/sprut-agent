@@ -861,6 +861,11 @@ export class AutomationService {
         type: "BLOCK",
         data,
       },
+      block_action_preview: blockActionPreview(
+        validation,
+        configuredHomeRef(this.hubSerial),
+        now,
+      ),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -869,7 +874,9 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    return publicNativeChange(change);
+    return publicNativeChange(change, undefined, {
+      blockActionSnapshotFresh: true,
+    });
   }
 
   async #prepareBlockUpdate(input) {
@@ -911,6 +918,11 @@ export class AutomationService {
       reason: input.reason,
       baseline_snapshot: baseline,
       requested_snapshot: { ...structuredClone(baseline), data },
+      block_action_preview: blockActionPreview(
+        validation,
+        configuredHomeRef(this.hubSerial),
+        now,
+      ),
       ...(prepared.pauseOutcomes.length > 0
         ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
@@ -922,7 +934,9 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    return publicNativeChange(change);
+    return publicNativeChange(change, undefined, {
+      blockActionSnapshotFresh: true,
+    });
   }
 
   async #prepareBlockActionPause(input) {
@@ -5781,7 +5795,12 @@ async function validateBlockData(
     const contract = characteristicContract(characteristic.control, {
       requireWrite: reference.role === "action",
     });
-    if (reference.role === "action") reference.contract_kind = contract.kind;
+    if (reference.role === "action") {
+      reference.contract_kind = contract.kind;
+      reference.observed_value = observableBlockValue(
+        characteristic.control.value,
+      );
+    }
     const value = parseBlockValue(reference.value, contract.kind);
     if (reference.role === "action") reference.parsed_value = value;
     validateCharacteristicValue(value, contract);
@@ -5824,6 +5843,46 @@ async function validateBlockData(
     );
   }
   return context;
+}
+
+function observableBlockValue(value) {
+  const typed = typedNativeValue(value);
+  const validation = validateNativeScalarValue(typed.value, {
+    kind: typed.kind,
+  });
+  return validation.valid ? validation.value : null;
+}
+
+function blockActionPreview(validation, homeRef, capturedAt) {
+  return {
+    snapshot: {
+      source: "accessory_read_during_preparation",
+      captured_at: capturedAt,
+    },
+    actions: validation.actions.map((action) => {
+      const command = {
+        value: action.parsed_value,
+        kind: action.contract_kind,
+        execution: "write_if_action_runs",
+      };
+      const observation = action.observed_value
+        ? { status: "available", ...action.observed_value }
+        : { status: "unavailable" };
+      return {
+        configuration_pointer: blockPathToPointer(action.path),
+        characteristic_ref: `${homeRef}/accessory/${action.aId}/service/${action.sId}/characteristic/${action.cId}`,
+        service_type: action.hs,
+        characteristic_type: action.hc,
+        command,
+        observation,
+        comparison_to_observation: action.observed_value
+          ? valuesEqual(command, action.observed_value)
+            ? "equal"
+            : "different"
+          : "unknown",
+      };
+    }),
+  };
 }
 
 async function validateScenarioRun(snapshot, client) {
@@ -8164,6 +8223,16 @@ function publicStoredNativeChange(change) {
   });
 }
 
+function publicBlockActionPreview(change, fresh) {
+  return {
+    snapshot: {
+      ...structuredClone(change.block_action_preview.snapshot),
+      fresh,
+    },
+    actions: structuredClone(change.block_action_preview.actions),
+  };
+}
+
 function publicNativeChange(
   change,
   observedValue = change.observed_value,
@@ -8659,6 +8728,14 @@ function publicNativeChange(
       reason: change.reason,
       target_ref: change.target_ref,
       diff,
+      ...(change.block_action_preview
+        ? {
+            block_action_preview: publicBlockActionPreview(
+              change,
+              options.blockActionSnapshotFresh === true,
+            ),
+          }
+        : {}),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent
@@ -8682,6 +8759,13 @@ function publicNativeChange(
         : {}),
       restore_supported: true,
       limitations: [
+        ...(change.block_action_preview
+          ? [
+              "Every listed service/set remains a write when its enclosing action runs; equality with the preparation observation is not a no-op or a manual-control guarantee.",
+              "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
+              "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
+            ]
+          : []),
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
         "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
       ],
