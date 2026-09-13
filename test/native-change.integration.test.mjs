@@ -406,6 +406,240 @@ function dailyCron(hour, minute) {
   };
 }
 
+function parseNativeRefIds(ref) {
+  const match =
+    /\/accessory\/(\d+)\/service\/(\d+)(?:\/characteristic\/(\d+))?$/.exec(ref);
+  assert.ok(match, `unexpected native ref: ${ref}`);
+  return {
+    aId: Number(match[1]),
+    sId: Number(match[2]),
+    ...(match[3] === undefined ? {} : { cId: Number(match[3]) }),
+  };
+}
+
+function publishedBlockNode(contract, kind) {
+  const node = contract.supported?.nodes?.[kind];
+  if (node === null || typeof node !== "object" || Array.isArray(node)) {
+    throw new Error(`BLOCK contract does not publish node ${kind}`);
+  }
+  return node;
+}
+
+function publishedChild(form, field, shape) {
+  const rule = form.children?.[field];
+  if (
+    rule === null ||
+    typeof rule !== "object" ||
+    Array.isArray(rule) ||
+    rule.shape !== shape ||
+    !Array.isArray(rule.types)
+  ) {
+    throw new Error(
+      `BLOCK ${form.type ?? "root"} does not publish ${shape} child ${field}`,
+    );
+  }
+  return rule;
+}
+
+function publishedPredicateField(form, childType) {
+  const matches = Object.entries(form.children ?? {}).filter(
+    ([, rule]) =>
+      rule?.shape === "single" &&
+      Array.isArray(rule.types) &&
+      rule.types.includes(childType),
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `BLOCK ${form.type ?? "root"} does not publish one scalar child for ${childType}`,
+    );
+  }
+  return matches[0][0];
+}
+
+function publishedNativeIds(form, ids) {
+  if (!Array.isArray(form.native_ids) || form.native_ids.length === 0) {
+    throw new Error(`BLOCK ${form.type} does not publish native_ids`);
+  }
+  const selected = {};
+  for (const key of form.native_ids) {
+    if (!Number.isSafeInteger(ids[key])) {
+      throw new Error(`missing native id ${key} for ${form.type}`);
+    }
+    selected[key] = ids[key];
+  }
+  return selected;
+}
+
+function publishedScalarString(form, value) {
+  if (form.value_encoding !== "native_scalar_as_string") {
+    throw new Error(
+      `BLOCK ${form.type} does not publish string value encoding`,
+    );
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return value;
+  throw new Error(`unsupported ${form.type} value`);
+}
+
+function assembleCronFromContract(contract, hhmm) {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const form = publishedBlockNode(contract, "cron");
+  const template =
+    contract.supported?.daily_interval?.native_shape?.start ??
+    contract.supported?.daily_interval?.native_shape?.end;
+  if (template === null || typeof template !== "object") {
+    throw new Error("BLOCK contract does not publish daily cron shape");
+  }
+  return {
+    ...structuredClone(template),
+    ...structuredClone(form.constants ?? {}),
+    cron: String(template.cron)
+      .replace("MM", String(minute))
+      .replace("HH", String(hour)),
+  };
+}
+
+function assembleIntervalFromContract(contract, { start, end, trigger }) {
+  const form = publishedBlockNode(contract, "interval");
+  const startField = "start";
+  const endField = "end";
+  publishedChild(form, startField, "single");
+  publishedChild(form, endField, "single");
+  if (form.fields?.trigger !== "boolean") {
+    throw new Error("BLOCK interval does not publish trigger");
+  }
+  return {
+    type: form.type,
+    trigger,
+    [startField]: assembleCronFromContract(contract, start),
+    [endField]: assembleCronFromContract(contract, end),
+  };
+}
+
+function assembleCharacteristicFromContract(
+  contract,
+  { ref, hs, hc, trigger, cond, value },
+) {
+  const form = publishedBlockNode(contract, "characteristic");
+  return {
+    type: form.type,
+    ...publishedNativeIds(form, parseNativeRefIds(ref)),
+    hs,
+    hc,
+    trigger,
+    cond,
+    value: publishedScalarString(form, value),
+    ...structuredClone(form.constants ?? {}),
+  };
+}
+
+function assembleServiceSetFromContract(contract, { ref, hs, hc, value }) {
+  const serviceForm = publishedBlockNode(contract, "service");
+  const setForm = publishedBlockNode(contract, "set");
+  const ids = parseNativeRefIds(ref);
+  const setField = Object.entries(serviceForm.children ?? {}).find(
+    ([, rule]) =>
+      rule?.shape === "array" &&
+      Array.isArray(rule.types) &&
+      rule.types.includes("set"),
+  )?.[0];
+  if (setField === undefined) {
+    throw new Error("BLOCK service does not publish set children");
+  }
+  return {
+    type: serviceForm.type,
+    ...publishedNativeIds(serviceForm, ids),
+    hs,
+    [setField]: [
+      {
+        type: setForm.type,
+        ...publishedNativeIds(setForm, ids),
+        hc,
+        value: publishedScalarString(setForm, value),
+      },
+    ],
+  };
+}
+
+function assembleDelayFromContract(contract, { time, targets }) {
+  const form = publishedBlockNode(contract, "delay");
+  const targetsField = Object.entries(form.children ?? {}).find(
+    ([, rule]) =>
+      rule?.shape === "array" &&
+      Array.isArray(rule.types) &&
+      rule.types.includes(targets[0]?.type),
+  )?.[0];
+  if (targetsField === undefined) {
+    throw new Error("BLOCK delay does not publish action children");
+  }
+  if (
+    form.fields?.index?.type !== "integer" ||
+    form.fields?.time?.type !== "integer"
+  ) {
+    throw new Error("BLOCK delay does not publish index and time");
+  }
+  return {
+    type: form.type,
+    ...structuredClone(form.constants ?? {}),
+    index: form.fields.index.minimum,
+    time,
+    [targetsField]: targets,
+  };
+}
+
+function assembleConditionFromContract(contract, children) {
+  const form = publishedBlockNode(contract, "condition");
+  const conditionsField = Object.entries(form.children ?? {}).find(
+    ([, rule]) =>
+      rule?.shape === "array" &&
+      Array.isArray(rule.types) &&
+      children.every((child) => rule.types.includes(child.type)),
+  )?.[0];
+  if (conditionsField === undefined) {
+    throw new Error("BLOCK condition does not publish nested conditions");
+  }
+  const modes = form.fields?.mode;
+  if (!Array.isArray(modes) || !modes.includes("AND")) {
+    throw new Error("BLOCK condition does not publish AND/OR modes");
+  }
+  return {
+    type: form.type,
+    mode: "AND",
+    [conditionsField]: children,
+  };
+}
+
+function assembleIfFromContract(contract, { when, thenActions, elseActions }) {
+  const form = publishedBlockNode(contract, "if");
+  const predicateField = publishedPredicateField(form, when.type);
+  const thenField = "then";
+  const elseField = "else";
+  publishedChild(form, thenField, "array");
+  publishedChild(form, elseField, "array");
+  return {
+    type: form.type,
+    ...structuredClone(form.constants ?? {}),
+    [predicateField]: when,
+    [thenField]: thenActions,
+    [elseField]: elseActions,
+  };
+}
+
+function assembleSupportedBlockFromContract(contract, { targets }) {
+  const form = publishedBlockNode(contract, "root");
+  const targetsField = Object.entries(form.children ?? {}).find(
+    ([, rule]) =>
+      rule?.shape === "array" &&
+      Array.isArray(rule.types) &&
+      targets.every((child) => rule.types.includes(child.type)),
+  )?.[0];
+  if (targetsField === undefined) {
+    throw new Error("BLOCK root does not publish supported targets");
+  }
+  return { [targetsField]: targets };
+}
+
 function dailyIntervalBlockData({
   start = [22, 30],
   end = [6, 15],
@@ -5714,6 +5948,192 @@ test("daily interval contract lets a client repair cron before preparation", asy
   assert.equal(corrected.isError, undefined, corrected.content[0]?.text);
   assert.equal(corrected.structuredContent.status, "prepared");
   assert.equal(corrected.structuredContent.native_write_sent, false);
+});
+
+test("a client can assemble a supported BLOCK from the public contract without a sample scenario", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios = [];
+  const client = await startClient(t, hub, stateDirectory);
+  const brightnessRef = `${homeRef}/accessory/34/service/13/characteristic/16`;
+  const modeRef = `${homeRef}/accessory/34/service/13/characteristic/18`;
+  const motionServiceRef = `${homeRef}/accessory/32/service/13`;
+
+  const contractResult = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "block_create" },
+  });
+  assert.equal(
+    contractResult.isError,
+    undefined,
+    contractResult.content[0]?.text,
+  );
+  const contract = contractResult.structuredContent.contract;
+
+  const entityRefs = [
+    motionServiceRef,
+    serviceRef,
+    motionCharacteristicRef,
+    characteristicRef,
+  ];
+  const [motionService, lampService, motion, lampOn] = await Promise.all(
+    entityRefs.map((entity_ref) =>
+      client.callTool({ name: "get_entity", arguments: { entity_ref } }),
+    ),
+  );
+  for (const result of [motionService, lampService, motion, lampOn]) {
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+  }
+  assert.equal(
+    contract.supported.characteristic_conditions.boolean.includes("="),
+    true,
+  );
+
+  const data = assembleSupportedBlockFromContract(contract, {
+    targets: [
+      assembleIfFromContract(contract, {
+        when: assembleConditionFromContract(contract, [
+          assembleIntervalFromContract(contract, {
+            start: "22:30",
+            end: "06:15",
+            trigger: true,
+          }),
+          assembleCharacteristicFromContract(contract, {
+            ref: motionCharacteristicRef,
+            hs: motionService.structuredContent.entity.type,
+            hc: motion.structuredContent.entity.type,
+            trigger: false,
+            cond: "=",
+            value: true,
+          }),
+        ]),
+        thenActions: [
+          assembleServiceSetFromContract(contract, {
+            ref: characteristicRef,
+            hs: lampService.structuredContent.entity.type,
+            hc: lampOn.structuredContent.entity.type,
+            value: true,
+          }),
+        ],
+        elseActions: [
+          assembleDelayFromContract(contract, {
+            time: 60_000,
+            targets: [
+              assembleServiceSetFromContract(contract, {
+                ref: characteristicRef,
+                hs: lampService.structuredContent.entity.type,
+                hc: lampOn.structuredContent.entity.type,
+                value: false,
+              }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Ночной свет по движению",
+      description:
+        "Включать лампу ночью при движении и выключать вне этого условия, не трогая яркость",
+      active: true,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Собрать поддержанный BLOCK по публичному контракту",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.equal(prepared.structuredContent.native_write_sent, false);
+
+  const actions = prepared.structuredContent.block_action_preview.actions;
+  assert.equal(actions.length, 2);
+  const nightOn = actions.find(({ command }) => command.value === true);
+  const delayedOff = actions.find(({ command }) => command.value === false);
+  assert.deepEqual(
+    {
+      ref: nightOn.characteristic_ref,
+      type: nightOn.characteristic_type,
+      service: nightOn.service_type,
+      kind: nightOn.command.kind,
+      value: nightOn.command.value,
+    },
+    {
+      ref: characteristicRef,
+      type: lampOn.structuredContent.entity.type,
+      service: lampService.structuredContent.entity.type,
+      kind: "boolValue",
+      value: true,
+    },
+  );
+  assert.match(nightOn.configuration_pointer, /\/then\//);
+  assert.equal(/\/else\//.test(nightOn.configuration_pointer), false);
+  assert.deepEqual(
+    {
+      ref: delayedOff.characteristic_ref,
+      type: delayedOff.characteristic_type,
+      value: delayedOff.command.value,
+    },
+    {
+      ref: characteristicRef,
+      type: lampOn.structuredContent.entity.type,
+      value: false,
+    },
+  );
+  assert.match(delayedOff.configuration_pointer, /\/else\//);
+  assert.match(delayedOff.configuration_pointer, /\/targets\//);
+  assert.equal(
+    actions.some(({ characteristic_ref: ref }) =>
+      [brightnessRef, modeRef].includes(ref),
+    ),
+    false,
+    "neighboring Brightness and TargetMode must stay unwritten",
+  );
+
+  const guessed = structuredClone(data);
+  guessed.targets[0].conditions = guessed.targets[0].if.conditions;
+  delete guessed.targets[0].if;
+  const rejected = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Угаданная форма if",
+      description: "condition/conditions вместо опубликованного if",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: guessed,
+      reason: "Не отправлять неподдержанную native форму",
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "invalid_block_data");
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+
+  const liveDerived = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Уже проверенная interval-форма",
+      description: "Существующая live-derived форма остаётся допустимой",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: dailyIntervalBlockData(),
+      reason: "Не отвергать ранее принятую native форму",
+    },
+  });
+  assert.equal(liveDerived.isError, undefined, liveDerived.content[0]?.text);
+  assert.equal(liveDerived.structuredContent.status, "prepared");
 });
 
 test("daily interval BLOCK completes create, find, update, readback, and restore without device writes", async (t) => {
