@@ -58,9 +58,13 @@
   `characteristic`, `service`, `set`, `delay`, `interval` и `cron` возвращает
   свежий контракт в `supported.nodes`: обязательные поля и константы,
   scalar/array children, native types, строковые значения и отдельно
-  `editor_optional` (`blockId`, runtime `state`). Предикат ветки — поле `if`,
-  не `condition`/`conditions`. Не копируй чужой BLOCK как образец синтаксиса:
-  актуальные поля даёт контракт, а не эта карточка.
+  `editor_optional` (`blockId`). `if.state` — серверное `hub_assigned` поле,
+  при create его опускают. `hs`/`hc` берутся из `get_entity.entity.type`
+  сервиса и характеристики, не из имени. `delay.time` — миллисекунды; не
+  подставляй секунды из `auto_off_after_seconds`. Boolean/число/строка в
+  `value` — native scalar строкой (`true`/`false`, целое без точки). Предикат
+  ветки — поле `if`, не `condition`/`conditions`. Не копируй чужой BLOCK как
+  образец синтаксиса: актуальные поля даёт контракт, а не эта карточка.
 - BLOCK manifest версии `2026-09-13` допускает `root.targets`, вложенные `if`
   (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
   опубликованными comparisons, daily interval с вложенными cron-границами,

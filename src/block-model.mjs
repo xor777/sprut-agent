@@ -77,48 +77,68 @@ const BLOCK_CREATE_NODE_KINDS = [
   "delay",
 ];
 
+const NATIVE_SCALAR_AS_STRING = {
+  form: "native_scalar_as_string",
+  bool: { true: "true", false: "false" },
+  integer: "optional_minus_digits",
+  float: "finite_decimal_string",
+  string: "literal",
+};
+
 const BLOCK_NODE_CONSTRAINTS = {
-  root: {},
+  root: {
+    editor_optional: ["blockId"],
+  },
   if: {
     constants: { mode: "EVERY", then_delay: 0, else_delay: 0 },
+    editor_optional: ["blockId"],
+    hub_assigned: { state: "omit_on_create" },
   },
   condition: {
     fields: { mode: ["AND", "OR"] },
+    editor_optional: ["blockId"],
   },
   characteristic: {
     native_ids: ["aId", "sId", "cId"],
     fields: {
-      hs: "string",
-      hc: "string",
+      hs: "service_type_from_get_entity",
+      hc: "characteristic_type_from_get_entity",
       trigger: "boolean",
       cond: "string",
       value: "string",
     },
     constants: { timeCond: "", time: 0 },
-    value_encoding: "native_scalar_as_string",
+    value_encoding: NATIVE_SCALAR_AS_STRING,
+    editor_optional: ["blockId"],
   },
   interval: {
     fields: { trigger: "boolean" },
+    editor_optional: ["blockId"],
   },
   cron: {
     constants: { mode: "NONE", offset: 0 },
     fields: { cron: "string" },
+    editor_optional: ["blockId"],
   },
   service: {
     native_ids: ["aId", "sId"],
-    fields: { hs: "string" },
+    fields: { hs: "service_type_from_get_entity" },
+    editor_optional: ["blockId"],
   },
   set: {
     native_ids: ["cId"],
-    fields: { hc: "string", value: "string" },
-    value_encoding: "native_scalar_as_string",
+    fields: { hc: "characteristic_type_from_get_entity", value: "string" },
+    value_encoding: NATIVE_SCALAR_AS_STRING,
+    editor_optional: ["blockId"],
   },
   delay: {
     constants: { mode: "RESET" },
     fields: {
       index: { type: "integer", minimum: 1, unique: true },
-      time: { type: "integer", minimum: 1 },
+      // Native delay.time is milliseconds; auto_off_after_seconds stays a separate public unit.
+      time: { type: "integer", minimum: 1, unit: "milliseconds" },
     },
+    editor_optional: ["blockId"],
   },
 };
 
@@ -128,21 +148,10 @@ export function publishedBlockNodes() {
   for (const kind of BLOCK_CREATE_NODE_KINDS) {
     const constraints = BLOCK_NODE_CONSTRAINTS[kind] ?? {};
     const nodeChildren = children[kind];
-    const used = new Set([
-      ...(kind === "root" ? [] : ["type"]),
-      ...Object.keys(constraints.constants ?? {}),
-      ...Object.keys(nodeChildren ?? {}),
-      ...(constraints.native_ids ?? []),
-      ...Object.keys(constraints.fields ?? {}),
-    ]);
-    const editorOptional = [...(BLOCK_ALLOWED_KEYS[kind] ?? [])].filter(
-      (key) => !used.has(key),
-    );
     nodes[kind] = {
       ...(kind === "root" ? {} : { type: kind }),
       ...constraints,
       ...(nodeChildren ? { children: nodeChildren } : {}),
-      ...(editorOptional.length > 0 ? { editor_optional: editorOptional } : {}),
     };
   }
   return nodes;
