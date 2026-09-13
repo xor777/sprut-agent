@@ -97,7 +97,10 @@ export class SprutHubClient {
     this.url = url;
     this.token = token;
     this.serial = serial ?? null;
-    this.#configuredSerial = configuredSerial ?? null;
+    this.#configuredSerial =
+      typeof configuredSerial === "string" && configuredSerial.length > 0
+        ? configuredSerial
+        : null;
     this.#availableHomeCount = availableHomeCount;
     this.cid = cid;
     this.timeoutMs = timeoutMs;
@@ -107,30 +110,38 @@ export class SprutHubClient {
     const deadline = Date.now() + this.timeoutMs;
     const { homes, observedAt } = await this.#listHomes(deadline);
     this.#availableHomeCount = homes.length;
+    const selectedHome = homes.find((home) => home.serial === this.serial);
     const configuredHomeUnavailable =
       this.#configuredSerial !== null &&
       !homes.some((home) => home.serial === this.#configuredSerial);
+    const options = homes.map((home) => ({
+      home_ref: homeRef(home.serial),
+      pin_value: home.serial,
+    }));
     return {
       status: "ok",
       homes: homes.map((home) => normalizeHome(home, observedAt)),
       selection:
         homes.length === 0
           ? { required: false, reason: "no_available_homes" }
-          : homes.length === 1 && !configuredHomeUnavailable
+          : selectedHome
             ? {
                 required: false,
-                default_home_ref: homeRef(homes[0].serial),
+                default_home_ref: homeRef(selectedHome.serial),
+                ...(homes.length > 1 ? { options } : {}),
               }
-            : {
-                required: true,
-                ...(configuredHomeUnavailable
-                  ? { reason: "configured_home_unavailable" }
-                  : {}),
-                options: homes.map((home) => ({
-                  home_ref: homeRef(home.serial),
-                  pin_value: home.serial,
-                })),
-              },
+            : homes.length === 1 && !configuredHomeUnavailable
+              ? {
+                  required: false,
+                  default_home_ref: homeRef(homes[0].serial),
+                }
+              : {
+                  required: true,
+                  ...(configuredHomeUnavailable
+                    ? { reason: "configured_home_unavailable" }
+                    : {}),
+                  options,
+                },
       freshness: freshness(observedAt),
     };
   }

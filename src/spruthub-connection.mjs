@@ -50,9 +50,12 @@ export class SprutHubConnection {
 
   constructor({ env = process.env } = {}) {
     this.#env = env;
-    this.#homeSelectionSource = hasCompleteExplicitConnection(env)
-      ? "environment"
-      : "file";
+    this.#homeSelectionSource =
+      (Object.hasOwn(env, "SPRUTHUB_SERIAL") &&
+        env.SPRUTHUB_SERIAL !== undefined) ||
+      hasCompleteExplicitConnection(env)
+        ? "environment"
+        : "file";
     this.#remember(
       env.SPRUTHUB_LOGIN,
       env.SPRUTHUB_PASSWORD,
