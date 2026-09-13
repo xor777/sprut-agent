@@ -612,6 +612,8 @@ async function startHub() {
       rejectNextScenarioCreate: false,
       rejectNextScenarioUpdate: false,
       rejectNextScenarioRun: false,
+      rejectNextScenarioRunAsUnsupported: false,
+      stopAfterAccessoryGet: null,
       closeAfterScenarioUpdate: false,
       closeAfterScenarioRun: false,
       closeAfterCharacteristicUpdate: false,
@@ -1192,6 +1194,16 @@ async function startHub() {
           },
         };
       } else if (params.scenario?.run) {
+        if (state.behavior.rejectNextScenarioRunAsUnsupported) {
+          state.behavior.rejectNextScenarioRunAsUnsupported = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: -32601, message: "method not found" },
+            }),
+          );
+          return;
+        }
         if (state.behavior.rejectNextScenarioRun) {
           state.behavior.rejectNextScenarioRun = false;
           socket.send(
@@ -1269,7 +1281,18 @@ async function startHub() {
           await callback();
         }
       }
-      socket.send(JSON.stringify({ id: request.id, result }));
+      const response = JSON.stringify({ id: request.id, result });
+      const stopAfterAccessoryGet =
+        params.accessory?.get &&
+        state.behavior.stopAfterAccessoryGet === params.accessory.get.id;
+      if (stopAfterAccessoryGet) {
+        state.behavior.stopAfterAccessoryGet = null;
+        socket.send(response);
+        socket.terminate();
+        server.close();
+        return;
+      }
+      socket.send(response);
     });
   });
   const address = server.address();
@@ -2397,6 +2420,147 @@ test("a rejected scenario run remains rejected after inspection and restart", as
     persisted.structuredContent.command_delivery,
     inspected.structuredContent.command_delivery,
   );
+  const repeated = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "not_applied");
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
+});
+
+test("a scenario run not sent after connection loss keeps its reason and needs a new intent", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Сохранить подтверждённую неотправку запуска",
+    },
+  });
+  hub.state.behavior.stopAfterAccessoryGet = 36;
+
+  const notSent = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    notSent.isError,
+    true,
+    JSON.stringify(notSent.structuredContent),
+  );
+  assert.equal(notSent.structuredContent.error.code, "connection_failed");
+  assert.equal(
+    notSent.structuredContent.error.action,
+    "restore_connection_then_prepare_native_change",
+  );
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 0);
+  const inspectedWhileOffline = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspectedWhileOffline.structuredContent.status, "not_applied");
+  assert.equal(
+    inspectedWhileOffline.structuredContent.native_write_sent,
+    false,
+  );
+  assert.deepEqual(inspectedWhileOffline.structuredContent.command_delivery, {
+    status: "not_sent",
+    native_acknowledged: false,
+    failure: {
+      code: "connection_failed",
+      action: "restore_connection_then_prepare_native_change",
+    },
+    physical_delivery: "not_proven",
+    atomic: false,
+  });
+  await firstClient.close();
+
+  const recoveredHub = await startHub();
+  t.after(async () => {
+    for (const socket of recoveredHub.server.clients) socket.terminate();
+    await new Promise((resolve) => recoveredHub.server.close(resolve));
+  });
+  const recoveredFixture = installNativeCommandFixture(recoveredHub);
+  const restartedClient = await startClient(t, recoveredHub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.deepEqual(
+    persisted.structuredContent.command_delivery,
+    inspectedWhileOffline.structuredContent.command_delivery,
+  );
+  const repeated = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "not_applied");
+  assert.equal(
+    recoveredHub.requests.filter(({ scenario }) => scenario?.run).length,
+    0,
+  );
+
+  const newIntent = await restartedClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: recoveredFixture.scenarioRef,
+      reason: "Повторить явный запрос после восстановления соединения",
+    },
+  });
+  const applied = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: newIntent.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    recoveredHub.requests.filter(({ scenario }) => scenario?.run).length,
+    1,
+  );
+});
+
+test("an unsupported scenario run is a persisted explicit rejection", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Сохранить отсутствие native run метода",
+    },
+  });
+  hub.state.behavior.rejectNextScenarioRunAsUnsupported = true;
+
+  const unsupported = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    unsupported.isError,
+    true,
+    JSON.stringify(unsupported.structuredContent),
+  );
+  assert.equal(unsupported.structuredContent.error.code, "unsupported");
+  await firstClient.close();
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "not_applied");
+  assert.deepEqual(persisted.structuredContent.command_delivery, {
+    status: "rejected",
+    native_acknowledged: false,
+    rejection: { code: "unsupported", action: "inspect_home" },
+    physical_delivery: "not_proven",
+    atomic: false,
+  });
   const repeated = await restartedClient.callTool({
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
