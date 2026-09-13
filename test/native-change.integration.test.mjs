@@ -611,6 +611,7 @@ async function startHub() {
       closeAfterCreate: false,
       rejectNextScenarioCreate: false,
       rejectNextScenarioUpdate: false,
+      rejectNextScenarioRun: false,
       closeAfterScenarioUpdate: false,
       closeAfterScenarioRun: false,
       closeAfterCharacteristicUpdate: false,
@@ -1191,6 +1192,16 @@ async function startHub() {
           },
         };
       } else if (params.scenario?.run) {
+        if (state.behavior.rejectNextScenarioRun) {
+          state.behavior.rejectNextScenarioRun = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: 400, message: "scenario run rejected" },
+            }),
+          );
+          return;
+        }
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.run.index,
         );
@@ -2339,6 +2350,126 @@ test("scenario run refuses changed targets and never retries an unknown delivery
   assert.equal(
     hub.requests.filter(({ scenario: request }) => request?.run).length,
     1,
+  );
+});
+
+test("a rejected scenario run remains rejected after inspection and restart", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Сохранить подтверждённый отказ запуска",
+    },
+  });
+  hub.state.behavior.rejectNextScenarioRun = true;
+
+  const rejected = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "request_rejected");
+  const inspected = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "not_applied");
+  assert.deepEqual(inspected.structuredContent.command_delivery, {
+    status: "rejected",
+    native_acknowledged: false,
+    rejection: { code: "request_rejected", protocol_code: 400 },
+    physical_delivery: "not_proven",
+    atomic: false,
+  });
+  await firstClient.close();
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const persisted = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(persisted.structuredContent.status, "not_applied");
+  assert.deepEqual(
+    persisted.structuredContent.command_delivery,
+    inspected.structuredContent.command_delivery,
+  );
+  const repeated = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "not_applied");
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
+});
+
+test("scenario run readback distinguishes an unavailable target from a known difference", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  const secondAccessory = structuredClone(
+    hub.state.accessories.find(({ id }) => id === 36),
+  );
+  const unavailablePrepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Различить недоступное показание после ACK",
+    },
+  });
+  hub.state.behavior.afterRun = () => {
+    hub.state.accessories = hub.state.accessories.filter(({ id }) => id !== 36);
+  };
+
+  const unavailable = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: unavailablePrepared.structuredContent.change_ref },
+  });
+  assert.equal(unavailable.structuredContent.status, "applied");
+  assert.equal(
+    unavailable.structuredContent.verification.result,
+    "command_acknowledged_with_incomplete_target_readback",
+  );
+  assert.equal(
+    unavailable.structuredContent.target_observations[1].matches,
+    null,
+  );
+  assert.equal(
+    unavailable.structuredContent.target_observations[1].error.code,
+    "incompatible_response",
+  );
+
+  hub.state.accessories.push(secondAccessory);
+  const differentPrepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Отличить измеренное расхождение после ACK",
+    },
+  });
+  hub.state.behavior.afterRun = () => {
+    hub.state.accessories
+      .find(({ id }) => id === 34)
+      .services.find(({ sId }) => sId === 13)
+      .characteristics.find(({ cId }) => cId === 15).control.value = {
+      boolValue: true,
+    };
+  };
+  const different = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: differentPrepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    different.structuredContent.verification.result,
+    "command_acknowledged_with_target_value_difference",
+  );
+  assert.equal(
+    different.structuredContent.target_observations[0].matches,
+    false,
   );
 });
 
