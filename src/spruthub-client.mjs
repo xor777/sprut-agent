@@ -3826,7 +3826,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
                   key: redactSensitiveText(option.key),
                   text: redactSensitiveText(
                     String(extractTypedValue(option.value).value ?? ""),
-                  ).slice(0, 16_384),
+                  ),
                   content_origin: "spruthub_device_window_diagnostics",
                   semantic_status: "uninterpreted",
                   source_timestamp: null,

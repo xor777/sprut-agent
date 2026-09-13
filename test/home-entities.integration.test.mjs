@@ -1235,30 +1235,19 @@ test("long device-window diagnostics remain fully addressable after redaction", 
     false,
   );
 
-  const origin = await client.callTool({
-    name: "get_entity",
-    arguments: {
-      ...baseArguments,
-      pointer: "/diagnostics/0/content_origin",
-    },
-  });
-  assert.equal(origin.isError, undefined, origin.content[0]?.text);
-  assert.equal(
-    origin.structuredContent.selection.value,
-    "spruthub_device_window_diagnostics",
-  );
-  const sourceTimestamp = await client.callTool({
-    name: "get_entity",
-    arguments: {
-      ...baseArguments,
-      pointer: "/diagnostics/0/source_timestamp",
-    },
-  });
-  assert.equal(
-    sourceTimestamp.structuredContent.selection.value,
-    null,
-    sourceTimestamp.content[0]?.text,
-  );
+  for (const [pointer, expected] of [
+    ["/diagnostics/0/content_origin", "spruthub_device_window_diagnostics"],
+    ["/diagnostics/0/semantic_status", "uninterpreted"],
+    ["/diagnostics/0/source_timestamp", null],
+    ["/diagnostics/0/direct_device_report", "not_established"],
+  ]) {
+    const metadata = await client.callTool({
+      name: "get_entity",
+      arguments: { ...baseArguments, pointer },
+    });
+    assert.equal(metadata.isError, undefined, metadata.content[0]?.text);
+    assert.equal(metadata.structuredContent.selection.value, expected);
+  }
   const redacted = await client.callTool({
     name: "get_entity",
     arguments: {
