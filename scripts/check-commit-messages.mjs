@@ -7,7 +7,8 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const configPath = path.join(projectRoot, "commitlint.config.js");
+// Explicit ESM: commitlint's Node 26.7 heuristic would otherwise sync-load a .js config from a temp cwd.
+const configPath = path.join(projectRoot, "commitlint.config.mjs");
 const repo = process.cwd();
 const headSha = process.env.HEAD_SHA ?? "";
 const defaultBranch = process.env.DEFAULT_BRANCH || "main";

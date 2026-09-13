@@ -48,10 +48,7 @@ test("first push still rejects an invalid new commit message", async (t) => {
     DEFAULT_BRANCH: "main",
   });
 
-  assertRejectedByConventionalCommits(
-    result,
-    /not a conventional new commit/,
-  );
+  assertRejectedByConventionalCommits(result, /not a conventional new commit/);
 });
 
 test("a later valid commit does not hide an invalid new commit in the same range", async (t) => {
