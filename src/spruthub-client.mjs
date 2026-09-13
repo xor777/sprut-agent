@@ -1831,7 +1831,6 @@ export class SprutHubClient {
   }
 
   async #readRelations(serial, accessory, services, characteristic, deadline) {
-    const homeReference = homeRef(serial);
     const accessoryReference = accessoryRef(serial, accessory.id);
     const associationPromise = this.#readRelationSource(
       { scenario: { list: { aId: accessory.id } } },
@@ -1844,17 +1843,6 @@ export class SprutHubClient {
             ["scenario", "list", "scenarios"],
             true,
           ).map((scenario) => normalizeScenarioSummary(serial, scenario)),
-        ),
-    );
-    const catalogPromise = this.#readRelationSource(
-      { scenario: { list: {} } },
-      deadline,
-      serial,
-      (response) =>
-        uniqueByRef(
-          extractEntityArray(response, ["scenario", "list", "scenarios"]).map(
-            (scenario) => normalizeScenarioSummary(serial, scenario),
-          ),
         ),
     );
     const logicPromises = services.map((service) =>
@@ -1887,13 +1875,11 @@ export class SprutHubClient {
             ),
         )
       : null;
-    const [associationRead, catalogRead, logicReads, linkRead] =
-      await Promise.all([
-        associationPromise,
-        catalogPromise,
-        Promise.all(logicPromises),
-        linkPromise,
-      ]);
+    const [associationRead, logicReads, linkRead] = await Promise.all([
+      associationPromise,
+      Promise.all(logicPromises),
+      linkPromise,
+    ]);
 
     const associations = associationRead.ok ? associationRead.value : [];
     const blockReads = await Promise.all(
@@ -1902,12 +1888,15 @@ export class SprutHubClient {
         .map((summary) => this.#readRelationBlock(serial, summary, deadline)),
     );
     const scopes = [
-      relationListScope(
-        "scenario_accessory_index",
-        accessoryReference,
-        associationRead,
-      ),
-      relationListScope("scenario_catalog", homeReference, catalogRead),
+      {
+        ...relationListScope(
+          "scenario_accessory_index",
+          accessoryReference,
+          associationRead,
+        ),
+        coverage: "native_accessory_index_for_selected_accessory",
+        completeness: "not_established",
+      },
       ...blockReads.map(({ scope }) => scope),
       ...logicReads.map((read, index) =>
         relationListScope(
@@ -1969,7 +1958,6 @@ export class SprutHubClient {
     const unresolvedAreas = relationUnresolvedAreas({
       associationRead,
       associations,
-      catalogRead,
       blockReads,
       logicReads,
       linkRead,
@@ -3267,7 +3255,6 @@ function relationReadScope(area, sourceRef, read) {
 function relationUnresolvedAreas({
   associationRead,
   associations,
-  catalogRead,
   blockReads,
   logicReads,
   linkRead,
@@ -3285,37 +3272,46 @@ function relationUnresolvedAreas({
       source_ref: accessoryRef(serial, accessory.id),
     });
   }
-  if (!catalogRead.ok) {
+  unresolved.push({
+    area: "scenario_index_coverage",
+    outcome: "not_established",
+    source_ref: accessoryRef(serial, accessory.id),
+    limitation:
+      "The native accessory index is an addressed association lookup; its completeness for every influence is not established.",
+  });
+  for (const association of associations.filter(
+    ({ type }) => type !== "BLOCK",
+  )) {
     unresolved.push({
-      area: "scenario_catalog",
-      outcome: catalogRead.outcome,
-      source_ref: homeRef(serial),
+      area: "associated_scenario_configuration",
+      outcome: "not_read",
+      scenario_ref: association.ref,
+      scenario_type: association.type,
+      limitation:
+        "An index association does not establish the scenario's role or effects.",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: association.ref,
+          include: ["configuration"],
+        },
+      },
     });
-  } else {
-    const associatedRefs = new Set(associations.map(({ ref }) => ref));
-    const codeScenarios = catalogRead.value.filter(
-      ({ type }) => type !== "BLOCK",
-    );
-    if (codeScenarios.length > 0) {
-      unresolved.push({
-        area: "scenario_code",
-        outcome: "not_read",
-        scenario_count: codeScenarios.length,
-        scenario_types: [...new Set(codeScenarios.map(({ type }) => type))],
-      });
-    }
-    const unindexedBlocks = catalogRead.value.filter(
-      ({ type, ref }) => type === "BLOCK" && !associatedRefs.has(ref),
-    );
-    if (unindexedBlocks.length > 0) {
-      unresolved.push({
-        area: "unindexed_block_scenarios",
-        outcome: "not_read",
-        scenario_count: unindexedBlocks.length,
-        scenario_types: ["BLOCK"],
-      });
-    }
   }
+  unresolved.push(
+    {
+      area: "scenario_code",
+      outcome: "not_read",
+      limitation:
+        "This addressed read does not enumerate or inspect LOGIC, GLOBAL, or code outside returned associated BLOCK configurations.",
+    },
+    {
+      area: "dynamic_targets",
+      outcome: "not_resolved",
+      limitation:
+        "The native index and stored BLOCK roles do not resolve targets selected by code, extensions, or runtime state.",
+    },
+  );
   logicReads.forEach((read, index) => {
     if (read.ok) return;
     unresolved.push({

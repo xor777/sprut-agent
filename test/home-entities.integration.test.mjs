@@ -1409,7 +1409,11 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     }),
   };
   state.scenarios.push(block);
-  state.scenarioAssociations.set(32, [block]);
+  const globalCode = state.scenarios.find(
+    ({ index }) => index === "global-code",
+  );
+  assert(globalCode);
+  state.scenarioAssociations.set(32, [block, globalCode]);
   state.logics.set("32.13", [
     { type: "AssignedSensorLogic", name: "Назначенная logic", active: true },
   ]);
@@ -1454,6 +1458,17 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
       name: "Датчик управляет лампой",
       type: "BLOCK",
+      predefined: false,
+      active: true,
+      on_start: false,
+      sync: false,
+      meaning: "accessory_index_association",
+      direction: "not_established",
+    },
+    {
+      ref: "spruthub://hub/home%2FA/scenario/global-code",
+      name: "Глобальный сценарий",
+      type: "GLOBAL",
       predefined: false,
       active: true,
       on_start: false,
@@ -1568,6 +1583,38 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       },
     },
   ]);
+  const associatedCode = relations.unresolved_areas.find(
+    ({ area }) => area === "associated_scenario_configuration",
+  );
+  assert.deepEqual(associatedCode, {
+    area: "associated_scenario_configuration",
+    outcome: "not_read",
+    scenario_ref: "spruthub://hub/home%2FA/scenario/global-code",
+    scenario_type: "GLOBAL",
+    limitation:
+      "An index association does not establish the scenario's role or effects.",
+    next: {
+      tool: "get_entity",
+      arguments: {
+        entity_ref: "spruthub://hub/home%2FA/scenario/global-code",
+        include: ["configuration"],
+      },
+    },
+  });
+  const associatedCodeDetail = await client.callTool({
+    name: associatedCode.next.tool,
+    arguments: associatedCode.next.arguments,
+  });
+  assert.equal(
+    associatedCodeDetail.isError,
+    undefined,
+    associatedCodeDetail.content[0]?.text,
+  );
+  assert.equal(
+    associatedCodeDetail.structuredContent.entity.configuration.format,
+    "code",
+  );
+  assert.doesNotMatch(JSON.stringify(associatedCodeDetail), /must-not-leak/);
   for (const evidence of [...relations.scenario_roles, ...codeConditions]) {
     const detail = await client.callTool({
       name: evidence.next.tool,
@@ -1618,9 +1665,9 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   assert.deepEqual(
     relations.scopes.map(
       ({ area, outcome, source_ref, coverage, completeness }) => ({
-      area,
-      outcome,
-      source_ref,
+        area,
+        outcome,
+        source_ref,
         ...(coverage === undefined ? {} : { coverage }),
         ...(completeness === undefined ? {} : { completeness }),
       }),
