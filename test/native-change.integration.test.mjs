@@ -612,6 +612,7 @@ async function startHub() {
       rejectNextScenarioCreate: false,
       rejectNextScenarioUpdate: false,
       closeAfterScenarioUpdate: false,
+      closeAfterScenarioRun: false,
       closeAfterCharacteristicUpdate: false,
       dropNextCharacteristicUpdate: false,
       closeAfterCharacteristicSetOptions: false,
@@ -1189,6 +1190,44 @@ async function startHub() {
             update: {},
           },
         };
+      } else if (params.scenario?.run) {
+        const scenario = state.scenarios.find(
+          ({ index }) => index === params.scenario.run.index,
+        );
+        assert.ok(scenario, "scenario.run must address an existing scenario");
+        const data = JSON.parse(scenario.data);
+        assert.ok(
+          data.targets.every(({ type }) => type === "service"),
+          "the fake hub executes only the observed action-only BLOCK form",
+        );
+        for (const target of data.targets) {
+          const service = state.accessories
+            .find(({ id }) => id === target.aId)
+            ?.services.find(({ sId }) => sId === target.sId);
+          assert.equal(service?.type, target.hs);
+          for (const action of target.characteristics) {
+            assert.equal(action.type, "set");
+            const characteristic = service.characteristics.find(
+              ({ cId }) => cId === action.cId,
+            );
+            assert.equal(characteristic?.control.type, action.hc);
+            const kind = Object.keys(characteristic.control.value)[0];
+            characteristic.control.value = {
+              [kind]:
+                kind === "boolValue"
+                  ? action.value === "true"
+                  : kind === "stringValue"
+                    ? action.value
+                    : Number(action.value),
+            };
+          }
+        }
+        if (state.behavior.closeAfterScenarioRun) {
+          state.behavior.closeAfterScenarioRun = false;
+          socket.close();
+          return;
+        }
+        result = { scenario: { run: {} } };
       } else if (params.scenario?.delete) {
         const index = state.scenarios.findIndex(
           (scenario) => scenario.index === params.scenario.delete.index,
@@ -1961,6 +2000,392 @@ async function setup(t) {
   });
   return { hub, stateDirectory };
 }
+
+function installNativeCommandFixture(hub) {
+  const firstLight = hub.state.accessories
+    .find(({ id }) => id === 34)
+    .services.find(({ sId }) => sId === 13);
+  firstLight.characteristics.find(({ cId }) => cId === 15).control.value = {
+    boolValue: true,
+  };
+  hub.state.accessories.push(
+    {
+      id: 36,
+      roomId: 2,
+      name: "Настольная лампа",
+      online: true,
+      services: [
+        {
+          aId: 36,
+          sId: 13,
+          name: "Свет",
+          type: "Lightbulb",
+          characteristics: [
+            {
+              aId: 36,
+              sId: 13,
+              cId: 15,
+              control: {
+                name: "Включена",
+                type: "On",
+                read: true,
+                write: true,
+                value: { boolValue: true },
+              },
+            },
+            {
+              aId: 36,
+              sId: 13,
+              cId: 16,
+              control: {
+                name: "Яркость",
+                type: "Brightness",
+                read: true,
+                write: true,
+                value: { intValue: 80 },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: 37,
+      roomId: 2,
+      name: "Чужая лампа",
+      online: true,
+      services: [
+        {
+          aId: 37,
+          sId: 13,
+          name: "Свет",
+          type: "Lightbulb",
+          characteristics: [
+            {
+              aId: 37,
+              sId: 13,
+              cId: 15,
+              control: {
+                name: "Включена",
+                type: "On",
+                read: true,
+                write: true,
+                value: { boolValue: true },
+              },
+            },
+            {
+              aId: 37,
+              sId: 13,
+              cId: 16,
+              control: {
+                name: "Яркость",
+                type: "Brightness",
+                read: true,
+                write: true,
+                value: { intValue: 55 },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  );
+  const data = {
+    blockId: 0,
+    targets: [
+      { ...setAction({ aId: 34, value: "false" }), blockId: 1 },
+      { ...setAction({ aId: 36, value: "false" }), blockId: 3 },
+    ],
+  };
+  data.targets[0].characteristics[0].blockId = 2;
+  data.targets[1].characteristics[0].blockId = 4;
+  hub.state.scenarios.push({
+    index: "all-off-command",
+    name: "Выключить выбранный свет",
+    desc: "Постоянная команда общего выключения",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "BLOCK",
+    data: JSON.stringify(data),
+    predefined: false,
+  });
+  return {
+    scenarioRef: `${homeRef}/scenario/all-off-command`,
+    data,
+    secondOnRef: `${homeRef}/accessory/36/service/13/characteristic/15`,
+    secondBrightnessRef: `${homeRef}/accessory/36/service/13/characteristic/16`,
+    foreignOnRef: `${homeRef}/accessory/37/service/13/characteristic/15`,
+    foreignBrightnessRef: `${homeRef}/accessory/37/service/13/characteristic/16`,
+  };
+}
+
+test("an action-only BLOCK is explicitly run once and can be run again with a new intent", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+    },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.equal(contract.structuredContent.contract.scope, "one_action_only_BLOCK");
+
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Выключить выбранные лампы общей нативной командой",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.equal(prepared.structuredContent.native_write_sent, false);
+  assert.deepEqual(
+    prepared.structuredContent.targets.map(({ characteristic_ref, value }) => ({
+      characteristic_ref,
+      value,
+    })),
+    [
+      { characteristic_ref: characteristicRef, value: false },
+      { characteristic_ref: fixture.secondOnRef, value: false },
+    ],
+  );
+  assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+    boolValue: true,
+  });
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.run),
+    false,
+  );
+
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.deepEqual(applied.structuredContent.command_delivery, {
+    status: "acknowledged",
+    native_acknowledged: true,
+    physical_delivery: "not_proven",
+    atomic: false,
+  });
+  assert.deepEqual(
+    applied.structuredContent.target_observations.map(
+      ({ characteristic_ref, expected_value, observed_value, matches }) => ({
+        characteristic_ref,
+        expected_value,
+        observed_value,
+        matches,
+      }),
+    ),
+    [
+      {
+        characteristic_ref: characteristicRef,
+        expected_value: { value: false, kind: "boolValue" },
+        observed_value: { value: false, kind: "boolValue" },
+        matches: true,
+      },
+      {
+        characteristic_ref: fixture.secondOnRef,
+        expected_value: { value: false, kind: "boolValue" },
+        observed_value: { value: false, kind: "boolValue" },
+        matches: true,
+      },
+    ],
+  );
+  assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+    boolValue: false,
+  });
+  assert.deepEqual(currentCharacteristicValue(hub, fixture.secondOnRef), {
+    boolValue: false,
+  });
+  assert.deepEqual(
+    currentCharacteristicValue(
+      hub,
+      `${homeRef}/accessory/34/service/13/characteristic/16`,
+    ),
+    { intValue: 20 },
+  );
+  assert.deepEqual(currentCharacteristicValue(hub, fixture.secondBrightnessRef), {
+    intValue: 80,
+  });
+  assert.deepEqual(currentCharacteristicValue(hub, fixture.foreignOnRef), {
+    boolValue: true,
+  });
+  assert.deepEqual(currentCharacteristicValue(hub, fixture.foreignBrightnessRef), {
+    intValue: 55,
+  });
+
+  const repeatedApply = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeatedApply.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.run).length,
+    1,
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const history = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: fixture.scenarioRef },
+  });
+  assert.equal(history.structuredContent.changes[0].operation, "scenario_run");
+  hub.state.accessories
+    .filter(({ id }) => [34, 36].includes(id))
+    .forEach((accessory) => {
+      accessory.services[0].characteristics.find(
+        ({ cId }) => cId === 15,
+      ).control.value = { boolValue: true };
+    });
+  const secondPrepared = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Повторно выключить выбранные лампы",
+    },
+  });
+  const secondApplied = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: secondPrepared.structuredContent.change_ref },
+  });
+  assert.equal(secondApplied.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.run).length,
+    2,
+  );
+});
+
+test("scenario run refuses changed targets and never retries an unknown delivery", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  const changed = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Зафиксировать выбранную область команды",
+    },
+  });
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === "all-off-command",
+  );
+  const changedData = JSON.parse(scenario.data);
+  changedData.targets[1].aId = 37;
+  scenario.data = JSON.stringify(changedData);
+  const conflict = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: changed.structuredContent.change_ref },
+  });
+  assert.equal(conflict.structuredContent.status, "conflict");
+  assert.equal(conflict.structuredContent.conflict_reason, "scenario_changed");
+  assert.equal(
+    hub.requests.filter(({ scenario: request }) => request?.run).length,
+    0,
+  );
+
+  scenario.data = JSON.stringify(fixture.data);
+  const lostAck = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Не повторять команду после потерянного ACK",
+    },
+  });
+  hub.state.behavior.closeAfterScenarioRun = true;
+  const uncertain = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: lostAck.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.command_delivery.status, "unknown");
+  assert.equal(
+    hub.requests.filter(({ scenario: request }) => request?.run).length,
+    1,
+  );
+  const repeated = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: lostAck.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ scenario: request }) => request?.run).length,
+    1,
+  );
+});
+
+test("an action-only BLOCK can be created without running and restoration removes only its configuration", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== "all-off-command",
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const preparedCreate = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Выключить выбранный свет",
+      description: "Постоянная команда общего выключения",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: fixture.data,
+      reason: "Сохранить общую команду на хабе",
+    },
+  });
+  assert.equal(preparedCreate.isError, undefined, preparedCreate.content[0]?.text);
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedCreate.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+    boolValue: true,
+  });
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.run).length,
+    0,
+  );
+
+  const run = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: created.structuredContent.scenario_ref,
+      reason: "Запустить сохранённую команду",
+    },
+  });
+  await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: run.structuredContent.change_ref },
+  });
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: preparedCreate.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+    boolValue: false,
+  });
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    false,
+  );
+});
 
 async function blockStateDirectory(t, stateDirectory) {
   const backupDirectory = `${stateDirectory}-backup`;
