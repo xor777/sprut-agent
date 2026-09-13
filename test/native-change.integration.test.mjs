@@ -5299,6 +5299,189 @@ test("versioned BLOCK contract prepares different supported compositions", async
   );
 });
 
+test("prepared BLOCK changes preserve typed branch commands and their preparation observations", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const scheduledData = dailyIntervalBlockData({
+    inside: "false",
+    outside: "true",
+  });
+  scheduledData.targets[0].then.push(
+    setAction({ cId: 18, hc: "TargetMode", value: "home" }),
+  );
+  hub.state.accessories[1].services[0].characteristics.find(
+    ({ cId }) => cId === 18,
+  ).control.value = { stringValue: null };
+
+  const preparedCreate = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Ночной режим с явными командами",
+      description: "Показать будущие записи до применения",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: scheduledData,
+      reason: "Отличить сохранение настройки от повторной записи",
+    },
+  });
+  assert.equal(
+    preparedCreate.isError,
+    undefined,
+    preparedCreate.content[0]?.text,
+  );
+  assert.equal(preparedCreate.structuredContent.native_write_sent, false);
+  assert.match(
+    preparedCreate.structuredContent.block_action_preview.snapshot.captured_at,
+    /^\d{4}-\d{2}-\d{2}T/,
+  );
+  assert.deepEqual(
+    preparedCreate.structuredContent.block_action_preview.snapshot,
+    {
+      source: "accessory_read_during_preparation",
+      captured_at:
+        preparedCreate.structuredContent.block_action_preview.snapshot
+          .captured_at,
+      fresh: true,
+    },
+  );
+  assert.deepEqual(
+    preparedCreate.structuredContent.block_action_preview.actions,
+    [
+      {
+        configuration_pointer: "/targets/0/then/0/characteristics/0",
+        characteristic_ref: characteristicRef,
+        service_type: "Lightbulb",
+        characteristic_type: "On",
+        command: {
+          kind: "boolValue",
+          value: false,
+          execution: "write_if_action_runs",
+        },
+        observation: {
+          status: "available",
+          kind: "boolValue",
+          value: false,
+        },
+        comparison_to_observation: "equal",
+      },
+      {
+        configuration_pointer: "/targets/0/then/1/characteristics/0",
+        characteristic_ref: `${serviceRef}/characteristic/18`,
+        service_type: "Lightbulb",
+        characteristic_type: "TargetMode",
+        command: {
+          kind: "stringValue",
+          value: "home",
+          execution: "write_if_action_runs",
+        },
+        observation: { status: "unavailable" },
+        comparison_to_observation: "unknown",
+      },
+      {
+        configuration_pointer: "/targets/0/else/0/characteristics/0",
+        characteristic_ref: characteristicRef,
+        service_type: "Lightbulb",
+        characteristic_type: "On",
+        command: {
+          kind: "boolValue",
+          value: true,
+          execution: "write_if_action_runs",
+        },
+        observation: {
+          status: "available",
+          kind: "boolValue",
+          value: false,
+        },
+        comparison_to_observation: "different",
+      },
+    ],
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+
+  const capturedPreview = structuredClone(
+    preparedCreate.structuredContent.block_action_preview,
+  );
+  hub.state.characteristic.control.value.boolValue = true;
+  hub.state.accessories[1].services[0].characteristics.find(
+    ({ cId }) => cId === 18,
+  ).control.value = { stringValue: "away" };
+  const accessoryReadsBeforeRestart = hub.requests.filter(
+    ({ accessory }) => accessory?.get,
+  ).length;
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const persisted = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: preparedCreate.structuredContent.change_ref },
+  });
+  assert.deepEqual(persisted.structuredContent.block_action_preview, {
+    ...capturedPreview,
+    snapshot: { ...capturedPreview.snapshot, fresh: false },
+  });
+  assert.equal(
+    hub.requests.filter(({ accessory }) => accessory?.get).length,
+    accessoryReadsBeforeRestart,
+    "reading history must not refresh the saved preparation observation",
+  );
+
+  const updatedData = blockData({ delay: 90_000 });
+  const preparedUpdate = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: updatedData,
+      reason: "Показать команды существующего BLOCK",
+    },
+  });
+  assert.equal(
+    preparedUpdate.isError,
+    undefined,
+    preparedUpdate.content[0]?.text,
+  );
+  assert.deepEqual(
+    preparedUpdate.structuredContent.block_action_preview.actions.map(
+      ({ configuration_pointer, command, comparison_to_observation }) => ({
+        configuration_pointer,
+        command,
+        comparison_to_observation,
+      }),
+    ),
+    [
+      {
+        configuration_pointer: "/targets/0/then/0/characteristics/0",
+        command: {
+          kind: "boolValue",
+          value: true,
+          execution: "write_if_action_runs",
+        },
+        comparison_to_observation: "equal",
+      },
+      {
+        configuration_pointer:
+          "/targets/0/then/1/targets/0/characteristics/0",
+        command: {
+          kind: "boolValue",
+          value: false,
+          execution: "write_if_action_runs",
+        },
+        comparison_to_observation: "different",
+      },
+    ],
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+    "preparing the update must not write BLOCK data",
+  );
+});
+
 test("daily interval contract lets a client repair cron before preparation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
