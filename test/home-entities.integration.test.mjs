@@ -2881,6 +2881,95 @@ test("native secrets are redacted from structured and text output", async (t) =>
   assert.match(visible, /\[REDACTED\]/);
 });
 
+test("pairing PIN codes stay redacted while ordinary window settings remain readable", async (t) => {
+  const hub = await startHub();
+  const pairingSecret = "pairing-code-secret-must-not-leak";
+  hub.states.get("home/A").window.options.push(
+    {
+      key: "PinCode",
+      name: "PIN-код для привязки чата",
+      type: "GenericString",
+      inputType: "STATUS",
+      read: true,
+      write: false,
+      events: false,
+      value: { stringValue: pairingSecret },
+    },
+    {
+      key: "BotName",
+      name: "Имя бота",
+      type: "GenericString",
+      inputType: "STATUS",
+      read: true,
+      write: false,
+      events: false,
+      value: { stringValue: "bot-ready" },
+    },
+    {
+      key: "GpioPin",
+      name: "GPIO pin",
+      type: "GenericInteger",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      events: false,
+      value: { intValue: 12 },
+    },
+  );
+  const client = await startClient(t, hub);
+  const entityRef = "spruthub://hub/home%2FA/window/window-A";
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: entityRef },
+  });
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const visible = JSON.stringify(result);
+  assert.doesNotMatch(visible, /pairing-code-secret-must-not-leak/);
+  const options = result.structuredContent.entity.options;
+  const botIndex = options.findIndex((option) => option.key === "BotName");
+  assert.equal(options[botIndex].configured_value, "bot-ready");
+  assert.equal(
+    options.find((option) => option.key === "GpioPin")?.configured_value,
+    12,
+  );
+  assert.match(visible, /bot-ready/);
+  assert.equal(
+    options.some((option) => option.key === "PinCode"),
+    false,
+  );
+  assert.deepEqual(options[botIndex - 1], {
+    redacted: true,
+    reason: "sensitive_native_data",
+  });
+
+  const child = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: entityRef,
+      pointer: `/options/${botIndex - 1}/configured_value`,
+    },
+  });
+  assert.equal(child.isError, true);
+  assert.equal(
+    child.structuredContent.error.code,
+    "entity_pointer_redacted",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(child),
+    /pairing-code-secret-must-not-leak/,
+  );
+
+  const overview = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: entityRef, max_bytes: 2048 },
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  assert.doesNotMatch(
+    JSON.stringify(overview),
+    /pairing-code-secret-must-not-leak/,
+  );
+});
+
 test("native entity names stay data when they resemble JavaScript contexts", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
