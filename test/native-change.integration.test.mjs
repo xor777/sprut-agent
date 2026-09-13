@@ -467,6 +467,7 @@ function withRuntimeBlockFields(data) {
     root: ["targets"],
     if: ["if", "then", "else"],
     condition: ["conditions"],
+    interval: ["start", "end"],
     service: ["characteristics"],
     delay: ["targets"],
   };
@@ -5317,12 +5318,93 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
       crosses_midnight: true,
       native_trigger: true,
       cron: {
+        format: "0 MM HH ? * * *",
+        fields: {
+          MM: "minute_0_to_59",
+          HH: "hour_0_to_23",
+        },
         seconds: 0,
         mode: "NONE",
         offset: 0,
       },
+      native_shape: {
+        type: "interval",
+        start: {
+          type: "cron",
+          mode: "NONE",
+          cron: "0 MM HH ? * * *",
+          offset: 0,
+        },
+        end: {
+          type: "cron",
+          mode: "NONE",
+          cron: "0 MM HH ? * * *",
+          offset: 0,
+        },
+        trigger: true,
+      },
+      boundaries: {
+        start: "enter_interval",
+        end: "leave_interval",
+        clock: "selected_hub_local_wall_clock",
+      },
+      branch_semantics: {
+        sole_interval_condition: "start_then_end_else",
+        compound_condition:
+          "boundary_rechecks_complete_condition_tree_then_selects_result_branch",
+      },
     },
   );
+
+  const initiallyInvalid = dailyIntervalBlockData();
+  initiallyInvalid.targets[0].if.conditions[0].start.cron =
+    "0 30 22 * * *";
+  const rejected = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Исправляемая форма interval",
+      description: "Проверить исправление формы cron по публичному контракту",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: initiallyInvalid,
+      reason: "Исправить неподдержанную форму до записи",
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "invalid_block_data");
+  assert.equal(
+    rejected.structuredContent.error.action,
+    "get_native_change_contract",
+  );
+  assert.match(
+    rejected.structuredContent.error.message,
+    /0 MM HH \? \* \* \*/,
+  );
+
+  initiallyInvalid.targets[0].if.conditions[0].start.cron =
+    contract.structuredContent.contract.supported.daily_interval.native_shape.start.cron
+      .replace("MM", "30")
+      .replace("HH", "22");
+  const corrected = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Исправляемая форма interval",
+      description: "Проверить исправление формы cron по публичному контракту",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: initiallyInvalid,
+      reason: "Подготовить поддержанную форму после исправления",
+    },
+  });
+  assert.equal(corrected.isError, undefined, corrected.content[0]?.text);
+  assert.equal(corrected.structuredContent.status, "prepared");
+  assert.equal(corrected.structuredContent.native_write_sent, false);
 
   const preparedCreate = await firstClient.callTool({
     name: "prepare_native_change",
