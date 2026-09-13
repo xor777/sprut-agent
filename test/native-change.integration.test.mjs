@@ -397,6 +397,48 @@ function blockData({ delay = 60_000, nested = false } = {}) {
   };
 }
 
+function dailyCron(hour, minute) {
+  return {
+    type: "cron",
+    mode: "NONE",
+    cron: `0 ${minute} ${hour} ? * * *`,
+    offset: 0,
+  };
+}
+
+function dailyIntervalBlockData({
+  start = [22, 30],
+  end = [6, 15],
+  inside = "true",
+  outside = "false",
+} = {}) {
+  return {
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            {
+              type: "interval",
+              start: dailyCron(...start),
+              end: dailyCron(...end),
+              trigger: true,
+            },
+          ],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [setAction({ value: inside })],
+        else: [setAction({ value: outside })],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  };
+}
+
 function blockNodeAtPointer(data, pointer) {
   return pointer
     .split("/")
@@ -5248,6 +5290,221 @@ test("versioned BLOCK contract prepares different supported compositions", async
     assert.match(
       prepared.structuredContent.diff.configuration.to.desc,
       /sprut-agent:native:[a-f0-9]{24}/,
+    );
+  }
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
+test("daily interval BLOCK completes create, find, update, readback, and restore without device writes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const overnightData = dailyIntervalBlockData();
+
+  const contract = await firstClient.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "block_create" },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+  assert.equal(contract.structuredContent.contract.version, "2026-09-13");
+  assert.deepEqual(contract.structuredContent.contract.supported.daily_interval, {
+    local_time: "HH:mm",
+    start_and_end: "distinct",
+    crosses_midnight: true,
+    native_trigger: true,
+    cron: {
+      seconds: 0,
+      mode: "NONE",
+      offset: 0,
+    },
+  });
+
+  const preparedCreate = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Ночной режим света",
+      description: "Снижать освещение ночью и возвращать дневное значение утром",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: overnightData,
+      reason: "Настроить ежедневный ночной режим",
+    },
+  });
+  assert.equal(
+    preparedCreate.isError,
+    undefined,
+    preparedCreate.content[0]?.text,
+  );
+  assert.equal(preparedCreate.structuredContent.status, "prepared");
+  assert.deepEqual(
+    preparedCreate.structuredContent.diff.configuration.to.data,
+    overnightData,
+  );
+
+  const created = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedCreate.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.configuration_matches, true);
+  assert.deepEqual(
+    JSON.parse(
+      hub.state.scenarios.find(
+        ({ index }) => index === created.structuredContent.scenario_index,
+      ).data,
+    ),
+    withRuntimeBlockFields(overnightData),
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const found = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: characteristicRef },
+  });
+  assert.equal(found.isError, undefined, found.content[0]?.text);
+  assert.equal(found.structuredContent.changes.length, 1);
+  assert.equal(
+    found.structuredContent.changes[0].change_ref,
+    preparedCreate.structuredContent.change_ref,
+  );
+  assert.equal(
+    found.structuredContent.changes[0].target_refs.includes(
+      created.structuredContent.scenario_ref,
+    ),
+    true,
+  );
+
+  const observed = await secondClient.callTool({
+    name: found.structuredContent.changes[0].next.tool,
+    arguments: found.structuredContent.changes[0].next.arguments,
+  });
+  assert.equal(observed.structuredContent.status, "applied");
+  assert.equal(observed.structuredContent.configuration_matches, true);
+
+  const daytimeData = dailyIntervalBlockData({
+    start: [6, 15],
+    end: [22, 30],
+    inside: "false",
+    outside: "true",
+  });
+  const preparedUpdate = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: created.structuredContent.scenario_ref,
+      data: daytimeData,
+      reason: "Изменить границы и явные значения режима",
+    },
+  });
+  assert.equal(
+    preparedUpdate.isError,
+    undefined,
+    preparedUpdate.content[0]?.text,
+  );
+  const updated = await secondClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedUpdate.structuredContent.change_ref },
+  });
+  assert.equal(updated.structuredContent.status, "applied");
+  assert.equal(updated.structuredContent.configuration_matches, true);
+
+  const restoredUpdate = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: preparedUpdate.structuredContent.change_ref },
+  });
+  assert.equal(restoredUpdate.structuredContent.status, "restored");
+  assert.deepEqual(
+    JSON.parse(
+      hub.state.scenarios.find(
+        ({ index }) => index === created.structuredContent.scenario_index,
+      ).data,
+    ),
+    withRuntimeBlockFields(overnightData),
+  );
+
+  const removed = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: preparedCreate.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === created.structuredContent.scenario_index,
+    ),
+    false,
+  );
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+    "removing the schedule must not write a prior physical value",
+  );
+});
+
+test("daily interval BLOCK rejects ambiguous or unsupported schedules before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    {
+      name: "equal edges",
+      mutate: (data) => {
+        data.targets[0].if.conditions[0].end = dailyCron(22, 30);
+      },
+    },
+    {
+      name: "non-daily calendar",
+      mutate: (data) => {
+        data.targets[0].if.conditions[0].start.cron = "0 30 22 ? * MON *";
+      },
+    },
+    {
+      name: "sunset mode",
+      mutate: (data) => {
+        data.targets[0].if.conditions[0].start.mode = "SUNSET";
+      },
+    },
+    {
+      name: "offset",
+      mutate: (data) => {
+        data.targets[0].if.conditions[0].start.offset = 15;
+      },
+    },
+    {
+      name: "not a trigger",
+      mutate: (data) => {
+        data.targets[0].if.conditions[0].trigger = false;
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const data = dailyIntervalBlockData();
+    testCase.mutate(data);
+    const result = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name: testCase.name,
+        description: "Не сохранять неподдержанную форму расписания",
+        active: true,
+        on_start: false,
+        sync: false,
+        data,
+        reason: "Проверить границу daily interval",
+      },
+    });
+    assert.equal(result.isError, true, testCase.name);
+    assert.equal(
+      result.structuredContent.error.code,
+      "invalid_block_data",
+      testCase.name,
     );
   }
   assert.equal(

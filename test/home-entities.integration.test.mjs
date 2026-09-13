@@ -1345,6 +1345,25 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
                   },
                 ],
               },
+              {
+                type: "interval",
+                blockId: 11,
+                start: {
+                  type: "cron",
+                  blockId: 12,
+                  mode: "NONE",
+                  cron: "0 30 22 ? * * *",
+                  offset: 0,
+                },
+                end: {
+                  type: "cron",
+                  blockId: 13,
+                  mode: "NONE",
+                  cron: "0 15 6 ? * * *",
+                  offset: 0,
+                },
+                trigger: true,
+              },
             ],
           },
           // biome-ignore lint/suspicious/noThenProperty: this is the native SprutHub BLOCK key.
@@ -1636,6 +1655,41 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       native_type: "notify",
     },
   );
+  assert.equal(
+    relations.unresolved_areas.some(
+      ({ area, native_type: nativeType }) =>
+        area === "block_node" && ["interval", "cron"].includes(nativeType),
+    ),
+    false,
+  );
+  const interval = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      include: ["configuration"],
+      pointer: "/configuration/value/targets/1/if/conditions/4",
+    },
+  });
+  assert.equal(interval.isError, undefined, interval.content[0]?.text);
+  assert.deepEqual(interval.structuredContent.selection.value, {
+    type: "interval",
+    blockId: 11,
+    start: {
+      type: "cron",
+      blockId: 12,
+      mode: "NONE",
+      cron: "0 30 22 ? * * *",
+      offset: 0,
+    },
+    end: {
+      type: "cron",
+      blockId: 13,
+      mode: "NONE",
+      cron: "0 15 6 ? * * *",
+      offset: 0,
+    },
+    trigger: true,
+  });
   assert.equal(
     relations.unresolved_areas.some(
       ({ area, outcome }) =>
