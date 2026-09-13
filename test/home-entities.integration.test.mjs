@@ -653,7 +653,14 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
       { ref: "spruthub://hub/home%20B", name: "Одинаковый дом" },
     ],
   );
-  assert.equal(catalog.structuredContent.selection.required, true);
+  assert.deepEqual(catalog.structuredContent.selection, {
+    required: false,
+    default_home_ref: "spruthub://hub/home%2FA",
+    options: [
+      { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
+      { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
+    ],
+  });
   assert.equal(catalog.structuredContent.homes[0].access.ownership, "unknown");
   assert.equal(
     catalog.structuredContent.homes[0].access.native_owner,

@@ -525,6 +525,18 @@ test("an installed multi-home profile explains and completes explicit home selec
     { mode: 0o600 },
   );
   const restarted = await startInstalledProfileClient(t, configRoot);
+  const selectedHomes = await restarted.callTool({
+    name: "list_homes",
+    arguments: {},
+  });
+  assert.deepEqual(selectedHomes.structuredContent.selection, {
+    required: false,
+    default_home_ref: "spruthub://hub/home%20B",
+    options: [
+      { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
+      { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
+    ],
+  });
   const rooms = await restarted.callTool({
     name: "list_rooms",
     arguments: {},
@@ -656,6 +668,36 @@ test("an invalid pin for one home still exposes the exact replacement", async (t
   });
 });
 
+test("an empty file pin is treated as no selection for a single home", async (t) => {
+  const hub = await startHub(t);
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut empty-pin-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const configRoot = path.join(directory, "config");
+  const connectionFile = path.join(configRoot, "sprut-agent", "connection.env");
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_SERIAL=",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+
+  const client = await startInstalledProfileClient(t, configRoot);
+  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.deepEqual(catalog.structuredContent.selection, {
+    required: false,
+    default_home_ref: "spruthub://hub/home%2FA",
+  });
+  const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
+  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+});
+
 test("an account without homes returns a terminal catalog outcome", async (t) => {
   const hub = await startHub(t, { homes: [] });
   const client = await startClient(t, hub, await withSessionPath(t));
@@ -710,6 +752,43 @@ test("a complete MCP environment points home selection back to that environment"
     hub.requests.filter(({ params }) => params.room?.list).at(-1).serial,
     "home B",
   );
+});
+
+test("an environment home pin wins over credentials loaded from the profile", async (t) => {
+  const hub = await startHub(t, {
+    homes: [home("home/A", "Дом A"), home("home B", "Дом B")],
+  });
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut mixed-pin-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const configRoot = path.join(directory, "config");
+  const connectionFile = path.join(configRoot, "sprut-agent", "connection.env");
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      `SPRUTHUB_URL=${hub.url}`,
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+
+  const client = await startInstalledProfileClient(t, configRoot, {
+    SPRUTHUB_SERIAL: "missing-home",
+  });
+  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.equal(
+    catalog.structuredContent.selection.reason,
+    "configured_home_unavailable",
+  );
+  assert.deepEqual(catalog.structuredContent.selection.pin, {
+    source: "environment",
+    field: "SPRUTHUB_SERIAL",
+    restart:
+      "Set SPRUTHUB_SERIAL in the same MCP launch environment, then restart the MCP application.",
+  });
 });
 
 test("a partial profile preserves safe credential guidance without reflecting credentials", async (t) => {
@@ -1262,7 +1341,14 @@ test("a write-bound home does not restrict explicit reads or follow their select
     arguments: {},
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.equal(catalog.structuredContent.selection.required, true);
+  assert.deepEqual(catalog.structuredContent.selection, {
+    required: false,
+    default_home_ref: "spruthub://hub/home%2FA",
+    options: [
+      { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
+      { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
+    ],
+  });
 
   const room = await readRoomServices(client, "spruthub://hub/home%20B/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
