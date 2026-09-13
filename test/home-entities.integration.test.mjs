@@ -1139,8 +1139,8 @@ test("raw device-window diagnostics preserve text without claiming a device repo
     },
   });
   assert.equal(service.isError, undefined, service.content[0]?.text);
-  const next = service.structuredContent.entity.include_resolution.not_applied[0]
-    .next;
+  const next =
+    service.structuredContent.entity.include_resolution.not_applied[0].next;
   assert.deepEqual(next, {
     tool: "get_entity",
     arguments: {
