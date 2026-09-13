@@ -29,6 +29,150 @@ export const BLOCK_CHILD_FIELDS = {
   },
 };
 
+export const BLOCK_ALLOWED_KEYS = {
+  root: new Set(["blockId", "targets"]),
+  if: new Set([
+    "type",
+    "blockId",
+    "state",
+    "mode",
+    "if",
+    "then",
+    "else",
+    "then_delay",
+    "else_delay",
+  ]),
+  condition: new Set(["type", "blockId", "mode", "conditions"]),
+  code: new Set(["type", "blockId", "code"]),
+  characteristic: new Set([
+    "type",
+    "blockId",
+    "aId",
+    "sId",
+    "cId",
+    "hs",
+    "hc",
+    "trigger",
+    "cond",
+    "value",
+    "timeCond",
+    "time",
+  ]),
+  interval: new Set(["type", "blockId", "start", "end", "trigger"]),
+  cron: new Set(["type", "blockId", "mode", "cron", "offset"]),
+  service: new Set(["type", "blockId", "aId", "sId", "hs", "characteristics"]),
+  set: new Set(["type", "blockId", "cId", "hc", "value"]),
+  delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
+};
+
+const BLOCK_CREATE_NODE_KINDS = [
+  "root",
+  "if",
+  "condition",
+  "characteristic",
+  "interval",
+  "cron",
+  "service",
+  "set",
+  "delay",
+];
+
+const BLOCK_NODE_CONSTRAINTS = {
+  root: {},
+  if: {
+    constants: { mode: "EVERY", then_delay: 0, else_delay: 0 },
+  },
+  condition: {
+    fields: { mode: ["AND", "OR"] },
+  },
+  characteristic: {
+    native_ids: ["aId", "sId", "cId"],
+    fields: {
+      hs: "string",
+      hc: "string",
+      trigger: "boolean",
+      cond: "string",
+      value: "string",
+    },
+    constants: { timeCond: "", time: 0 },
+    value_encoding: "native_scalar_as_string",
+  },
+  interval: {
+    fields: { trigger: "boolean" },
+  },
+  cron: {
+    constants: { mode: "NONE", offset: 0 },
+    fields: { cron: "string" },
+  },
+  service: {
+    native_ids: ["aId", "sId"],
+    fields: { hs: "string" },
+  },
+  set: {
+    native_ids: ["cId"],
+    fields: { hc: "string", value: "string" },
+    value_encoding: "native_scalar_as_string",
+  },
+  delay: {
+    constants: { mode: "RESET" },
+    fields: {
+      index: { type: "integer", minimum: 1, unique: true },
+      time: { type: "integer", minimum: 1 },
+    },
+  },
+};
+
+export function publishedBlockNodes() {
+  const children = publishedBlockChildren();
+  const nodes = {};
+  for (const kind of BLOCK_CREATE_NODE_KINDS) {
+    const constraints = BLOCK_NODE_CONSTRAINTS[kind] ?? {};
+    const nodeChildren = children[kind];
+    const used = new Set([
+      ...(kind === "root" ? [] : ["type"]),
+      ...Object.keys(constraints.constants ?? {}),
+      ...Object.keys(nodeChildren ?? {}),
+      ...(constraints.native_ids ?? []),
+      ...Object.keys(constraints.fields ?? {}),
+    ]);
+    const editorOptional = [...(BLOCK_ALLOWED_KEYS[kind] ?? [])].filter(
+      (key) => !used.has(key),
+    );
+    nodes[kind] = {
+      ...(kind === "root" ? {} : { type: kind }),
+      ...constraints,
+      ...(nodeChildren ? { children: nodeChildren } : {}),
+      ...(editorOptional.length > 0 ? { editor_optional: editorOptional } : {}),
+    };
+  }
+  return nodes;
+}
+
+function publishedBlockChildren() {
+  const children = {};
+  for (const [kind, fields] of Object.entries(BLOCK_CHILD_FIELDS)) {
+    children[kind] = {};
+    for (const [key, rule] of Object.entries(fields)) {
+      const types = [...rule.kinds].filter(
+        (type) =>
+          !(kind === "condition" && key === "conditions" && type === "code"),
+      );
+      const minItems =
+        (kind === "root" && key === "targets") ||
+        (kind === "condition" && key === "conditions") ||
+        (kind === "service" && key === "characteristics")
+          ? 1
+          : undefined;
+      children[kind][key] = {
+        shape: rule.shape,
+        types,
+        ...(minItems === undefined ? {} : { min_items: minItems }),
+      };
+    }
+  }
+  return children;
+}
+
 export function visitKnownBlockNodes(data, visitor, invalidChild) {
   const visit = (node, kind, path) => {
     if (!isRecord(node)) return;

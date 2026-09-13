@@ -1,6 +1,6 @@
 # `block_create` и `block_data_update`
 
-Сначала вызови `get_native_change_contract` для `block_create` или `block_data_update`. Ниже — проверенный общий BLOCK-контракт, включая daily interval, полную замену data и общие границы восстановления.
+Сначала вызови `get_native_change_contract` для `block_create` или `block_data_update`. Ниже — проверенный общий BLOCK-контракт, включая форму поддержанных узлов, daily interval, полную замену data и общие границы восстановления.
 
 - `block_create` требует явные `name`, `description`, `active`, `onStart`,
   `sync`, `type=BLOCK` и `data`. После неопределённого create маркер позволяет
@@ -54,6 +54,13 @@
   update прочитай [карточку паузы](block-action-pause.md): полная замена также
   может восстановить или убрать этот контроллер.
 
+- Точную native форму поддержанных узлов `root`, `if`, `condition`,
+  `characteristic`, `service`, `set`, `delay`, `interval` и `cron` возвращает
+  свежий контракт в `supported.nodes`: обязательные поля и константы,
+  scalar/array children, native types, строковые значения и отдельно
+  `editor_optional` (`blockId`, runtime `state`). Предикат ветки — поле `if`,
+  не `condition`/`conditions`. Не копируй чужой BLOCK как образец синтаксиса:
+  актуальные поля даёт контракт, а не эта карточка.
 - BLOCK manifest версии `2026-09-13` допускает `root.targets`, вложенные `if`
   (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
   опубликованными comparisons, daily interval с вложенными cron-границами,

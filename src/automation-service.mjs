@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import {
+  BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
+  publishedBlockNodes,
   visitKnownBlockNodes,
 } from "./block-model.mjs";
 import {
@@ -5611,6 +5613,7 @@ function blockContract() {
         },
       },
       nesting: [
+        "if.if",
         "if.then",
         "if.else",
         "delay.targets",
@@ -5618,6 +5621,7 @@ function blockContract() {
         "interval.start",
         "interval.end",
       ],
+      nodes: publishedBlockNodes(),
     },
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
@@ -6170,42 +6174,6 @@ function blockNode(value) {
 function blockNodeArray(value) {
   return Array.isArray(value) && value.every(blockNode);
 }
-
-const BLOCK_ALLOWED_KEYS = {
-  root: new Set(["blockId", "targets"]),
-  if: new Set([
-    "type",
-    "blockId",
-    "state",
-    "mode",
-    "if",
-    "then",
-    "else",
-    "then_delay",
-    "else_delay",
-  ]),
-  condition: new Set(["type", "blockId", "mode", "conditions"]),
-  code: new Set(["type", "blockId", "code"]),
-  characteristic: new Set([
-    "type",
-    "blockId",
-    "aId",
-    "sId",
-    "cId",
-    "hs",
-    "hc",
-    "trigger",
-    "cond",
-    "value",
-    "timeCond",
-    "time",
-  ]),
-  interval: new Set(["type", "blockId", "start", "end", "trigger"]),
-  cron: new Set(["type", "blockId", "mode", "cron", "offset"]),
-  service: new Set(["type", "blockId", "aId", "sId", "hs", "characteristics"]),
-  set: new Set(["type", "blockId", "cId", "hc", "value"]),
-  delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
-};
 
 function collectUnknownBlockFields(data) {
   const unknown = [];

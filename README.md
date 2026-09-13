@@ -183,7 +183,9 @@ Codex CLI 0.154.0 и синтетическими хабами. Из общег�
 Изменения проходят через `get_native_change_contract` →
 `prepare_native_change` → `apply_native_change`. Состояние и возврат доступны
 через `get_native_change`, `list_native_changes` и
-`restore_native_change`. Preview boolean → boolean BLOCK остаётся отдельным
+`restore_native_change`. Контракт `block_create`/`block_data_update` публикует
+форму поддержанных узлов, достаточную чтобы собрать data без чужого
+BLOCK-образца. Preview boolean → boolean BLOCK остаётся отдельным
 совместимым входом. Подготовка не меняет хаб, timeout записи оставляет исход
 неизвестным до сверки, а последующая ручная правка блокирует автоматическое
 восстановление этим change даже при позднейшем совпадении с запрошенным
