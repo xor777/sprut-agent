@@ -1175,6 +1175,105 @@ test("raw device-window diagnostics preserve text without claiming a device repo
   assert(observedAt <= hubResponseReceivedAt);
 });
 
+test("long device-window diagnostics remain fully addressable after redaction", async (t) => {
+  const hub = await startHub();
+  const finalEvidence = "\nИтог: конечный узел mesh-42 отвечает нестабильно 💡";
+  const rawDiagnostic =
+    Array.from(
+      { length: 700 },
+      (_, index) =>
+        `Наблюдение ${index}: маршрут ${index % 17}, качество ${index % 101} 💡\n`,
+    ).join("") + finalEvidence;
+  assert(rawDiagnostic.length > 16_384);
+  const info = hub.states
+    .get("home/A")
+    .window.options.find(({ key }) => key === "Info");
+  info.value.stringValue = rawDiagnostic;
+  const client = await startClient(t, hub);
+  const baseArguments = {
+    entity_ref: "spruthub://hub/home%2FA/window/window-A",
+    include: ["diagnostics"],
+    max_bytes: 2_048,
+  };
+
+  let result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      ...baseArguments,
+      pointer: "/diagnostics/0/text",
+    },
+  });
+  const chunks = [];
+  while (true) {
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert(
+      Buffer.byteLength(result.content[0].text) <= baseArguments.max_bytes,
+    );
+    const selected = result.structuredContent.selection;
+    assert.equal(selected.pointer, "/diagnostics/0/text");
+    assert.equal(
+      selected.value.start_character,
+      Array.from(chunks.join("")).length,
+    );
+    assert.equal(
+      selected.value.total_characters,
+      Array.from(rawDiagnostic).length,
+    );
+    chunks.push(selected.value.text);
+    if (!selected.next) break;
+    result = await client.callTool({
+      name: selected.next.tool,
+      arguments: selected.next.arguments,
+    });
+  }
+  const restored = chunks.join("");
+  assert.equal(restored, rawDiagnostic);
+  assert(restored.endsWith(finalEvidence));
+  assert.equal(result.structuredContent.selection.value.complete, true);
+  assert.equal(
+    result.structuredContent.representation.selected_complete,
+    false,
+  );
+
+  const origin = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      ...baseArguments,
+      pointer: "/diagnostics/0/content_origin",
+    },
+  });
+  assert.equal(origin.isError, undefined, origin.content[0]?.text);
+  assert.equal(
+    origin.structuredContent.selection.value,
+    "spruthub_device_window_diagnostics",
+  );
+  const sourceTimestamp = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      ...baseArguments,
+      pointer: "/diagnostics/0/source_timestamp",
+    },
+  });
+  assert.equal(
+    sourceTimestamp.structuredContent.selection.value,
+    null,
+    sourceTimestamp.content[0]?.text,
+  );
+  const redacted = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      ...baseArguments,
+      pointer: "/diagnostics/1/text",
+    },
+  });
+  assert.equal(redacted.isError, undefined, redacted.content[0]?.text);
+  assert.equal(redacted.structuredContent.selection.value, "[REDACTED]");
+  assert.doesNotMatch(
+    JSON.stringify(redacted),
+    /diagnostic-secret-must-not-leak/,
+  );
+});
+
 test("get_entity relations separate proven BLOCK roles from bounded native scopes", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
