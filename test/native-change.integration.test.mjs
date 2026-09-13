@@ -470,16 +470,110 @@ function publishedNativeIds(form, ids) {
   return selected;
 }
 
-function publishedScalarString(form, value) {
-  if (form.value_encoding !== "native_scalar_as_string") {
+function requiredFieldSpec(form, name) {
+  const spec = form.fields?.[name];
+  if ((form.editor_optional ?? []).includes(name)) {
     throw new Error(
-      `BLOCK ${form.type} does not publish string value encoding`,
+      `BLOCK ${form.type} publishes required field ${name} as optional`,
     );
   }
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") return String(value);
-  if (typeof value === "string") return value;
+  if (spec === undefined) {
+    throw new Error(
+      `BLOCK ${form.type} does not publish required field ${name}`,
+    );
+  }
+  return spec;
+}
+
+function requiredFieldName(form, name) {
+  requiredFieldSpec(form, name);
+  return name;
+}
+
+function entityType(result) {
+  const type = result?.structuredContent?.entity?.type;
+  if (typeof type !== "string" || type.length === 0) {
+    throw new Error("get_entity did not return a native type");
+  }
+  return type;
+}
+
+function publishedNativeType(form, field, entityResult) {
+  const expectedSource =
+    field === "hs"
+      ? "service_type_from_get_entity"
+      : "characteristic_type_from_get_entity";
+  if (requiredFieldSpec(form, field) !== expectedSource) {
+    throw new Error(
+      `BLOCK ${form.type}.${field} does not publish ${expectedSource}`,
+    );
+  }
+  return entityType(entityResult);
+}
+
+function publishedScalarString(form, value) {
+  const encoding = form.value_encoding;
+  if (encoding?.form !== "native_scalar_as_string") {
+    throw new Error(
+      `BLOCK ${form.type} does not publish native scalar string encoding`,
+    );
+  }
+  if (typeof value === "boolean") {
+    const token = encoding.bool?.[value];
+    if (token !== (value ? "true" : "false")) {
+      throw new Error(
+        `BLOCK ${form.type} does not publish lowercase bool scalar strings`,
+      );
+    }
+    return token;
+  }
+  if (typeof value === "number") {
+    if (
+      Number.isInteger(value) &&
+      encoding.integer !== "optional_minus_digits"
+    ) {
+      throw new Error(
+        `BLOCK ${form.type} does not publish integer scalar strings`,
+      );
+    }
+    return String(value);
+  }
+  if (typeof value === "string") {
+    if (encoding.string !== "literal") {
+      throw new Error(
+        `BLOCK ${form.type} does not publish literal string scalars`,
+      );
+    }
+    return value;
+  }
   throw new Error(`unsupported ${form.type} value`);
+}
+
+function nativeDelayTimeFromContract(contract, { seconds }) {
+  const form = publishedBlockNode(contract, "delay");
+  const spec = requiredFieldSpec(form, "time");
+  if (spec.type !== "integer" || spec.unit !== "milliseconds") {
+    throw new Error("BLOCK delay.time does not publish native milliseconds");
+  }
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    throw new Error("household delay seconds must be a positive integer");
+  }
+  return seconds * 1000;
+}
+
+function preparedDelayTimes(data) {
+  const times = [];
+  const visit = (node) => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    if (node.type === "delay" && "time" in node) times.push(node.time);
+    for (const value of Object.values(node)) visit(value);
+  };
+  visit(data);
+  return times;
 }
 
 function assembleCronFromContract(contract, hhmm) {
@@ -519,22 +613,30 @@ function assembleIntervalFromContract(contract, { start, end, trigger }) {
 
 function assembleCharacteristicFromContract(
   contract,
-  { ref, hs, hc, trigger, cond, value },
+  { ref, service, characteristic, trigger, cond, value },
 ) {
   const form = publishedBlockNode(contract, "characteristic");
+  const hs = requiredFieldName(form, "hs");
+  const hc = requiredFieldName(form, "hc");
+  const triggerField = requiredFieldName(form, "trigger");
+  const condField = requiredFieldName(form, "cond");
+  const valueField = requiredFieldName(form, "value");
   return {
     type: form.type,
     ...publishedNativeIds(form, parseNativeRefIds(ref)),
-    hs,
-    hc,
-    trigger,
-    cond,
-    value: publishedScalarString(form, value),
+    [hs]: publishedNativeType(form, hs, service),
+    [hc]: publishedNativeType(form, hc, characteristic),
+    [triggerField]: trigger,
+    [condField]: cond,
+    [valueField]: publishedScalarString(form, value),
     ...structuredClone(form.constants ?? {}),
   };
 }
 
-function assembleServiceSetFromContract(contract, { ref, hs, hc, value }) {
+function assembleServiceSetFromContract(
+  contract,
+  { ref, service, characteristic, value },
+) {
   const serviceForm = publishedBlockNode(contract, "service");
   const setForm = publishedBlockNode(contract, "set");
   const ids = parseNativeRefIds(ref);
@@ -547,22 +649,25 @@ function assembleServiceSetFromContract(contract, { ref, hs, hc, value }) {
   if (setField === undefined) {
     throw new Error("BLOCK service does not publish set children");
   }
+  const hs = requiredFieldName(serviceForm, "hs");
+  const hc = requiredFieldName(setForm, "hc");
+  const valueField = requiredFieldName(setForm, "value");
   return {
     type: serviceForm.type,
     ...publishedNativeIds(serviceForm, ids),
-    hs,
+    [hs]: publishedNativeType(serviceForm, hs, service),
     [setField]: [
       {
         type: setForm.type,
         ...publishedNativeIds(setForm, ids),
-        hc,
-        value: publishedScalarString(setForm, value),
+        [hc]: publishedNativeType(setForm, hc, characteristic),
+        [valueField]: publishedScalarString(setForm, value),
       },
     ],
   };
 }
 
-function assembleDelayFromContract(contract, { time, targets }) {
+function assembleDelayFromContract(contract, { afterSeconds, targets }) {
   const form = publishedBlockNode(contract, "delay");
   const targetsField = Object.entries(form.children ?? {}).find(
     ([, rule]) =>
@@ -573,17 +678,14 @@ function assembleDelayFromContract(contract, { time, targets }) {
   if (targetsField === undefined) {
     throw new Error("BLOCK delay does not publish action children");
   }
-  if (
-    form.fields?.index?.type !== "integer" ||
-    form.fields?.time?.type !== "integer"
-  ) {
-    throw new Error("BLOCK delay does not publish index and time");
+  if (form.fields?.index?.type !== "integer") {
+    throw new Error("BLOCK delay does not publish index");
   }
   return {
     type: form.type,
     ...structuredClone(form.constants ?? {}),
     index: form.fields.index.minimum,
-    time,
+    time: nativeDelayTimeFromContract(contract, { seconds: afterSeconds }),
     [targetsField]: targets,
   };
 }
@@ -612,6 +714,14 @@ function assembleConditionFromContract(contract, children) {
 
 function assembleIfFromContract(contract, { when, thenActions, elseActions }) {
   const form = publishedBlockNode(contract, "if");
+  if ((form.editor_optional ?? []).includes("state")) {
+    throw new Error("BLOCK if publishes hub-assigned state as editor optional");
+  }
+  if (form.hub_assigned?.state !== "omit_on_create") {
+    throw new Error(
+      "BLOCK if does not publish hub-assigned state omit_on_create",
+    );
+  }
   const predicateField = publishedPredicateField(form, when.type);
   const thenField = "then";
   const elseField = "else";
@@ -5988,6 +6098,8 @@ test("a client can assemble a supported BLOCK from the public contract without a
     true,
   );
 
+  const autoOffAfterSeconds = 120;
+  nativeDelayTimeFromContract(contract, { seconds: autoOffAfterSeconds });
   const data = assembleSupportedBlockFromContract(contract, {
     targets: [
       assembleIfFromContract(contract, {
@@ -5999,8 +6111,8 @@ test("a client can assemble a supported BLOCK from the public contract without a
           }),
           assembleCharacteristicFromContract(contract, {
             ref: motionCharacteristicRef,
-            hs: motionService.structuredContent.entity.type,
-            hc: motion.structuredContent.entity.type,
+            service: motionService,
+            characteristic: motion,
             trigger: false,
             cond: "=",
             value: true,
@@ -6009,19 +6121,19 @@ test("a client can assemble a supported BLOCK from the public contract without a
         thenActions: [
           assembleServiceSetFromContract(contract, {
             ref: characteristicRef,
-            hs: lampService.structuredContent.entity.type,
-            hc: lampOn.structuredContent.entity.type,
+            service: lampService,
+            characteristic: lampOn,
             value: true,
           }),
         ],
         elseActions: [
           assembleDelayFromContract(contract, {
-            time: 60_000,
+            afterSeconds: autoOffAfterSeconds,
             targets: [
               assembleServiceSetFromContract(contract, {
                 ref: characteristicRef,
-                hs: lampService.structuredContent.entity.type,
-                hc: lampOn.structuredContent.entity.type,
+                service: lampService,
+                characteristic: lampOn,
                 value: false,
               }),
             ],
@@ -6049,6 +6161,10 @@ test("a client can assemble a supported BLOCK from the public contract without a
   assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   assert.equal(prepared.structuredContent.status, "prepared");
   assert.equal(prepared.structuredContent.native_write_sent, false);
+  assert.deepEqual(
+    preparedDelayTimes(prepared.structuredContent.diff.configuration.to.data),
+    [120_000],
+  );
 
   const actions = prepared.structuredContent.block_action_preview.actions;
   assert.equal(actions.length, 2);
