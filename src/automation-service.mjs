@@ -5560,9 +5560,40 @@ function blockContract() {
         crosses_midnight: true,
         native_trigger: true,
         cron: {
+          format: "0 MM HH ? * * *",
+          fields: {
+            MM: "minute_0_to_59",
+            HH: "hour_0_to_23",
+          },
           seconds: 0,
           mode: "NONE",
           offset: 0,
+        },
+        native_shape: {
+          type: "interval",
+          start: {
+            type: "cron",
+            mode: "NONE",
+            cron: "0 MM HH ? * * *",
+            offset: 0,
+          },
+          end: {
+            type: "cron",
+            mode: "NONE",
+            cron: "0 MM HH ? * * *",
+            offset: 0,
+          },
+          trigger: true,
+        },
+        boundaries: {
+          start: "enter_interval",
+          end: "leave_interval",
+          clock: "selected_hub_local_wall_clock",
+        },
+        branch_semantics: {
+          sole_interval_condition: "start_then_end_else",
+          compound_condition:
+            "boundary_rechecks_complete_condition_tree_then_selects_result_branch",
         },
       },
       nesting: [
@@ -6063,7 +6094,7 @@ function parseDailyCron(node, path) {
   if (!match) {
     throw invalidBlock(
       path,
-      "daily cron must contain zero seconds and one local HH:mm every day",
+      "daily cron must match 0 MM HH ? * * * with MM 0-59 and HH 0-23 in the selected hub's local wall clock",
     );
   }
   return { minute: Number(match[1]), hour: Number(match[2]) };

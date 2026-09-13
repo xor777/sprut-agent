@@ -5299,10 +5299,9 @@ test("versioned BLOCK contract prepares different supported compositions", async
   );
 });
 
-test("daily interval BLOCK completes create, find, update, readback, and restore without device writes", async (t) => {
+test("daily interval contract lets a client repair cron before preparation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
-  const overnightData = dailyIntervalBlockData();
 
   const contract = await firstClient.callTool({
     name: "get_native_change_contract",
@@ -5357,8 +5356,7 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   );
 
   const initiallyInvalid = dailyIntervalBlockData();
-  initiallyInvalid.targets[0].if.conditions[0].start.cron =
-    "0 30 22 * * *";
+  initiallyInvalid.targets[0].if.conditions[0].start.cron = "0 30 22 * * *";
   const rejected = await firstClient.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -5379,10 +5377,7 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
     rejected.structuredContent.error.action,
     "get_native_change_contract",
   );
-  assert.match(
-    rejected.structuredContent.error.message,
-    /0 MM HH \? \* \* \*/,
-  );
+  assert.match(rejected.structuredContent.error.message, /0 MM HH \? \* \* \*/);
 
   initiallyInvalid.targets[0].if.conditions[0].start.cron =
     contract.structuredContent.contract.supported.daily_interval.native_shape.start.cron
@@ -5405,6 +5400,12 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   assert.equal(corrected.isError, undefined, corrected.content[0]?.text);
   assert.equal(corrected.structuredContent.status, "prepared");
   assert.equal(corrected.structuredContent.native_write_sent, false);
+});
+
+test("daily interval BLOCK completes create, find, update, readback, and restore without device writes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const overnightData = dailyIntervalBlockData();
 
   const preparedCreate = await firstClient.callTool({
     name: "prepare_native_change",
