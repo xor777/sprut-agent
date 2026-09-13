@@ -5521,14 +5521,15 @@ test("prepared BLOCK observations preserve offline availability beside cached fa
     undefined,
     preparedOffline.content[0]?.text,
   );
-  const offlineObservations = preparedOffline.structuredContent.block_action_preview.actions
-    .filter(({ characteristic_type }) =>
-      ["On", "Brightness"].includes(characteristic_type),
-    )
-    .map(({ observation, comparison_to_observation }) => ({
-      observation,
-      comparison_to_observation,
-    }));
+  const offlineObservations =
+    preparedOffline.structuredContent.block_action_preview.actions
+      .filter(({ characteristic_type }) =>
+        ["On", "Brightness"].includes(characteristic_type),
+      )
+      .map(({ observation, comparison_to_observation }) => ({
+        observation,
+        comparison_to_observation,
+      }));
   assert.deepEqual(offlineObservations, [
     {
       observation: { status: "unavailable", kind: "boolValue", value: false },

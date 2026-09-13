@@ -5797,6 +5797,7 @@ async function validateBlockData(
     });
     if (reference.role === "action") {
       reference.contract_kind = contract.kind;
+      reference.observation_available = accessory.online;
       reference.observed_value = observableBlockValue(
         characteristic.control.value,
       );
@@ -5865,9 +5866,12 @@ function blockActionPreview(validation, homeRef, capturedAt) {
         kind: action.contract_kind,
         execution: "write_if_action_runs",
       };
-      const observation = action.observed_value
-        ? { status: "available", ...action.observed_value }
-        : { status: "unavailable" };
+      const observationAvailable =
+        action.observation_available === true && action.observed_value !== null;
+      const observation = {
+        status: observationAvailable ? "available" : "unavailable",
+        ...(action.observed_value ?? {}),
+      };
       return {
         configuration_pointer: blockPathToPointer(action.path),
         characteristic_ref: `${homeRef}/accessory/${action.aId}/service/${action.sId}/characteristic/${action.cId}`,
@@ -5875,7 +5879,7 @@ function blockActionPreview(validation, homeRef, capturedAt) {
         characteristic_type: action.hc,
         command,
         observation,
-        comparison_to_observation: action.observed_value
+        comparison_to_observation: observationAvailable
           ? valuesEqual(command, action.observed_value)
             ? "equal"
             : "different"
