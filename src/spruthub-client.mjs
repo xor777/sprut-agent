@@ -3497,7 +3497,6 @@ function normalizeCharacteristicDetail(
     current_value: {
       value: value.value,
       ...(currentEnum ? { enum: currentEnum } : {}),
-      source: "characteristic",
       source_timestamp: null,
     },
     capabilities: {
