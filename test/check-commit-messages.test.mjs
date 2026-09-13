@@ -18,6 +18,7 @@ const zeros = "0".repeat(40);
 test("first push of a new branch does not re-check historical commit messages", async (t) => {
   const repo = await initRepo(t);
   await commit(repo, "not a conventional history commit");
+  await addOrigin(t, repo);
   await git(repo, "checkout", "-b", "candidate");
   await commit(repo, "feat: candidate change");
 
@@ -121,6 +122,7 @@ test("pull request range lints commits after the base tip", async (t) => {
 test("manual run with empty before SHA uses the default branch as the range base", async (t) => {
   const repo = await initRepo(t);
   await commit(repo, "not a conventional history commit");
+  await addOrigin(t, repo);
   await git(repo, "checkout", "-b", "candidate");
   await commit(repo, "feat: manual dispatch");
 
@@ -173,6 +175,17 @@ async function initRepo(t, { branch = "main" } = {}) {
   await git(repo, "config", "user.email", "commitlint-range@example.invalid");
   await git(repo, "config", "commit.gpgsign", "false");
   return repo;
+}
+
+async function addOrigin(t, repo, branch = "main") {
+  const originParent = await mkdtemp(
+    path.join(tmpdir(), "sprut-commitlint-origin-"),
+  );
+  t.after(() => rm(originParent, { recursive: true, force: true }));
+  const origin = path.join(originParent, "origin.git");
+  await run("git", ["clone", "--bare", "--branch", branch, repo, origin]);
+  await git(repo, "remote", "add", "origin", origin);
+  await git(repo, "fetch", "origin");
 }
 
 async function commit(repo, message) {
