@@ -5481,6 +5481,137 @@ test("prepared BLOCK changes preserve typed branch commands and their preparatio
   );
 });
 
+test("prepared BLOCK observations preserve offline availability beside cached false and zero values", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const accessory = hub.state.accessories.find(({ id }) => id === 34);
+  accessory.online = false;
+  accessory.services[0].characteristics.find(
+    ({ cId }) => cId === 16,
+  ).control.value = { intValue: 0 };
+  const data = dailyIntervalBlockData({ inside: "false", outside: "true" });
+  data.targets[0].then.push(
+    setAction({ cId: 16, hc: "Brightness", value: "0" }),
+  );
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const direct = await firstClient.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef },
+  });
+  assert.equal(direct.isError, undefined, direct.content[0]?.text);
+  assert.equal(direct.structuredContent.entity.available, false);
+  assert.equal(direct.structuredContent.entity.current_value.value, false);
+
+  const preparedOffline = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Offline preview",
+      description: "Сохранить доступность вместе с cached значениями",
+      active: true,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Не выдавать cached значения за текущее состояние",
+    },
+  });
+  assert.equal(
+    preparedOffline.isError,
+    undefined,
+    preparedOffline.content[0]?.text,
+  );
+  const offlineObservations = preparedOffline.structuredContent.block_action_preview.actions
+    .filter(({ characteristic_type }) =>
+      ["On", "Brightness"].includes(characteristic_type),
+    )
+    .map(({ observation, comparison_to_observation }) => ({
+      observation,
+      comparison_to_observation,
+    }));
+  assert.deepEqual(offlineObservations, [
+    {
+      observation: { status: "unavailable", kind: "boolValue", value: false },
+      comparison_to_observation: "unknown",
+    },
+    {
+      observation: { status: "unavailable", kind: "intValue", value: 0 },
+      comparison_to_observation: "unknown",
+    },
+    {
+      observation: { status: "unavailable", kind: "boolValue", value: false },
+      comparison_to_observation: "unknown",
+    },
+  ]);
+
+  const capturedOffline = structuredClone(
+    preparedOffline.structuredContent.block_action_preview,
+  );
+  const accessoryReadsBeforeRestart = hub.requests.filter(
+    ({ accessory: request }) => request?.get,
+  ).length;
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const persisted = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: preparedOffline.structuredContent.change_ref },
+  });
+  assert.deepEqual(persisted.structuredContent.block_action_preview, {
+    ...capturedOffline,
+    snapshot: { ...capturedOffline.snapshot, fresh: false },
+  });
+  assert.equal(
+    hub.requests.filter(({ accessory: request }) => request?.get).length,
+    accessoryReadsBeforeRestart,
+    "reading after restart must preserve rather than refresh source availability",
+  );
+
+  accessory.online = true;
+  const preparedOnline = await secondClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Online preview",
+      description: "Сравнить те же false и zero у доступного источника",
+      active: true,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Проверить контраст доступности без потери значений",
+    },
+  });
+  assert.equal(
+    preparedOnline.isError,
+    undefined,
+    preparedOnline.content[0]?.text,
+  );
+  assert.deepEqual(
+    preparedOnline.structuredContent.block_action_preview.actions
+      .filter(({ characteristic_type }) =>
+        ["On", "Brightness"].includes(characteristic_type),
+      )
+      .map(({ observation, comparison_to_observation }) => ({
+        observation,
+        comparison_to_observation,
+      })),
+    [
+      {
+        observation: { status: "available", kind: "boolValue", value: false },
+        comparison_to_observation: "equal",
+      },
+      {
+        observation: { status: "available", kind: "intValue", value: 0 },
+        comparison_to_observation: "equal",
+      },
+      {
+        observation: { status: "available", kind: "boolValue", value: false },
+        comparison_to_observation: "different",
+      },
+    ],
+  );
+});
+
 test("daily interval contract lets a client repair cron before preparation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
