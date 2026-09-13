@@ -11,7 +11,7 @@ import {
 } from "./spruthub-connection.mjs";
 
 const server = new McpServer(
-  { name: "sprut-agent", version: "0.1.4" },
+  { name: "sprut-agent", version: "0.1.5" },
   {
     instructions:
       "Start with list_homes. Choose an exact returned home_ref for home-qualified reads such as inspect_home and read_services, and follow executable next tool calls from responses. If a tool requires a pinned home, follow list_homes selection.pin locally, restart the same MCP application, and retry. Keep SprutHub credentials only in the local connection.env described by credential_setup; never ask for or echo credential values. The optional spruthub-master skill provides deeper SprutHub advice beyond this basic MCP entry path.",
@@ -287,7 +287,7 @@ server.registerTool(
   {
     title: "Read a supported native change contract",
     description:
-      "Return the limited contract for one supported native write without changing the hub. Omit target_ref to compare the static room_create and virtual_light_group capabilities; when supplied for either, it must be the exact configured home ref. Entity-dependent operations require the matching home-qualified target described by target_ref. block_action_pause gates one selected existing BLOCK action with a hub-executed absolute deadline, so expiry does not depend on this MCP process; it rejects trigger-containing or overlapping scopes and recognizes an unchanged owned controller after a position shift. Accessory placement changes only one accessory name and room; room creation is a separate reversible change. A virtual_light_group creates one native Lightbulb with explicit common On/Brightness links and last-value feedback; create and link were replayed on hub 3.0.0, while same-valued repeat delivery remains a reported native limitation. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref. characteristic_option, logic_option, and window_option require an exact live option key and share NUMBER, CHECKBOX, and explicit LIST scalar validation. TargetTemperature, TargetHeatingCoolingState, and C_FanSpeed characteristic values expose guarded setting restoration only when the observed baseline satisfies the native write contract, without claiming reversal of physical effects; other characteristic values remain non-restorable commands or unknown semantics. LOGIC source creation reports stored source ownership separately from fresh logic.types mapping readiness, and source update writes only data while readback protects native metadata flags. Characteristic values, typed options, and BLOCK contracts remain separately bounded.",
+      "Return the limited contract for one supported native write without changing the hub. scenario_run accepts one active action-only BLOCK with onStart=false, sync=false, and literal Lightbulb On=false service/set targets; preparation reads but does not run it, and each new prepared intent can send exactly one native run. Omit target_ref to compare the static room_create and virtual_light_group capabilities; when supplied for either, it must be the exact configured home ref. Entity-dependent operations require the matching home-qualified target described by target_ref. block_action_pause gates one selected existing BLOCK action with a hub-executed absolute deadline, so expiry does not depend on this MCP process; it rejects trigger-containing or overlapping scopes and recognizes an unchanged owned controller after a position shift. Accessory placement changes only one accessory name and room; room creation is a separate reversible change. A virtual_light_group creates one native Lightbulb with explicit common On/Brightness links and last-value feedback; create and link were replayed on hub 3.0.0, while same-valued repeat delivery remains a reported native limitation. Logic assignment uses a logic ref from a service catalog; logic_active uses an assigned logic ref. characteristic_option, logic_option, and window_option require an exact live option key and share NUMBER, CHECKBOX, and explicit LIST scalar validation. TargetTemperature, TargetHeatingCoolingState, and C_FanSpeed characteristic values expose guarded setting restoration only when the observed baseline satisfies the native write contract, without claiming reversal of physical effects; other characteristic values remain non-restorable commands or unknown semantics. LOGIC source creation reports stored source ownership separately from fresh logic.types mapping readiness, and source update writes only data while readback protects native metadata flags. Characteristic values, typed options, and BLOCK contracts remain separately bounded.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -302,6 +302,7 @@ server.registerTool(
         "block_create",
         "block_data_update",
         "block_action_pause",
+        "scenario_run",
         "logic_source_create",
         "logic_source_update",
       ]),
@@ -327,7 +328,7 @@ server.registerTool(
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Prepare one typed native change with its current baseline and concrete diff. block_action_pause takes an RFC 6901 pointer to one executable action in an existing BLOCK and a positive duration; its absolute deadline starts on first apply and is executed by the hub. Selecting its unchanged owned controller or direct then/0 action replaces one window, while an overlapping scope or a subgraph containing trigger=true returns a correctable error before any write. Supported operations also include one accessory name-and-room placement, creation of an absent room, one virtual Lightbulb group over explicit member service refs and common On/Brightness controls, a catalogued native logic assignment, its active flag, typed characteristic/logic/window options using NUMBER, CHECKBOX, or an explicit scalar LIST, creation or exact source update of a native LOGIC, characteristic_value, and bounded BLOCK changes. TargetTemperature, TargetHeatingCoolingState, and C_FanSpeed values save a guarded restorable setting when the baseline itself remains writable; this does not reverse physical effects. Room creation and accessory placement are separate changes so they can be reconciled and restored in reverse order. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired known setting creates no owned change, while a same-valued command with unknown semantics remains explicit.",
+      "Prepare one typed native change with its current baseline and concrete diff. scenario_run snapshots one active action-only BLOCK and every literal target without executing it; apply rechecks the exact scenario before one native run. block_action_pause takes an RFC 6901 pointer to one executable action in an existing BLOCK and a positive duration; its absolute deadline starts on first apply and is executed by the hub. Selecting its unchanged owned controller or direct then/0 action replaces one window, while an overlapping scope or a subgraph containing trigger=true returns a correctable error before any write. Supported operations also include one accessory name-and-room placement, creation of an absent room, one virtual Lightbulb group over explicit member service refs and common On/Brightness controls, a catalogued native logic assignment, its active flag, typed characteristic/logic/window options using NUMBER, CHECKBOX, or an explicit scalar LIST, creation or exact source update of a native LOGIC, characteristic_value, and bounded BLOCK changes. TargetTemperature, TargetHeatingCoolingState, and C_FanSpeed values save a guarded restorable setting when the baseline itself remains writable; this does not reverse physical effects. Room creation and accessory placement are separate changes so they can be reconciled and restored in reverse order. Preparation validates the configured home and current native contract before any write; an already assigned logic or already desired known setting creates no owned change, while a same-valued command with unknown semantics remains explicit.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -342,6 +343,7 @@ server.registerTool(
         "block_create",
         "block_data_update",
         "block_action_pause",
+        "scenario_run",
         "logic_source_create",
         "logic_source_update",
       ]),
@@ -486,7 +488,7 @@ server.registerTool(
   {
     title: "Apply a prepared native SprutHub change",
     description:
-      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it; after an observed manual value, prepare a new change for any further authorized write because the old change cannot reclaim that value.",
+      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A scenario_run change sends its exact scenario index at most once; an unknown run outcome is never retried, while a new explicit run requires a newly prepared change. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it; after an observed manual value, prepare a new change for any further authorized write because the old change cannot reclaim that value.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,

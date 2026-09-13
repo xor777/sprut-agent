@@ -194,6 +194,19 @@ export class AutomationService {
         contract: virtualLightGroupContract(),
       };
     }
+    if (input.operation === "scenario_run") {
+      const target = parseScenarioRef(input.target_ref, this.hubSerial);
+      const scenario = await this.client.getScenario(target.index);
+      if (!scenario) throw scenarioNotFound();
+      const snapshot = scenarioSnapshot(scenario);
+      await validateScenarioRun(snapshot, this.client);
+      return {
+        status: "ok",
+        operation: input.operation,
+        target_ref: input.target_ref,
+        contract: scenarioRunContract(),
+      };
+    }
     if (["block_create", "block_data_update"].includes(input.operation)) {
       return {
         status: "ok",
@@ -254,6 +267,9 @@ export class AutomationService {
     }
     if (input.operation === "block_action_pause") {
       return this.#prepareBlockActionPause(input);
+    }
+    if (input.operation === "scenario_run") {
+      return this.#prepareScenarioRun(input);
     }
     if (input.operation === "logic_source_create") {
       return this.#prepareLogicSourceCreate(input);
@@ -814,7 +830,18 @@ export class AutomationService {
     }
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
     const data = structuredClone(input.data);
-    await validateBlockData(data, this.client, { allowUnknownFrom: null });
+    const validation = await validateBlockData(data, this.client, {
+      allowUnknownFrom: null,
+      allowActionOnly: true,
+    });
+    requireActionOnlyRuntime(
+      {
+        active: input.active,
+        onStart: input.on_start,
+        sync: input.sync,
+      },
+      validation,
+    );
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -866,10 +893,12 @@ export class AutomationService {
       Date.now(),
     );
     const data = prepared.data;
-    await validateBlockData(data, this.client, {
+    const validation = await validateBlockData(data, this.client, {
       allowUnknownFrom: baseline.data,
       allowedPauses: pauseChanges,
+      allowActionOnly: true,
     });
+    requireActionOnlyRuntime(baseline, validation);
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -945,6 +974,35 @@ export class AutomationService {
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareScenarioRun(input) {
+    const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    const snapshot = scenarioSnapshot(scenario);
+    const targets = await validateScenarioRun(snapshot, this.client);
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "scenario_run",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      baseline_snapshot: snapshot,
+      targets,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("scenario_and_targets_validated"),
       created_at: now,
       updated_at: now,
       history: [{ status: "prepared", at: now }],
@@ -1122,6 +1180,9 @@ export class AutomationService {
       }
       if (change.kind === "logic_assignment") {
         return this.#applyLogicAssignment(change);
+      }
+      if (change.kind === "scenario_run") {
+        return this.#applyScenarioRun(change);
       }
       if (isLogicSourceChange(change)) {
         return this.#applyScenarioChange(change);
@@ -1370,6 +1431,9 @@ export class AutomationService {
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
+    if (change.kind === "scenario_run") {
+      return this.#getScenarioRun(change);
+    }
     if (isLogicSourceChange(change)) {
       return this.#getScenarioChange(change);
     }
@@ -1457,6 +1521,13 @@ export class AutomationService {
       }
       if (change.kind === "logic_assignment") {
         return this.#restoreLogicAssignment(change);
+      }
+      if (change.kind === "scenario_run") {
+        throw new SprutHubError(
+          "restore_unsupported",
+          "A scenario run is a physical command; restoring its journal entry cannot undo that effect.",
+          "get_native_change",
+        );
       }
       if (isLogicSourceChange(change)) {
         return this.#restoreScenarioChange(change);
@@ -3481,6 +3552,7 @@ export class AutomationService {
         "block_create",
         "block_data_update",
         "block_action_pause",
+        "scenario_run",
         "logic_source_create",
         "logic_source_update",
       ].includes(change?.kind)
@@ -3879,6 +3951,141 @@ export class AutomationService {
     await this.#saveBeforeWrite(change);
   }
 
+  async #applyScenarioRun(change) {
+    if (change.status === "applying" && change.native_write_sent === true) {
+      const observations = await this.#readScenarioRunTargets(change);
+      return this.#finishNative(change, "uncertain", undefined, {
+        target_observations: observations,
+        last_verification: freshVerification("run_outcome_unknown"),
+      });
+    }
+    if (change.status !== "prepared") return publicStoredNativeChange(change);
+    const scenario = await this.client.getScenario(change.target.index);
+    if (
+      scenario === null ||
+      !snapshotsEqual(scenarioSnapshot(scenario), change.baseline_snapshot)
+    ) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "scenario_changed",
+        configuration_matches: false,
+        last_verification: freshVerification("scenario_changed"),
+      });
+    }
+    const targets = await validateScenarioRun(
+      scenarioSnapshot(scenario),
+      this.client,
+    );
+    if (!isDeepStrictEqual(targets, change.targets)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "scenario_changed",
+        configuration_matches: false,
+        last_verification: freshVerification("scenario_changed"),
+      });
+    }
+
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.runScenario(change.target.index);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        await this.#finishNative(change, "not_applied", undefined, {
+          last_verification: failedVerification(error),
+        });
+        throw error;
+      }
+      const observations = await this.#readScenarioRunTargets(change);
+      return this.#finishNative(change, "uncertain", undefined, {
+        target_observations: observations,
+        configuration_matches: true,
+        last_verification: failedVerification(error),
+      });
+    }
+    const observations = await this.#readScenarioRunTargets(change);
+    return this.#finishNative(change, "applied", undefined, {
+      target_observations: observations,
+      configuration_matches: true,
+      last_verification: freshVerification(
+        observations.every(({ matches }) => matches === true)
+          ? "command_acknowledged_and_target_values_observed"
+          : "command_acknowledged_with_target_value_difference",
+      ),
+    });
+  }
+
+  async #getScenarioRun(change) {
+    if (change.status === "applying" && change.native_write_sent === true) {
+      change.status = "uncertain";
+      change.write_intent = change.write_intent
+        ? { ...change.write_intent, phase: "needs_reconciliation" }
+        : change.write_intent;
+      change.history.push({
+        status: "uncertain",
+        at: new Date().toISOString(),
+      });
+    }
+    let configurationMatches;
+    let verification;
+    try {
+      const scenario = await this.client.getScenario(change.target.index);
+      configurationMatches =
+        scenario !== null &&
+        snapshotsEqual(scenarioSnapshot(scenario), change.baseline_snapshot);
+      verification = freshVerification(
+        configurationMatches
+          ? "scenario_unchanged"
+          : "scenario_changed_after_preparation",
+      );
+    } catch (error) {
+      verification = failedVerification(error);
+    }
+    const targetObservations = await this.#readScenarioRunTargets(change);
+    Object.assign(change, {
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
+        : {}),
+      target_observations: targetObservations,
+      last_verification: verification,
+      updated_at: new Date().toISOString(),
+    });
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
+  }
+
+  async #readScenarioRunTargets(change) {
+    return Promise.all(
+      change.targets.map(async (target) => {
+        try {
+          const characteristic = await this.client.getCharacteristic(
+            target.target,
+          );
+          const observed = typedNativeValue(characteristic.control.value);
+          return {
+            characteristic_ref: target.characteristic_ref,
+            expected_value: structuredClone(target.expected_value),
+            observed_value: observed,
+            matches: valuesEqual(observed, target.expected_value),
+          };
+        } catch (error) {
+          return {
+            characteristic_ref: target.characteristic_ref,
+            expected_value: structuredClone(target.expected_value),
+            observed_value: null,
+            matches: null,
+            error: {
+              code: error instanceof SprutHubError ? error.code : "read_failed",
+            },
+          };
+        }
+      }),
+    );
+  }
+
   async #applyScenarioChange(change) {
     if (["restored", "superseded", "completed"].includes(change.status))
       return publicStoredNativeChange(change);
@@ -3936,6 +4143,7 @@ export class AutomationService {
         allowedPauses: [...pauseChanges, change],
         allowedPauseIntentId:
           change.kind === "block_action_pause" ? change.id : undefined,
+        allowActionOnly: change.kind !== "block_action_pause",
       });
     }
 
@@ -4387,6 +4595,7 @@ export class AutomationService {
       await validateBlockData(prepared.data, this.client, {
         allowUnknownFrom: scenarioSnapshot(current.scenario).data,
         allowedPauses: pauseChanges,
+        allowActionOnly: true,
       });
       // Validation reads current bindings and can outlast a short pause. Rebuild
       // from the immutable baseline immediately afterwards so that such a pause
@@ -5339,10 +5548,47 @@ function blockContract() {
     },
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
-      "At least one characteristic condition must have trigger=true.",
+      "A conditional BLOCK requires at least one characteristic condition with trigger=true; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
       "The same characteristic cannot be both a condition and an action in this slice.",
       "Only full data replacement is supported for an existing BLOCK; top-level rename and flag updates are not supported.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
+    ],
+  };
+}
+
+function scenarioRunContract() {
+  return {
+    version: "2026-09-13",
+    write: "scenario.run({index})",
+    scope: "one_action_only_light_off_BLOCK",
+    required_configuration: {
+      type: "BLOCK",
+      active: true,
+      on_start: false,
+      sync: false,
+      targets: "literal_Lightbulb_On_false_service_set_actions_only",
+    },
+    preparation: "read_and_validate_without_execution",
+    repeat:
+      "one send per prepared change; prepare a new change for each explicit run",
+    delivery: {
+      acknowledged: "native scenario.run ACK received",
+      unknown: "request may have run but ACK was lost; never retry this change",
+      target_readback:
+        "fresh values are reported separately and do not prove physical or atomic delivery",
+    },
+    restore_supported: false,
+    evidence: {
+      live_hub_version: "3.0.0b (20131)",
+      action_only_create_read: true,
+      explicit_repeat_run: true,
+      live_targets: 1,
+    },
+    limitations: [
+      "Only active action-only Lightbulb On=false BLOCK scenarios with onStart=false and sync=false are supported.",
+      "Arbitrary code, conditions, delays, child scenarios, and unknown action nodes are rejected.",
+      "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
+      "SprutHub exposes no native compare-and-set; a race remains after the pre-run scenario check.",
     ],
   };
 }
@@ -5388,7 +5634,12 @@ function blockActionPauseContract() {
 async function validateBlockData(
   data,
   client,
-  { allowUnknownFrom, allowedPauses = [], allowedPauseIntentId },
+  {
+    allowUnknownFrom,
+    allowedPauses = [],
+    allowedPauseIntentId,
+    allowActionOnly = false,
+  },
 ) {
   if (
     !isRecord(data) ||
@@ -5431,7 +5682,10 @@ async function validateBlockData(
       throw invalidBlock(path, message);
     },
   );
-  if (context.triggers === 0) {
+  if (
+    context.triggers === 0 &&
+    !(allowActionOnly && isLiteralActionOnlyBlock(data))
+  ) {
     throw invalidBlock("targets", "at least one trigger=true is required");
   }
 
@@ -5461,7 +5715,9 @@ async function validateBlockData(
     const contract = characteristicContract(characteristic.control, {
       requireWrite: reference.role === "action",
     });
+    if (reference.role === "action") reference.contract_kind = contract.kind;
     const value = parseBlockValue(reference.value, contract.kind);
+    if (reference.role === "action") reference.parsed_value = value;
     validateCharacteristicValue(value, contract);
     if (
       reference.role === "condition" &&
@@ -5486,6 +5742,102 @@ async function validateBlockData(
       "a condition cannot write the same characteristic in this slice",
     );
   }
+  if (
+    context.triggers === 0 &&
+    context.actions.some(
+      (action) =>
+        action.hs !== "Lightbulb" ||
+        action.hc !== "On" ||
+        action.contract_kind !== "boolValue" ||
+        action.parsed_value !== false,
+    )
+  ) {
+    throw invalidBlock(
+      "targets",
+      "action-only BLOCK supports only literal Lightbulb On=false actions",
+    );
+  }
+  return context;
+}
+
+async function validateScenarioRun(snapshot, client) {
+  if (snapshot.type !== "BLOCK") throw unsupportedScenarioType();
+  const context = await validateBlockData(snapshot.data, client, {
+    allowUnknownFrom: null,
+    allowActionOnly: true,
+  });
+  if (
+    !isLiteralActionOnlyBlock(snapshot.data) ||
+    context.conditions.length > 0
+  ) {
+    throw new SprutHubError(
+      "unsupported_scenario_run",
+      "Only a BLOCK containing literal service/set targets and no conditions, delays, or code can be run by this path.",
+      "get_native_change_contract",
+    );
+  }
+  requireActionOnlyRuntime(snapshot, context, "unsupported_scenario_run");
+  const homeRef = configuredHomeRef(client.serial);
+  const targets = context.actions.map((action) => ({
+    characteristic_ref: `${homeRef}/accessory/${action.aId}/service/${action.sId}/characteristic/${action.cId}`,
+    target: { aId: action.aId, sId: action.sId, cId: action.cId },
+    service_type: action.hs,
+    characteristic_type: action.hc,
+    expected_value: {
+      value: action.parsed_value,
+      kind: action.contract_kind,
+    },
+  }));
+  const refs = targets.map(({ characteristic_ref: ref }) => ref);
+  if (new Set(refs).size !== refs.length) {
+    throw new SprutHubError(
+      "unsupported_scenario_run",
+      "A runnable native command must set each target characteristic at most once.",
+      "get_native_change_contract",
+    );
+  }
+  return targets;
+}
+
+function requireActionOnlyRuntime(
+  snapshot,
+  validation,
+  code = "invalid_native_change",
+) {
+  if (validation.triggers > 0) return;
+  if (
+    snapshot.active === true &&
+    snapshot.onStart === false &&
+    snapshot.sync === false
+  ) {
+    return;
+  }
+  throw new SprutHubError(
+    code,
+    "An action-only native command must be active with onStart=false and sync=false.",
+    "get_native_change_contract",
+  );
+}
+
+function isLiteralActionOnlyBlock(data) {
+  return (
+    isRecord(data) &&
+    Array.isArray(data.targets) &&
+    data.targets.length > 0 &&
+    data.targets.every(
+      (target) =>
+        isRecord(target) &&
+        target.type === "service" &&
+        Array.isArray(target.characteristics) &&
+        target.characteristics.length > 0 &&
+        target.characteristics.every(
+          (action) =>
+            isRecord(action) &&
+            action.type === "set" &&
+            typeof action.value === "string",
+        ),
+    )
+  );
 }
 
 function validateBlockNode(node, kind, path, context) {
@@ -8061,6 +8413,67 @@ function publicNativeChange(
       ],
     };
   }
+  if (change.kind === "scenario_run") {
+    return {
+      status: change.status,
+      change_ref: `spruthub-change://native/${change.id}`,
+      operation: change.kind,
+      reason: change.reason,
+      target_ref: change.target_ref,
+      scenario: {
+        ref: change.target_ref,
+        name: change.baseline_snapshot.name,
+        description: change.baseline_snapshot.desc,
+        type: change.baseline_snapshot.type,
+        active: change.baseline_snapshot.active,
+        on_start: change.baseline_snapshot.onStart,
+        sync: change.baseline_snapshot.sync,
+      },
+      targets: change.targets.map((target) => ({
+        characteristic_ref: target.characteristic_ref,
+        service_type: target.service_type,
+        characteristic_type: target.characteristic_type,
+        value: target.expected_value.value,
+        kind: target.expected_value.kind,
+      })),
+      native_write_sent: change.native_write_sent,
+      native_acknowledged: change.native_acknowledged,
+      command_delivery: {
+        status:
+          change.native_acknowledged === true
+            ? "acknowledged"
+            : change.native_write_sent === true
+              ? "unknown"
+              : "not_sent",
+        native_acknowledged: change.native_acknowledged === true,
+        physical_delivery: "not_proven",
+        atomic: false,
+      },
+      ...(change.write_intent
+        ? { write_intent: structuredClone(change.write_intent) }
+        : {}),
+      ...(configurationMatches !== undefined
+        ? { configuration_matches: configurationMatches }
+        : {}),
+      ...(change.target_observations
+        ? {
+            target_observations: structuredClone(change.target_observations),
+          }
+        : {}),
+      ...(verification ? { verification } : {}),
+      ...(change.conflict_reason
+        ? { conflict_reason: change.conflict_reason }
+        : {}),
+      restore_supported: false,
+      limitations: [
+        "Preparation and read-only inspection do not run the scenario.",
+        "An acknowledged run means SprutHub accepted scenario.run; target values are observed separately and do not prove physical delivery or causality.",
+        "The target actions are not atomic, and a race remains after the pre-run scenario comparison.",
+        "An unknown run outcome is never resent; prepare a new change only for a new explicit user request.",
+        "Removing or restoring scenario configuration does not undo a past command effect.",
+      ],
+    };
+  }
   if (!isNativeValueChange(change)) {
     const diff =
       change.kind === "block_create"
@@ -8299,6 +8712,7 @@ function changeSummary(change, homeRef) {
       "block_create",
       "block_data_update",
       "block_action_pause",
+      "scenario_run",
       "logic_source_create",
       "logic_source_update",
     ].includes(change.kind)
@@ -8478,9 +8892,12 @@ function nativeAffectedRefs(change, homeRef) {
   ) {
     refs.push(...canonicalAncestors(refs[0]));
   } else if (
-    ["block_create", "block_data_update", "block_action_pause"].includes(
-      change.kind,
-    )
+    [
+      "block_create",
+      "block_data_update",
+      "block_action_pause",
+      "scenario_run",
+    ].includes(change.kind)
   ) {
     if (change.scenario_index) {
       refs.push(
@@ -8490,11 +8907,13 @@ function nativeAffectedRefs(change, homeRef) {
     const configurations =
       change.kind === "block_create"
         ? [change.requested_snapshot?.data]
-        : [
-            change.baseline_snapshot?.data,
-            change.requested_snapshot?.data,
-            change.restore_snapshot?.data,
-          ];
+        : change.kind === "scenario_run"
+          ? [change.baseline_snapshot?.data]
+          : [
+              change.baseline_snapshot?.data,
+              change.requested_snapshot?.data,
+              change.restore_snapshot?.data,
+            ];
     for (const data of configurations) {
       refs.push(...blockAffectedRefs(data, homeRef));
     }

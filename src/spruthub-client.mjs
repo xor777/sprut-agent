@@ -1225,6 +1225,22 @@ export class SprutHubClient {
     }
   }
 
+  async runScenario(index) {
+    const response = await this.#request(
+      { scenario: { run: { index } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.scenario;
+    if (!container || !Object.hasOwn(container, "run")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the scenario run.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async getCharacteristic({ aId, sId, cId }) {
     const response = await this.#request(
       { characteristic: { get: { aId, sId, cId } } },

@@ -1249,6 +1249,7 @@ async function startHub() {
       for (const [matches, callbackName] of [
         [params.scenario?.create, "afterCreate"],
         [params.scenario?.update, "afterUpdate"],
+        [params.scenario?.run, "afterRun"],
         [params.scenario?.delete, "afterDelete"],
       ]) {
         if (matches && state.behavior[callbackName]) {
@@ -2133,7 +2134,10 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
     },
   });
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
-  assert.equal(contract.structuredContent.contract.scope, "one_action_only_BLOCK");
+  assert.equal(
+    contract.structuredContent.contract.scope,
+    "one_action_only_light_off_BLOCK",
+  );
 
   const prepared = await firstClient.callTool({
     name: "prepare_native_change",
@@ -2213,25 +2217,32 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
     ),
     { intValue: 20 },
   );
-  assert.deepEqual(currentCharacteristicValue(hub, fixture.secondBrightnessRef), {
-    intValue: 80,
-  });
+  assert.deepEqual(
+    currentCharacteristicValue(hub, fixture.secondBrightnessRef),
+    {
+      intValue: 80,
+    },
+  );
   assert.deepEqual(currentCharacteristicValue(hub, fixture.foreignOnRef), {
     boolValue: true,
   });
-  assert.deepEqual(currentCharacteristicValue(hub, fixture.foreignBrightnessRef), {
-    intValue: 55,
-  });
+  assert.deepEqual(
+    currentCharacteristicValue(hub, fixture.foreignBrightnessRef),
+    {
+      intValue: 55,
+    },
+  );
+  assert.deepEqual(
+    hub.requests.filter(({ scenario }) => scenario?.run),
+    [{ scenario: { run: { index: "all-off-command" } } }],
+  );
 
   const repeatedApply = await firstClient.callTool({
     name: "apply_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(repeatedApply.structuredContent.status, "applied");
-  assert.equal(
-    hub.requests.filter(({ scenario }) => scenario?.run).length,
-    1,
-  );
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
@@ -2260,10 +2271,7 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
     arguments: { change_ref: secondPrepared.structuredContent.change_ref },
   });
   assert.equal(secondApplied.structuredContent.status, "applied");
-  assert.equal(
-    hub.requests.filter(({ scenario }) => scenario?.run).length,
-    2,
-  );
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 2);
 });
 
 test("scenario run refuses changed targets and never retries an unknown delivery", async (t) => {
@@ -2315,7 +2323,15 @@ test("scenario run refuses changed targets and never retries an unknown delivery
     hub.requests.filter(({ scenario: request }) => request?.run).length,
     1,
   );
-  const repeated = await client.callTool({
+  await client.close();
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const inspected = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: lostAck.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "uncertain");
+  assert.equal(inspected.structuredContent.command_delivery.status, "unknown");
+  const repeated = await restartedClient.callTool({
     name: "apply_native_change",
     arguments: { change_ref: lostAck.structuredContent.change_ref },
   });
@@ -2326,6 +2342,51 @@ test("scenario run refuses changed targets and never retries an unknown delivery
   );
 });
 
+test("a persisted run intent becomes unknown after the final journal save is lost", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const fixture = installNativeCommandFixture(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: fixture.scenarioRef,
+      reason: "Не повторять отправленную команду после сбоя журнала",
+    },
+  });
+  let restoreStorage;
+  hub.state.behavior.afterRun = async () => {
+    restoreStorage = await blockStateDirectory(t, stateDirectory);
+  };
+
+  const appliedWithoutFinalSave = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(appliedWithoutFinalSave.structuredContent.status, "applied");
+  assert.equal(
+    appliedWithoutFinalSave.structuredContent.local_state.saved,
+    false,
+  );
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
+
+  await firstClient.close();
+  await restoreStorage();
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const recovered = await restartedClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(recovered.structuredContent.status, "uncertain");
+  assert.equal(recovered.structuredContent.command_delivery.status, "unknown");
+  const repeated = await restartedClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "uncertain");
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
+});
+
 test("an action-only BLOCK can be created without running and restoration removes only its configuration", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const fixture = installNativeCommandFixture(hub);
@@ -2333,6 +2394,54 @@ test("an action-only BLOCK can be created without running and restoration remove
     ({ index }) => index !== "all-off-command",
   );
   const client = await startClient(t, hub, stateDirectory);
+  const unsupportedData = structuredClone(fixture.data);
+  unsupportedData.targets[0].characteristics[0].value = "true";
+  const unsupportedCreate = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Неподдержанная action-only команда",
+      description: "Не расширять проверенный OFF-срез",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: unsupportedData,
+      reason: "Проверить границу безопасного запуска",
+    },
+  });
+  assert.equal(unsupportedCreate.isError, true);
+  assert.equal(
+    JSON.parse(unsupportedCreate.content[0].text).error.code,
+    "invalid_block_data",
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create),
+    false,
+  );
+  const unsafeAutostart = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Небезопасный автозапуск",
+      description: "Создание и запуск должны оставаться разными действиями",
+      active: true,
+      on_start: true,
+      sync: false,
+      data: fixture.data,
+      reason: "Не запускать общую команду при старте хаба",
+    },
+  });
+  assert.equal(unsafeAutostart.isError, true);
+  assert.equal(
+    JSON.parse(unsafeAutostart.content[0].text).error.code,
+    "invalid_native_change",
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create),
+    false,
+  );
   const preparedCreate = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -2347,7 +2456,11 @@ test("an action-only BLOCK can be created without running and restoration remove
       reason: "Сохранить общую команду на хабе",
     },
   });
-  assert.equal(preparedCreate.isError, undefined, preparedCreate.content[0]?.text);
+  assert.equal(
+    preparedCreate.isError,
+    undefined,
+    preparedCreate.content[0]?.text,
+  );
   const created = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: preparedCreate.structuredContent.change_ref },
@@ -2356,10 +2469,7 @@ test("an action-only BLOCK can be created without running and restoration remove
   assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
     boolValue: true,
   });
-  assert.equal(
-    hub.requests.filter(({ scenario }) => scenario?.run).length,
-    0,
-  );
+  assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 0);
 
   const run = await client.callTool({
     name: "prepare_native_change",
