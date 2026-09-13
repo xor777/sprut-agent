@@ -1,9 +1,9 @@
 # `logic_assignment` и `logic_active`
 
-Сначала вызови `get_native_change_contract` для выбранной `logic_assignment` или `logic_active` и точного target. Для `logic_option` используй отдельную карточку typed options.
+Сначала вызови `get_native_change_contract` для выбранной `logic_assignment` или `logic_active` и точного target. Для `logic_option` используй отдельную [карточку typed options](options.md).
 
 - `logic_assignment` применяет различие definition, type и назначения из
-  «Модели исполнения и адресного чтения»: принимает logic ref из
+  [«Модели исполнения и адресного чтения»](../spruthub-contract.md#модель-исполнения-и-адресное-чтение): принимает logic ref из
   `available_logic_types` выбранного
   service. Существующее назначение даёт no-op без владения; отсутствующий тип
   даёт `logic_type_unavailable`. Новое назначение создаётся неактивным, а потеря
