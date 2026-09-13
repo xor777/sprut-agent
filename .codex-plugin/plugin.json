@@ -1,6 +1,6 @@
 {
   "name": "sprut-agent",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Connect Codex to a SprutHub home with agent-first tools and guidance.",
   "author": {
     "name": "sprut-agent contributors",
