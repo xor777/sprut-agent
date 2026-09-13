@@ -38,6 +38,7 @@ test("first push of a new branch does not re-check historical commit messages", 
 test("first push still rejects an invalid new commit message", async (t) => {
   const repo = await initRepo(t);
   await commit(repo, "feat: history");
+  await addOrigin(t, repo);
   await git(repo, "checkout", "-b", "candidate");
   await commit(repo, "not a conventional new commit");
 

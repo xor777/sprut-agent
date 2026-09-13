@@ -9,7 +9,6 @@ const projectRoot = path.resolve(
 );
 const configPath = path.join(projectRoot, "commitlint.config.js");
 const repo = process.cwd();
-const baseSha = process.env.BASE_SHA ?? "";
 const headSha = process.env.HEAD_SHA ?? "";
 const defaultBranch = process.env.DEFAULT_BRANCH || "main";
 
@@ -19,53 +18,32 @@ if (headSha.length === 0) {
 }
 
 const head = git(["rev-parse", `${headSha}^{commit}`]);
-const fromSha = resolveRangeBase(head, baseSha, defaultBranch);
-process.exit(fromSha === null ? lintAll(head) : lintRange(fromSha, head));
+// GitHub sends 40 zeros as `before` on the first push of a ref; merge-base then fails.
+const from = [process.env.BASE_SHA ?? "", `origin/${defaultBranch}`]
+  .filter((rev) => rev.length > 0 && !/^0+$/.test(rev))
+  .map((rev) => spawnGit(["merge-base", rev, head]))
+  .find((result) => result.status === 0)
+  ?.stdout.trim();
 
-function resolveRangeBase(head, requestedBase, branch) {
-  if (isUsableBase(requestedBase, head)) {
-    return git(["rev-parse", `${requestedBase}^{commit}`]);
-  }
-  // GitHub sends 40 zeros as `before` on the first push of a ref.
-  for (const candidate of [`origin/${branch}`, branch]) {
-    if (!isCommit(candidate)) continue;
-    const mergeBase = gitMergeBase(candidate, head);
-    if (mergeBase !== null) return mergeBase;
-  }
-  return null;
+if (from === head) {
+  process.stdout.write(`No new commits in ${from}..${head}\n`);
+  process.exit(0);
 }
 
-function isUsableBase(sha, head) {
-  return isCommit(sha) && gitMergeBase(sha, head) !== null;
-}
-
-function isCommit(rev) {
-  if (rev.length === 0 || /^0+$/.test(rev)) return false;
-  return spawnGit(["cat-file", "-e", `${rev}^{commit}`]).status === 0;
-}
-
-function gitMergeBase(a, b) {
-  const result = spawnGit(["merge-base", a, b]);
-  if (result.status !== 0) return null;
-  return result.stdout.trim();
-}
-
-function lintRange(fromSha, head) {
-  if (fromSha === head) {
-    process.stdout.write(`No new commits in ${fromSha}..${head}\n`);
-    return 0;
-  }
-  const count = git(["rev-list", "--count", `${fromSha}..${head}`]);
-  process.stdout.write(`Linting ${count} commit(s) in ${fromSha}..${head}\n`);
-  return runCommitlint(["--from", fromSha, "--to", head]);
-}
-
-function lintAll(head) {
+if (from === undefined) {
   process.stderr.write(
     `No usable commit range base; linting all commits reachable from ${head}\n`,
   );
-  return runCommitlint(["--to", head]);
+} else {
+  const count = git(["rev-list", "--count", `${from}..${head}`]);
+  process.stdout.write(`Linting ${count} commit(s) in ${from}..${head}\n`);
 }
+
+process.exit(
+  runCommitlint(
+    from === undefined ? ["--to", head] : ["--from", from, "--to", head],
+  ),
+);
 
 function git(args) {
   const result = spawnGit(args);
