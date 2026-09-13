@@ -7637,6 +7637,11 @@ function scenarioSnapshot(scenario) {
   if (
     !isRecord(scenario) ||
     typeof scenario.index !== "string" ||
+    typeof scenario.name !== "string" ||
+    typeof scenario.desc !== "string" ||
+    typeof scenario.active !== "boolean" ||
+    typeof scenario.onStart !== "boolean" ||
+    typeof scenario.sync !== "boolean" ||
     typeof scenario.type !== "string" ||
     typeof scenario.data !== "string"
   ) {
@@ -7654,7 +7659,21 @@ function scenarioSnapshot(scenario) {
       "SprutHub returned invalid BLOCK data.",
     );
   }
-  return { ...structuredClone(scenario), data };
+  return nativeScenarioConfiguration(scenario, data);
+}
+
+function nativeScenarioConfiguration(scenario, data) {
+  return {
+    index: scenario.index,
+    predefined: scenario.predefined === true,
+    name: scenario.name,
+    desc: scenario.desc,
+    active: scenario.active,
+    onStart: scenario.onStart,
+    sync: scenario.sync,
+    type: scenario.type,
+    data,
+  };
 }
 
 function isLogicSourceChange(change) {
@@ -8164,17 +8183,19 @@ function blockSnapshotObservation(change, scenario, snapshot) {
 
 function snapshotsEqual(left, right) {
   return isDeepStrictEqual(
-    normalizeScenarioSnapshot(left),
-    normalizeScenarioSnapshot(right),
+    comparableNativeScenarioConfiguration(left),
+    comparableNativeScenarioConfiguration(right),
   );
 }
 
-function normalizeScenarioSnapshot(snapshot) {
-  const normalized = structuredClone(snapshot);
-  // SprutHub derives this projection from the BLOCK bindings after each write.
-  delete normalized.rooms;
-  normalized.data = configurationData(snapshot.data);
-  return normalized;
+function comparableNativeScenarioConfiguration(snapshot) {
+  // Compare identity plus ScenarioCreateRequest/ScenarioUpdateRequest fields.
+  // ScenarioMessage rooms, iconsIf/iconsThen, error, order and bundleId are
+  // hub projections or runtime diagnostics, not editable configuration.
+  return nativeScenarioConfiguration(
+    snapshot,
+    configurationData(snapshot.data),
+  );
 }
 
 function parseNativeChangeRef(ref) {
