@@ -789,6 +789,24 @@ test("an environment home pin wins over credentials loaded from the profile", as
     restart:
       "Set SPRUTHUB_SERIAL in the same MCP launch environment, then restart the MCP application.",
   });
+  await client.close();
+
+  const restarted = await startInstalledProfileClient(t, configRoot, {
+    SPRUTHUB_SERIAL: "home B",
+  });
+  const rooms = await restarted.callTool({
+    name: "list_rooms",
+    arguments: {},
+  });
+  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  assert.equal(
+    rooms.structuredContent.rooms[0].ref,
+    "spruthub://hub/home%20B/room/1",
+  );
+  assert.equal(
+    hub.requests.filter(({ params }) => params.room?.list).at(-1).serial,
+    "home B",
+  );
 });
 
 test("a partial profile preserves safe credential guidance without reflecting credentials", async (t) => {
