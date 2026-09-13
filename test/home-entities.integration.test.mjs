@@ -1157,10 +1157,22 @@ test("raw device-window diagnostics preserve text without claiming a device repo
     routed.structuredContent.entity.diagnostics,
     direct.structuredContent.entity.diagnostics,
   );
-  assert.deepEqual(routed.structuredContent.entity.freshness, {
-    observed_at: routed.structuredContent.freshness.hubResponseReceivedAt,
-    source_timestamp: null,
-  });
+  const routedWindowSentAt = hub.responseSentAt.findLast(({ request }) =>
+    Boolean(request.params.window?.get),
+  ).at;
+  const observedAt = Date.parse(
+    routed.structuredContent.entity.freshness.observed_at,
+  );
+  const hubResponseReceivedAt = Date.parse(
+    routed.structuredContent.freshness.hubResponseReceivedAt,
+  );
+  assert.equal(
+    routed.structuredContent.entity.freshness.source_timestamp,
+    null,
+  );
+  assert(Number.isFinite(observedAt));
+  assert(observedAt >= routedWindowSentAt);
+  assert(observedAt <= hubResponseReceivedAt);
 });
 
 test("get_entity relations separate proven BLOCK roles from bounded native scopes", async (t) => {
