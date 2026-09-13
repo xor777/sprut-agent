@@ -324,6 +324,7 @@ function setAction({
   aId = 34,
   sId = 13,
   cId = 15,
+  hs = "Lightbulb",
   hc = "On",
   value = "true",
 } = {}) {
@@ -331,7 +332,7 @@ function setAction({
     type: "service",
     aId,
     sId,
-    hs: "Lightbulb",
+    hs,
     characteristics: [{ type: "set", cId, hc, value }],
   };
 }
@@ -833,22 +834,79 @@ function withRuntimeBlockFields(data) {
   return visit(data, "root");
 }
 
-function scenarioRoomIds(data, accessories) {
-  const roomIds = new Set();
-  const visit = (value) => {
+function scenarioBindingProjection(data, accessories) {
+  const rooms = new Set();
+  const iconsIf = [];
+  const iconsThen = [];
+  const seenIf = new Set();
+  const seenThen = new Set();
+  const addIcon = (list, seen, icon) => {
+    if (typeof icon === "string" && !seen.has(icon)) {
+      seen.add(icon);
+      list.push(icon);
+    }
+  };
+  const visit = (value, region) => {
     if (Array.isArray(value)) {
-      value.forEach(visit);
+      for (const child of value) visit(child, region);
       return;
     }
     if (value === null || typeof value !== "object") return;
     if (Number.isInteger(value.aId)) {
-      const roomId = accessories.find(({ id }) => id === value.aId)?.roomId;
-      if (Number.isInteger(roomId)) roomIds.add(roomId);
+      const accessory = accessories.find(({ id }) => id === value.aId);
+      if (Number.isInteger(accessory?.roomId)) rooms.add(accessory.roomId);
+      const service = accessory?.services?.find(
+        (candidate) => candidate.sId === value.sId,
+      );
+      const icon = service?.type ?? value.hs;
+      if (region === "if") addIcon(iconsIf, seenIf, icon);
+      if (region === "then") addIcon(iconsThen, seenThen, icon);
     }
-    Object.values(value).forEach(visit);
+    if (Object.hasOwn(value, "if")) visit(value.if, "if");
+    if (Object.hasOwn(value, "then")) visit(value.then, "then");
+    if (Object.hasOwn(value, "else")) visit(value.else, "then");
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "if" || key === "then" || key === "else") continue;
+      visit(child, region);
+    }
   };
   visit(data);
-  return [...roomIds].sort((left, right) => left - right);
+  return {
+    rooms: [...rooms].sort((left, right) => left - right),
+    iconsIf,
+    iconsThen,
+  };
+}
+
+function boundAccessory({ id, roomId, name, service }) {
+  return {
+    id,
+    roomId,
+    name,
+    online: true,
+    services: [
+      {
+        aId: id,
+        sId: service.sId,
+        name: service.name,
+        type: service.type,
+        characteristics: [
+          {
+            aId: id,
+            sId: service.sId,
+            cId: service.cId,
+            control: {
+              name: service.characteristicName,
+              type: service.characteristicType,
+              read: true,
+              write: true,
+              value: service.value,
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
 
 async function startHub(port = 0) {
@@ -1032,6 +1090,7 @@ async function startHub(port = 0) {
       normalizeNextAccessoryName: false,
       rejectNextRoomGetAsInternalError: false,
       recalculateBlockRooms: false,
+      projectBlockDerivedFields: false,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -1557,11 +1616,22 @@ async function startHub(port = 0) {
             scenario.data = JSON.stringify(
               withRuntimeBlockFields(requestedData),
             );
-            if (state.behavior.recalculateBlockRooms) {
-              scenario.rooms = scenarioRoomIds(
+            if (
+              state.behavior.recalculateBlockRooms ||
+              state.behavior.projectBlockDerivedFields
+            ) {
+              const projection = scenarioBindingProjection(
                 requestedData,
                 state.accessories,
               );
+              scenario.rooms = projection.rooms;
+              if (state.behavior.projectBlockDerivedFields) {
+                scenario.iconsIf = projection.iconsIf;
+                scenario.iconsThen = projection.iconsThen;
+                scenario.error = true;
+                scenario.order = 11;
+                scenario.bundleId = "hub-ui";
+              }
             }
           } else if (typeof params.scenario.update.data === "string") {
             scenario.desc =
@@ -7909,6 +7979,158 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
     JSON.parse(hub.state.scenarios[0].data).targets[0].then[0].aId,
     36,
   );
+});
+
+test("BLOCK target class change stays applied when SprutHub projects rooms, icons, and error", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.rooms.push(
+    { id: 8, order: 8, name: "Коридор", visible: true },
+    { id: 14, order: 14, name: "Климат", visible: true },
+  );
+  hub.state.accessories.push(
+    boundAccessory({
+      id: 40,
+      roomId: 14,
+      name: "Термостат",
+      service: {
+        sId: 13,
+        name: "Термостат",
+        type: "Thermostat",
+        cId: 15,
+        characteristicName: "Режим",
+        characteristicType: "TargetHeatingCoolingState",
+        value: { intValue: 1 },
+      },
+    }),
+    boundAccessory({
+      id: 41,
+      roomId: 8,
+      name: "Охрана",
+      service: {
+        sId: 13,
+        name: "Охрана",
+        type: "SecuritySystem",
+        cId: 15,
+        characteristicName: "Режим",
+        characteristicType: "TargetSecuritySystemState",
+        value: { intValue: 1 },
+      },
+    }),
+  );
+  const thermostatAction = setAction({
+    aId: 40,
+    hs: "Thermostat",
+    hc: "TargetHeatingCoolingState",
+    value: "1",
+  });
+  const securityAction = setAction({
+    aId: 41,
+    hs: "SecuritySystem",
+    hc: "TargetSecuritySystemState",
+    value: "1",
+  });
+  const baselineData = blockData();
+  // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+  baselineData.targets[0].then = [thermostatAction];
+  hub.state.scenarios[0].data = JSON.stringify(baselineData);
+  hub.state.scenarios[0].rooms = [1, 14];
+  hub.state.scenarios[0].iconsIf = ["MotionSensor"];
+  hub.state.scenarios[0].iconsThen = ["Thermostat"];
+  hub.state.scenarios[0].error = false;
+  hub.state.scenarios[0].order = 4;
+  hub.state.behavior.projectBlockDerivedFields = true;
+  const requestedData = structuredClone(baselineData);
+  // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+  requestedData.targets[0].then = [thermostatAction, securityAction];
+
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requestedData,
+      reason: "Добавить охрану к климатическому правилу",
+    },
+  });
+  hub.state.behavior.closeAfterScenarioUpdate = true;
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  assert.equal(applied.structuredContent.native_acknowledged, false);
+  assert.equal(applied.structuredContent.recovered_after_uncertain_write, true);
+  assert.deepEqual(hub.state.scenarios[0].rooms, [1, 8, 14]);
+  assert.deepEqual(hub.state.scenarios[0].iconsThen, [
+    "Thermostat",
+    "SecuritySystem",
+  ]);
+  assert.equal(hub.state.scenarios[0].error, true);
+  assert.equal(hub.state.scenarios[0].order, 11);
+  assert.equal(hub.state.scenarios[0].bundleId, "hub-ui");
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].aId,
+    41,
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(afterRestart.structuredContent.status, "applied");
+  assert.equal(afterRestart.structuredContent.configuration_matches, true);
+
+  hub.state.scenarios[0].active = true;
+  const manualConflict = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(manualConflict.structuredContent.status, "conflict");
+  assert.equal(
+    manualConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+
+  const repeatedConflict = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeatedConflict.structuredContent.status, "conflict");
+  assert.equal(
+    repeatedConflict.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+    "a previous conflict must not restore without proven ownership",
+  );
+
+  hub.state.scenarios[0].active = false;
+  const restored = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.configuration_matches, true);
+  assert.deepEqual(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then.map(
+      ({ aId }) => aId,
+    ),
+    [40],
+  );
+  assert.deepEqual(hub.state.scenarios[0].rooms, [1, 14]);
+  assert.deepEqual(hub.state.scenarios[0].iconsThen, ["Thermostat"]);
 });
 
 test("restore preserves unknown vendor blockId and state fields", async (t) => {
