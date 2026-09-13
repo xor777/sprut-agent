@@ -383,6 +383,7 @@ async function startHub() {
     characteristicOptionsResult: null,
     logicOptionsResult: null,
     scenarioGetErrors: new Map(),
+    scenarioListErrors: new Map(),
     missingScenarioGets: new Set(),
   };
   const server = new WebSocketServer({ port: 0 });
@@ -419,6 +420,20 @@ async function startHub() {
           JSON.stringify({
             id: request.id,
             error: scenarioGetError,
+          }),
+        );
+        return;
+      }
+      const scenarioListAccessoryId = request.params.scenario?.list?.aId;
+      const scenarioListError = behavior.scenarioListErrors.get(
+        scenarioListAccessoryId,
+      );
+      if (scenarioListError) {
+        responseSentAt.push({ request, at: Date.now() });
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: scenarioListError,
           }),
         );
         return;
@@ -1601,21 +1616,22 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     },
   ]);
   assert.deepEqual(
-    relations.scopes.map(({ area, outcome, source_ref }) => ({
+    relations.scopes.map(
+      ({ area, outcome, source_ref, coverage, completeness }) => ({
       area,
       outcome,
       source_ref,
-    })),
+        ...(coverage === undefined ? {} : { coverage }),
+        ...(completeness === undefined ? {} : { completeness }),
+      }),
+    ),
     [
       {
         area: "scenario_accessory_index",
         outcome: "found",
         source_ref: "spruthub://hub/home%2FA/accessory/32",
-      },
-      {
-        area: "scenario_catalog",
-        outcome: "found",
-        source_ref: "spruthub://hub/home%2FA",
+        coverage: "native_accessory_index_for_selected_accessory",
+        completeness: "not_established",
       },
       {
         area: "block_configuration",
@@ -1733,6 +1749,13 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   );
   assert.equal(
     relationRequests.some(
+      ({ params }) =>
+        params.scenario?.list && params.scenario.list.aId === undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    relationRequests.some(
       ({ params }) => params.scenario?.get?.index === "global-code",
     ),
     false,
@@ -1819,7 +1842,7 @@ test("get_entity relations preserve an inactive BLOCK state", async (t) => {
   assert.equal(detail.structuredContent.selection.value.type, "characteristic");
 });
 
-test("empty accessory scenario index preserves unread code and BLOCK areas", async (t) => {
+test("empty accessory scenario index stays bounded without claiming no influences", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
   state.scenarioAssociations.set(32, []);
@@ -1843,33 +1866,100 @@ test("empty accessory scenario index preserves unread code and BLOCK areas", asy
     "checked_empty",
   );
   assert.deepEqual(
+    relations.scopes.find(({ area }) => area === "scenario_accessory_index"),
+    {
+      area: "scenario_accessory_index",
+      outcome: "checked_empty",
+      source_ref: "spruthub://hub/home%2FA/accessory/32",
+      observed_at: relations.scopes[0].observed_at,
+      coverage: "native_accessory_index_for_selected_accessory",
+      completeness: "not_established",
+    },
+  );
+  assert.deepEqual(
     relations.unresolved_areas
       .filter(({ area }) =>
-        ["scenario_code", "unindexed_block_scenarios"].includes(area),
+        [
+          "scenario_index_coverage",
+          "scenario_code",
+          "dynamic_targets",
+        ].includes(area),
       )
-      .map(({ area, outcome, scenario_count, scenario_types }) => ({
+      .map(({ area, outcome }) => ({
         area,
         outcome,
-        scenario_count,
-        scenario_types,
       })),
     [
       {
-        area: "scenario_code",
-        outcome: "not_read",
-        scenario_count: 1,
-        scenario_types: ["GLOBAL"],
+        area: "scenario_index_coverage",
+        outcome: "not_established",
       },
       {
-        area: "unindexed_block_scenarios",
+        area: "scenario_code",
         outcome: "not_read",
-        scenario_count: 1,
-        scenario_types: ["BLOCK"],
+      },
+      {
+        area: "dynamic_targets",
+        outcome: "not_resolved",
       },
     ],
   );
   assert.equal(
+    relations.unresolved_areas.some(
+      ({ area }) => area === "unindexed_block_scenarios",
+    ),
+    false,
+  );
+  assert.equal(
     hub.requests.some(({ params }) => params.scenario?.get),
+    false,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ params }) =>
+        params.scenario?.list && params.scenario.list.aId === undefined,
+    ),
+    false,
+  );
+});
+
+test("failed accessory scenario index remains unknown without a catalog fallback", async (t) => {
+  const hub = await startHub();
+  hub.behavior.scenarioListErrors.set(32, {
+    code: -32000,
+    message: "Native failure",
+  });
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      include: ["relations"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const relations = result.structuredContent.entity.relations;
+  assert.deepEqual(relations.scenario_associations, []);
+  assert.equal(
+    relations.scopes.find(({ area }) => area === "scenario_accessory_index")
+      .outcome,
+    "failed",
+  );
+  assert.equal(
+    relations.unresolved_areas.some(
+      ({ area, outcome }) =>
+        area === "scenario_accessory_index" && outcome === "failed",
+    ),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ params }) =>
+        params.scenario?.list && params.scenario.list.aId === undefined,
+    ),
     false,
   );
 });
