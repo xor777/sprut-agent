@@ -1076,6 +1076,93 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
   assert.equal(entity.freshness.source_timestamp, null);
 });
 
+test("raw device-window diagnostics preserve text without claiming a device report", async (t) => {
+  const hub = await startHub();
+  const rawDiagnostic =
+    "OnOff: true; binding: OnOff -> hub; Last update: 05:50:37";
+  const info = hub.states
+    .get("home/A")
+    .window.options.find(({ key }) => key === "Info");
+  info.value.stringValue = rawDiagnostic;
+  const client = await startClient(t, hub);
+  const characteristicRef =
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15";
+
+  const direct = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: characteristicRef,
+      include: ["options", "physical_configuration", "diagnostics"],
+    },
+  });
+  assert.equal(direct.isError, undefined, direct.content[0]?.text);
+  assert.deepEqual(direct.structuredContent.entity.current_value, {
+    value: false,
+    source: "characteristic",
+    source_timestamp: null,
+  });
+  assert.equal(
+    direct.structuredContent.entity.options[0].configured_value,
+    180,
+  );
+  const configured =
+    direct.structuredContent.entity.physical_configuration.options.find(
+      ({ property }) => property === "SensorDetectionSeconds",
+    );
+  assert.equal(configured.configured_value, 10);
+  assert.equal(configured.reported_value, null);
+  assert.equal(configured.source_timestamp, null);
+  assert.deepEqual(direct.structuredContent.entity.diagnostics, [
+    {
+      key: "Info",
+      text: rawDiagnostic,
+      content_origin: "spruthub_device_window_diagnostics",
+      semantic_status: "uninterpreted",
+      source_timestamp: null,
+      direct_device_report: "not_established",
+    },
+    {
+      key: "ConnectionDiagnostics",
+      text: "[REDACTED]",
+      content_origin: "spruthub_device_window_diagnostics",
+      semantic_status: "uninterpreted",
+      source_timestamp: null,
+      direct_device_report: "not_established",
+    },
+  ]);
+
+  const service = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
+      include: ["diagnostics"],
+    },
+  });
+  assert.equal(service.isError, undefined, service.content[0]?.text);
+  const next = service.structuredContent.entity.include_resolution.not_applied[0]
+    .next;
+  assert.deepEqual(next, {
+    tool: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/window/window-A",
+      include: ["diagnostics"],
+    },
+  });
+  const routed = await client.callTool({
+    name: next.tool,
+    arguments: next.arguments,
+  });
+  assert.equal(routed.isError, undefined, routed.content[0]?.text);
+  assert.deepEqual(
+    routed.structuredContent.entity.diagnostics,
+    direct.structuredContent.entity.diagnostics,
+  );
+  assert.deepEqual(routed.structuredContent.entity.freshness, {
+    observed_at: routed.structuredContent.freshness.hubResponseReceivedAt,
+    source_timestamp: null,
+  });
+});
+
 test("get_entity relations separate proven BLOCK roles from bounded native scopes", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");
