@@ -301,8 +301,7 @@ captures сохраняются с правами `0600` в исключённо
 
 ## Разработка
 
-Нужны Node.js 24.11+, npm и Git. Полная команда также проверяет Codex-адаптер,
-поэтому для `npm run check` нужен Codex CLI 0.154.0 или новее:
+Нужны Node.js 24.11+, npm и Git. Общая проверка не требует Codex:
 
 ```sh
 git clone https://github.com/xor777/sprut-agent.git
@@ -325,23 +324,28 @@ Codex plugin использует `./dist/server.mjs` внутри своего 
 от checkout или текущей папки клиента.
 
 ```sh
-npm run check           # Bundle, Biome и офлайн-тесты
-npm run test:mutations  # Необязательная адресная диагностика
+npm run check              # Bundle, Biome и офлайн-тесты общих MCP/SDK-границ
+npm run test:codex-install # Установка plugin реальным Codex CLI 0.154.0+
+npm run test:mutations     # Необязательная адресная диагностика
 ```
 
 `npm run check` воспроизводимо собирает поставляемый комплект, проверяет
-отсутствие diff, запускает тесты публичных MCP/SDK-входов и устанавливает plugin
-реальным Codex CLI в изолированный профиль. Внешняя граница тестов — локальный
-native-shaped WebSocket-хаб; это не живая проверка SprutHub.
+отсутствие diff и запускает тесты публичных MCP/SDK-входов. Внешняя граница
+тестов — локальный native-shaped WebSocket-хаб; это не живая проверка SprutHub.
 
-Переносимый agent-smoke:
+Проверка установки Codex отдельная: без CLI команда завершается ошибкой, без
+успешного skip. Она ставит plugin в изолированный профиль и проходит сценарии
+установки, занятого MCP-имени и перехода с прежнего ручного skill.
+
+`eval:spruthub-master` — текущий Codex-прогон переносимого skill+MCP, а не
+переносимый раннер. Он напрямую вызывает Codex CLI и его профиль:
 
 ```sh
 npm run eval:spruthub-master
 npm run eval:spruthub-master -- contact-option plugin
 ```
 
-Он использует новый временный профиль, синтетический хаб и сохраняет
+Запуск использует новый временный профиль, синтетический хаб и сохраняет
 доказательства вне репозитория. Успешный exit подтверждает завершение запуска,
 но не заменяет независимый продуктовый вердикт. Ручной сценарий неоднозначной
 комнаты доступен через `node research/check-agent-room-ambiguity.mjs ambiguous`.

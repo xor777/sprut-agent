@@ -15,7 +15,8 @@
     "research:diff": "node research/compare-snapshots.mjs",
     "research:record": "node research/record-websocket.mjs",
     "research:snapshot": "node research/extract-spruthub.mjs",
-    "test": "node --test",
+    "test": "node --test 'test/**/*.test.mjs' 'research/**/*.test.mjs'",
+    "test:codex-install": "node --test 'test-codex-install/**/*.test.mjs'",
     "test:mutations": "stryker run"
   },
   "engines": {
