@@ -1002,6 +1002,7 @@ export class AutomationService {
       targets,
       native_write_sent: false,
       native_acknowledged: false,
+      run_delivery: { status: "not_sent" },
       last_verification: freshVerification("scenario_and_targets_validated"),
       created_at: now,
       updated_at: now,
@@ -3952,7 +3953,10 @@ export class AutomationService {
   }
 
   async #applyScenarioRun(change) {
-    if (change.status === "applying" && change.native_write_sent === true) {
+    if (
+      change.status === "applying" &&
+      change.run_delivery?.status === "unknown"
+    ) {
       const observations = await this.#readScenarioRunTargets(change);
       return this.#finishNative(change, "uncertain", undefined, {
         target_observations: observations,
@@ -3983,16 +3987,19 @@ export class AutomationService {
       });
     }
 
+    change.run_delivery = { status: "unknown" };
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.client.runScenario(change.target.index);
       change.native_acknowledged = true;
       change.write_intent.acknowledged = true;
+      change.run_delivery = { status: "acknowledged" };
     } catch (error) {
-      if (!isUncertainWriteError(error)) {
-        const rejection = confirmedScenarioRunRejection(error);
+      const delivery = classifyScenarioRunDelivery(error);
+      change.run_delivery = delivery;
+      if (delivery.status !== "unknown") {
+        change.native_write_sent = delivery.status !== "not_sent";
         await this.#finishNative(change, "not_applied", undefined, {
-          ...(rejection ? { run_rejection: rejection } : {}),
           last_verification: failedVerification(error),
         });
         throw error;
@@ -4015,7 +4022,10 @@ export class AutomationService {
   }
 
   async #getScenarioRun(change) {
-    if (change.status === "applying" && change.native_write_sent === true) {
+    if (
+      change.status === "applying" &&
+      change.run_delivery?.status === "unknown"
+    ) {
       change.status = "uncertain";
       change.write_intent = change.write_intent
         ? { ...change.write_intent, phase: "needs_reconciliation" }
@@ -5572,9 +5582,11 @@ function scenarioRunContract() {
     repeat:
       "one send per prepared change; prepare a new change for each explicit run",
     delivery: {
+      not_sent:
+        "transport confirmed that scenario.run was not sent; prepare a new change after recovery",
       acknowledged: "native scenario.run ACK received",
       rejected:
-        "SprutHub returned an explicit rejection; its code remains available in history",
+        "SprutHub returned an explicit rejection; its code remains available in command_delivery.rejection",
       unknown: "request may have run but ACK was lost; never retry this change",
       target_readback:
         "fresh values are reported separately and do not prove physical or atomic delivery",
@@ -5584,7 +5596,7 @@ function scenarioRunContract() {
       live_hub_version: "3.0.0b (20131)",
       action_only_create_read: true,
       explicit_repeat_run: true,
-      live_targets: 1,
+      live_targets: 2,
     },
     limitations: [
       "Only active action-only Lightbulb On=false BLOCK scenarios with onStart=false and sync=false are supported.",
@@ -7380,15 +7392,23 @@ function failedVerification(error) {
   };
 }
 
-function confirmedScenarioRunRejection(error) {
+function classifyScenarioRunDelivery(error) {
+  if (error instanceof SprutHubError && error.requestSent === false) {
+    error.action = "restore_connection_then_prepare_native_change";
+    return { status: "not_sent", failure: scenarioRunFailure(error) };
+  }
   if (
-    !(error instanceof SprutHubError) ||
-    !["authentication_failed", "request_rejected", "unsupported"].includes(
+    error instanceof SprutHubError &&
+    ["authentication_failed", "request_rejected", "unsupported"].includes(
       error.code,
     )
   ) {
-    return null;
+    return { status: "rejected", rejection: scenarioRunFailure(error) };
   }
+  return { status: "unknown" };
+}
+
+function scenarioRunFailure(error) {
   return {
     code: error.code,
     ...(error.protocolErrorCode !== undefined
@@ -8475,17 +8495,8 @@ function publicNativeChange(
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       command_delivery: {
-        status: change.run_rejection
-          ? "rejected"
-          : change.native_acknowledged === true
-            ? "acknowledged"
-            : change.native_write_sent === true
-              ? "unknown"
-              : "not_sent",
+        ...structuredClone(change.run_delivery),
         native_acknowledged: change.native_acknowledged === true,
-        ...(change.run_rejection
-          ? { rejection: structuredClone(change.run_rejection) }
-          : {}),
         physical_delivery: "not_proven",
         atomic: false,
       },

@@ -488,7 +488,7 @@ server.registerTool(
   {
     title: "Apply a prepared native SprutHub change",
     description:
-      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A scenario_run change sends its exact scenario index at most once; an unknown run outcome is never retried, while a new explicit run requires a newly prepared change. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it; after an observed manual value, prepare a new change for any further authorized write because the old change cannot reclaim that value.",
+      "Apply one prepared native change after comparing its current state with the saved baseline and revalidating the current native contract, bindings and values. Directional intent is persisted before send; native ACK and readback are reported separately. A scenario_run change sends its exact scenario index at most once; confirmed not_sent and rejected results are terminal, while an unknown outcome is never retried. Every new explicit run requires a newly prepared change. A rejected timed pause remains not_applied and the same change will not send an already expired controller. Inspect an uncertain change instead of blindly repeating it; after an observed manual value, prepare a new change for any further authorized write because the old change cannot reclaim that value.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,

@@ -464,7 +464,7 @@ function scenarioRoomIds(data, accessories) {
   return [...roomIds].sort((left, right) => left - right);
 }
 
-async function startHub() {
+async function startHub(port = 0) {
   const requests = [];
   const state = {
     rooms: [
@@ -701,7 +701,7 @@ async function startHub() {
       },
     },
   );
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ port });
   await once(server, "listening");
   server.on("connection", (socket) => {
     socket.on("message", async (data) => {
@@ -2478,7 +2478,9 @@ test("a scenario run not sent after connection loss keeps its reason and needs a
   });
   await firstClient.close();
 
-  const recoveredHub = await startHub();
+  const recoveredPort = Number(new URL(hub.url).port);
+  await new Promise((resolve) => hub.server.close(() => resolve()));
+  const recoveredHub = await startHub(recoveredPort);
   t.after(async () => {
     for (const socket of recoveredHub.server.clients) socket.terminate();
     await new Promise((resolve) => recoveredHub.server.close(resolve));
@@ -2489,6 +2491,11 @@ test("a scenario run not sent after connection loss keeps its reason and needs a
     name: "get_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
+  assert.equal(
+    persisted.isError,
+    undefined,
+    JSON.stringify(persisted.structuredContent),
+  );
   assert.deepEqual(
     persisted.structuredContent.command_delivery,
     inspectedWhileOffline.structuredContent.command_delivery,
