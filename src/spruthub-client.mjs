@@ -2150,6 +2150,7 @@ export class SprutHubClient {
       entity.configuration = normalizeScenarioConfiguration(scenario);
     }
     if (
+      scenario.type === "BLOCK" &&
       typeof scenario.optionsWindow === "string" &&
       scenario.optionsWindow.length > 0
     ) {
@@ -3267,7 +3268,8 @@ function normalizeScenarioSummary(serial, scenario) {
     active: scenario.active === true,
     on_start: scenario.onStart === true,
     sync: scenario.sync === true,
-    ...(typeof scenario.optionsWindow === "string" &&
+    ...(scenario.type === "BLOCK" &&
+    typeof scenario.optionsWindow === "string" &&
     scenario.optionsWindow.length > 0
       ? { options_window_ref: windowRef(serial, scenario.optionsWindow) }
       : {}),

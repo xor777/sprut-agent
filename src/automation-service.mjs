@@ -127,10 +127,7 @@ export class AutomationService {
         };
       }
       const { option } = await this.#readWindowOption(owner, input.option_key);
-      await this.#rejectDirectScenarioMetadataWindow(
-        owner.windowKey,
-        input.option_key,
-      );
+      await this.#rejectDirectScenarioMetadataWindow(owner.windowKey, option);
       const state = windowOptionState(option);
       const restoration = scalarValueRestoration(state.contract, state.value);
       return {
@@ -462,10 +459,7 @@ export class AutomationService {
       return this.#prepareScenarioMetadataOption(input, owner);
     }
     const { option } = await this.#readWindowOption(owner, input.option_key);
-    await this.#rejectDirectScenarioMetadataWindow(
-      owner.windowKey,
-      input.option_key,
-    );
+    await this.#rejectDirectScenarioMetadataWindow(owner.windowKey, option);
     const { contract, value: baselineValue } = windowOptionState(option);
     const requestedValue = validateCharacteristicValue(input.value, contract);
     if (valuesEqual(baselineValue, requestedValue)) {
@@ -1390,7 +1384,6 @@ export class AutomationService {
     const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
       change,
       current,
-      "apply",
     );
     if (ownerConflict) return ownerConflict;
 
@@ -3840,15 +3833,18 @@ export class AutomationService {
     return `${configuredHomeRef(this.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
   }
 
-  async #rejectDirectScenarioMetadataWindow(windowKey, optionKey) {
-    if (!SCENARIO_METADATA_KEYS.has(optionKey)) return;
+  async #rejectDirectScenarioMetadataWindow(windowKey, option) {
+    if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
+    if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
+      return;
+    }
     throw scenarioOwnerRequired(
       await this.#findScenarioRefForWindow(windowKey),
-      optionKey,
+      option.key,
     );
   }
 
-  async #finishScenarioMetadataOwnerConflict(change, current, direction) {
+  async #finishScenarioMetadataOwnerConflict(change, current) {
     if (change.owner_kind !== "scenario") return null;
     const scenario = await this.client.getScenario(change.owner_index);
     if (!scenario || scenario.optionsWindow !== change.target.windowKey) {
@@ -3864,8 +3860,7 @@ export class AutomationService {
       )
     ) {
       return this.#finishNative(change, "conflict", current, {
-        conflict_reason:
-          direction === "restore" ? "manual_change" : "baseline_changed",
+        conflict_reason: "owner_configuration_changed",
         last_verification: freshVerification("conflict"),
       });
     }
@@ -4051,7 +4046,6 @@ export class AutomationService {
     const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
       change,
       current,
-      "restore",
     );
     if (ownerConflict) return ownerConflict;
     await this.#persistNativeIntent(change, "restoring", "restore");
@@ -5045,6 +5039,7 @@ export class AutomationService {
       if (
         change.home_ref !== homeRef ||
         change.kind !== "block_create" ||
+        change.status === "restored" ||
         typeof change.marker !== "string" ||
         change.applied_snapshot === undefined ||
         change.scenario_index !== index ||
@@ -9368,8 +9363,9 @@ function publicNativeChange(
             "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
             ...(change.owner_kind === "scenario"
               ? [
-                  "Name, Desc, and BLOCK data are separate native changes. Restore of this metadata write is allowed only while the remaining significant configuration and owner window binding still match the saved snapshot.",
-                  "A proven create marker in Desc is kept by the adapter; it is not copied from history and does not restore create-delete rights.",
+                  "Name, Desc, and BLOCK data are separate native changes. Prepare each field on a fresh baseline after the previous apply. Restore of this metadata write is allowed only while the remaining significant configuration and owner window binding still match the saved snapshot.",
+                  "A later sibling Name, Desc, data, or flag write is owner_configuration_changed, not proof that this field was edited by hand. Restore remaining fields in reverse apply order.",
+                  "A proven create marker in Desc is kept by the adapter only while that create change is still applied; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
                 ]
               : []),
           ]
