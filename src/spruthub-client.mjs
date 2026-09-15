@@ -2124,6 +2124,8 @@ export class SprutHubClient {
     );
     const scenario = extractEntity(response, ["scenario", "get"], "scenario");
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
+    entity.description =
+      typeof scenario.desc === "string" ? scenario.desc : null;
     if (requested.has("configuration")) {
       entity.configuration = normalizeScenarioConfiguration(scenario);
     }
