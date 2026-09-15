@@ -4129,6 +4129,12 @@ export class AutomationService {
         : this.#reconcileScenarioApply(change, false);
     }
     const current = await this.#observeScenarioChange(change);
+    if (scenarioLacksProvenApply(change)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: change.conflict_reason ?? "manual_change",
+        ...scenarioUnprovenApplyFields(change, current),
+      });
+    }
     if (change.status === "applied") {
       const observation = scenarioChangeObservation(change, current, "applied");
       return observation.matches
@@ -4233,6 +4239,11 @@ export class AutomationService {
         logic_assignments: undefined,
         conflict_reason: undefined,
         ...requested.fields,
+        last_verification: freshVerification(
+          isLogicSourceChange(change)
+            ? "applied_logic_source"
+            : "applied_configuration",
+        ),
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
     }
@@ -4256,7 +4267,9 @@ export class AutomationService {
       !isLogicSourceChange(change) ||
       change.applied_snapshot !== undefined ||
       change.native_write_sent !== true ||
-      ["prepared", "not_applied", "restored"].includes(change.status) ||
+      ["prepared", "not_applied", "restored", "conflict"].includes(
+        change.status,
+      ) ||
       !requested.matches
     ) {
       return false;
@@ -4320,6 +4333,12 @@ export class AutomationService {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
         ...applied.fields,
+      });
+    }
+    if (change.status === "conflict") {
+      return this.#recordScenarioObservation(change, {
+        matches: false,
+        fields: scenarioUnprovenApplyFields(change, current),
       });
     }
     return this.#recordScenarioObservation(
@@ -4605,10 +4624,12 @@ export class AutomationService {
       scenarioChangeObservation(change, current, "requested"),
     );
     const applied = scenarioChangeObservation(change, current, "applied");
-    if (!applied.matches) {
+    if (scenarioLacksProvenApply(change) || !applied.matches) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "manual_change",
-        ...applied.fields,
+        ...(scenarioLacksProvenApply(change)
+          ? scenarioUnprovenApplyFields(change, current)
+          : applied.fields),
       });
     }
     if (change.kind === "block_data_update") {
@@ -8166,10 +8187,7 @@ function blockSnapshotObservation(change, scenario, snapshot) {
   } else {
     throw new TypeError(`Unknown BLOCK snapshot ${snapshot}.`);
   }
-  const result =
-    snapshot === "baseline"
-      ? "baseline_configuration"
-      : "applied_configuration";
+  const result = `${snapshot}_configuration`;
   return {
     matches,
     fields: {
@@ -8179,6 +8197,33 @@ function blockSnapshotObservation(change, scenario, snapshot) {
       ),
     },
   };
+}
+
+function scenarioLacksProvenApply(change) {
+  // Lost write ownership: a later requested match is coincidence, not restore rights.
+  return change.status === "conflict" && change.applied_snapshot === undefined;
+}
+
+function scenarioUnprovenApplyFields(change, current) {
+  const requested = scenarioChangeObservation(change, current, "requested");
+  return {
+    ...requested.fields,
+    configuration_matches: false,
+  };
+}
+
+function unprovenApplyNext(change) {
+  return {
+    tool: "get_native_change_contract",
+    arguments: {
+      operation: change.kind,
+      target_ref: change.target_ref,
+    },
+  };
+}
+
+function unprovenApplyLimitation() {
+  return "This change has no proven applied snapshot, so restore is not allowed. Prepare a new authorized change from the current hub configuration.";
 }
 
 function snapshotsEqual(left, right) {
@@ -8568,8 +8613,12 @@ function publicNativeChange(
         ? { logic_assignments: structuredClone(change.logic_assignments) }
         : {}),
       restore_supported:
-        change.kind !== "logic_source_create" ||
-        typeof change.native_logic_type === "string",
+        !scenarioLacksProvenApply(change) &&
+        (change.kind !== "logic_source_create" ||
+          typeof change.native_logic_type === "string"),
+      ...(scenarioLacksProvenApply(change)
+        ? { next: unprovenApplyNext(change) }
+        : {}),
       limitations: [
         "The source is compared exactly and represented by SHA-256 in change output so embedded native data is not echoed from the journal.",
         "LOGIC creation appends a unique JavaScript ownership comment to the source sent to SprutHub.",
@@ -8577,6 +8626,9 @@ function publicNativeChange(
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
+        ...(scenarioLacksProvenApply(change)
+          ? [unprovenApplyLimitation()]
+          : []),
       ],
     };
   }
@@ -8750,7 +8802,10 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
-      restore_supported: true,
+      restore_supported: !scenarioLacksProvenApply(change),
+      ...(scenarioLacksProvenApply(change)
+        ? { next: unprovenApplyNext(change) }
+        : {}),
       limitations: [
         ...(change.block_action_preview
           ? [
@@ -8760,7 +8815,9 @@ function publicNativeChange(
             ]
           : []),
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
-        "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
+        scenarioLacksProvenApply(change)
+          ? unprovenApplyLimitation()
+          : "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
       ],
     };
   }

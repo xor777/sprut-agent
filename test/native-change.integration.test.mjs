@@ -8350,6 +8350,50 @@ test("BLOCK conflict without an applied snapshot does not treat a requested matc
   );
 });
 
+test("BLOCK restore keeps a manual name change after apply without writing", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Проверить защиту имени после apply",
+    },
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const writesAfterApply = hub.requests.filter(
+    ({ scenario }) => scenario?.update,
+  ).length;
+  hub.state.scenarios[0].name = "Ручное имя после записи";
+
+  const observed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "conflict");
+  assert.equal(observed.structuredContent.conflict_reason, "manual_change");
+  assert.equal(observed.structuredContent.configuration_matches, false);
+
+  const refused = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refused.structuredContent.status, "conflict");
+  assert.equal(refused.structuredContent.conflict_reason, "manual_change");
+  assert.equal(refused.structuredContent.configuration_matches, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesAfterApply,
+  );
+  assert.equal(hub.state.scenarios[0].name, "Ручное имя после записи");
+});
+
 test("restore preserves unknown vendor blockId and state fields", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
