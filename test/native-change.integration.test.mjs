@@ -8350,6 +8350,139 @@ test("BLOCK conflict without an applied snapshot does not treat a requested matc
   );
 });
 
+test("BLOCK apply does not overwrite a manual revert after a proven apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const baselineData = hub.state.scenarios[0].data;
+  const requestedData = blockData({ delay: 45_000 });
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requestedData,
+      reason: "Не затирать ручной откат повторным apply",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  const writesAfterApply = hub.requests.filter(
+    ({ scenario }) => scenario?.update,
+  ).length;
+  assert.equal(writesAfterApply, 1);
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+    45_000,
+  );
+
+  hub.state.scenarios[0].data = baselineData;
+  const observed = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "conflict");
+  assert.equal(observed.structuredContent.conflict_reason, "manual_change");
+  assert.equal(observed.structuredContent.configuration_matches, false);
+  assert.equal(observed.structuredContent.restore_supported, true);
+
+  const refusedRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedRestore.structuredContent.status, "conflict");
+  assert.equal(
+    refusedRestore.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesAfterApply,
+  );
+
+  const refusedApply = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedApply.isError, undefined, refusedApply.content[0]?.text);
+  assert.equal(refusedApply.structuredContent.status, "conflict");
+  assert.equal(refusedApply.structuredContent.conflict_reason, "manual_change");
+  assert.equal(refusedApply.structuredContent.configuration_matches, false);
+  assert.equal(refusedApply.structuredContent.restore_supported, true);
+  assert.deepEqual(refusedApply.structuredContent.next, {
+    tool: "get_native_change_contract",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+    },
+  });
+  assert.match(
+    refusedApply.structuredContent.limitations.join("\n"),
+    /already applied[\s\S]*apply will not be sent again/i,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesAfterApply,
+    "repeat apply must not overwrite a manual revert of a proven BLOCK change",
+  );
+  assert.equal(hub.state.scenarios[0].data, baselineData);
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+    60_000,
+  );
+
+  await firstClient.close();
+  const restarted = await startClient(t, hub, stateDirectory);
+  const refusedAfterRestart = await restarted.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedAfterRestart.structuredContent.status, "conflict");
+  assert.equal(
+    refusedAfterRestart.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesAfterApply,
+  );
+  assert.equal(hub.state.scenarios[0].data, baselineData);
+
+  const contract = await restarted.callTool({
+    name: refusedApply.structuredContent.next.tool,
+    arguments: refusedApply.structuredContent.next.arguments,
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+
+  const retried = await restarted.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requestedData,
+      reason: "Новое разрешённое изменение после ручного отката",
+    },
+  });
+  assert.equal(retried.structuredContent.status, "prepared");
+  const retriedApply = await restarted.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: retried.structuredContent.change_ref },
+  });
+  assert.equal(retriedApply.isError, undefined, retriedApply.content[0]?.text);
+  assert.equal(retriedApply.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesAfterApply + 1,
+  );
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+    45_000,
+  );
+});
+
 test("BLOCK restore keeps a manual name change after apply without writing", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
