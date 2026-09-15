@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "DashboardProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/DashboardColumn.proto";
+
+message DashboardRequest {
+  oneof kind {
+    DashboardListRequest list = 1;
+    DashboardGetRequest get = 2;
+    DashboardCreateRequest create = 3;
+    DashboardUpdateRequest update = 4;
+    DashboardDeleteRequest delete = 5;
+    DashboardOrdersMessage orders = 6;
+    DashboardSubscribeRequest subscribe = 7;
+  }
+}
+
+message DashboardResponse {
+  oneof kind {
+    DashboardsMessage list = 1;
+    DashboardMessage get = 2;
+    DashboardMessage create = 3;
+    EmptyResponse update = 4;
+    EmptyResponse delete = 5;
+    DashboardOrdersMessage orders = 6;
+    EmptyResponse subscribe = 7;
+  }
+}
+
+message DashboardListRequest {
+  repeated uint32 ids = 1;
+}
+
+message DashboardGetRequest {
+  uint32 id = 1;
+}
+
+message DashboardCreateRequest {
+  string name = 1;
+  optional uint32 order = 2;
+}
+
+message DashboardUpdateRequest {
+  uint32 id = 1;
+  optional string name = 2;
+}
+
+message DashboardDeleteRequest {
+  uint32 id = 1;
+}
+
+message DashboardOrderMessage {
+  uint32 id = 1;
+  uint32 order = 2;
+}
+
+message DashboardOrdersMessage {
+  repeated DashboardOrderMessage orders = 1;
+}
+
+message DashboardSubscribe {
+  optional uint32 id = 1;
+  repeated SubscribeType events = 2;
+}
+
+message DashboardSubscribeRequest {
+  repeated DashboardSubscribe subscribes = 1;
+}
+
+message DashboardMessage {
+  uint32 id = 1;
+  uint32 order = 2;
+  optional string name = 3;
+  repeated DashboardColumnMessage columns = 4;
+}
+
+message DashboardsMessage {
+  repeated DashboardMessage dashboards = 1;
+}
+
+message DashboardEvent {
+  SubscribeType event = 1;
+  repeated DashboardMessage dashboards = 2;
+}

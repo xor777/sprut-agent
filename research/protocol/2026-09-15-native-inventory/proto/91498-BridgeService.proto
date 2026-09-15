@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "BridgeServiceProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message BridgeServiceRequest {
+  oneof kind {
+    BridgeServiceListRequest list = 1;
+    BridgeServiceGetRequest get = 2;
+    //NotificationClientCreateDialogRequest createDialog = 3;
+    BridgeServiceCreateRequest create = 4;
+    BridgeServiceDeleteRequest delete = 5;
+    //NotificationClientGetOptionsRequest getOptions = 6;
+    //NotificationClientSetOptionsRequest setOptions = 7;
+  }
+}
+
+message BridgeServiceResponse {
+  oneof kind {
+    BridgeServicesMessage list = 1;
+    BridgeServiceMessage get = 2;
+    //OptionsMessage createDialog = 3;
+    EmptyResponse create = 4;
+    EmptyResponse delete = 5;
+    //OptionsMessage getOptions = 6;
+    //EmptyResponse setOptions = 7;
+  }
+}
+
+message BridgeServiceListRequest {
+  string extensionKey = 1;
+  optional uint32 aId = 2;
+
+  optional string bridgeIndex = 1000 [deprecated = true];
+}
+
+message BridgeServicesMessage {
+  repeated BridgeServiceMessage services = 1;
+}
+
+message BridgeServiceMessage {
+  string extensionKey = 1;
+  optional uint32 aId = 2;
+  optional uint32 sId = 3;
+  optional bool write = 4;
+
+  optional string bridgeIndex = 1000 [deprecated = true];
+}
+
+message BridgeServiceGetRequest {
+  string extensionKey = 1;
+  uint32 aId = 2;
+  uint32 sId = 3;
+
+  optional string bridgeIndex = 1000 [deprecated = true];
+}
+
+message BridgeServiceCreateRequest {
+  string extensionKey = 1;
+  uint32 aId = 2;
+  uint32 sId = 3;
+  optional bool write = 4;
+
+  optional string bridgeIndex = 1000 [deprecated = true];
+}
+
+message BridgeServiceDeleteRequest {
+  string extensionKey = 1;
+  optional uint32 aId = 2;
+  optional uint32 sId = 3;
+
+  optional string bridgeIndex = 1000 [deprecated = true];
+}
+
+message BridgeServiceEvent {
+  optional SubscribeType event = 1;
+  repeated BridgeServiceMessage services = 2;
+}

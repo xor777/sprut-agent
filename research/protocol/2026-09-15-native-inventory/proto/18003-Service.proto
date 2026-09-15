@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ServiceProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Characteristic.proto";
+import "SprutHub/API/Utils.proto";
+
+message ServiceRequest {
+  oneof kind {
+    ServiceListRequest list = 1;
+    ServiceGetRequest get = 2;
+    ServiceUpdateRequest update = 3;
+    ServiceTypesRequest types = 4;
+    ServiceOrdersMessage orders = 5;
+    ServiceSubscribeRequest subscribe = 6;
+  }
+}
+
+message ServiceResponse {
+  oneof kind {
+    ServicesMessage list = 1;
+    ServiceMessage get = 2;
+    EmptyResponse update = 3;
+    ServiceTypesMessage types = 4;
+    ServiceOrdersMessage orders = 5;
+    EmptyResponse subscribe = 6;
+  }
+}
+
+message ServiceListRequest {
+  repeated uint32 ids = 1;
+  optional string expand = 2;
+}
+
+message ServiceGetRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string expand = 3;
+}
+
+message ServiceUpdateRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 order = 3;
+  optional GridMessage grid = 4;
+  optional string name = 5;
+  optional bool visible = 6;
+  optional string expand = 7;
+}
+
+message ServiceCreateRequest {
+  optional string name = 1;
+  optional string type = 2;
+  repeated string optional = 3;
+  optional string expand = 4;
+}
+
+message ServiceMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 order = 3;
+  optional GridMessage grid = 4;
+  optional string name = 5;
+  optional string type = 6;
+  optional bool visible = 7;
+  optional bool system = 8;
+  repeated CharacteristicMessage characteristics = 9;
+  // Список потоков камеры — заполняется только для CameraRTPStreamManagement.
+  // Старые клиенты игнорируют это поле и видят камеру как один поток.
+  repeated StreamProfileMessage streams = 10;
+}
+
+// Профиль потока камеры. Несколько профилей — это, например, Main HD/Sub SD.
+// Веб-клиент рендерит переключатель потоков на основе этого списка.
+message StreamProfileMessage {
+  optional string id = 1;          // уникальный id потока внутри камеры (например, "main", "sub")
+  optional string name = 2;        // отображаемое имя (опц., если null — UI показывает id)
+  optional uint32 width = 3;
+  optional uint32 height = 4;
+  optional uint32 fps = 5;
+  optional uint32 bitrate = 6;     // kbps
+  optional string videoCodec = 7;  // H264, H265, ...
+  optional string audioCodec = 8;
+  optional bool service = 9;       // служебная роль: снапшоты, AI, миниатюры (наименьший поток)
+  optional bool defaultView = 10;  // просмотровый дефолт: играет при OFFER без streamId
+}
+
+message ServicesMessage {
+  repeated ServiceMessage services = 1;
+}
+
+message ServiceTypesRequest {}
+
+message ServiceTypeMessage {
+  optional string id = 1;
+  optional string shortId = 2;
+  optional string type = 3;
+  optional string name = 4;
+  optional bool system = 5;
+  repeated CharacteristicTypeMessage required = 6;
+  repeated CharacteristicTypeMessage optional = 7;
+}
+
+message ServiceTypesMessage {
+  repeated ServiceTypeMessage types = 1;
+}
+
+message ServiceOrderMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 order = 3;
+  optional GridMessage grid = 4;
+}
+
+message ServiceOrdersMessage {
+  repeated ServiceOrderMessage orders = 1;
+}
+
+message ServiceSubscribe {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string sType = 3;
+  repeated SubscribeType events = 4;
+}
+
+message ServiceSubscribeRequest {
+  repeated ServiceSubscribe subscribes = 1;
+}
+
+message ServiceEvent {
+  optional SubscribeType event = 1;
+  repeated ServiceMessage services = 2;
+}
+
+message GridMessage {
+  optional uint32 order = 1;
+  optional uint32 width = 2;
+  optional uint32 height = 3;
+}

@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ServerProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Hub.proto";
+import "SprutHub/API/Utils.proto";
+
+message ServerRequest {
+  oneof kind {
+    ClientInfoMessage clientInfo = 5;
+    ClientDisconnectRequest clientDisconnect = 14; // Закрытие вкладки браузера или переключение на другой хаб
+    PingRequest ping = 15; // Проверка живости WebSocket-сокета клиентом (probe)
+
+    VersionRequest version = 1003 [deprecated = true]; // 11365
+    ServerPoolRequest pool = 1004 [deprecated = true]; // 11365
+    ServerRestartRequest restart = 1006 [deprecated = true]; // 11365
+    ServerUpgradeRequest upgrade = 1007 [deprecated = true]; // 11365
+  }
+}
+
+message ServerResponse {
+  oneof kind {
+    EmptyResponse clientInfo = 5;
+    EmptyResponse clientDisconnect = 14;
+    PongResponse ping = 15;
+
+    VersionMessage version = 1003 [deprecated = true]; // 11365
+    ServerPoolResponse pool = 1004 [deprecated = true]; // 11365
+    EmptyResponse restart = 1006 [deprecated = true]; // 11365
+    EmptyResponse upgrade = 1007 [deprecated = true]; // 11365
+  }
+}
+
+// @Deprecated since rev.11365
+message VersionRequest {}
+
+// @Deprecated since rev.11365
+message VersionMessage {
+  optional string branch = 1;
+  optional string version = 2;
+  optional uint32 revision = 3;
+  optional uint32 release = 4;
+  optional uint32 beta = 5;
+  optional uint32 test = 6;
+  optional uint32 main = 7;
+  optional uint32 early = 8;
+  optional uint32 premium = 9;
+  optional uint64 timestamp = 10;
+  optional string lastVersion = 11;
+  optional uint32 lastRevision = 12;
+  optional uint32 lastMain = 13;
+  optional uint32 lastEarly = 14;
+  optional uint32 lastPremium = 15;
+  optional uint64 lastBuildTime = 16;
+  optional string owner = 17;
+  optional string manufacturer = 18;
+  optional string model = 19;
+  optional string serial = 20;
+  optional bool discovery = 21;
+  optional bool remote = 22;
+  optional PlatformMessage platform = 23;
+}
+
+message ClientInfoMessage {
+  optional string id = 1;
+  optional string name = 2;
+  optional ClientType type = 3;
+  optional string auth = 4;
+}
+
+message ClientDisconnectRequest {
+  optional string sessionId = 1; // Номер сессии, которую нужно очистить
+}
+
+message PingRequest {}
+
+message PongResponse {
+  optional uint64 time = 1; // Серверное время, ms — для диагностики RTT и дрейфа часов
+}
+
+// @Deprecated since rev.11365
+message ServerRestartRequest {}
+
+// @Deprecated since rev.11365
+message ServerUpgradeRequest {}
+
+// @Deprecated since rev.11365
+message ServerPoolRequest {
+  optional bool extended = 1;
+  optional bool query = 2;
+  optional bool work = 3;
+}
+
+// @Deprecated since rev.11365
+message ServerPoolResponse {
+  optional string info = 1;
+}
+
+message ServerNotifyMessage {
+  optional ServerNotifyLevel level = 1;
+  optional string icon = 2;
+  optional string title = 3;
+  optional string text = 4;
+  optional uint64 created = 5;
+}
+
+message ServerEvent {
+  optional string serial = 1;
+  optional ServerNotifyMessage message = 2; // Сообщение от сервера
+}
+
+enum ServerNotifyLevel {
+  NOTIFY_INFO = 0;
+  NOTIFY_SUCCESS = 1;
+  NOTIFY_ERROR = 2;
+}
+
+enum ClientType {
+  CLIENT_API = 0;
+  CLIENT_DESKTOP = 1;
+  CLIENT_TABLET = 2;
+  CLIENT_MOBILE = 3;
+  CLIENT_TV = 4;
+}

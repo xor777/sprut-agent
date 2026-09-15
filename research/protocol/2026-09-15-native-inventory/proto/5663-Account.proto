@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "AccountProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message AccountRequest {
+  oneof kind {
+    AuthRequest auth = 1;
+    AnswerRequest answer = 2;
+    AccountGetRequest get = 3;
+    AccountChangePasswordRequest changePassword = 4;
+    AccountDeleteRequest delete = 5;
+  }
+}
+
+message AccountResponse {
+  oneof kind {
+    AccountResponseMessage auth = 1;
+    AccountResponseMessage answer = 2;
+    AccountMessage get = 3;
+    AccountResponseMessage changePassword = 4;
+    AccountResponseMessage delete = 5;
+  }
+}
+
+message AccountGetRequest {
+}
+
+message AccountDeleteRequest {
+}
+
+message AnswerRequest {
+  optional string data = 1; // Ответ на вопрос
+}
+
+message AccountLoginRequest {
+  optional string login = 1;
+}
+
+message AccountChangePasswordRequest {
+}
+
+message AccountResponseMessage {
+  optional AccountResponseStatus status = 1; // Статус операции
+  optional Question question = 3; // Вопрос, на который нужно ответить для выполнения действия
+  optional string token = 4; // Токен для входа, если ответили на все вопросы
+  optional FormLabelMessage label = 5; // Текстовая информация, для отображения на форме
+}
+
+message AccountMessage {
+  optional string email = 1;
+  optional string phone = 2;
+  optional uint64 created = 3;
+}
+
+message Question {
+  optional QuestionType type = 1; // Тип вопроса
+  optional string data = 2; // Данные (если есть) в base64, с указанием типа: data:image/gif;base64,XXXX
+  optional int32 delay = 3; // Задержка до следующего вопроса, в секундах
+}
+
+message AuthRequest {
+  map<string, string> params = 1;
+}
+
+enum QuestionType {
+  QUESTION_TYPE_CAPTCHA = 0;
+  QUESTION_TYPE_PASSWORD = 1;
+  QUESTION_TYPE_NEW_PASSWORD = 2;
+  QUESTION_TYPE_PIN_EMAIL = 3;
+  QUESTION_TYPE_PIN_SMS = 4;
+  QUESTION_TYPE_EMAIL = 5;
+  QUESTION_TYPE_ADD_HUB = 6;
+  QUESTION_TYPE_UNSUPPORTED_DEVICE = 7;
+  // Авторизация v2 (challenge-response, только веб)
+  QUESTION_TYPE_CHALLENGE = 8;
+  QUESTION_TYPE_ENROLL = 9;
+  // Единый OAuth-флоу ассистентов
+  QUESTION_TYPE_SELECT_HUB = 10;
+  QUESTION_TYPE_REDIRECT = 11;
+}
+
+enum AccountResponseStatus {
+  ACCOUNT_RESPONSE_SUCCESS = 0;
+  ACCOUNT_RESPONSE_FAILED = 1;
+  ACCOUNT_RESPONSE_NOT_CONFIRMED = 2;
+  ACCOUNT_RESPONSE_FORMAT = 3;
+  ACCOUNT_RESPONSE_NOT_CONNECTED = 4;
+  ACCOUNT_RESPONSE_NO_MORE_TRIES = 5;
+  ACCOUNT_RESPONSE_TOO_FAST = 6;
+}

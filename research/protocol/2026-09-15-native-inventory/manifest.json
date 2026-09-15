@@ -1,0 +1,370 @@
+{
+  "observation": "S-SPRUT-89",
+  "observedOn": "2026-09-15",
+  "source": "https://beta.spruthub.ru/",
+  "webClientVersion": null,
+  "webClientBuild": null,
+  "hubFirmware": null,
+  "implementationCommit": "52bf784bc6bbf8dcdb3d3ae876e3237abd4dc183",
+  "assets": [
+    {
+      "url": "https://beta.spruthub.ru/js/runtime.74a7f4ffc5bcf4eddfff.js",
+      "bytes": 2827,
+      "sha256": "6e8bef12e60a1b401acf94b8d4d149015ab4b07faef2018a400a56785c34a206"
+    },
+    {
+      "url": "https://beta.spruthub.ru/js/vendors.6502ff82393a9f4f45b5.js",
+      "bytes": 7911146,
+      "sha256": "f9813a51e9a7f86d334f025b90b5668c1aca01cddb12cdee4bb83c63d999fcec"
+    },
+    {
+      "url": "https://beta.spruthub.ru/js/app.16735171810a795a9f2d.js",
+      "bytes": 1348618,
+      "sha256": "81c1ef74ce21eb5ccff583255ba82fe766ff4cf6bc251c0566b7bd67436647f8"
+    }
+  ],
+  "modules": [
+    {
+      "moduleId": "22160",
+      "reportedFilename": "Accessory.proto",
+      "file": "proto/22160-Accessory.proto",
+      "sha256": "45b6a5b5d130d81e99dde90bd88df7a3fd3680e7ffed6e43f427b7a936ec28a2"
+    },
+    {
+      "moduleId": "5663",
+      "reportedFilename": "Account.proto",
+      "file": "proto/5663-Account.proto",
+      "sha256": "f557ee2e8e90661c8626f8c2cdaed77163ee34e208ed1085667c20da7bdefbd7"
+    },
+    {
+      "moduleId": "60122",
+      "reportedFilename": "API.proto",
+      "file": "proto/60122-API.proto",
+      "sha256": "a0410559c80d4a8162db45f82d4f5baa12a049f7494ec8dfe50f380b1cf962ac"
+    },
+    {
+      "moduleId": "98313",
+      "reportedFilename": "Bridge.proto",
+      "file": "proto/98313-Bridge.proto",
+      "sha256": "793df2b84a2186ce10382a322275ee4f60fafc17af02aaf384bd50a38fa65521"
+    },
+    {
+      "moduleId": "91498",
+      "reportedFilename": "BridgeService.proto",
+      "file": "proto/91498-BridgeService.proto",
+      "sha256": "bf04385cda53f920d758b52e5057908d0200097cf55f03d41b5e0a3e4a7c08a6"
+    },
+    {
+      "moduleId": "14934",
+      "reportedFilename": "Bundle.proto",
+      "file": "proto/14934-Bundle.proto",
+      "sha256": "f85986319da08616e766894165ad70643549fb043cafb410f6257c265a458092"
+    },
+    {
+      "moduleId": "41851",
+      "reportedFilename": "Catalog.proto",
+      "file": "proto/41851-Catalog.proto",
+      "sha256": "67ae0ca4c3a92bad36e70f2e9f29ef58d4940667c298327355ba5918747282a8"
+    },
+    {
+      "moduleId": "63189",
+      "reportedFilename": "Characteristic.proto",
+      "file": "proto/63189-Characteristic.proto",
+      "sha256": "69db50121c1292b7d74aab3e4ebcd2f46e5fad0a82b57fced4a1214ad937549f"
+    },
+    {
+      "moduleId": "1829",
+      "reportedFilename": "Cloud.proto",
+      "file": "proto/1829-Cloud.proto",
+      "sha256": "b0b5451ac0e5061481725952b0f2ba169dea6e611747fef2dd307ef945f54869"
+    },
+    {
+      "moduleId": "51062",
+      "reportedFilename": "Controller.proto",
+      "file": "proto/51062-Controller.proto",
+      "sha256": "2ec9cdeae5f6b11ca6763d418ad3da0a7072ed7d0bda05f16794baec73b86a34"
+    },
+    {
+      "moduleId": "39246",
+      "reportedFilename": "Dashboard.proto",
+      "file": "proto/39246-Dashboard.proto",
+      "sha256": "dd7520a50713052744b42add1ba4e3db80f634e2b2908624dca2697263f4ba41"
+    },
+    {
+      "moduleId": "57808",
+      "reportedFilename": "DashboardColumn.proto",
+      "file": "proto/57808-DashboardColumn.proto",
+      "sha256": "97aa23e574014a3d271a131b7da0dca66e88b8bfebeec411a09de19c2a25af49"
+    },
+    {
+      "moduleId": "88338",
+      "reportedFilename": "DashboardWidget.proto",
+      "file": "proto/88338-DashboardWidget.proto",
+      "sha256": "c78b7ea748a1f16ed2014ed6de6d71a3c7113db99660ac009a71b6fdd4a2e432"
+    },
+    {
+      "moduleId": "72252",
+      "reportedFilename": "Device.proto",
+      "file": "proto/72252-Device.proto",
+      "sha256": "200fcca66b94c7baf866553e8202ddeba92ced24be8a1df55b187587ae6886bd"
+    },
+    {
+      "moduleId": "79657",
+      "reportedFilename": "Extension.proto",
+      "file": "proto/79657-Extension.proto",
+      "sha256": "55c4f918ecb6dc1873bdb789882e1209109b2572cbfd9a317844305675ff0440"
+    },
+    {
+      "moduleId": "69921",
+      "reportedFilename": "ExtensionChild.proto",
+      "file": "proto/69921-ExtensionChild.proto",
+      "sha256": "af4a6598eb68df49bf57b531742bba015e059b242ca6071614f190b23ad0b197"
+    },
+    {
+      "moduleId": "37730",
+      "reportedFilename": "ExtensionChild.proto",
+      "file": "proto/37730-ExtensionChild.proto",
+      "sha256": "5524ed1af928f5dec49c23bc19aed819f1444d88d43735db40f3ff6a1be87d30"
+    },
+    {
+      "moduleId": "3644",
+      "reportedFilename": "File.proto",
+      "file": "proto/3644-File.proto",
+      "sha256": "9ec09b6fbec6b1cab1c86abe7def4f8fe4f15c57517fc6e72387b0875671c3eb"
+    },
+    {
+      "moduleId": "51742",
+      "reportedFilename": "History.proto",
+      "file": "proto/51742-History.proto",
+      "sha256": "40ea9598e4dd0f26df0d61cc19ac5f0f527a31ef55468cf36b25a2ff4e5a82d1"
+    },
+    {
+      "moduleId": "77267",
+      "reportedFilename": "Hub.proto",
+      "file": "proto/77267-Hub.proto",
+      "sha256": "29d5a72820890df08d2443e25d3ba9dc12e87921f7f3510301d3aff07a14bf38"
+    },
+    {
+      "moduleId": "82166",
+      "reportedFilename": "Link.proto",
+      "file": "proto/82166-Link.proto",
+      "sha256": "2444423cf7f3a06fd6656d89e32749ce5a86c3a7d15b42023dbdf5c1e081793f"
+    },
+    {
+      "moduleId": "95512",
+      "reportedFilename": "Log.proto",
+      "file": "proto/95512-Log.proto",
+      "sha256": "f27b1a3c341b6fa5148cb7019950af77bb2bbe07bbf7eeaddab7e4177f69fcbe"
+    },
+    {
+      "moduleId": "24448",
+      "reportedFilename": "Logic.proto",
+      "file": "proto/24448-Logic.proto",
+      "sha256": "25b95ca57da72d41e2beb2f3ef5ad7edc54466f201ab16da1e16a16def403cbf"
+    },
+    {
+      "moduleId": "18793",
+      "reportedFilename": "module-18793.proto",
+      "file": "proto/18793-module-18793.proto",
+      "sha256": "324186756468093c0bc5852dcbdd2afa3bb38266d77620762af22da5e0bb310b"
+    },
+    {
+      "moduleId": "72779",
+      "reportedFilename": "Notification.proto",
+      "file": "proto/72779-Notification.proto",
+      "sha256": "91b389552d804c006a06f864eedbaf2d6ce96cb8b5eb222bb6f81e3fa7bbfd9b"
+    },
+    {
+      "moduleId": "40870",
+      "reportedFilename": "NotificationClient.proto",
+      "file": "proto/40870-NotificationClient.proto",
+      "sha256": "58a59c5b5adf3302752f5c66a1a13bed087fd720c307b0c441c5024373bc7e38"
+    },
+    {
+      "moduleId": "51547",
+      "reportedFilename": "Room.proto",
+      "file": "proto/51547-Room.proto",
+      "sha256": "319cd3755c403836b4ed997138cbda5be42bb2fbce598ee1e77270e688f98ed1"
+    },
+    {
+      "moduleId": "20880",
+      "reportedFilename": "Scenario.proto",
+      "file": "proto/20880-Scenario.proto",
+      "sha256": "2319535876324b44c2048267d8b4297ec48d0881b964d5acc5ed1cbddfaa3657"
+    },
+    {
+      "moduleId": "40455",
+      "reportedFilename": "Server.proto",
+      "file": "proto/40455-Server.proto",
+      "sha256": "6a81c840da42790e3700cae763bd841f96bf8eec6d2c5205a6930c03163f9adf"
+    },
+    {
+      "moduleId": "18003",
+      "reportedFilename": "Service.proto",
+      "file": "proto/18003-Service.proto",
+      "sha256": "e3799ff51729c49385996af8d79e1e410e48160cb484eda224bff79b5cfd1a25"
+    },
+    {
+      "moduleId": "38941",
+      "reportedFilename": "Utils.proto",
+      "file": "proto/38941-Utils.proto",
+      "sha256": "83b0f6e86c4548a79e4779db04c93db68af90c6745758a5d0815c568c134d2d9"
+    }
+  ],
+  "rootDomains": [
+    {
+      "name": "room",
+      "requestType": "RoomRequest",
+      "deprecated": false
+    },
+    {
+      "name": "accessory",
+      "requestType": "AccessoryRequest",
+      "deprecated": false
+    },
+    {
+      "name": "service",
+      "requestType": "ServiceRequest",
+      "deprecated": false
+    },
+    {
+      "name": "characteristic",
+      "requestType": "CharacteristicRequest",
+      "deprecated": false
+    },
+    {
+      "name": "device",
+      "requestType": "DeviceRequest",
+      "deprecated": false
+    },
+    {
+      "name": "link",
+      "requestType": "LinkRequest",
+      "deprecated": false
+    },
+    {
+      "name": "logic",
+      "requestType": "LogicRequest",
+      "deprecated": false
+    },
+    {
+      "name": "server",
+      "requestType": "ServerRequest",
+      "deprecated": false
+    },
+    {
+      "name": "file",
+      "requestType": "FileRequest",
+      "deprecated": false
+    },
+    {
+      "name": "log",
+      "requestType": "LogRequest",
+      "deprecated": false
+    },
+    {
+      "name": "scenario",
+      "requestType": "ScenarioRequest",
+      "deprecated": false
+    },
+    {
+      "name": "controller",
+      "requestType": "ControllerRequest",
+      "deprecated": false
+    },
+    {
+      "name": "bridge",
+      "requestType": "BridgeRequest",
+      "deprecated": false
+    },
+    {
+      "name": "bridgeService",
+      "requestType": "BridgeServiceRequest",
+      "deprecated": false
+    },
+    {
+      "name": "notification",
+      "requestType": "NotificationRequest",
+      "deprecated": false
+    },
+    {
+      "name": "notificationClient",
+      "requestType": "NotificationClientRequest",
+      "deprecated": false
+    },
+    {
+      "name": "hub",
+      "requestType": "HubRequest",
+      "deprecated": false
+    },
+    {
+      "name": "cloud",
+      "requestType": "CloudRequest",
+      "deprecated": false
+    },
+    {
+      "name": "account",
+      "requestType": "AccountRequest",
+      "deprecated": false
+    },
+    {
+      "name": "history",
+      "requestType": "HistoryRequest",
+      "deprecated": false
+    },
+    {
+      "name": "catalog",
+      "requestType": "CatalogRequest",
+      "deprecated": false
+    },
+    {
+      "name": "bundle",
+      "requestType": "BundleRequest",
+      "deprecated": true
+    },
+    {
+      "name": "extension",
+      "requestType": "ExtensionRequest",
+      "deprecated": false
+    },
+    {
+      "name": "extensionChild",
+      "requestType": "ExtensionChildRequest",
+      "deprecated": false
+    },
+    {
+      "name": "window",
+      "requestType": "WindowRequest",
+      "deprecated": false
+    },
+    {
+      "name": "dashboard",
+      "requestType": "DashboardRequest",
+      "deprecated": false
+    },
+    {
+      "name": "dashboardColumn",
+      "requestType": "DashboardColumnRequest",
+      "deprecated": false
+    },
+    {
+      "name": "dashboardWidget",
+      "requestType": "DashboardWidgetRequest",
+      "deprecated": false
+    }
+  ],
+  "counts": {
+    "modules": 31,
+    "rootDomains": 28,
+    "declaredOperations": 206,
+    "deprecatedOperations": 26
+  },
+  "limitations": [
+    "Static public frontend only; not an executed RPC inventory or firmware compatibility claim.",
+    "Version extractor failed on this build; asset hashes pin the source.",
+    "Module 37730 reports ExtensionChild.proto but declares Window messages; module 69921 is the distinct ExtensionChild schema. Both preserved verbatim.",
+    "Nested DashboardWidgetCreateRequest/UpdateRequest variants are payload fields, not root RPC domains.",
+    "bundle root and operations are retained as deprecated schema; source comments state the server API is removed.",
+    "Deprecated operations and generated request names do not establish a safe or supported action."
+  ]
+}

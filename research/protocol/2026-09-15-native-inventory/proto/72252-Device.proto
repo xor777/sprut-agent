@@ -1,0 +1,278 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "DeviceProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Accessory.proto";
+import "SprutHub/API/ExtensionChild.proto";
+import "SprutHub/API/Utils.proto";
+
+message DeviceRequest {
+  oneof kind {
+    DeviceListRequest list = 1;
+    DeviceGetRequest get = 2;
+    DeviceCreateDialogRequest createDialog = 3;
+    DeviceCreateRequest create = 4;
+    DeviceDeleteRequest delete = 5;
+    DeviceGetInfoRequest getInfo = 6;
+    DeviceGetMeshRequest getMesh = 7;
+    DeviceGetOptionsRequest getOptions = 8;
+    DeviceSetOptionsRequest setOptions = 9;
+    DeviceIdentifyRequest identify = 10;
+    DeviceResetRequest reset = 11;
+    DeviceHealRequest heal = 14;
+    DeviceDiscoveryRequest discovery = 15;
+    DeviceGetAccessories getAccessories = 17;
+    DeviceSupportInfoRequest supportInfo = 18;
+
+    DeviceUpdateFirmwareRequest updateFirmware = 1000 [deprecated = true];
+    DeviceJoinRequest join = 1001 [deprecated = true];
+    DeviceJoinDialogRequest joinDialog = 1002 [deprecated = true];
+  }
+}
+
+message DeviceResponse {
+  oneof kind {
+    DevicesMessage list = 1;
+    DeviceMessage get = 2;
+    OptionsMessage createDialog = 3;
+    EmptyResponse create = 4;
+    EmptyResponse delete = 5;
+    DeviceInfoMessage getInfo = 6;
+    DeviceMeshMessage getMesh = 7;
+    OptionsMessage getOptions = 8;
+    EmptyResponse setOptions = 9;
+    EmptyResponse identify = 10;
+    EmptyResponse reset = 11;
+    EmptyResponse heal = 14;
+    EmptyResponse discovery = 15;
+    DeviceAccessories getAccessories = 17;
+    SupportInfoResponseMessage supportInfo = 18;
+
+    EmptyResponse updateFirmware = 1000 [deprecated = true];
+    EmptyResponse join = 1001 [deprecated = true];
+    OptionsMessage joinDialog = 1002 [deprecated = true];
+  }
+}
+
+message DeviceListRequest {
+  string extensionKey = 1;
+  optional string expand = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceGetRequest {
+  string extensionKey = 1;
+  string id = 2;
+  optional string expand = 3;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceCreateDialogRequest {
+  string extensionKey = 1;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceCreateRequest {
+  string extensionKey = 1;
+  repeated OptionUpdateMessage options = 2;
+
+  //Deprecated
+  optional string name = 1000 [deprecated = true];
+  optional string controllerIndex = 1001 [deprecated = true];
+}
+
+message DeviceDeleteRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceGetInfoRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceInfoMessage {
+  string extensionKey = 1;
+  string id = 2;
+  optional string info = 3;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceGetMeshRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceMeshMessage {
+  optional string id = 1; // Уникальный id устройства
+  optional string address = 2; // Сетевой адрес, если есть
+  optional string role = 3; // Роль устройства в mesh сети (координатор, роутер, конечное устройство)
+  optional string parent = 4; // Место прописки, если предусмотрено протоколом
+  repeated string associated = 5; // Ассоциации или биндинги
+  repeated DeviceNeighborMessage neighbor = 6; // Соседние ноды
+  repeated string route = 7; // Последний успешный маршрут
+  repeated string RSSI = 8; // Последний RSSI, если больше одного то соотносится с маршрутом
+  repeated string LQI = 9; // Последний LQI, если больше одного то соотносится с маршрутом
+  optional uint64 txSpeed = 10; // Скорость отправки данных в kbit/s, если предусмотрено протоколом
+  optional uint64 rxSpeed = 11; // Скорость получения данных в kbit/s, если предусмотрено протоколом
+}
+
+message DeviceNeighborMessage {
+  optional string id = 1; // Уникальный id устройства
+  optional string address = 2; // Сетевой адрес, если есть
+  optional string lqi = 3; // Качество связи с этим соседом, если предусмотрено протоколом
+  optional string hop = 4; // Глубина, или количество шагов, если предусмотрено протоколом
+}
+
+message DeviceGetOptionsRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional uint32 endpoint = 1000 [deprecated = true];
+  optional string controllerIndex = 1001 [deprecated = true];
+}
+
+message DeviceSetOptionsRequest {
+  string extensionKey = 1;
+  string id = 2;
+  repeated OptionUpdateMessage options = 3;
+
+  optional uint32 endpoint = 1000 [deprecated = true];
+  optional string controllerIndex = 1001 [deprecated = true];
+}
+
+message DeviceIdentifyRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceResetRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceJoinRequest {
+  string extensionKey = 1;
+  string id = 2;
+  repeated OptionUpdateMessage options = 3;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceJoinDialogRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceHealRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceDiscoveryRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceMessage {
+  //общая часть с ExtensionChild
+  string extensionKey = 1;
+  string id = 2; // Уникальный id
+  bool online = 3; // Находится ли в сети
+  bool paired = 4; // Устройство спарено
+  string name = 5; // Имя
+  optional string description = 6; // Описание
+  optional uint32 groupId = 7; // id группы
+  optional sint32 progressBar = 8; // шкала прогресс бара
+
+  repeated FeatureMessage features = 100; // фичи устройства
+  repeated OptionMessage options = 101; // Опции
+  repeated ExtensionChildButtonType buttons = 102; // Дополнительные кнопки управления
+
+  //////////////////////////////////
+  ///Утиль
+  //////////////////////////////////
+  optional string address = 1000; // Сетевой адрес, если есть (NWK)
+  optional string firmware = 1001; // Прошивка
+  optional string manufacturer = 1002; // Производитель
+  optional string model = 1003; // Модель
+  optional string init = 1004; // Текущий этап спаривания
+  optional string state = 1005; // Статус устройства (работает, не отвечает)
+  optional bool removed = 1006; // Устройство удалено
+  optional bool firmwareAvailable = 1007; // Устройство удалено
+  optional uint32 catalogId = 1008; // Номер в каталоге
+  optional string host = 1009; // Имя хоста, либо ip адрес, если есть
+  optional uint32 port = 1010; // Порт, если есть
+  optional string template = 1011; // Указание происхождения шаблона
+  repeated uint32 roomIds = 1014;
+
+  //get
+  optional uint64 lastSeen = 1017; // Время последнего сообщения от устройства (unix timestamp)
+
+
+  optional DeviceMeshMessage mesh = 1018; // Топология, если это mesh сеть
+  optional string info = 1019; // Информация об устройстве в виде html странички без стиля
+
+  //repeated OptionUpdateMessage properties = 22; // Любые дополнительные свойства
+
+  optional string controllerIndex = 10000 [deprecated = true]; // Индекс контроллера
+}
+
+message DeviceEvent {
+  optional SubscribeType event = 1;
+  repeated DeviceMessage devices = 2;
+}
+
+message DevicesMessage {
+  repeated DeviceMessage devices = 1;
+  repeated GroupMessage groups = 2;
+}
+
+message DeviceUpdateFirmwareRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceGetAccessories {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}
+
+message DeviceAccessories {
+  repeated AccessoryMessage accessories = 1;
+}
+
+message DeviceSupportInfoRequest {
+  string extensionKey = 1;
+  string id = 2;
+
+  optional string controllerIndex = 1000 [deprecated = true];
+}

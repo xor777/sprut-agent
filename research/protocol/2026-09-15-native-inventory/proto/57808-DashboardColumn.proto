@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "DashboardColumnProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/DashboardWidget.proto";
+
+message DashboardColumnRequest {
+  oneof kind {
+    DashboardColumnListRequest list = 1;
+    DashboardColumnGetRequest get = 2;
+    DashboardColumnCreateRequest create = 3;
+    DashboardColumnUpdateRequest update = 4;
+    DashboardColumnDeleteRequest delete = 5;
+    DashboardColumnOrdersMessage orders = 6;
+  }
+}
+
+message DashboardColumnResponse {
+  oneof kind {
+    DashboardColumnsMessage list = 1;
+    DashboardColumnMessage get = 2;
+    DashboardColumnMessage create = 3;
+    EmptyResponse update = 4;
+    EmptyResponse delete = 5;
+    DashboardColumnOrdersMessage orders = 6;
+  }
+}
+
+message DashboardColumnListRequest {
+  uint32 dashboardId = 1;
+}
+
+message DashboardColumnGetRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+}
+
+message DashboardColumnCreateRequest {
+  uint32 dashboardId = 1;
+  optional string name = 2;
+  optional uint32 order = 3;
+}
+
+message DashboardColumnUpdateRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+  optional string name = 3;
+}
+
+message DashboardColumnDeleteRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+}
+
+message DashboardColumnOrderMessage {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+  uint32 order = 3;
+}
+
+message DashboardColumnOrdersMessage {
+  repeated DashboardColumnOrderMessage orders = 1;
+}
+
+message DashboardColumnMessage {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+  uint32 order = 3;
+  optional string name = 4;
+  repeated DashboardWidgetMessage widgets = 5;
+}
+
+message DashboardColumnsMessage {
+  repeated DashboardColumnMessage columns = 1;
+}
+
+message DashboardColumnEvent {
+  SubscribeType event = 1;
+  repeated DashboardColumnMessage columns = 2;
+}

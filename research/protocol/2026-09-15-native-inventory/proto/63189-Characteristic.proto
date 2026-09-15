@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "CharacteristicProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message CharacteristicRequest {
+  oneof kind {
+    CharacteristicListRequest list = 1;
+    CharacteristicGetRequest get = 2;
+    CharacteristicGetOptionsRequest getOptions = 3;
+    CharacteristicSetOptionsRequest setOptions = 4;
+    CharacteristicUpdateRequest update = 5;
+    CharacteristicTypesRequest types = 6;
+    CharacteristicSubscribeRequest subscribe = 7;
+  }
+}
+
+message CharacteristicResponse {
+  oneof kind {
+    CharacteristicsMessage list = 1;
+    CharacteristicMessage get = 2;
+    OptionsMessage getOptions = 3;
+    EmptyResponse setOptions = 4;
+    EmptyResponse update = 5;
+    CharacteristicTypesMessage types = 6;
+    EmptyResponse subscribe = 7;
+  }
+}
+
+message CharacteristicListRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional string expand = 3;
+}
+
+message CharacteristicGetRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  optional string expand = 4;
+}
+
+message CharacteristicGetOptionsRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+}
+
+message CharacteristicSetOptionsRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  repeated OptionUpdateMessage options = 4;
+}
+
+message CharacteristicMessage {
+  uint32 aId = 1;
+  uint32 sId = 2;
+  uint32 cId = 3;
+  OptionMessage control = 4;
+  optional bool hasOptions = 5;
+  repeated OptionMessage options = 6; // Опции
+  optional bool hasLinks = 7;
+  optional uint32 linkProcessing = 9;
+  optional bool statusVisible = 11;
+  optional bool notify = 12;
+  optional bool option = 13;
+  string optionsWindow = 14;
+
+  //Deprecated
+  optional string name = 1000 [deprecated = true];
+  optional string desc = 1001 [deprecated = true];
+  optional string type = 1002 [deprecated = true];
+  optional bool read = 1003 [deprecated = true];
+  optional bool write = 1004 [deprecated = true];
+  optional bool events = 1005 [deprecated = true];
+  optional bool hidden = 1006 [deprecated = true];
+  optional double minValue = 1007 [deprecated = true];
+  optional double maxValue = 1008 [deprecated = true];
+  optional double minStep = 1009 [deprecated = true];
+  optional uint32 minLen = 1010 [deprecated = true];
+  optional uint32 maxLen = 1011 [deprecated = true];
+  optional uint32 maxDataLen = 1012 [deprecated = true];
+  optional Value value = 1013 [deprecated = true];
+  optional string unit = 1014 [deprecated = true];
+  repeated ValidValueMessage validValues = 1015 [deprecated = true];
+  optional uint32 order = 1016 [deprecated = true];
+  repeated ValidValueMessage list = 1017 [deprecated = true]; // 12105
+  optional uint32 minLength = 1018 [deprecated = true]; // 12105
+  optional uint32 maxLength = 1019 [deprecated = true]; // 12105
+  optional string autocomplete = 1020 [deprecated = true]; // 12105
+  optional Value def = 1021 [deprecated = true]; // 12105
+  optional uint32 endpoint = 1022 [deprecated = true]; // 12105
+  optional string formType = 1023 [deprecated = true]; // 12200
+  optional string confirmYes = 1024 [deprecated = true]; // 12200
+  optional string confirmNo = 1025 [deprecated = true]; // 12200
+  optional bool refresh = 1026 [deprecated = true]; // 12200
+
+  optional LinkMessage mainLink = 1027 [deprecated = true]; // 13263
+  repeated LinkMessage links = 1028 [deprecated = true]; // 13263
+}
+
+message CharacteristicUpdateRequest {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  optional OptionUpdateMessage control = 4;
+  //optional bool hasOptions = 5;
+  //repeated OptionMessage options = 6; // Опции
+  //optional bool hasLinks = 7;
+  //optional LinkMessage mainLink = 8;
+  optional uint32 linkProcessing = 9;
+  //repeated LinkMessage links = 10;
+  optional bool statusVisible = 11;
+  optional bool notify = 12;
+  optional bool option = 13;
+
+  //Deprecated
+  optional double minValue = 1000 [deprecated = true];
+  optional double maxValue = 1001 [deprecated = true];
+  optional double minStep = 1002 [deprecated = true];
+  optional Value value = 1003 [deprecated = true];
+  repeated ValidValueMessage validValues = 1004 [deprecated = true];
+}
+
+message CharacteristicsMessage {
+  repeated CharacteristicMessage characteristics = 1;
+}
+
+message CharacteristicTypesRequest {}
+
+message CharacteristicTypeMessage {
+  optional string id = 1;
+  optional string shortId = 2;
+  optional string type = 3;
+  optional string name = 4;
+  optional string format = 5;
+  optional bool read = 6;
+  optional bool write = 7;
+  optional bool events = 8;
+  optional bool hidden = 9;
+  optional double minValue = 10;
+  optional double maxValue = 11;
+  optional double minStep = 12;
+  optional uint32 maxLen = 13;
+  optional string unit = 14;
+  repeated ValidValueMessage validValues = 15;
+}
+
+message CharacteristicTypesMessage {
+  repeated CharacteristicTypeMessage types = 1;
+}
+
+message CharacteristicSubscribe {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+  optional string sType = 4;
+  optional string cType = 5;
+  repeated SubscribeType events = 6;
+}
+
+message CharacteristicSubscribeRequest {
+  repeated CharacteristicSubscribe subscribes = 1;
+}
+
+message CharacteristicEvent {
+  optional SubscribeType event = 1;
+  repeated CharacteristicMessage characteristics = 2;
+}

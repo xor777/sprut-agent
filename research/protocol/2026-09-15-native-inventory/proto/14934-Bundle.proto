@@ -1,0 +1,105 @@
+// Deprecated: RPC bundle.* снесено — магазин приложений живёт в плагине appstore (окна).
+// Прото сохранён для совместимости: старые клиенты продолжают парсить структуры,
+// номера полей не переиспользуются. Сервер эти сообщения больше не заполняет.
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "StoreProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/Extension.proto";
+import "SprutHub/API/Scenario.proto";
+import "SDK/Utils.proto";
+
+message BundleRequest {
+  oneof kind {
+    BundleListRequest list = 1;
+    BundleGetRequest get = 2;
+    BundleCreateInstanceRequest createInstance = 3;
+    BundleUpdateRequest update = 4;
+    BundleInstallRequest install = 5;
+  }
+}
+
+message BundleResponse {
+  oneof kind {
+    BundlesMessage list = 1;
+    BundleMessage get = 2;
+    BundleCreateInstanceResponse createInstance = 3;
+    BundleUpdateResponse update = 4;
+    BundleInstallResponse install = 5;
+  }
+}
+
+message BundleListRequest {
+  optional BundleType bundleType = 1;
+}
+
+message BundleGetRequest {
+  string bundleId = 1;
+}
+
+message BundleCreateInstanceRequest {
+  string bundleId = 1;
+}
+
+message BundleCreateInstanceResponse {
+  InstanceMessage instance = 1;
+}
+
+// Обновление app-плагина до availableVersion из канального каталога (§5.3): jar скачивается
+// в data/Apps с проверкой sha256; применяется при следующем старте хаба (pendingRestart).
+message BundleUpdateRequest {
+  string bundleId = 1;
+}
+
+message BundleUpdateResponse {
+  string version = 1;
+  bool pendingRestart = 2;
+}
+
+// Установка НЕустановленного плагина из витрины каталога (§5.3): jar скачивается в data/Apps
+// и грузится горячо — bundle сразу доступен, перезапуск не нужен.
+message BundleInstallRequest {
+  string bundleId = 1;
+}
+
+message BundleInstallResponse {
+  string version = 1;
+}
+
+message BundlesMessage {
+  repeated BundleMessage bundles = 1;
+}
+
+message BundleMessage {
+  string bundleId = 1;
+  BundleType bundleType = 2;
+  string icon = 3;
+  string name = 4;
+  string desc = 5;
+  string fullDesc = 6;
+  string author = 7;
+  string version = 8;
+  SDK.ReleaseState releaseState = 9;
+  bool canCreateInstance = 10;
+  InstanceMessage instance = 11;
+  optional string infoURL = 12;
+  optional string wikiURL = 13;
+  // Канальный каталог плагинов (plugin-release-channels §5.3): старшая совместимая
+  // с ядром версия из <branch>/apps/index.json; updateAvailable — она новее установленной.
+  optional string availableVersion = 14;
+  optional bool updateAvailable = 15;
+  // Обновление уже скачано в data/Apps и применится при следующем старте хаба.
+  optional string pendingVersion = 16;
+  // false — плагин из витрины каталога, на хабе не установлен (доступен bundle.install).
+  optional bool installed = 17;
+}
+
+message InstanceMessage {
+  repeated ExtensionMessage extensions = 1;
+  repeated ScenarioMessage scenarios = 2;
+}

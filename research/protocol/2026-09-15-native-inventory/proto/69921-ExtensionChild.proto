@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ExtensionChildProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message ExtensionChildRequest {
+  oneof kind {
+    ExtensionChildListRequest list = 1;
+    ExtensionChildGetRequest get = 2;
+    ExtensionChildCreateDialogRequest createDialog = 3;
+    ExtensionChildCreateRequest create = 4;
+    ExtensionChildDeleteRequest delete = 5;
+    ExtensionChildGetOptionsRequest getOptions = 6;
+    ExtensionChildSetOptionsRequest setOptions = 7;
+  }
+}
+
+message ExtensionChildResponse {
+  oneof kind {
+    ExtensionChildesMessage list = 1;
+    ExtensionChildMessage get = 2;
+    OptionsMessage createDialog = 3;
+    EmptyResponse create = 4;
+    EmptyResponse delete = 5;
+    OptionsMessage getOptions = 6;
+    EmptyResponse setOptions = 7;
+  }
+}
+
+message ExtensionChildCreateDialogRequest {
+  string extensionKey = 1;
+}
+
+message ExtensionChildListRequest {
+  string extensionKey = 1;
+}
+
+message ExtensionChildGetRequest {
+  string extensionKey = 1;
+  string id = 2;
+}
+
+message ExtensionChildCreateRequest {
+  string extensionKey = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message ExtensionChildDeleteRequest {
+  string extensionKey = 1;
+  string id = 2;
+}
+
+message ExtensionChildGetOptionsRequest {
+  string extensionKey = 1;
+  string id = 2;
+}
+
+message ExtensionChildSetOptionsRequest {
+  string extensionKey = 1;
+  string id = 2;
+  repeated OptionUpdateMessage options = 3;
+}
+
+message ExtensionChildMessage {
+  string extensionKey = 1;
+  string spaceKey = 2; // Key пространства
+  string id = 3; // Уникальный id
+  bool online = 4; // Находится ли в сети
+  string name = 5; // Имя
+  optional uint32 groupId = 6; // id группы
+  optional string icon = 7; // Иконка
+  optional string description = 8; // Описание
+  optional sint32 progressBar = 9; // шкала прогресс бара
+  string optionsWindow = 10;
+  optional string error = 11;
+  optional string status = 12;
+
+  repeated FeatureMessage features = 100; // фичи устройства
+  repeated OptionMessage options = 101; // Опции
+  repeated ExtensionChildButtonType buttons = 102; // Дополнительные кнопки управления
+  repeated FeatureMessage transports = 103;
+}
+
+message ExtensionChildEvent {
+  SubscribeType event = 1;
+  repeated ExtensionChildMessage children = 2;
+}
+
+message ExtensionChildesMessage {
+  repeated ExtensionChildMessage children = 1;
+}
+
+enum ExtensionChildButtonType {
+  CHILD_B_INFO = 0;
+  CHILD_B_OPTIONS = 1;
+  CHILD_B_JOIN = 2;
+  CHILD_B_JOIN_DIALOG = 3;
+  CHILD_B_REMOVE = 4;
+  CHILD_B_HEAL = 5;
+  CHILD_B_DISCOVERY = 6;
+  CHILD_B_UPDATE = 7;
+  CHILD_B_UPDATE_FIRMWARE = 8;
+}

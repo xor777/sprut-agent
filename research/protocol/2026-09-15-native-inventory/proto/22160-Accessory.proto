@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "AccessoryProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/Service.proto";
+
+message AccessoryRequest {
+  oneof kind {
+    AccessoryListRequest list = 1;
+    AccessoryGetRequest get = 2;
+    AccessoryCreateRequest create = 3;
+    AccessoryDeleteRequest delete = 4;
+    AccessoryUpdateRequest update = 5;
+    AccessorySubscribeRequest subscribe = 6;
+    AccessoryStreamMessage stream = 7;
+    AccessorySupportInfoRequest supportInfo = 8;
+  }
+}
+
+message AccessoryResponse {
+  oneof kind {
+    AccessoriesMessage list = 1;
+    AccessoryMessage get = 2;
+    AccessoryMessage create = 3;
+    EmptyResponse delete = 4;
+    EmptyResponse update = 5;
+    EmptyResponse subscribe = 6;
+    AccessoryStreamMessage stream = 7;
+    SupportInfoResponseMessage supportInfo = 8;
+  }
+}
+
+message AccessoryListRequest {
+  repeated uint32 ids = 1;
+  optional string expand = 2;
+  optional uint32 roomId = 3;
+}
+
+message AccessoryGetRequest {
+  optional uint32 id = 1;
+  optional string expand = 2;
+}
+
+message AccessorySupportInfoRequest {
+  optional uint32 id = 1;
+}
+
+message AccessoryCreateRequest {
+  optional uint32 endpoint = 1;
+  optional string name = 2;
+  optional uint32 roomId = 3;
+  repeated ServiceCreateRequest services = 4;
+  optional string expand = 5;
+}
+
+message AccessoryDeleteRequest {
+  optional uint32 id = 1;
+}
+
+message AccessoryUpdateRequest {
+  optional uint32 id = 1;
+  optional string name = 2;
+  optional uint32 roomId = 3;
+  optional string expand = 4;
+}
+
+message AccessoryMessage {
+  optional uint32 id = 1;
+  optional uint64 endpoint = 2;
+  optional bool online = 3;
+  optional string name = 4;
+  optional string manufacturer = 5;
+  optional string model = 6;
+  optional string manufacturerId = 7;
+  optional string modelId = 8;
+  optional string serial = 9;
+  optional uint32 roomId = 11;
+  repeated ServiceMessage services = 17;
+
+  //get
+  optional string firmware = 10;
+  optional bool virtual = 12;
+  optional uint64 lastUpdate = 13;
+  optional string extensionKey = 15;
+  optional string deviceId = 14;
+  optional bool hasOptions = 18;
+  optional bool hasScenarios = 20;
+
+  optional string deviceWindow = 21;
+
+  //optional ExtensionMessage controller = 16;
+  optional string controllerIndex = 1000 [deprecated = true];
+  optional bool hasRelatives = 1001 [deprecated = true];
+}
+
+message AccessoriesMessage {
+  repeated AccessoryMessage accessories = 1;
+}
+
+message AccessorySubscribe {
+  optional uint32 id = 1;
+  repeated SubscribeType events = 2;
+}
+
+message AccessorySubscribeRequest {
+  repeated AccessorySubscribe subscribes = 1;
+}
+
+message AccessoryEvent {
+  optional SubscribeType event = 1;
+  repeated AccessoryMessage accessories = 2;
+  repeated AccessoryStreamMessage streams = 3;
+}
+
+message AccessoryStreamMessage {
+  optional uint32 id = 1;
+  optional string mid = 2;
+  optional string sdp = 3;
+  repeated string candidates = 4;
+  optional uint32 status = 5;
+  optional bytes snapshot = 6;
+  optional StreamAction action = 7;
+  optional PtzCommand ptz = 8;
+  optional bool hasPtz = 9;  // В ответе - камера поддерживает PTZ
+  // ID потока для multi-stream камер: пусто/null = поток по умолчанию.
+  // Старые клиенты не передают это поле — backend выбирает default-поток.
+  optional string streamId = 10;
+  // Клиентский идентификатор WebRTC-сессии: один клиент может держать
+  // несколько параллельных подключений к камере (миниатюра + модалка).
+  // Пусто — сессия выводится из (accessory, канал, streamId), как раньше.
+  optional string session = 11;
+}
+
+enum StreamAction {
+  STREAM_OFFER = 0;
+  STREAM_CANDIDATE = 1;
+  STREAM_STOP = 2;
+  STREAM_SNAPSHOT = 3;
+  STREAM_REQUEST_TURN = 4;
+  STREAM_PTZ_MOVE = 5;
+  STREAM_PTZ_STOP = 6;
+}
+
+message PtzCommand {
+  optional double panSpeed = 1;   // -1.0 (left) to 1.0 (right), 0 = stop
+  optional double tiltSpeed = 2;  // -1.0 (down) to 1.0 (up), 0 = stop
+  optional double zoomSpeed = 3;  // -1.0 (out) to 1.0 (in), 0 = stop
+}
+
+enum StreamStatus {
+  STATUS_OK = 0;
+  STATUS_ACCESS_DENIED = 1;
+  STATUS_OFFER_FAILED = 3;
+  STATUS_STREAM_NOT_READY = 5;
+}

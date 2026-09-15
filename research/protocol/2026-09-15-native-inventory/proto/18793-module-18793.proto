@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.spruthub.sdk";
+
+package SDK;
+
+enum InputType {
+  GROUP = 0;
+  FOLDER = 1;
+  BUTTON = 2;
+  NUMBER = 3;
+  TEXT = 4;
+  TEXT_MULTILINE = 5;
+  PASSWORD = 6;
+  CHECKBOX = 7;
+  STATUS = 8;
+  URL = 9;
+  INFO = 10;
+  EMAIL = 11;
+  HTML = 12;
+  IP_ADDR = 13;
+  PINCODE = 14;
+  QR_CODE = 15;
+  LIST = 16;
+  PROGRESS_BAR = 17;
+  DATE = 18;
+  TIME = 19;
+  DATETIME = 20;
+  PHONE = 21;
+  ADDRESS = 22;
+  CAPTCHA = 23;
+  WINDOW = 24;
+  ACCESSORY_LIST = 25;
+  CLIPBOARD = 26;
+  BUTTON_DANGER = 27;
+  LOCATION = 28;
+  MARKDOWN = 29;
+  SLIDER = 30;
+  MESH = 31;
+  FILE_UPLOAD = 32;
+  FILE_DOWNLOAD = 33;
+  EXTENSION = 34;
+}
+
+enum BarcodeFormat {
+  BC_QR_CODE = 0;
+  BC_AZTEC = 1;
+  BC_CODE_128 = 2;
+  BC_CODE_39 = 3;
+  BC_CODE_93 = 4;
+  BC_CODABAR = 5;
+  BC_DATABAR = 6;
+  BC_DATABAR_EXPANDED = 7;
+  BC_DATA_MATRIX = 8;
+  BC_EAN_13 = 9;
+  BC_EAN_8 = 10;
+  BC_ITF = 11;
+  BC_PDF417 = 12;
+  BC_UPC_A = 13;
+  BC_UPC_E = 14;
+  BC_MAXI_CODE = 15;
+  BC_MICRO_QR_CODE = 16;
+  BC_DX_FILM_EDGE = 17;
+  BC_RM_QR_CODE = 18;
+  BC_LINEAR_CODES = 19;
+  BC_MATRIX_CODES = 20;
+}
+
+enum ReleaseState {
+  ALPHA = 0;
+  BETA = 1;
+  RELEASE = 2;
+  TEST = 3;
+}
+
+// Тип узла цепочки контекстов (com.spruthub.sdk.Context). Номера — вечный контракт:
+// они уходят в API (HistoryContext.type) и зафиксированы по историческому порядку констант.
+enum ContextType {
+  ACCESSORY = 0;
+  SERVICE = 1;
+  CHARACTERISTIC = 2;
+  DATABASE = 3;
+  INIT_VALUE = 4;
+  WEB = 5;
+  CLOUD = 6;
+  MCP = 7;
+  CONTROLLER = 8;
+  BRIDGE = 9;
+  PLUGIN = 10;
+  NOTIFICATION = 11;
+  SCENARIO = 12;
+  HUB = 13;
+  LOGIC = 14;
+  CRON = 15;
+  LINK_CONTROLLER = 16;
+  LINK_VIRTUAL = 17;
+  OPTION = 18;
+  USER = 19;
+  DISCOVERY = 20;
+}
+
+// Универсальная карта-граф для InputType.MESH — доменно-нейтральный набор узлов и связей.
+// Годится для любой топологии: ZigBee/Z-Wave/Matter mesh, схема Ethernet или произвольный граф.
+// Наполняется тем местом хаба, которое объявило Variable<MeshMessage>; сам тип ничего не знает
+// об устройствах.
+message MeshMessage {
+  repeated MeshNode nodes = 1; // Узлы графа
+  repeated MeshLink links = 2; // Связи (рёбра) между узлами
+}
+
+message MeshNode {
+  string id = 1;                   // Уникальный идентификатор узла (на него ссылаются MeshLink.source/target)
+  optional bool online = 2;        // В сети (true) или нет (false)
+  optional MeshNodeType type = 3;  // Тип (роль) узла — для группировки/окраски; по умолчанию NODE_UNSPECIFIED
+  optional string address = 4;     // Сетевой адрес узла, если есть
+  optional string label = 5;       // Подпись узла
+  optional string description = 6; // Дополнительное описание / подсказка
+  optional string icon = 7;        // Иконка
+  optional bool root = 8;          // Корневой узел — центр графа (координатор, шлюз)
+  optional string window = 9;      // id окна устройства — для открытия настроек по клику на узле
+}
+
+message MeshLink {
+  MeshLinkType type = 1;           // Тип связи — для фильтра/окраски на UI; по умолчанию LINK_UNSPECIFIED
+  string source = 2;               // id узла-источника
+  string target = 3;               // id узла-назначения
+  optional string label = 4;       // Подпись на ребре (например LQI, скорость)
+  optional bool directed = 5;      // Направленная связь (со стрелкой)
+  optional double weight = 6;      // Вес/качество связи 0..1 — толщина/цвет линии
+}
+
+// Тип (роль) узла на карте — для группировки/окраски.
+enum MeshNodeType {
+  NODE_UNSPECIFIED = 0; // тип не задан (произвольный граф)
+  NODE_COORDINATOR = 1; // главный узел сети (координатор ZigBee / контроллер Z-Wave)
+  NODE_ROUTER = 2;      // ретранслятор / роутер
+  NODE_END_DEVICE = 3;  // конечное устройство
+}
+
+// Тип связи на карте — для фильтрации и окраски на UI (переключатель «все / соседи / ассоциации / маршруты»).
+enum MeshLinkType {
+  LINK_UNSPECIFIED = 0; // тип не задан (произвольный граф)
+  LINK_NEIGHBOR = 1;    // сосед (mesh-связь по таблице соседей)
+  LINK_ASSOCIATION = 2; // ассоциация / биндинг
+  LINK_ROUTE = 3;       // активный маршрут (source-route)
+}

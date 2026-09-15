@@ -1,0 +1,2062 @@
+[
+  {
+    "endpoint": "room.list",
+    "requestType": "RoomListRequest",
+    "responseType": "RoomsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.get",
+    "requestType": "RoomGetRequest",
+    "responseType": "RoomMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.create",
+    "requestType": "RoomCreateRequest",
+    "responseType": "RoomMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.delete",
+    "requestType": "RoomDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.update",
+    "requestType": "RoomUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.orders",
+    "requestType": "RoomOrdersMessage",
+    "responseType": "RoomOrdersMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "room.subscribe",
+    "requestType": "RoomSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51547",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.list",
+    "requestType": "AccessoryListRequest",
+    "responseType": "AccessoriesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.get",
+    "requestType": "AccessoryGetRequest",
+    "responseType": "AccessoryMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.create",
+    "requestType": "AccessoryCreateRequest",
+    "responseType": "AccessoryMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.delete",
+    "requestType": "AccessoryDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.update",
+    "requestType": "AccessoryUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.subscribe",
+    "requestType": "AccessorySubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.stream",
+    "requestType": "AccessoryStreamMessage",
+    "responseType": "AccessoryStreamMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "accessory.supportInfo",
+    "requestType": "AccessorySupportInfoRequest",
+    "responseType": "SupportInfoResponseMessage",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "22160",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.list",
+    "requestType": "ServiceListRequest",
+    "responseType": "ServicesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.get",
+    "requestType": "ServiceGetRequest",
+    "responseType": "ServiceMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.update",
+    "requestType": "ServiceUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.types",
+    "requestType": "ServiceTypesRequest",
+    "responseType": "ServiceTypesMessage",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.orders",
+    "requestType": "ServiceOrdersMessage",
+    "responseType": "ServiceOrdersMessage",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "service.subscribe",
+    "requestType": "ServiceSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "18003",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.list",
+    "requestType": "CharacteristicListRequest",
+    "responseType": "CharacteristicsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.get",
+    "requestType": "CharacteristicGetRequest",
+    "responseType": "CharacteristicMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.getOptions",
+    "requestType": "CharacteristicGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.setOptions",
+    "requestType": "CharacteristicSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.update",
+    "requestType": "CharacteristicUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.types",
+    "requestType": "CharacteristicTypesRequest",
+    "responseType": "CharacteristicTypesMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "characteristic.subscribe",
+    "requestType": "CharacteristicSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "63189",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.list",
+    "requestType": "DeviceListRequest",
+    "responseType": "DevicesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.get",
+    "requestType": "DeviceGetRequest",
+    "responseType": "DeviceMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.createDialog",
+    "requestType": "DeviceCreateDialogRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.create",
+    "requestType": "DeviceCreateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.delete",
+    "requestType": "DeviceDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.getInfo",
+    "requestType": "DeviceGetInfoRequest",
+    "responseType": "DeviceInfoMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.getMesh",
+    "requestType": "DeviceGetMeshRequest",
+    "responseType": "DeviceMeshMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.getOptions",
+    "requestType": "DeviceGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.setOptions",
+    "requestType": "DeviceSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.identify",
+    "requestType": "DeviceIdentifyRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 10,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.reset",
+    "requestType": "DeviceResetRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 11,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.heal",
+    "requestType": "DeviceHealRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 14,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.discovery",
+    "requestType": "DeviceDiscoveryRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 15,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.getAccessories",
+    "requestType": "DeviceGetAccessories",
+    "responseType": "DeviceAccessories",
+    "requestFieldNumber": 17,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.supportInfo",
+    "requestType": "DeviceSupportInfoRequest",
+    "responseType": "SupportInfoResponseMessage",
+    "requestFieldNumber": 18,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.updateFirmware",
+    "requestType": "DeviceUpdateFirmwareRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.join",
+    "requestType": "DeviceJoinRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1001,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "device.joinDialog",
+    "requestType": "DeviceJoinDialogRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 1002,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "72252",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "link.list",
+    "requestType": "LinkListRequest",
+    "responseType": "LinksMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "82166",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "link.addVirtual",
+    "requestType": "LinkAddVirtualRequest",
+    "responseType": "LinkMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "82166",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "link.remove",
+    "requestType": "LinkRemoveRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "82166",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "link.add",
+    "requestType": "LinkAddRequest",
+    "responseType": "LinkMessage",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "82166",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.list",
+    "requestType": "LogicListRequest",
+    "responseType": "LogicsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.get",
+    "requestType": "LogicGetRequest",
+    "responseType": "LogicMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.create",
+    "requestType": "LogicCreateRequest",
+    "responseType": "LogicMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.delete",
+    "requestType": "LogicDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.update",
+    "requestType": "LogicUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.types",
+    "requestType": "LogicTypesRequest",
+    "responseType": "LogicTypesMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.getOptions",
+    "requestType": "LogicGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.setOptions",
+    "requestType": "LogicSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "logic.setActive",
+    "requestType": "LogicSetActiveRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "24448",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.clientInfo",
+    "requestType": "ClientInfoMessage",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.clientDisconnect",
+    "requestType": "ClientDisconnectRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 14,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.ping",
+    "requestType": "PingRequest",
+    "responseType": "PongResponse",
+    "requestFieldNumber": 15,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.version",
+    "requestType": "VersionRequest",
+    "responseType": "VersionMessage",
+    "requestFieldNumber": 1003,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.pool",
+    "requestType": "ServerPoolRequest",
+    "responseType": "ServerPoolResponse",
+    "requestFieldNumber": 1004,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.restart",
+    "requestType": "ServerRestartRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1006,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "server.upgrade",
+    "requestType": "ServerUpgradeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1007,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "40455",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.backups",
+    "requestType": "FileBackupsRequest",
+    "responseType": "FilePrepareResponse",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.logs",
+    "requestType": "FileLogsRequest",
+    "responseType": "FilePrepareResponse",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.devInfo",
+    "requestType": "FileDevInfoRequest",
+    "responseType": "FilePrepareResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.filePart",
+    "requestType": "FilePartRequest",
+    "responseType": "FilePartResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.complete",
+    "requestType": "FileCompleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.ready",
+    "requestType": "FileReadyMessage",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.uploadStart",
+    "requestType": "FileUploadStartRequest",
+    "responseType": "FileUploadStartResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.uploadPart",
+    "requestType": "FileUploadPartRequest",
+    "responseType": "FileUploadPartResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.uploadFinish",
+    "requestType": "FileUploadFinishRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "file.uploadAbort",
+    "requestType": "FileUploadAbortRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 10,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "3644",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "log.list",
+    "requestType": "LogListRequest",
+    "responseType": "LogsResponse",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "95512",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "log.print",
+    "requestType": "LogPrintRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "95512",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "log.subscribe",
+    "requestType": "LogSubscribeRequest",
+    "responseType": "LogSubscribeResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "95512",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "log.unsubscribe",
+    "requestType": "LogUnSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "95512",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.list",
+    "requestType": "ScenarioListRequest",
+    "responseType": "ScenariosMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.get",
+    "requestType": "ScenarioGetRequest",
+    "responseType": "ScenarioMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.update",
+    "requestType": "ScenarioUpdateRequest",
+    "responseType": "ScenarioMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.create",
+    "requestType": "ScenarioCreateRequest",
+    "responseType": "ScenarioMessage",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.delete",
+    "requestType": "ScenarioDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.getOptions",
+    "requestType": "ScenarioGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.setOptions",
+    "requestType": "ScenarioSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.run",
+    "requestType": "ScenarioRunRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.orders",
+    "requestType": "ScenarioOrdersMessage",
+    "responseType": "ScenarioOrdersMessage",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.sdk",
+    "requestType": "ScenarioSdkRequest",
+    "responseType": "ScenarioSdkMessage",
+    "requestFieldNumber": 10,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.subscribe",
+    "requestType": "ScenarioSubscribeRequest",
+    "responseType": "ScenarioSubscribeResponse",
+    "requestFieldNumber": 11,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "scenario.unsubscribe",
+    "requestType": "ScenarioUnSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 12,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "20880",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.list",
+    "requestType": "ControllerListRequest",
+    "responseType": "ControllersMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.get",
+    "requestType": "ControllerGetRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.delete",
+    "requestType": "ControllerDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.update",
+    "requestType": "ControllerUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.getOptions",
+    "requestType": "ControllerGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.setOptions",
+    "requestType": "ControllerSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.discovery",
+    "requestType": "ControllerDiscoveryMessage",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.exclusion",
+    "requestType": "ControllerExclusionMessage",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 10,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.scan",
+    "requestType": "ControllerScanRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 11,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.getScanResult",
+    "requestType": "ControllerScanResultRequest",
+    "responseType": "ControllerScanResponse",
+    "requestFieldNumber": 12,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.updateMesh",
+    "requestType": "ControllerUpdateMeshRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 13,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.healMesh",
+    "requestType": "ControllerHealMeshRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 14,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.create",
+    "requestType": "ControllerCreateRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.types",
+    "requestType": "ControllerTypesRequest",
+    "responseType": "ControllerTypesMessage",
+    "requestFieldNumber": 1001,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "controller.deleteAccessories",
+    "requestType": "ControllerDeleteAccessoriesRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1002,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "51062",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.list",
+    "requestType": "BridgeListRequest",
+    "responseType": "BridgesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.get",
+    "requestType": "BridgeGetRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.delete",
+    "requestType": "BridgeDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.update",
+    "requestType": "BridgeUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.getOptions",
+    "requestType": "BridgeGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.setOptions",
+    "requestType": "BridgeSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.getServices",
+    "requestType": "BridgeGetServicesRequest",
+    "responseType": "BridgeServicesMessageOld",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.setService",
+    "requestType": "BridgeSetServiceRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1001,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.removeService",
+    "requestType": "BridgeRemoveServiceRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 1002,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.getServiceBridges",
+    "requestType": "BridgeGetServiceBridgesRequest",
+    "responseType": "ServiceBridgesMessage",
+    "requestFieldNumber": 1003,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.getAccessoryBridges",
+    "requestType": "BridgeGetAccessoryBridgesRequest",
+    "responseType": "BridgesServicesMessage",
+    "requestFieldNumber": 1004,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.create",
+    "requestType": "BridgeCreateRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 1005,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridge.types",
+    "requestType": "BridgeTypesRequest",
+    "responseType": "BridgeTypesMessage",
+    "requestFieldNumber": 1006,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "98313",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridgeService.list",
+    "requestType": "BridgeServiceListRequest",
+    "responseType": "BridgeServicesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "91498",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridgeService.get",
+    "requestType": "BridgeServiceGetRequest",
+    "responseType": "BridgeServiceMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "91498",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridgeService.create",
+    "requestType": "BridgeServiceCreateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "91498",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bridgeService.delete",
+    "requestType": "BridgeServiceDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "91498",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.list",
+    "requestType": "NotificationListRequest",
+    "responseType": "NotificationsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.get",
+    "requestType": "NotificationGetRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.update",
+    "requestType": "NotificationUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.delete",
+    "requestType": "NotificationDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.getOptions",
+    "requestType": "NotificationGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.setOptions",
+    "requestType": "NotificationSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.create",
+    "requestType": "NotificationCreateRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 1000,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notification.types",
+    "requestType": "NotificationTypesRequest",
+    "responseType": "NotificationTypesMessage",
+    "requestFieldNumber": 1001,
+    "domainDeprecated": false,
+    "operationDeprecated": true,
+    "sourceModuleId": "72779",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.list",
+    "requestType": "NotificationClientListRequest",
+    "responseType": "NotificationClientsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.get",
+    "requestType": "NotificationClientGetRequest",
+    "responseType": "NotificationClientMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.createDialog",
+    "requestType": "NotificationClientCreateDialogRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.create",
+    "requestType": "NotificationClientCreateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.delete",
+    "requestType": "NotificationClientDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.getOptions",
+    "requestType": "NotificationClientGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "notificationClient.setOptions",
+    "requestType": "NotificationClientSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "40870",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.list",
+    "requestType": "HubListRequest",
+    "responseType": "HubsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.get",
+    "requestType": "HubGetRequest",
+    "responseType": "HubMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.addCheck",
+    "requestType": "HubAddCheckRequest",
+    "responseType": "HubAddCheckResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.add",
+    "requestType": "HubAddRequest",
+    "responseType": "HubAddResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.delete",
+    "requestType": "HubDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.getOptions",
+    "requestType": "HubGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.setOptions",
+    "requestType": "HubSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.discovery",
+    "requestType": "HubDiscoveryRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 8,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.restart",
+    "requestType": "HubRestartRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.upgrade",
+    "requestType": "HubUpgradeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 10,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.pool",
+    "requestType": "HubPoolRequest",
+    "responseType": "HubPoolResponse",
+    "requestFieldNumber": 11,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.supportInfo",
+    "requestType": "HubSupportInfoRequest",
+    "responseType": "SupportInfoResponseMessage",
+    "requestFieldNumber": 12,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "hub.connection",
+    "requestType": "HubConnectionRequest",
+    "responseType": "HubConnectionResponse",
+    "requestFieldNumber": 13,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "77267",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "cloud.test",
+    "requestType": "int32",
+    "responseType": "int32",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "1829",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "account.auth",
+    "requestType": "AuthRequest",
+    "responseType": "AccountResponseMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "5663",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "account.answer",
+    "requestType": "AnswerRequest",
+    "responseType": "AccountResponseMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "5663",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "account.get",
+    "requestType": "AccountGetRequest",
+    "responseType": "AccountMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "5663",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "account.changePassword",
+    "requestType": "AccountChangePasswordRequest",
+    "responseType": "AccountResponseMessage",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "5663",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "account.delete",
+    "requestType": "AccountDeleteRequest",
+    "responseType": "AccountResponseMessage",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "5663",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "history.list",
+    "requestType": "HistoryListRequest",
+    "responseType": "HistoriesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "51742",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.list",
+    "requestType": "CatalogListRequest",
+    "responseType": "CatalogsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.get",
+    "requestType": "CatalogGetRequest",
+    "responseType": "CatalogMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.create",
+    "requestType": "CatalogCreateRequest",
+    "responseType": "CatalogMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.delete",
+    "requestType": "CatalogDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.update",
+    "requestType": "CatalogUpdateRequest",
+    "responseType": "CatalogMessage",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.types",
+    "requestType": "CatalogTypesRequest",
+    "responseType": "CatalogTypesMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "catalog.scheme",
+    "requestType": "CatalogSchemeRequest",
+    "responseType": "CatalogSchemeMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "41851",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bundle.list",
+    "requestType": "BundleListRequest",
+    "responseType": "BundlesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": true,
+    "operationDeprecated": false,
+    "sourceModuleId": "14934",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bundle.get",
+    "requestType": "BundleGetRequest",
+    "responseType": "BundleMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": true,
+    "operationDeprecated": false,
+    "sourceModuleId": "14934",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bundle.createInstance",
+    "requestType": "BundleCreateInstanceRequest",
+    "responseType": "BundleCreateInstanceResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": true,
+    "operationDeprecated": false,
+    "sourceModuleId": "14934",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bundle.update",
+    "requestType": "BundleUpdateRequest",
+    "responseType": "BundleUpdateResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": true,
+    "operationDeprecated": false,
+    "sourceModuleId": "14934",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "bundle.install",
+    "requestType": "BundleInstallRequest",
+    "responseType": "BundleInstallResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": true,
+    "operationDeprecated": false,
+    "sourceModuleId": "14934",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.list",
+    "requestType": "ExtensionListRequest",
+    "responseType": "ExtensionsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.get",
+    "requestType": "ExtensionGetRequest",
+    "responseType": "ExtensionMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.delete",
+    "requestType": "ExtensionDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.getOptions",
+    "requestType": "ExtensionGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.setOptions",
+    "requestType": "ExtensionSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extension.action",
+    "requestType": "ExtensionActionRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 9,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "79657",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.list",
+    "requestType": "ExtensionChildListRequest",
+    "responseType": "ExtensionChildesMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.get",
+    "requestType": "ExtensionChildGetRequest",
+    "responseType": "ExtensionChildMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.createDialog",
+    "requestType": "ExtensionChildCreateDialogRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.create",
+    "requestType": "ExtensionChildCreateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.delete",
+    "requestType": "ExtensionChildDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.getOptions",
+    "requestType": "ExtensionChildGetOptionsRequest",
+    "responseType": "OptionsMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "extensionChild.setOptions",
+    "requestType": "ExtensionChildSetOptionsRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "69921",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "window.get",
+    "requestType": "WindowGetRequest",
+    "responseType": "WindowMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "37730",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "window.update",
+    "requestType": "WindowUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "37730",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.list",
+    "requestType": "DashboardListRequest",
+    "responseType": "DashboardsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.get",
+    "requestType": "DashboardGetRequest",
+    "responseType": "DashboardMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.create",
+    "requestType": "DashboardCreateRequest",
+    "responseType": "DashboardMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.update",
+    "requestType": "DashboardUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.delete",
+    "requestType": "DashboardDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.orders",
+    "requestType": "DashboardOrdersMessage",
+    "responseType": "DashboardOrdersMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboard.subscribe",
+    "requestType": "DashboardSubscribeRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "39246",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.list",
+    "requestType": "DashboardColumnListRequest",
+    "responseType": "DashboardColumnsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.get",
+    "requestType": "DashboardColumnGetRequest",
+    "responseType": "DashboardColumnMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.create",
+    "requestType": "DashboardColumnCreateRequest",
+    "responseType": "DashboardColumnMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.update",
+    "requestType": "DashboardColumnUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.delete",
+    "requestType": "DashboardColumnDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardColumn.orders",
+    "requestType": "DashboardColumnOrdersMessage",
+    "responseType": "DashboardColumnOrdersMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "57808",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.list",
+    "requestType": "DashboardWidgetListRequest",
+    "responseType": "DashboardWidgetsMessage",
+    "requestFieldNumber": 1,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.get",
+    "requestType": "DashboardWidgetGetRequest",
+    "responseType": "DashboardWidgetMessage",
+    "requestFieldNumber": 2,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.create",
+    "requestType": "DashboardWidgetCreateRequest",
+    "responseType": "DashboardWidgetMessage",
+    "requestFieldNumber": 3,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.update",
+    "requestType": "DashboardWidgetUpdateRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 4,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.delete",
+    "requestType": "DashboardWidgetDeleteRequest",
+    "responseType": "EmptyResponse",
+    "requestFieldNumber": 5,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.orders",
+    "requestType": "DashboardWidgetOrdersMessage",
+    "responseType": "DashboardWidgetOrdersMessage",
+    "requestFieldNumber": 6,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  },
+  {
+    "endpoint": "dashboardWidget.types",
+    "requestType": "DashboardWidgetTypesRequest",
+    "responseType": "DashboardWidgetTypesMessage",
+    "requestFieldNumber": 7,
+    "domainDeprecated": false,
+    "operationDeprecated": false,
+    "sourceModuleId": "88338",
+    "evidence": "schema_only"
+  }
+]

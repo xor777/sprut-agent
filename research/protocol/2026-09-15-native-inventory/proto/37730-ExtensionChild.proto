@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "ExtensionChildProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message WindowRequest {
+  oneof kind {
+    WindowGetRequest get = 1;
+    WindowUpdateRequest update = 2;
+  }
+}
+
+message WindowResponse {
+  oneof kind {
+    WindowMessage get = 1;
+    EmptyResponse update = 2;
+  }
+}
+
+message WindowGetRequest {
+  string windowKey = 1;
+}
+
+message WindowUpdateRequest {
+  string windowKey = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message WindowEvent {
+  SubscribeType event = 1;
+  repeated WindowMessage windows = 2;
+}
+
+message WindowMessage {
+  string windowKey = 1;
+  FormLabelMessage label = 2;
+  repeated OptionMessage options = 3;
+}

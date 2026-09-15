@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "RoomProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message RoomRequest {
+  oneof kind {
+    RoomListRequest list = 1;
+    RoomGetRequest get = 2;
+    RoomCreateRequest create = 3;
+    RoomDeleteRequest delete = 4;
+    RoomUpdateRequest update = 5;
+    RoomOrdersMessage orders = 6;
+    RoomSubscribeRequest subscribe = 7;
+  }
+}
+
+message RoomResponse {
+  oneof kind {
+    RoomsMessage list = 2;
+    RoomMessage get = 4;
+    RoomMessage create = 6;
+    EmptyResponse delete = 8;
+    EmptyResponse update = 10;
+    RoomOrdersMessage orders = 12;
+    EmptyResponse subscribe = 14;
+  }
+}
+
+message RoomListRequest {
+}
+
+message RoomGetRequest {
+  optional uint32 id = 1;
+}
+
+message RoomCreateRequest {
+  optional string name = 1;
+  optional uint32 order = 2;
+}
+
+message RoomDeleteRequest {
+  optional uint32 id = 1;
+}
+
+message RoomUpdateRequest {
+  optional uint32 id = 1;
+  optional string name = 2;
+  optional bool visible = 3;
+}
+
+message RoomOrderMessage {
+  optional uint32 id = 1;
+  optional uint32 order = 2;
+}
+
+message RoomOrdersMessage {
+  repeated RoomOrderMessage orders = 1;
+}
+
+message RoomMessage {
+  optional uint32 id = 1;
+  optional uint32 order = 2;
+  optional string name = 3;
+  optional bool visible = 4;
+  repeated FeatureMessage sensors = 5;
+  repeated FeatureMessage actions = 6;
+}
+
+message RoomsMessage {
+  repeated RoomMessage rooms = 1;
+}
+
+message RoomSubscribe {
+  optional uint32 id = 1;
+  repeated SubscribeType events = 2;
+}
+
+message RoomSubscribeRequest {
+  repeated RoomSubscribe subscribes = 1;
+}
+
+message RoomEvent {
+  optional SubscribeType event = 1;
+  repeated RoomMessage rooms = 2;
+}

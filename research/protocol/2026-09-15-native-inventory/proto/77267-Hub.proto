@@ -1,0 +1,224 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "HubProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message HubRequest {
+  oneof kind {
+    HubListRequest list = 1;
+    HubGetRequest get = 2;
+    HubAddCheckRequest addCheck = 3;
+    HubAddRequest add = 4;
+    HubDeleteRequest delete = 5;
+    HubGetOptionsRequest getOptions = 6;
+    HubSetOptionsRequest setOptions = 7;
+    HubDiscoveryRequest discovery = 8;
+    HubRestartRequest restart = 9;
+    HubUpgradeRequest upgrade = 10;
+    HubPoolRequest pool = 11;
+    HubSupportInfoRequest supportInfo = 12;
+    HubConnectionRequest connection = 13;
+  }
+}
+
+message HubResponse {
+  oneof kind {
+    HubsMessage list = 1;
+    HubMessage get = 2;
+    HubAddCheckResponse addCheck = 3;
+    HubAddResponse add = 4;
+    EmptyResponse delete = 5;
+    OptionsMessage getOptions = 6;
+    EmptyResponse setOptions = 7;
+    EmptyResponse discovery = 8;
+    EmptyResponse restart = 9;
+    EmptyResponse upgrade = 10;
+    HubPoolResponse pool = 11;
+    SupportInfoResponseMessage supportInfo = 12;
+    HubConnectionResponse connection = 13;
+  }
+}
+
+// Постоянная p2p-труба «hub-connection»: WebRTC DataChannel-транспорт вкладки,
+// не привязанный к камере (SDP только с m=application, клиент всегда offerer).
+// Сигналинг: offer/answer этим методом, кандидаты хаба — событием HubConnectionEvent.
+// Типовой порядок: requestIce → создание RTCPeerConnection с iceServers → offer.
+message HubConnectionRequest {
+  optional string session = 1;    // клиентский id трубы (uuid вкладки), обязателен
+  optional string sdp = 2;        // offer; повторный offer той же session — переподключение/ICE restart
+  repeated string candidates = 3; // trickle ICE от клиента: голые строки "candidate:..." (как в RTCIceCandidate.candidate)
+  optional string mid = 4;        // mid для candidates
+  optional bool stop = 5;         // явное закрытие трубы
+  optional bool requestIce = 6;   // выдать ICE-серверы (STUN + TURN с кредами) для RTCPeerConnection
+}
+
+enum HubConnectionStatus {
+  HUB_CONNECTION_OK = 0;
+  HUB_CONNECTION_OFFER_FAILED = 1;  // сессия не собралась (нет ICE-кредов, внутренняя ошибка)
+  HUB_CONNECTION_LIMIT_REACHED = 2; // достигнут потолок одновременных труб
+}
+
+message HubConnectionResponse {
+  optional HubConnectionStatus status = 1;
+  optional string sdp = 2;               // answer на offer
+  repeated IceServerMessage iceServers = 3; // ответ на requestIce
+}
+
+// Один элемент для RTCPeerConnection.iceServers
+message IceServerMessage {
+  repeated string urls = 1;       // "stun:host:port", "turn:host:port?transport=udp"
+  optional string username = 2;   // только для TURN
+  optional string credential = 3; // только для TURN
+  optional int64 expiresAt = 4;   // unix ms истечения кредов; отсутствует у STUN
+}
+
+// Push-событие трубы: trickle ICE-кандидаты хаба (candidates — RTCIceCandidateInit в JSON,
+// готовые для addIceCandidate)
+message HubConnectionEvent {
+  optional string session = 1;
+  optional string mid = 2;
+  repeated string candidates = 3;
+}
+
+message HubListRequest {}
+
+message HubGetRequest {
+  optional string serial = 1;
+}
+
+message HubAddCheckRequest {
+  optional string hwSerial = 1;
+  optional string hwMac = 2;
+}
+
+message HubAddRequest {
+  optional string hwSerial = 1;
+  optional string hwMac = 2;
+}
+
+message HubDeleteRequest {
+  optional string serial = 1;
+}
+
+message HubGetOptionsRequest {
+  optional string serial = 1;
+}
+
+message HubSetOptionsRequest {
+  optional string serial = 1;
+  repeated OptionUpdateMessage options = 2;
+}
+
+message HubDiscoveryRequest {
+  optional string serial = 1;
+  optional string key = 2;
+  optional bool state = 3; // Запустить/остановить поиск
+  optional uint32 roomId = 4; // ID комнаты, в которой запущен поиск
+}
+
+message HubRestartRequest {
+  optional string serial = 1;
+}
+
+message HubUpgradeRequest {
+  optional string serial = 1;
+}
+
+message HubPoolRequest {
+  optional string serial = 1;
+  optional bool extended = 2;
+  optional bool query = 3;
+  optional bool work = 4;
+}
+
+message HubPoolResponse {
+  optional string info = 1;
+}
+
+message HubSupportInfoRequest {
+  optional string serial = 1;
+}
+
+message HubMessage {
+  optional string serial = 1;
+  optional string name = 2;
+  optional string manufacturer = 3;
+  optional string model = 4;
+  optional string owner = 5;
+  optional string lang = 6;
+  optional bool online = 7;
+  optional bool selected = 8;
+  optional bool support = 9;
+  optional bool discovery = 10;
+  optional uint64 lastSeen = 11;
+  optional HubVersionMessage version = 12;
+  optional PlatformMessage platform = 13;
+  repeated OptionMessage options = 14;
+  string optionsWindow = 15;
+
+  optional HubVersionMessage upgrade = 1000 [deprecated = true];
+  optional string branch = 1001 [deprecated = true];
+}
+
+message HubVersionMessage {
+  string branch = 1;
+  HubVersionInfoMessage current = 2;
+  optional HubVersionInfoMessage upgrade = 3;
+
+  optional string version = 1000 [deprecated = true];
+  optional uint32 revision = 1002 [deprecated = true];
+  optional uint32 template = 1003 [deprecated = true];
+  optional string hardware = 1004 [deprecated = true];
+}
+
+message HubVersionInfoMessage {
+  optional string version = 1;
+  optional uint32 revision = 2;
+  optional uint32 template = 3;
+  optional string hardware = 4;
+}
+
+message HubsMessage {
+  repeated HubMessage hubs = 1;
+}
+
+message HubEvent {
+  optional SubscribeType event = 1;
+  repeated HubMessage hubs = 2;
+}
+
+message PlatformMessage {
+  optional string manufacturer = 1;
+  optional string model = 2;
+  optional string serial = 3;
+  optional string mac = 4;
+  optional string jdk = 7;
+  repeated string IPv4 = 8;
+  repeated string IPv6 = 9;
+}
+
+message HubAddCheckResponse {
+  optional HubAddCheckStatus status = 1; // Можно ли добавить хаб
+  optional string serial = 2; // Серийный номер хаба, на который нужно переключиться
+}
+
+message HubAddResponse {
+  optional HubAddStatus status = 1; // Успешно ли добавление
+  optional string message = 2; // Текст ошибки
+}
+
+enum HubAddCheckStatus {
+  HUB_ADD_CHECK_AWAITING = 0; // Ожидает добавления
+  HUB_ADD_CHECK_EXISTS = 1; // Уже существует
+  HUB_ADD_CHECK_NOT_FOUND = 2; // Не найден
+}
+
+enum HubAddStatus {
+  ADD_HUB_SUCCESS = 0;
+  ADD_HUB_FAILED = 1;
+}

@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "FileProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+
+message FileRequest {
+  oneof kind {
+    FileBackupsRequest backups = 1;
+    FileLogsRequest logs = 2;
+    FileDevInfoRequest devInfo = 3;
+    FilePartRequest filePart = 4;
+    FileCompleteRequest complete = 5;
+    FileReadyMessage ready = 6;
+    FileUploadStartRequest uploadStart = 7;
+    FileUploadPartRequest uploadPart = 8;
+    FileUploadFinishRequest uploadFinish = 9;
+    FileUploadAbortRequest uploadAbort = 10;
+  }
+}
+
+message FileResponse {
+  oneof kind {
+    FilePrepareResponse backups = 1;
+    FilePrepareResponse logs = 2;
+    FilePrepareResponse devInfo = 3;
+    FilePartResponse filePart = 4;
+    EmptyResponse complete = 5;
+    EmptyResponse ready = 6;
+    FileUploadStartResponse uploadStart = 7;
+    FileUploadPartResponse uploadPart = 8;
+    EmptyResponse uploadFinish = 9;
+    EmptyResponse uploadAbort = 10;
+  }
+}
+
+message FileBackupsRequest {}
+
+message FileLogsRequest {}
+
+message FileDevInfoRequest {}
+
+message FilePrepareResponse {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+  optional string scope = 3;
+}
+
+message FileReadyMessage {
+  optional bool success = 1;
+  optional FileLoc loc = 2;
+  optional string path = 3;
+  optional uint64 length = 4;
+  optional string scope = 5;
+  optional string name = 6;
+}
+
+message FilePartRequest {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+  optional uint64 start = 3;
+  optional uint32 length = 4;
+  optional string scope = 5;
+}
+
+message FilePartResponse {
+  optional string data = 1;
+}
+
+message FileCompleteRequest {
+  optional FileLoc loc = 1;
+  optional string path = 2;
+  optional string scope = 3;
+}
+
+message FileUploadStartRequest {
+  optional string purpose = 1;
+  optional string name = 2;
+  optional uint64 length = 3;
+}
+
+message FileUploadStartResponse {
+  optional string token = 1;
+}
+
+message FileUploadPartRequest {
+  optional string token = 1;
+  optional uint64 start = 2;
+  optional string data = 3;
+}
+
+message FileUploadPartResponse {
+  optional uint64 received = 1;
+}
+
+message FileUploadFinishRequest {
+  optional string token = 1;
+}
+
+message FileUploadAbortRequest {
+  optional string token = 1;
+}
+
+enum FileLoc {
+  LOC_TMP = 0;
+  LOC_BACKUP = 1;
+}

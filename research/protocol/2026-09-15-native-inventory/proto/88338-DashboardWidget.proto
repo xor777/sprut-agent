@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "DashboardWidgetProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/History.proto";
+
+message DashboardWidgetRequest {
+  oneof kind {
+    DashboardWidgetListRequest list = 1;
+    DashboardWidgetGetRequest get = 2;
+    DashboardWidgetCreateRequest create = 3;
+    DashboardWidgetUpdateRequest update = 4;
+    DashboardWidgetDeleteRequest delete = 5;
+    DashboardWidgetOrdersMessage orders = 6;
+    DashboardWidgetTypesRequest types = 7;
+  }
+}
+
+message DashboardWidgetResponse {
+  oneof kind {
+    DashboardWidgetsMessage list = 1;
+    DashboardWidgetMessage get = 2;
+    DashboardWidgetMessage create = 3;
+    EmptyResponse update = 4;
+    EmptyResponse delete = 5;
+    DashboardWidgetOrdersMessage orders = 6;
+    DashboardWidgetTypesMessage types = 7;
+  }
+}
+
+message DashboardWidgetListRequest {
+  uint32 dashboardId = 1;
+  optional uint32 columnId = 2;
+}
+
+message DashboardWidgetGetRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+}
+
+message DashboardWidgetCreateRequest {
+  uint32 dashboardId = 1;
+  uint32 columnId = 2;
+  optional string name = 3;
+  optional uint32 order = 4;
+  oneof kind {
+    DashboardTileWidget tile = 10;
+    DashboardServiceWidget service = 11;
+    DashboardCharacteristicWidget characteristic = 12;
+    DashboardChartWidget chart = 13;
+    DashboardCameraWidget camera = 14;
+    DashboardShortcutWidget shortcut = 15;
+    DashboardWeatherWidget weather = 16;
+    DashboardClockWidget clock = 17;
+  }
+}
+
+message DashboardWidgetUpdateRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+  optional string name = 3;
+  oneof kind {
+    DashboardTileWidget tile = 10;
+    DashboardServiceWidget service = 11;
+    DashboardCharacteristicWidget characteristic = 12;
+    DashboardChartWidget chart = 13;
+    DashboardCameraWidget camera = 14;
+    DashboardShortcutWidget shortcut = 15;
+    DashboardWeatherWidget weather = 16;
+    DashboardClockWidget clock = 17;
+  }
+}
+
+message DashboardWidgetDeleteRequest {
+  uint32 dashboardId = 1;
+  uint32 id = 2;
+}
+
+message DashboardWidgetOrderMessage {
+  uint32 dashboardId = 1;
+  uint32 columnId = 2;
+  uint32 id = 3;
+  uint32 order = 4;
+}
+
+message DashboardWidgetOrdersMessage {
+  repeated DashboardWidgetOrderMessage orders = 1;
+}
+
+message DashboardWidgetMessage {
+  uint32 dashboardId = 1;
+  uint32 columnId = 2;
+  uint32 id = 3;
+  uint32 order = 4;
+  optional string name = 5;
+  oneof kind {
+    DashboardTileWidget tile = 10;
+    DashboardServiceWidget service = 11;
+    DashboardCharacteristicWidget characteristic = 12;
+    DashboardChartWidget chart = 13;
+    DashboardCameraWidget camera = 14;
+    DashboardShortcutWidget shortcut = 15;
+    DashboardWeatherWidget weather = 16;
+    DashboardClockWidget clock = 17;
+  }
+}
+
+message DashboardWidgetsMessage {
+  repeated DashboardWidgetMessage widgets = 1;
+}
+
+message DashboardWidgetEvent {
+  SubscribeType event = 1;
+  repeated DashboardWidgetMessage widgets = 2;
+}
+
+enum DashboardWidgetType {
+  TILE = 0;
+  SERVICE = 1;
+  CHARACTERISTIC = 2;
+  CHART = 3;
+  CAMERA = 4;
+  SHORTCUT = 5;
+  WEATHER = 6;
+  CLOCK = 7;
+}
+
+message DashboardWidgetTypesRequest {}
+
+message DashboardWidgetTypeMessage {
+  DashboardWidgetType type = 1;
+  string name = 2;
+}
+
+message DashboardWidgetTypesMessage {
+  repeated DashboardWidgetTypeMessage types = 1;
+}
+
+message DashboardTileWidget {}
+
+message DashboardServiceWidget {
+  repeated DashboardServiceItem items = 1;
+  optional bool showRooms = 2;
+}
+
+message DashboardServiceItem {
+  uint32 aId = 1;
+  uint32 sId = 2;
+}
+
+message DashboardCharacteristicWidget {
+  repeated DashboardCharacteristicItem items = 1;
+}
+
+message DashboardCharacteristicItem {
+  uint32 aId = 1;
+  uint32 sId = 2;
+  uint32 cId = 3;
+}
+
+message DashboardChartWidget {
+  repeated DashboardCharacteristicItem items = 1;
+  optional HistoryGroup group = 2;
+}
+
+message DashboardCameraWidget {
+  repeated DashboardServiceItem items = 1;
+}
+
+message DashboardShortcutWidget {
+  repeated DashboardShortcutItem items = 1;
+}
+
+message DashboardShortcutItem {
+  uint32 id = 1;
+}
+
+message DashboardWeatherWidget {}
+
+message DashboardClockWidget {}

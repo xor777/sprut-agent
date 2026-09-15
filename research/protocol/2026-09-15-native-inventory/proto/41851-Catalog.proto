@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "CatalogProto";
+
+package SprutHub.API;
+
+import "SprutHub/API/Utils.proto";
+import "SprutHub/API/Device.proto";
+import "SprutHub/API/Accessory.proto";
+
+message CatalogRequest {
+  oneof kind {
+    CatalogListRequest list = 1;
+    CatalogGetRequest get = 2;
+    CatalogCreateRequest create = 3;
+    CatalogDeleteRequest delete = 4;
+    CatalogUpdateRequest update = 5;
+    CatalogTypesRequest types = 6;
+    CatalogSchemeRequest scheme = 7;
+  }
+}
+
+message CatalogResponse {
+  oneof kind {
+    CatalogsMessage list = 1;
+    CatalogMessage get = 2;
+    CatalogMessage create = 3;
+    EmptyResponse delete = 4;
+    CatalogMessage update = 5;
+    CatalogTypesMessage types = 6;
+    CatalogSchemeMessage scheme = 7;
+  }
+}
+
+message CatalogListRequest {
+  optional CatalogFilterMessage filter = 1;
+  optional string search = 2;
+  optional uint32 limit = 3;
+  optional uint64 afterIndex = 4;
+}
+
+message CatalogFilterMessage {
+  repeated StoreTemplate stores = 1;
+  repeated string controllers = 2;
+  repeated string serviceTypes = 3;
+  repeated string characteristicTypes = 4;
+}
+
+message CatalogGetRequest {
+  StoreTemplate store = 1;
+  string controller = 2;
+  string file = 3;
+}
+
+message CatalogCreateRequest {
+  string controller = 1;
+  string template = 2;
+}
+
+message CatalogDeleteRequest {
+  StoreTemplate store = 1;
+  string controller = 2;
+  string file = 3;
+}
+
+message CatalogUpdateRequest {
+  StoreTemplate store = 1;
+  string controller = 2;
+  string file = 3;
+  string template = 4;
+}
+
+message CatalogMessage {
+  bool active = 1;
+  StoreTemplate store = 2;
+  string controller = 3;
+  string file = 4;
+  optional uint32 deviceCount = 5;
+
+  optional string manufacturer = 10;
+  optional string model = 11;
+  repeated string manufacturerIds = 12;
+  repeated string modelIds = 13;
+  repeated FeatureMessage availableServices = 14;
+
+  optional uint32 catalogId = 20;
+
+  //get
+  optional string template = 100;
+  optional bool write = 101;
+  optional string error = 102;
+
+  repeated DeviceMessage devices = 200;
+  repeated AccessoryMessage accessories = 201;
+}
+
+message CatalogsMessage {
+  repeated CatalogMessage catalogs = 1;
+}
+
+message CatalogTypesRequest {}
+
+message CatalogTypesMessage {
+  repeated string controllers = 1;
+  repeated StoreTemplate stores = 2;
+}
+
+message CatalogSchemeRequest {}
+
+message CatalogSchemeMessage {
+  string scheme = 1;
+}
+
+enum StoreTemplate {
+  MAIN = 0;
+  DEV_MAIN = 1;
+  INTERNAL = 2;
+  GENERATED = 3;
+  APP = 4;
+}

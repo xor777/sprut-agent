@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "HistoryProto";
+
+package SprutHub.API;
+
+import "SDK/Utils.proto";
+import "SprutHub/API/Utils.proto";
+
+message HistoryRequest {
+  oneof kind {
+    HistoryListRequest list = 1;
+  }
+}
+
+message HistoryResponse {
+  oneof kind {
+    HistoriesMessage list = 1;
+  }
+}
+
+message HistoryListRequest {
+  optional HistoryFilterMessage filter = 1;
+  optional uint32 limit = 2;
+  optional uint64 afterTimestamp = 3;
+  optional uint64 beforeTimestamp = 4;
+  optional uint64 afterId = 5;
+  optional uint64 beforeId = 6;
+  optional HistoryGroup group = 7;
+
+  repeated HistoryFilterAccessoryMessage filters = 10;
+
+  optional bool includeContexts = 11; // вернуть цепочку контекстов (contexts) для каждой записи; только для не-group запросов
+}
+
+message HistoryFilterMessage {
+  repeated HistoryFilterAccessoryMessage accessories = 1;
+}
+
+message HistoryFilterAccessoryMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+}
+
+message HistoryMessage {
+  optional uint64 id = 1;
+  optional uint64 timestamp = 2;
+  optional uint32 aId = 3;
+  optional uint32 sId = 4;
+  optional uint32 cId = 5;
+  optional Value value = 6;
+  optional Value minValue = 7;
+  optional Value maxValue = 8;
+  optional Value openValue = 9;   // OHLC: первое значение в периоде (FIRST)
+  optional Value closeValue = 10; // OHLC: последнее значение в периоде (LAST)
+
+  repeated HistoryContext contexts = 11; // цепочка контекстов: [верхний узел ... первопричина], по includeContexts
+}
+
+// Узел цепочки контекстов — кто/через что привёл к событию (зеркало com.spruthub.sdk.Context + время шага)
+message HistoryContext {
+  optional SDK.ContextType type = 1;
+  optional string id = 2;
+  optional int64 timestamp = 3;
+}
+
+message HistoriesMessage {
+  repeated HistoryMessage histories = 1;
+}
+
+enum HistoryGroup {
+  MINUTE = 0;
+  HOUR = 1;
+  DAY = 2;
+}

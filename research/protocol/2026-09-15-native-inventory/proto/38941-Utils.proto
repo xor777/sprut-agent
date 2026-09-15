@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "org.makesimple.SprutHub.API";
+option java_outer_classname = "UtilsProto";
+
+package SprutHub.API;
+
+import "SDK/Utils.proto";
+
+message EmptyResponse {}
+
+message DecimalValue {
+  // Whole units part of the amount
+  int64 units = 1;
+  // Nano units of the amount (10^-9)
+  // Must be same sign as units
+  int32 nanos = 2;
+}
+
+message LangMessage {
+  optional string BY = 1;
+  optional string CS = 2;
+  optional string DE = 3;
+  optional string EL = 4;
+  optional string EN = 5;
+  optional string ES = 6;
+  optional string FR = 7;
+  optional string IT = 8;
+  optional string PL = 9;
+  optional string RU = 10;
+  optional string TR = 11;
+  optional string UK = 12;
+  optional string ZH = 13;
+}
+
+message SupportInfoResponseMessage {
+  optional string info = 1;
+}
+
+message OptionUpdateMessage {
+  optional string key = 1;
+  //optional string name = 2;
+  //optional string desc = 3;
+  //optional string type = 4;
+  //optional string unit = 5;
+  //optional bool read = 6;
+  //optional bool write = 7;
+  //optional bool events = 8;
+  //optional bool hidden = 9;
+  optional double minValue = 10;
+  optional double maxValue = 11;
+  optional double minStep = 12;
+  //optional uint32 minLen = 13;
+  //optional uint32 maxLen = 14;
+  //optional uint32 maxDataLen = 15;
+  optional Value value = 16;
+  repeated ValidValueMessage validValues = 17;
+  //optional string parent = 18;
+  //optional InputType inputType = 19;
+  //optional uint32 order = 20;
+  //optional bool visible = 21;
+  //optional bool disabled = 22;
+
+  //Deprecated
+  optional string name = 1000 [deprecated = true]; // 12200
+  optional string desc = 1001 [deprecated = true]; // 12200
+  optional string type = 1002 [deprecated = true]; // 12200
+}
+
+/////////////////////////////////////////////
+message OptionMessage {
+  optional string key = 1;
+  optional string name = 2;
+  optional string desc = 3;
+  optional string type = 4;
+  optional string unit = 5;
+  optional bool read = 6;
+  optional bool write = 7;
+  optional bool events = 8;
+  optional bool hidden = 9;
+  optional double minValue = 10;
+  optional double maxValue = 11;
+  optional double minStep = 12;
+  optional uint32 minLen = 13;
+  optional uint32 maxLen = 14;
+  optional uint32 maxDataLen = 15;
+  optional Value value = 16;
+  repeated ValidValueMessage validValues = 17;
+  optional string parent = 18;
+  optional SDK.InputType inputType = 19;
+  optional uint32 order = 20;
+  optional bool visible = 21;
+  optional bool disabled = 22;
+  optional string error = 23;
+  optional string spaceKey = 24;
+  optional string icon = 25;
+  optional string placeholder = 26;
+  repeated SDK.BarcodeFormat barcodeFormats = 27;
+
+  //Deprecated
+  repeated ValidValueMessage list = 1000 [deprecated = true]; // 12105
+  optional uint32 minLength = 1001 [deprecated = true]; // 12105
+  optional uint32 maxLength = 1002 [deprecated = true]; // 12105
+  optional string autocomplete = 1003 [deprecated = true]; // 12105
+  optional Value def = 1004 [deprecated = true]; // 12105
+  optional uint32 endpoint = 1005 [deprecated = true]; // 12105
+  optional string formType = 1006 [deprecated = true]; // 12200
+  optional string confirmYes = 1007 [deprecated = true]; // 12200
+  optional string confirmNo = 1008 [deprecated = true]; // 12200
+  optional bool refresh = 1009 [deprecated = true]; //12200
+}
+
+message FormLabelMessage {
+  optional string header = 1;
+  optional string text = 2;
+  optional string error = 3;
+  optional string button = 4;
+  optional string status = 5;
+  optional sint32 progressBar = 9; // шкала прогресс бара
+}
+
+message LinkMessage {
+  optional string index = 1;
+  optional string controller = 2;
+  optional LinkType type = 3;
+  repeated LinkCharacteristicMessage characteristics = 4;
+}
+
+enum LinkType {
+  SYSTEM = 0;
+  IN = 1;
+  OUT = 2;
+}
+
+message LinkCharacteristicMessage {
+  optional uint32 aId = 1;
+  optional uint32 sId = 2;
+  optional uint32 cId = 3;
+
+  //Deprecated
+  optional bool main = 1000 [deprecated = true];
+}
+/////////////////////////////////////////////
+
+message FeatureMessage {
+  optional string type = 1;
+  optional uint64 count = 2;
+  optional string label = 3;
+}
+
+message GroupMessage {
+  uint32 id = 1;
+  string name = 2;
+  uint32 order = 3;
+}
+
+message OptionsMessage {
+  repeated OptionMessage options = 1;
+}
+
+message ValidValueMessage {
+  optional string key = 1;
+  optional string name = 2;
+  optional string desc = 3;
+  optional string confirm = 4;
+  optional Value value = 5;
+  optional bool checked = 6;
+
+  //Deprecated
+  optional string id = 1000 [deprecated = true]; // del для совместимости с 1.9.10
+}
+
+message Value {
+  // The kind of value.
+  oneof kind {
+    bool boolValue = 1;
+    int32 intValue = 2;
+    int64 longValue = 3;
+    double doubleValue = 4;
+    string stringValue = 5;
+    SDK.MeshMessage meshValue = 6;
+  }
+}
+
+enum SubscribeType {
+  EVENT_ADD = 0;
+  EVENT_UPDATE = 1;
+  EVENT_REMOVE = 2;
+  EVENT_REFRESH = 3;
+  //EVENT_VALUE = 0;
+}
+
+enum LoadingState {
+  NOT_LOADED = 0;
+  LOADING = 1;
+  LOADED = 2;
+  FAILED = 3;
+  SHUTDOWNING = 4;
+}
+
+enum BundleType {
+  CONTROLLER = 0;
+  BRIDGE = 1;
+  NOTIFICATION = 2;
+  SCENARIO_BLOCK = 3;
+  SCENARIO_LOGIC = 4;
+  PLUGIN = 5;
+}
