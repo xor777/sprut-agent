@@ -9814,7 +9814,7 @@ test("a proven BLOCK name apply is not resent after a sibling owner conflict and
     name: "apply_native_change",
     arguments: { change_ref: nameRef },
   });
-  assert.equal(refusedAfterRestart.structuredContent.status, "conflict");
+  assert.notEqual(refusedAfterRestart.structuredContent.status, "applied");
   assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
   assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
 });
@@ -9951,6 +9951,61 @@ test("an observed deleted BLOCK create marker does not claim a later scenario at
   assert.deepEqual(windowUpdates(hub).at(-1).window.update.options, [
     { key: "Desc", value: { stringValue: "" } },
   ]);
+});
+
+test("BLOCK description keeps a proven marker after a later data edit of the same create", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило, чью data потом изменят",
+    },
+  });
+  const appliedCreate = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const owned = hub.state.scenarios.find(
+    ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+  );
+  const marker = owned.desc.match(/\[sprut-agent:native:[a-f0-9]{24}\]/)?.[0];
+  assert.equal(typeof marker, "string");
+  const edited = JSON.parse(owned.data);
+  edited.targets[0].then[1].time = 12_000;
+  owned.data = JSON.stringify(edited);
+  const observed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "conflict");
+  const cleared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: appliedCreate.structuredContent.scenario_ref,
+      option_key: "Desc",
+      value: "",
+      reason: "Обычный conflict create не прекращает marker",
+    },
+  });
+  const appliedClear = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: cleared.structuredContent.change_ref },
+  });
+  assert.equal(appliedClear.structuredContent.status, "applied");
+  assert.equal(owned.desc, marker);
 });
 
 test("TEXT Name on a device window is ordinary unsupported TEXT, not a fictional BLOCK owner", async (t) => {

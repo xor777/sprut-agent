@@ -1344,20 +1344,18 @@ export class AutomationService {
       if (!retryableApply) return pending.result;
       currentState = { value: pending.current, contract: pending.contract };
     }
-    if (change.status === "applied") {
-      const current = await this.#readNativeValue(change);
-      if (valuesEqual(current, change.requested_value)) {
-        change.applied_value_observed = true;
-        return this.#recordNativeObservation(
-          change,
-          current,
-          "requested_value_observed",
-        );
-      }
-      return this.#finishNative(change, "conflict", current, {
-        conflict_reason: "value_changed_after_apply",
-        last_verification: freshVerification("conflict"),
-      });
+    if (nativeValueProvenApply(change)) {
+      const current =
+        currentState?.value ?? (await this.#readNativeValue(change));
+      const provenOwnershipLoss = await this.#finishObservedValueOwnershipLoss(
+        change,
+        current,
+      );
+      if (provenOwnershipLoss) return provenOwnershipLoss;
+      const provenSentWithoutOwnership =
+        await this.#finishSentValueOwnershipLoss(change, current);
+      if (provenSentWithoutOwnership) return provenSentWithoutOwnership;
+      return this.#observeProvenNativeValue(change, current);
     }
     const { value: current, contract } =
       currentState ??
@@ -1600,16 +1598,6 @@ export class AutomationService {
         verification: failedVerification(error),
       });
     }
-    if (
-      change.status === "applied" &&
-      !valuesEqual(current, change.requested_value)
-    ) {
-      return this.#finishNative(change, "conflict", current, {
-        conflict_reason: "value_changed_after_apply",
-        manual_change_observed: true,
-        last_verification: freshVerification("conflict"),
-      });
-    }
     const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
       change,
       current,
@@ -1620,6 +1608,9 @@ export class AutomationService {
       current,
     );
     if (sentWithoutOwnership) return sentWithoutOwnership;
+    if (nativeValueProvenApply(change)) {
+      return this.#observeProvenNativeValue(change, current);
+    }
     return this.#recordNativeObservation(
       change,
       current,
@@ -3838,10 +3829,9 @@ export class AutomationService {
     if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
       return;
     }
-    throw scenarioOwnerRequired(
-      await this.#findScenarioRefForWindow(windowKey),
-      option.key,
-    );
+    const scenarioRef = await this.#findScenarioRefForWindow(windowKey);
+    if (!scenarioRef) return;
+    throw scenarioOwnerRequired(scenarioRef, option.key);
   }
 
   async #finishScenarioMetadataOwnerConflict(change, current) {
@@ -4022,7 +4012,7 @@ export class AutomationService {
       current,
     );
     if (sentWithoutOwnership) return sentWithoutOwnership;
-    if (change.applied_value_observed !== true) {
+    if (!nativeValueProvenApply(change)) {
       return this.#finishNative(change, "not_owned", current, {
         conflict_reason: "change_was_not_applied",
         last_verification: freshVerification("current_value_observed"),
@@ -4061,6 +4051,31 @@ export class AutomationService {
       return this.#reconcileValueAfterWrite(change, "restore");
     }
     return this.#reconcileValueAfterWrite(change, "restore", true);
+  }
+
+  async #observeProvenNativeValue(change, current) {
+    if (!valuesEqual(current, change.requested_value)) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "value_changed_after_apply",
+        manual_change_observed: true,
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
+      change,
+      current,
+    );
+    if (ownerConflict) return ownerConflict;
+    if (change.status === "applied") {
+      return this.#recordNativeObservation(
+        change,
+        current,
+        "requested_value_observed",
+      );
+    }
+    return this.#finishNative(change, "applied", current, {
+      last_verification: freshVerification("requested_value_observed"),
+    });
   }
 
   async #finishObservedValueOwnershipLoss(change, current) {
@@ -4330,10 +4345,15 @@ export class AutomationService {
             logic_assignments: undefined,
           });
     }
+    const ownedTargetAbsent =
+      change.kind === "block_create" &&
+      current.scenario === null &&
+      change.applied_snapshot !== undefined;
     return this.#finishNative(change, "conflict", undefined, {
       ...observation.fields,
       conflict_reason: "manual_change",
       logic_assignments: undefined,
+      ...(ownedTargetAbsent ? { owned_target_absent_observed: true } : {}),
     });
   }
 
@@ -5040,6 +5060,8 @@ export class AutomationService {
         change.home_ref !== homeRef ||
         change.kind !== "block_create" ||
         change.status === "restored" ||
+        // Observed deletion ends marker ownership; a later config conflict does not.
+        change.owned_target_absent_observed === true ||
         typeof change.marker !== "string" ||
         change.applied_snapshot === undefined ||
         change.scenario_index !== index ||
@@ -7837,6 +7859,11 @@ function isNativeValueChange(change) {
   ].includes(change?.kind);
 }
 
+function nativeValueProvenApply(change) {
+  // Proven apply follows observed write-back, not the current lifecycle status.
+  return change.applied_value_observed === true;
+}
+
 function isKnownCharacteristicSetting(type) {
   return STATEFUL_CHARACTERISTIC_SETTING_TYPES.has(type);
 }
@@ -7983,7 +8010,7 @@ function nativeValueIntentEvidence(change) {
   if (change.status === "not_applied") {
     return { outcome: "rejected", unresolved: false };
   }
-  if (intent.direction === "apply" && change.applied_value_observed === true) {
+  if (intent.direction === "apply" && nativeValueProvenApply(change)) {
     return { outcome: "requested_value_observed", unresolved: false };
   }
   if (intent.direction === "restore" && change.status === "restored") {
@@ -9275,7 +9302,7 @@ function publicNativeChange(
   const conflictResolution =
     optionChange &&
     change.status === "conflict" &&
-    change.applied_value_observed === true &&
+    nativeValueProvenApply(change) &&
     observedValue
       ? {
           requires_user_decision: true,
@@ -9364,8 +9391,8 @@ function publicNativeChange(
             ...(change.owner_kind === "scenario"
               ? [
                   "Name, Desc, and BLOCK data are separate native changes. Prepare each field on a fresh baseline after the previous apply. Restore of this metadata write is allowed only while the remaining significant configuration and owner window binding still match the saved snapshot.",
-                  "A later sibling Name, Desc, data, or flag write is owner_configuration_changed, not proof that this field was edited by hand. Restore remaining fields in reverse apply order.",
-                  "A proven create marker in Desc is kept by the adapter only while that create change is still applied; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
+                  "A later sibling Name, Desc, data, or flag write is owner_configuration_changed, not proof that this field was edited by hand. Restore remaining fields in reverse apply order. A proven apply of this field is not resent after that conflict; a later observed change of this field still blocks restore even if the value later matches again.",
+                  "A proven create marker in Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
                 ]
               : []),
           ]
