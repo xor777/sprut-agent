@@ -9048,6 +9048,18 @@ test("a changed BLOCK baseline is preserved before any update", async (t) => {
     JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
     55_000,
   );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "conflict");
+  assert.equal(restored.structuredContent.conflict_reason, "baseline_changed");
+  assert.equal(restored.structuredContent.restore_supported, false);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
 });
 
 test("history discovers changes by home and entity after restart", async (t) => {
@@ -12371,3 +12383,192 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
     false,
   );
 });
+
+test("LOGIC restore blocked by assignments does not ask to prepare a new LOGIC", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "LOGIC с чужим назначением",
+      description: "Проверить причину blocked restore",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Не предлагать новый LOGIC вместо снятия назначения",
+    },
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  const scenarioIndex = created.structuredContent.scenario_index;
+  const appliedSource = hub.state.scenarios.find(
+    ({ index }) => index === scenarioIndex,
+  ).data;
+  hub.state.logics.push({
+    aId: 32,
+    sId: 13,
+    type: created.structuredContent.native_logic_type,
+    name: "Чужое назначение",
+    active: true,
+  });
+
+  const blocked = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertAssignedLogicRestoreBlocked(blocked, {
+    tool: "restore_native_change",
+    type: created.structuredContent.native_logic_type,
+    scenarioIndex,
+    hub,
+  });
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenarioIndex),
+    true,
+  );
+
+  const createdScenario = hub.state.scenarios.find(
+    ({ index }) => index === scenarioIndex,
+  );
+  createdScenario.data = `${appliedSource}\n// manual edit`;
+  const mismatchedRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertCurrentLogicSourceMismatch(mismatchedRestore, {
+    tool: "restore_native_change",
+    targetRef: serviceRef,
+    scenarioIndex,
+    hub,
+  });
+  const mismatchedGet = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertCurrentLogicSourceMismatch(mismatchedGet, {
+    tool: "get_native_change",
+    targetRef: serviceRef,
+    scenarioIndex,
+    hub,
+  });
+
+  hub.state.logics.length = 0;
+  const afterRemovalRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertCurrentLogicSourceMismatch(afterRemovalRestore, {
+    tool: "restore_native_change after assignment removal",
+    targetRef: serviceRef,
+    scenarioIndex,
+    hub,
+  });
+  const afterRemovalGet = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertCurrentLogicSourceMismatch(afterRemovalGet, {
+    tool: "get_native_change after assignment removal",
+    targetRef: serviceRef,
+    scenarioIndex,
+    hub,
+  });
+
+  createdScenario.data = appliedSource;
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenarioIndex),
+    false,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === scenarioIndex,
+    ),
+    true,
+  );
+});
+
+function assertDoesNotAskToPrepareNewLogic(result, tool) {
+  assert.equal(
+    result.structuredContent.next,
+    undefined,
+    `${tool} must not treat assignment conflict as a new LOGIC prepare`,
+  );
+  assert.doesNotMatch(
+    result.structuredContent.limitations.join("\n"),
+    /already applied[\s\S]*Prepare a new authorized change/i,
+    tool,
+  );
+}
+
+function assertAssignedLogicRestoreBlocked(
+  result,
+  { tool, type, scenarioIndex, hub },
+) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.status, "conflict", tool);
+  assert.equal(
+    result.structuredContent.conflict_reason,
+    "logic_assignments_present",
+    tool,
+  );
+  assert.equal(result.structuredContent.restore_supported, true, tool);
+  assert.deepEqual(result.structuredContent.logic_assignments, [
+    {
+      ref: `${homeRef}/accessory/32/service/13/logic/${encodeURIComponent(type)}`,
+      active: true,
+    },
+  ]);
+  assertDoesNotAskToPrepareNewLogic(result, tool);
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === scenarioIndex,
+    ),
+    false,
+    `${tool} must not delete a LOGIC that still has assignments`,
+  );
+}
+
+function assertCurrentLogicSourceMismatch(
+  result,
+  { tool, targetRef, scenarioIndex, hub },
+) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.status, "conflict", tool);
+  assert.equal(result.structuredContent.conflict_reason, "manual_change", tool);
+  assert.equal(result.structuredContent.configuration_matches, false, tool);
+  assert.equal("logic_assignments" in result.structuredContent, false, tool);
+  assert.deepEqual(
+    result.structuredContent.next,
+    {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "logic_source_create",
+        target_ref: targetRef,
+      },
+    },
+    tool,
+  );
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenarioIndex),
+    true,
+    tool,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) => scenario?.delete?.index === scenarioIndex,
+    ),
+    false,
+    `${tool} must not delete after a source mismatch`,
+  );
+}
