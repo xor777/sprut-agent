@@ -9492,8 +9492,465 @@ test("BLOCK metadata restore refuses after a later significant data change", asy
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(refused.structuredContent.status, "conflict");
+  assert.equal(
+    refused.structuredContent.conflict_reason,
+    "owner_configuration_changed",
+  );
+  assert.equal(refused.structuredContent.manual_change_observed, undefined);
   assert.equal(hub.state.scenarios[0].name, "После паузы");
   assert.equal(windowUpdates(hub).length, writesAfterApply);
+});
+
+test("BLOCK metadata restore of an earlier field is not a sticky manual change", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const originalData = hub.state.scenarios[0].data;
+  const renamed = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Name",
+      value: "Свет кабинета по движению",
+      reason: "Переименовать до описания",
+    },
+  });
+  const appliedName = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(appliedName.structuredContent.status, "applied");
+  const described = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Desc",
+      value: "Новое назначение",
+      reason: "Описать после переименования",
+    },
+  });
+  const appliedDesc = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: described.structuredContent.change_ref },
+  });
+  assert.equal(appliedDesc.structuredContent.status, "applied");
+  const writesAfterApply = windowUpdates(hub).length;
+
+  const earlyNameRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(earlyNameRestore.structuredContent.status, "conflict");
+  assert.equal(
+    earlyNameRestore.structuredContent.conflict_reason,
+    "owner_configuration_changed",
+  );
+  assert.equal(
+    earlyNameRestore.structuredContent.manual_change_observed,
+    undefined,
+  );
+  assert.equal(windowUpdates(hub).length, writesAfterApply);
+  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
+  assert.equal(hub.state.scenarios[0].desc, "Новое назначение");
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const observed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "conflict");
+  assert.equal(
+    observed.structuredContent.conflict_reason,
+    "owner_configuration_changed",
+  );
+  assert.equal(observed.structuredContent.manual_change_observed, undefined);
+
+  const restoredDesc = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: described.structuredContent.change_ref },
+  });
+  assert.equal(restoredDesc.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
+  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
+  const restoredName = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(restoredName.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
+  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
+  assert.equal(hub.state.scenarios[0].data, originalData);
+  assert.equal(windowUpdates(hub).length, writesAfterApply + 2);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
+
+  const repeated = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "restored");
+  assert.equal(windowUpdates(hub).length, writesAfterApply + 2);
+});
+
+test("an observed BLOCK name change stays unrestorable after the value matches again", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Name",
+      value: "Свет по датчику",
+      reason: "Переименовать до ручной правки имени",
+    },
+  });
+  const applied = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const writesAfterApply = windowUpdates(hub).length;
+  setScenarioMetadata(hub, { name: "Имя владельца" });
+
+  const observed = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "conflict");
+  assert.equal(
+    observed.structuredContent.conflict_reason,
+    "value_changed_after_apply",
+  );
+  assert.equal(observed.structuredContent.manual_change_observed, true);
+
+  setScenarioMetadata(hub, { name: "Свет по датчику" });
+  const refused = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refused.structuredContent.status, "conflict");
+  assert.equal(refused.structuredContent.conflict_reason, "manual_change");
+  assert.equal(refused.structuredContent.manual_change_observed, true);
+  assert.equal(windowUpdates(hub).length, writesAfterApply);
+  assert.equal(hub.state.scenarios[0].name, "Свет по датчику");
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(afterRestart.structuredContent.status, "conflict");
+  assert.equal(afterRestart.structuredContent.manual_change_observed, true);
+  const refusedAfterRestart = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refusedAfterRestart.structuredContent.status, "conflict");
+  assert.equal(
+    refusedAfterRestart.structuredContent.manual_change_observed,
+    true,
+  );
+  assert.equal(windowUpdates(hub).length, writesAfterApply);
+});
+
+test("a restored BLOCK create marker does not claim a later scenario at the same index", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило со служебным маркером",
+    },
+  });
+  const appliedCreate = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const owned = hub.state.scenarios.find(
+    ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+  );
+  const marker = owned.desc.match(/\[sprut-agent:native:[a-f0-9]{24}\]/)?.[0];
+  assert.equal(typeof marker, "string");
+  const restoredCreate = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(restoredCreate.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+    ),
+    false,
+  );
+
+  const resurrectedWindowKey = "opaque-copied-marker-window";
+  hub.state.scenarios.push({
+    index: appliedCreate.structuredContent.scenario_index,
+    name: "Чужой сценарий",
+    desc: `Скопированный текст\n\n${marker}`,
+    active: false,
+    onStart: false,
+    sync: false,
+    type: "BLOCK",
+    optionsWindow: resurrectedWindowKey,
+    data: JSON.stringify(createData),
+    predefined: false,
+  });
+  hub.state.windows[resurrectedWindowKey] = scenarioOptionsWindow({
+    name: "Чужой сценарий",
+    desc: `Скопированный текст\n\n${marker}`,
+    windowKey: resurrectedWindowKey,
+  });
+  const resurrectedRef = appliedCreate.structuredContent.scenario_ref;
+  const cleared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: resurrectedRef,
+      option_key: "Desc",
+      value: "",
+      reason: "Очистить описание чужого сценария с скопированным token",
+    },
+  });
+  assert.equal(cleared.isError, undefined, cleared.content[0]?.text);
+  const appliedClear = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: cleared.structuredContent.change_ref },
+  });
+  assert.equal(appliedClear.structuredContent.status, "applied");
+  const resurrected = hub.state.scenarios.find(
+    ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+  );
+  assert.equal(resurrected.desc, "");
+  assert.equal(resurrected.desc.includes(marker.slice(1, -1)), false);
+  assert.deepEqual(windowUpdates(hub).at(-1).window.update.options, [
+    { key: "Desc", value: { stringValue: "" } },
+  ]);
+});
+
+test("get_entity does not offer BLOCK Name and Desc writes on a LOGIC scenario", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const logicWindowKey = "opaque-logic-window";
+  hub.state.scenarios.push({
+    index: "existing-logic",
+    name: "LOGIC сценарий",
+    desc: "Не BLOCK",
+    active: false,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    optionsWindow: logicWindowKey,
+    data: firstLogicSource,
+    predefined: false,
+  });
+  hub.state.windows[logicWindowKey] = scenarioOptionsWindow({
+    name: "LOGIC сценарий",
+    desc: "Не BLOCK",
+    windowKey: logicWindowKey,
+  });
+  const client = await startClient(t, hub, stateDirectory);
+  const logicRef = `${homeRef}/scenario/existing-logic`;
+  const logicEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: logicRef },
+  });
+  assert.equal(logicEntity.isError, undefined, logicEntity.content[0]?.text);
+  assert.equal(logicEntity.structuredContent.entity.type, "LOGIC");
+  assert.equal(
+    logicEntity.structuredContent.entity.options_window_ref,
+    undefined,
+  );
+  assert.equal(
+    logicEntity.structuredContent.entity.metadata_options?.some(
+      (option) => option.native_change?.supported === true,
+    ) ?? false,
+    false,
+  );
+  const rejected = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: logicRef,
+      option_key: "Name",
+      value: "Не расширять LOGIC",
+      reason: "LOGIC metadata не входит в этот срез",
+    },
+  });
+  assert.equal(rejected.isError, true);
+  assert.equal(
+    rejected.structuredContent.error.code,
+    "unsupported_scenario_type",
+  );
+  assert.equal(windowUpdates(hub).length, 0);
+
+  const blockEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef },
+  });
+  assert.equal(
+    blockEntity.structuredContent.entity.options_window_ref,
+    scenarioWindowRef,
+  );
+  const nameOption = blockEntity.structuredContent.entity.metadata_options.find(
+    ({ key }) => key === "Name",
+  );
+  assert.equal(nameOption.native_change.supported, true);
+  assert.deepEqual(nameOption.native_change.next, {
+    tool: "get_native_change_contract",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Name",
+    },
+  });
+});
+
+test("a device NUMBER option named Name remains a writable window_option", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.window.options.push(
+    {
+      key: "Name",
+      name: "Канал",
+      type: "GenericInteger",
+      inputType: "NUMBER",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { intValue: 3 },
+      minValue: 0,
+      maxValue: 10,
+      minStep: 1,
+    },
+    {
+      key: "Desc",
+      name: "Подсветка",
+      type: "GenericBoolean",
+      inputType: "CHECKBOX",
+      read: true,
+      write: true,
+      disabled: false,
+      value: { boolValue: false },
+    },
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const nameContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: "Name",
+    },
+  });
+  assert.equal(nameContract.isError, undefined, nameContract.content[0]?.text);
+  assert.equal(nameContract.structuredContent.contract.input_type, "NUMBER");
+  const renamed = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: "Name",
+      value: 7,
+      reason: "Записать NUMBER, ключ которого совпал с именем сценария",
+    },
+  });
+  assert.equal(renamed.isError, undefined, renamed.content[0]?.text);
+  const appliedName = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(appliedName.structuredContent.status, "applied");
+  assert.equal(
+    hub.state.window.options.find(({ key }) => key === "Name").value.intValue,
+    7,
+  );
+
+  const descContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: "Desc",
+    },
+  });
+  assert.equal(descContract.isError, undefined, descContract.content[0]?.text);
+  assert.equal(descContract.structuredContent.contract.input_type, "CHECKBOX");
+  const described = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: "Desc",
+      value: true,
+      reason: "Записать CHECKBOX, ключ которого совпал с описанием сценария",
+    },
+  });
+  const appliedDesc = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: described.structuredContent.change_ref },
+  });
+  assert.equal(appliedDesc.structuredContent.status, "applied");
+  assert.equal(
+    hub.state.window.options.find(({ key }) => key === "Desc").value.boolValue,
+    true,
+  );
+  const restoredDesc = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: described.structuredContent.change_ref },
+  });
+  assert.equal(restoredDesc.structuredContent.status, "restored");
+  const restoredName = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: renamed.structuredContent.change_ref },
+  });
+  assert.equal(restoredName.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.window.options.find(({ key }) => key === "Name").value.intValue,
+    3,
+  );
+  assert.equal(
+    hub.state.window.options.find(({ key }) => key === "Desc").value.boolValue,
+    false,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ scenario }) =>
+        scenario?.update || scenario?.create || scenario?.delete,
+    ),
+    false,
+  );
+
+  const textBypass = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioWindowRef,
+      option_key: "Name",
+      value: "Обход через окно",
+      reason: "TEXT Name по-прежнему только через владельца",
+    },
+  });
+  assert.equal(textBypass.isError, true);
+  assert.equal(
+    textBypass.structuredContent.error.code,
+    "scenario_owner_required",
+  );
 });
 
 test("restore preserves unknown vendor blockId and state fields", async (t) => {
