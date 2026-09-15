@@ -4112,6 +4112,21 @@ export class AutomationService {
     );
   }
 
+  async #observeProvenScenarioChange(change, current) {
+    const observation = scenarioChangeObservation(change, current, "applied");
+    if (observation.matches) {
+      return change.status === "applied"
+        ? this.#recordScenarioObservation(change, observation)
+        : this.#finishNative(change, "applied", undefined, observation.fields);
+    }
+    return change.status === "conflict"
+      ? this.#recordScenarioObservation(change, observation)
+      : this.#finishNative(change, "conflict", undefined, {
+          conflict_reason: "manual_change",
+          ...observation.fields,
+        });
+  }
+
   async #applyScenarioChange(change) {
     if (["restored", "superseded", "completed"].includes(change.status))
       return publicStoredNativeChange(change);
@@ -4135,14 +4150,9 @@ export class AutomationService {
         ...scenarioUnprovenApplyFields(change, current),
       });
     }
-    if (change.status === "applied") {
-      const observation = scenarioChangeObservation(change, current, "applied");
-      return observation.matches
-        ? this.#recordScenarioObservation(change, observation)
-        : this.#finishNative(change, "conflict", undefined, {
-            conflict_reason: "manual_change",
-            ...observation.fields,
-          });
+    // Proven apply of this change is not resent; observed conflict is not a new write grant.
+    if (change.status === "applied" || change.applied_snapshot !== undefined) {
+      return this.#observeProvenScenarioChange(change, current);
     }
     const baseline = scenarioChangeObservation(change, current, "baseline");
     if (!baseline.matches) {
@@ -4312,27 +4322,13 @@ export class AutomationService {
     ) {
       updateLogicTypeMapping(change, current.logicTypes);
     }
-    const applied = scenarioChangeObservation(change, current, "applied");
-    if (applied.matches) {
-      return change.status === "applied"
-        ? this.#recordScenarioObservation(change, applied)
-        : this.#finishNative(change, "applied", undefined, {
-            ...applied.fields,
-          });
+    if (change.applied_snapshot !== undefined) {
+      return this.#observeProvenScenarioChange(change, current);
     }
     const requested = scenarioChangeObservation(change, current, "requested");
     if (this.#adoptRequestedLogicSource(change, current, requested)) {
       return this.#finishNative(change, "applied", undefined, {
         ...requested.fields,
-      });
-    }
-    if (change.applied_snapshot !== undefined) {
-      if (change.status === "conflict") {
-        return this.#recordScenarioObservation(change, applied);
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
-        ...applied.fields,
       });
     }
     if (change.status === "conflict") {
@@ -4626,7 +4622,7 @@ export class AutomationService {
     const applied = scenarioChangeObservation(change, current, "applied");
     if (scenarioLacksProvenApply(change) || !applied.matches) {
       return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: "manual_change",
+        conflict_reason: change.conflict_reason ?? "manual_change",
         ...(scenarioLacksProvenApply(change)
           ? scenarioUnprovenApplyFields(change, current)
           : applied.fields),
@@ -8223,7 +8219,11 @@ function unprovenApplyNext(change) {
 }
 
 function unprovenApplyLimitation() {
-  return "This change has no proven applied snapshot, so restore is not allowed. Prepare a new authorized change from the current hub configuration.";
+  return "This change has no proven applied snapshot, so apply will not be sent again and restore is not allowed. Prepare a new authorized change from the current hub configuration.";
+}
+
+function scenarioRepeatApplyLimitation() {
+  return "This change was already applied, so apply will not be sent again. Prepare a new authorized change from the current hub configuration.";
 }
 
 function snapshotsEqual(left, right) {
@@ -8616,7 +8616,7 @@ function publicNativeChange(
         !scenarioLacksProvenApply(change) &&
         (change.kind !== "logic_source_create" ||
           typeof change.native_logic_type === "string"),
-      ...(scenarioLacksProvenApply(change)
+      ...(change.status === "conflict"
         ? { next: unprovenApplyNext(change) }
         : {}),
       limitations: [
@@ -8628,7 +8628,10 @@ function publicNativeChange(
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
-          : []),
+          : change.status === "conflict" &&
+              change.applied_snapshot !== undefined
+            ? [scenarioRepeatApplyLimitation()]
+            : []),
       ],
     };
   }
@@ -8803,7 +8806,7 @@ function publicNativeChange(
         ? { conflict_reason: change.conflict_reason }
         : {}),
       restore_supported: !scenarioLacksProvenApply(change),
-      ...(scenarioLacksProvenApply(change)
+      ...(change.status === "conflict"
         ? { next: unprovenApplyNext(change) }
         : {}),
       limitations: [
@@ -8818,6 +8821,10 @@ function publicNativeChange(
         scenarioLacksProvenApply(change)
           ? unprovenApplyLimitation()
           : "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
+        ...(change.status === "conflict" &&
+        change.applied_snapshot !== undefined
+          ? [scenarioRepeatApplyLimitation()]
+          : []),
       ],
     };
   }

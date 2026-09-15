@@ -8221,6 +8221,67 @@ async function inspectUnprovenBlockConflict(
   }
 }
 
+function assertUnprovenLogicConflict(
+  result,
+  { tool, hub, writesBefore, targetRef },
+) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.status, "conflict", tool);
+  assert.equal(result.structuredContent.conflict_reason, "manual_change", tool);
+  assert.equal(result.structuredContent.configuration_matches, false, tool);
+  assert.equal(result.structuredContent.restore_supported, false, tool);
+  assert.equal(
+    result.structuredContent.verification.result,
+    "requested_logic_source",
+    tool,
+  );
+  assert.equal(result.structuredContent.diff.source.exact_match, true, tool);
+  assert.deepEqual(
+    result.structuredContent.next,
+    {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "logic_source_update",
+        target_ref: targetRef,
+      },
+    },
+    tool,
+  );
+  assert.match(
+    result.structuredContent.limitations.join("\n"),
+    /no proven applied snapshot/i,
+    tool,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create || scenario?.update)
+      .length,
+    writesBefore,
+    `${tool} must not send a LOGIC write without proven ownership`,
+  );
+}
+
+async function inspectUnprovenLogicConflict(
+  client,
+  changeRef,
+  hub,
+  writesBefore,
+  targetRef,
+) {
+  let last;
+  for (const tool of [
+    "get_native_change",
+    "restore_native_change",
+    "apply_native_change",
+  ]) {
+    last = await client.callTool({
+      name: tool,
+      arguments: { change_ref: changeRef },
+    });
+    assertUnprovenLogicConflict(last, { tool, hub, writesBefore, targetRef });
+  }
+  return last;
+}
+
 test("BLOCK conflict without an applied snapshot does not treat a requested match as applied", async (t) => {
   await t.test(
     "a foreign edit during write then matching revert keeps conflict without a write",
@@ -8480,6 +8541,143 @@ test("BLOCK apply does not overwrite a manual revert after a proven apply", asyn
   assert.equal(
     JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
     45_000,
+  );
+});
+
+test("LOGIC conflict without an applied snapshot does not treat a requested match as applied", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const created = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "LOGIC без ложного apply",
+      description: "Проверить conflict без applied snapshot",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC для проверки conflict",
+    },
+  });
+  const appliedCreate = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(
+    appliedCreate.isError,
+    undefined,
+    appliedCreate.content[0]?.text,
+  );
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const scenarioTarget = appliedCreate.structuredContent.scenario_ref;
+  const writesAfterCreate = hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update,
+  ).length;
+
+  const update = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: scenarioTarget,
+      source: secondLogicSource,
+      reason: "Проверить conflict LOGIC без applied snapshot",
+    },
+  });
+  let requestedRuntime;
+  hub.state.behavior.afterUpdate = () => {
+    const scenario = hub.state.scenarios.find(
+      ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+    );
+    requestedRuntime = scenario.data;
+    scenario.data = `${requestedRuntime}\n// foreign edit`;
+  };
+  const appliedUpdate = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(appliedUpdate.structuredContent.status, "conflict");
+  assert.equal(
+    appliedUpdate.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  const writesAfterConflict = hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update,
+  ).length;
+  assert.equal(writesAfterConflict, writesAfterCreate + 1);
+  const journalAfterConflict = JSON.parse(
+    await readFile(nativeChangeJournalFile(stateDirectory, hub.url), "utf8"),
+  );
+  const updateId = update.structuredContent.change_ref.slice(
+    "spruthub-change://native/".length,
+  );
+  assert.equal(
+    "applied_snapshot" in journalAfterConflict.changes[updateId],
+    false,
+  );
+
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === appliedCreate.structuredContent.scenario_index,
+  );
+  scenario.data = requestedRuntime;
+  await inspectUnprovenLogicConflict(
+    firstClient,
+    update.structuredContent.change_ref,
+    hub,
+    writesAfterConflict,
+    scenarioTarget,
+  );
+
+  await firstClient.close();
+  const restarted = await startClient(t, hub, stateDirectory);
+  const refusedAfterRestart = await inspectUnprovenLogicConflict(
+    restarted,
+    update.structuredContent.change_ref,
+    hub,
+    writesAfterConflict,
+    scenarioTarget,
+  );
+
+  const contract = await restarted.callTool({
+    name: refusedAfterRestart.structuredContent.next.tool,
+    arguments: refusedAfterRestart.structuredContent.next.arguments,
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
+
+  const nextSource = secondLogicSource.replace("setValue(25)", "setValue(35)");
+  const retried = await restarted.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_update",
+      target_ref: scenarioTarget,
+      source: nextSource,
+      reason: "Новое разрешённое изменение после conflict без applied",
+    },
+  });
+  assert.equal(retried.structuredContent.status, "prepared");
+  const retriedApply = await restarted.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: retried.structuredContent.change_ref },
+  });
+  assert.equal(retriedApply.isError, undefined, retriedApply.content[0]?.text);
+  assert.equal(retriedApply.structuredContent.status, "applied");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create || scenario?.update)
+      .length,
+    writesAfterConflict + 1,
+  );
+
+  const oldChange = await restarted.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: update.structuredContent.change_ref },
+  });
+  assert.equal(oldChange.structuredContent.status, "conflict");
+  assert.equal(oldChange.structuredContent.restore_supported, false);
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create || scenario?.update)
+      .length,
+    writesAfterConflict + 1,
   );
 });
 
