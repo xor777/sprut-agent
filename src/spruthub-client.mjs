@@ -1209,9 +1209,13 @@ export class SprutHubClient {
     return container.get;
   }
 
-  async updateScenarioData(index, data) {
+  async updateScenario(index, fields) {
+    const update = { index };
+    if (Object.hasOwn(fields, "name")) update.name = fields.name;
+    if (Object.hasOwn(fields, "desc")) update.desc = fields.desc;
+    if (Object.hasOwn(fields, "data")) update.data = fields.data;
     const response = await this.#request(
-      { scenario: { update: { index, data } } },
+      { scenario: { update } },
       Date.now() + this.timeoutMs,
     );
     const container = response.result?.scenario;
@@ -1223,6 +1227,10 @@ export class SprutHubClient {
         { requestSent: true },
       );
     }
+  }
+
+  async updateScenarioData(index, data) {
+    await this.updateScenario(index, { data });
   }
 
   async runScenario(index) {
@@ -2124,6 +2132,11 @@ export class SprutHubClient {
     );
     const scenario = extractEntity(response, ["scenario", "get"], "scenario");
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
+    entity.description =
+      typeof scenario.desc === "string" ? scenario.desc : null;
+    // Runtime execution error is not editable configuration and must not be
+    // folded into configuration.value or treated as a failed save.
+    entity.execution_error = scenario.error === true;
     if (requested.has("configuration")) {
       entity.configuration = normalizeScenarioConfiguration(scenario);
     }

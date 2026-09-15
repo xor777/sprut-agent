@@ -882,10 +882,13 @@ export class AutomationService {
   }
 
   async #prepareBlockUpdate(input) {
-    if (!isRecord(input.data)) {
+    const writesName = typeof input.name === "string";
+    const writesDescription = typeof input.description === "string";
+    const writesData = isRecord(input.data);
+    if (!writesName && !writesDescription && !writesData) {
       throw new SprutHubError(
         "invalid_native_change",
-        "BLOCK data update requires one complete data object.",
+        "BLOCK update requires name, description, and/or data. Omit a field to keep it; an empty description clears user text.",
         "get_native_change_contract",
       );
     }
@@ -894,20 +897,42 @@ export class AutomationService {
     if (!scenario) throw scenarioNotFound();
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
-    const pauseChanges = await this.#knownBlockPauses(input.target_ref);
-    const prepared = prepareBlockUpdateSource(
-      baseline.data,
-      input.data,
-      pauseChanges,
-      Date.now(),
-    );
-    const data = prepared.data;
-    const validation = await validateBlockData(data, this.client, {
-      allowUnknownFrom: baseline.data,
-      allowedPauses: pauseChanges,
-      allowActionOnly: true,
-    });
-    requireActionOnlyRuntime(baseline, validation);
+    const updateFields = [
+      ...(writesName ? ["name"] : []),
+      ...(writesDescription ? ["desc"] : []),
+      ...(writesData ? ["data"] : []),
+    ];
+    let data = structuredClone(baseline.data);
+    let pauseOutcomes = [];
+    let validation;
+    if (writesData) {
+      const pauseChanges = await this.#knownBlockPauses(input.target_ref);
+      const prepared = prepareBlockUpdateSource(
+        baseline.data,
+        input.data,
+        pauseChanges,
+        Date.now(),
+      );
+      data = prepared.data;
+      pauseOutcomes = prepared.pauseOutcomes;
+      validation = await validateBlockData(data, this.client, {
+        allowUnknownFrom: baseline.data,
+        allowedPauses: pauseChanges,
+        allowActionOnly: true,
+      });
+      requireActionOnlyRuntime(baseline, validation);
+    }
+    const provenMarker = writesDescription
+      ? await this.#provenBlockOwnershipMarker(input.target_ref, baseline.desc)
+      : null;
+    const requested = {
+      ...structuredClone(baseline),
+      ...(writesName ? { name: input.name } : {}),
+      ...(writesDescription
+        ? { desc: nativeScenarioDescription(input.description, provenMarker) }
+        : {}),
+      data,
+    };
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -918,16 +943,19 @@ export class AutomationService {
       target_ref: input.target_ref,
       target,
       reason: input.reason,
+      update_fields: updateFields,
       baseline_snapshot: baseline,
-      requested_snapshot: { ...structuredClone(baseline), data },
-      block_action_preview: blockActionPreview(
-        validation,
-        configuredHomeRef(this.hubSerial),
-        now,
-      ),
-      ...(prepared.pauseOutcomes.length > 0
-        ? { pause_outcomes: prepared.pauseOutcomes }
+      requested_snapshot: requested,
+      ...(validation
+        ? {
+            block_action_preview: blockActionPreview(
+              validation,
+              configuredHomeRef(this.hubSerial),
+              now,
+            ),
+          }
         : {}),
+      ...(pauseOutcomes.length > 0 ? { pause_outcomes: pauseOutcomes } : {}),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -4177,7 +4205,7 @@ export class AutomationService {
       change.requested_snapshot = buildPauseRequestedSnapshot(change);
     }
 
-    if (isBlockChange(change)) {
+    if (isBlockChange(change) && blockUpdateWritesData(change)) {
       const pauseChanges = await this.#knownBlockPauses(change.target_ref);
       await validateBlockData(change.requested_snapshot.data, this.client, {
         allowUnknownFrom:
@@ -4200,9 +4228,12 @@ export class AutomationService {
             : logicSourceCreateRequest(change),
         );
         change.scenario_index = created.index;
-      } else if (
-        ["block_data_update", "block_action_pause"].includes(change.kind)
-      ) {
+      } else if (change.kind === "block_data_update") {
+        await this.client.updateScenario(
+          change.target.index,
+          scenarioUpdateFields(change, change.requested_snapshot),
+        );
+      } else if (change.kind === "block_action_pause") {
         await this.client.updateScenarioData(
           change.target.index,
           JSON.stringify(change.requested_snapshot.data),
@@ -4638,36 +4669,40 @@ export class AutomationService {
       });
     }
     if (change.kind === "block_data_update") {
-      const pauseChanges = await this.#knownBlockPauses(change.target_ref);
-      let prepared = prepareBlockWriteSource(
-        change.baseline_snapshot.data,
-        pauseChanges,
-        Date.now(),
-      );
-      await validateBlockData(prepared.data, this.client, {
-        allowUnknownFrom: scenarioSnapshot(current.scenario).data,
-        allowedPauses: pauseChanges,
-        allowActionOnly: true,
-      });
-      // Validation reads current bindings and can outlast a short pause. Rebuild
-      // from the immutable baseline immediately afterwards so that such a pause
-      // is not revived by the restore write.
-      prepared = prepareBlockWriteSource(
-        change.baseline_snapshot.data,
-        pauseChanges,
-        Date.now(),
-      );
-      change.restore_snapshot = {
-        ...structuredClone(change.baseline_snapshot),
-        data: prepared.data,
-      };
-      change.pause_outcomes = mergePauseOutcomes(
-        nativePauseOutcomes(change),
-        prepared.pauseOutcomes.map((outcome) => ({
-          ...outcome,
-          direction: "restore",
-        })),
-      );
+      if (blockUpdateWritesData(change)) {
+        const pauseChanges = await this.#knownBlockPauses(change.target_ref);
+        let prepared = prepareBlockWriteSource(
+          change.baseline_snapshot.data,
+          pauseChanges,
+          Date.now(),
+        );
+        await validateBlockData(prepared.data, this.client, {
+          allowUnknownFrom: scenarioSnapshot(current.scenario).data,
+          allowedPauses: pauseChanges,
+          allowActionOnly: true,
+        });
+        // Validation reads current bindings and can outlast a short pause. Rebuild
+        // from the immutable baseline immediately afterwards so that such a pause
+        // is not revived by the restore write.
+        prepared = prepareBlockWriteSource(
+          change.baseline_snapshot.data,
+          pauseChanges,
+          Date.now(),
+        );
+        change.restore_snapshot = {
+          ...structuredClone(change.baseline_snapshot),
+          data: prepared.data,
+        };
+        change.pause_outcomes = mergePauseOutcomes(
+          nativePauseOutcomes(change),
+          prepared.pauseOutcomes.map((outcome) => ({
+            ...outcome,
+            direction: "restore",
+          })),
+        );
+      } else {
+        change.restore_snapshot = structuredClone(change.baseline_snapshot);
+      }
     }
     if (change.kind === "logic_source_create") {
       if (typeof change.native_logic_type !== "string") {
@@ -4695,9 +4730,12 @@ export class AutomationService {
       if (["block_create", "logic_source_create"].includes(change.kind)) {
         await this.client.deleteScenario(change.scenario_index);
       } else if (change.kind === "block_data_update") {
-        await this.client.updateScenarioData(
+        await this.client.updateScenario(
           change.target.index,
-          JSON.stringify(change.restore_snapshot.data),
+          scenarioUpdateFields(
+            change,
+            change.restore_snapshot ?? change.baseline_snapshot,
+          ),
         );
       } else {
         await this.client.updateScenarioData(
@@ -4811,6 +4849,26 @@ export class AutomationService {
       );
     }
     return matches[0] ?? null;
+  }
+
+  async #provenBlockOwnershipMarker(targetRef, desc) {
+    if (typeof desc !== "string") return null;
+    const index = parseScenarioRef(targetRef, this.hubSerial).index;
+    const homeRef = configuredHomeRef(this.hubSerial);
+    for (const change of await this.store.list()) {
+      if (
+        change.home_ref !== homeRef ||
+        change.kind !== "block_create" ||
+        typeof change.marker !== "string" ||
+        change.applied_snapshot === undefined ||
+        change.scenario_index !== index ||
+        !desc.includes(`[${change.marker}]`)
+      ) {
+        continue;
+      }
+      return change.marker;
+    }
+    return null;
   }
 
   async previewBooleanAutomation(input) {
@@ -5581,6 +5639,7 @@ function blockContract() {
       scenario_proto_sha256:
         "2319535876324b44c2048267d8b4297ec48d0881b964d5acc5ed1cbddfaa3657",
     },
+    update: "scenario.update({index,name?,desc?,data?})",
     supported: {
       root: { required: ["targets"] },
       target_types: ["if", "service", "delay"],
@@ -5655,7 +5714,8 @@ function blockContract() {
       "Daily interval HH:mm values use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
-      "Only full data replacement is supported for an existing BLOCK; top-level rename and flag updates are not supported.",
+      "Name and description can be changed with data or alone. Omitting a field keeps it; an empty description clears user text. Metadata-only does not validate, rebuild, or send data.",
+      "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
     ],
   };
@@ -8114,13 +8174,73 @@ function stableJson(value) {
 function blockCreateRequest(change) {
   return {
     name: change.requested_snapshot.name,
-    desc: `${change.requested_snapshot.desc}\n\n[${change.marker}]`,
+    desc: nativeScenarioDescription(
+      change.requested_snapshot.desc,
+      change.marker,
+    ),
     active: change.requested_snapshot.active,
     onStart: change.requested_snapshot.onStart,
     sync: change.requested_snapshot.sync,
     type: "BLOCK",
     data: JSON.stringify(change.requested_snapshot.data),
   };
+}
+
+function nativeScenarioDescription(userDescription, provenMarker) {
+  if (typeof provenMarker !== "string") return userDescription;
+  const token = `[${provenMarker}]`;
+  const userText = userDescription.split(token).join("").replace(/\n+$/u, "");
+  return `${userText}\n\n${token}`;
+}
+
+function blockUpdateFields(change) {
+  return change.update_fields ?? ["data"];
+}
+
+function blockUpdateWritesData(change) {
+  if (change.kind === "block_data_update") {
+    return blockUpdateFields(change).includes("data");
+  }
+  return isBlockChange(change);
+}
+
+function scenarioUpdateFields(change, snapshot) {
+  const fields = {};
+  for (const field of blockUpdateFields(change)) {
+    if (field === "data") fields.data = JSON.stringify(snapshot.data);
+    else fields[field] = snapshot[field];
+  }
+  return fields;
+}
+
+function blockDataUpdateDiff(change) {
+  const diff = {};
+  const written = blockUpdateFields(change);
+  if (written.includes("name")) {
+    diff.name = {
+      changed: change.baseline_snapshot.name !== change.requested_snapshot.name,
+      from: change.baseline_snapshot.name,
+      to: change.requested_snapshot.name,
+    };
+  }
+  if (written.includes("desc")) {
+    diff.description = {
+      changed: change.baseline_snapshot.desc !== change.requested_snapshot.desc,
+      from: change.baseline_snapshot.desc,
+      to: change.requested_snapshot.desc,
+    };
+  }
+  if (written.includes("data")) {
+    diff.data = {
+      changed: !isDeepStrictEqual(
+        configurationData(change.baseline_snapshot.data),
+        configurationData(change.requested_snapshot.data),
+      ),
+      from: structuredClone(change.baseline_snapshot.data),
+      to: structuredClone(change.requested_snapshot.data),
+    };
+  }
+  return diff;
 }
 
 function blockCreateSnapshot(change) {
@@ -8779,16 +8899,7 @@ function publicNativeChange(
               to: blockCreateSnapshot(change),
             },
           }
-        : {
-            data: {
-              changed: !isDeepStrictEqual(
-                configurationData(change.baseline_snapshot.data),
-                configurationData(change.requested_snapshot.data),
-              ),
-              from: structuredClone(change.baseline_snapshot.data),
-              to: structuredClone(change.requested_snapshot.data),
-            },
-          };
+        : blockDataUpdateDiff(change);
     return {
       status: change.status,
       change_ref: `spruthub-change://native/${change.id}`,

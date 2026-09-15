@@ -1611,7 +1611,10 @@ async function startHub(port = 0) {
               ),
             ),
           );
-          if (scenario.type === "BLOCK") {
+          if (
+            scenario.type === "BLOCK" &&
+            typeof params.scenario.update.data === "string"
+          ) {
             const requestedData = JSON.parse(params.scenario.update.data);
             scenario.data = JSON.stringify(
               withRuntimeBlockFields(requestedData),
