@@ -33,7 +33,10 @@
   и применённый снимок до restore остаются строгими guards ручной правки. После
   обратной записи readback подтверждает точный исходный source и снова сохраняет
   наблюдённые metadata. Predefined source доступен для чтения и клонирования, но
-  не изменяется. Restore update не затирает ручную правку. Restore create перед delete сканирует текущие
+  не изменяется. Restore update не затирает ручную правку. Conflict без
+  applied snapshot не становится applied по совпадению с requested, а
+  повторный apply уже подтверждённого change не перезаписывает ручной откат;
+  новое намерение идёт через свежий prepare. Restore create перед delete сканирует текущие
   назначения подтверждённого native type по сервисам дома; omitted `services`
   трактуется как пустое repeated-поле, а present malformed ответ отклоняется.
   Любое назначение блокирует удаление. После снятия дочерних source/options/

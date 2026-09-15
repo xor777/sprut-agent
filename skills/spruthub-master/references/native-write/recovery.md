@@ -31,7 +31,10 @@ readback: прошлый outcome и последнее наблюдение мо
 считаются текущей проверкой. Для BLOCK/LOGIC conflict без сохранённого
 applied snapshot совпадение с requested не восстанавливает право записи:
 get, restore и повторный apply остаются `conflict`, `restore_supported=false`,
-а следующий шаг — новый prepare на текущем baseline.
+а следующий шаг — новый prepare на текущем baseline. Подтверждённый apply
+того же change больше не отправляется: ручной откат к baseline остаётся
+conflict, не перезаписывается повторным apply, и новое намерение идёт через
+свежий prepare. Явный restore по доказанному applied snapshot не меняется.
 
 Локальная история привязана к URL и serial хаба через SHA-256 и не содержит
 token. По умолчанию она хранится вне Git; `SPRUT_AGENT_STATE_DIR` задаёт
