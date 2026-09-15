@@ -7,6 +7,7 @@ import {
   blockAffectedRefs,
   publishedBlockNodes,
   visitKnownBlockNodes,
+  wrapDirectCharacteristicIfPredicates,
 } from "./block-model.mjs";
 import {
   inspectNativeOption,
@@ -923,6 +924,7 @@ export class AutomationService {
     }
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
     const data = structuredClone(input.data);
+    wrapDirectCharacteristicIfPredicates(data);
     const validation = await validateBlockData(data, this.client, {
       allowUnknownFrom: null,
       allowActionOnly: true,
@@ -1015,6 +1017,7 @@ export class AutomationService {
       pauseChanges,
       Date.now(),
     );
+    wrapDirectCharacteristicIfPredicates(prepared.data);
     const validation = await validateBlockData(prepared.data, this.client, {
       allowUnknownFrom: baseline.data,
       allowedPauses: pauseChanges,
@@ -6037,6 +6040,7 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "A conditional BLOCK requires at least one characteristic or daily interval condition with trigger=true; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
+      "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
       "Daily interval HH:mm values use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
