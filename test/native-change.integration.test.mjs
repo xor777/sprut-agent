@@ -784,6 +784,110 @@ function dailyIntervalBlockData({
   };
 }
 
+function everyIf({ when, thenActions, elseActions = [] }) {
+  return {
+    type: "if",
+    mode: "EVERY",
+    if: when,
+    // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+    then: thenActions,
+    else: elseActions,
+    then_delay: 0,
+    else_delay: 0,
+  };
+}
+
+function conditionGroup(leaf, mode = "AND") {
+  return {
+    type: "condition",
+    mode,
+    conditions: [structuredClone(leaf)],
+  };
+}
+
+function singleCharacteristicPredicateBlockData({
+  predicate = characteristicCondition(),
+  nestedPredicate = characteristicCondition({ trigger: false }),
+  siblingMode = "OR",
+} = {}) {
+  return {
+    targets: [
+      everyIf({
+        when: predicate,
+        thenActions: [
+          setAction(),
+          everyIf({
+            when: nestedPredicate,
+            thenActions: [
+              setAction({ cId: 16, hc: "Brightness", value: "20" }),
+            ],
+          }),
+        ],
+        elseActions: [setAction({ value: "false" })],
+      }),
+      everyIf({
+        when: conditionGroup(
+          characteristicCondition({ trigger: false }),
+          siblingMode,
+        ),
+        thenActions: [setAction({ value: "false" })],
+      }),
+    ],
+  };
+}
+
+function parseScenarioBlockData(payload) {
+  if (typeof payload?.data !== "string") return null;
+  try {
+    return JSON.parse(payload.data);
+  } catch {
+    return null;
+  }
+}
+
+function hasDirectCharacteristicIfPredicate(data) {
+  let found = false;
+  const childFields = {
+    root: ["targets"],
+    if: ["if", "then", "else"],
+    condition: ["conditions"],
+    interval: ["start", "end"],
+    service: ["characteristics"],
+    delay: ["targets"],
+  };
+  const visit = (node, kind) => {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) {
+      return;
+    }
+    if (kind === "if" && node.if?.type === "characteristic") found = true;
+    for (const key of childFields[kind] ?? []) {
+      const value = node[key];
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child, child?.type);
+      } else {
+        visit(value, value?.type);
+      }
+    }
+  };
+  visit(data, "root");
+  return found;
+}
+
+function rejectDirectCharacteristicIfPredicate(socket, request, payload) {
+  const data = parseScenarioBlockData(payload);
+  if (!data || !hasDirectCharacteristicIfPredicate(data)) return false;
+  socket.send(
+    JSON.stringify({
+      id: request.id,
+      error: {
+        code: 400,
+        message: "if predicate must be a condition group",
+      },
+    }),
+  );
+  return true;
+}
+
 function blockNodeAtPointer(data, pointer) {
   return pointer
     .split("/")
@@ -1551,6 +1655,16 @@ async function startHub(port = 0) {
           );
           return;
         }
+        if (
+          params.scenario.create.type === "BLOCK" &&
+          rejectDirectCharacteristicIfPredicate(
+            socket,
+            request,
+            params.scenario.create,
+          )
+        ) {
+          return;
+        }
         const index = `created-${state.nextScenario++}`;
         const { expand: _expand, ...createFields } = params.scenario.create;
         const created = {
@@ -1600,6 +1714,16 @@ async function startHub(port = 0) {
         const scenario = state.scenarios.find(
           ({ index }) => index === params.scenario.update.index,
         );
+        if (
+          scenario?.type === "BLOCK" &&
+          rejectDirectCharacteristicIfPredicate(
+            socket,
+            request,
+            params.scenario.update,
+          )
+        ) {
+          return;
+        }
         if (!state.behavior.ignoreNextUpdate) {
           Object.assign(
             scenario,
@@ -6575,6 +6699,182 @@ test("daily interval BLOCK rejects ambiguous or unsupported schedules before sen
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
     false,
+  );
+});
+
+test("block_data_update wraps a single characteristic if predicate into a condition group before write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const scheduled = dailyIntervalBlockData();
+  hub.state.scenarios[0].data = JSON.stringify(scheduled);
+  const leaf = characteristicCondition();
+  const nestedLeaf = characteristicCondition({ trigger: false });
+  const requested = singleCharacteristicPredicateBlockData({
+    predicate: leaf,
+    nestedPredicate: nestedLeaf,
+  });
+  const expected = structuredClone(requested);
+  expected.targets[0].if = conditionGroup(leaf);
+  expected.targets[0].then[1].if = conditionGroup(nestedLeaf);
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: requested,
+      reason: "Заменить расписание одним условием характеристики",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.diff.data.from, scheduled);
+  assert.deepEqual(prepared.structuredContent.diff.data.to, expected);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+    "preparation must not write the unwrapped leaf",
+  );
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const updates = hub.requests.filter(({ scenario }) => scenario?.update);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].scenario.update.index, "existing-block");
+  assert.deepEqual(JSON.parse(updates[0].scenario.update.data), expected);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.delete),
+    false,
+  );
+  assert.equal(hub.state.scenarios[0].index, "existing-block");
+  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
+  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
+  assert.equal(hub.state.scenarios[0].active, false);
+  assert.equal(hub.state.scenarios[0].onStart, false);
+  assert.equal(hub.state.scenarios[0].sync, false);
+  assert.equal(hub.state.scenarios[0].vendorTopLevel, "preserve-me");
+
+  const readback = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+  });
+  assert.equal(readback.isError, undefined, readback.content[0]?.text);
+  assert.equal(readback.structuredContent.entity.name, "Существующий BLOCK");
+  assert.equal(
+    readback.structuredContent.entity.description,
+    "Ручная конфигурация",
+  );
+  assert.equal(readback.structuredContent.entity.active, false);
+  assert.equal(readback.structuredContent.entity.on_start, false);
+  const value = readback.structuredContent.entity.configuration.value;
+  assert.equal(value.targets[0].if.type, "condition");
+  assert.equal(value.targets[0].if.mode, "AND");
+  assert.equal(value.targets[0].if.conditions.length, 1);
+  assert.equal(value.targets[0].if.conditions[0].type, "characteristic");
+  assert.equal(value.targets[0].if.conditions[0].aId, leaf.aId);
+  assert.equal(value.targets[0].else[0].characteristics[0].value, "false");
+  assert.equal(value.targets[0].then[1].if.type, "condition");
+  assert.equal(value.targets[0].then[1].if.mode, "AND");
+  assert.equal(
+    value.targets[0].then[1].if.conditions[0].type,
+    "characteristic",
+  );
+  assert.equal(value.targets[1].if.type, "condition");
+  assert.equal(value.targets[1].if.mode, "OR");
+  assert.equal(value.targets[1].if.conditions[0].type, "characteristic");
+
+  const repeated = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: expected,
+      reason: "Повторно записать уже каноническую группу",
+    },
+  });
+  assert.equal(repeated.isError, undefined, repeated.content[0]?.text);
+  assert.deepEqual(repeated.structuredContent.diff.data.to, expected);
+  const repeatedApply = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: repeated.structuredContent.change_ref },
+  });
+  assert.equal(repeatedApply.structuredContent.status, "applied");
+  assert.deepEqual(
+    JSON.parse(
+      hub.requests.filter(({ scenario }) => scenario?.update).at(-1).scenario
+        .update.data,
+    ),
+    expected,
+  );
+
+  const orGroup = {
+    targets: [
+      everyIf({
+        when: conditionGroup(characteristicCondition(), "OR"),
+        thenActions: [setAction()],
+        elseActions: [setAction({ value: "false" })],
+      }),
+    ],
+  };
+  const preparedOr = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: orGroup,
+      reason: "Сохранить одиночный OR без повторной обёртки",
+    },
+  });
+  assert.equal(preparedOr.isError, undefined, preparedOr.content[0]?.text);
+  assert.deepEqual(preparedOr.structuredContent.diff.data.to, orGroup);
+  const appliedOr = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedOr.structuredContent.change_ref },
+  });
+  assert.equal(appliedOr.structuredContent.status, "applied");
+  const sentOr = JSON.parse(
+    hub.requests.filter(({ scenario }) => scenario?.update).at(-1).scenario
+      .update.data,
+  );
+  assert.equal(sentOr.targets[0].if.type, "condition");
+  assert.equal(sentOr.targets[0].if.mode, "OR");
+  assert.equal(sentOr.targets[0].if.conditions.length, 1);
+  assert.equal(sentOr.targets[0].if.conditions[0].type, "characteristic");
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.create || scenario?.delete)
+      .length,
+    0,
+  );
+
+  const unknown = structuredClone(orGroup);
+  unknown.targets[0].if = { type: "code", code: "return true;" };
+  const rejectedUnknown = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: unknown,
+      reason: "Не чинить неизвестный узел условия",
+    },
+  });
+  assert.equal(rejectedUnknown.isError, true);
+  assert.equal(
+    rejectedUnknown.structuredContent.error.code,
+    "invalid_block_data",
+  );
+  assert.equal(
+    rejectedUnknown.structuredContent.error.message,
+    "Unsupported BLOCK data at root.targets[0].if.if: child type must be one of condition, characteristic.",
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    3,
+    "an unknown if predicate must not be rewritten and sent",
   );
 });
 
