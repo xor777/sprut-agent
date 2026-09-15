@@ -379,7 +379,15 @@ function windowUpdates(hub) {
   return hub.requests.filter(({ window }) => window?.update);
 }
 
-async function applyBlockNameAndDesc(
+function characteristicUpdates(hub) {
+  return hub.requests.filter(({ characteristic }) => characteristic?.update);
+}
+
+function scenarioDeletes(hub) {
+  return hub.requests.filter(({ scenario }) => scenario?.delete);
+}
+
+async function prepareBlockNameAndDesc(
   client,
   { name, desc, nameReason, descReason },
 ) {
@@ -393,11 +401,7 @@ async function applyBlockNameAndDesc(
       reason: nameReason,
     },
   });
-  const appliedName = await client.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(appliedName.structuredContent.status, "applied");
+  assert.equal(renamed.structuredContent.status, "prepared");
   const described = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -408,11 +412,7 @@ async function applyBlockNameAndDesc(
       reason: descReason,
     },
   });
-  const appliedDesc = await client.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: described.structuredContent.change_ref },
-  });
-  assert.equal(appliedDesc.structuredContent.status, "applied");
+  assert.equal(described.structuredContent.status, "prepared");
   return {
     nameRef: renamed.structuredContent.change_ref,
     descRef: described.structuredContent.change_ref,
@@ -9505,7 +9505,67 @@ test("the first BLOCK rename is kept when the following description write is los
   assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
 });
 
-test("BLOCK metadata restore refuses after a later significant data change", async (t) => {
+test("BLOCK Name and Desc prepared together restore independently", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const originalData = hub.state.scenarios[0].data;
+  const originalActive = hub.state.scenarios[0].active;
+  const { nameRef, descRef } = await prepareBlockNameAndDesc(firstClient, {
+    name: "Свет кабинета по движению",
+    desc: "Новое назначение",
+    nameReason: "Переименовать на исходной конфигурации",
+    descReason: "Описать на той же исходной конфигурации",
+  });
+
+  const appliedName = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: nameRef },
+  });
+  assert.equal(appliedName.structuredContent.status, "applied");
+  const appliedDesc = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: descRef },
+  });
+  assert.equal(appliedDesc.structuredContent.status, "applied");
+  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
+  assert.equal(hub.state.scenarios[0].desc, "Новое назначение");
+  assert.equal(hub.state.scenarios[0].data, originalData);
+  assert.equal(hub.state.scenarios[0].active, originalActive);
+  const writesAfterApply = windowUpdates(hub).length;
+  assert.equal(writesAfterApply, 2);
+
+  const restoredName = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: nameRef },
+  });
+  assert.equal(restoredName.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
+  assert.equal(hub.state.scenarios[0].desc, "Новое назначение");
+  assert.equal(hub.state.scenarios[0].data, originalData);
+  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
+  assert.deepEqual(windowUpdates(hub).at(-1).window.update.options, [
+    { key: "Name", value: { stringValue: "Существующий BLOCK" } },
+  ]);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restoredDesc = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: descRef },
+  });
+  assert.equal(restoredDesc.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
+  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
+  assert.equal(hub.state.scenarios[0].data, originalData);
+  assert.equal(hub.state.scenarios[0].active, originalActive);
+  assert.equal(windowUpdates(hub).length, writesAfterApply + 2);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
+});
+
+test("BLOCK metadata restore keeps a later data and flag edit of the same scenario", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const prepared = await client.callTool({
@@ -9515,7 +9575,7 @@ test("BLOCK metadata restore refuses after a later significant data change", asy
       target_ref: scenarioRef,
       option_key: "Name",
       value: "После паузы",
-      reason: "Имя, restore которого зависит от значимой конфигурации",
+      reason: "Вернуть имя, не трогая позднюю правку data",
     },
   });
   const applied = await client.callTool({
@@ -9527,113 +9587,28 @@ test("BLOCK metadata restore refuses after a later significant data change", asy
   const edited = JSON.parse(hub.state.scenarios[0].data);
   edited.targets[0].then[1].time = 12_000;
   hub.state.scenarios[0].data = JSON.stringify(edited);
-  const refused = await client.callTool({
+  hub.state.scenarios[0].active = true;
+  hub.state.scenarios[0].onStart = true;
+  const restored = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(refused.structuredContent.status, "conflict");
-  assert.equal(
-    refused.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  assert.equal(refused.structuredContent.manual_change_observed, undefined);
-  assert.equal(hub.state.scenarios[0].name, "После паузы");
-  assert.equal(windowUpdates(hub).length, writesAfterApply);
-});
-
-test("BLOCK metadata restore of an earlier field is not a sticky manual change", async (t) => {
-  const { hub, stateDirectory } = await setup(t);
-  const firstClient = await startClient(t, hub, stateDirectory);
-  const originalData = hub.state.scenarios[0].data;
-  const renamed = await firstClient.callTool({
-    name: "prepare_native_change",
-    arguments: {
-      operation: "window_option",
-      target_ref: scenarioRef,
-      option_key: "Name",
-      value: "Свет кабинета по движению",
-      reason: "Переименовать до описания",
-    },
-  });
-  const appliedName = await firstClient.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(appliedName.structuredContent.status, "applied");
-  const described = await firstClient.callTool({
-    name: "prepare_native_change",
-    arguments: {
-      operation: "window_option",
-      target_ref: scenarioRef,
-      option_key: "Desc",
-      value: "Новое назначение",
-      reason: "Описать после переименования",
-    },
-  });
-  const appliedDesc = await firstClient.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: described.structuredContent.change_ref },
-  });
-  assert.equal(appliedDesc.structuredContent.status, "applied");
-  const writesAfterApply = windowUpdates(hub).length;
-
-  const earlyNameRestore = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(earlyNameRestore.structuredContent.status, "conflict");
-  assert.equal(
-    earlyNameRestore.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  assert.equal(
-    earlyNameRestore.structuredContent.manual_change_observed,
-    undefined,
-  );
-  assert.equal(windowUpdates(hub).length, writesAfterApply);
-  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
-  assert.equal(hub.state.scenarios[0].desc, "Новое назначение");
-
-  await firstClient.close();
-  const secondClient = await startClient(t, hub, stateDirectory);
-  const observed = await secondClient.callTool({
-    name: "get_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(observed.structuredContent.status, "conflict");
-  assert.equal(
-    observed.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  assert.equal(observed.structuredContent.manual_change_observed, undefined);
-
-  const restoredDesc = await secondClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: described.structuredContent.change_ref },
-  });
-  assert.equal(restoredDesc.structuredContent.status, "restored");
-  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
-  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
-  const restoredName = await secondClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(restoredName.structuredContent.status, "restored");
+  assert.equal(restored.structuredContent.status, "restored");
   assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
-  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
-  assert.equal(hub.state.scenarios[0].data, originalData);
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 2);
+  assert.equal(
+    JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+    12_000,
+  );
+  assert.equal(hub.state.scenarios[0].active, true);
+  assert.equal(hub.state.scenarios[0].onStart, true);
+  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
+  assert.deepEqual(windowUpdates(hub).at(-1).window.update.options, [
+    { key: "Name", value: { stringValue: "Существующий BLOCK" } },
+  ]);
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.update),
     false,
   );
-
-  const repeated = await secondClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: renamed.structuredContent.change_ref },
-  });
-  assert.equal(repeated.structuredContent.status, "restored");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 2);
 });
 
 test("an observed BLOCK name change stays unrestorable after the value matches again", async (t) => {
@@ -9699,170 +9674,224 @@ test("an observed BLOCK name change stays unrestorable after the value matches a
   assert.equal(windowUpdates(hub).length, writesAfterApply);
 });
 
-test("a proven BLOCK name stays unrestorable after a sibling owner conflict and a later hand edit", async (t) => {
-  const { hub, stateDirectory } = await setup(t);
-  const firstClient = await startClient(t, hub, stateDirectory);
-  const { nameRef, descRef } = await applyBlockNameAndDesc(firstClient, {
-    name: "Свет по датчику",
-    desc: "Соседнее описание",
-    nameReason: "Переименовать до соседнего описания",
-    descReason: "Изменить соседнее поле после proven Name",
-  });
-  const writesAfterApply = windowUpdates(hub).length;
-  const earlyNameRestore = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(earlyNameRestore.structuredContent.status, "conflict");
-  assert.equal(
-    earlyNameRestore.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  assert.equal(
-    earlyNameRestore.structuredContent.manual_change_observed,
-    undefined,
-  );
-  setScenarioMetadata(hub, { name: "Имя владельца" });
+test("a restored native value stays closed after get and a later requested match", async (t) => {
+  for (const example of [
+    {
+      name: "BLOCK Name",
+      setup(hub) {
+        return hub;
+      },
+      prepare: {
+        operation: "window_option",
+        target_ref: scenarioRef,
+        option_key: "Name",
+        value: "Свет по датчику",
+        reason: "Переименовать, затем вернуть исходное имя",
+      },
+      readCurrent(hub) {
+        return hub.state.scenarios[0].name;
+      },
+      setCurrent(hub, value) {
+        setScenarioMetadata(hub, { name: value });
+      },
+      requested: "Свет по датчику",
+      baseline: "Существующий BLOCK",
+      writes: windowUpdates,
+    },
+    {
+      name: "TargetTemperature",
+      setup: installClimateFixture,
+      prepare: {
+        operation: "characteristic_value",
+        target_ref: climateSettings[0].ref,
+        value: climateSettings[0].requested,
+        reason: "Сменить уставку, затем вернуть исходную",
+      },
+      readCurrent(hub) {
+        return currentCharacteristicValue(hub, climateSettings[0].ref)
+          .doubleValue;
+      },
+      setCurrent(hub, value) {
+        currentCharacteristicValue(hub, climateSettings[0].ref).doubleValue =
+          value;
+      },
+      requested: climateSettings[0].requested,
+      baseline: climateSettings[0].baseline,
+      writes: characteristicUpdates,
+    },
+  ]) {
+    await t.test(example.name, async (scenario) => {
+      const { hub, stateDirectory } = await setup(scenario);
+      example.setup(hub);
+      const firstClient = await startClient(scenario, hub, stateDirectory);
+      const prepared = await firstClient.callTool({
+        name: "prepare_native_change",
+        arguments: example.prepare,
+      });
+      const applied = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+      const restored = await firstClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(restored.structuredContent.status, "restored");
+      const writesAfterRestore = example.writes(hub).length;
 
-  const observed = await firstClient.callTool({
-    name: "get_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(observed.structuredContent.status, "conflict");
-  assert.equal(
-    observed.structuredContent.conflict_reason,
-    "value_changed_after_apply",
-  );
-  assert.equal(observed.structuredContent.manual_change_observed, true);
-  assert.equal(hub.state.scenarios[0].name, "Имя владельца");
-  assert.equal(windowUpdates(hub).length, writesAfterApply);
+      const observed = await firstClient.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(observed.structuredContent.status, "restored");
+      assert.equal(
+        observed.structuredContent.manual_change_observed,
+        undefined,
+      );
+      assert.equal(example.readCurrent(hub), example.baseline);
 
-  setScenarioMetadata(hub, { name: "Свет по датчику" });
-  const restoredDesc = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: descRef },
-  });
-  assert.equal(restoredDesc.structuredContent.status, "restored");
-  const refused = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(refused.structuredContent.status, "conflict");
-  assert.equal(refused.structuredContent.manual_change_observed, true);
-  assert.equal(hub.state.scenarios[0].name, "Свет по датчику");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
+      example.setCurrent(hub, example.requested);
+      const afterManual = await firstClient.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(afterManual.structuredContent.status, "restored");
+      assert.equal(
+        afterManual.structuredContent.manual_change_observed,
+        undefined,
+      );
+      const refusedApply = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(refusedApply.structuredContent.status, "restored");
+      const refusedRestore = await firstClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(refusedRestore.structuredContent.status, "restored");
+      assert.equal(example.readCurrent(hub), example.requested);
+      assert.equal(example.writes(hub).length, writesAfterRestore);
 
-  await firstClient.close();
-  const secondClient = await startClient(t, hub, stateDirectory);
-  const afterRestart = await secondClient.callTool({
-    name: "get_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(afterRestart.structuredContent.status, "conflict");
-  assert.equal(afterRestart.structuredContent.manual_change_observed, true);
-  const refusedAfterRestart = await secondClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(refusedAfterRestart.structuredContent.status, "conflict");
-  assert.equal(hub.state.scenarios[0].name, "Свет по датчику");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
+      await firstClient.close();
+      const secondClient = await startClient(scenario, hub, stateDirectory);
+      const afterRestart = await secondClient.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(afterRestart.structuredContent.status, "restored");
+      const refusedApplyAfterRestart = await secondClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(
+        refusedApplyAfterRestart.structuredContent.status,
+        "restored",
+      );
+      const refusedRestoreAfterRestart = await secondClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(
+        refusedRestoreAfterRestart.structuredContent.status,
+        "restored",
+      );
+      assert.equal(example.readCurrent(hub), example.requested);
+      assert.equal(example.writes(hub).length, writesAfterRestore);
+    });
+  }
 });
 
-test("a proven BLOCK name apply is not resent after a sibling owner conflict and a manual return to baseline", async (t) => {
-  const { hub, stateDirectory } = await setup(t);
-  const firstClient = await startClient(t, hub, stateDirectory);
-  const { nameRef, descRef } = await applyBlockNameAndDesc(firstClient, {
-    name: "Свет кабинета по движению",
-    desc: "Новое назначение",
-    nameReason: "Переименовать до соседнего описания",
-    descReason: "Изменить соседнее поле после proven Name",
-  });
-  const writesAfterApply = windowUpdates(hub).length;
-  const earlyNameRestore = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(earlyNameRestore.structuredContent.status, "conflict");
-  assert.equal(
-    earlyNameRestore.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  const restoredDesc = await firstClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: descRef },
-  });
-  assert.equal(restoredDesc.structuredContent.status, "restored");
-  assert.equal(hub.state.scenarios[0].name, "Свет кабинета по движению");
-  setScenarioMetadata(hub, { name: "Существующий BLOCK" });
-
-  const refusedApply = await firstClient.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.equal(refusedApply.structuredContent.status, "conflict");
-  assert.equal(
-    refusedApply.structuredContent.conflict_reason,
-    "value_changed_after_apply",
-  );
-  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
-
-  await firstClient.close();
-  const secondClient = await startClient(t, hub, stateDirectory);
-  const refusedAfterRestart = await secondClient.callTool({
-    name: "apply_native_change",
-    arguments: { change_ref: nameRef },
-  });
-  assert.notEqual(refusedAfterRestart.structuredContent.status, "applied");
-  assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
-});
-
-test("get of a proven BLOCK name follows the current owner guard after a sibling field returns", async (t) => {
+test("a fresh read error does not reopen a restored native value", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
-  const { nameRef, descRef } = await applyBlockNameAndDesc(client, {
-    name: "Имя для сверки guard",
-    desc: "Соседнее для сверки guard",
-    nameReason: "Переименовать до временного конфликта владельца",
-    descReason: "Создать временный owner_configuration_changed",
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Name",
+      value: "Свет по датчику",
+      reason: "Вернуть имя, затем проверить ошибку чтения",
+    },
   });
-  const writesAfterApply = windowUpdates(hub).length;
-  const earlyNameRestore = await client.callTool({
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const restored = await client.callTool({
     name: "restore_native_change",
-    arguments: { change_ref: nameRef },
+    arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(earlyNameRestore.structuredContent.status, "conflict");
-  assert.equal(
-    earlyNameRestore.structuredContent.conflict_reason,
-    "owner_configuration_changed",
-  );
-  setScenarioMetadata(hub, { desc: "Ручная конфигурация" });
-
-  const observed = await client.callTool({
+  assert.equal(restored.structuredContent.status, "restored");
+  const writesAfterRestore = windowUpdates(hub).length;
+  hub.state.behavior.failNextWindowGet = true;
+  const unreadable = await client.callTool({
     name: "get_native_change",
-    arguments: { change_ref: nameRef },
+    arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(observed.structuredContent.status, "applied");
-  assert.equal(observed.structuredContent.conflict_reason, undefined);
-  assert.equal(observed.structuredContent.applied_value_observed, true);
-  assert.equal(hub.state.scenarios[0].name, "Имя для сверки guard");
-  assert.equal(hub.state.scenarios[0].desc, "Ручная конфигурация");
-  assert.equal(windowUpdates(hub).length, writesAfterApply);
-
-  const restoredName = await client.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: nameRef },
+  assert.equal(unreadable.structuredContent.status, "restored");
+  assert.equal(unreadable.structuredContent.verification.fresh, false);
+  assert.equal(unreadable.structuredContent.manual_change_observed, undefined);
+  const refusedApply = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(restoredName.structuredContent.status, "restored");
+  assert.equal(refusedApply.structuredContent.status, "restored");
+  assert.equal(windowUpdates(hub).length, writesAfterRestore);
   assert.equal(hub.state.scenarios[0].name, "Существующий BLOCK");
-  assert.equal(windowUpdates(hub).length, writesAfterApply + 1);
-  const leftoverDesc = await client.callTool({
-    name: "get_native_change",
-    arguments: { change_ref: descRef },
+});
+
+test("pending BLOCK metadata does not complete from an old window after the owner binding changes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: scenarioRef,
+      option_key: "Name",
+      value: "Свет по датчику",
+      reason: "Переименовать до смены optionsWindow",
+    },
   });
-  assert.notEqual(leftoverDesc.structuredContent.status, "restored");
+  hub.state.behavior.failWindowGetAfterUpdate = true;
+  const uncertain = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(uncertain.structuredContent.write_intent.direction, "apply");
+  assert.equal(hub.state.scenarios[0].name, "Свет по датчику");
+  const writesAfterUncertain = windowUpdates(hub).length;
+  const movedWindowKey = "opaque-scenario-window-other";
+  hub.state.scenarios[0].optionsWindow = movedWindowKey;
+  hub.state.windows[movedWindowKey] = scenarioOptionsWindow({
+    name: "Существующий BLOCK",
+    desc: "Ручная конфигурация",
+    windowKey: movedWindowKey,
+  });
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const observed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.notEqual(observed.structuredContent.status, "applied");
+  assert.notEqual(observed.structuredContent.status, "restored");
+  assert.equal(
+    observed.structuredContent.conflict_reason,
+    "owner_window_changed",
+  );
+  const refusedRestore = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedRestore.structuredContent.status, "restored");
+  assert.equal(windowUpdates(hub).length, writesAfterUncertain);
 });
 
 test("an observed deleted BLOCK create marker does not claim a later scenario at the same index", async (t) => {
@@ -9951,6 +9980,67 @@ test("an observed deleted BLOCK create marker does not claim a later scenario at
   assert.deepEqual(windowUpdates(hub).at(-1).window.update.options, [
     { key: "Desc", value: { stringValue: "" } },
   ]);
+});
+
+test("an observed deleted BLOCK create does not delete a later exact copy at the same index", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило, которое владелец удалит и заменит копией",
+    },
+  });
+  const appliedCreate = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const ownedIndex = appliedCreate.structuredContent.scenario_index;
+  const owned = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  const snapshot = structuredClone(owned);
+  const windowSnapshot = structuredClone(
+    hub.state.windows[owned.optionsWindow],
+  );
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== ownedIndex,
+  );
+  delete hub.state.windows[owned.optionsWindow];
+
+  const observedDelete = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(observedDelete.structuredContent.status, "conflict");
+  const deletesAfterAbsence = scenarioDeletes(hub).length;
+
+  hub.state.scenarios.push(snapshot);
+  hub.state.windows[snapshot.optionsWindow] = windowSnapshot;
+  const observedCopy = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(observedCopy.structuredContent.status, "applied");
+  const refusedRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedRestore.structuredContent.status, "restored");
+  assert.equal(scenarioDeletes(hub).length, deletesAfterAbsence);
+  const copy = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  assert.equal(copy.name, snapshot.name);
+  assert.equal(copy.desc, snapshot.desc);
+  assert.equal(copy.data, snapshot.data);
 });
 
 test("BLOCK description keeps a proven marker after a later data edit of the same create", async (t) => {
