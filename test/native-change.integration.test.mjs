@@ -6869,7 +6869,7 @@ test("block_data_update wraps a single characteristic if predicate into a condit
   );
   assert.equal(
     rejectedUnknown.structuredContent.error.message,
-    "Unsupported BLOCK data at root.targets[0].if.if: child type must be one of condition, characteristic.",
+    "Unsupported BLOCK data at root.targets[0].if: child type must be one of condition, characteristic.",
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,

@@ -182,6 +182,20 @@ function publishedBlockChildren() {
   return children;
 }
 
+export function wrapDirectCharacteristicIfPredicates(data) {
+  visitKnownBlockNodes(data, (node, kind) => {
+    if (kind !== "if") return;
+    const predicate = node.if;
+    if (!isRecord(predicate) || predicate.type !== "characteristic") return;
+    // Official schema/if.if is a condition group; AND of one leaf is the same meaning.
+    node.if = {
+      type: "condition",
+      mode: "AND",
+      conditions: [predicate],
+    };
+  });
+}
+
 export function visitKnownBlockNodes(data, visitor, invalidChild) {
   const visit = (node, kind, path) => {
     if (!isRecord(node)) return;

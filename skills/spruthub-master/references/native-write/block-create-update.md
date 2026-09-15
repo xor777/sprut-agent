@@ -63,8 +63,13 @@
   сервиса и характеристики, не из имени. `delay.time` — миллисекунды; не
   подставляй секунды из `auto_off_after_seconds`. Boolean/число/строка в
   `value` — native scalar строкой (`true`/`false`, целое без точки). Предикат
-  ветки — поле `if`, не `condition`/`conditions`. Не копируй чужой BLOCK как
-  образец синтаксиса: актуальные поля даёт контракт, а не эта карточка.
+  ветки — поле `if`, не `condition`/`conditions`. Исполняемый `if.if` — группа
+  `condition` с `mode` AND или OR и массивом `conditions`. Одиночный
+  поддержанный characteristic в этом поле нормализуется в AND-группу с тем же
+  leaf; готовую группу повторно не оборачивают и её AND/OR не меняют.
+  [Наблюдение формы редактора](https://github.com/xor777/sprut-agent/blob/main/research/protocol/2026-09-15-block-if-condition-group.md)
+  не заменяет live same-index update. Не копируй чужой BLOCK как образец
+  синтаксиса: актуальные поля даёт контракт, а не эта карточка.
 - BLOCK manifest версии `2026-09-13` допускает `root.targets`, вложенные `if`
   (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
   опубликованными comparisons, daily interval с вложенными cron-границами,
