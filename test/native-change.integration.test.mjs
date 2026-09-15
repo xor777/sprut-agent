@@ -12433,9 +12433,57 @@ test("LOGIC restore blocked by assignments does not ask to prepare a new LOGIC",
     true,
   );
 
+  // get first while the applied source is intact. Restore-first after a later
+  // source edit is a separate observation so one order does not hide the other.
+  const writesBeforeMatchingGet = scenarioWriteCount(hub);
+  const matchingGet = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertAssignedLogicStillApplied(matchingGet, {
+    tool: "get_native_change after blocked restore",
+    scenarioIndex,
+    hub,
+    writesBefore: writesBeforeMatchingGet,
+  });
+
+  const blockedAfterMatchingGet = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertAssignedLogicRestoreBlocked(blockedAfterMatchingGet, {
+    tool: "restore_native_change after get applied",
+    type: created.structuredContent.native_logic_type,
+    scenarioIndex,
+    hub,
+  });
+
   const createdScenario = hub.state.scenarios.find(
     ({ index }) => index === scenarioIndex,
   );
+  createdScenario.data = `${appliedSource}\n// manual edit`;
+  const mismatchedGetFirst = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertCurrentLogicSourceMismatch(mismatchedGetFirst, {
+    tool: "get_native_change first after source mismatch",
+    targetRef: serviceRef,
+    scenarioIndex,
+    hub,
+  });
+
+  createdScenario.data = appliedSource;
+  const blockedForRestoreFirst = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertAssignedLogicRestoreBlocked(blockedForRestoreFirst, {
+    tool: "restore_native_change before restore-first mismatch",
+    type: created.structuredContent.native_logic_type,
+    scenarioIndex,
+    hub,
+  });
   createdScenario.data = `${appliedSource}\n// manual edit`;
   const mismatchedRestore = await client.callTool({
     name: "restore_native_change",
@@ -12497,6 +12545,33 @@ test("LOGIC restore blocked by assignments does not ask to prepare a new LOGIC",
     true,
   );
 });
+
+function scenarioWriteCount(hub) {
+  return hub.requests.filter(
+    ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
+  ).length;
+}
+
+function assertAssignedLogicStillApplied(
+  result,
+  { tool, scenarioIndex, hub, writesBefore },
+) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.status, "applied", tool);
+  assert.equal(result.structuredContent.configuration_matches, true, tool);
+  assert.equal("logic_assignments" in result.structuredContent, false, tool);
+  assertDoesNotAskToPrepareNewLogic(result, tool);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenarioIndex),
+    true,
+    tool,
+  );
+  assert.equal(
+    scenarioWriteCount(hub),
+    writesBefore,
+    `${tool} must not write after a blocked restore`,
+  );
+}
 
 function assertDoesNotAskToPrepareNewLogic(result, tool) {
   assert.equal(
