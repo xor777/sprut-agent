@@ -4117,14 +4117,16 @@ export class AutomationService {
     if (observation.matches) {
       return change.status === "applied"
         ? this.#recordScenarioObservation(change, observation)
-        : this.#finishNative(change, "applied", undefined, observation.fields);
+        : this.#finishNative(change, "applied", undefined, {
+            ...observation.fields,
+            logic_assignments: undefined,
+          });
     }
-    return change.status === "conflict"
-      ? this.#recordScenarioObservation(change, observation)
-      : this.#finishNative(change, "conflict", undefined, {
-          conflict_reason: "manual_change",
-          ...observation.fields,
-        });
+    return this.#finishNative(change, "conflict", undefined, {
+      ...observation.fields,
+      conflict_reason: "manual_change",
+      logic_assignments: undefined,
+    });
   }
 
   async #applyScenarioChange(change) {
@@ -4621,11 +4623,18 @@ export class AutomationService {
     );
     const applied = scenarioChangeObservation(change, current, "applied");
     if (scenarioLacksProvenApply(change) || !applied.matches) {
+      // Keep unproven baseline_changed; a proven snapshot mismatch is a fresh
+      // manual_change, not a leftover assignment list.
       return this.#finishNative(change, "conflict", undefined, {
-        conflict_reason: change.conflict_reason ?? "manual_change",
         ...(scenarioLacksProvenApply(change)
           ? scenarioUnprovenApplyFields(change, current)
           : applied.fields),
+        conflict_reason: scenarioLacksProvenApply(change)
+          ? (change.conflict_reason ?? "manual_change")
+          : "manual_change",
+        ...(scenarioLacksProvenApply(change)
+          ? {}
+          : { logic_assignments: undefined }),
       });
     }
     if (change.kind === "block_data_update") {
@@ -8218,6 +8227,17 @@ function unprovenApplyNext(change) {
   };
 }
 
+function scenarioConflictAsksForNewPrepare(change) {
+  // Conflict is a lifecycle status. Only these reasons mean "prepare a new
+  // change"; assignment-blocked restore still needs the current dependency.
+  return (
+    change.status === "conflict" &&
+    (scenarioLacksProvenApply(change) ||
+      change.conflict_reason === "manual_change" ||
+      change.conflict_reason === "baseline_changed")
+  );
+}
+
 function unprovenApplyLimitation() {
   return "This change has no proven applied snapshot, so apply will not be sent again and restore is not allowed. Prepare a new authorized change from the current hub configuration.";
 }
@@ -8616,7 +8636,7 @@ function publicNativeChange(
         !scenarioLacksProvenApply(change) &&
         (change.kind !== "logic_source_create" ||
           typeof change.native_logic_type === "string"),
-      ...(change.status === "conflict"
+      ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
         : {}),
       limitations: [
@@ -8628,7 +8648,7 @@ function publicNativeChange(
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
-          : change.status === "conflict" &&
+          : scenarioConflictAsksForNewPrepare(change) &&
               change.applied_snapshot !== undefined
             ? [scenarioRepeatApplyLimitation()]
             : []),
@@ -8806,7 +8826,7 @@ function publicNativeChange(
         ? { conflict_reason: change.conflict_reason }
         : {}),
       restore_supported: !scenarioLacksProvenApply(change),
-      ...(change.status === "conflict"
+      ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
         : {}),
       limitations: [
@@ -8821,7 +8841,7 @@ function publicNativeChange(
         scenarioLacksProvenApply(change)
           ? unprovenApplyLimitation()
           : "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
-        ...(change.status === "conflict" &&
+        ...(scenarioConflictAsksForNewPrepare(change) &&
         change.applied_snapshot !== undefined
           ? [scenarioRepeatApplyLimitation()]
           : []),
