@@ -106,8 +106,31 @@ export class AutomationService {
       };
     }
     if (input.operation === "window_option") {
-      const target = parseWindowRef(input.target_ref, this.hubSerial);
-      const { option } = await this.#readWindowOption(target, input.option_key);
+      const owner = parseWindowOptionOwner(input.target_ref, this.hubSerial);
+      if (owner.kind === "scenario") {
+        const { option } = await this.#readScenarioMetadataOption(
+          owner,
+          input.option_key,
+        );
+        const state = windowOptionState(option, { allowText: true });
+        const restoration = scalarValueRestoration(state.contract, state.value);
+        return {
+          status: "ok",
+          operation: input.operation,
+          target_ref: input.target_ref,
+          option_key: input.option_key,
+          contract: state.contract,
+          restore_supported: restoration.supported,
+          ...(restoration.limitation
+            ? { restore_limitation: restoration.limitation }
+            : {}),
+        };
+      }
+      const { option } = await this.#readWindowOption(owner, input.option_key);
+      await this.#rejectDirectScenarioMetadataWindow(
+        owner.windowKey,
+        input.option_key,
+      );
       const state = windowOptionState(option);
       const restoration = scalarValueRestoration(state.contract, state.value);
       return {
@@ -434,8 +457,15 @@ export class AutomationService {
   }
 
   async #prepareWindowOptionChange(input) {
-    const target = parseWindowRef(input.target_ref, this.hubSerial);
-    const { option } = await this.#readWindowOption(target, input.option_key);
+    const owner = parseWindowOptionOwner(input.target_ref, this.hubSerial);
+    if (owner.kind === "scenario") {
+      return this.#prepareScenarioMetadataOption(input, owner);
+    }
+    const { option } = await this.#readWindowOption(owner, input.option_key);
+    await this.#rejectDirectScenarioMetadataWindow(
+      owner.windowKey,
+      input.option_key,
+    );
     const { contract, value: baselineValue } = windowOptionState(option);
     const requestedValue = validateCharacteristicValue(input.value, contract);
     if (valuesEqual(baselineValue, requestedValue)) {
@@ -459,7 +489,75 @@ export class AutomationService {
       reason: input.reason,
       target_ref: input.target_ref,
       option_key: input.option_key,
-      target,
+      target: owner,
+      contract,
+      baseline_value: baselineValue,
+      requested_value: requestedValue,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #prepareScenarioMetadataOption(input, owner) {
+    const { scenario, option, windowKey } =
+      await this.#readScenarioMetadataOption(owner, input.option_key);
+    const { contract, value: baselineValue } = windowOptionState(option, {
+      allowText: true,
+    });
+    if (typeof input.value !== "string") {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "BLOCK Name and Desc require a string value.",
+        "get_native_change_contract",
+      );
+    }
+    if (input.option_key === "Name")
+      requiredNativeName(input.value, "window_option");
+    const requestedText =
+      input.option_key === "Desc"
+        ? nativeScenarioDescription(
+            input.value,
+            await this.#provenBlockOwnershipMarker(
+              input.target_ref,
+              typeof scenario.desc === "string"
+                ? scenario.desc
+                : baselineValue.value,
+            ),
+          )
+        : input.value;
+    const requestedValue = validateCharacteristicValue(requestedText, contract);
+    if (valuesEqual(baselineValue, requestedValue)) {
+      return {
+        status: "already_desired",
+        operation: "window_option",
+        target_ref: input.target_ref,
+        option_key: input.option_key,
+        observed_value: baselineValue,
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: "window_option",
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      window_ref: `${configuredHomeRef(this.hubSerial)}/window/${encodeURIComponent(windowKey)}`,
+      option_key: input.option_key,
+      target: { windowKey },
+      owner_kind: "scenario",
+      owner_index: owner.index,
+      owner_guard: scenarioOwnerGuard(scenario, input.option_key),
       contract,
       baseline_value: baselineValue,
       requested_value: requestedValue,
@@ -882,14 +980,34 @@ export class AutomationService {
   }
 
   async #prepareBlockUpdate(input) {
-    const writesName = typeof input.name === "string";
-    const writesDescription = typeof input.description === "string";
-    const writesData = isRecord(input.data);
-    if (!writesName && !writesDescription && !writesData) {
+    if (
+      typeof input.name === "string" ||
+      typeof input.description === "string"
+    ) {
+      throw unsupportedBlockMetadata(input);
+    }
+    if (
+      input.active !== undefined ||
+      input.on_start !== undefined ||
+      input.sync !== undefined
+    ) {
+      throw unsupportedBlockFlags(input.target_ref);
+    }
+    if (!isRecord(input.data)) {
       throw new SprutHubError(
         "invalid_native_change",
-        "BLOCK update requires name, description, and/or data. Omit a field to keep it; an empty description clears user text.",
+        "BLOCK update requires data. Change Name or Desc with window_option using the scenario ref.",
         "get_native_change_contract",
+        {
+          next: {
+            tool: "get_native_change_contract",
+            arguments: {
+              operation: "window_option",
+              target_ref: input.target_ref,
+              option_key: "Name",
+            },
+          },
+        },
       );
     }
     const target = parseScenarioRef(input.target_ref, this.hubSerial);
@@ -897,41 +1015,22 @@ export class AutomationService {
     if (!scenario) throw scenarioNotFound();
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
-    const updateFields = [
-      ...(writesName ? ["name"] : []),
-      ...(writesDescription ? ["desc"] : []),
-      ...(writesData ? ["data"] : []),
-    ];
-    let data = structuredClone(baseline.data);
-    let pauseOutcomes = [];
-    let validation;
-    if (writesData) {
-      const pauseChanges = await this.#knownBlockPauses(input.target_ref);
-      const prepared = prepareBlockUpdateSource(
-        baseline.data,
-        input.data,
-        pauseChanges,
-        Date.now(),
-      );
-      data = prepared.data;
-      pauseOutcomes = prepared.pauseOutcomes;
-      validation = await validateBlockData(data, this.client, {
-        allowUnknownFrom: baseline.data,
-        allowedPauses: pauseChanges,
-        allowActionOnly: true,
-      });
-      requireActionOnlyRuntime(baseline, validation);
-    }
-    const provenMarker = writesDescription
-      ? await this.#provenBlockOwnershipMarker(input.target_ref, baseline.desc)
-      : null;
+    const pauseChanges = await this.#knownBlockPauses(input.target_ref);
+    const prepared = prepareBlockUpdateSource(
+      baseline.data,
+      input.data,
+      pauseChanges,
+      Date.now(),
+    );
+    const validation = await validateBlockData(prepared.data, this.client, {
+      allowUnknownFrom: baseline.data,
+      allowedPauses: pauseChanges,
+      allowActionOnly: true,
+    });
+    requireActionOnlyRuntime(baseline, validation);
     const requested = {
       ...structuredClone(baseline),
-      ...(writesName ? { name: input.name } : {}),
-      ...(writesDescription
-        ? { desc: nativeScenarioDescription(input.description, provenMarker) }
-        : {}),
-      data,
+      data: prepared.data,
     };
     const id = this.store.newId();
     const now = new Date().toISOString();
@@ -943,19 +1042,17 @@ export class AutomationService {
       target_ref: input.target_ref,
       target,
       reason: input.reason,
-      update_fields: updateFields,
+      update_fields: ["data"],
       baseline_snapshot: baseline,
       requested_snapshot: requested,
-      ...(validation
-        ? {
-            block_action_preview: blockActionPreview(
-              validation,
-              configuredHomeRef(this.hubSerial),
-              now,
-            ),
-          }
+      block_action_preview: blockActionPreview(
+        validation,
+        configuredHomeRef(this.hubSerial),
+        now,
+      ),
+      ...(prepared.pauseOutcomes.length > 0
+        ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
-      ...(pauseOutcomes.length > 0 ? { pause_outcomes: pauseOutcomes } : {}),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -1290,6 +1387,12 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
+    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
+      change,
+      current,
+      "apply",
+    );
+    if (ownerConflict) return ownerConflict;
 
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
@@ -3695,12 +3798,89 @@ export class AutomationService {
     return { window, option: matches[0] };
   }
 
+  async #readScenarioMetadataOption(owner, optionKey) {
+    if (!SCENARIO_METADATA_KEYS.has(optionKey)) {
+      throw new SprutHubError(
+        "unsupported_window_option",
+        "A scenario window_option target supports only Name and Desc.",
+        "get_entity",
+      );
+    }
+    const scenario = await this.client.getScenario(owner.index);
+    if (!scenario) throw scenarioNotFound();
+    if (scenario.type !== "BLOCK") throw unsupportedScenarioType();
+    if (
+      typeof scenario.optionsWindow !== "string" ||
+      scenario.optionsWindow.length === 0
+    ) {
+      throw new SprutHubError(
+        "options_window_unavailable",
+        "This scenario has no native options window for Name and Desc.",
+        "get_entity",
+      );
+    }
+    const { window, option } = await this.#readWindowOption(
+      { windowKey: scenario.optionsWindow },
+      optionKey,
+    );
+    return {
+      scenario,
+      window,
+      option,
+      windowKey: scenario.optionsWindow,
+    };
+  }
+
+  async #findScenarioRefForWindow(windowKey) {
+    const matches = (await this.client.listScenarios()).filter(
+      (scenario) =>
+        scenario.type === "BLOCK" && scenario.optionsWindow === windowKey,
+    );
+    if (matches.length !== 1) return undefined;
+    return `${configuredHomeRef(this.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
+  }
+
+  async #rejectDirectScenarioMetadataWindow(windowKey, optionKey) {
+    if (!SCENARIO_METADATA_KEYS.has(optionKey)) return;
+    throw scenarioOwnerRequired(
+      await this.#findScenarioRefForWindow(windowKey),
+      optionKey,
+    );
+  }
+
+  async #finishScenarioMetadataOwnerConflict(change, current, direction) {
+    if (change.owner_kind !== "scenario") return null;
+    const scenario = await this.client.getScenario(change.owner_index);
+    if (!scenario || scenario.optionsWindow !== change.target.windowKey) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason: "owner_window_changed",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    if (
+      !isDeepStrictEqual(
+        scenarioOwnerGuard(scenario, change.option_key),
+        change.owner_guard,
+      )
+    ) {
+      return this.#finishNative(change, "conflict", current, {
+        conflict_reason:
+          direction === "restore" ? "manual_change" : "baseline_changed",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    return null;
+  }
+
   async #readWindowOptionState(change, { requireWrite = false } = {}) {
     const { option } = await this.#readWindowOption(
       change.target,
       change.option_key,
     );
-    const state = windowOptionState(option, { requireWrite });
+    const state = windowOptionState(option, {
+      requireWrite,
+      allowText: change.owner_kind === "scenario",
+    });
     assertOptionBinding(change, state.contract, "window");
     change.contract = state.contract;
     return state;
@@ -3868,6 +4048,12 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
+    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
+      change,
+      current,
+      "restore",
+    );
+    if (ownerConflict) return ownerConflict;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -5480,6 +5666,114 @@ function parseWindowRef(ref, configuredSerial) {
   return { windowKey };
 }
 
+const SCENARIO_METADATA_KEYS = new Set(["Name", "Desc"]);
+
+function parseWindowOptionOwner(ref, configuredSerial) {
+  try {
+    return { kind: "scenario", ...parseScenarioRef(ref, configuredSerial) };
+  } catch (error) {
+    if (
+      !(error instanceof SprutHubError) ||
+      error.code !== "invalid_scenario_ref"
+    ) {
+      throw error;
+    }
+  }
+  return { kind: "window", ...parseWindowRef(ref, configuredSerial) };
+}
+
+function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
+  return new SprutHubError(
+    "scenario_owner_required",
+    "TEXT Name and Desc on a BLOCK are written through window_option with the owning scenario ref.",
+    "get_entity",
+    scenarioRef
+      ? {
+          next: {
+            tool: "get_native_change_contract",
+            arguments: {
+              operation: "window_option",
+              target_ref: scenarioRef,
+              option_key: optionKey,
+            },
+          },
+        }
+      : {},
+  );
+}
+
+function unsupportedBlockMetadata(input) {
+  return new SprutHubError(
+    "unsupported_block_metadata",
+    "block_data_update writes only data. Change Name or Desc with window_option using the scenario ref.",
+    "get_native_change_contract",
+    {
+      next: {
+        tool: "get_native_change_contract",
+        arguments: {
+          operation: "window_option",
+          target_ref: input.target_ref,
+          option_key: typeof input.name === "string" ? "Name" : "Desc",
+        },
+      },
+    },
+  );
+}
+
+function unsupportedBlockFlags(targetRef) {
+  return new SprutHubError(
+    "unsupported_block_flags",
+    "block_data_update does not change runtime flags. Omit active, on_start, and sync.",
+    "get_native_change_contract",
+    {
+      next: {
+        tool: "get_native_change_contract",
+        arguments: {
+          operation: "block_data_update",
+          target_ref: targetRef,
+        },
+      },
+    },
+  );
+}
+
+function scenarioOwnerGuard(scenario, optionKey) {
+  const comparable = comparableScenarioOwnerConfiguration(scenario);
+  if (optionKey === "Name") {
+    const { name: _name, ...rest } = comparable;
+    return rest;
+  }
+  if (optionKey === "Desc") {
+    const { desc: _desc, ...rest } = comparable;
+    return rest;
+  }
+  return comparable;
+}
+
+function comparableScenarioOwnerConfiguration(scenario) {
+  let data;
+  try {
+    data = {
+      kind: "json",
+      value: configurationData(JSON.parse(scenario.data)),
+    };
+  } catch {
+    data = { kind: "opaque", value: scenario.data };
+  }
+  return {
+    index: scenario.index,
+    predefined: scenario.predefined === true,
+    name: scenario.name,
+    desc: scenario.desc,
+    active: scenario.active === true,
+    onStart: scenario.onStart === true,
+    sync: scenario.sync === true,
+    type: scenario.type,
+    window_key: scenario.optionsWindow,
+    data,
+  };
+}
+
 function parseLogicRef(ref, configuredSerial) {
   const match =
     /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/logic\/([^/]+)$/.exec(
@@ -5639,7 +5933,7 @@ function blockContract() {
       scenario_proto_sha256:
         "2319535876324b44c2048267d8b4297ec48d0881b964d5acc5ed1cbddfaa3657",
     },
-    update: "scenario.update({index,name?,desc?,data?})",
+    update: "scenario.update({index,data})",
     supported: {
       root: { required: ["targets"] },
       target_types: ["if", "service", "delay"],
@@ -5714,7 +6008,7 @@ function blockContract() {
       "Daily interval HH:mm values use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
-      "Name and description can be changed with data or alone. Omitting a field keeps it; an empty description clears user text. Metadata-only does not validate, rebuild, or send data.",
+      "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
     ],
@@ -6800,7 +7094,13 @@ function logicOptionState(option, options = {}) {
 
 function nativeOptionState(
   option,
-  { requireWrite = true, owner, unsupportedCode, confirmation },
+  {
+    requireWrite = true,
+    owner,
+    unsupportedCode,
+    confirmation,
+    allowText = false,
+  },
 ) {
   if (isSensitiveNativeNode(option)) {
     throw new SprutHubError(
@@ -6809,7 +7109,7 @@ function nativeOptionState(
       "get_entity",
     );
   }
-  const inspected = inspectNativeOption(option, { requireWrite });
+  const inspected = inspectNativeOption(option, { requireWrite, allowText });
   if (!inspected.supported) {
     throw new SprutHubError(
       inspected.category === "rights"
@@ -8189,7 +8489,11 @@ function blockCreateRequest(change) {
 function nativeScenarioDescription(userDescription, provenMarker) {
   if (typeof provenMarker !== "string") return userDescription;
   const token = `[${provenMarker}]`;
-  const userText = userDescription.split(token).join("").replace(/\n+$/u, "");
+  const userText = userDescription
+    .split(token)
+    .join("")
+    .replace(/^\n+|\n+$/gu, "");
+  if (userText.length === 0) return token;
   return `${userText}\n\n${token}`;
 }
 
@@ -8999,6 +9303,7 @@ function publicNativeChange(
     operation: change.kind,
     reason: change.reason,
     target_ref: change.target_ref,
+    ...(change.window_ref ? { window_ref: change.window_ref } : {}),
     diff: {
       value: {
         from: change.baseline_value.value,
@@ -9061,6 +9366,12 @@ function publicNativeChange(
       ...(change.kind === "window_option"
         ? [
             "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
+            ...(change.owner_kind === "scenario"
+              ? [
+                  "Name, Desc, and BLOCK data are separate native changes. Restore of this metadata write is allowed only while the remaining significant configuration and owner window binding still match the saved snapshot.",
+                  "A proven create marker in Desc is kept by the adapter; it is not copied from history and does not restore create-delete rights.",
+                ]
+              : []),
           ]
         : []),
       ...(change.group_member_targets
@@ -9286,6 +9597,12 @@ function invalidHistoryCursor(selection) {
 
 function nativeAffectedRefs(change, homeRef) {
   const refs = [canonicalEntityRef(change.target_ref, homeRef)];
+  if (
+    change.kind === "window_option" &&
+    typeof change.window_ref === "string"
+  ) {
+    refs.push(change.window_ref);
+  }
   if (change.kind === "accessory_placement") {
     refs.push(
       `${homeRef}/room/${change.baseline_snapshot.room_id}`,

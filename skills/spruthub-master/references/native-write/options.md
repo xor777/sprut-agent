@@ -6,7 +6,11 @@
   владельца и один option key. Общий контракт допускает только
   readable/writable/enabled `NUMBER` с `intValue`/`longValue`/`doubleValue`,
   `CHECKBOX` с `boolValue` или `LIST` с непустыми scalar `validValues` того же
-  kind. Известный `GenericBoolean`/`GenericInteger`/`GenericLong`/`GenericDouble`
+  kind. Для подтверждённых `Name` (`TEXT`) и `Desc` (`TEXT_MULTILINE`) BLOCK
+  `window_option` принимает scenario-ref: внутри читается свежий
+  `optionsWindow`, затем обычный scalar prepare/apply/restore через
+  `window.update`. Прямой window-ref не открывает TEXT и не обходит marker;
+  отказ указывает на владельца-сценария. Известный `GenericBoolean`/`GenericInteger`/`GenericLong`/`GenericDouble`
   обязан совпадать с envelope. Явные min/max/step и список сохраняются и
   проверяются; LIST, в котором хотя бы один вариант противоречит явному
   диапазону или шагу, целиком несовместим. Отсутствующие ограничения не

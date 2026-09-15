@@ -1209,6 +1209,15 @@ export class SprutHubClient {
     return container.get;
   }
 
+  async listScenarios() {
+    return extractScenarioCatalog(
+      await this.#request(
+        { scenario: { list: {} } },
+        Date.now() + this.timeoutMs,
+      ),
+    );
+  }
+
   async updateScenario(index, fields) {
     const update = { index };
     if (Object.hasOwn(fields, "name")) update.name = fields.name;
@@ -2139,6 +2148,41 @@ export class SprutHubClient {
     entity.execution_error = scenario.error === true;
     if (requested.has("configuration")) {
       entity.configuration = normalizeScenarioConfiguration(scenario);
+    }
+    if (
+      typeof scenario.optionsWindow === "string" &&
+      scenario.optionsWindow.length > 0
+    ) {
+      try {
+        const windowResponse = await this.#request(
+          { window: { get: { windowKey: scenario.optionsWindow } } },
+          deadline,
+          { serial: parsed.serial },
+        );
+        const window = extractEntity(
+          windowResponse,
+          ["window", "get"],
+          "window",
+        );
+        if (
+          window?.windowKey === scenario.optionsWindow &&
+          Array.isArray(window.options)
+        ) {
+          entity.metadata_options = window.options
+            .filter(
+              (option) => option?.key === "Name" || option?.key === "Desc",
+            )
+            .map((option) =>
+              normalizeOption(option, {
+                operation: "window_option",
+                targetRef: entity.ref,
+                allowText: true,
+              }),
+            );
+        }
+      } catch (error) {
+        if (!(error instanceof SprutHubError)) throw error;
+      }
     }
     return { kind: "scenario", ...entity };
   }
@@ -3223,6 +3267,10 @@ function normalizeScenarioSummary(serial, scenario) {
     active: scenario.active === true,
     on_start: scenario.onStart === true,
     sync: scenario.sync === true,
+    ...(typeof scenario.optionsWindow === "string" &&
+    scenario.optionsWindow.length > 0
+      ? { options_window_ref: windowRef(serial, scenario.optionsWindow) }
+      : {}),
   };
 }
 
@@ -3636,6 +3684,17 @@ function nextReadTowardOwner(entity, include, ownerContext) {
   }
 
   if (
+    entity.kind === "scenario" &&
+    typeof entity.options_window_ref === "string" &&
+    include === "options"
+  ) {
+    return {
+      tool: "get_entity",
+      arguments: { entity_ref: entity.options_window_ref },
+    };
+  }
+
+  if (
     entity.kind === "extension" &&
     typeof entity.options_window_ref === "string" &&
     ["options", "physical_configuration", "diagnostics"].includes(include)
@@ -3696,6 +3755,7 @@ function ownerScopeReason(entity, include) {
   if (entity.kind === "extension") return "window_scoped";
   if (include === "configuration") return "scenario_scoped";
   if (include === "options") {
+    if (entity.kind === "scenario") return "window_scoped";
     return entity.kind === "logic" ? "logic_scoped" : "characteristic_scoped";
   }
   if (["physical_configuration", "diagnostics"].includes(include)) {
@@ -3965,8 +4025,11 @@ function normalizeLogicOption(option, changeContext) {
   };
 }
 
-function publicNativeOptionChange(option, { operation, targetRef }) {
-  const inspected = inspectNativeOption(option);
+function publicNativeOptionChange(
+  option,
+  { operation, targetRef, allowText = false },
+) {
+  const inspected = inspectNativeOption(option, { allowText });
   if (!inspected.supported) {
     return {
       native_write: option?.write === true,

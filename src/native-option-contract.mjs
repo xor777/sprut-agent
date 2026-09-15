@@ -11,9 +11,13 @@ const genericKindByType = new Map([
   ["GenericInteger", "intValue"],
   ["GenericLong", "longValue"],
   ["GenericDouble", "doubleValue"],
+  ["GenericString", "stringValue"],
 ]);
 
-export function inspectNativeOption(option, { requireWrite = true } = {}) {
+export function inspectNativeOption(
+  option,
+  { requireWrite = true, allowText = false } = {},
+) {
   if (!option || typeof option !== "object" || Array.isArray(option)) {
     return incompatible(
       "invalid_option",
@@ -72,6 +76,16 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
         "A CHECKBOX setting must use boolValue.",
       );
     }
+  } else if (
+    allowText &&
+    (inputType === "TEXT" || inputType === "TEXT_MULTILINE")
+  ) {
+    if (current.kind !== "stringValue") {
+      return unsupported(
+        "incompatible_input_value",
+        "A TEXT setting must use stringValue.",
+      );
+    }
   } else if (inputType !== "LIST") {
     return unsupported(
       "unsupported_input_type",
@@ -81,6 +95,8 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
 
   const numericMetadata = inspectNumericMetadata(option, current);
   if (!numericMetadata.supported) return numericMetadata;
+  const lengthMetadata = inspectLengthMetadata(option, current);
+  if (!lengthMetadata.supported) return lengthMetadata;
 
   let validValues;
   if (inputType === "LIST") {
@@ -119,6 +135,7 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
     const constrainedListContract = {
       kind: current.kind,
       ...numericMetadata.contract,
+      ...lengthMetadata.contract,
     };
     if (
       validValues.some(
@@ -141,6 +158,7 @@ export function inspectNativeOption(option, { requireWrite = true } = {}) {
       input_type: inputType,
       kind: current.kind,
       ...numericMetadata.contract,
+      ...lengthMetadata.contract,
       ...(validValues ? { valid_values: validValues } : {}),
     },
   };
@@ -227,6 +245,39 @@ export function nativeScalarContract(source, kind) {
     ...(typeof source.minLen === "number" ? { min_length: source.minLen } : {}),
     ...(typeof source.maxLen === "number" ? { max_length: source.maxLen } : {}),
   };
+}
+
+function inspectLengthMetadata(option, current) {
+  const entries = [
+    ["minLen", "min_length"],
+    ["maxLen", "max_length"],
+  ];
+  const contract = {};
+  for (const [nativeKey, publicKey] of entries) {
+    if (option[nativeKey] === undefined) continue;
+    if (
+      current.kind !== "stringValue" ||
+      !Number.isSafeInteger(option[nativeKey]) ||
+      option[nativeKey] < 0
+    ) {
+      return incompatible(
+        "invalid_length_constraint",
+        "SprutHub returned an invalid length setting constraint.",
+      );
+    }
+    contract[publicKey] = option[nativeKey];
+  }
+  if (
+    contract.min_length !== undefined &&
+    contract.max_length !== undefined &&
+    contract.min_length > contract.max_length
+  ) {
+    return incompatible(
+      "invalid_length_constraint",
+      "SprutHub returned inconsistent length setting constraints.",
+    );
+  }
+  return { supported: true, contract };
 }
 
 function inspectNumericMetadata(option, current) {
