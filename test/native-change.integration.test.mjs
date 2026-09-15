@@ -8133,6 +8133,223 @@ test("BLOCK target class change stays applied when SprutHub projects rooms, icon
   assert.deepEqual(hub.state.scenarios[0].iconsThen, ["Thermostat"]);
 });
 
+function nativeChangeJournalFile(stateDirectory, hubUrl) {
+  const fingerprint = createHash("sha256")
+    .update(`${hubUrl}\0${serial}`)
+    .digest("hex");
+  return path.join(
+    stateDirectory,
+    `automation-changes-${fingerprint.slice(0, 24)}.json`,
+  );
+}
+
+function rewriteJournalChangeAsUnprovenConflict(change) {
+  delete change.applied_snapshot;
+  change.status = "conflict";
+  change.conflict_reason = "manual_change";
+  change.configuration_matches = false;
+  const projections = {
+    rooms: [14],
+    iconsIf: ["MotionSensor"],
+    iconsThen: ["Thermostat"],
+    error: false,
+    order: 4,
+    bundleId: "hub-ui",
+  };
+  change.baseline_snapshot = { ...change.baseline_snapshot, ...projections };
+  change.requested_snapshot = {
+    ...change.requested_snapshot,
+    ...projections,
+    rooms: [1, 8, 14],
+    iconsThen: ["Thermostat", "SecuritySystem"],
+  };
+}
+
+function assertUnprovenBlockConflict(
+  result,
+  { tool, hub, writesBefore, verificationResult = "requested_configuration" },
+) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(result.structuredContent.status, "conflict", tool);
+  assert.equal(result.structuredContent.conflict_reason, "manual_change", tool);
+  assert.equal(result.structuredContent.configuration_matches, false, tool);
+  assert.equal(result.structuredContent.restore_supported, false, tool);
+  assert.equal(
+    result.structuredContent.verification.result,
+    verificationResult,
+    tool,
+  );
+  assert.deepEqual(
+    result.structuredContent.next,
+    {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "block_data_update",
+        target_ref: scenarioRef,
+      },
+    },
+    tool,
+  );
+  assert.match(
+    result.structuredContent.limitations.join("\n"),
+    /no proven applied snapshot/i,
+    tool,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    writesBefore,
+    `${tool} must not send a BLOCK write without proven ownership`,
+  );
+}
+
+async function inspectUnprovenBlockConflict(
+  client,
+  changeRef,
+  hub,
+  writesBefore,
+) {
+  for (const tool of [
+    "get_native_change",
+    "restore_native_change",
+    "apply_native_change",
+  ]) {
+    const result = await client.callTool({
+      name: tool,
+      arguments: { change_ref: changeRef },
+    });
+    assertUnprovenBlockConflict(result, { tool, hub, writesBefore });
+  }
+}
+
+test("BLOCK conflict without an applied snapshot does not treat a requested match as applied", async (t) => {
+  await t.test(
+    "a foreign edit during write then matching revert keeps conflict without a write",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const requestedData = blockData({ delay: 45_000 });
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_data_update",
+          target_ref: scenarioRef,
+          data: requestedData,
+          reason: "Проверить конфликт без applied snapshot",
+        },
+      });
+      const baselineData = hub.state.scenarios[0].data;
+      let requestedRuntime;
+      hub.state.behavior.afterUpdate = () => {
+        const scenario = hub.state.scenarios[0];
+        requestedRuntime = scenario.data;
+        const edited = JSON.parse(scenario.data);
+        edited.targets[0].then[1].time = 99_000;
+        scenario.data = JSON.stringify(edited);
+      };
+
+      const applied = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "conflict");
+      assert.equal(applied.structuredContent.conflict_reason, "manual_change");
+      const writesAfterApply = hub.requests.filter(
+        ({ scenario }) => scenario?.update,
+      ).length;
+      assert.equal(writesAfterApply, 1);
+      const journalAfterConflict = JSON.parse(
+        await readFile(
+          nativeChangeJournalFile(stateDirectory, hub.url),
+          "utf8",
+        ),
+      );
+      const changeId = prepared.structuredContent.change_ref.slice(
+        "spruthub-change://native/".length,
+      );
+      assert.equal(
+        "applied_snapshot" in journalAfterConflict.changes[changeId],
+        false,
+      );
+
+      hub.state.scenarios[0].data = requestedRuntime;
+      await inspectUnprovenBlockConflict(
+        client,
+        prepared.structuredContent.change_ref,
+        hub,
+        writesAfterApply,
+      );
+
+      await client.close();
+      const restarted = await startClient(t, hub, stateDirectory);
+      await inspectUnprovenBlockConflict(
+        restarted,
+        prepared.structuredContent.change_ref,
+        hub,
+        writesAfterApply,
+      );
+
+      hub.state.scenarios[0].data = baselineData;
+      const baselineResult = await restarted.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assertUnprovenBlockConflict(baselineResult, {
+        tool: "apply_native_change",
+        hub,
+        writesBefore: writesAfterApply,
+        verificationResult: "requested_configuration_missing",
+      });
+      assert.equal(hub.state.scenarios[0].data, baselineData);
+    },
+  );
+
+  await t.test(
+    "a saved 0.1.17 conflict with projected rooms and icons stays unrestorable",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const firstClient = await startClient(t, hub, stateDirectory);
+      const prepared = await firstClient.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_data_update",
+          target_ref: scenarioRef,
+          data: blockData({ delay: 45_000 }),
+          reason: "Сохранить старую conflict-запись без applied snapshot",
+        },
+      });
+      const applied = await firstClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "applied");
+      const writesAfterApply = hub.requests.filter(
+        ({ scenario }) => scenario?.update,
+      ).length;
+      await firstClient.close();
+
+      const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
+      const journal = JSON.parse(await readFile(journalFile, "utf8"));
+      const changeId = prepared.structuredContent.change_ref.slice(
+        "spruthub-change://native/".length,
+      );
+      rewriteJournalChangeAsUnprovenConflict(journal.changes[changeId]);
+      await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+
+      const secondClient = await startClient(t, hub, stateDirectory);
+      await inspectUnprovenBlockConflict(
+        secondClient,
+        prepared.structuredContent.change_ref,
+        hub,
+        writesAfterApply,
+      );
+      assert.equal(
+        JSON.parse(hub.state.scenarios[0].data).targets[0].then[1].time,
+        45_000,
+      );
+    },
+  );
+});
+
 test("restore preserves unknown vendor blockId and state fields", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
