@@ -98,5 +98,11 @@
   сравнение и не считаются ручной правкой: хаб пересчитывает их из привязок
   после записи. Ручная правка имени, флагов или data даёт conflict и
   сохраняется. Известный conflict не даёт права откатить запись без
-  совпадения с применённым снимком. Завершённый `restored` терминален
-  для change ref; повторное изменение требует нового prepare.
+  совпадения с применённым снимком. Conflict без `applied_snapshot` не
+  становится applied, даже если текущая конфигурация совпала с requested:
+  `configuration_matches=false`, `restore_supported=false`,
+  `verification.result` отличает `requested_configuration` от
+  установленного применения, а `next` ведёт к
+  `get_native_change_contract` и новому разрешённому prepare на свежем
+  baseline. Завершённый `restored` терминален для change ref; повторное
+  изменение требует нового prepare.
