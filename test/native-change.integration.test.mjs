@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  chmod,
   mkdtemp,
   readdir,
   readFile,
@@ -10341,6 +10342,347 @@ test("an observed deleted BLOCK create does not delete a later exact copy at the
   assert.equal(copy.name, snapshot.name);
   assert.equal(copy.desc, snapshot.desc);
   assert.equal(copy.data, snapshot.data);
+});
+
+test("restore of a deleted BLOCK create does not delete a later exact copy at the same index", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило, которое владелец удалит до restore",
+    },
+  });
+  const appliedCreate = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const ownedIndex = appliedCreate.structuredContent.scenario_index;
+  const owned = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  const marker = owned.desc.match(/\[sprut-agent:native:[a-f0-9]{24}\]/)?.[0];
+  assert.equal(typeof marker, "string");
+  const snapshot = structuredClone(owned);
+  const windowSnapshot = structuredClone(
+    hub.state.windows[owned.optionsWindow],
+  );
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== ownedIndex,
+  );
+  delete hub.state.windows[owned.optionsWindow];
+  const deletesBeforeRestore = scenarioDeletes(hub).length;
+
+  const observedRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(observedRestore.structuredContent.status, "conflict");
+  assert.equal(observedRestore.structuredContent.restore_supported, false);
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+
+  hub.state.scenarios.push(snapshot);
+  hub.state.windows[snapshot.optionsWindow] = windowSnapshot;
+  const observedCopy = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(observedCopy.structuredContent.status, "applied");
+  assert.equal(observedCopy.structuredContent.restore_supported, false);
+  const refusedApply = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedApply.structuredContent.status, "applied");
+  assert.equal(refusedApply.structuredContent.restore_supported, false);
+  const refusedRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedRestore.structuredContent.status, "restored");
+  assert.equal(refusedRestore.structuredContent.restore_supported, false);
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+  const copy = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  assert.equal(copy.desc, snapshot.desc);
+
+  const cleared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: appliedCreate.structuredContent.scenario_ref,
+      option_key: "Desc",
+      value: "",
+      reason: "Не присваивать marker create, право которого утрачено",
+    },
+  });
+  const appliedClear = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: cleared.structuredContent.change_ref },
+  });
+  assert.equal(appliedClear.structuredContent.status, "applied");
+  assert.equal(copy.desc, "");
+  assert.equal(copy.desc.includes(marker.slice(1, -1)), false);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(afterRestart.structuredContent.status, "applied");
+  assert.equal(afterRestart.structuredContent.restore_supported, false);
+  const restoreAfterRestart = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(restoreAfterRestart.structuredContent.status, "restored");
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === ownedIndex),
+    true,
+  );
+});
+
+test("a marker copy at another index does not hide observed absence of a proven BLOCK create", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило, копию которого сохранят под другим index",
+    },
+  });
+  const appliedCreate = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const ownedIndex = appliedCreate.structuredContent.scenario_index;
+  const owned = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  const snapshot = structuredClone(owned);
+  const windowSnapshot = structuredClone(
+    hub.state.windows[owned.optionsWindow],
+  );
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== ownedIndex,
+  );
+  delete hub.state.windows[owned.optionsWindow];
+  const otherIndex = "copied-elsewhere";
+  const otherWindowKey = "opaque-copied-elsewhere-window";
+  hub.state.scenarios.push({
+    ...structuredClone(snapshot),
+    index: otherIndex,
+    optionsWindow: otherWindowKey,
+  });
+  hub.state.windows[otherWindowKey] = scenarioOptionsWindow({
+    name: snapshot.name,
+    desc: snapshot.desc,
+    windowKey: otherWindowKey,
+  });
+  const deletesBeforeObservation = scenarioDeletes(hub).length;
+
+  const observedOther = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(observedOther.structuredContent.status, "conflict");
+  assert.equal(observedOther.structuredContent.restore_supported, false);
+  const refusedApply = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(refusedApply.structuredContent.status, "conflict");
+  assert.equal(refusedApply.structuredContent.restore_supported, false);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === otherIndex),
+    true,
+  );
+
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== otherIndex,
+  );
+  delete hub.state.windows[otherWindowKey];
+  hub.state.scenarios.push(snapshot);
+  hub.state.windows[snapshot.optionsWindow] = windowSnapshot;
+  const observedCopy = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(observedCopy.structuredContent.status, "applied");
+  assert.equal(observedCopy.structuredContent.restore_supported, false);
+  const refusedRestore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedRestore.structuredContent.status, "restored");
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeObservation);
+  const copy = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  assert.equal(copy.name, snapshot.name);
+  assert.equal(copy.desc, snapshot.desc);
+  assert.equal(copy.data, snapshot.data);
+});
+
+test("an observed deleted LOGIC create does not delete a later exact copy at the same index", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const created = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Яркость при включении",
+      description: "Установить стартовый уровень один раз",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC, который владелец удалит и заменит копией",
+    },
+  });
+  const appliedCreate = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(appliedCreate.structuredContent.status, "applied");
+  const ownedIndex = appliedCreate.structuredContent.scenario_index;
+  const owned = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  const snapshot = structuredClone(owned);
+  const logicType = hub.state.scenarioLogicTypes[ownedIndex];
+  const logicTypeSnapshot = structuredClone(
+    hub.state.logicTypes.find(({ type }) => type === logicType),
+  );
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== ownedIndex,
+  );
+  delete hub.state.scenarioLogicTypes[ownedIndex];
+  hub.state.logicTypes = hub.state.logicTypes.filter(
+    ({ type }) => type !== logicType,
+  );
+  const deletesBeforeRestore = scenarioDeletes(hub).length;
+
+  const observedRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(observedRestore.structuredContent.status, "conflict");
+  assert.equal(observedRestore.structuredContent.restore_supported, false);
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+
+  hub.state.scenarios.push(snapshot);
+  hub.state.scenarioLogicTypes[ownedIndex] = logicType;
+  hub.state.logicTypes.push(logicTypeSnapshot);
+  const observedCopy = await firstClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(observedCopy.structuredContent.status, "applied");
+  assert.equal(observedCopy.structuredContent.restore_supported, false);
+  const refusedRestore = await firstClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(refusedRestore.structuredContent.status, "restored");
+  assert.equal(refusedRestore.structuredContent.restore_supported, false);
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+  const copy = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  assert.equal(copy.data, snapshot.data);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(afterRestart.structuredContent.status, "applied");
+  assert.equal(afterRestart.structuredContent.restore_supported, false);
+  const restoreAfterRestart = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.notEqual(restoreAfterRestart.structuredContent.status, "restored");
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+});
+
+test("an unsaved absence observation does not claim lasting delete protection", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createData = blockData();
+  delete createData.vendorConfiguration;
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет по движению",
+      description: "Старое назначение",
+      active: false,
+      on_start: false,
+      sync: false,
+      data: createData,
+      reason: "Создать правило, чьё отсутствие не удастся сохранить",
+    },
+  });
+  const appliedCreate = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  const ownedIndex = appliedCreate.structuredContent.scenario_index;
+  const owned = hub.state.scenarios.find(({ index }) => index === ownedIndex);
+  const snapshot = structuredClone(owned);
+  const windowSnapshot = structuredClone(
+    hub.state.windows[owned.optionsWindow],
+  );
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== ownedIndex,
+  );
+  delete hub.state.windows[owned.optionsWindow];
+  t.after(async () => {
+    await chmod(stateDirectory, 0o700).catch(() => {});
+  });
+  await chmod(stateDirectory, 0o555);
+  const deletesBeforeRestore = scenarioDeletes(hub).length;
+
+  const unsaved = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(unsaved.structuredContent.status, "conflict");
+  assert.equal(unsaved.structuredContent.restore_supported, false);
+  assert.deepEqual(unsaved.structuredContent.local_state, {
+    saved: false,
+    action: "restore_state_storage_then_get_native_change",
+  });
+  assert.equal(scenarioDeletes(hub).length, deletesBeforeRestore);
+
+  await chmod(stateDirectory, 0o700);
+  await client.close();
+  hub.state.scenarios.push(snapshot);
+  hub.state.windows[snapshot.optionsWindow] = windowSnapshot;
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const afterRestart = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: created.structuredContent.change_ref },
+  });
+  assert.equal(afterRestart.structuredContent.status, "applied");
 });
 
 test("BLOCK description keeps a proven marker after a later data edit of the same create", async (t) => {
