@@ -1,6 +1,6 @@
 {
   "name": "sprut-agent",
-  "version": "0.1.30",
+  "version": "0.1.32",
   "description": "Connect an agent to a SprutHub home with agent-first tools and guidance.",
   "author": {
     "name": "sprut-agent contributors",

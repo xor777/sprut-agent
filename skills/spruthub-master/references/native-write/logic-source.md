@@ -44,6 +44,11 @@
   чужого назначения — отдельное разрешённое изменение. Ручная правка source
   или уже снятые назначения заменяют сохранённую причину текущим наблюдением.
   После снятия дочерних source/options/active changes и назначений созданный
-  неизменённый LOGIC можно явно restore.
+  неизменённый LOGIC можно явно restore. Сохранённое отсутствие proven create
+  по записанному index через `get_native_change`, `apply_native_change` или
+  `restore_native_change` прекращает delete этого change: точная копия под
+  тем же index не удаляется, `restore_supported=false`. `get_entity` и
+  `inspect_home` этот факт не записывают; ошибка чтения не считается
+  отсутствием, а `local_state.saved=false` не обещает память после рестарта.
   Source readback не подтверждает callback lifecycle или физический эффект; JS
   локально не исполняется и не проходит обещанный полный static analysis.

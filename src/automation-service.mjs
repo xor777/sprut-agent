@@ -4395,7 +4395,7 @@ export class AutomationService {
           });
     }
     const ownedTargetAbsent =
-      change.kind === "block_create" &&
+      ["block_create", "logic_source_create"].includes(change.kind) &&
       current.scenario === null &&
       change.applied_snapshot !== undefined;
     return this.#finishNative(change, "conflict", undefined, {
@@ -4888,15 +4888,6 @@ export class AutomationService {
         ? this.#reconcileScenarioRestore(change, false)
         : this.#reconcileScenarioApply(change, false);
     }
-    if (change.owned_target_absent_observed === true) {
-      const current = await this.#observeScenarioChange(change);
-      const applied = scenarioChangeObservation(change, current, "applied");
-      return this.#finishNative(change, "conflict", undefined, {
-        ...applied.fields,
-        conflict_reason: "manual_change",
-        owned_target_absent_observed: true,
-      });
-    }
     const current = await this.#observeScenarioChange(change);
     if (
       change.kind === "logic_source_create" &&
@@ -4911,6 +4902,12 @@ export class AutomationService {
       scenarioChangeObservation(change, current, "requested"),
     );
     const applied = scenarioChangeObservation(change, current, "applied");
+    if (
+      change.applied_snapshot !== undefined &&
+      (change.owned_target_absent_observed === true || !applied.matches)
+    ) {
+      return this.#observeProvenScenarioChange(change, current);
+    }
     if (scenarioLacksProvenApply(change) || !applied.matches) {
       // Keep unproven baseline_changed; a proven snapshot mismatch is a fresh
       // manual_change, not a leftover assignment list.
@@ -5090,7 +5087,11 @@ export class AutomationService {
     }
     if (change.scenario_index) {
       const scenario = await this.client.getScenario(change.scenario_index);
-      if (scenario) return scenario;
+      // Proven create is bound to the recorded index; a marker copy elsewhere
+      // must not replace a confirmed absence.
+      if (scenario || change.applied_snapshot !== undefined) {
+        return scenario ?? null;
+      }
     }
     const scenarios = await this.client.listScenarioDetails({
       descriptionIncludes: `[${change.marker}]`,
@@ -8697,6 +8698,24 @@ function scenarioLacksProvenApply(change) {
   return change.status === "conflict" && change.applied_snapshot === undefined;
 }
 
+function scenarioRestoreSupported(change) {
+  if (scenarioLacksProvenApply(change)) return false;
+  if (change.owned_target_absent_observed === true) return false;
+  if (
+    ["block_create", "logic_source_create"].includes(change.kind) &&
+    change.status === "restored"
+  ) {
+    return false;
+  }
+  if (
+    change.kind === "logic_source_create" &&
+    typeof change.native_logic_type !== "string"
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function scenarioUnprovenApplyFields(change, current) {
   const requested = scenarioChangeObservation(change, current, "requested");
   return {
@@ -8728,6 +8747,10 @@ function scenarioConflictAsksForNewPrepare(change) {
 
 function unprovenApplyLimitation() {
   return "This change has no proven applied snapshot, so apply will not be sent again and restore is not allowed. Prepare a new authorized change from the current hub configuration.";
+}
+
+function ownedTargetAbsentLimitation() {
+  return "A saved absence of this created scenario at its recorded index ends restore for this change; a later copy is not deleted.";
 }
 
 function scenarioRepeatApplyLimitation() {
@@ -9120,10 +9143,7 @@ function publicNativeChange(
       ...(change.logic_assignments
         ? { logic_assignments: structuredClone(change.logic_assignments) }
         : {}),
-      restore_supported:
-        !scenarioLacksProvenApply(change) &&
-        (change.kind !== "logic_source_create" ||
-          typeof change.native_logic_type === "string"),
+      restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
         : {}),
@@ -9136,10 +9156,12 @@ function publicNativeChange(
         "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
-          : scenarioConflictAsksForNewPrepare(change) &&
-              change.applied_snapshot !== undefined
-            ? [scenarioRepeatApplyLimitation()]
-            : []),
+          : change.owned_target_absent_observed === true
+            ? [ownedTargetAbsentLimitation()]
+            : scenarioConflictAsksForNewPrepare(change) &&
+                change.applied_snapshot !== undefined
+              ? [scenarioRepeatApplyLimitation()]
+              : []),
       ],
     };
   }
@@ -9304,9 +9326,7 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
-      restore_supported:
-        !scenarioLacksProvenApply(change) &&
-        change.owned_target_absent_observed !== true,
+      restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
         : {}),
@@ -9321,7 +9341,9 @@ function publicNativeChange(
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
         scenarioLacksProvenApply(change)
           ? unprovenApplyLimitation()
-          : "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
+          : change.owned_target_absent_observed === true
+            ? ownedTargetAbsentLimitation()
+            : "Restoration is allowed only while the current configuration matches the saved applied snapshot.",
         ...(scenarioConflictAsksForNewPrepare(change) &&
         change.applied_snapshot !== undefined
           ? [scenarioRepeatApplyLimitation()]
