@@ -8764,13 +8764,17 @@ function snapshotsEqual(left, right) {
   );
 }
 
+export function comparableScenarioConfigurationData(data) {
+  return configurationData(data);
+}
+
 function comparableNativeScenarioConfiguration(snapshot) {
   // Compare identity plus ScenarioCreateRequest/ScenarioUpdateRequest fields.
   // ScenarioMessage rooms, iconsIf/iconsThen, error, order and bundleId are
   // hub projections or runtime diagnostics, not editable configuration.
   return nativeScenarioConfiguration(
     snapshot,
-    configurationData(snapshot.data),
+    comparableScenarioConfigurationData(snapshot.data),
   );
 }
 

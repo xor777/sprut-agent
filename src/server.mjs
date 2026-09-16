@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { AutomationService } from "./automation-service.mjs";
+import { ConfigurationPointService } from "./configuration-point-service.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
 import { SprutHubError, sanitizeAgentOutput } from "./spruthub-client.mjs";
 import {
@@ -485,6 +486,166 @@ server.registerTool(
 );
 
 server.registerTool(
+  "save_configuration_point",
+  {
+    title: "Save selected SprutHub settings for later comparison",
+    description:
+      "Read the current settings of explicitly selected entities in one home and save them as a local configuration point. The point has its own point_ref and is not a live get_entity target or a restore payload. First-slice classes are scenario settings/metadata, accessory name and room, assigned logic active plus savable options, and savable options of a non-home window. Other classes, the home settings window, incomplete reads, and unsupported options are returned as not_captured with a reason. This does not write to SprutHub, walk the whole home, or save sensor values. Sequential reads are not an atomic snapshot. Ordinary save of a point does not require extra confirmation.",
+    inputSchema: {
+      home_ref: z
+        .string()
+        .min(1)
+        .describe("Explicit configured spruthub://hub/<serial> reference"),
+      entity_refs: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(50)
+        .describe(
+          "Exact entity refs to capture; the agent chooses them from the ordinary catalog",
+        ),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  async ({ home_ref: homeRef, entity_refs: entityRefs }) =>
+    runRoomTool(async () =>
+      (await getConfigurationPointService({ requireHub: true })).save({
+        home_ref: homeRef,
+        entity_refs: entityRefs,
+      }),
+    ),
+);
+
+server.registerTool(
+  "list_configuration_points",
+  {
+    title: "List saved SprutHub configuration points",
+    description:
+      "Return saved configuration points for one home, optionally filtered by one exact entity ref that was selected at capture. Listing uses local files and does not need a live hub. A corrupt file is unavailable with an explicit reason, not missing history. Points from another home are not included. This does not write to SprutHub.",
+    inputSchema: {
+      home_ref: z
+        .string()
+        .min(1)
+        .describe("Explicit configured spruthub://hub/<serial> reference"),
+      entity_ref: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional exact entity ref selected when the point was saved",
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .default(10)
+        .describe("Points per page, from 1 through 50"),
+      cursor: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Opaque continuation returned by the previous matching call"),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({ home_ref: homeRef, entity_ref: entityRef, limit, cursor }) =>
+    runRoomTool(async () =>
+      (await getConfigurationPointService()).list({
+        home_ref: homeRef,
+        entity_ref: entityRef,
+        limit,
+        cursor,
+      }),
+    ),
+);
+
+server.registerTool(
+  "get_configuration_point",
+  {
+    title: "Read or compare a saved SprutHub configuration point",
+    description:
+      "Read the saved settings of one configuration point. The past image does not require a live hub. compare=true reads the current selected entities and reports field paths that changed, including rename of the same ref; sensor values, runtime diagnostics, and hub projections are not compared. Redacted or unknown values are not_compared, not equal. The point is not a live entity and does not authorize a write. Large results use the same pointer and max_bytes addressing as get_entity.",
+    inputSchema: {
+      point_ref: z
+        .string()
+        .min(1)
+        .describe("spruthub-point:// reference returned by save or list"),
+      compare: z
+        .boolean()
+        .default(false)
+        .describe("Read current hub settings and compare them with the point"),
+      pointer: z
+        .string()
+        .max(4_096)
+        .optional()
+        .describe(
+          "Optional RFC 6901 JSON Pointer relative to the saved point entity",
+        ),
+      max_bytes: z
+        .number()
+        .int()
+        .min(2_048)
+        .max(32_768)
+        .default(16_000)
+        .describe("Maximum UTF-8 bytes in the compact serialized result"),
+      offset: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe(
+          "Unicode character or container-map offset from a returned continuation",
+        ),
+      version: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          "Content version returned by the previous string or container-map continuation",
+        ),
+    },
+    annotations: readOnlyAnnotations,
+  },
+  async ({
+    point_ref: pointRef,
+    compare,
+    pointer,
+    max_bytes: maxBytes,
+    offset,
+    version,
+  }) =>
+    runRoomTool(
+      async () =>
+        (
+          await getConfigurationPointService({
+            requireHub: compare === true,
+          })
+        ).get({
+          point_ref: pointRef,
+          compare,
+        }),
+      {
+        compact: true,
+        present: (result) =>
+          presentEntityResult(result, {
+            entityRef: pointRef,
+            include: [],
+            pointer,
+            maxBytes,
+            offset,
+            version,
+          }),
+      },
+    ),
+);
+
+server.registerTool(
   "apply_native_change",
   {
     title: "Apply a prepared native SprutHub change",
@@ -719,6 +880,17 @@ async function getAutomationService() {
     hubSerial: client.serial,
   });
   return automationService;
+}
+
+async function getConfigurationPointService({ requireHub = false } = {}) {
+  const client = requireHub ? await getHubClient() : null;
+  const identity = await connection.localHubIdentity();
+  return new ConfigurationPointService({
+    client,
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+    hubUrl: client?.url ?? identity.url,
+    hubSerial: client?.serial ?? identity.serial,
+  });
 }
 
 function toToolError(error) {

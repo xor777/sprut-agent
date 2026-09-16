@@ -3210,7 +3210,7 @@ function oversizedServiceSummary(service) {
   };
 }
 
-function parseEntityRef(ref) {
+export function parseEntityRef(ref) {
   let url;
   try {
     url = new URL(ref);
@@ -4470,7 +4470,7 @@ function scenarioCodeConfiguration(result) {
     : null;
 }
 
-function isRedactedNode(value) {
+export function isRedactedNode(value) {
   return (
     value !== null &&
     typeof value === "object" &&

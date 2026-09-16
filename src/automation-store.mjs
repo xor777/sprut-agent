@@ -8,9 +8,7 @@ export class AutomationStore {
 
   constructor({ directory, hubUrl, hubSerial }) {
     this.directory = directory ?? defaultStateDirectory();
-    this.hubFingerprint = createHash("sha256")
-      .update(`${hubUrl}\0${hubSerial}`)
-      .digest("hex");
+    this.hubFingerprint = hubStateFingerprint(hubUrl, hubSerial);
     this.file = path.join(
       this.directory,
       `automation-changes-${this.hubFingerprint.slice(0, 24)}.json`,
@@ -71,7 +69,11 @@ export class AutomationStore {
   }
 }
 
-function defaultStateDirectory() {
+export function hubStateFingerprint(hubUrl, hubSerial) {
+  return createHash("sha256").update(`${hubUrl}\0${hubSerial}`).digest("hex");
+}
+
+export function defaultStateDirectory() {
   if (process.platform === "darwin") {
     return path.join(
       homedir(),

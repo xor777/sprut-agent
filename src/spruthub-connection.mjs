@@ -67,6 +67,17 @@ export class SprutHubConnection {
     return [...this.#secrets];
   }
 
+  async localHubIdentity() {
+    let env = this.#env;
+    if (!hasCompleteExplicitConnection(env)) {
+      env = await loadCredentialFile(env, credentialSetup(env));
+    }
+    return {
+      url: env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL,
+      serial: hasValue(env.SPRUTHUB_SERIAL) ? env.SPRUTHUB_SERIAL : null,
+    };
+  }
+
   homeSelectionSetup() {
     if (this.#homeSelectionSource === "environment") {
       return {
