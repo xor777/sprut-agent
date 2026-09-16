@@ -1583,7 +1583,9 @@ export class SprutHubClient {
     } else if (parsed.kind === "scenario") {
       entity = await this.#readScenarioEntity(parsed, requested, deadline);
     } else if (parsed.kind === "extension") {
-      entity = await this.#readExtensionEntity(parsed, deadline);
+      entity = await this.#readExtensionEntity(parsed, requested, deadline);
+    } else if (parsed.kind === "extension_child") {
+      entity = await this.#readExtensionChildEntity(parsed, deadline);
     } else if (parsed.kind === "window") {
       entity = await this.#readWindowEntity(parsed, requested, deadline);
     } else {
@@ -2132,22 +2134,76 @@ export class SprutHubClient {
     return { kind: "scenario", ...entity };
   }
 
-  async #readExtensionEntity(parsed, deadline) {
+  async #readExtensionEntity(parsed, requested, deadline) {
     const response = await this.#request(
-      { extension: { list: {} } },
+      { extension: { get: { extensionKey: parsed.extensionKey } } },
       deadline,
       { serial: parsed.serial },
     );
-    const extensions = extractEntityArray(response, [
+    const extension = extractEntity(
+      response,
+      ["extension", "get"],
       "extension",
-      "list",
-      "extensions",
-    ]).filter((candidate) => extensionKey(candidate) === parsed.extensionKey);
-    if (extensions.length === 0) throw entityNotFound("extension");
-    if (extensions.length > 1) throw incompatibleExtensionIdentity();
-    return {
+    );
+    if (extensionKey(extension) !== parsed.extensionKey) {
+      throw incompatibleExtensionIdentity();
+    }
+    const entity = {
       kind: "extension",
-      ...normalizeExtension(parsed.serial, extensions[0]),
+      ...normalizeExtensionDetail(parsed.serial, extension),
+    };
+    if (requested.has("children")) {
+      entity.children = await this.#readExtensionChildren(
+        parsed.serial,
+        parsed.extensionKey,
+        deadline,
+      );
+    }
+    return entity;
+  }
+
+  async #readExtensionChildren(serial, selectedExtensionKey, deadline) {
+    const response = await this.#request(
+      { extensionChild: { list: { extensionKey: selectedExtensionKey } } },
+      deadline,
+      { serial },
+    );
+    const children = extractEntityArray(response, [
+      "extensionChild",
+      "list",
+      "children",
+    ]);
+    return normalizeExtensionChildren(serial, children, selectedExtensionKey);
+  }
+
+  async #readExtensionChildEntity(parsed, deadline) {
+    const response = await this.#request(
+      {
+        extensionChild: {
+          get: { extensionKey: parsed.extensionKey, id: parsed.childId },
+        },
+      },
+      deadline,
+      { serial: parsed.serial },
+    );
+    const child = extractEntity(
+      response,
+      ["extensionChild", "get"],
+      "extension child",
+    );
+    if (
+      extensionKey(child) !== parsed.extensionKey ||
+      child?.id !== parsed.childId
+    ) {
+      throw incompatibleExtensionChildIdentity();
+    }
+    return {
+      kind: "extension_child",
+      ...normalizeExtensionChildDetail(
+        parsed.serial,
+        child,
+        parsed.extensionKey,
+      ),
     };
   }
 
@@ -2854,6 +2910,10 @@ function extensionRef(serial, key) {
   return `${homeRef(serial)}/extension/${encodeURIComponent(key)}`;
 }
 
+function extensionChildRef(serial, key, id) {
+  return `${extensionRef(serial, key)}/child/${encodeURIComponent(id)}`;
+}
+
 function windowRef(serial, key) {
   return `${homeRef(serial)}/window/${encodeURIComponent(key)}`;
 }
@@ -3086,6 +3146,21 @@ function parseEntityRef(ref) {
   }
   if (segments.length === 3 && segments[1] === "extension") {
     return { kind: "extension", serial, extensionKey: segments[2] };
+  }
+  if (
+    segments.length === 5 &&
+    segments[1] === "extension" &&
+    segments[3] === "child"
+  ) {
+    const childExtensionKey = segments[2];
+    const childId = segments[4];
+    if (!childExtensionKey || !childId) throw invalidEntityRef();
+    return {
+      kind: "extension_child",
+      serial,
+      extensionKey: childExtensionKey,
+      childId,
+    };
   }
   if (segments.length === 3 && segments[1] === "window") {
     return { kind: "window", serial, windowKey: segments[2] };
@@ -3401,6 +3476,12 @@ function normalizeExtension(serial, extension) {
   ) {
     throw incompatibleExtensionIdentity();
   }
+  if (
+    Object.hasOwn(extension, "childCount") &&
+    !Number.isSafeInteger(extension.childCount)
+  ) {
+    throw incompatibleExtensionIdentity();
+  }
   return {
     ref: extensionRef(serial, key),
     key,
@@ -3414,10 +3495,137 @@ function normalizeExtension(serial, extension) {
       typeof extension.optionsWindow === "string"
         ? windowRef(serial, extension.optionsWindow)
         : null,
+    ...(typeof extension.mainWindow === "string"
+      ? { main_window_ref: windowRef(serial, extension.mainWindow) }
+      : {}),
+    ...(Object.hasOwn(extension, "childCount")
+      ? { child_count: extension.childCount }
+      : {}),
     bundle_type: extension.bundleType ?? null,
     enabled: extension.enabled === true,
     state: extension.state ?? null,
   };
+}
+
+function normalizeExtensionDetail(serial, extension) {
+  const spaces = normalizeExtensionSpaces(extension.spaces);
+  return {
+    ...normalizeExtension(serial, extension),
+    ...(spaces ? { spaces } : {}),
+  };
+}
+
+function normalizeExtensionSpaces(spaces) {
+  if (spaces === undefined) return undefined;
+  if (!Array.isArray(spaces)) {
+    throw incompatibleExtensionIdentity();
+  }
+  return spaces.map((space) => {
+    if (typeof space?.key !== "string" || space.key.length === 0) {
+      throw incompatibleExtensionIdentity();
+    }
+    return {
+      key: redactSensitiveText(space.key),
+      type:
+        typeof space.type === "string" ? redactSensitiveText(space.type) : null,
+      label: normalizeFormLabel(space.label),
+    };
+  });
+}
+
+function normalizeFormLabel(label) {
+  if (!label || typeof label !== "object" || Array.isArray(label)) return null;
+  const normalized = {};
+  for (const field of ["header", "text", "button"]) {
+    if (typeof label[field] === "string") {
+      normalized[field] = redactSensitiveText(label[field]);
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function incompatibleExtensionChildIdentity() {
+  return new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned an extension child that does not match the requested identity.",
+    "inspect_home",
+  );
+}
+
+function normalizeExtensionChildren(serial, children, expectedExtensionKey) {
+  const normalized = children.map((child) =>
+    normalizeExtensionChildSummary(serial, child, expectedExtensionKey),
+  );
+  if (new Set(normalized.map(({ id }) => id)).size !== normalized.length) {
+    throw incompatibleExtensionChildIdentity();
+  }
+  return normalized;
+}
+
+function normalizeExtensionChildSummary(serial, child, expectedExtensionKey) {
+  validateExtensionChildIdentity(child, expectedExtensionKey);
+  return {
+    kind: "extension_child",
+    ref: extensionChildRef(serial, child.extensionKey, child.id),
+    id: child.id,
+    space_key:
+      typeof child.spaceKey === "string"
+        ? redactSensitiveText(child.spaceKey)
+        : null,
+    name:
+      typeof child.name === "string" ? redactSensitiveText(child.name) : null,
+    // Missing online is unknown; native space membership is a separate fact.
+    online: typeof child.online === "boolean" ? child.online : null,
+    options_window_ref:
+      typeof child.optionsWindow === "string"
+        ? windowRef(serial, child.optionsWindow)
+        : null,
+  };
+}
+
+function normalizeExtensionChildDetail(serial, child, expectedExtensionKey) {
+  const features = normalizeFeatureList(child.features);
+  const transports = normalizeFeatureList(child.transports);
+  return {
+    ...normalizeExtensionChildSummary(serial, child, expectedExtensionKey),
+    extension_ref: extensionRef(serial, child.extensionKey),
+    description:
+      typeof child.description === "string"
+        ? redactSensitiveText(child.description)
+        : null,
+    status:
+      typeof child.status === "string"
+        ? redactSensitiveText(child.status)
+        : null,
+    ...(Number.isSafeInteger(child.groupId) ? { group_id: child.groupId } : {}),
+    ...(features ? { features } : {}),
+    ...(transports ? { transports } : {}),
+  };
+}
+
+function validateExtensionChildIdentity(child, expectedExtensionKey) {
+  if (
+    typeof child?.id !== "string" ||
+    child.id.length === 0 ||
+    extensionKey(child) !== expectedExtensionKey
+  ) {
+    throw incompatibleExtensionChildIdentity();
+  }
+}
+
+function normalizeFeatureList(list) {
+  if (list === undefined) return undefined;
+  if (!Array.isArray(list)) {
+    throw incompatibleExtensionChildIdentity();
+  }
+  return list.map((item) => ({
+    type:
+      typeof item?.type === "string" ? redactSensitiveText(item.type) : null,
+    ...(typeof item?.count === "number" ? { count: item.count } : {}),
+    ...(typeof item?.label === "string"
+      ? { label: redactSensitiveText(item.label) }
+      : {}),
+  }));
 }
 
 function normalizeAccessoryDetail(serial, accessory, observedAt) {
@@ -3577,6 +3785,9 @@ function includeWasApplied(entity, include) {
       Object.hasOwn(entity, "diagnostics")
     );
   }
+  if (include === "children") {
+    return entity.kind === "extension" && Object.hasOwn(entity, "children");
+  }
   return false;
 }
 
@@ -3625,7 +3836,7 @@ function nextReadTowardOwner(entity, include, ownerContext) {
   }
 
   if (
-    entity.kind === "extension" &&
+    ["extension", "extension_child"].includes(entity.kind) &&
     typeof entity.options_window_ref === "string" &&
     ["options", "physical_configuration", "diagnostics"].includes(include)
   ) {
@@ -3682,7 +3893,8 @@ function ownerCandidatesFromContainer(entity, include) {
 
 function ownerScopeReason(entity, include) {
   if (entity.kind === "home") return "catalog_required";
-  if (entity.kind === "extension") return "window_scoped";
+  if (["extension", "extension_child"].includes(entity.kind))
+    return "window_scoped";
   if (include === "configuration") return "scenario_scoped";
   if (include === "options") {
     return entity.kind === "logic" ? "logic_scoped" : "characteristic_scoped";
@@ -3771,6 +3983,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
       });
       if (normalized.redacted) return normalized;
       const property = propertyFromNativeOptionKey(option.key);
+      const linkedAccessories = linkedAccessoriesFromOption(serial, option);
       return {
         ...normalized,
         ...(property
@@ -3781,6 +3994,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
               reported_observed_at: null,
             }
           : {}),
+        ...(linkedAccessories ? { linked_accessories: linkedAccessories } : {}),
         pending: "unknown",
         source_timestamp: null,
       };
@@ -3840,6 +4054,39 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
 function propertyFromNativeOptionKey(key) {
   const match = /\/[0-9A-Fa-f]+_([A-Za-z][A-Za-z0-9_]*)\/([^/]+)$/.exec(key);
   return match?.[1] ?? null;
+}
+
+function linkedAccessoriesFromOption(serial, option) {
+  if (option.inputType !== "ACCESSORY_LIST") return undefined;
+  // Current value 0 is a placeholder, not an accessory id. Only confirmed
+  // validValues.intValue entries are executable accessory refs.
+  if (
+    !Object.hasOwn(option, "validValues") ||
+    !Array.isArray(option.validValues)
+  ) {
+    return { status: "unreliable_form" };
+  }
+  const accessories = [];
+  for (const candidate of option.validValues) {
+    const typed = extractTypedValue(candidate?.value);
+    if (
+      !typed.found ||
+      typed.field !== "intValue" ||
+      !isStableId(typed.value)
+    ) {
+      continue;
+    }
+    accessories.push({
+      ref: accessoryRef(serial, typed.value),
+      ...(typeof candidate.name === "string"
+        ? { name: redactSensitiveText(candidate.name) }
+        : {}),
+    });
+  }
+  if (accessories.length === 0 && option.validValues.length > 0) {
+    return { status: "unreliable_form" };
+  }
+  return { status: "confirmed", accessories };
 }
 
 function normalizeWindowControl(option) {
