@@ -31,6 +31,13 @@ const accessoryRef = `${homeRef}/accessory/34`;
 const missingAccessoryRef = `${homeRef}/accessory/99`;
 const serviceRef = `${homeRef}/accessory/34/service/13`;
 const characteristicRef = `${serviceRef}/characteristic/15`;
+const breezerAccessoryRef = `${homeRef}/accessory/40`;
+const climateServiceRef = `${breezerAccessoryRef}/service/20`;
+const targetTemperatureRef = `${climateServiceRef}/characteristic/1`;
+const targetModeRef = `${climateServiceRef}/characteristic/2`;
+const fanSpeedRef = `${climateServiceRef}/characteristic/3`;
+const currentTemperatureRef = `${climateServiceRef}/characteristic/4`;
+const currentModeRef = `${climateServiceRef}/characteristic/5`;
 const logicType = "SmoothBrightnessChange";
 const logicRef = `${serviceRef}/logic/${logicType}`;
 const scenarioRef = `${homeRef}/scenario/office-light`;
@@ -146,11 +153,159 @@ function deviceWindowOptions(startupValue = 255) {
   ];
 }
 
+function heatingCoolingValues(kind) {
+  return kind === "current"
+    ? [
+        { key: "OFF", name: "Выключен", value: { intValue: 0 } },
+        { key: "HEAT", name: "Нагревает", value: { intValue: 1 } },
+        { key: "COOL", name: "Охлаждает", value: { intValue: 2 } },
+      ]
+    : [
+        { key: "OFF", name: "Выключено", value: { intValue: 0 } },
+        { key: "HEAT", name: "Нагрев", value: { intValue: 1 } },
+        { key: "COOL", name: "Охлаждение", value: { intValue: 2 } },
+      ];
+}
+
+function fanSpeedValues() {
+  return [
+    { key: "LOW", name: "Медленно", value: { intValue: 30 } },
+    { key: "MEDIUM", name: "Средне", value: { intValue: 60 } },
+    { key: "HIGH", name: "Быстро", value: { intValue: 90 } },
+  ];
+}
+
+function breezerAccessory({
+  online = true,
+  targetTemperature = 26,
+  targetMode = 0,
+  fanSpeed = 30,
+  currentTemperature = 21,
+  currentMode = 0,
+} = {}) {
+  return {
+    id: 40,
+    roomId: 3,
+    name: "Бризер детской",
+    online,
+    services: [
+      {
+        aId: 40,
+        sId: 20,
+        name: "Климат",
+        type: "HeaterCooler",
+        characteristics: [
+          {
+            aId: 40,
+            sId: 20,
+            cId: 1,
+            hasOptions: false,
+            control: {
+              name: "Уставка",
+              type: "TargetTemperature",
+              read: true,
+              write: true,
+              events: true,
+              unit: "°C",
+              minValue: 10,
+              maxValue: 30,
+              minStep: 0.5,
+              value: { doubleValue: targetTemperature },
+            },
+          },
+          {
+            aId: 40,
+            sId: 20,
+            cId: 2,
+            hasOptions: false,
+            control: {
+              name: "Целевой режим",
+              type: "TargetHeatingCoolingState",
+              read: true,
+              write: true,
+              events: true,
+              value: { intValue: targetMode },
+              validValues: heatingCoolingValues("target"),
+            },
+          },
+          {
+            aId: 40,
+            sId: 20,
+            cId: 3,
+            hasOptions: false,
+            control: {
+              name: "Скорость",
+              type: "C_FanSpeed",
+              read: true,
+              write: true,
+              events: true,
+              value: { intValue: fanSpeed },
+              validValues: fanSpeedValues(),
+            },
+          },
+          {
+            aId: 40,
+            sId: 20,
+            cId: 4,
+            hasOptions: false,
+            control: {
+              name: "Температура",
+              type: "CurrentTemperature",
+              read: true,
+              write: false,
+              events: true,
+              unit: "°C",
+              value: { doubleValue: currentTemperature },
+            },
+          },
+          {
+            aId: 40,
+            sId: 20,
+            cId: 5,
+            hasOptions: false,
+            control: {
+              name: "Текущий режим",
+              type: "CurrentHeatingCoolingState",
+              read: true,
+              write: false,
+              events: true,
+              value: { intValue: currentMode },
+              validValues: heatingCoolingValues("current"),
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function characteristicControl(state, ref) {
+  const match =
+    /\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(ref);
+  assert.ok(match, `unexpected characteristic ref: ${ref}`);
+  const [, aId, sId, cId] = match.map(Number);
+  const control = state.accessories
+    .find(({ id }) => id === aId)
+    ?.services.find((service) => service.sId === sId)
+    ?.characteristics.find(
+      (characteristic) => characteristic.cId === cId,
+    )?.control;
+  assert.ok(control, `missing characteristic ${ref}`);
+  return control;
+}
+
+function capturedEntity(point, entityRef) {
+  return point.entity.entities.find(
+    ({ entity_ref }) => entity_ref === entityRef,
+  );
+}
+
 function createState() {
   return {
     rooms: [
       { id: 1, name: "Офис" },
       { id: 2, name: "Мастерская" },
+      { id: 3, name: "Детская" },
     ],
     accessories: [
       {
@@ -200,6 +355,7 @@ function createState() {
           },
         ],
       },
+      breezerAccessory(),
     ],
     scenarios: [
       {
@@ -1129,5 +1285,299 @@ test("incomplete logic and window options are not compared as added, removed, or
     startupOptionKey,
     "current_value_not_listed",
   );
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
+});
+
+test("a later agent recalls saved climate setpoints after telemetry and off-state noise", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const saved = toolResult(
+    await firstClient.callTool({
+      name: "save_configuration_point",
+      arguments: {
+        home_ref: homeRef,
+        entity_refs: [
+          targetTemperatureRef,
+          targetModeRef,
+          fanSpeedRef,
+          currentTemperatureRef,
+          currentModeRef,
+          characteristicRef,
+        ],
+      },
+    }),
+  );
+  assert.equal(saved.status, "ok");
+  assert.deepEqual(
+    saved.captured.map(({ entity_ref, kind }) => ({ entity_ref, kind })),
+    [
+      { entity_ref: targetTemperatureRef, kind: "characteristic" },
+      { entity_ref: targetModeRef, kind: "characteristic" },
+      { entity_ref: fanSpeedRef, kind: "characteristic" },
+    ],
+  );
+  assert.deepEqual(
+    saved.not_captured.map(({ entity_ref, reason }) => ({
+      entity_ref,
+      reason,
+    })),
+    [
+      {
+        entity_ref: currentTemperatureRef,
+        reason: "unsupported_characteristic_type",
+      },
+      {
+        entity_ref: currentModeRef,
+        reason: "unsupported_characteristic_type",
+      },
+      {
+        entity_ref: characteristicRef,
+        reason: "unsupported_characteristic_type",
+      },
+    ],
+  );
+  await firstClient.close();
+
+  characteristicControl(hub.state, currentTemperatureRef).value = {
+    doubleValue: 24,
+  };
+  characteristicControl(hub.state, currentModeRef).value = { intValue: 1 };
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 60 };
+  characteristicControl(hub.state, targetTemperatureRef).name =
+    "Целевая температура";
+  hub.state.accessories.find(({ id }) => id === 40).online = false;
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const listed = toolResult(
+    await secondClient.callTool({
+      name: "list_configuration_points",
+      arguments: { home_ref: homeRef, entity_ref: fanSpeedRef },
+    }),
+  );
+  assert.equal(listed.points.length, 1);
+  assert.equal(listed.points[0].point_ref, saved.point_ref);
+  assert.equal(
+    listed.points[0].captured_kinds.includes("characteristic"),
+    true,
+  );
+
+  const past = toolResult(
+    await secondClient.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref },
+    }),
+  );
+  const pastTemperature = capturedEntity(past, targetTemperatureRef);
+  assert.equal(pastTemperature.kind, "characteristic");
+  assert.equal(pastTemperature.settings.type, "TargetTemperature");
+  assert.equal(pastTemperature.settings.name, "Уставка");
+  assert.equal(pastTemperature.settings.value, 26);
+  assert.equal(pastTemperature.settings.unit, "°C");
+  assert.equal(pastTemperature.settings.available, true);
+  assert.equal(pastTemperature.settings.source_timestamp, null);
+  assert.ok(Date.parse(pastTemperature.settings.observed_at));
+  const pastMode = capturedEntity(past, targetModeRef);
+  assert.equal(pastMode.settings.value, 0);
+  assert.deepEqual(pastMode.settings.enum, { key: "OFF", name: "Выключено" });
+  const pastFan = capturedEntity(past, fanSpeedRef);
+  assert.equal(pastFan.settings.value, 30);
+  assert.deepEqual(pastFan.settings.enum, { key: "LOW", name: "Медленно" });
+  assert.equal(capturedEntity(past, currentTemperatureRef), undefined);
+  assert.equal(
+    JSON.stringify(past.entity.entities).includes("CurrentTemperature"),
+    false,
+  );
+
+  const compared = toolResult(
+    await secondClient.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const temperatureDiff = comparisonFor(compared, targetTemperatureRef);
+  assert.equal(temperatureDiff.status, "unchanged");
+  assert.equal(changeAt(temperatureDiff, ["value"]), undefined);
+  const modeDiff = comparisonFor(compared, targetModeRef);
+  assert.equal(modeDiff.status, "unchanged");
+  assert.equal(changeAt(modeDiff, ["value"]), undefined);
+  const fanDiff = comparisonFor(compared, fanSpeedRef);
+  assert.equal(fanDiff.status, "changed");
+  assert.deepEqual(changeAt(fanDiff, ["value"]), {
+    path: ["value"],
+    from: {
+      value: 30,
+      enum: { key: "LOW", name: "Медленно" },
+      unit: null,
+    },
+    to: {
+      value: 60,
+      enum: { key: "MEDIUM", name: "Средне" },
+      unit: null,
+    },
+  });
+  assert.equal(comparisonFor(compared, currentTemperatureRef), undefined);
+  assert.equal(comparisonFor(compared, currentModeRef), undefined);
+  for (const entity of compared.comparison.entities) {
+    assert.equal(
+      entity.changes.some((change) =>
+        ["name", "available", "observed_at", "source_timestamp"].some((noise) =>
+          change.path.includes(noise),
+        ),
+      ),
+      false,
+      JSON.stringify(entity.changes),
+    );
+  }
+
+  characteristicControl(hub.state, targetTemperatureRef).value = {
+    doubleValue: 22,
+  };
+  const afterSetpoint = toolResult(
+    await secondClient.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  assert.deepEqual(
+    changeAt(comparisonFor(afterSetpoint, targetTemperatureRef), ["value"]),
+    {
+      path: ["value"],
+      from: { value: 26, unit: "°C" },
+      to: { value: 22, unit: "°C" },
+    },
+  );
+  assert.equal(comparisonFor(afterSetpoint, targetModeRef).status, "unchanged");
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
+
+  await secondClient.close();
+  for (const socket of hub.server.clients) socket.terminate();
+  await new Promise((resolve) => hub.server.close(resolve));
+  const offlineClient = await startClient(t, { url: hub.url }, stateDirectory);
+  const offlinePast = toolResult(
+    await offlineClient.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref },
+    }),
+  );
+  assert.equal(
+    capturedEntity(offlinePast, targetTemperatureRef).settings.value,
+    26,
+  );
+  assert.equal(capturedEntity(offlinePast, targetModeRef).settings.value, 0);
+  assert.equal(capturedEntity(offlinePast, fanSpeedRef).settings.value, 30);
+  const compareOffline = toolError(
+    await offlineClient.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  assert.equal(
+    ["connection_failed", "connection_closed", "timeout"].includes(
+      compareOffline.error.code,
+    ),
+    true,
+    compareOffline.error.code,
+  );
+});
+
+test("unsaved climate characteristics and changed setpoint meaning are not compared as numbers", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const accessoryOnly = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [accessoryRef] },
+    }),
+  );
+  characteristicControl(hub.state, targetTemperatureRef).value = {
+    doubleValue: 22,
+  };
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 0 };
+  const oldPast = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: accessoryOnly.point_ref },
+    }),
+  );
+  assert.equal(oldPast.entity.entities.length, 1);
+  assert.equal(oldPast.entity.entities[0].kind, "accessory");
+  assert.equal(capturedEntity(oldPast, targetTemperatureRef), undefined);
+  assert.equal(JSON.stringify(oldPast).includes("TargetTemperature"), false);
+  const oldCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: accessoryOnly.point_ref, compare: true },
+    }),
+  );
+  assert.equal(oldCompared.comparison.entities.length, 1);
+  assert.equal(
+    oldCompared.comparison.entities.some(
+      (entity) => entity.kind === "characteristic",
+    ),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(oldCompared.comparison).includes('"from":0'),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(oldCompared.comparison).includes('"from":22'),
+    false,
+  );
+
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 30 };
+  const fanSaved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [fanSpeedRef] },
+    }),
+  );
+  assert.deepEqual(
+    fanSaved.captured.map(({ entity_ref, kind }) => ({ entity_ref, kind })),
+    [{ entity_ref: fanSpeedRef, kind: "characteristic" }],
+  );
+  const fanControl = characteristicControl(hub.state, fanSpeedRef);
+  fanControl.validValues[0].key = "QUIET";
+  fanControl.validValues[0].name = "Тихо";
+  const remapped = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: fanSaved.point_ref, compare: true },
+    }),
+  );
+  const remappedFan = comparisonFor(remapped, fanSpeedRef);
+  assert.equal(remappedFan.status, "unchanged");
+  assert.equal(remappedFan.changes.length, 0);
+  assert.deepEqual(remappedFan.not_compared, [
+    { path: ["value"], reason: "incomparable_semantics" },
+  ]);
+
+  const temperatureSaved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [targetTemperatureRef] },
+    }),
+  );
+  assert.deepEqual(
+    temperatureSaved.captured.map(({ entity_ref, kind }) => ({
+      entity_ref,
+      kind,
+    })),
+    [{ entity_ref: targetTemperatureRef, kind: "characteristic" }],
+  );
+  characteristicControl(hub.state, targetTemperatureRef).type =
+    "CurrentTemperature";
+  const retyped = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: temperatureSaved.point_ref, compare: true },
+    }),
+  );
+  const retypedTemperature = comparisonFor(retyped, targetTemperatureRef);
+  assert.equal(retypedTemperature.status, "unchanged");
+  assert.equal(retypedTemperature.changes.length, 0);
+  assert.deepEqual(retypedTemperature.not_compared, [
+    { path: ["value"], reason: "incomparable_semantics" },
+  ]);
   assert.equal(hubWriteRequests(hub.requests).length, 0);
 });
