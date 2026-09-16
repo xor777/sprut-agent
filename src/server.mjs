@@ -490,7 +490,7 @@ server.registerTool(
   {
     title: "Save selected SprutHub settings for later comparison",
     description:
-      "Read the current settings of explicitly selected entities in one home and save them as a local configuration point. The point has its own point_ref and is not a live get_entity target or a restore payload. First-slice classes are scenario settings/metadata, accessory name and room, assigned logic active plus savable options, and savable options of a non-home window. Other classes, the home settings window, incomplete reads, and unsupported options are returned as not_captured with a reason. This does not write to SprutHub, walk the whole home, or save sensor values. Sequential reads are not an atomic snapshot. Ordinary save of a point does not require extra confirmation.",
+      "Read the current settings of explicitly selected entities in one home and save them as a local configuration point. The point has its own point_ref and is not a live get_entity target or a restore payload. First-slice classes are scenario settings/metadata, accessory name and room, assigned logic active plus savable options, savable options of a non-home window, and selected TargetTemperature, TargetHeatingCoolingState, and C_FanSpeed characteristics as observed control parameters. Other classes, current readings, the home settings window, incomplete reads, and unsupported options are returned as not_captured with a reason. This does not write to SprutHub, walk the whole home, or save sensor values. Sequential reads are not an atomic snapshot. Ordinary save of a point does not require extra confirmation.",
     inputSchema: {
       home_ref: z
         .string()
@@ -569,7 +569,7 @@ server.registerTool(
   {
     title: "Read or compare a saved SprutHub configuration point",
     description:
-      "Read the saved settings of one configuration point. The past image does not require a live hub. compare=true reads the current selected entities and reports field paths that changed, including rename of the same ref; sensor values, runtime diagnostics, and hub projections are not compared. Redacted, disabled, or otherwise incomplete option reads are not_compared, not added, removed, or equal. The point is not a live entity and does not authorize a write. Large results use the same pointer and max_bytes addressing as get_entity; follow returned next on this tool with point_ref and the same compare mode so saved data and comparison stay addressable.",
+      "Read the saved settings of one configuration point. The past image does not require a live hub. compare=true reads the current selected entities and reports field paths that changed, including rename of the same ref; sensor values, runtime diagnostics, hub projections, labels, availability, and read time are not setpoint changes. Observed climate control parameters compare type, unit, and the set number or mode; unknown or changed meaning is not_compared, not an exact match, and a missing field in an older point is not filled with today's value or zero. Redacted, disabled, or otherwise incomplete option reads are not_compared, not added, removed, or equal. The point is not a live entity and does not authorize a write. Large results use the same pointer and max_bytes addressing as get_entity; follow returned next on this tool with point_ref and the same compare mode so saved data and comparison stay addressable.",
     inputSchema: {
       point_ref: z
         .string()

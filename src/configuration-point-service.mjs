@@ -12,7 +12,20 @@ import {
   SprutHubError,
 } from "./spruthub-client.mjs";
 
-const SUPPORTED_KINDS = new Set(["scenario", "accessory", "logic", "window"]);
+const SUPPORTED_KINDS = new Set([
+  "scenario",
+  "accessory",
+  "logic",
+  "window",
+  "characteristic",
+]);
+// Observed control parameters for this history slice, not a restore
+// allowlist and not every writable characteristic.
+const CONTROL_SETTING_TYPES = new Set([
+  "TargetTemperature",
+  "TargetHeatingCoolingState",
+  "C_FanSpeed",
+]);
 
 export class ConfigurationPointService {
   constructor({ client = null, stateDirectory, hubUrl, hubSerial }) {
@@ -160,6 +173,26 @@ export class ConfigurationPointService {
       const current = await this.#captureEntity(serial, captured.entity_ref);
       if (!current.captured) {
         const reason = current.not_captured[0]?.reason ?? "read_error";
+        if (
+          captured.kind === "characteristic" &&
+          (reason === "unsupported_characteristic_type" ||
+            reason === "redacted")
+        ) {
+          entities.push({
+            entity_ref: captured.entity_ref,
+            kind: captured.kind,
+            status: "unchanged",
+            changes: [],
+            not_compared: [
+              {
+                path: ["value"],
+                reason:
+                  reason === "redacted" ? "redacted" : "incomparable_semantics",
+              },
+            ],
+          });
+          continue;
+        }
         entities.push({
           entity_ref: captured.entity_ref,
           kind: captured.kind,
@@ -224,7 +257,7 @@ export class ConfigurationPointService {
         error_code: error.code,
       });
     }
-    return extractCapturedEntity(entity);
+    return extractCapturedEntity(entity, entityRef);
   }
 
   #requireClient() {
@@ -270,7 +303,13 @@ export class ConfigurationPointService {
   }
 }
 
-function extractCapturedEntity(entity) {
+function extractCapturedEntity(entity, entityRef) {
+  if (isRedactedNode(entity)) {
+    return notCaptured(entityRef, "redacted");
+  }
+  if (entity.kind === "characteristic") {
+    return extractCapturedCharacteristic(entity, entityRef);
+  }
   if (entity.kind === "accessory") {
     return {
       captured: {
@@ -346,6 +385,40 @@ function extractCapturedEntity(entity) {
     };
   }
   return notCaptured(entity.ref, "unsupported_entity_kind");
+}
+
+function extractCapturedCharacteristic(entity, entityRef) {
+  if (!CONTROL_SETTING_TYPES.has(entity.type)) {
+    return notCaptured(entityRef, "unsupported_characteristic_type");
+  }
+  const current = entity.current_value;
+  if (!current || typeof current !== "object") {
+    return notCaptured(entityRef, "read_error");
+  }
+  const settings = {
+    type: entity.type,
+    name: entity.name,
+    value: Object.hasOwn(current, "value") ? current.value : null,
+    unit: entity.capabilities?.unit ?? null,
+    available: entity.available === true,
+    observed_at: entity.freshness?.observed_at ?? null,
+    source_timestamp:
+      current.source_timestamp ?? entity.freshness?.source_timestamp ?? null,
+  };
+  if (current.enum && typeof current.enum === "object") {
+    settings.enum = {
+      key: current.enum.key,
+      name: current.enum.name,
+    };
+  }
+  return {
+    captured: {
+      entity_ref: entityRef,
+      kind: "characteristic",
+      settings,
+    },
+    not_captured: [],
+  };
 }
 
 function extractOptions(entityRef, options) {
@@ -433,11 +506,77 @@ function summarizePoint(point, serial) {
 }
 
 function diffCaptured(previous, current) {
+  if (previous.kind === "characteristic") {
+    return diffCharacteristicSettings(previous.settings, current.settings);
+  }
   const { changes, not_compared } = diffSettings(
     previous.settings,
     current.settings,
   );
   return foldIncompleteOptions(previous, current, changes, not_compared);
+}
+
+function diffCharacteristicSettings(previous, current) {
+  if (!climateSemanticsComparable(previous, current)) {
+    return {
+      changes: [],
+      not_compared: [{ path: ["value"], reason: "incomparable_semantics" }],
+    };
+  }
+  if (
+    !isKnownClimateValue(previous.value) ||
+    !isKnownClimateValue(current.value)
+  ) {
+    return {
+      changes: [],
+      not_compared: [{ path: ["value"], reason: "unknown_value" }],
+    };
+  }
+  if (
+    Object.is(previous.value, current.value) &&
+    (previous.enum?.key ?? null) === (current.enum?.key ?? null)
+  ) {
+    return { changes: [], not_compared: [] };
+  }
+  return {
+    changes: [
+      {
+        path: ["value"],
+        from: comparableClimateValue(previous),
+        to: comparableClimateValue(current),
+      },
+    ],
+    not_compared: [],
+  };
+}
+
+function climateSemanticsComparable(previous, current) {
+  if (previous.type !== current.type) return false;
+  if (!Object.is(previous.unit, current.unit)) return false;
+  const previousKey = previous.enum?.key ?? null;
+  const currentKey = current.enum?.key ?? null;
+  if (previousKey === currentKey) return true;
+  // Same type with different keys is an ordinary mode/speed change only when
+  // the numeric codes also differ; the same code with a new key changed meaning.
+  return (
+    Boolean(previousKey) &&
+    Boolean(currentKey) &&
+    !Object.is(previous.value, current.value)
+  );
+}
+
+function isKnownClimateValue(value) {
+  return ["boolean", "number", "string"].includes(typeof value);
+}
+
+function comparableClimateValue(settings) {
+  return {
+    value: settings.value,
+    ...(settings.enum
+      ? { enum: { key: settings.enum.key, name: settings.enum.name } }
+      : {}),
+    unit: settings.unit,
+  };
 }
 
 function diffSettings(previous, current) {

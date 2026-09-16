@@ -802,7 +802,10 @@ test("a later agent finds a saved configuration point and compares real setting 
     [
       { entity_ref: roomRef, reason: "unsupported_entity_kind" },
       { entity_ref: homeWindowRef, reason: "home_settings_window" },
-      { entity_ref: characteristicRef, reason: "unsupported_entity_kind" },
+      {
+        entity_ref: characteristicRef,
+        reason: "unsupported_characteristic_type",
+      },
     ],
   );
   assert.deepEqual(saved.next, {
