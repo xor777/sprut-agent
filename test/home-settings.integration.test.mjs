@@ -22,6 +22,21 @@ const selectedRootWindowRef = `${selectedHomeRef}/window/`;
 const otherRootWindowRef = `${otherHomeRef}/window/`;
 const deviceWindowKey = "Controller/zigbee_demo/Child/DEVICE_A/";
 const deviceWindowRef = `${selectedHomeRef}/window/${encodeURIComponent(deviceWindowKey)}`;
+const ownerRoomId = 1;
+const ownerRoomRef = `${selectedHomeRef}/room/${ownerRoomId}`;
+const emptyExtensionKey = "Controller:empty_windows";
+const populatedExtensionKey = "Controller:zigbee_demo";
+const emptyExtensionRef = `${selectedHomeRef}/extension/${encodeURIComponent(emptyExtensionKey)}`;
+const populatedExtensionRef = `${selectedHomeRef}/extension/${encodeURIComponent(populatedExtensionKey)}`;
+const populatedOptionsWindowKey = "Controller/zigbee_demo/";
+const populatedMainWindowKey = "Controller/zigbee_demo/main";
+const populatedOptionsWindowRef = `${selectedHomeRef}/window/${encodeURIComponent(populatedOptionsWindowKey)}`;
+const populatedMainWindowRef = `${selectedHomeRef}/window/${encodeURIComponent(populatedMainWindowKey)}`;
+const emptyChildId = "EMPTY_CHILD";
+const populatedChildId = "DEVICE_A";
+const emptyAccessoryId = 41;
+const populatedAccessoryId = 42;
+const missingWindowAccessoryId = 43;
 const hubClock = "2026-09-16 - 23:59:58 (GMT+03:00)";
 const hubTimeZone = "Europe/Moscow";
 const wifiSecret = "root-wifi-secret-must-not-leak";
@@ -161,14 +176,13 @@ function rootWindow() {
         value: { stringValue: wifiSecret },
       },
       {
-        key: "Users",
-        name: "Users",
+        key: "UserToken",
+        name: "User token",
         type: "GenericString",
         inputType: "TEXT",
         parent: "main",
         read: true,
         write: true,
-        sensitive: true,
         value: { stringValue: userSecret },
       },
       {
@@ -211,6 +225,94 @@ function deviceWindow() {
   };
 }
 
+function ownerContrastInventory() {
+  const emptyExtension = {
+    extensionKey: emptyExtensionKey,
+    type: "bus",
+    index: "empty_windows",
+    bundleType: "CONTROLLER",
+    name: "Empty-window controller",
+    optionsWindow: "",
+    mainWindow: "",
+    childCount: 1,
+    enabled: true,
+    state: "LOADED",
+  };
+  const populatedExtension = {
+    extensionKey: populatedExtensionKey,
+    type: "zigbee",
+    index: "zigbee_demo",
+    bundleType: "CONTROLLER",
+    name: "Zigbee controller",
+    optionsWindow: populatedOptionsWindowKey,
+    mainWindow: populatedMainWindowKey,
+    childCount: 1,
+    enabled: true,
+    state: "LOADED",
+  };
+  return {
+    rooms: [{ id: ownerRoomId, name: "Office" }],
+    accessories: [
+      {
+        id: emptyAccessoryId,
+        roomId: ownerRoomId,
+        name: "Lamp without window",
+        online: true,
+        deviceWindow: "",
+        services: [],
+      },
+      {
+        id: populatedAccessoryId,
+        roomId: ownerRoomId,
+        name: "Lamp with window",
+        online: true,
+        deviceWindow: deviceWindowKey,
+        services: [],
+      },
+      {
+        id: missingWindowAccessoryId,
+        roomId: ownerRoomId,
+        name: "Lamp missing window",
+        online: true,
+        services: [],
+      },
+    ],
+    extensions: [emptyExtension, populatedExtension],
+    extensionDetails: new Map([
+      [emptyExtensionKey, emptyExtension],
+      [populatedExtensionKey, populatedExtension],
+    ]),
+    children: new Map([
+      [
+        emptyExtensionKey,
+        [
+          {
+            extensionKey: emptyExtensionKey,
+            spaceKey: "main",
+            id: emptyChildId,
+            name: "Child without window",
+            online: true,
+            optionsWindow: "",
+          },
+        ],
+      ],
+      [
+        populatedExtensionKey,
+        [
+          {
+            extensionKey: populatedExtensionKey,
+            spaceKey: "main",
+            id: populatedChildId,
+            name: "Child with window",
+            online: true,
+            optionsWindow: deviceWindowKey,
+          },
+        ],
+      ],
+    ]),
+  };
+}
+
 function paddedRootWindow() {
   const window = rootWindow();
   const padding = Array.from({ length: 80 }, (_, index) => ({
@@ -227,7 +329,17 @@ function paddedRootWindow() {
   return window;
 }
 
-async function startHub(t, { root = rootWindow() } = {}) {
+async function startHub(
+  t,
+  {
+    root = rootWindow(),
+    rooms = [],
+    accessories = [],
+    extensions = [],
+    extensionDetails = new Map(),
+    children = new Map(),
+  } = {},
+) {
   const homes = [selectedHome(), otherHome()];
   const windows = new Map([
     [selectedSerial, new Map([["", structuredClone(root)]])],
@@ -252,11 +364,28 @@ async function startHub(t, { root = rootWindow() } = {}) {
         return;
       }
       const serial = request.serial;
+      const selected = serial === selectedSerial;
       if (params.room?.list) {
         socket.send(
           JSON.stringify({
             id: request.id,
-            result: { room: { list: { rooms: [] } } },
+            result: { room: { list: { rooms: selected ? rooms : [] } } },
+          }),
+        );
+        return;
+      }
+      if (params.room?.get) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              room: {
+                get:
+                  (selected ? rooms : []).find(
+                    ({ id }) => id === params.room.get.id,
+                  ) ?? null,
+              },
+            },
           }),
         );
         return;
@@ -274,7 +403,95 @@ async function startHub(t, { root = rootWindow() } = {}) {
         socket.send(
           JSON.stringify({
             id: request.id,
-            result: { extension: { list: { extensions: [] } } },
+            result: {
+              extension: {
+                list: { extensions: selected ? extensions : [] },
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (params.extension?.get) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              extension: {
+                get: selected
+                  ? (extensionDetails.get(params.extension.get.extensionKey) ??
+                    null)
+                  : null,
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (params.extensionChild?.list) {
+        const key = params.extensionChild.list.extensionKey;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              extensionChild: {
+                list: selected
+                  ? children.has(key)
+                    ? { children: children.get(key) }
+                    : null
+                  : null,
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (params.extensionChild?.get) {
+        const { extensionKey, id } = params.extensionChild.get;
+        const child = selected
+          ? (children.get(extensionKey) ?? []).find(
+              (candidate) => candidate.id === id,
+            )
+          : null;
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: { extensionChild: { get: child ?? null } },
+          }),
+        );
+        return;
+      }
+      if (params.accessory?.list) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              accessory: {
+                list: {
+                  accessories: (selected ? accessories : []).filter(
+                    ({ roomId }) =>
+                      params.accessory.list.roomId === undefined ||
+                      roomId === params.accessory.list.roomId,
+                  ),
+                },
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (params.accessory?.get) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              accessory: {
+                get:
+                  (selected ? accessories : []).find(
+                    ({ id }) => id === params.accessory.get.id,
+                  ) ?? null,
+              },
+            },
           }),
         );
         return;
@@ -663,4 +880,207 @@ test("root settings writes are rejected before window.update and device windows 
 
   assert.deepEqual(windowUpdates(hub), []);
   assert.equal(JSON.stringify(rootContract).includes(wifiSecret), false);
+});
+
+test("empty device and extension windows are not the hub settings window", async (t) => {
+  const hub = await startHub(t, ownerContrastInventory());
+  const client = await startClient(t, hub);
+
+  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  const selected = catalog.structuredContent.homes.find(
+    ({ ref }) => ref === selectedHomeRef,
+  );
+  assert.equal(selected.options_window_ref, selectedRootWindowRef);
+
+  const overview = await client.callTool({
+    name: "inspect_home",
+    arguments: { home_ref: selectedHomeRef },
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  const emptyExtension = overview.structuredContent.entities.extensions.find(
+    ({ ref }) => ref === emptyExtensionRef,
+  );
+  const populatedExtension =
+    overview.structuredContent.entities.extensions.find(
+      ({ ref }) => ref === populatedExtensionRef,
+    );
+  assert.equal(emptyExtension.options_window_ref, null);
+  assert.equal(Object.hasOwn(emptyExtension, "main_window_ref"), false);
+  assert.equal(
+    populatedExtension.options_window_ref,
+    populatedOptionsWindowRef,
+  );
+  assert.equal(populatedExtension.main_window_ref, populatedMainWindowRef);
+
+  const emptyExtensionEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: emptyExtension.ref },
+  });
+  assert.equal(
+    emptyExtensionEntity.isError,
+    undefined,
+    emptyExtensionEntity.content[0]?.text,
+  );
+  assert.equal(
+    emptyExtensionEntity.structuredContent.entity.options_window_ref,
+    null,
+  );
+  assert.equal(
+    Object.hasOwn(
+      emptyExtensionEntity.structuredContent.entity,
+      "main_window_ref",
+    ),
+    false,
+  );
+
+  const listed = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: emptyExtension.ref, include: ["children"] },
+  });
+  assert.equal(listed.isError, undefined, listed.content[0]?.text);
+  const emptyChild = listed.structuredContent.entity.children.find(
+    ({ id }) => id === emptyChildId,
+  );
+  assert.equal(emptyChild.options_window_ref, null);
+
+  const child = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: emptyChild.ref,
+      include: ["options", "physical_configuration"],
+    },
+  });
+  assert.equal(child.isError, undefined, child.content[0]?.text);
+  assert.equal(child.structuredContent.entity.options_window_ref, null);
+  const childConfiguration =
+    child.structuredContent.entity.include_resolution.not_applied.find(
+      ({ include }) => include === "physical_configuration",
+    );
+  assert.equal(Object.hasOwn(childConfiguration, "next"), false);
+
+  const populatedListed = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: populatedExtension.ref,
+      include: ["children"],
+    },
+  });
+  assert.equal(
+    populatedListed.isError,
+    undefined,
+    populatedListed.content[0]?.text,
+  );
+  const populatedChild = populatedListed.structuredContent.entity.children.find(
+    ({ id }) => id === populatedChildId,
+  );
+  assert.equal(populatedChild.options_window_ref, deviceWindowRef);
+
+  const room = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: ownerRoomRef },
+  });
+  assert.equal(room.isError, undefined, room.content[0]?.text);
+  const emptyAccessoryRef = room.structuredContent.entity.accessories.find(
+    ({ name }) => name === "Lamp without window",
+  ).ref;
+  const populatedAccessoryRef = room.structuredContent.entity.accessories.find(
+    ({ name }) => name === "Lamp with window",
+  ).ref;
+  const missingAccessoryRef = room.structuredContent.entity.accessories.find(
+    ({ name }) => name === "Lamp missing window",
+  ).ref;
+
+  const emptyAccessory = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: emptyAccessoryRef,
+      include: ["physical_configuration"],
+    },
+  });
+  assert.equal(
+    emptyAccessory.isError,
+    undefined,
+    emptyAccessory.content[0]?.text,
+  );
+  const emptyEntity = emptyAccessory.structuredContent.entity;
+  assert.equal(emptyEntity.native.device_window_ref, null);
+  assert.equal(emptyEntity.physical_configuration, null);
+  const emptyPayload = `${JSON.stringify(emptyAccessory.structuredContent)}${emptyAccessory.content[0].text}`;
+  assert.equal(emptyPayload.includes("Hub settings"), false);
+  assert.equal(emptyPayload.includes(hubClock), false);
+  assert.equal(emptyPayload.includes("NTP1"), false);
+
+  const missingAccessory = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: missingAccessoryRef,
+      include: ["physical_configuration"],
+    },
+  });
+  assert.equal(
+    missingAccessory.isError,
+    undefined,
+    missingAccessory.content[0]?.text,
+  );
+  assert.equal(
+    missingAccessory.structuredContent.entity.native.device_window_ref,
+    null,
+  );
+  assert.equal(
+    missingAccessory.structuredContent.entity.physical_configuration,
+    null,
+  );
+
+  assert.deepEqual(
+    windowGets(hub).filter(({ windowKey }) => windowKey === ""),
+    [],
+  );
+
+  const populatedAccessory = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: populatedAccessoryRef },
+  });
+  assert.equal(
+    populatedAccessory.isError,
+    undefined,
+    populatedAccessory.content[0]?.text,
+  );
+  assert.equal(
+    populatedAccessory.structuredContent.entity.native.device_window_ref,
+    deviceWindowRef,
+  );
+
+  const deviceSettings = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: deviceWindowRef },
+  });
+  assert.equal(
+    deviceSettings.isError,
+    undefined,
+    deviceSettings.content[0]?.text,
+  );
+  assert.equal(deviceSettings.structuredContent.entity.name, "Lamp settings");
+  assert.equal(
+    optionByKey(
+      deviceSettings.structuredContent.entity.options,
+      startupOptionKey,
+    ).configured_value,
+    255,
+  );
+
+  const homeWindow = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: selected.options_window_ref },
+  });
+  assert.equal(homeWindow.isError, undefined, homeWindow.content[0]?.text);
+  assert.equal(
+    optionByKey(homeWindow.structuredContent.entity.options, "Time")
+      .configured_value,
+    hubClock,
+  );
+  assert.deepEqual(
+    windowGets(hub).filter(({ windowKey }) => windowKey === ""),
+    [{ serial: selectedSerial, windowKey: "" }],
+  );
 });
