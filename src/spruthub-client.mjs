@@ -1178,16 +1178,35 @@ export class SprutHubClient {
 
   async getScenario(index) {
     const deadline = Date.now() + this.timeoutMs;
+    return this.#getScenarioRecord(index, deadline, { expand: "data" });
+  }
+
+  // Live hubs reject a deleted scenario with -32603, not get:null. Confirm
+  // absence only with an unfiltered list of the home from the ref.
+  async #getScenarioRecord(index, deadline, { serial, expand } = {}) {
+    const requestOptions = serial === undefined ? {} : { serial };
     let response;
     try {
       response = await this.#request(
-        { scenario: { get: { index, expand: "data" } } },
+        {
+          scenario: {
+            get: {
+              index,
+              ...(expand === undefined ? {} : { expand }),
+            },
+          },
+        },
         deadline,
+        requestOptions,
       );
     } catch (error) {
       if (!isScenarioNotFoundCandidate(error)) throw error;
       const scenarios = extractScenarioCatalog(
-        await this.#request({ scenario: { list: {} } }, deadline),
+        await this.#request(
+          { scenario: { list: {} } },
+          deadline,
+          requestOptions,
+        ),
       );
       if (scenarios.some((scenario) => scenario.index === index)) throw error;
       return null;
@@ -2126,19 +2145,22 @@ export class SprutHubClient {
   }
 
   async #readScenarioEntity(parsed, requested, deadline) {
-    const response = await this.#request(
-      {
-        scenario: {
-          get: {
-            index: parsed.scenarioIndex,
-            ...(requested.has("configuration") ? { expand: "data" } : {}),
-          },
-        },
-      },
+    const scenario = await this.#getScenarioRecord(
+      parsed.scenarioIndex,
       deadline,
-      { serial: parsed.serial },
+      {
+        serial: parsed.serial,
+        ...(requested.has("configuration") ? { expand: "data" } : {}),
+      },
     );
-    const scenario = extractEntity(response, ["scenario", "get"], "scenario");
+    if (!scenario) {
+      throw entityNotFound("scenario", {
+        next: {
+          tool: "inspect_home",
+          arguments: { home_ref: homeRef(parsed.serial) },
+        },
+      });
+    }
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
     entity.description =
       typeof scenario.desc === "string" ? scenario.desc : null;
@@ -2872,11 +2894,12 @@ function extractEntity(response, path, kind) {
   return container[key];
 }
 
-function entityNotFound(kind) {
+function entityNotFound(kind, details = {}) {
   return new SprutHubError(
     "entity_not_found",
     `The selected SprutHub ${kind} was not found.`,
     "inspect_home",
+    details,
   );
 }
 
