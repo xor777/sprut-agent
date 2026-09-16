@@ -40,31 +40,31 @@ const homeWindowRef = `${homeRef}/window/`;
 const startupOptionKey = "/11/0006_OnOff/4003_StartUpOnOff/255";
 const wifiSecret = "wifi-secret-must-not-leak";
 const windowPasswordSecret = "window-password-must-not-leak";
+const replacementWindowPasswordSecret = "new-window-password-must-not-leak";
 const accessTokenSecret = "token-secret-must-not-leak";
 const replacementTokenSecret = "other-token-must-not-leak";
+const thenDelayPath = ["configuration", "value", "targets", 0, "then_delay"];
 
-function officeBlockData({ delay = 0, blockId = 7 } = {}) {
+function officeBlockData({ delay = 0, blockId = 7, targetCount = 1 } = {}) {
   return {
     blockId,
-    targets: [
-      {
-        type: "if",
-        blockId: 1,
-        mode: "EVERY",
-        if: {
-          type: "condition",
-          blockId: 2,
-          mode: "AND",
-          state: "runtime-projection",
-          conditions: [],
-        },
-        // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK scenarios use this native key.
-        then: [],
-        else: [],
-        then_delay: delay,
-        else_delay: 0,
+    targets: Array.from({ length: targetCount }, (_, index) => ({
+      type: "if",
+      blockId: index + 1,
+      mode: "EVERY",
+      if: {
+        type: "condition",
+        blockId: 1000 + index,
+        mode: "AND",
+        state: "runtime-projection",
+        conditions: [],
       },
-    ],
+      // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK scenarios use this native key.
+      then: [],
+      else: [],
+      then_delay: index === 0 ? delay : 0,
+      else_delay: 0,
+    })),
   };
 }
 
@@ -512,6 +512,80 @@ function changeAt(entity, path) {
   );
 }
 
+function findComparedChange(result, entityRef, path) {
+  const candidates = [];
+  if (result.comparison) candidates.push(result.comparison);
+  const selected = result.selection?.value;
+  if (selected && typeof selected === "object") candidates.push(selected);
+  for (const candidate of candidates) {
+    const entities = Array.isArray(candidate.entities)
+      ? candidate.entities
+      : candidate.entity_ref
+        ? [candidate]
+        : [];
+    for (const entity of entities) {
+      if (entity.entity_ref !== entityRef || !Array.isArray(entity.changes)) {
+        continue;
+      }
+      const change = changeAt(entity, path);
+      if (change) return change;
+    }
+  }
+  return null;
+}
+
+function nextTowardComparison(result) {
+  const parts = result.representation?.available_parts ?? [];
+  const comparisonPart = parts.find((part) =>
+    (part.pointer ?? "").startsWith("/comparison"),
+  );
+  if (comparisonPart?.next) return comparisonPart.next;
+  if (result.representation?.next) return result.representation.next;
+  if (result.selection?.next) return result.selection.next;
+  return null;
+}
+
+async function followComparedChange(client, page, entityRef, path) {
+  let current = page;
+  for (let step = 0; step < 20; step += 1) {
+    const found = findComparedChange(current, entityRef, path);
+    if (found) return found;
+    const nextCall = nextTowardComparison(current);
+    assert.ok(
+      nextCall,
+      `compared change ${JSON.stringify(path)} was not addressable`,
+    );
+    current = toolResult(
+      await client.callTool({
+        name: nextCall.tool,
+        arguments: nextCall.arguments,
+      }),
+    );
+  }
+  assert.fail(`compared change ${JSON.stringify(path)} was not reached`);
+}
+
+function assertNotComparedOption(entity, optionKey, reason) {
+  assert.equal(
+    entity.changes.some((change) =>
+      optionKey ? change.path.includes(optionKey) : false,
+    ),
+    false,
+    JSON.stringify(entity.changes),
+  );
+  assert.equal(
+    entity.not_compared.some(
+      (item) =>
+        item.reason === reason &&
+        (optionKey
+          ? JSON.stringify(item.path) === JSON.stringify(["options", optionKey])
+          : JSON.stringify(item.path) === JSON.stringify(["options"])),
+    ),
+    true,
+    JSON.stringify(entity.not_compared),
+  );
+}
+
 async function filesUnder(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
@@ -940,4 +1014,121 @@ test("the saved point remains readable after restart without a live hub", async 
     true,
     compareOffline.error.code,
   );
+});
+
+test("a later agent follows get_configuration_point next to a compared change of a large saved point", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios[0].data = JSON.stringify(
+    officeBlockData({ delay: 0, targetCount: 250 }),
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const saved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
+    }),
+  );
+  hub.state.scenarios[0].data = JSON.stringify(
+    officeBlockData({ delay: 5, targetCount: 250 }),
+  );
+
+  for (const maxBytes of [16_000, 32_768]) {
+    const overview = toolResult(
+      await client.callTool({
+        name: "get_configuration_point",
+        arguments: {
+          point_ref: saved.point_ref,
+          compare: true,
+          max_bytes: maxBytes,
+        },
+      }),
+    );
+    assert.equal(overview.representation.kind, "entity_overview");
+    assert.equal(overview.comparison, undefined);
+    assert.deepEqual(
+      await followComparedChange(client, overview, scenarioRef, thenDelayPath),
+      { path: thenDelayPath, from: 0, to: 5 },
+    );
+  }
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
+});
+
+test("incomplete logic and window options are not compared as added, removed, or equal", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const available = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: {
+        home_ref: homeRef,
+        entity_refs: [logicRef, deviceWindowRef],
+      },
+    }),
+  );
+
+  hub.state.windows[deviceWindowKey].options.find(
+    ({ key }) => key === "DevicePassword",
+  ).value = { stringValue: replacementWindowPasswordSecret };
+  const passwordCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: available.point_ref, compare: true },
+    }),
+  );
+  const passwordWindow = comparisonFor(passwordCompared, deviceWindowRef);
+  assert.equal(passwordWindow.status, "unchanged");
+  assert.equal(passwordWindow.changes.length, 0);
+  assertNotComparedOption(passwordWindow, null, "redacted");
+  const passwordDump = JSON.stringify(passwordCompared);
+  assert.equal(passwordDump.includes("DevicePassword"), false);
+  assert.equal(passwordDump.includes(replacementWindowPasswordSecret), false);
+  assert.equal(passwordDump.includes(windowPasswordSecret), false);
+
+  hub.state.logicOptions.find(({ key }) => key === "Duration").disabled = true;
+  hub.state.windows[deviceWindowKey].options = deviceWindowOptions(7);
+  const unavailableCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: available.point_ref, compare: true },
+    }),
+  );
+  assertNotComparedOption(
+    comparisonFor(unavailableCompared, logicRef),
+    "Duration",
+    "disabled",
+  );
+  assertNotComparedOption(
+    comparisonFor(unavailableCompared, deviceWindowRef),
+    startupOptionKey,
+    "current_value_not_listed",
+  );
+
+  const unavailable = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: {
+        home_ref: homeRef,
+        entity_refs: [logicRef, deviceWindowRef],
+      },
+    }),
+  );
+  hub.state.logicOptions = smoothLogicOptions(300);
+  hub.state.windows[deviceWindowKey].options = deviceWindowOptions(1);
+  const restoredCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: unavailable.point_ref, compare: true },
+    }),
+  );
+  assertNotComparedOption(
+    comparisonFor(restoredCompared, logicRef),
+    "Duration",
+    "disabled",
+  );
+  assertNotComparedOption(
+    comparisonFor(restoredCompared, deviceWindowRef),
+    startupOptionKey,
+    "current_value_not_listed",
+  );
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
 });
