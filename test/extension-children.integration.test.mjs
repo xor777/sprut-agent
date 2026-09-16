@@ -25,6 +25,11 @@ const xiaomiChildRef = `${xiaomiRef}/child/${encodeURIComponent(sharedChildId)}`
 const bridgeChildRef = `${bridgeRef}/child/${encodeURIComponent(sharedChildId)}`;
 const xiaomiChildWindowKey = "Controller/xiaomi_air/child/aqs-1";
 const xiaomiChildWindowRef = `${homeRef}/window/${encodeURIComponent(xiaomiChildWindowKey)}`;
+const writableListWindowKey = "Controller/xiaomi_air/child/writable-list";
+const unreadListWindowKey = "Controller/xiaomi_air/child/unread-list";
+const mixedListWindowKey = "Controller/xiaomi_air/child/mixed-list";
+const emptyListWindowKey = "Controller/xiaomi_air/child/empty-list";
+const malformedListWindowKey = "Controller/xiaomi_air/child/malformed-list";
 const linkedAccessoryRef = `${homeRef}/accessory/49`;
 const decoyAccessoryRef = `${homeRef}/accessory/50`;
 const childSecret = "child-description-secret-must-not-leak";
@@ -251,21 +256,37 @@ function xiaomiChildWindow() {
 }
 
 function unreliableAccessoryWindow() {
+  return accessoryListWindow("Controller/xiaomi_air/child/found-plug", {
+    read: true,
+    write: false,
+  });
+}
+
+function accessoryListWindow(windowKey, { read, write, validValues }) {
   return {
-    windowKey: "Controller/xiaomi_air/child/found-plug",
-    label: { text: "Розетка" },
+    windowKey,
+    label: { text: "Список" },
     options: [
       {
-        key: "AccessoriesList",
-        name: "AccessoriesList",
+        key: "LinkedAccessories",
+        name: "Связанные аксессуары",
         type: "GenericInteger",
         inputType: "ACCESSORY_LIST",
-        read: true,
-        write: false,
+        read,
+        write,
+        events: false,
         value: { intValue: 0 },
+        ...(validValues !== undefined ? { validValues } : {}),
       },
     ],
   };
+}
+
+function confirmedAccessoryValues() {
+  return [
+    { value: { intValue: 49 }, name: "Станция качества воздуха" },
+    { value: { intValue: 50 }, name: "Другая станция" },
+  ];
 }
 
 function homeState() {
@@ -336,6 +357,53 @@ function homeState() {
     windows: new Map([
       [xiaomiChildWindowKey, xiaomiChildWindow()],
       ["Controller/xiaomi_air/child/found-plug", unreliableAccessoryWindow()],
+      [
+        writableListWindowKey,
+        accessoryListWindow(writableListWindowKey, {
+          read: true,
+          write: true,
+          validValues: confirmedAccessoryValues(),
+        }),
+      ],
+      [
+        unreadListWindowKey,
+        accessoryListWindow(unreadListWindowKey, {
+          read: false,
+          write: false,
+          validValues: confirmedAccessoryValues(),
+        }),
+      ],
+      [
+        mixedListWindowKey,
+        accessoryListWindow(mixedListWindowKey, {
+          read: true,
+          write: false,
+          validValues: [
+            { value: { intValue: 49 }, name: "Станция качества воздуха" },
+            { value: { stringValue: "50" }, name: "Строка" },
+            { value: { intValue: -3 }, name: "Отрицательное" },
+          ],
+        }),
+      ],
+      [
+        emptyListWindowKey,
+        accessoryListWindow(emptyListWindowKey, {
+          read: true,
+          write: false,
+          validValues: [],
+        }),
+      ],
+      [
+        malformedListWindowKey,
+        accessoryListWindow(malformedListWindowKey, {
+          read: true,
+          write: false,
+          validValues: [
+            { value: { stringValue: "49" }, name: "Строка" },
+            { value: { intValue: -1 }, name: "Отрицательное" },
+          ],
+        }),
+      ],
     ]),
   };
 }
@@ -573,6 +641,19 @@ async function collectPagedIdentities(client, entityRef, pointer, maxBytes) {
     assert(Buffer.byteLength(page.content[0].text) <= maxBytes);
   }
   return identities;
+}
+
+async function readAccessoryList(client, windowKey) {
+  const window = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: `${homeRef}/window/${encodeURIComponent(windowKey)}`,
+    },
+  });
+  assert.equal(window.isError, undefined, window.content[0]?.text);
+  return window.structuredContent.entity.options.find(
+    ({ input_type }) => input_type === "ACCESSORY_LIST",
+  );
 }
 
 test("controller children outside rooms are found with settings and a linked accessory", async (t) => {
@@ -885,6 +966,18 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
       ({ kind }) => kind === "extension_child" || kind === undefined,
     ),
   );
+  assert.ok(
+    identities.every((identity) => Object.hasOwn(identity, "space_key")),
+  );
+  assert.ok(
+    identities.some(
+      ({ space_key, id }) => space_key === "main" && id === "bridge-main-1",
+    ),
+  );
+  assert.equal(
+    identities.filter(({ space_key }) => space_key === "notConnected").length,
+    largeChildCount + 2,
+  );
 
   const empty = await client.callTool({
     name: "get_entity",
@@ -935,6 +1028,21 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
   );
   assert.doesNotMatch(JSON.stringify(mismatched), /Controller:other/);
 
+  hub.behavior.childGetMutator = (child) => ({
+    ...child,
+    id: "other-id",
+  });
+  const mismatchedId = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: xiaomiChildRef },
+  });
+  assert.equal(mismatchedId.isError, true);
+  assert.equal(
+    mismatchedId.structuredContent.error.code,
+    "incompatible_response",
+  );
+  assert.doesNotMatch(JSON.stringify(mismatchedId), /other-id/);
+
   const unreliable = await client.callTool({
     name: "get_entity",
     arguments: {
@@ -948,6 +1056,64 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
   assert.equal(unreliableList.linked_accessories.status, "unreliable_form");
   assert.equal(
     Object.hasOwn(unreliableList.linked_accessories, "accessories"),
+    false,
+  );
+});
+
+test("ACCESSORY_LIST claims links only for a confirmed read-only form", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  const writable = await readAccessoryList(client, writableListWindowKey);
+  assert.equal(writable.read, true);
+  assert.equal(writable.write, true);
+  assert.equal(Object.hasOwn(writable, "linked_accessories"), false);
+  assert.deepEqual(
+    writable.valid_values.map(({ value }) => value),
+    [49, 50],
+  );
+
+  const unread = await readAccessoryList(client, unreadListWindowKey);
+  assert.equal(unread.read, false);
+  assert.equal(unread.write, false);
+  assert.equal(Object.hasOwn(unread, "linked_accessories"), false);
+  assert.deepEqual(
+    unread.valid_values.map(({ value }) => value),
+    [49, 50],
+  );
+
+  const mixed = await readAccessoryList(client, mixedListWindowKey);
+  assert.equal(mixed.read, true);
+  assert.equal(mixed.write, false);
+  assert.equal(mixed.linked_accessories.status, "unreliable_form");
+  assert.equal(Object.hasOwn(mixed.linked_accessories, "accessories"), false);
+  assert.deepEqual(
+    mixed.valid_values.map(({ value }) => value),
+    [49, "50", -3],
+  );
+
+  const empty = await readAccessoryList(client, emptyListWindowKey);
+  assert.deepEqual(empty.linked_accessories, {
+    status: "confirmed",
+    accessories: [],
+  });
+
+  const malformed = await readAccessoryList(client, malformedListWindowKey);
+  assert.equal(malformed.linked_accessories.status, "unreliable_form");
+  assert.equal(
+    Object.hasOwn(malformed.linked_accessories, "accessories"),
+    false,
+  );
+
+  const confirmed = await readAccessoryList(client, xiaomiChildWindowKey);
+  assert.deepEqual(confirmed.linked_accessories, {
+    status: "confirmed",
+    accessories: [
+      { ref: linkedAccessoryRef, name: "Станция качества воздуха" },
+    ],
+  });
+  assert.equal(
+    hub.requests.some((request) => isMutation(paramsOf(request))),
     false,
   );
 });
