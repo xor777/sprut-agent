@@ -600,7 +600,14 @@ function respond(states, request, behavior) {
       },
     };
   }
-  if (params.window?.get) return { window: { get: state.window } };
+  if (params.window?.get) {
+    const windowKey = params.window.get.windowKey;
+    const window =
+      state.window.windowKey === windowKey
+        ? state.window
+        : { ...state.window, windowKey };
+    return { window: { get: window } };
+  }
   if (params.scenario?.list) {
     return {
       scenario: {
@@ -627,6 +634,17 @@ function respond(states, request, behavior) {
   }
   if (params.extension?.list)
     return { extension: { list: { extensions: state.extensions } } };
+  if (params.extension?.get) {
+    const key = params.extension.get.extensionKey;
+    const matches = state.extensions.filter(
+      (item) => item.extensionKey === key,
+    );
+    return {
+      extension: {
+        get: matches.length === 1 ? matches[0] : (matches[0] ?? null),
+      },
+    };
+  }
   assert.fail(`unsupported test request: ${JSON.stringify(params)}`);
 }
 
@@ -2720,38 +2738,49 @@ test("extension refs preserve native instance identity", async (t) => {
 });
 
 test("extension catalog rejects missing and conflicting native identity", async (t) => {
-  for (const { mutate, ref, errorCode } of [
-    {
-      mutate: (extensions) => delete extensions[0].extensionKey,
-      ref: "spruthub://hub/home%2FA/extension/yandex",
-      errorCode: "entity_not_found",
-    },
-    {
-      mutate: (extensions) => {
-        extensions[1].extensionKey = extensions[0].extensionKey;
-      },
-      ref: "spruthub://hub/home%2FA/extension/Bridge%3Ayandex_1",
-      errorCode: "incompatible_response",
-    },
-  ]) {
-    const hub = await startHub();
-    mutate(hub.states.get("home/A").extensions);
-    const client = await startClient(t, hub);
-    const result = await client.callTool({
-      name: "inspect_home",
-      arguments: { home_ref: "spruthub://hub/home%2FA" },
-    });
-    assert.equal(result.isError, true);
-    assert.equal(result.structuredContent.error.code, "incompatible_response");
-    assert.doesNotMatch(result.content[0].text, /extension\/yandex/);
+  const hub = await startHub();
+  delete hub.states.get("home/A").extensions[0].extensionKey;
+  const client = await startClient(t, hub);
+  const result = await client.callTool({
+    name: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.code, "incompatible_response");
+  assert.doesNotMatch(result.content[0].text, /extension\/yandex/);
 
-    const read = await client.callTool({
-      name: "get_entity",
-      arguments: { entity_ref: ref },
-    });
-    assert.equal(read.isError, true);
-    assert.equal(read.structuredContent.error.code, errorCode);
-  }
+  const missing = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/extension/yandex",
+    },
+  });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.structuredContent.error.code, "entity_not_found");
+
+  const duplicateHub = await startHub();
+  const extensions = duplicateHub.states.get("home/A").extensions;
+  extensions[1].extensionKey = extensions[0].extensionKey;
+  const duplicateClient = await startClient(t, duplicateHub);
+  const catalog = await duplicateClient.callTool({
+    name: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
+  assert.equal(catalog.isError, true);
+  assert.equal(catalog.structuredContent.error.code, "incompatible_response");
+
+  const duplicateRead = await duplicateClient.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/extension/Bridge%3Ayandex_1",
+    },
+  });
+  assert.equal(
+    duplicateRead.isError,
+    undefined,
+    duplicateRead.content[0]?.text,
+  );
+  assert.equal(duplicateRead.structuredContent.entity.key, "Bridge:yandex_1");
 });
 
 test("missing independent device report stays unknown", async (t) => {

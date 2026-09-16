@@ -1600,7 +1600,9 @@ export class SprutHubClient {
     } else if (parsed.kind === "scenario") {
       entity = await this.#readScenarioEntity(parsed, requested, deadline);
     } else if (parsed.kind === "extension") {
-      entity = await this.#readExtensionEntity(parsed, deadline);
+      entity = await this.#readExtensionEntity(parsed, requested, deadline);
+    } else if (parsed.kind === "extension_child") {
+      entity = await this.#readExtensionChildEntity(parsed, deadline);
     } else if (parsed.kind === "window") {
       entity = await this.#readWindowEntity(parsed, requested, deadline);
     } else {
@@ -1668,10 +1670,7 @@ export class SprutHubClient {
     const observedAt = response.responseReceivedAt;
     validateAccessory(accessory);
     const ownerContext = {
-      device_window_ref:
-        typeof accessory.deviceWindow === "string"
-          ? windowRef(parsed.serial, accessory.deviceWindow)
-          : null,
+      device_window_ref: ownerWindowRef(parsed.serial, accessory.deviceWindow),
     };
     if (parsed.kind === "accessory") {
       const entity = normalizeAccessoryDetail(
@@ -2109,7 +2108,7 @@ export class SprutHubClient {
   }
 
   async #readPhysicalConfiguration(serial, accessory, requested, deadline) {
-    if (typeof accessory.deviceWindow !== "string") {
+    if (ownerWindowRef(serial, accessory.deviceWindow) == null) {
       return { physical_configuration: null };
     }
     const response = await this.#request(
@@ -2188,22 +2187,76 @@ export class SprutHubClient {
     return { kind: "scenario", ...entity };
   }
 
-  async #readExtensionEntity(parsed, deadline) {
+  async #readExtensionEntity(parsed, requested, deadline) {
     const response = await this.#request(
-      { extension: { list: {} } },
+      { extension: { get: { extensionKey: parsed.extensionKey } } },
       deadline,
       { serial: parsed.serial },
     );
-    const extensions = extractEntityArray(response, [
+    const extension = extractEntity(
+      response,
+      ["extension", "get"],
       "extension",
-      "list",
-      "extensions",
-    ]).filter((candidate) => extensionKey(candidate) === parsed.extensionKey);
-    if (extensions.length === 0) throw entityNotFound("extension");
-    if (extensions.length > 1) throw incompatibleExtensionIdentity();
-    return {
+    );
+    if (extensionKey(extension) !== parsed.extensionKey) {
+      throw incompatibleExtensionIdentity();
+    }
+    const entity = {
       kind: "extension",
-      ...normalizeExtension(parsed.serial, extensions[0]),
+      ...normalizeExtensionDetail(parsed.serial, extension),
+    };
+    if (requested.has("children")) {
+      entity.children = await this.#readExtensionChildren(
+        parsed.serial,
+        parsed.extensionKey,
+        deadline,
+      );
+    }
+    return entity;
+  }
+
+  async #readExtensionChildren(serial, selectedExtensionKey, deadline) {
+    const response = await this.#request(
+      { extensionChild: { list: { extensionKey: selectedExtensionKey } } },
+      deadline,
+      { serial },
+    );
+    const children = extractEntityArray(response, [
+      "extensionChild",
+      "list",
+      "children",
+    ]);
+    return normalizeExtensionChildren(serial, children, selectedExtensionKey);
+  }
+
+  async #readExtensionChildEntity(parsed, deadline) {
+    const response = await this.#request(
+      {
+        extensionChild: {
+          get: { extensionKey: parsed.extensionKey, id: parsed.childId },
+        },
+      },
+      deadline,
+      { serial: parsed.serial },
+    );
+    const child = extractEntity(
+      response,
+      ["extensionChild", "get"],
+      "extension child",
+    );
+    if (
+      extensionKey(child) !== parsed.extensionKey ||
+      child?.id !== parsed.childId
+    ) {
+      throw incompatibleExtensionChildIdentity();
+    }
+    return {
+      kind: "extension_child",
+      ...normalizeExtensionChildDetail(
+        parsed.serial,
+        child,
+        parsed.extensionKey,
+      ),
     };
   }
 
@@ -2214,6 +2267,12 @@ export class SprutHubClient {
       { serial: parsed.serial },
     );
     const window = extractEntity(response, ["window", "get"], "window");
+    if (window.windowKey !== parsed.windowKey) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incomplete device-window data.",
+      );
+    }
     const normalized = normalizeWindow(
       parsed.serial,
       window,
@@ -2858,6 +2917,9 @@ function normalizeHome(home, observedAt) {
       version: home.version?.current?.version ?? null,
       revision: home.version?.current?.revision ?? null,
     },
+    ...(typeof home.optionsWindow === "string"
+      ? { options_window_ref: windowRef(home.serial, home.optionsWindow) }
+      : {}),
     observed_at: observedAt,
   };
 }
@@ -2910,8 +2972,20 @@ function extensionRef(serial, key) {
   return `${homeRef(serial)}/extension/${encodeURIComponent(key)}`;
 }
 
+function extensionChildRef(serial, key, id) {
+  return `${extensionRef(serial, key)}/child/${encodeURIComponent(id)}`;
+}
+
 function windowRef(serial, key) {
   return `${homeRef(serial)}/window/${encodeURIComponent(key)}`;
+}
+
+function ownerWindowRef(serial, key) {
+  // Hub optionsWindow may be ""; frontend treats empty device/extension
+  // windows as absent.
+  return typeof key === "string" && key.length > 0
+    ? windowRef(serial, key)
+    : null;
 }
 
 function logicRef(serial, accessoryId, serviceId, type) {
@@ -3123,7 +3197,7 @@ function parseEntityRef(ref) {
   if (url.protocol !== "spruthub:" || url.hostname !== "hub") {
     throw invalidEntityRef();
   }
-  const encoded = url.pathname.split("/").filter(Boolean);
+  const encoded = entityPathSegments(url.pathname);
   if (encoded.length === 0) throw invalidEntityRef();
   let segments;
   try {
@@ -3142,6 +3216,21 @@ function parseEntityRef(ref) {
   }
   if (segments.length === 3 && segments[1] === "extension") {
     return { kind: "extension", serial, extensionKey: segments[2] };
+  }
+  if (
+    segments.length === 5 &&
+    segments[1] === "extension" &&
+    segments[3] === "child"
+  ) {
+    const childExtensionKey = segments[2];
+    const childId = segments[4];
+    if (!childExtensionKey || !childId) throw invalidEntityRef();
+    return {
+      kind: "extension_child",
+      serial,
+      extensionKey: childExtensionKey,
+      childId,
+    };
   }
   if (segments.length === 3 && segments[1] === "window") {
     return { kind: "window", serial, windowKey: segments[2] };
@@ -3173,6 +3262,16 @@ function parseEntityRef(ref) {
     };
   }
   throw invalidEntityRef();
+}
+
+function entityPathSegments(pathname) {
+  if (!pathname.startsWith("/")) throw invalidEntityRef();
+  const raw = pathname.slice(1).split("/");
+  return raw.filter((segment, index) => {
+    if (segment.length > 0) return true;
+    // windowRef(serial, "") ends with /window/; keep that empty key.
+    return index === raw.length - 1 && raw.length === 3 && raw[1] === "window";
+  });
 }
 
 function parseEntityId(value) {
@@ -3462,6 +3561,13 @@ function normalizeExtension(serial, extension) {
   ) {
     throw incompatibleExtensionIdentity();
   }
+  if (
+    Object.hasOwn(extension, "childCount") &&
+    !Number.isSafeInteger(extension.childCount)
+  ) {
+    throw incompatibleExtensionIdentity();
+  }
+  const mainWindowRef = ownerWindowRef(serial, extension.mainWindow);
   return {
     ref: extensionRef(serial, key),
     key,
@@ -3471,14 +3577,133 @@ function normalizeExtension(serial, extension) {
       typeof extension.index === "string"
         ? redactSensitiveText(extension.index)
         : null,
-    options_window_ref:
-      typeof extension.optionsWindow === "string"
-        ? windowRef(serial, extension.optionsWindow)
-        : null,
+    options_window_ref: ownerWindowRef(serial, extension.optionsWindow),
+    ...(mainWindowRef ? { main_window_ref: mainWindowRef } : {}),
+    ...(Object.hasOwn(extension, "childCount")
+      ? { child_count: extension.childCount }
+      : {}),
     bundle_type: extension.bundleType ?? null,
     enabled: extension.enabled === true,
     state: extension.state ?? null,
   };
+}
+
+function normalizeExtensionDetail(serial, extension) {
+  const spaces = normalizeExtensionSpaces(extension.spaces);
+  return {
+    ...normalizeExtension(serial, extension),
+    ...(spaces ? { spaces } : {}),
+  };
+}
+
+function normalizeExtensionSpaces(spaces) {
+  if (spaces === undefined) return undefined;
+  if (!Array.isArray(spaces)) {
+    throw incompatibleExtensionIdentity();
+  }
+  return spaces.map((space) => {
+    if (typeof space?.key !== "string" || space.key.length === 0) {
+      throw incompatibleExtensionIdentity();
+    }
+    return {
+      key: redactSensitiveText(space.key),
+      type:
+        typeof space.type === "string" ? redactSensitiveText(space.type) : null,
+      label: normalizeFormLabel(space.label),
+    };
+  });
+}
+
+function normalizeFormLabel(label) {
+  if (!label || typeof label !== "object" || Array.isArray(label)) return null;
+  const normalized = {};
+  for (const field of ["header", "text", "button"]) {
+    if (typeof label[field] === "string") {
+      normalized[field] = redactSensitiveText(label[field]);
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function incompatibleExtensionChildIdentity() {
+  return new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned an extension child that does not match the requested identity.",
+    "inspect_home",
+  );
+}
+
+function normalizeExtensionChildren(serial, children, expectedExtensionKey) {
+  const normalized = children.map((child) =>
+    normalizeExtensionChildSummary(serial, child, expectedExtensionKey),
+  );
+  if (new Set(normalized.map(({ id }) => id)).size !== normalized.length) {
+    throw incompatibleExtensionChildIdentity();
+  }
+  return normalized;
+}
+
+function normalizeExtensionChildSummary(serial, child, expectedExtensionKey) {
+  validateExtensionChildIdentity(child, expectedExtensionKey);
+  return {
+    kind: "extension_child",
+    ref: extensionChildRef(serial, child.extensionKey, child.id),
+    id: child.id,
+    space_key:
+      typeof child.spaceKey === "string"
+        ? redactSensitiveText(child.spaceKey)
+        : null,
+    name:
+      typeof child.name === "string" ? redactSensitiveText(child.name) : null,
+    // Missing online is unknown; native space membership is a separate fact.
+    online: typeof child.online === "boolean" ? child.online : null,
+    options_window_ref: ownerWindowRef(serial, child.optionsWindow),
+  };
+}
+
+function normalizeExtensionChildDetail(serial, child, expectedExtensionKey) {
+  const features = normalizeFeatureList(child.features);
+  const transports = normalizeFeatureList(child.transports);
+  return {
+    ...normalizeExtensionChildSummary(serial, child, expectedExtensionKey),
+    extension_ref: extensionRef(serial, child.extensionKey),
+    description:
+      typeof child.description === "string"
+        ? redactSensitiveText(child.description)
+        : null,
+    status:
+      typeof child.status === "string"
+        ? redactSensitiveText(child.status)
+        : null,
+    ...(Number.isSafeInteger(child.groupId) ? { group_id: child.groupId } : {}),
+    ...(features ? { features } : {}),
+    ...(transports ? { transports } : {}),
+  };
+}
+
+function validateExtensionChildIdentity(child, expectedExtensionKey) {
+  if (
+    typeof child?.id !== "string" ||
+    child.id.length === 0 ||
+    extensionKey(child) !== expectedExtensionKey
+  ) {
+    throw incompatibleExtensionChildIdentity();
+  }
+}
+
+function normalizeFeatureList(list) {
+  if (list === undefined) return undefined;
+  if (!Array.isArray(list)) {
+    throw incompatibleExtensionChildIdentity();
+  }
+  return list.map((item) => ({
+    type:
+      typeof item?.type === "string" ? redactSensitiveText(item.type) : null,
+    ...(typeof item?.count === "number" ? { count: item.count } : {}),
+    ...(typeof item?.label === "string"
+      ? { label: redactSensitiveText(item.label) }
+      : {}),
+  }));
 }
 
 function normalizeAccessoryDetail(serial, accessory, observedAt) {
@@ -3491,10 +3716,7 @@ function normalizeAccessoryDetail(serial, accessory, observedAt) {
     native: {
       extension_key: accessory.extensionKey ?? null,
       device_id: accessory.deviceId ?? null,
-      device_window_ref:
-        typeof accessory.deviceWindow === "string"
-          ? windowRef(serial, accessory.deviceWindow)
-          : null,
+      device_window_ref: ownerWindowRef(serial, accessory.deviceWindow),
     },
     services: (accessory.services ?? []).map((service) =>
       normalizeServiceDetail(serial, accessory, service, observedAt),
@@ -3638,6 +3860,9 @@ function includeWasApplied(entity, include) {
       Object.hasOwn(entity, "diagnostics")
     );
   }
+  if (include === "children") {
+    return entity.kind === "extension" && Object.hasOwn(entity, "children");
+  }
   return false;
 }
 
@@ -3697,7 +3922,7 @@ function nextReadTowardOwner(entity, include, ownerContext) {
   }
 
   if (
-    entity.kind === "extension" &&
+    ["extension", "extension_child"].includes(entity.kind) &&
     typeof entity.options_window_ref === "string" &&
     ["options", "physical_configuration", "diagnostics"].includes(include)
   ) {
@@ -3754,7 +3979,8 @@ function ownerCandidatesFromContainer(entity, include) {
 
 function ownerScopeReason(entity, include) {
   if (entity.kind === "home") return "catalog_required";
-  if (entity.kind === "extension") return "window_scoped";
+  if (["extension", "extension_child"].includes(entity.kind))
+    return "window_scoped";
   if (include === "configuration") return "scenario_scoped";
   if (include === "options") {
     if (entity.kind === "scenario") return "window_scoped";
@@ -3788,6 +4014,9 @@ function normalizeOption(option, changeContext) {
     write: option.write === true,
     events: option.events === true,
     ...(option.inputType ? { input_type: option.inputType } : {}),
+    ...(typeof option.parent === "string" && option.parent.length > 0
+      ? { parent: redactSensitiveText(option.parent) }
+      : {}),
     ...(option.minValue !== undefined ? { min: option.minValue } : {}),
     ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
     ...(option.minStep !== undefined ? { step: option.minStep } : {}),
@@ -3825,7 +4054,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     ["HTML", "INFO", "CLIPBOARD"].includes(option.inputType),
   );
   const layoutOptions = window.options.filter(({ inputType }) =>
-    ["GROUP", "LABEL", "DIVIDER"].includes(inputType),
+    ["GROUP", "FOLDER", "LABEL", "DIVIDER"].includes(inputType),
   );
   const commandOptions = window.options.filter(({ inputType }) =>
     inputType?.startsWith("BUTTON"),
@@ -3841,9 +4070,11 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
       const normalized = normalizeOption(option, {
         operation: "window_option",
         targetRef: windowRef(serial, window.windowKey),
+        writesSupported: window.windowKey !== "",
       });
       if (normalized.redacted) return normalized;
       const property = propertyFromNativeOptionKey(option.key);
+      const linkedAccessories = linkedAccessoriesFromOption(serial, option);
       return {
         ...normalized,
         ...(property
@@ -3854,6 +4085,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
               reported_observed_at: null,
             }
           : {}),
+        ...(linkedAccessories ? { linked_accessories: linkedAccessories } : {}),
         pending: "unknown",
         source_timestamp: null,
       };
@@ -3915,6 +4147,38 @@ function propertyFromNativeOptionKey(key) {
   return match?.[1] ?? null;
 }
 
+function linkedAccessoriesFromOption(serial, option) {
+  if (option.inputType !== "ACCESSORY_LIST") return undefined;
+  // Writable picker validValues are candidates, not existing links.
+  if (option.read !== true || option.write === true) return undefined;
+  // Current value 0 is a placeholder, not an accessory id. Only a fully
+  // parseable validValues.intValue list is a confirmed accessory set.
+  if (
+    !Object.hasOwn(option, "validValues") ||
+    !Array.isArray(option.validValues)
+  ) {
+    return { status: "unreliable_form" };
+  }
+  const accessories = [];
+  for (const candidate of option.validValues) {
+    const typed = extractTypedValue(candidate?.value);
+    if (
+      !typed.found ||
+      typed.field !== "intValue" ||
+      !isStableId(typed.value)
+    ) {
+      return { status: "unreliable_form" };
+    }
+    accessories.push({
+      ref: accessoryRef(serial, typed.value),
+      ...(typeof candidate.name === "string"
+        ? { name: redactSensitiveText(candidate.name) }
+        : {}),
+    });
+  }
+  return { status: "confirmed", accessories };
+}
+
 function normalizeWindowControl(option) {
   return {
     key: redactSensitiveText(option.key ?? ""),
@@ -3924,7 +4188,7 @@ function normalizeWindowControl(option) {
       typeof option.type === "string" ? redactSensitiveText(option.type) : null,
     input_type: option.inputType ?? null,
     parent:
-      typeof option.parent === "string"
+      typeof option.parent === "string" && option.parent.length > 0
         ? redactSensitiveText(option.parent)
         : null,
   };
@@ -4029,8 +4293,15 @@ function normalizeLogicOption(option, changeContext) {
 
 function publicNativeOptionChange(
   option,
-  { operation, targetRef, allowText = false },
+  { operation, targetRef, allowText = false, writesSupported = true },
 ) {
+  if (!writesSupported) {
+    return {
+      native_write: option.write === true,
+      supported: false,
+      reason: "unsupported_home_settings_write",
+    };
+  }
   const inspected = inspectNativeOption(option, { allowText });
   if (!inspected.supported) {
     return {
