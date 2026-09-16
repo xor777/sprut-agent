@@ -2214,6 +2214,12 @@ export class SprutHubClient {
       { serial: parsed.serial },
     );
     const window = extractEntity(response, ["window", "get"], "window");
+    if (window.windowKey !== parsed.windowKey) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incomplete device-window data.",
+      );
+    }
     const normalized = normalizeWindow(
       parsed.serial,
       window,
@@ -2858,6 +2864,9 @@ function normalizeHome(home, observedAt) {
       version: home.version?.current?.version ?? null,
       revision: home.version?.current?.revision ?? null,
     },
+    ...(typeof home.optionsWindow === "string"
+      ? { options_window_ref: windowRef(home.serial, home.optionsWindow) }
+      : {}),
     observed_at: observedAt,
   };
 }
@@ -3127,7 +3136,7 @@ function parseEntityRef(ref) {
   if (url.protocol !== "spruthub:" || url.hostname !== "hub") {
     throw invalidEntityRef();
   }
-  const encoded = url.pathname.split("/").filter(Boolean);
+  const encoded = entityPathSegments(url.pathname);
   if (encoded.length === 0) throw invalidEntityRef();
   let segments;
   try {
@@ -3192,6 +3201,16 @@ function parseEntityRef(ref) {
     };
   }
   throw invalidEntityRef();
+}
+
+function entityPathSegments(pathname) {
+  if (!pathname.startsWith("/")) throw invalidEntityRef();
+  const raw = pathname.slice(1).split("/");
+  return raw.filter((segment, index) => {
+    if (segment.length > 0) return true;
+    // windowRef(serial, "") ends with /window/; keep that empty key.
+    return index === raw.length - 1 && raw.length === 3 && raw[1] === "window";
+  });
 }
 
 function parseEntityId(value) {
@@ -3927,6 +3946,9 @@ function normalizeOption(option, changeContext) {
     write: option.write === true,
     events: option.events === true,
     ...(option.inputType ? { input_type: option.inputType } : {}),
+    ...(typeof option.parent === "string" && option.parent.length > 0
+      ? { parent: redactSensitiveText(option.parent) }
+      : {}),
     ...(option.minValue !== undefined ? { min: option.minValue } : {}),
     ...(option.maxValue !== undefined ? { max: option.maxValue } : {}),
     ...(option.minStep !== undefined ? { step: option.minStep } : {}),
@@ -3964,7 +3986,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     ["HTML", "INFO", "CLIPBOARD"].includes(option.inputType),
   );
   const layoutOptions = window.options.filter(({ inputType }) =>
-    ["GROUP", "LABEL", "DIVIDER"].includes(inputType),
+    ["GROUP", "FOLDER", "LABEL", "DIVIDER"].includes(inputType),
   );
   const commandOptions = window.options.filter(({ inputType }) =>
     inputType?.startsWith("BUTTON"),
@@ -3980,6 +4002,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
       const normalized = normalizeOption(option, {
         operation: "window_option",
         targetRef: windowRef(serial, window.windowKey),
+        writesSupported: window.windowKey !== "",
       });
       if (normalized.redacted) return normalized;
       const property = propertyFromNativeOptionKey(option.key);
@@ -4097,7 +4120,7 @@ function normalizeWindowControl(option) {
       typeof option.type === "string" ? redactSensitiveText(option.type) : null,
     input_type: option.inputType ?? null,
     parent:
-      typeof option.parent === "string"
+      typeof option.parent === "string" && option.parent.length > 0
         ? redactSensitiveText(option.parent)
         : null,
   };
@@ -4200,7 +4223,17 @@ function normalizeLogicOption(option, changeContext) {
   };
 }
 
-function publicNativeOptionChange(option, { operation, targetRef }) {
+function publicNativeOptionChange(
+  option,
+  { operation, targetRef, writesSupported = true },
+) {
+  if (!writesSupported) {
+    return {
+      native_write: option.write === true,
+      supported: false,
+      reason: "unsupported_home_settings_write",
+    };
+  }
   const inspected = inspectNativeOption(option);
   if (!inspected.supported) {
     return {

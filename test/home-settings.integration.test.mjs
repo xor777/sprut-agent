@@ -424,8 +424,7 @@ test("selected home empty optionsWindow is an executable settings window with hu
     ({ ref }) => ref === otherHomeRef,
   );
   assert.equal(selected.options_window_ref, selectedRootWindowRef);
-  assert.equal(other.options_window_ref, null);
-  assert.equal(Object.hasOwn(other, "options_window_ref"), true);
+  assert.equal(Object.hasOwn(other, "options_window_ref"), false);
   const catalogText = JSON.stringify(catalog.structuredContent);
   assert.equal(catalogText.includes(hubClock), false);
   assert.equal(catalogText.includes(wifiSecret), false);

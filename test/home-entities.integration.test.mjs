@@ -600,7 +600,14 @@ function respond(states, request, behavior) {
       },
     };
   }
-  if (params.window?.get) return { window: { get: state.window } };
+  if (params.window?.get) {
+    const windowKey = params.window.get.windowKey;
+    const window =
+      state.window.windowKey === windowKey
+        ? state.window
+        : { ...state.window, windowKey };
+    return { window: { get: window } };
+  }
   if (params.scenario?.list) {
     return {
       scenario: {

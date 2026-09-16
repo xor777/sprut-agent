@@ -3647,6 +3647,7 @@ export class AutomationService {
   }
 
   async #readWindowOption(target, optionKey) {
+    assertWindowOptionWritable(target.windowKey);
     if (typeof optionKey !== "string" || optionKey.length === 0) {
       throw new SprutHubError(
         "option_key_required",
@@ -3753,6 +3754,7 @@ export class AutomationService {
       });
     }
     if (change.kind === "window_option") {
+      assertWindowOptionWritable(change.target.windowKey);
       return this.client.updateWindowOption({
         ...change.target,
         key: change.option_key,
@@ -5404,7 +5406,7 @@ function parseScenarioRef(ref, configuredSerial) {
 }
 
 function parseWindowRef(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)\/window\/([^/]+)$/.exec(ref);
+  const match = /^spruthub:\/\/hub\/([^/]+)\/window\/([^/]*)$/.exec(ref);
   if (!match) {
     throw new SprutHubError(
       "invalid_window_ref",
@@ -5414,15 +5416,16 @@ function parseWindowRef(ref, configuredSerial) {
   }
   const serial = decodeReferenceSegment(match[1]);
   requireConfiguredHome(serial, configuredSerial);
-  const windowKey = decodeReferenceSegment(match[2]);
-  if (windowKey.length === 0) {
-    throw new SprutHubError(
-      "invalid_window_ref",
-      "Use a home-qualified window reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  return { windowKey };
+  return { windowKey: decodeReferenceSegment(match[2]) };
+}
+
+function assertWindowOptionWritable(windowKey) {
+  if (windowKey !== "") return;
+  throw new SprutHubError(
+    "unsupported_window_option",
+    "Home settings windows are read-only in this slice; clock, timezone, network, and security options cannot be changed through native write tools.",
+    "get_entity",
+  );
 }
 
 function parseLogicRef(ref, configuredSerial) {
