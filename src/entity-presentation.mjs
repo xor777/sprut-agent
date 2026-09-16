@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { SprutHubError } from "./spruthub-client.mjs";
 
-const IDENTITY_KEYS = ["kind", "ref", "name", "type", "key", "id"];
+const IDENTITY_KEYS = ["kind", "ref", "name", "type", "key", "id", "space_key"];
 
 export function presentEntityResult(
   result,

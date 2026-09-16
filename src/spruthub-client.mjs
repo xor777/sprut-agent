@@ -4058,8 +4058,10 @@ function propertyFromNativeOptionKey(key) {
 
 function linkedAccessoriesFromOption(serial, option) {
   if (option.inputType !== "ACCESSORY_LIST") return undefined;
-  // Current value 0 is a placeholder, not an accessory id. Only confirmed
-  // validValues.intValue entries are executable accessory refs.
+  // Writable picker validValues are candidates, not existing links.
+  if (option.read !== true || option.write === true) return undefined;
+  // Current value 0 is a placeholder, not an accessory id. Only a fully
+  // parseable validValues.intValue list is a confirmed accessory set.
   if (
     !Object.hasOwn(option, "validValues") ||
     !Array.isArray(option.validValues)
@@ -4074,7 +4076,7 @@ function linkedAccessoriesFromOption(serial, option) {
       typed.field !== "intValue" ||
       !isStableId(typed.value)
     ) {
-      continue;
+      return { status: "unreliable_form" };
     }
     accessories.push({
       ref: accessoryRef(serial, typed.value),
@@ -4082,9 +4084,6 @@ function linkedAccessoriesFromOption(serial, option) {
         ? { name: redactSensitiveText(candidate.name) }
         : {}),
     });
-  }
-  if (accessories.length === 0 && option.validValues.length > 0) {
-    return { status: "unreliable_form" };
   }
   return { status: "confirmed", accessories };
 }

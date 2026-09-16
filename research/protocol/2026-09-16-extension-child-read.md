@@ -42,7 +42,10 @@ child в `main` может иметь `online=false` и отдавать окн�
 
 В окне связь с аксессуаром — read-only `inputType=ACCESSORY_LIST`,
 `value.intValue=0` не является accessory id; связанные id только в
-`validValues[].value.intValue`. Имя key не контракт.
+`validValues[].value.intValue`. Имя key не контракт. Writable
+ACCESSORY_LIST на хабе не наблюдался: продукт не выдаёт
+`linked_accessories` без `read=true` и `write!==true`, а смешанную
+форму validValues не помечает частичным confirmed.
 
 `device.get` и `device.getAccessories` ответили `-32601` Module not found.
 Ошибка хаба может копировать служебный envelope.
@@ -50,8 +53,10 @@ child в `main` может иметь `online=false` и отдавать окн�
 ## Подтверждённый вывод
 
 Рабочий MCP-маршрут: list → get extension → list/get extensionChild →
-window.get. `space_key` объясняет принадлежность, online — отдельный факт.
-ACCESSORY_LIST refs строятся из validValues.intValue. device.* не использовать.
+window.get. `space_key` объясняет принадлежность, online — отдельный факт;
+в ограниченной выдаче children `space_key` сохраняется в identity части.
+ACCESSORY_LIST refs строятся только из read-only validValues.intValue.
+device.* не использовать.
 
 ## Ограничения
 
