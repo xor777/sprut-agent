@@ -385,6 +385,9 @@ async function startHub() {
     scenarioGetErrors: new Map(),
     scenarioListErrors: new Map(),
     missingScenarioGets: new Set(),
+    missingScenarioGetEnvelopes: new Set(),
+    scenarioListFails: false,
+    invalidScenarioList: false,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -420,6 +423,16 @@ async function startHub() {
           JSON.stringify({
             id: request.id,
             error: scenarioGetError,
+          }),
+        );
+        return;
+      }
+      if (behavior.scenarioListFails && request.params.scenario?.list) {
+        responseSentAt.push({ request, at: Date.now() });
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            error: { code: -32000, message: "Native list failure" },
           }),
         );
         return;
@@ -609,6 +622,9 @@ function respond(states, request, behavior) {
     return { window: { get: window } };
   }
   if (params.scenario?.list) {
+    if (behavior.invalidScenarioList) {
+      return { scenario: { list: { scenarios: {} } } };
+    }
     return {
       scenario: {
         list: {
@@ -622,6 +638,9 @@ function respond(states, request, behavior) {
     };
   }
   if (params.scenario?.get) {
+    if (behavior.missingScenarioGetEnvelopes.has(params.scenario.get.index)) {
+      return { scenario: {} };
+    }
     return {
       scenario: {
         get: behavior.missingScenarioGets.has(params.scenario.get.index)
@@ -3148,6 +3167,185 @@ test("coverage names only observed operations and -32601 is unsupported", async 
   assert.equal(unsupported.isError, true);
   assert.equal(unsupported.structuredContent.error.code, "unsupported");
   assert.equal(unsupported.structuredContent.capability_status, "unsupported");
+});
+
+test("get_entity confirms a deleted scenario from catalog absence instead of a generic rejection", async (t) => {
+  const hub = await startHub();
+  hub.states.get("home B").scenarios.push({
+    index: "deleted-50",
+    name: "Сценарий другого дома",
+    type: "BLOCK",
+    predefined: false,
+    active: false,
+    data: "{}",
+  });
+  hub.states.get("home/A").scenarios.push({
+    index: "only-on-A",
+    name: "Сценарий только этого дома",
+    type: "BLOCK",
+    predefined: false,
+    active: false,
+    data: "{}",
+  });
+  const client = await startClient(t, hub);
+  const deletedRef = "spruthub://hub/home%2FA/scenario/deleted-50";
+  hub.behavior.scenarioGetErrors.set("deleted-50", {
+    code: -32603,
+    message: "Not found: 'Scenario deleted-50'",
+  });
+
+  const requestsBeforeMissing = hub.requests.length;
+  const missing = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: deletedRef },
+  });
+  assert.equal(missing.isError, true, missing.content[0]?.text);
+  assert.equal(missing.structuredContent.error.code, "entity_not_found");
+  assert.equal(missing.structuredContent.error.action, "inspect_home");
+  assert.deepEqual(missing.structuredContent.next, {
+    tool: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
+
+  const missingRequests = hub.requests.slice(requestsBeforeMissing);
+  const scenarioGets = missingRequests.filter(
+    ({ params }) => params.scenario?.get,
+  );
+  const scenarioLists = missingRequests.filter(
+    ({ params }) => params.scenario?.list,
+  );
+  assert.equal(scenarioGets.length, 1);
+  assert.equal(scenarioGets[0].serial, "home/A");
+  assert.equal(scenarioGets[0].params.scenario.get.index, "deleted-50");
+  assert.equal("expand" in scenarioGets[0].params.scenario.get, false);
+  assert.equal(scenarioLists.length, 1);
+  assert.equal(scenarioLists[0].serial, "home/A");
+  assert.deepEqual(scenarioLists[0].params.scenario.list, {});
+  assert.equal(
+    missingRequests.some(
+      ({ params }) =>
+        params.scenario?.create ||
+        params.scenario?.update ||
+        params.scenario?.delete,
+    ),
+    false,
+  );
+
+  const catalog = await client.callTool({
+    name: missing.structuredContent.next.tool,
+    arguments: missing.structuredContent.next.arguments,
+  });
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.deepEqual(
+    catalog.structuredContent.entities.scenarios.map(({ ref }) => ref),
+    [
+      "spruthub://hub/home%2FA/scenario/motion-block",
+      "spruthub://hub/home%2FA/scenario/global-code",
+      "spruthub://hub/home%2FA/scenario/only-on-A",
+    ],
+  );
+
+  hub.behavior.scenarioGetErrors.set("motion-block", {
+    code: -32603,
+    message: "Not found: 'Scenario motion-block'",
+  });
+  const stillListed = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/motion-block",
+    },
+  });
+  assert.equal(stillListed.isError, true);
+  assert.equal(stillListed.structuredContent.error.code, "request_rejected");
+
+  hub.behavior.scenarioGetErrors.set("only-on-A", {
+    code: -32603,
+    message: "Not found: 'Scenario only-on-A'",
+  });
+  const otherHome = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%20B/scenario/only-on-A",
+    },
+  });
+  assert.equal(otherHome.isError, true);
+  assert.equal(otherHome.structuredContent.error.code, "entity_not_found");
+  assert.deepEqual(otherHome.structuredContent.next, {
+    tool: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%20B" },
+  });
+
+  hub.behavior.missingScenarioGets.add("ghost-null");
+  const explicitNull = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/ghost-null",
+    },
+  });
+  assert.equal(explicitNull.isError, true);
+  assert.equal(explicitNull.structuredContent.error.code, "entity_not_found");
+  assert.deepEqual(explicitNull.structuredContent.next, {
+    tool: "inspect_home",
+    arguments: { home_ref: "spruthub://hub/home%2FA" },
+  });
+
+  hub.behavior.scenarioGetErrors.set("global-code", {
+    code: -32000,
+    message: "Native failure",
+  });
+  const otherError = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/global-code",
+    },
+  });
+  assert.equal(otherError.isError, true);
+  assert.equal(otherError.structuredContent.error.code, "request_rejected");
+
+  hub.behavior.scenarioGetErrors.set("catalog-fail", {
+    code: -32603,
+    message: "Not found: 'Scenario catalog-fail'",
+  });
+  hub.behavior.scenarioListFails = true;
+  const catalogFailed = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/catalog-fail",
+    },
+  });
+  hub.behavior.scenarioListFails = false;
+  assert.equal(catalogFailed.isError, true);
+  assert.notEqual(
+    catalogFailed.structuredContent.error.code,
+    "entity_not_found",
+  );
+
+  hub.behavior.invalidScenarioList = true;
+  const corruptCatalog = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/catalog-fail",
+    },
+  });
+  hub.behavior.invalidScenarioList = false;
+  assert.equal(corruptCatalog.isError, true);
+  assert.equal(
+    corruptCatalog.structuredContent.error.code,
+    "incompatible_response",
+  );
+
+  hub.behavior.missingScenarioGetEnvelopes.add("no-envelope");
+  const noEnvelope = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/scenario/no-envelope",
+    },
+  });
+  assert.equal(noEnvelope.isError, true);
+  assert.equal(
+    noEnvelope.structuredContent.error.code,
+    "incompatible_response",
+  );
 });
 
 test("scenario detail returns native BLOCK data and redacted code instead of trusting names", async (t) => {
