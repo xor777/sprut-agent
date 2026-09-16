@@ -39,6 +39,13 @@ INFO. NTP1/2 — TEXT под ntp. Наличие NTP-серверов не до�
 пустой строки. Корневое окно в этом срезе read-only: native `write:true` не
 открывает `window.update`.
 
+Официальный frontend для extension рисует настройки только при truthy
+`optionsWindow`, для accessory — при truthy `deviceWindow`. Пустая строка у
+этих владельцев — отсутствие окна прибора, не корневой ключ хаба. Живого
+пустого `deviceWindow`/`optionsWindow` у accessory/extension на хабе не
+наблюдалось; JSON-RPC сериализатор для non-optional string уже отдавал `""`
+у `Hub.optionsWindow`.
+
 ## Ограничения
 
 Чтение не доказывает точность часов, физический runtime расписаний или

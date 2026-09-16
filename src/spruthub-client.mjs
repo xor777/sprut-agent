@@ -1653,10 +1653,7 @@ export class SprutHubClient {
     const observedAt = response.responseReceivedAt;
     validateAccessory(accessory);
     const ownerContext = {
-      device_window_ref:
-        typeof accessory.deviceWindow === "string"
-          ? windowRef(parsed.serial, accessory.deviceWindow)
-          : null,
+      device_window_ref: ownerWindowRef(parsed.serial, accessory.deviceWindow),
     };
     if (parsed.kind === "accessory") {
       const entity = normalizeAccessoryDetail(
@@ -2094,7 +2091,7 @@ export class SprutHubClient {
   }
 
   async #readPhysicalConfiguration(serial, accessory, requested, deadline) {
-    if (typeof accessory.deviceWindow !== "string") {
+    if (ownerWindowRef(serial, accessory.deviceWindow) == null) {
       return { physical_configuration: null };
     }
     const response = await this.#request(
@@ -2927,6 +2924,14 @@ function windowRef(serial, key) {
   return `${homeRef(serial)}/window/${encodeURIComponent(key)}`;
 }
 
+function ownerWindowRef(serial, key) {
+  // Hub optionsWindow may be ""; frontend treats empty device/extension
+  // windows as absent.
+  return typeof key === "string" && key.length > 0
+    ? windowRef(serial, key)
+    : null;
+}
+
 function logicRef(serial, accessoryId, serviceId, type) {
   return `${serviceRef(serial, accessoryId, serviceId)}/logic/${encodeURIComponent(type)}`;
 }
@@ -3501,6 +3506,7 @@ function normalizeExtension(serial, extension) {
   ) {
     throw incompatibleExtensionIdentity();
   }
+  const mainWindowRef = ownerWindowRef(serial, extension.mainWindow);
   return {
     ref: extensionRef(serial, key),
     key,
@@ -3510,13 +3516,8 @@ function normalizeExtension(serial, extension) {
       typeof extension.index === "string"
         ? redactSensitiveText(extension.index)
         : null,
-    options_window_ref:
-      typeof extension.optionsWindow === "string"
-        ? windowRef(serial, extension.optionsWindow)
-        : null,
-    ...(typeof extension.mainWindow === "string"
-      ? { main_window_ref: windowRef(serial, extension.mainWindow) }
-      : {}),
+    options_window_ref: ownerWindowRef(serial, extension.optionsWindow),
+    ...(mainWindowRef ? { main_window_ref: mainWindowRef } : {}),
     ...(Object.hasOwn(extension, "childCount")
       ? { child_count: extension.childCount }
       : {}),
@@ -3595,10 +3596,7 @@ function normalizeExtensionChildSummary(serial, child, expectedExtensionKey) {
       typeof child.name === "string" ? redactSensitiveText(child.name) : null,
     // Missing online is unknown; native space membership is a separate fact.
     online: typeof child.online === "boolean" ? child.online : null,
-    options_window_ref:
-      typeof child.optionsWindow === "string"
-        ? windowRef(serial, child.optionsWindow)
-        : null,
+    options_window_ref: ownerWindowRef(serial, child.optionsWindow),
   };
 }
 
@@ -3657,10 +3655,7 @@ function normalizeAccessoryDetail(serial, accessory, observedAt) {
     native: {
       extension_key: accessory.extensionKey ?? null,
       device_id: accessory.deviceId ?? null,
-      device_window_ref:
-        typeof accessory.deviceWindow === "string"
-          ? windowRef(serial, accessory.deviceWindow)
-          : null,
+      device_window_ref: ownerWindowRef(serial, accessory.deviceWindow),
     },
     services: (accessory.services ?? []).map((service) =>
       normalizeServiceDetail(serial, accessory, service, observedAt),
