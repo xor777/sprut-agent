@@ -6,10 +6,8 @@ import {
   configurationPointRef,
   parseConfigurationPointRef,
 } from "./configuration-point-store.mjs";
-import { inspectNativeOption } from "./native-option-contract.mjs";
 import {
   isRedactedNode,
-  isSensitiveNativeNode,
   parseEntityRef,
   SprutHubError,
 } from "./spruthub-client.mjs";
@@ -171,9 +169,9 @@ export class ConfigurationPointService {
         });
         continue;
       }
-      const { changes, not_compared } = diffSettings(
-        captured.settings,
-        current.captured.settings,
+      const { changes, not_compared } = diffCaptured(
+        captured,
+        current.captured,
       );
       entities.push({
         entity_ref: captured.entity_ref,
@@ -209,16 +207,13 @@ export class ConfigurationPointService {
     }
     let entity;
     try {
-      const include = parsed.kind === "scenario" ? ["configuration"] : [];
+      const include =
+        parsed.kind === "scenario"
+          ? ["configuration"]
+          : parsed.kind === "logic"
+            ? ["options"]
+            : [];
       ({ entity } = await this.client.getEntity(entityRef, include));
-      if (parsed.kind === "logic") {
-        const nativeOptions = await this.client.getLogicOptions({
-          aId: parsed.accessoryId,
-          sId: parsed.serviceId,
-          type: parsed.logicType,
-        });
-        return extractLogicEntity(entity, nativeOptions);
-      }
     } catch (error) {
       if (!(error instanceof SprutHubError)) throw error;
       if (isHubUnavailable(error)) throw error;
@@ -322,23 +317,27 @@ function extractCapturedEntity(entity) {
       not_captured: [],
     };
   }
-  if (entity.kind === "logic") {
-    return extractLogicEntity(entity, []);
-  }
-  if (entity.kind === "window") {
+  if (entity.kind === "logic" || entity.kind === "window") {
     const { options, not_captured } = extractOptions(
       entity.ref,
       entity.options ?? [],
-      "configured_value",
     );
     return {
       captured: {
         entity_ref: entity.ref,
-        kind: "window",
-        settings: {
-          name: entity.name ?? null,
-          options,
-        },
+        kind: entity.kind,
+        settings:
+          entity.kind === "logic"
+            ? {
+                type: entity.type,
+                name: entity.name,
+                active: entity.active === true,
+                options,
+              }
+            : {
+                name: entity.name ?? null,
+                options,
+              },
         ...(not_captured.length > 0
           ? { not_captured_options: not_captured }
           : {}),
@@ -349,61 +348,7 @@ function extractCapturedEntity(entity) {
   return notCaptured(entity.ref, "unsupported_entity_kind");
 }
 
-function extractLogicEntity(entity, nativeOptions) {
-  const { options, not_captured } = extractNativeOptions(
-    entity.ref,
-    nativeOptions,
-  );
-  return {
-    captured: {
-      entity_ref: entity.ref,
-      kind: "logic",
-      settings: {
-        type: entity.type,
-        name: entity.name,
-        active: entity.active === true,
-        options,
-      },
-      ...(not_captured.length > 0
-        ? { not_captured_options: not_captured }
-        : {}),
-    },
-    not_captured: [],
-  };
-}
-
-function extractNativeOptions(entityRef, options) {
-  const captured = {};
-  const notCaptured = [];
-  for (const option of options) {
-    if (typeof option?.key !== "string") {
-      notCaptured.push(
-        notCapturedOption(entityRef, null, "unsupported_option"),
-      );
-      continue;
-    }
-    if (isSensitiveNativeNode(option)) {
-      captured[option.key] = redactedMarker();
-      continue;
-    }
-    const inspected = inspectNativeOption(option);
-    if (!inspected.supported) {
-      notCaptured.push(
-        notCapturedOption(entityRef, option.key, inspected.reason),
-      );
-      continue;
-    }
-    captured[option.key] = {
-      name: typeof option.name === "string" ? option.name : "",
-      type: typeof option.type === "string" ? option.type : null,
-      input_type: option.inputType ?? null,
-      configured_value: inspected.current.value,
-    };
-  }
-  return { options: captured, not_captured: notCaptured };
-}
-
-function extractOptions(entityRef, options, valueField) {
+function extractOptions(entityRef, options) {
   const captured = {};
   const notCaptured = [];
   for (const option of options) {
@@ -424,7 +369,9 @@ function extractOptions(entityRef, options, valueField) {
         name: option.name ?? "",
         type: option.type ?? null,
         input_type: option.input_type ?? null,
-        configured_value: option[valueField],
+        configured_value: Object.hasOwn(option, "configured_value")
+          ? option.configured_value
+          : option.value,
       };
       continue;
     }
@@ -485,11 +432,57 @@ function summarizePoint(point, serial) {
   };
 }
 
+function diffCaptured(previous, current) {
+  const { changes, not_compared } = diffSettings(
+    previous.settings,
+    current.settings,
+  );
+  return foldIncompleteOptions(previous, current, changes, not_compared);
+}
+
 function diffSettings(previous, current) {
   const changes = [];
   const notCompared = [];
   diffValues([], previous, current, changes, notCompared);
   return { changes, not_compared: notCompared };
+}
+
+function foldIncompleteOptions(previous, current, changes, notCompared) {
+  // Incomplete options are not add/remove: disabled, unsupported, and redacted
+  // values stay not_compared, including when the option key is hidden.
+  const previousByKey = keyedIncomplete(previous.not_captured_options);
+  const currentByKey = keyedIncomplete(current.not_captured_options);
+  const keys = new Set([...previousByKey.keys(), ...currentByKey.keys()]);
+  const remainingChanges = changes.filter((change) => {
+    const optionKey = change.path[0] === "options" ? change.path[1] : undefined;
+    return typeof optionKey !== "string" || !keys.has(optionKey);
+  });
+  for (const key of keys) {
+    const reason =
+      currentByKey.get(key)?.reason ?? previousByKey.get(key)?.reason;
+    notCompared.push({ path: ["options", key], reason });
+  }
+  const seen = new Set(notCompared.map((item) => JSON.stringify(item)));
+  for (const item of [
+    ...(previous.not_captured_options ?? []),
+    ...(current.not_captured_options ?? []),
+  ]) {
+    if (item.option_key) continue;
+    const entry = { path: ["options"], reason: item.reason };
+    const encoded = JSON.stringify(entry);
+    if (seen.has(encoded)) continue;
+    seen.add(encoded);
+    notCompared.push(entry);
+  }
+  return { changes: remainingChanges, not_compared: notCompared };
+}
+
+function keyedIncomplete(items = []) {
+  return new Map(
+    items
+      .filter((item) => typeof item.option_key === "string")
+      .map((item) => [item.option_key, item]),
+  );
 }
 
 function diffValues(path, previous, current, changes, notCompared) {

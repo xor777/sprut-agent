@@ -569,7 +569,7 @@ server.registerTool(
   {
     title: "Read or compare a saved SprutHub configuration point",
     description:
-      "Read the saved settings of one configuration point. The past image does not require a live hub. compare=true reads the current selected entities and reports field paths that changed, including rename of the same ref; sensor values, runtime diagnostics, and hub projections are not compared. Redacted or unknown values are not_compared, not equal. The point is not a live entity and does not authorize a write. Large results use the same pointer and max_bytes addressing as get_entity.",
+      "Read the saved settings of one configuration point. The past image does not require a live hub. compare=true reads the current selected entities and reports field paths that changed, including rename of the same ref; sensor values, runtime diagnostics, and hub projections are not compared. Redacted, disabled, or otherwise incomplete option reads are not_compared, not added, removed, or equal. The point is not a live entity and does not authorize a write. Large results use the same pointer and max_bytes addressing as get_entity; follow returned next on this tool with point_ref and the same compare mode so saved data and comparison stay addressable.",
     inputSchema: {
       point_ref: z
         .string()
@@ -640,6 +640,9 @@ server.registerTool(
             maxBytes,
             offset,
             version,
+            readTool: "get_configuration_point",
+            readRefArgument: "point_ref",
+            readArguments: compare ? { compare: true } : {},
           }),
       },
     ),

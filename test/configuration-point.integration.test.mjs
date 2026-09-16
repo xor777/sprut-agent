@@ -782,11 +782,10 @@ test("a later agent finds a saved configuration point and compares real setting 
     },
   );
   assert.equal(
-    logicDiff.not_compared.some(
-      (item) => item.reason === "redacted" && item.path.includes("AccessToken"),
-    ),
+    logicDiff.not_compared.some((item) => item.reason === "redacted"),
     true,
   );
+  assert.equal(JSON.stringify(logicDiff).includes("AccessToken"), false);
   assert.equal(
     logicDiff.changes.some((change) => change.path.includes("AccessToken")),
     false,

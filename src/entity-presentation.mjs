@@ -5,7 +5,17 @@ const IDENTITY_KEYS = ["kind", "ref", "name", "type", "key", "id", "space_key"];
 
 export function presentEntityResult(
   result,
-  { entityRef, include, pointer, maxBytes, offset = 0, version },
+  {
+    entityRef,
+    include,
+    pointer,
+    maxBytes,
+    offset = 0,
+    version,
+    readTool = "get_entity",
+    readRefArgument = "entity_ref",
+    readArguments = {},
+  },
 ) {
   if (pointer === undefined && (offset !== 0 || version !== undefined)) {
     throw invalidProjection(
@@ -13,7 +23,15 @@ export function presentEntityResult(
     );
   }
 
-  const selection = { entityRef, include, maxBytes };
+  const selection = {
+    entityRef,
+    include,
+    maxBytes,
+    readTool,
+    readRefArgument,
+    readArguments,
+  };
+  const root = presentationRoot(result);
   if (pointer === undefined) {
     const complete = withPage(
       {
@@ -28,18 +46,10 @@ export function presentEntityResult(
       maxBytes,
     );
     if (serializedBytes(complete) <= maxBytes) return complete;
-    return containerOverview(
-      result,
-      result.entity,
-      "",
-      selection,
-      false,
-      0,
-      undefined,
-    );
+    return containerOverview(result, root, "", selection, false, 0, undefined);
   }
 
-  const selected = resolveJsonPointer(result.entity, pointer);
+  const selected = resolveJsonPointer(root, pointer);
   if (selected.status === "missing") {
     throw new SprutHubError(
       "entity_pointer_not_found",
@@ -403,15 +413,23 @@ function isCompactScalar(value) {
   return typeof value === "string" && Buffer.byteLength(value) <= 256;
 }
 
+function presentationRoot(result) {
+  // Comparison is a sibling of entity in the complete result; include it in
+  // the addressable root so a large point can still reach the diff by pointer.
+  if (result.comparison === undefined) return result.entity;
+  return { ...result.entity, comparison: result.comparison };
+}
+
 function entityNext(selection, pointer, continuation = {}) {
   return {
-    tool: "get_entity",
+    tool: selection.readTool,
     arguments: {
-      entity_ref: selection.entityRef,
+      [selection.readRefArgument]: selection.entityRef,
       ...(selection.include.length > 0 ? { include: selection.include } : {}),
       pointer,
       max_bytes: selection.maxBytes,
       ...continuation,
+      ...selection.readArguments,
     },
   };
 }
