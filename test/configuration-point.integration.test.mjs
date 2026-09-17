@@ -759,6 +759,38 @@ async function followCurrentObservation(client, page, entityRef) {
   assert.fail(`current observation of ${entityRef} was not reached`);
 }
 
+function comparisonEntitiesListNext(result) {
+  const next = result.representation?.next ?? null;
+  if (!next) return null;
+  assert.equal(next.tool, "get_configuration_point");
+  assert.equal(next.arguments.pointer, "/comparison/entities");
+  assert.equal(typeof next.arguments.version, "string");
+  assert.equal(Number.isInteger(next.arguments.offset), true);
+  assert.ok(next.arguments.offset > 0);
+  return next;
+}
+
+async function followComparisonEntityList(client, firstPage) {
+  const parts = [];
+  const executedNexts = [];
+  let current = firstPage;
+  for (let step = 0; step < 40; step += 1) {
+    parts.push(...(current.representation?.available_parts ?? []));
+    const next = comparisonEntitiesListNext(current);
+    if (!next) {
+      return { parts, executedNexts };
+    }
+    executedNexts.push(next);
+    current = toolResult(
+      await client.callTool({
+        name: next.tool,
+        arguments: next.arguments,
+      }),
+    );
+  }
+  assert.fail("comparison entity list continuation did not complete");
+}
+
 async function followComparedChange(client, page, entityRef, path) {
   let current = page;
   for (let step = 0; step < 20; step += 1) {
@@ -1864,5 +1896,242 @@ test("a later agent sees current climate availability of an unchanged saved setp
   );
   assert.equal(missingTemperature.status, "missing");
   assert.equal(missingTemperature.current_observation, undefined);
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
+});
+
+test("a later agent pages mixed comparison entities by returned offset while observation time changes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const mixedRefs = [
+    scenarioRef,
+    accessoryRef,
+    logicRef,
+    deviceWindowRef,
+    breezerAccessoryRef,
+    targetTemperatureRef,
+    targetModeRef,
+    fanSpeedRef,
+  ];
+  const saved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: mixedRefs },
+    }),
+  );
+  assert.equal(saved.status, "ok");
+  assert.deepEqual(
+    saved.captured.map(({ entity_ref }) => entity_ref),
+    mixedRefs,
+  );
+
+  characteristicControl(hub.state, targetTemperatureRef).value = {
+    doubleValue: 22,
+  };
+  characteristicControl(hub.state, targetModeRef).value = { intValue: 1 };
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 90 };
+
+  const listArguments = {
+    point_ref: saved.point_ref,
+    compare: true,
+    max_bytes: 2048,
+    pointer: "/comparison/entities",
+  };
+  const first = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: listArguments,
+    }),
+  );
+  assert.equal(first.representation.kind, "selected_value");
+  assert.equal(first.representation.selected_pointer, "/comparison/entities");
+  const firstListNext = comparisonEntitiesListNext(first);
+  assert.ok(
+    firstListNext,
+    "comparison.entities must not fit into 2048 so offset continuation is required",
+  );
+
+  const { parts, executedNexts } = await followComparisonEntityList(
+    client,
+    first,
+  );
+  assert.ok(executedNexts.length >= 1);
+  assert.equal(
+    executedNexts.every(
+      (next) => next.arguments.pointer === "/comparison/entities",
+    ),
+    true,
+  );
+  assert.equal(parts.length, mixedRefs.length);
+  assert.deepEqual(
+    parts.map((part) => part.identity?.entity_ref),
+    mixedRefs,
+  );
+
+  const loaded = [];
+  for (const part of parts) {
+    const childPointer = part.next?.arguments.pointer ?? "";
+    assert.equal(
+      childPointer.startsWith("/comparison/entities/"),
+      true,
+      childPointer,
+    );
+    assert.notEqual(childPointer, "/comparison/entities");
+    loaded.push(
+      toolResult(
+        await client.callTool({
+          name: part.next.tool,
+          arguments: part.next.arguments,
+        }),
+      ).selection.value,
+    );
+  }
+  assert.deepEqual(
+    loaded.map((entity) => entity.entity_ref),
+    mixedRefs,
+  );
+  const climateObservations = {};
+  for (const climateRef of [targetTemperatureRef, targetModeRef, fanSpeedRef]) {
+    const entity = loaded.find(({ entity_ref }) => entity_ref === climateRef);
+    assert.ok(entity.current_observation, JSON.stringify(entity));
+    assert.ok(Date.parse(entity.current_observation.observed_at));
+    climateObservations[climateRef] = entity.current_observation.observed_at;
+  }
+  const temperatureDiff = comparisonFor(
+    { comparison: { entities: loaded } },
+    targetTemperatureRef,
+  );
+  assert.equal(temperatureDiff.status, "changed");
+  assert.deepEqual(changeAt(temperatureDiff, ["value"]), {
+    path: ["value"],
+    from: { value: 26, unit: "°C" },
+    to: { value: 22, unit: "°C" },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const climatePart = parts.find(
+    (part) => part.identity.entity_ref === targetTemperatureRef,
+  );
+  const rereadClimate = toolResult(
+    await client.callTool({
+      name: climatePart.next.tool,
+      arguments: climatePart.next.arguments,
+    }),
+  );
+  assert.ok(
+    Date.parse(rereadClimate.selection.value.current_observation.observed_at),
+  );
+  assert.notEqual(
+    rereadClimate.selection.value.current_observation.observed_at,
+    climateObservations[targetTemperatureRef],
+  );
+
+  const afterObservation = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: listArguments,
+    }),
+  );
+  const afterNext = comparisonEntitiesListNext(afterObservation);
+  assert.equal(afterNext.arguments.version, firstListNext.arguments.version);
+  const afterContinued = toolResult(
+    await client.callTool({
+      name: firstListNext.tool,
+      arguments: firstListNext.arguments,
+    }),
+  );
+  assert.equal(afterContinued.representation.available_parts.length > 0, true);
+
+  const uniqueItems = Array.from({ length: 24 }, (_, index) => ({
+    entity_ref: `${homeRef}/accessory/${index + 100}`,
+    marker: `unique-${index}-${"x".repeat(80)}`,
+  }));
+  hub.state.scenarios.push({
+    index: "entity-ref-identity",
+    name: "Карта entity_ref",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({ items: uniqueItems }),
+  });
+  const identityRef = `${homeRef}/scenario/entity-ref-identity`;
+  const identityArguments = {
+    entity_ref: identityRef,
+    include: ["configuration"],
+    pointer: "/configuration/value/items",
+    max_bytes: 2048,
+  };
+  const identityFirst = toolResult(
+    await client.callTool({
+      name: "get_entity",
+      arguments: identityArguments,
+    }),
+  );
+  const identityNext = identityFirst.representation.next;
+  assert.ok(identityNext?.arguments.version);
+  [uniqueItems[0], uniqueItems[1]] = [uniqueItems[1], uniqueItems[0]];
+  hub.state.scenarios.find(
+    ({ index }) => index === "entity-ref-identity",
+  ).data = JSON.stringify({ items: uniqueItems });
+  const reordered = await client.callTool({
+    name: identityNext.tool,
+    arguments: identityNext.arguments,
+  });
+  assert.equal(reordered.isError, true);
+  assert.equal(reordered.structuredContent.error.code, "stale_entity_content");
+
+  [uniqueItems[0], uniqueItems[1]] = [uniqueItems[1], uniqueItems[0]];
+  hub.state.scenarios.find(
+    ({ index }) => index === "entity-ref-identity",
+  ).data = JSON.stringify({ items: uniqueItems });
+  const beforeValueChange = toolResult(
+    await client.callTool({
+      name: "get_entity",
+      arguments: identityArguments,
+    }),
+  );
+  const valueNext = beforeValueChange.representation.next;
+  assert.ok(valueNext?.arguments.version);
+  uniqueItems[10].marker = `changed-${"y".repeat(80)}`;
+  hub.state.scenarios.find(
+    ({ index }) => index === "entity-ref-identity",
+  ).data = JSON.stringify({ items: uniqueItems });
+  const valueChanged = toolResult(
+    await client.callTool({
+      name: valueNext.tool,
+      arguments: valueNext.arguments,
+    }),
+  );
+  assert.equal(valueChanged.representation.available_parts.length > 0, true);
+
+  const duplicates = Array.from({ length: 24 }, (_, index) => ({
+    entity_ref: `${homeRef}/accessory/1`,
+    marker: `dup-${index}-${"z".repeat(80)}`,
+  }));
+  hub.state.scenarios.find(
+    ({ index }) => index === "entity-ref-identity",
+  ).data = JSON.stringify({ items: duplicates });
+  const beforeAmbiguous = toolResult(
+    await client.callTool({
+      name: "get_entity",
+      arguments: identityArguments,
+    }),
+  );
+  const ambiguousNext = beforeAmbiguous.representation.next;
+  assert.ok(ambiguousNext?.arguments.version);
+  duplicates[10].marker = `new-dup-${"q".repeat(80)}`;
+  hub.state.scenarios.find(
+    ({ index }) => index === "entity-ref-identity",
+  ).data = JSON.stringify({ items: duplicates });
+  const ambiguousChanged = await client.callTool({
+    name: ambiguousNext.tool,
+    arguments: ambiguousNext.arguments,
+  });
+  assert.equal(ambiguousChanged.isError, true);
+  assert.equal(
+    ambiguousChanged.structuredContent.error.code,
+    "stale_entity_content",
+  );
   assert.equal(hubWriteRequests(hub.requests).length, 0);
 });
