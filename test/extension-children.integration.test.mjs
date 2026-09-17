@@ -17,9 +17,11 @@ const homeRef = "spruthub://hub/home%2FA";
 const xiaomiKey = "Controller:xiaomi_air";
 const bridgeKey = "Bridge:homekit_1";
 const emptyKey = "Controller:empty_bus";
+const telegramKey = "Notification:telegram";
 const xiaomiRef = `${homeRef}/extension/${encodeURIComponent(xiaomiKey)}`;
 const bridgeRef = `${homeRef}/extension/${encodeURIComponent(bridgeKey)}`;
 const emptyRef = `${homeRef}/extension/${encodeURIComponent(emptyKey)}`;
+const telegramRef = `${homeRef}/extension/${encodeURIComponent(telegramKey)}`;
 const sharedChildId = "aqs-1";
 const xiaomiChildRef = `${xiaomiRef}/child/${encodeURIComponent(sharedChildId)}`;
 const bridgeChildRef = `${bridgeRef}/child/${encodeURIComponent(sharedChildId)}`;
@@ -36,6 +38,33 @@ const childSecret = "child-description-secret-must-not-leak";
 const envelopeSecret = "child-envelope-secret-must-not-leak";
 const rawEnvelopeSecret = "raw-envelope-secret-must-not-leak";
 const largeChildCount = 40;
+
+function telegramListItem() {
+  return {
+    extensionKey: telegramKey,
+    type: "telegram",
+    index: "telegram",
+    bundleType: "NOTIFICATION",
+    name: "Telegram",
+    optionsWindow: "Notification/telegram/",
+    childCount: 0,
+    enabled: true,
+    state: "FAILED",
+  };
+}
+
+function telegramDetail() {
+  return {
+    ...telegramListItem(),
+    spaces: [
+      {
+        key: "main",
+        type: "SPACE_CHILDREN",
+        label: { header: "Telegram", text: "Получатели" },
+      },
+    ],
+  };
+}
 
 function xiaomiListItem() {
   return {
@@ -312,6 +341,7 @@ function homeState() {
     extensions: [
       xiaomiListItem(),
       bridgeListItem(),
+      telegramListItem(),
       {
         extensionKey: emptyKey,
         type: "bus",
@@ -327,6 +357,7 @@ function homeState() {
     extensionDetails: new Map([
       [xiaomiKey, xiaomiDetail()],
       [bridgeKey, bridgeDetail()],
+      [telegramKey, telegramDetail()],
       [
         emptyKey,
         {
@@ -414,7 +445,10 @@ async function startHub() {
   const behavior = {
     childListErrorKey: null,
     childListUnsupportedKey: null,
+    childListHangKey: null,
+    childListForm: new Map([[telegramKey, "omitted_children"]]),
     childGetMutator: null,
+    extensionGetErrorKey: null,
   };
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -423,6 +457,7 @@ async function startHub() {
       const request = JSON.parse(data.toString());
       requests.push(request);
       const reply = respond(state, request, behavior);
+      if (reply === undefined) return;
       socket.send(JSON.stringify({ id: request.id, ...reply }));
     });
   });
@@ -479,23 +514,58 @@ function respond(state, request, behavior) {
   }
   if (params.extension?.get) {
     const key = params.extension.get.extensionKey;
+    if (behavior.extensionGetErrorKey === key) {
+      return hubFault(`Not found: '${envelopeSecret}'`);
+    }
     return {
       result: { extension: { get: state.extensionDetails.get(key) ?? null } },
     };
   }
   if (params.extensionChild?.list) {
     const key = params.extensionChild.list.extensionKey;
+    if (behavior.childListHangKey === key) return undefined;
     if (behavior.childListUnsupportedKey === key) {
       return { error: { code: -32601, message: "Method not found" } };
     }
     if (behavior.childListErrorKey === key) {
+      return hubFault(`Not found: '${envelopeSecret}'`);
+    }
+    const form = behavior.childListForm.get(key);
+    if (form === "omitted_children") {
+      return { result: { extensionChild: { list: {} } } };
+    }
+    if (form === "empty_array") {
+      return { result: { extensionChild: { list: { children: [] } } } };
+    }
+    if (form === "null_list") {
+      return { result: { extensionChild: { list: null } } };
+    }
+    if (form === "missing_list") {
+      return { result: { extensionChild: {} } };
+    }
+    if (form === "missing_envelope") {
+      return { result: {} };
+    }
+    if (form === "null_children") {
+      return { result: { extensionChild: { list: { children: null } } } };
+    }
+    if (form === "wrong_type") {
+      return { result: { extensionChild: { list: { children: {} } } } };
+    }
+    if (form === "foreign_identity") {
       return {
-        error: {
-          code: -32603,
-          message: `Not found: '${envelopeSecret}'`,
-          data: {
-            jsonrpc: "2.0",
-            raw: { envelope: rawEnvelopeSecret },
+        result: {
+          extensionChild: {
+            list: {
+              children: [
+                {
+                  extensionKey: "Notification:other",
+                  spaceKey: "main",
+                  id: "foreign-1",
+                  name: "Чужой получатель",
+                },
+              ],
+            },
           },
         },
       };
@@ -578,6 +648,102 @@ async function startClient(t, hub) {
 
 function paramsOf(request) {
   return request.params ?? {};
+}
+
+function hubFault(message) {
+  return {
+    error: {
+      code: -32603,
+      message,
+      data: {
+        jsonrpc: "2.0",
+        raw: { envelope: rawEnvelopeSecret },
+      },
+    },
+  };
+}
+
+function assertNoHubSecrets(payload) {
+  const text = JSON.stringify(payload);
+  assert.doesNotMatch(text, new RegExp(envelopeSecret));
+  assert.doesNotMatch(text, new RegExp(rawEnvelopeSecret));
+  assert.doesNotMatch(text, /jsonrpc/);
+}
+
+function assertEmptyChildCatalog(result, { enabled, state }) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const entity = result.structuredContent.entity;
+  assert.equal(entity.kind, "extension");
+  assert.equal(entity.enabled, enabled);
+  assert.equal(entity.state, state);
+  assert.equal(entity.child_count, 0);
+  assert.deepEqual(entity.children, []);
+  assert.deepEqual(entity.include_resolution.applied, ["children"]);
+  assert.equal(
+    entity.include_resolution.not_applied.some(
+      ({ include }) => include === "children",
+    ),
+    false,
+  );
+  return entity;
+}
+
+function assertUnreadChildren(result, { enabled, state, errorCode }) {
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const entity = result.structuredContent.entity;
+  assert.equal(entity.kind, "extension");
+  assert.equal(entity.enabled, enabled);
+  assert.equal(entity.state, state);
+  assert.equal(Object.hasOwn(entity, "children"), false);
+  assert.equal(entity.include_resolution.applied.includes("children"), false);
+  const outcome = entity.include_resolution.not_applied.find(
+    ({ include }) => include === "children",
+  );
+  assert.equal(outcome.reason, "read_failed");
+  assert.equal(outcome.error_code, errorCode);
+  if (errorCode === "unsupported" || errorCode === "incompatible_response") {
+    assert.equal(Object.hasOwn(outcome, "next"), false);
+  } else {
+    assert.deepEqual(outcome.next, {
+      tool: "get_entity",
+      arguments: { entity_ref: entity.ref, include: ["children"] },
+    });
+  }
+  assertNoHubSecrets(result);
+  return entity;
+}
+
+function childrenIncludeNext(entityRef) {
+  return {
+    tool: "get_entity",
+    arguments: { entity_ref: entityRef, include: ["children"] },
+  };
+}
+
+function assertIncludeReadPointerError(
+  result,
+  { code, retryable, action, next },
+) {
+  assert.equal(result.isError, true, result.content[0]?.text);
+  assert.equal(result.structuredContent.error.code, code);
+  assert.equal(result.structuredContent.error.retryable, retryable);
+  assert.notEqual(code, "entity_pointer_not_found");
+  if (action === undefined) {
+    assert.equal(
+      Object.hasOwn(result.structuredContent.error, "action"),
+      false,
+    );
+  } else {
+    assert.equal(result.structuredContent.error.action, action);
+  }
+  if (next === undefined) {
+    assert.equal(Object.hasOwn(result.structuredContent, "next"), false);
+  } else {
+    assert.deepEqual(result.structuredContent.next, next);
+  }
+  assert.equal(Object.hasOwn(result.structuredContent, "entity"), false);
+  assert.equal(Object.hasOwn(result.structuredContent, "selection"), false);
+  assertNoHubSecrets(result);
 }
 
 function isMutation(params) {
@@ -994,13 +1160,12 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
     name: "get_entity",
     arguments: { entity_ref: xiaomiRef, include: ["children"] },
   });
-  assert.equal(rejected.isError, true);
-  assert.equal(rejected.structuredContent.error.code, "request_rejected");
-  assert.equal(Object.hasOwn(rejected.structuredContent, "entity"), false);
-  const rejectedText = JSON.stringify(rejected);
-  assert.doesNotMatch(rejectedText, new RegExp(envelopeSecret));
-  assert.doesNotMatch(rejectedText, new RegExp(rawEnvelopeSecret));
-  assert.doesNotMatch(rejectedText, /jsonrpc/);
+  const rejectedEntity = assertUnreadChildren(rejected, {
+    enabled: true,
+    state: "LOADED",
+    errorCode: "request_rejected",
+  });
+  assert.equal(rejectedEntity.child_count, 3);
 
   hub.behavior.childListErrorKey = null;
   hub.behavior.childListUnsupportedKey = xiaomiKey;
@@ -1008,9 +1173,12 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
     name: "get_entity",
     arguments: { entity_ref: xiaomiRef, include: ["children"] },
   });
-  assert.equal(unsupported.isError, true);
-  assert.equal(unsupported.structuredContent.error.code, "unsupported");
-  assert.equal(Object.hasOwn(unsupported.structuredContent, "entity"), false);
+  const unsupportedEntity = assertUnreadChildren(unsupported, {
+    enabled: true,
+    state: "LOADED",
+    errorCode: "unsupported",
+  });
+  assert.equal(unsupportedEntity.child_count, 3);
 
   hub.behavior.childListUnsupportedKey = null;
   hub.behavior.childGetMutator = (child) => ({
@@ -1058,6 +1226,323 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
     Object.hasOwn(unreliableList.linked_accessories, "accessories"),
     false,
   );
+});
+
+test("empty notification children stay empty and keep provider status when the catalog cannot be read", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  const omitted = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children", "diagnostics"],
+    },
+  });
+  const omittedEntity = assertEmptyChildCatalog(omitted, {
+    enabled: true,
+    state: "FAILED",
+  });
+  assert.deepEqual(
+    omittedEntity.spaces.map(({ key, type }) => ({ key, type })),
+    [{ key: "main", type: "SPACE_CHILDREN" }],
+  );
+  const diagnosticsOutcome = omittedEntity.include_resolution.not_applied.find(
+    ({ include }) => include === "diagnostics",
+  );
+  assert.equal(diagnosticsOutcome.reason, "window_scoped");
+  assert.equal(omittedEntity.child_count, 0);
+
+  hub.behavior.childListForm.set(telegramKey, "empty_array");
+  const explicitEmpty = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  assertEmptyChildCatalog(explicitEmpty, { enabled: true, state: "FAILED" });
+
+  const listed = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: xiaomiRef, include: ["children"] },
+  });
+  assert.equal(listed.isError, undefined, listed.content[0]?.text);
+  const mainChild = listed.structuredContent.entity.children.find(
+    ({ space_key, id }) => space_key === "main" && id === sharedChildId,
+  );
+  assert.equal(mainChild.ref, xiaomiChildRef);
+  const child = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: mainChild.ref },
+  });
+  assert.equal(child.isError, undefined, child.content[0]?.text);
+  assert.equal(child.structuredContent.entity.ref, xiaomiChildRef);
+  const window = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: mainChild.options_window_ref },
+  });
+  assert.equal(window.isError, undefined, window.content[0]?.text);
+  assert.equal(window.structuredContent.entity.kind, "window");
+
+  for (const [form, errorCode] of [
+    ["null_list", "incompatible_response"],
+    ["missing_list", "incompatible_response"],
+    ["missing_envelope", "incompatible_response"],
+    ["null_children", "incompatible_response"],
+    ["wrong_type", "incompatible_response"],
+    ["foreign_identity", "incompatible_response"],
+  ]) {
+    hub.behavior.childListForm.set(telegramKey, form);
+    const unread = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: telegramRef, include: ["children"] },
+    });
+    const unreadEntity = assertUnreadChildren(unread, {
+      enabled: true,
+      state: "FAILED",
+      errorCode,
+    });
+    assert.equal(unreadEntity.child_count, 0);
+    assert.doesNotMatch(JSON.stringify(unread), /Notification:other/);
+    assert.doesNotMatch(JSON.stringify(unread), /foreign-1/);
+  }
+
+  hub.behavior.childListForm.delete(telegramKey);
+  hub.behavior.childListErrorKey = telegramKey;
+  const rejected = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  assertUnreadChildren(rejected, {
+    enabled: true,
+    state: "FAILED",
+    errorCode: "request_rejected",
+  });
+
+  hub.behavior.childListErrorKey = null;
+  hub.behavior.childListHangKey = telegramKey;
+  const timedOut = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  assertUnreadChildren(timedOut, {
+    enabled: true,
+    state: "FAILED",
+    errorCode: "timeout",
+  });
+
+  hub.behavior.childListHangKey = null;
+  hub.behavior.extensionGetErrorKey = telegramKey;
+  const missingProvider = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  assert.equal(missingProvider.isError, true);
+  assert.equal(
+    missingProvider.structuredContent.error.code,
+    "request_rejected",
+  );
+  assert.equal(
+    Object.hasOwn(missingProvider.structuredContent, "entity"),
+    false,
+  );
+  assertNoHubSecrets(missingProvider);
+});
+
+test("a pointer into unread children keeps the include read failure", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  hub.behavior.childListHangKey = telegramKey;
+  const timedOut = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(timedOut, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  const nested = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0",
+    },
+  });
+  assertIncludeReadPointerError(nested, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  const readablePart = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/spaces",
+    },
+  });
+  assert.equal(readablePart.isError, undefined, readablePart.content[0]?.text);
+  assert.equal(readablePart.structuredContent.selection.status, "found");
+  assert.equal(readablePart.structuredContent.identity.enabled, true);
+  assert.equal(readablePart.structuredContent.identity.state, "FAILED");
+
+  const missingPath = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/not_a_child_catalog",
+    },
+  });
+  assert.equal(missingPath.isError, true);
+  assert.equal(
+    missingPath.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
+  hub.behavior.childListHangKey = null;
+  hub.behavior.childListErrorKey = telegramKey;
+  const rejected = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(rejected, {
+    code: "request_rejected",
+    retryable: false,
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  hub.behavior.childListErrorKey = null;
+  hub.behavior.childListUnsupportedKey = telegramKey;
+  const unsupported = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(unsupported, {
+    code: "unsupported",
+    retryable: false,
+    action: "inspect_home",
+    next: { tool: "inspect_home", arguments: { home_ref: homeRef } },
+  });
+  assert.notDeepEqual(
+    unsupported.structuredContent.next,
+    childrenIncludeNext(telegramRef),
+  );
+
+  const unsupportedEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  const unsupportedOutcome =
+    unsupportedEntity.structuredContent.entity.include_resolution.not_applied.find(
+      ({ include }) => include === "children",
+    );
+  assert.equal(unsupportedOutcome.error_code, "unsupported");
+  assert.equal(Object.hasOwn(unsupportedOutcome, "next"), false);
+
+  hub.behavior.childListUnsupportedKey = null;
+  hub.behavior.childListForm.set(telegramKey, "wrong_type");
+  const incompatible = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0/ref",
+    },
+  });
+  assertIncludeReadPointerError(incompatible, {
+    code: "incompatible_response",
+    retryable: false,
+  });
+
+  hub.behavior.childListForm.set(telegramKey, "omitted_children");
+  const empty = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assert.equal(empty.isError, undefined, empty.content[0]?.text);
+  assert.deepEqual(empty.structuredContent.selection.value, []);
+
+  const emptyMissing = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0",
+    },
+  });
+  assert.equal(emptyMissing.isError, true);
+  assert.equal(
+    emptyMissing.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
+  const page = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: bridgeRef,
+      include: ["children"],
+      pointer: "/children",
+      max_bytes: 2_048,
+    },
+  });
+  assert.equal(page.isError, undefined, page.content[0]?.text);
+  const continuation = page.structuredContent.representation.next;
+  assert.equal(continuation?.tool, "get_entity");
+  assert.equal(continuation.arguments.pointer, "/children");
+  assert.ok(continuation.arguments.offset > 0);
+  assert.equal(typeof continuation.arguments.version, "string");
+
+  hub.behavior.childListHangKey = bridgeKey;
+  const continued = await client.callTool({
+    name: continuation.tool,
+    arguments: continuation.arguments,
+  });
+  assertIncludeReadPointerError(continued, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(bridgeRef),
+  });
+
+  hub.behavior.childListHangKey = null;
+  const recovered = await client.callTool({
+    name: continued.structuredContent.next.tool,
+    arguments: continued.structuredContent.next.arguments,
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  const recoveredEntity = recovered.structuredContent.entity;
+  if (recoveredEntity) {
+    assert.ok(Array.isArray(recoveredEntity.children));
+    assert.ok(recoveredEntity.include_resolution.applied.includes("children"));
+  } else {
+    assert.ok(
+      recovered.structuredContent.representation.available_parts.some(
+        ({ pointer: partPointer }) => partPointer === "/children",
+      ),
+    );
+  }
 });
 
 test("ACCESSORY_LIST claims links only for a confirmed read-only form", async (t) => {
