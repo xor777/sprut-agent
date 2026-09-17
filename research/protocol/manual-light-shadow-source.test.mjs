@@ -534,6 +534,11 @@ test("a foreign light is not written even if its On event arrives first", () => 
   shadow.motion(true);
   assert.equal(shadow.foreignWrites().length, 0);
   assert.equal(shadow.foreignOnValue(), false);
+  assert.equal(
+    shadow.onValue(),
+    true,
+    "bound lamp must still receive auto On after a foreign On event",
+  );
 });
 
 test("after the filled expiresAt the source does not write On or Off", () => {
