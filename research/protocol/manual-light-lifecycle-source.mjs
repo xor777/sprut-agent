@@ -1,7 +1,10 @@
-export const BRIGHTNESS_IMMEDIATE = 11;
-export const BRIGHTNESS_ARM = 22;
-export const BRIGHTNESS_DISPOSE = 33;
-export const LIFECYCLE_TIMER_MS = 5_000;
+export const BRIGHTNESS_IMMEDIATE_MIN = 10;
+export const BRIGHTNESS_IMMEDIATE_MAX = 19;
+export const BRIGHTNESS_ARM_MIN = 20;
+export const BRIGHTNESS_ARM_MAX = 29;
+export const BRIGHTNESS_DISPOSE_MIN = 30;
+export const BRIGHTNESS_DISPOSE_MAX = 39;
+export const LIFECYCLE_TIMER_MS = 40_000;
 export const LIFECYCLE_MAX_MS = 5 * 60 * 1_000;
 
 export function fillLifecycleSource({
@@ -9,12 +12,14 @@ export function fillLifecycleSource({
   serviceId,
   onCharacteristicId,
   brightnessCharacteristicId,
+  expiresAt,
 }) {
   for (const [name, value] of Object.entries({
     accessoryId,
     serviceId,
     onCharacteristicId,
     brightnessCharacteristicId,
+    expiresAt,
   })) {
     if (!Number.isInteger(value) || value <= 0) {
       throw new Error(`${name} must be a positive integer copied after create`);
@@ -30,7 +35,7 @@ export function fillLifecycleSource({
   sourceServices: [HS.Lightbulb],
   sourceCharacteristics: [HC.On],
   options: [],
-  variables: { started: false, startedAt: 0, offTask: undefined }
+  variables: { started: false }
 };
 
 var TARGET_AID = ${accessoryId};
@@ -38,17 +43,31 @@ var TARGET_SID = ${serviceId};
 var ON_CID = ${onCharacteristicId};
 var BRIGHTNESS_CID = ${brightnessCharacteristicId};
 var TIMER_MS = ${LIFECYCLE_TIMER_MS};
-var MAX_MS = ${LIFECYCLE_MAX_MS};
-var BRIGHTNESS_IMMEDIATE = ${BRIGHTNESS_IMMEDIATE};
-var BRIGHTNESS_ARM = ${BRIGHTNESS_ARM};
-var BRIGHTNESS_DISPOSE = ${BRIGHTNESS_DISPOSE};
+var EXPIRES_AT = ${expiresAt};
+var BRIGHTNESS_IMMEDIATE_MIN = ${BRIGHTNESS_IMMEDIATE_MIN};
+var BRIGHTNESS_IMMEDIATE_MAX = ${BRIGHTNESS_IMMEDIATE_MAX};
+var BRIGHTNESS_ARM_MIN = ${BRIGHTNESS_ARM_MIN};
+var BRIGHTNESS_ARM_MAX = ${BRIGHTNESS_ARM_MAX};
+var BRIGHTNESS_DISPOSE_MIN = ${BRIGHTNESS_DISPOSE_MIN};
+var BRIGHTNESS_DISPOSE_MAX = ${BRIGHTNESS_DISPOSE_MAX};
+
+var subscribeTask;
+var offTask;
+
+function ownCharacteristic(cid) {
+  var accessory = Hub.getAccessory(TARGET_AID);
+  if (!accessory || typeof accessory.getService !== "function") return undefined;
+  var service = accessory.getService(TARGET_SID);
+  if (!service || typeof service.getCharacteristic !== "function") return undefined;
+  return service.getCharacteristic(cid);
+}
 
 function ownOn() {
-  return Hub.getCharacteristic(TARGET_AID, TARGET_SID, ON_CID);
+  return ownCharacteristic(ON_CID);
 }
 
 function ownBrightness() {
-  return Hub.getCharacteristic(TARGET_AID, TARGET_SID, BRIGHTNESS_CID);
+  return ownCharacteristic(BRIGHTNESS_CID);
 }
 
 function sameUuid(left, right) {
@@ -61,51 +80,68 @@ function sameUuid(left, right) {
   );
 }
 
-function withinBound(variables) {
-  return Date.now() - variables.startedAt < MAX_MS;
+function withinBound() {
+  return Date.now() < EXPIRES_AT;
 }
 
-function writeOwnOn(value, variables) {
-  if (!withinBound(variables)) return;
+function writeOwnOn(value) {
+  if (!withinBound()) return;
   var on = ownOn();
-  if (!on) return;
+  if (!on || typeof on.setValue !== "function") return;
   on.setValue(value);
 }
 
-function clearOff(variables) {
-  var task = variables.offTask;
+function clearTask(task) {
   if (task && typeof task.clear === "function") {
     try { task.clear(); } catch (e) {}
   }
-  variables.offTask = undefined;
 }
 
-function handleBrightness(extSource, extValue, variables) {
+function clearOff() {
+  clearTask(offTask);
+  offTask = undefined;
+}
+
+function clearSubscribe() {
+  clearTask(subscribeTask);
+  subscribeTask = undefined;
+}
+
+function dispose() {
+  clearOff();
+  clearSubscribe();
+}
+
+function inRange(value, min, max) {
+  return value >= min && value <= max;
+}
+
+function handleBrightness(extSource, extValue) {
   if (!sameUuid(extSource, ownBrightness())) return;
-  if (!withinBound(variables)) return;
-  if (extValue === BRIGHTNESS_DISPOSE) {
-    clearOff(variables);
+  if (!withinBound()) return;
+  if (inRange(extValue, BRIGHTNESS_DISPOSE_MIN, BRIGHTNESS_DISPOSE_MAX)) {
+    dispose();
     return;
   }
-  if (extValue === BRIGHTNESS_IMMEDIATE) {
-    writeOwnOn(true, variables);
+  if (inRange(extValue, BRIGHTNESS_IMMEDIATE_MIN, BRIGHTNESS_IMMEDIATE_MAX)) {
+    writeOwnOn(true);
     return;
   }
-  if (extValue === BRIGHTNESS_ARM) {
-    clearOff(variables);
-    variables.offTask = setTimeout(function () {
-      writeOwnOn(false, variables);
+  if (inRange(extValue, BRIGHTNESS_ARM_MIN, BRIGHTNESS_ARM_MAX)) {
+    clearOff();
+    offTask = setTimeout(function () {
+      writeOwnOn(false);
     }, TIMER_MS);
   }
 }
 
 function trigger(source, value, variables, options, context) {
   if (variables.started) return;
+  if (!withinBound()) return;
   if (!sameUuid(source, ownOn())) return;
   variables.started = true;
-  variables.startedAt = Date.now();
-  Hub.subscribeWithCondition("", "", [HS.Lightbulb], [HC.Brightness], function (extSource, extValue) {
-    handleBrightness(extSource, extValue, variables);
+  subscribeTask = Hub.subscribeWithCondition("", "", [HS.Lightbulb], [HC.Brightness], function (extSource, extValue) {
+    handleBrightness(extSource, extValue);
   });
 }
 `;
