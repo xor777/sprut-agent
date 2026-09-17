@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import { SprutHubError } from "./spruthub-client.mjs";
 
-const IDENTITY_KEYS = ["kind", "ref", "name", "type", "key", "id", "space_key"];
+const IDENTITY_KEYS = [
+  "kind",
+  "ref",
+  "entity_ref",
+  "name",
+  "type",
+  "key",
+  "id",
+  "space_key",
+];
 
 export function presentEntityResult(
   result,
@@ -482,6 +491,13 @@ function containerVersion(entries, pointer) {
 function stableIdentityKey(identity) {
   if (typeof identity?.ref === "string" && identity.ref.length > 0) {
     return JSON.stringify(["ref", identity.ref]);
+  }
+  // Comparison rows name the same object with entity_ref rather than ref.
+  if (
+    typeof identity?.entity_ref === "string" &&
+    identity.entity_ref.length > 0
+  ) {
+    return JSON.stringify(["entity_ref", identity.entity_ref]);
   }
   if (typeof identity?.key === "string" && identity.key.length > 0) {
     return JSON.stringify(["key", identity.key]);
