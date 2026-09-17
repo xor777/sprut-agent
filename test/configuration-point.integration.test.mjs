@@ -701,6 +701,64 @@ function nextTowardComparison(result) {
   return null;
 }
 
+function hubMethodNames(requests) {
+  return requests.flatMap((request) =>
+    Object.entries(request.params ?? {}).flatMap(([section, body]) =>
+      Object.keys(body && typeof body === "object" ? body : {}).map(
+        (method) => `${section}.${method}`,
+      ),
+    ),
+  );
+}
+
+function findCurrentObservation(result, entityRef) {
+  const candidates = [];
+  if (result.comparison) candidates.push(result.comparison);
+  const selected = result.selection?.value;
+  if (selected && typeof selected === "object") candidates.push(selected);
+  for (const candidate of candidates) {
+    const entities = Array.isArray(candidate.entities)
+      ? candidate.entities
+      : candidate.entity_ref
+        ? [candidate]
+        : [];
+    for (const entity of entities) {
+      if (entity.entity_ref === entityRef && entity.current_observation) {
+        return entity.current_observation;
+      }
+    }
+    if (
+      (result.selection?.pointer ?? "").endsWith("/current_observation") &&
+      Object.hasOwn(candidate, "available") &&
+      Object.hasOwn(candidate, "observed_at") &&
+      Object.hasOwn(candidate, "source_timestamp")
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function followCurrentObservation(client, page, entityRef) {
+  let current = page;
+  for (let step = 0; step < 40; step += 1) {
+    const found = findCurrentObservation(current, entityRef);
+    if (found) return found;
+    const nextCall = nextTowardComparison(current);
+    assert.ok(
+      nextCall,
+      `current observation of ${entityRef} was not addressable`,
+    );
+    current = toolResult(
+      await client.callTool({
+        name: nextCall.tool,
+        arguments: nextCall.arguments,
+      }),
+    );
+  }
+  assert.fail(`current observation of ${entityRef} was not reached`);
+}
+
 async function followComparedChange(client, page, entityRef, path) {
   let current = page;
   for (let step = 0; step < 20; step += 1) {
@@ -1582,5 +1640,229 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   assert.deepEqual(retypedTemperature.not_compared, [
     { path: ["value"], reason: "incomparable_semantics" },
   ]);
+  assert.equal(hubWriteRequests(hub.requests).length, 0);
+});
+
+test("a later agent sees current climate availability of an unchanged saved setpoint without another get_entity", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const saved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: {
+        home_ref: homeRef,
+        entity_refs: [targetTemperatureRef, targetModeRef, fanSpeedRef],
+      },
+    }),
+  );
+  assert.equal(saved.status, "ok");
+  const past = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref },
+    }),
+  );
+  const pastTemperature = capturedEntity(past, targetTemperatureRef);
+  assert.equal(pastTemperature.settings.available, true);
+  assert.equal(pastTemperature.settings.value, 26);
+  assert.equal(pastTemperature.settings.source_timestamp, null);
+  const pastObservedAt = pastTemperature.settings.observed_at;
+
+  const beforeOnline = hub.requests.length;
+  const onlineCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const onlineMethods = hubMethodNames(hub.requests.slice(beforeOnline));
+  assert.equal(
+    onlineMethods.every((method) =>
+      ["hub.list", "accessory.get"].includes(method),
+    ),
+    true,
+    JSON.stringify(onlineMethods),
+  );
+  const onlineTemperature = comparisonFor(onlineCompared, targetTemperatureRef);
+  assert.equal(onlineTemperature.status, "unchanged");
+  assert.equal(changeAt(onlineTemperature, ["value"]), undefined);
+  assert.equal(
+    onlineTemperature.current_observation?.available,
+    true,
+    JSON.stringify(onlineTemperature),
+  );
+  assert.equal(onlineTemperature.current_observation.source_timestamp, null);
+  assert.ok(Date.parse(onlineTemperature.current_observation.observed_at));
+  assert.notEqual(
+    onlineTemperature.current_observation.observed_at,
+    pastObservedAt,
+  );
+
+  hub.state.accessories.find(({ id }) => id === 40).online = false;
+  const liveOffline = toolResult(
+    await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: targetTemperatureRef },
+    }),
+  );
+  assert.equal(liveOffline.entity.available, false);
+  assert.equal(liveOffline.entity.current_value.source_timestamp, null);
+
+  const beforeOffline = hub.requests.length;
+  const offlineCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const offlineMethods = hubMethodNames(hub.requests.slice(beforeOffline));
+  assert.equal(
+    offlineMethods.every((method) =>
+      ["hub.list", "accessory.get"].includes(method),
+    ),
+    true,
+    JSON.stringify(offlineMethods),
+  );
+  const offlineTemperature = comparisonFor(
+    offlineCompared,
+    targetTemperatureRef,
+  );
+  assert.equal(offlineTemperature.status, "unchanged");
+  assert.equal(changeAt(offlineTemperature, ["value"]), undefined);
+  assert.equal(
+    offlineTemperature.current_observation?.available,
+    liveOffline.entity.available,
+    JSON.stringify(offlineTemperature),
+  );
+  assert.notEqual(
+    offlineTemperature.current_observation.available,
+    onlineTemperature.current_observation.available,
+  );
+  assert.equal(
+    offlineTemperature.current_observation.source_timestamp,
+    liveOffline.entity.current_value.source_timestamp,
+  );
+  assert.equal(
+    Number.isFinite(
+      Date.parse(offlineTemperature.current_observation.source_timestamp),
+    ),
+    false,
+  );
+  assert.ok(Date.parse(offlineTemperature.current_observation.observed_at));
+  assert.notEqual(
+    offlineTemperature.current_observation.observed_at,
+    pastObservedAt,
+  );
+  const pastOfflineTemperature = capturedEntity(
+    offlineCompared,
+    targetTemperatureRef,
+  );
+  assert.equal(pastOfflineTemperature.settings.available, true);
+  assert.equal(pastOfflineTemperature.settings.value, 26);
+  assert.equal(
+    offlineTemperature.changes.some((change) =>
+      ["available", "observed_at", "source_timestamp"].some((noise) =>
+        change.path.includes(noise),
+      ),
+    ),
+    false,
+  );
+
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 60 };
+  const changedCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const changedFan = comparisonFor(changedCompared, fanSpeedRef);
+  assert.equal(changedFan.status, "changed");
+  assert.deepEqual(changeAt(changedFan, ["value"]), {
+    path: ["value"],
+    from: {
+      value: 30,
+      enum: { key: "LOW", name: "Медленно" },
+      unit: null,
+    },
+    to: {
+      value: 60,
+      enum: { key: "MEDIUM", name: "Средне" },
+      unit: null,
+    },
+  });
+  assert.equal(changedFan.current_observation?.available, false);
+  assert.equal(changedFan.current_observation.source_timestamp, null);
+  assert.ok(Date.parse(changedFan.current_observation.observed_at));
+  assert.equal(capturedEntity(changedCompared, fanSpeedRef).settings.value, 30);
+  assert.equal(
+    capturedEntity(changedCompared, fanSpeedRef).settings.available,
+    true,
+  );
+
+  characteristicControl(hub.state, fanSpeedRef).value = { intValue: 30 };
+  const fanControl = characteristicControl(hub.state, fanSpeedRef);
+  fanControl.validValues[0].key = "QUIET";
+  fanControl.validValues[0].name = "Тихо";
+  const remapped = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const remappedFan = comparisonFor(remapped, fanSpeedRef);
+  assert.equal(remappedFan.status, "unchanged");
+  assert.deepEqual(remappedFan.not_compared, [
+    { path: ["value"], reason: "incomparable_semantics" },
+  ]);
+  assert.equal(remappedFan.current_observation?.available, false);
+  assert.equal(remappedFan.current_observation.source_timestamp, null);
+  assert.ok(Date.parse(remappedFan.current_observation.observed_at));
+
+  hub.state.scenarios[0].data = JSON.stringify(
+    officeBlockData({ delay: 0, targetCount: 250 }),
+  );
+  const largeSaved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: {
+        home_ref: homeRef,
+        entity_refs: [scenarioRef, targetTemperatureRef],
+      },
+    }),
+  );
+  const overview = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: {
+        point_ref: largeSaved.point_ref,
+        compare: true,
+        max_bytes: 16_000,
+      },
+    }),
+  );
+  assert.equal(overview.representation.kind, "entity_overview");
+  assert.equal(overview.comparison, undefined);
+  const addressed = await followCurrentObservation(
+    client,
+    overview,
+    targetTemperatureRef,
+  );
+  assert.equal(addressed.available, false);
+  assert.equal(addressed.source_timestamp, null);
+  assert.ok(Date.parse(addressed.observed_at));
+
+  hub.state.accessories = hub.state.accessories.filter(({ id }) => id !== 40);
+  const missingCompared = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref, compare: true },
+    }),
+  );
+  const missingTemperature = comparisonFor(
+    missingCompared,
+    targetTemperatureRef,
+  );
+  assert.equal(missingTemperature.status, "missing");
+  assert.equal(missingTemperature.current_observation, undefined);
   assert.equal(hubWriteRequests(hub.requests).length, 0);
 });
