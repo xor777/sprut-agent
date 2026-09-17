@@ -218,9 +218,11 @@ async function startHub() {
     behavior: {
       closeAfterNextLinkAdd: false,
       closeAfterNextLinkAddReadback: false,
+      closeBeforeNextLinkAdd: false,
       closeBeforeNextLinkList: false,
       closeAfterNextLinkRemove: false,
       closeBeforeNextLinkRemove: false,
+      dropOtherGroupBrightnessOnNextLinkWrite: false,
       keepReciprocalConsumerOnRemove: false,
     },
   };
@@ -286,8 +288,14 @@ async function startHub() {
           },
         };
       } else if (params.link?.addVirtual) {
+        if (state.behavior.closeBeforeNextLinkAdd) {
+          state.behavior.closeBeforeNextLinkAdd = false;
+          socket.close();
+          return;
+        }
         const input = params.link.addVirtual;
         addVirtualLink(state, input);
+        maybeDropOtherGroupBrightness(state);
         if (state.behavior.closeAfterNextLinkAdd) {
           state.behavior.closeAfterNextLinkAdd = false;
           socket.close();
@@ -309,6 +317,7 @@ async function startHub() {
           return;
         }
         removeIncomingLink(state, params.link.remove);
+        maybeDropOtherGroupBrightness(state);
         if (state.behavior.closeAfterNextLinkRemove) {
           state.behavior.closeAfterNextLinkRemove = false;
           socket.close();
@@ -467,6 +476,47 @@ function unlinkDashaBrightnessFromOtherGroup(state) {
   });
 }
 
+function linkDashaBrightnessToOtherGroup(state) {
+  addVirtualLink(state, {
+    aId: 91,
+    sId: 1,
+    cId: 2,
+    tAId: 35,
+    tSId: 14,
+    tCId: 21,
+  });
+}
+
+function unlinkDashaBrightnessFromBedroom(state) {
+  removeIncomingLink(state, {
+    aId: 90,
+    sId: 1,
+    cId: 2,
+    linkId: "Virtual/35.21",
+  });
+}
+
+function maybeDropOtherGroupBrightness(state) {
+  if (!state.behavior.dropOtherGroupBrightnessOnNextLinkWrite) return;
+  state.behavior.dropOtherGroupBrightnessOnNextLinkWrite = false;
+  unlinkDashaBrightnessFromOtherGroup(state);
+}
+
+function setGroupBrightness(state, value) {
+  findCharacteristic(state, { aId: 90, sId: 1, cId: 2 }).control.value = {
+    intValue: value,
+  };
+}
+
+function groupBrightness(state) {
+  return findCharacteristic(state, { aId: 90, sId: 1, cId: 2 }).control.value
+    .intValue;
+}
+
+function nativeLinkWrites(requests) {
+  return requests.filter(({ link }) => link?.addVirtual || link?.remove);
+}
+
 function incomingTargets(state, source) {
   return (state.links.get(linkKey(source)) ?? [])
     .filter(({ type }) => type === "IN")
@@ -548,6 +598,20 @@ async function prepareLink(client, extra = {}) {
 async function applyChange(client, changeRef) {
   return client.callTool({
     name: "apply_native_change",
+    arguments: { change_ref: changeRef },
+  });
+}
+
+async function getChange(client, changeRef) {
+  return client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: changeRef },
+  });
+}
+
+async function restoreChange(client, changeRef) {
+  return client.callTool({
+    name: "restore_native_change",
     arguments: { change_ref: changeRef },
   });
 }
@@ -1141,4 +1205,243 @@ test("a missing virtual flag is unknown and is not written", async (t) => {
     "target_not_virtual",
   );
   assert.equal(hub.requests.filter(isLinkWrite).length, writesBefore);
+});
+
+test("a proven virtual link apply is not resent after a manual rollback", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const first = await startClient(t, hub, stateDirectory);
+  const removed = await prepareLink(first);
+  const appliedRemove = await applyChange(
+    first,
+    removed.structuredContent.change_ref,
+  );
+  assert.equal(appliedRemove.structuredContent.status, "applied");
+  addVirtualLink(hub.state, {
+    aId: 90,
+    sId: 1,
+    cId: 2,
+    tAId: 35,
+    tSId: 14,
+    tCId: 21,
+  });
+  await first.close();
+
+  const second = await startClient(t, hub, stateDirectory);
+  const inspectedRemove = await getChange(
+    second,
+    removed.structuredContent.change_ref,
+  );
+  assert.equal(inspectedRemove.structuredContent.status, "conflict");
+  assert.equal(
+    inspectedRemove.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  const writesBeforeRepeatRemove = nativeLinkWrites(hub.requests).length;
+  const repeatedRemove = await applyChange(
+    second,
+    removed.structuredContent.change_ref,
+  );
+  assert.equal(repeatedRemove.structuredContent.status, "conflict");
+  assert.equal(
+    repeatedRemove.structuredContent.conflict_reason,
+    "manual_change",
+  );
+  assert.equal(nativeLinkWrites(hub.requests).length, writesBeforeRepeatRemove);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+
+  unlinkDashaBrightnessFromBedroom(hub.state);
+  const added = await prepareLink(second, {
+    value: true,
+    reason: "Вернуть Дашину лампу под общую яркость",
+  });
+  const appliedAdd = await applyChange(
+    second,
+    added.structuredContent.change_ref,
+  );
+  assert.equal(appliedAdd.structuredContent.status, "applied");
+  unlinkDashaBrightnessFromBedroom(hub.state);
+  await second.close();
+
+  const third = await startClient(t, hub, stateDirectory);
+  const inspectedAdd = await getChange(
+    third,
+    added.structuredContent.change_ref,
+  );
+  assert.equal(inspectedAdd.structuredContent.status, "conflict");
+  assert.equal(inspectedAdd.structuredContent.conflict_reason, "manual_change");
+  const writesBeforeRepeatAdd = nativeLinkWrites(hub.requests).length;
+  const repeatedAdd = await applyChange(
+    third,
+    added.structuredContent.change_ref,
+  );
+  assert.equal(repeatedAdd.structuredContent.status, "conflict");
+  assert.equal(nativeLinkWrites(hub.requests).length, writesBeforeRepeatAdd);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+});
+
+test("restore of an unexecuted virtual link apply does not write to cancel it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const first = await startClient(t, hub, stateDirectory);
+  setGroupBrightness(hub.state, 70);
+  hub.state.behavior.closeBeforeNextLinkRemove = true;
+  const removed = await prepareLink(first);
+  const interruptedRemove = await applyChange(
+    first,
+    removed.structuredContent.change_ref,
+  );
+  assert.equal(interruptedRemove.structuredContent.status, "uncertain");
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+  assert.equal(groupBrightness(hub.state), 70);
+  await first.close();
+
+  const second = await startClient(t, hub, stateDirectory);
+  const writesBeforeRestoreRemove = nativeLinkWrites(hub.requests).length;
+  const restoredRemove = await restoreChange(
+    second,
+    removed.structuredContent.change_ref,
+  );
+  assert.notEqual(restoredRemove.structuredContent.status, "restored");
+  assert.equal(
+    nativeLinkWrites(hub.requests).length,
+    writesBeforeRestoreRemove,
+  );
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+  assert.equal(groupBrightness(hub.state), 70);
+  assert.equal(restoredRemove.structuredContent.observed_presence, true);
+
+  const appliedRemove = await applyChange(
+    second,
+    removed.structuredContent.change_ref,
+  );
+  assert.equal(appliedRemove.structuredContent.status, "applied");
+  setGroupBrightness(hub.state, 70);
+  hub.state.behavior.closeBeforeNextLinkAdd = true;
+  const added = await prepareLink(second, {
+    value: true,
+    reason: "Вернуть Дашину лампу под общую яркость",
+  });
+  const interruptedAdd = await applyChange(
+    second,
+    added.structuredContent.change_ref,
+  );
+  assert.equal(interruptedAdd.structuredContent.status, "uncertain");
+  await second.close();
+
+  const third = await startClient(t, hub, stateDirectory);
+  const writesBeforeRestoreAdd = nativeLinkWrites(hub.requests).length;
+  const restoredAdd = await restoreChange(
+    third,
+    added.structuredContent.change_ref,
+  );
+  assert.notEqual(restoredAdd.structuredContent.status, "restored");
+  assert.equal(nativeLinkWrites(hub.requests).length, writesBeforeRestoreAdd);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+  assert.equal(groupBrightness(hub.state), 70);
+});
+
+test("a restore that lost a neighbor does not resume the old link command", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const first = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareLink(first);
+  const applied = await applyChange(
+    first,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.structuredContent.status, "applied");
+  hub.state.behavior.dropOtherGroupBrightnessOnNextLinkWrite = true;
+  const restored = await restoreChange(
+    first,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(restored.structuredContent.status, "conflict");
+  assert.equal(
+    restored.structuredContent.conflict_reason,
+    "physical_link_not_preserved",
+  );
+  assert.equal(restored.structuredContent.observed_presence, true);
+  assert.equal(restored.structuredContent.restore_supported, false);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+  await first.close();
+
+  const second = await startClient(t, hub, stateDirectory);
+  const writesBefore = nativeLinkWrites(hub.requests).length;
+  const repeatedApply = await applyChange(
+    second,
+    prepared.structuredContent.change_ref,
+  );
+  const repeatedRestore = await restoreChange(
+    second,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(nativeLinkWrites(hub.requests).length, writesBefore);
+  assert.notEqual(repeatedApply.structuredContent.status, "applied");
+  assert.notEqual(repeatedRestore.structuredContent.status, "restored");
+  assert.equal(repeatedApply.structuredContent.restore_supported, false);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+});
+
+test("get reevaluates a preserved neighbor after a physical-link conflict", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const first = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareLink(first);
+  hub.state.behavior.dropOtherGroupBrightnessOnNextLinkWrite = true;
+  const applied = await applyChange(
+    first,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.structuredContent.status, "conflict");
+  assert.equal(
+    applied.structuredContent.conflict_reason,
+    "physical_link_not_preserved",
+  );
+  assert.equal(applied.structuredContent.observed_presence, false);
+  assert.ok(
+    applied.structuredContent.physical_link_preservation_failures?.length > 0,
+  );
+  linkDashaBrightnessToOtherGroup(hub.state);
+  await first.close();
+
+  const second = await startClient(t, hub, stateDirectory);
+  const inspected = await getChange(
+    second,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(inspected.structuredContent.status, "applied");
+  assert.equal(inspected.structuredContent.conflict_reason, undefined);
+  assert.equal(
+    inspected.structuredContent.physical_link_preservation_failures,
+    undefined,
+  );
+  assert.equal(inspected.structuredContent.observed_presence, false);
+  assert.equal(inspected.structuredContent.restore_supported, true);
+  const writesBefore = nativeLinkWrites(hub.requests).length;
+  const repeated = await applyChange(
+    second,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(repeated.structuredContent.status, "applied");
+  assert.equal(nativeLinkWrites(hub.requests).length, writesBefore);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), [
+    "35.14.21",
+  ]);
 });
