@@ -13807,6 +13807,126 @@ test("an incomplete native SDK response stays an error instead of becoming a com
   assert.equal(result.structuredContent.sdk_complete, undefined);
 });
 
+test("restoring an unapplied scenario change does not accuse a manual edit or cancel later apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push({
+    index: "manual-logic",
+    name: "Ручной LOGIC",
+    desc: "Существующий код",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: firstLogicSource,
+    predefined: false,
+  });
+  const fixture = installNativeCommandFixture(hub);
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== "all-off-command",
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    {
+      name: "logic_source_create",
+      arguments: {
+        operation: "logic_source_create",
+        target_ref: serviceRef,
+        name: "Черновик яркости",
+        description: "Ещё не применённый JS",
+        active: false,
+        on_start: false,
+        sync: false,
+        source: firstLogicSource,
+        reason: "Подготовить JS-черновик без записи",
+      },
+    },
+    {
+      name: "logic_source_update",
+      arguments: {
+        operation: "logic_source_update",
+        target_ref: `${homeRef}/scenario/manual-logic`,
+        source: secondLogicSource,
+        reason: "Подготовить правку source без записи",
+      },
+    },
+    {
+      name: "block_create",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name: "Черновик выключения",
+        description: "Ещё не применённый BLOCK",
+        active: true,
+        on_start: false,
+        sync: false,
+        data: fixture.data,
+        reason: "Подготовить BLOCK-черновик без записи",
+      },
+    },
+    {
+      name: "block_data_update",
+      arguments: {
+        operation: "block_data_update",
+        target_ref: scenarioRef,
+        data: dailyIntervalBlockData(),
+        reason: "Подготовить замену data без записи",
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: testCase.arguments,
+    });
+    assert.equal(
+      prepared.isError,
+      undefined,
+      `${testCase.name}: ${prepared.content[0]?.text}`,
+    );
+    assert.equal(prepared.structuredContent.status, "prepared", testCase.name);
+    const writesBeforeRestore = scenarioWriteCount(hub);
+    const scenariosBeforeRestore = hub.state.scenarios.length;
+
+    const restored = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+    assertUnappliedScenarioRestore(restored, {
+      tool: `restore_native_change ${testCase.name}`,
+      hub,
+      writesBefore: writesBeforeRestore,
+      scenariosBefore: scenariosBeforeRestore,
+    });
+
+    const observed = await client.callTool({
+      name: "get_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+    assertUnappliedScenarioRestore(observed, {
+      tool: `get_native_change ${testCase.name}`,
+      hub,
+      writesBefore: writesBeforeRestore,
+      scenariosBefore: scenariosBeforeRestore,
+    });
+
+    const applied = await client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+    assert.equal(
+      applied.isError,
+      undefined,
+      `${testCase.name}: ${applied.content[0]?.text}`,
+    );
+    assert.equal(applied.structuredContent.status, "applied", testCase.name);
+    assert.ok(
+      scenarioWriteCount(hub) > writesBeforeRestore,
+      `${testCase.name}: later apply must still write`,
+    );
+  }
+});
+
 test("a native LOGIC source is created, assigned, updated, read back, and restored through public tools", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -14914,6 +15034,35 @@ function scenarioWriteCount(hub) {
   return hub.requests.filter(
     ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
   ).length;
+}
+
+function assertUnappliedScenarioRestore(
+  result,
+  { tool, hub, writesBefore, scenariosBefore },
+) {
+  assert.equal(result.isError, undefined, `${tool}: ${result.content[0]?.text}`);
+  assert.equal(result.structuredContent.status, "not_owned", tool);
+  assert.equal(
+    result.structuredContent.conflict_reason,
+    "change_was_not_applied",
+    tool,
+  );
+  assert.equal(result.structuredContent.manual_change_observed, undefined, tool);
+  assert.equal(
+    result.structuredContent.next,
+    undefined,
+    `${tool} must not cancel the draft by asking for a new prepare`,
+  );
+  assert.equal(
+    scenarioWriteCount(hub),
+    writesBefore,
+    `${tool} must not write to the hub`,
+  );
+  assert.equal(
+    hub.state.scenarios.length,
+    scenariosBefore,
+    `${tool} must not create or delete a scenario`,
+  );
 }
 
 function assertAssignedLogicStillApplied(
