@@ -51,7 +51,8 @@
 
 ## Значения, свежесть и диагностика
 
-- `current_value` характеристики — типизированное значение, возвращённое хабом. Оно сохраняет `false`, ноль, enum и unit, но само по себе не устанавливает прямой отчёт физического прибора или наступление физического эффекта команды.
+- `current_value` характеристики — типизированное значение, возвращённое хабом. Оно сохраняет `false`, ноль, enum и unit, но само по себе не устанавливает прямой отчёт физического прибора или наступление физического эффекта команды. Accessory `virtual` и characteristic `has_links`/`link_processing` сохраняют отсутствие поля отдельно от `false` и `0`; `link_processing=0` — явное LastValue, а не догадка по UI.
+- Изменение одной IN-связи существующей виртуальной лампы: [2026-09-17](https://github.com/xor777/sprut-agent/blob/main/research/protocol/2026-09-17-virtual-light-link.md).
 - `freshness.hubResponseReceivedAt` — время получения ответа. `measurementAt: null` или `source_timestamp: null` означает, что время источника неизвестно. Строка Time корневого окна — наблюдённые часы хаба, не это время получения и не часы ОС агента.
 - Наблюдение пустого `optionsWindow` и `window.get({windowKey:""})`: [корневое окно настроек дома](https://github.com/xor777/sprut-agent/blob/main/research/protocol/2026-09-16-home-settings-window.md).
 - Configured value, диагностический report и `pending: unknown` не выводятся друг из друга.
@@ -70,6 +71,7 @@
 - [`accessory_placement`](native-write/accessory-placement.md)
 - [`room_create`](native-write/room-create.md)
 - [`virtual_light_group`](native-write/virtual-light-group.md)
+- [`virtual_light_link`](native-write/virtual-light-link.md)
 - [`characteristic_value`](native-write/characteristic-value.md)
 - [`characteristic_option`, `logic_option`, `window_option`](native-write/options.md)
 - [`logic_assignment`, `logic_active`](native-write/logic-assignment-active.md)

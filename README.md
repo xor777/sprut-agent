@@ -207,7 +207,9 @@ Time/TimeZone читаются тем же `get_entity`; это не обяза�
 Изменения проходят через `get_native_change_contract` →
 `prepare_native_change` → `apply_native_change`. Состояние и возврат доступны
 через `get_native_change`, `list_native_changes` и
-`restore_native_change`. Контракт `block_create`/`block_data_update` публикует
+`restore_native_change`. `virtual_light_link` добавляет или снимает одну IN-связь
+`On` или `Brightness` уже существующей виртуальной лампы, не пересоздавая группу;
+успех — граф, не команда свету. Контракт `block_create`/`block_data_update` публикует
 форму поддержанных узлов, достаточную чтобы собрать data без чужого
 BLOCK-образца. Имя и описание существующего BLOCK меняются отдельным
 `window_option` по scenario-ref (`Name`/`Desc`); `block_data_update` пишет

@@ -1666,6 +1666,7 @@ export class SprutHubClient {
           ref: accessoryRef(parsed.serial, accessory.id),
           name: accessory.name,
           available: accessory.online,
+          virtual: nativeBooleanFlag(accessory.virtual),
           services: (accessory.services ?? []).map((service) => ({
             ref: serviceRef(parsed.serial, accessory.id, service.sId),
             name: service.name,
@@ -3735,6 +3736,7 @@ function normalizeAccessoryDetail(serial, accessory, observedAt) {
     ref: accessoryRef(serial, accessory.id),
     name: accessory.name,
     available: accessory.online,
+    virtual: nativeBooleanFlag(accessory.virtual),
     room_ref: roomRef(serial, accessory.roomId),
     native: {
       extension_key: accessory.extensionKey ?? null,
@@ -3798,6 +3800,8 @@ function normalizeCharacteristicDetail(
     name: control.name,
     type: control.type ?? control.key,
     available: accessory.online,
+    has_links: nativeBooleanFlag(characteristic.hasLinks),
+    link_processing: nativeIntegerFlag(characteristic.linkProcessing),
     current_value: {
       value: value.value,
       ...(currentEnum ? { enum: currentEnum } : {}),
@@ -5011,6 +5015,14 @@ function normalizeReadableCharacteristics(serial, accessory, service) {
         measured_at: null,
       };
     });
+}
+
+function nativeBooleanFlag(value) {
+  return typeof value === "boolean" ? value : null;
+}
+
+function nativeIntegerFlag(value) {
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function extractTypedValue(value) {

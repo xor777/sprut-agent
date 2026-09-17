@@ -853,7 +853,15 @@ test("a lost link write stays unknown until the graph is read and does not dupli
     client,
     prepared.structuredContent.change_ref,
   );
-  assert.equal(interrupted.isError, true);
+  assert.equal(interrupted.isError, undefined, interrupted.content[0]?.text);
+  assert.equal(
+    ["applied", "uncertain"].includes(interrupted.structuredContent.status),
+    true,
+    interrupted.structuredContent.status,
+  );
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
 
   const recovered = await startClient(t, hub, stateDirectory);
   const inspected = await recovered.callTool({

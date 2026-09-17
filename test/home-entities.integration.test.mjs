@@ -738,6 +738,7 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
       ref: "spruthub://hub/home%20B/accessory/32",
       name: "Датчик B",
       available: true,
+      virtual: null,
       services: [
         {
           ref: "spruthub://hub/home%20B/accessory/32/service/13",
@@ -825,6 +826,7 @@ test("compact room catalog preserves named services without reading their values
       ref: "spruthub://hub/home%2FA/accessory/70",
       name: "Настенный контроллер",
       available: true,
+      virtual: null,
       services: [
         {
           ref: "spruthub://hub/home%2FA/accessory/70/service/21",
@@ -842,6 +844,7 @@ test("compact room catalog preserves named services without reading their values
       ref: "spruthub://hub/home%2FA/accessory/81",
       name: "Лампа у окна",
       available: true,
+      virtual: null,
       services: [
         {
           ref: "spruthub://hub/home%2FA/accessory/81/service/4",
