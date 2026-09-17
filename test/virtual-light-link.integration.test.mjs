@@ -221,6 +221,7 @@ async function startHub() {
       closeBeforeNextLinkList: false,
       closeAfterNextLinkRemove: false,
       closeBeforeNextLinkRemove: false,
+      keepReciprocalConsumerOnRemove: false,
     },
   };
   const server = new WebSocketServer({ port: 0 });
@@ -425,6 +426,7 @@ function removeIncomingLink(state, input) {
     (state.links.get(key) ?? []).filter(({ index }) => index !== input.linkId),
   );
   if (removed?.type !== "IN") return;
+  if (state.behavior.keepReciprocalConsumerOnRemove) return;
   for (const target of removed.characteristics) {
     const outgoingKey = linkKey(target);
     const remaining = [];
@@ -454,6 +456,15 @@ function findCharacteristic(state, { aId, sId, cId }) {
     .find(({ id }) => id === aId)
     ?.services.find((service) => service.sId === sId)
     ?.characteristics.find((characteristic) => characteristic.cId === cId);
+}
+
+function unlinkDashaBrightnessFromOtherGroup(state) {
+  removeIncomingLink(state, {
+    aId: 91,
+    sId: 1,
+    cId: 2,
+    linkId: "Virtual/35.21",
+  });
 }
 
 function incomingTargets(state, source) {
@@ -921,4 +932,177 @@ test("a later manual rewrite of the selected link is not overwritten by restore"
     "34.13.16",
     "35.14.21",
   ]);
+});
+
+test("a neighbor consumer changed after prepare does not block apply or restore of the selected link", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareLink(client);
+  unlinkDashaBrightnessFromOtherGroup(hub.state);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+
+  const applied = await applyChange(
+    client,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.observed_presence, false);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+  assert.deepEqual(
+    outgoingConsumers(hub.state, { aId: 35, sId: 14, cId: 21 }),
+    [],
+  );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+  assert.deepEqual(
+    outgoingConsumers(hub.state, { aId: 35, sId: 14, cId: 21 }),
+    ["90.1.2"],
+  );
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 1 }), [
+    "34.13.15",
+    "35.14.20",
+  ]);
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("an inconsistent virtual IN and physical OUT is not a successful link change", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.keepReciprocalConsumerOnRemove = true;
+  const prepared = await prepareLink(client);
+  const applied = await applyChange(
+    client,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(
+    ["applied", "restored"].includes(applied.structuredContent.status),
+    false,
+    applied.structuredContent.status,
+  );
+  assert.notEqual(
+    applied.structuredContent.verification?.result,
+    "requested_link_observed",
+  );
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+  assert.deepEqual(
+    outgoingConsumers(hub.state, { aId: 35, sId: 14, cId: 21 }),
+    ["90.1.2", "91.1.2"],
+  );
+
+  const inspected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(
+    ["applied", "restored"].includes(inspected.structuredContent.status),
+    false,
+    inspected.structuredContent.status,
+  );
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("a missing virtual target is not a removed link and does not revive restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const first = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareLink(first);
+  const applied = await applyChange(
+    first,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.structuredContent.status, "applied");
+  hub.state.accessories = hub.state.accessories.filter(({ id }) => id !== 90);
+
+  const inspected = await first.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.isError, undefined, inspected.content[0]?.text);
+  assert.notEqual(inspected.structuredContent.status, "applied");
+  assert.notEqual(
+    inspected.structuredContent.verification?.result,
+    "requested_link_observed",
+  );
+  assert.equal(inspected.structuredContent.restore_supported, false);
+  assert.equal(inspected.structuredContent.observed_presence, undefined);
+  await first.close();
+
+  hub.state.accessories.push(
+    virtualLamp({ id: 90, name: "Свет спальни", brightness: 46 }),
+  );
+  hub.state.links.set("90.1.2", [incoming(34, 13, 16), incoming(35, 14, 21)]);
+  const writesBeforeRestore = hub.requests.filter(isLinkWrite).length;
+  const second = await startClient(t, hub, stateDirectory);
+  const restored = await second.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.restore_supported, false);
+  assert.equal(hub.requests.filter(isLinkWrite).length, writesBeforeRestore);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+    "35.14.21",
+  ]);
+});
+
+test("a missing virtual or online flag is unknown and is not written", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const writesBefore = hub.requests.filter(isLinkWrite).length;
+  const dasha = hub.state.accessories.find(({ id }) => id === 35);
+  delete dasha.virtual;
+
+  const unknownVirtual = await prepareLink(client, {
+    reason: "Снять яркость лампы с неизвестным virtual",
+  });
+  assert.equal(unknownVirtual.isError, true);
+  assert.equal(
+    unknownVirtual.structuredContent.error.code,
+    "unknown_link_flags",
+  );
+  assert.notEqual(
+    unknownVirtual.structuredContent.error.code,
+    "incompatible_link_endpoint",
+  );
+  assert.equal(hub.requests.filter(isLinkWrite).length, writesBefore);
+
+  dasha.virtual = false;
+  const group = hub.state.accessories.find(({ id }) => id === 90);
+  delete group.online;
+  const unknownOnline = await prepareLink(client, {
+    reason: "Снять яркость группы с неизвестным online",
+  });
+  assert.equal(unknownOnline.isError, true);
+  assert.equal(
+    unknownOnline.structuredContent.error.code,
+    "unknown_link_flags",
+  );
+  assert.notEqual(
+    unknownOnline.structuredContent.error.code,
+    "accessory_unavailable",
+  );
+  assert.equal(hub.requests.filter(isLinkWrite).length, writesBefore);
 });
