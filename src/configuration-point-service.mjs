@@ -212,6 +212,7 @@ export class ConfigurationPointService {
         status: changes.length > 0 ? "changed" : "unchanged",
         changes,
         not_compared,
+        ...currentObservationFrom(current.captured),
       });
     }
     return {
@@ -576,6 +577,19 @@ function comparableClimateValue(settings) {
       ? { enum: { key: settings.enum.key, name: settings.enum.name } }
       : {}),
     unit: settings.unit,
+  };
+}
+
+function currentObservationFrom(captured) {
+  if (captured?.kind !== "characteristic") return {};
+  const settings = captured.settings;
+  if (!settings || typeof settings !== "object") return {};
+  return {
+    current_observation: {
+      available: settings.available,
+      observed_at: settings.observed_at,
+      source_timestamp: settings.source_timestamp,
+    },
   };
 }
 
