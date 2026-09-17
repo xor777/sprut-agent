@@ -17,6 +17,7 @@ const VALUE_FIELDS = [
   "stringValue",
 ];
 
+const INCLUDE_READ_ERROR = Symbol("includeReadError");
 const LOG_LEVELS = new Set([
   "LOG_LEVEL_OFF",
   "LOG_LEVEL_ERROR",
@@ -2228,11 +2229,23 @@ export class SprutHubClient {
       ...normalizeExtensionDetail(parsed.serial, extension),
     };
     if (requested.has("children")) {
-      entity.children = await this.#readExtensionChildren(
-        parsed.serial,
-        parsed.extensionKey,
-        deadline,
-      );
+      try {
+        entity.children = await this.#readExtensionChildren(
+          parsed.serial,
+          parsed.extensionKey,
+          deadline,
+        );
+      } catch (error) {
+        if (!(error instanceof SprutHubError)) throw error;
+        // Optional children must not discard a successful extension.get.
+        Object.defineProperty(entity, INCLUDE_READ_ERROR, {
+          value: {
+            ...(entity[INCLUDE_READ_ERROR] ?? {}),
+            children: { code: error.code, message: error.message },
+          },
+          enumerable: false,
+        });
+      }
     }
     return entity;
   }
@@ -2243,11 +2256,13 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
-    const children = extractEntityArray(response, [
-      "extensionChild",
-      "list",
-      "children",
-    ]);
+    // Native empty catalogs omit children on a valid list object; missing
+    // list/envelope, null, or a non-array remain incompatible.
+    const children = extractEntityArray(
+      response,
+      ["extensionChild", "list", "children"],
+      true,
+    );
     return normalizeExtensionChildren(serial, children, selectedExtensionKey);
   }
 
@@ -3884,12 +3899,25 @@ function includeWasApplied(entity, include) {
     );
   }
   if (include === "children") {
-    return entity.kind === "extension" && Object.hasOwn(entity, "children");
+    return entity.kind === "extension" && Array.isArray(entity.children);
   }
   return false;
 }
 
 function explainUnappliedInclude(entity, include, ownerContext) {
+  const includeError = entity[INCLUDE_READ_ERROR]?.[include];
+  if (includeError) {
+    return {
+      include,
+      reason: "read_failed",
+      error_code: includeError.code,
+      limitation: includeError.message,
+      next: {
+        tool: "get_entity",
+        arguments: { entity_ref: entity.ref, include: [include] },
+      },
+    };
+  }
   const next = nextReadTowardOwner(entity, include, ownerContext);
   if (next) {
     return {

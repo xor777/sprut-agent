@@ -1303,7 +1303,10 @@ test("empty notification children stay empty and keep provider status when the c
     missingProvider.structuredContent.error.code,
     "request_rejected",
   );
-  assert.equal(Object.hasOwn(missingProvider.structuredContent, "entity"), false);
+  assert.equal(
+    Object.hasOwn(missingProvider.structuredContent, "entity"),
+    false,
+  );
   assertNoHubSecrets(missingProvider);
 });
 
