@@ -709,6 +709,39 @@ function assertUnreadChildren(result, { enabled, state, errorCode }) {
   return entity;
 }
 
+function childrenIncludeNext(entityRef) {
+  return {
+    tool: "get_entity",
+    arguments: { entity_ref: entityRef, include: ["children"] },
+  };
+}
+
+function assertIncludeReadPointerError(
+  result,
+  { code, retryable, action, next },
+) {
+  assert.equal(result.isError, true, result.content[0]?.text);
+  assert.equal(result.structuredContent.error.code, code);
+  assert.equal(result.structuredContent.error.retryable, retryable);
+  assert.notEqual(code, "entity_pointer_not_found");
+  if (action === undefined) {
+    assert.equal(
+      Object.hasOwn(result.structuredContent.error, "action"),
+      false,
+    );
+  } else {
+    assert.equal(result.structuredContent.error.action, action);
+  }
+  if (next === undefined) {
+    assert.equal(Object.hasOwn(result.structuredContent, "next"), false);
+  } else {
+    assert.deepEqual(result.structuredContent.next, next);
+  }
+  assert.equal(Object.hasOwn(result.structuredContent, "entity"), false);
+  assert.equal(Object.hasOwn(result.structuredContent, "selection"), false);
+  assertNoHubSecrets(result);
+}
+
 function isMutation(params) {
   return Boolean(
     params.window?.update ||
@@ -1308,6 +1341,207 @@ test("empty notification children stay empty and keep provider status when the c
     false,
   );
   assertNoHubSecrets(missingProvider);
+});
+
+test("a pointer into unread children keeps the include read failure", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  hub.behavior.childListHangKey = telegramKey;
+  const timedOut = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(timedOut, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  const nested = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0",
+    },
+  });
+  assertIncludeReadPointerError(nested, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  const readablePart = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/spaces",
+    },
+  });
+  assert.equal(readablePart.isError, undefined, readablePart.content[0]?.text);
+  assert.equal(readablePart.structuredContent.selection.status, "found");
+  assert.equal(readablePart.structuredContent.identity.enabled, true);
+  assert.equal(readablePart.structuredContent.identity.state, "FAILED");
+
+  const missingPath = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/not_a_child_catalog",
+    },
+  });
+  assert.equal(missingPath.isError, true);
+  assert.equal(
+    missingPath.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
+  hub.behavior.childListHangKey = null;
+  hub.behavior.childListErrorKey = telegramKey;
+  const rejected = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(rejected, {
+    code: "request_rejected",
+    retryable: false,
+    next: childrenIncludeNext(telegramRef),
+  });
+
+  hub.behavior.childListErrorKey = null;
+  hub.behavior.childListUnsupportedKey = telegramKey;
+  const unsupported = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assertIncludeReadPointerError(unsupported, {
+    code: "unsupported",
+    retryable: false,
+    action: "inspect_home",
+    next: { tool: "inspect_home", arguments: { home_ref: homeRef } },
+  });
+  assert.notDeepEqual(
+    unsupported.structuredContent.next,
+    childrenIncludeNext(telegramRef),
+  );
+
+  const unsupportedEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: telegramRef, include: ["children"] },
+  });
+  const unsupportedOutcome =
+    unsupportedEntity.structuredContent.entity.include_resolution.not_applied.find(
+      ({ include }) => include === "children",
+    );
+  assert.equal(unsupportedOutcome.error_code, "unsupported");
+  assert.equal(Object.hasOwn(unsupportedOutcome, "next"), false);
+
+  hub.behavior.childListUnsupportedKey = null;
+  hub.behavior.childListForm.set(telegramKey, "wrong_type");
+  const incompatible = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0/ref",
+    },
+  });
+  assertIncludeReadPointerError(incompatible, {
+    code: "incompatible_response",
+    retryable: false,
+  });
+
+  hub.behavior.childListForm.set(telegramKey, "omitted_children");
+  const empty = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children",
+    },
+  });
+  assert.equal(empty.isError, undefined, empty.content[0]?.text);
+  assert.deepEqual(empty.structuredContent.selection.value, []);
+
+  const emptyMissing = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: telegramRef,
+      include: ["children"],
+      pointer: "/children/0",
+    },
+  });
+  assert.equal(emptyMissing.isError, true);
+  assert.equal(
+    emptyMissing.structuredContent.error.code,
+    "entity_pointer_not_found",
+  );
+
+  const page = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: bridgeRef,
+      include: ["children"],
+      pointer: "/children",
+      max_bytes: 2_048,
+    },
+  });
+  assert.equal(page.isError, undefined, page.content[0]?.text);
+  const continuation = page.structuredContent.representation.next;
+  assert.equal(continuation?.tool, "get_entity");
+  assert.equal(continuation.arguments.pointer, "/children");
+  assert.ok(continuation.arguments.offset > 0);
+  assert.equal(typeof continuation.arguments.version, "string");
+
+  hub.behavior.childListHangKey = bridgeKey;
+  const continued = await client.callTool({
+    name: continuation.tool,
+    arguments: continuation.arguments,
+  });
+  assertIncludeReadPointerError(continued, {
+    code: "timeout",
+    retryable: true,
+    action: "retry",
+    next: childrenIncludeNext(bridgeRef),
+  });
+
+  hub.behavior.childListHangKey = null;
+  const recovered = await client.callTool({
+    name: continued.structuredContent.next.tool,
+    arguments: continued.structuredContent.next.arguments,
+  });
+  assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
+  if (recovered.structuredContent.entity) {
+    assert.ok(Array.isArray(recovered.structuredContent.entity.children));
+    assert.ok(
+      recovered.structuredContent.entity.include_resolution.applied.includes(
+        "children",
+      ),
+    );
+  } else {
+    assert.ok(
+      recovered.structuredContent.representation.available_parts.some(
+        ({ pointer }) => pointer === "/children" || pointer.startsWith("/0"),
+      ) || recovered.structuredContent.selection?.pointer === "/children",
+    );
+  }
 });
 
 test("ACCESSORY_LIST claims links only for a confirmed read-only form", async (t) => {
