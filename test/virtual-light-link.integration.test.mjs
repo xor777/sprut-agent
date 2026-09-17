@@ -982,6 +982,42 @@ test("a neighbor consumer changed after prepare does not block apply or restore 
   );
 });
 
+test("restore of an added link keeps a neighbor consumer changed after prepare", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const removed = await prepareLink(client);
+  await applyChange(client, removed.structuredContent.change_ref);
+  const prepared = await prepareLink(client, {
+    value: true,
+    reason: "Вернуть Дашину лампу под общую яркость",
+  });
+  const applied = await applyChange(
+    client,
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(applied.structuredContent.status, "applied");
+  unlinkDashaBrightnessFromOtherGroup(hub.state);
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 2 }), [
+    "34.13.16",
+  ]);
+  assert.deepEqual(incomingTargets(hub.state, { aId: 91, sId: 1, cId: 2 }), []);
+  assert.deepEqual(
+    outgoingConsumers(hub.state, { aId: 35, sId: 14, cId: 21 }),
+    [],
+  );
+  assert.deepEqual(incomingTargets(hub.state, { aId: 90, sId: 1, cId: 1 }), [
+    "34.13.15",
+    "35.14.20",
+  ]);
+});
+
 test("an inconsistent virtual IN and physical OUT is not a successful link change", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -1068,7 +1104,7 @@ test("a missing virtual target is not a removed link and does not revive restore
   ]);
 });
 
-test("a missing virtual or online flag is unknown and is not written", async (t) => {
+test("a missing virtual flag is unknown and is not written", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const writesBefore = hub.requests.filter(isLinkWrite).length;
@@ -1091,18 +1127,18 @@ test("a missing virtual or online flag is unknown and is not written", async (t)
 
   dasha.virtual = false;
   const group = hub.state.accessories.find(({ id }) => id === 90);
-  delete group.online;
-  const unknownOnline = await prepareLink(client, {
-    reason: "Снять яркость группы с неизвестным online",
+  delete group.virtual;
+  const unknownTarget = await prepareLink(client, {
+    reason: "Снять яркость группы с неизвестным virtual",
   });
-  assert.equal(unknownOnline.isError, true);
+  assert.equal(unknownTarget.isError, true);
   assert.equal(
-    unknownOnline.structuredContent.error.code,
+    unknownTarget.structuredContent.error.code,
     "unknown_link_flags",
   );
   assert.notEqual(
-    unknownOnline.structuredContent.error.code,
-    "accessory_unavailable",
+    unknownTarget.structuredContent.error.code,
+    "target_not_virtual",
   );
   assert.equal(hub.requests.filter(isLinkWrite).length, writesBefore);
 });

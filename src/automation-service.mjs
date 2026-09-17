@@ -3046,6 +3046,9 @@ export class AutomationService {
 
   async #applyVirtualLightLink(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.owned_target_absent_observed === true) {
+      return this.#finishVirtualLightLinkTargetAbsent(change);
+    }
     if (
       ["restoring", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "restore"
@@ -3053,18 +3056,7 @@ export class AutomationService {
       return this.#restoreVirtualLightLink(change);
     }
     if (change.status === "applied") {
-      const current = await this.#observeVirtualLightLink(change);
-      if (virtualLightLinkPresence(current) === change.requested_presence) {
-        return this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-          last_verification: freshVerification("requested_link_observed"),
-        });
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+      return this.#observeProvenVirtualLightLink(change);
     }
     if (
       ["applying", "uncertain"].includes(change.status) &&
@@ -3078,8 +3070,8 @@ export class AutomationService {
       const current = change.observed_snapshot;
       if (
         !current ||
-        current.absent ||
-        virtualLightLinkPresence(current) !== change.baseline_presence
+        virtualLightLinkGraphState(current, change.target) !==
+          virtualLightLinkExpectedGraphState(change.baseline_presence)
       ) {
         return reconciled;
       }
@@ -3095,17 +3087,29 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
-    if (current.presence === change.requested_presence) {
-      change.applied_snapshot = virtualLightLinkAppliedSnapshot(current);
-      return this.#finishNative(change, "applied", undefined, {
+    const graphState = virtualLightLinkGraphState(current, change.target);
+    if (graphState === "inconsistent") {
+      return this.#finishNative(change, "conflict", undefined, {
         observed_snapshot: current,
-        recovered_after_uncertain_write: change.native_write_sent === true,
-        last_verification: freshVerification("requested_link_observed"),
+        conflict_reason: "inconsistent_link_graph",
+        last_verification: freshVerification("inconsistent_link_graph"),
       });
+    }
+    if (
+      graphState ===
+      virtualLightLinkExpectedGraphState(change.requested_presence)
+    ) {
+      return this.#finishVirtualLightLinkMatchedGraph(
+        change,
+        current,
+        "applied",
+        "requested_link_observed",
+      );
     }
     if (change.requested_presence === false) {
       requireRemovableVirtualIncoming(current.incoming, change.endpoint);
     }
+    captureVirtualLightLinkWriteBaseline(change, current);
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.#writeVirtualLightLinkPresence(
@@ -3130,10 +3134,16 @@ export class AutomationService {
 
   async #getVirtualLightLink(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.owned_target_absent_observed === true) {
+      return this.#finishVirtualLightLinkTargetAbsent(change);
+    }
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       return nativeIntentDirection(change) === "restore"
         ? this.#reconcileVirtualLightLinkRestore(change, false)
         : this.#reconcileVirtualLightLinkApply(change, false);
+    }
+    if (change.status === "applied") {
+      return this.#observeProvenVirtualLightLink(change);
     }
     let current;
     try {
@@ -3143,18 +3153,8 @@ export class AutomationService {
         verification: failedVerification(error),
       });
     }
-    if (change.status === "applied") {
-      if (virtualLightLinkPresence(current) === change.requested_presence) {
-        return this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-          last_verification: freshVerification("requested_link_observed"),
-        });
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+    if (current.absent) {
+      return this.#finishVirtualLightLinkTargetAbsent(change, current);
     }
     return this.#finishNative(change, change.status, undefined, {
       observed_snapshot: current,
@@ -3164,6 +3164,9 @@ export class AutomationService {
 
   async #restoreVirtualLightLink(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.owned_target_absent_observed === true) {
+      return this.#finishVirtualLightLinkTargetAbsent(change);
+    }
     if (
       ["applying", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "apply"
@@ -3178,6 +3181,12 @@ export class AutomationService {
       });
     }
     if (
+      change.status === "conflict" &&
+      change.conflict_reason === "physical_link_not_preserved"
+    ) {
+      return publicStoredNativeChange(change);
+    }
+    if (
       ["restoring", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "restore"
     ) {
@@ -3188,21 +3197,37 @@ export class AutomationService {
       if (reconciled.status !== "uncertain") return reconciled;
       const pending = change.observed_snapshot;
       if (
-        !pending ||
-        pending.absent ||
-        virtualLightLinkPresence(pending) !== change.requested_presence
+        virtualLightLinkGraphState(pending, change.target) !==
+        virtualLightLinkExpectedGraphState(change.requested_presence)
       ) {
         return reconciled;
       }
     }
     const current = await this.#readRestorableVirtualLightLink(change);
-    if (virtualLightLinkPresence(current) === change.baseline_presence) {
+    if (current.absent) {
+      return this.#finishVirtualLightLinkTargetAbsent(change, current);
+    }
+    const graphState = virtualLightLinkGraphState(current, change.target);
+    if (graphState === "inconsistent") {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "inconsistent_link_graph",
+        last_verification: freshVerification("inconsistent_link_graph"),
+      });
+    }
+    if (
+      graphState ===
+      virtualLightLinkExpectedGraphState(change.baseline_presence)
+    ) {
       return this.#finishNative(change, "restored", undefined, {
         observed_snapshot: current,
         last_verification: freshVerification("baseline_link_observed"),
       });
     }
-    if (virtualLightLinkPresence(current) !== change.requested_presence) {
+    if (
+      graphState !==
+      virtualLightLinkExpectedGraphState(change.requested_presence)
+    ) {
       return this.#finishNative(change, "conflict", undefined, {
         observed_snapshot: current,
         conflict_reason: "manual_change",
@@ -3212,6 +3237,7 @@ export class AutomationService {
     if (change.baseline_presence === false) {
       requireRemovableVirtualIncoming(current.incoming, change.endpoint);
     }
+    captureVirtualLightLinkWriteBaseline(change, current);
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeVirtualLightLinkPresence(
@@ -3231,6 +3257,88 @@ export class AutomationService {
       return this.#reconcileVirtualLightLinkRestore(change, false);
     }
     return this.#reconcileVirtualLightLinkRestore(change, true);
+  }
+
+  async #observeProvenVirtualLightLink(change) {
+    let current;
+    try {
+      current = await this.#observeVirtualLightLink(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    if (current.absent) {
+      return this.#finishVirtualLightLinkTargetAbsent(change, current);
+    }
+    const graphState = virtualLightLinkGraphState(current, change.target);
+    if (graphState === "inconsistent") {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "inconsistent_link_graph",
+        last_verification: freshVerification("inconsistent_link_graph"),
+      });
+    }
+    if (
+      graphState ===
+      virtualLightLinkExpectedGraphState(change.requested_presence)
+    ) {
+      return this.#finishNative(change, "applied", undefined, {
+        observed_snapshot: current,
+        last_verification: freshVerification("requested_link_observed"),
+      });
+    }
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_snapshot: current,
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  async #finishVirtualLightLinkTargetAbsent(change, current) {
+    return this.#finishNative(change, "conflict", undefined, {
+      ...(current !== undefined ? { observed_snapshot: current } : {}),
+      conflict_reason: "target_absent",
+      owned_target_absent_observed: true,
+      last_verification:
+        current !== undefined
+          ? freshVerification("target_absent")
+          : savedVerification(change.last_verification),
+    });
+  }
+
+  async #finishVirtualLightLinkMatchedGraph(
+    change,
+    current,
+    successStatus,
+    observed,
+  ) {
+    const preserved = virtualLightLinkForeignConsumersPreserved(
+      change,
+      current,
+    );
+    if (successStatus === "applied") {
+      change.applied_snapshot = virtualLightLinkAppliedSnapshot(current);
+    }
+    if (current.presence === true && current.link_id) {
+      change.owned_link_id = current.link_id;
+    }
+    if (change.native_write_sent === true && !preserved.ok) {
+      return this.#finishNative(change, "conflict", undefined, {
+        observed_snapshot: current,
+        conflict_reason: "physical_link_not_preserved",
+        physical_link_preservation_failures: preserved.missing,
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    return this.#finishNative(change, successStatus, undefined, {
+      observed_snapshot: current,
+      recovered_after_uncertain_write:
+        change.native_write_sent === true && change.native_acknowledged !== true
+          ? true
+          : undefined,
+      last_verification: freshVerification(observed),
+    });
   }
 
   async #writeVirtualLightLinkPresence(change, presence, current) {
@@ -3301,30 +3409,25 @@ export class AutomationService {
         last_verification: failedVerification(error),
       });
     }
-    if (virtualLightLinkPresence(current) === expectedPresence) {
-      const preserved = virtualLightLinkForeignConsumersPreserved(
+    if (current.absent) {
+      return this.#finishVirtualLightLinkTargetAbsent(change, current);
+    }
+    const graphState = virtualLightLinkGraphState(current, change.target);
+    if (graphState === "inconsistent") {
+      return this.#finishNative(change, "uncertain", undefined, {
+        observed_snapshot: current,
+        configuration_matches: undefined,
+        conflict_reason: "inconsistent_link_graph",
+        last_verification: freshVerification("inconsistent_link_graph"),
+      });
+    }
+    if (graphState === virtualLightLinkExpectedGraphState(expectedPresence)) {
+      return this.#finishVirtualLightLinkMatchedGraph(
         change,
         current,
+        successStatus,
+        reasons.observed,
       );
-      if (!preserved.ok) {
-        return this.#finishNative(change, "conflict", undefined, {
-          observed_snapshot: current,
-          conflict_reason: "physical_link_not_preserved",
-          physical_link_preservation_failures: preserved.missing,
-          last_verification: freshVerification("conflict"),
-        });
-      }
-      if (successStatus === "applied") {
-        change.applied_snapshot = virtualLightLinkAppliedSnapshot(current);
-      }
-      if (current.presence === true && current.link_id) {
-        change.owned_link_id = current.link_id;
-      }
-      return this.#finishNative(change, successStatus, undefined, {
-        observed_snapshot: current,
-        recovered_after_uncertain_write: acknowledged ? undefined : true,
-        last_verification: freshVerification(reasons.observed),
-      });
     }
     if (acknowledged) {
       return this.#finishNative(change, "uncertain", undefined, {
@@ -3350,6 +3453,7 @@ export class AutomationService {
 
   async #readRestorableVirtualLightLink(change) {
     const current = await this.#observeVirtualLightLink(change);
+    if (current.absent) return current;
     validateObservedVirtualLightLink(current, change, { requireWrite: false });
     return current;
   }
@@ -3365,7 +3469,7 @@ export class AutomationService {
     return {
       absent: false,
       identity: virtualLightLinkIdentity(accessory),
-      online: accessory.online === true,
+      online: nativeBooleanFlag(accessory.online),
       type: characteristic.control?.type ?? characteristic.control?.key ?? null,
       has_links: nativeBooleanFlag(characteristic.hasLinks),
       link_processing: nativeIntegerFlag(characteristic.linkProcessing),
@@ -6431,8 +6535,11 @@ function virtualLightLinkContract() {
       "Adding may copy the physical scalar onto the virtual characteristic; removing may leave the previous virtual scalar.",
       "A changed link is a graph result, not a light command and not proof that members agree.",
       "Physical members are not written to compensate.",
-      "The physical OUT container is not deleted; other consumers of the same physical characteristic are preserved.",
-      "SprutHub exposes no native compare-and-set; a race remains after the pre-write observation.",
+      "The physical OUT container is not deleted; other consumers of the same physical characteristic are compared with the graph read immediately before this change's own write.",
+      "A later manual presence change of the selected IN is kept; a remove-then-add of the same native form is indistinguishable until the next observation.",
+      "A confirmed missing virtual target is not a removed link and ends restore; a later accessory with the same numeric id is not owned.",
+      "Unknown virtual or online flags on accessory.get are not treated as proven incompatibility and are not written.",
+      "SprutHub exposes no link generation or compare-and-set.",
     ],
   };
 }
@@ -8176,27 +8283,50 @@ function findNativeService(accessory, sId) {
   return accessory.services?.find((service) => service.sId === sId);
 }
 
+function requireExplicitBooleanFlag(value, unknownMessage) {
+  if (typeof value !== "boolean") {
+    throw new SprutHubError("unknown_link_flags", unknownMessage, "get_entity");
+  }
+  return value;
+}
+
 function validateVirtualLightLinkSelection(
   targetAccessory,
   target,
   endpointAccessory,
   endpoint,
 ) {
-  if (targetAccessory.online !== true || endpointAccessory.online !== true) {
+  const targetOnline = requireExplicitBooleanFlag(
+    targetAccessory.online,
+    "SprutHub did not return an explicit online flag for the virtual accessory; unknown availability is not treated as ready to write.",
+  );
+  const endpointOnline = requireExplicitBooleanFlag(
+    endpointAccessory.online,
+    "SprutHub did not return an explicit online flag for the physical endpoint; unknown availability is not treated as ready to write.",
+  );
+  if (targetOnline !== true || endpointOnline !== true) {
     throw new SprutHubError(
       "accessory_unavailable",
       "The virtual characteristic and physical endpoint must both be available before changing a link.",
       "get_entity",
     );
   }
-  if (targetAccessory.virtual !== true) {
+  const targetVirtual = requireExplicitBooleanFlag(
+    targetAccessory.virtual,
+    "SprutHub did not return an explicit virtual flag for the selected accessory; unknown is not treated as a virtual Lightbulb.",
+  );
+  if (targetVirtual !== true) {
     throw new SprutHubError(
       "target_not_virtual",
       "Link presence can be changed only on an existing virtual Lightbulb characteristic.",
       "get_entity",
     );
   }
-  if (endpointAccessory.virtual !== false) {
+  const endpointVirtual = requireExplicitBooleanFlag(
+    endpointAccessory.virtual,
+    "SprutHub did not return an explicit virtual flag for the endpoint accessory; unknown is not treated as a physical characteristic.",
+  );
+  if (endpointVirtual !== false) {
     throw new SprutHubError(
       "incompatible_link_endpoint",
       "The endpoint must be a physical characteristic of a matching On or Brightness type.",
@@ -8320,8 +8450,34 @@ function foreignPhysicalConsumers(physicalLinks, source) {
   });
 }
 
-function virtualLightLinkPresence(observation) {
-  return observation?.absent ? false : observation.presence;
+function virtualLightLinkExpectedGraphState(presence) {
+  return presence ? "present" : "absent_link";
+}
+
+function physicalOutgoingContains(physicalLinks, consumer) {
+  const key = nativeTargetKey(consumer);
+  return (physicalLinks ?? []).some(
+    (link) =>
+      link.type === "OUT" &&
+      (link.characteristics ?? []).some(
+        (characteristic) => nativeTargetKey(characteristic) === key,
+      ),
+  );
+}
+
+function virtualLightLinkGraphState(current, target) {
+  if (!current || current.absent) return "absent";
+  const inPresent = current.presence === true;
+  const outPresent = physicalOutgoingContains(current.physical_links, target);
+  if (inPresent !== outPresent) return "inconsistent";
+  return inPresent ? "present" : "absent_link";
+}
+
+function captureVirtualLightLinkWriteBaseline(change, current) {
+  change.foreign_physical_consumers = foreignPhysicalConsumers(
+    current.physical_links,
+    change.target,
+  );
 }
 
 function virtualLightLinkAppliedSnapshot(observation) {
@@ -8335,7 +8491,6 @@ function virtualLightLinkAppliedSnapshot(observation) {
 }
 
 function virtualLightLinkForeignConsumersPreserved(change, current) {
-  if (change.requested_presence === true) return { ok: true, missing: [] };
   const remaining = new Set(
     foreignPhysicalConsumers(current.physical_links, change.target).map(
       (consumer) =>
@@ -8351,6 +8506,18 @@ function virtualLightLinkForeignConsumersPreserved(change, current) {
   return { ok: missing.length === 0, missing };
 }
 
+function virtualLightLinkRestoreSupported(change) {
+  if (change.owned_target_absent_observed === true) return false;
+  if (change.applied_snapshot === undefined) return false;
+  if (
+    change.status === "conflict" &&
+    change.conflict_reason === "physical_link_not_preserved"
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function validateObservedVirtualLightLink(current, change, { requireWrite }) {
   if (current.absent) {
     throw new SprutHubError(
@@ -8359,12 +8526,21 @@ function validateObservedVirtualLightLink(current, change, { requireWrite }) {
       "get_entity",
     );
   }
-  if (requireWrite && current.online !== true) {
-    throw new SprutHubError(
-      "accessory_unavailable",
-      "The virtual characteristic is unavailable.",
-      "get_entity",
-    );
+  if (requireWrite) {
+    if (typeof current.online !== "boolean") {
+      throw new SprutHubError(
+        "unknown_link_flags",
+        "The virtual characteristic no longer has an explicit online flag; unknown availability is not treated as ready to write.",
+        "get_entity",
+      );
+    }
+    if (current.online !== true) {
+      throw new SprutHubError(
+        "accessory_unavailable",
+        "The virtual characteristic is unavailable.",
+        "get_entity",
+      );
+    }
   }
   if (
     current.identity.virtual !== true ||
@@ -9766,14 +9942,22 @@ function publicNativeChange(
             ),
           }
         : {}),
-      restore_supported: change.applied_snapshot !== undefined,
+      ...(change.owned_target_absent_observed === true
+        ? { owned_target_absent_observed: true }
+        : {}),
+      restore_supported: virtualLightLinkRestoreSupported(change),
       limitations: [
         "This change updates one incoming LastValue link on an existing virtual Lightbulb On or Brightness characteristic.",
         "A changed link is a graph result, not a light command and not proof that members agree.",
         "Adding may copy the physical scalar onto the virtual characteristic; removing may leave the previous virtual scalar.",
         "Physical members are not written to compensate, and hasLinks/linkProcessing are not rewritten.",
         "The last remaining incoming link is not removed, and the physical OUT container is not deleted.",
-        "SprutHub exposes no native compare-and-set; a race remains after the pre-write observation.",
+        "Other consumers are compared with the graph read immediately before this change's own write. A later manual presence change of the selected IN is kept; a remove-then-add of the same native form is indistinguishable until the next observation. SprutHub exposes no link generation or compare-and-set.",
+        ...(change.owned_target_absent_observed === true
+          ? [
+              "A confirmed missing virtual target is not a removed link and ends restore for this change; a later accessory with the same numeric id is not owned.",
+            ]
+          : []),
       ],
     };
   }

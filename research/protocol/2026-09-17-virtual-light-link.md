@@ -19,7 +19,14 @@ On/Brightness без домашних идентификаторов. VM жив�
 
 ## Наблюдение
 
-Create-response может опускать `virtual`; тип подтверждается `accessory.get`.
+Create-response и `accessory.list` могут опускать `virtual`; отсутствие поля в
+этих формах не переносится на get и не считается `false`. Повторное чтение
+сырых baseline/created/final снимков разрешённого native preflight 17.09.2026
+(без нового обращения к дому): у обеих физических ламп `accessory.get` явно
+`virtual=false` и `online=true`; у временной виртуальной группы явно
+`virtual=true` и `online=true`. Неизвестный get-флаг не допускается к записи и
+не выдаётся за доказанную несовместимость.
+
 Существующая виртуальная группа: `virtual=true`, отдельные On/Brightness с
 `hasLinks=true` и `linkProcessing=0`. `link.list` каждой характеристики
 возвращает отдельные IN к соответствующим характеристикам участников.
