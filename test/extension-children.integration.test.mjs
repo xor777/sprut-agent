@@ -701,10 +701,14 @@ function assertUnreadChildren(result, { enabled, state, errorCode }) {
   );
   assert.equal(outcome.reason, "read_failed");
   assert.equal(outcome.error_code, errorCode);
-  assert.deepEqual(outcome.next, {
-    tool: "get_entity",
-    arguments: { entity_ref: entity.ref, include: ["children"] },
-  });
+  if (errorCode === "unsupported" || errorCode === "incompatible_response") {
+    assert.equal(Object.hasOwn(outcome, "next"), false);
+  } else {
+    assert.deepEqual(outcome.next, {
+      tool: "get_entity",
+      arguments: { entity_ref: entity.ref, include: ["children"] },
+    });
+  }
   assertNoHubSecrets(result);
   return entity;
 }
@@ -1528,18 +1532,15 @@ test("a pointer into unread children keeps the include read failure", async (t) 
     arguments: continued.structuredContent.next.arguments,
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
-  if (recovered.structuredContent.entity) {
-    assert.ok(Array.isArray(recovered.structuredContent.entity.children));
-    assert.ok(
-      recovered.structuredContent.entity.include_resolution.applied.includes(
-        "children",
-      ),
-    );
+  const recoveredEntity = recovered.structuredContent.entity;
+  if (recoveredEntity) {
+    assert.ok(Array.isArray(recoveredEntity.children));
+    assert.ok(recoveredEntity.include_resolution.applied.includes("children"));
   } else {
     assert.ok(
       recovered.structuredContent.representation.available_parts.some(
-        ({ pointer }) => pointer === "/children" || pointer.startsWith("/0"),
-      ) || recovered.structuredContent.selection?.pointer === "/children",
+        ({ pointer: partPointer }) => partPointer === "/children",
+      ),
     );
   }
 });

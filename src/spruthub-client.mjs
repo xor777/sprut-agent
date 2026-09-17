@@ -3904,18 +3904,56 @@ function includeWasApplied(entity, include) {
   return false;
 }
 
+const DETERMINISTIC_INCLUDE_FAILURES = new Set([
+  "unsupported",
+  "incompatible_response",
+]);
+
+export function includeReadFailedAction(errorCode) {
+  if (
+    [
+      "timeout",
+      "connection_closed",
+      "connection_failed",
+      "invalid_message",
+    ].includes(errorCode)
+  ) {
+    return "retry";
+  }
+  if (errorCode === "unsupported") return "inspect_home";
+  return undefined;
+}
+
+export function includeReadFailedNext(
+  errorCode,
+  { entityRef, include, homeRef } = {},
+) {
+  if (errorCode === "unsupported") {
+    return typeof homeRef === "string"
+      ? { tool: "inspect_home", arguments: { home_ref: homeRef } }
+      : undefined;
+  }
+  if (DETERMINISTIC_INCLUDE_FAILURES.has(errorCode)) return undefined;
+  if (typeof entityRef !== "string" || !include) return undefined;
+  return {
+    tool: "get_entity",
+    arguments: { entity_ref: entityRef, include: [include] },
+  };
+}
+
 function explainUnappliedInclude(entity, include, ownerContext) {
   const includeError = entity[INCLUDE_READ_ERROR]?.[include];
   if (includeError) {
+    const next = includeReadFailedNext(includeError.code, {
+      entityRef: entity.ref,
+      include,
+    });
     return {
       include,
       reason: "read_failed",
       error_code: includeError.code,
       limitation: includeError.message,
-      next: {
-        tool: "get_entity",
-        arguments: { entity_ref: entity.ref, include: [include] },
-      },
+      ...(next ? { next } : {}),
     };
   }
   const next = nextReadTowardOwner(entity, include, ownerContext);

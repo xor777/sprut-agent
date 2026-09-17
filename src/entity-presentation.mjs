@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { SprutHubError } from "./spruthub-client.mjs";
+import {
+  includeReadFailedAction,
+  includeReadFailedNext,
+  SprutHubError,
+} from "./spruthub-client.mjs";
 
 const IDENTITY_KEYS = [
   "kind",
@@ -60,6 +64,11 @@ export function presentEntityResult(
 
   const selected = resolveJsonPointer(root, pointer);
   if (selected.status === "missing") {
+    const unread = unreadIncludeAlongPointer(result.entity, pointer);
+    // Failed includes omit their field; a pointer into that field is unread.
+    if (unread) {
+      throw unreadIncludePointerError(unread, pointer, result, entityRef);
+    }
     throw new SprutHubError(
       "entity_pointer_not_found",
       "The selected JSON Pointer does not exist in this entity.",
@@ -355,6 +364,35 @@ function stringChunkResult(
       },
     },
     selection.maxBytes,
+  );
+}
+
+function unreadIncludeAlongPointer(entity, pointer) {
+  const encodedToken = pointer.slice(1).split("/")[0];
+  if (!encodedToken) return null;
+  const token = decodePointerToken(encodedToken);
+  const outcomes = entity?.include_resolution?.not_applied;
+  if (!Array.isArray(outcomes)) return null;
+  const outcome = outcomes.find(
+    (item) => item?.include === token && item.reason === "read_failed",
+  );
+  return typeof outcome?.error_code === "string" ? outcome : null;
+}
+
+function unreadIncludePointerError(outcome, pointer, result, entityRef) {
+  const next = includeReadFailedNext(outcome.error_code, {
+    entityRef,
+    include: outcome.include,
+    homeRef: result.home?.ref,
+  });
+  return new SprutHubError(
+    outcome.error_code,
+    outcome.limitation ?? "The requested include could not be read.",
+    includeReadFailedAction(outcome.error_code),
+    {
+      pointer,
+      ...(next ? { next } : {}),
+    },
   );
 }
 
