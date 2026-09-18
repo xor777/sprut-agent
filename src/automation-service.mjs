@@ -4559,7 +4559,9 @@ export class AutomationService {
       !isLogicSourceChange(change) ||
       change.applied_snapshot !== undefined ||
       change.native_write_sent !== true ||
-      ["prepared", "not_applied", "restored", "conflict"].includes(
+      // not_owned after a rejected send still has native_write_sent; a later
+      // requested match is coincidence, not ownership of that source.
+      ["prepared", "not_applied", "not_owned", "restored", "conflict"].includes(
         change.status,
       ) ||
       !requested.matches
