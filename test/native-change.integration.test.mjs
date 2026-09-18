@@ -8659,6 +8659,83 @@ test("restoring an unapplied action pause does not accuse a controller change or
       assert.equal(scenarioWriteCount(hub), writesBeforeMissing);
     },
   );
+
+  await t.test(
+    "a saved apply conflict is not reopened by restore after the baseline returns",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const actionPointer = "/targets/0/then/1";
+      const originalData = hub.state.scenarios[0].data;
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_action_pause",
+          target_ref: scenarioRef,
+          action_pointer: actionPointer,
+          duration_seconds: 120,
+          reason: "Не открывать запись после отказа из-за ручной правки",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      const edited = JSON.parse(originalData);
+      blockNodeAtPointer(edited, actionPointer).time = 90_000;
+      hub.state.scenarios[0].data = JSON.stringify(edited);
+      const writesBeforeApply = scenarioWriteCount(hub);
+
+      const applied = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.structuredContent.status, "conflict");
+      assert.equal(
+        applied.structuredContent.conflict_reason,
+        "baseline_changed",
+      );
+      assert.equal(scenarioWriteCount(hub), writesBeforeApply);
+
+      const restored = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(restored.structuredContent.status, "conflict");
+      assert.equal(
+        restored.structuredContent.conflict_reason,
+        "baseline_changed",
+      );
+      assert.equal(scenarioWriteCount(hub), writesBeforeApply);
+      assert.equal(
+        blockNodeAtPointer(
+          JSON.parse(hub.state.scenarios[0].data),
+          actionPointer,
+        ).time,
+        90_000,
+      );
+
+      const observed = await client.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(observed.structuredContent.status, "conflict");
+      assert.equal(
+        observed.structuredContent.conflict_reason,
+        "baseline_changed",
+      );
+
+      hub.state.scenarios[0].data = originalData;
+      const retried = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(retried.structuredContent.status, "conflict");
+      assert.equal(
+        retried.structuredContent.conflict_reason,
+        "baseline_changed",
+      );
+      assert.equal(scenarioWriteCount(hub), writesBeforeApply);
+      assert.equal(hub.state.scenarios[0].data, originalData);
+    },
+  );
 });
 
 test("BLOCK update restore preserves an active pause and records its explicit removal", async (t) => {
