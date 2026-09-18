@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -78,3 +78,79 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
       "Create and fill the file locally; do not send credentials in chat.",
   });
 });
+
+test("MCP initialize reports the published package version from source and a copied plugin", async (t) => {
+  const deliveryVersion = JSON.parse(
+    await readFile(path.join(projectRoot, "package.json"), "utf8"),
+  ).version;
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-mcp-version-"));
+  const installedRoot = path.join(scratch, "installed", "sprut-agent");
+  const workspace = path.join(scratch, "workspace");
+  const configRoot = path.join(scratch, "config");
+  t.after(() => rm(scratch, { recursive: true }));
+  await Promise.all([
+    cp(path.join(projectRoot, "dist", "plugin"), installedRoot, {
+      recursive: true,
+    }),
+    mkdir(workspace, { recursive: true }),
+    mkdir(configRoot, { recursive: true }),
+  ]);
+  // A cwd package.json must not become initialize.serverInfo.version.
+  await writeFile(
+    path.join(workspace, "package.json"),
+    `${JSON.stringify({ name: "decoy", version: "0.0.0-decoy" })}\n`,
+  );
+
+  const sourceClient = await connectWithoutHub(t, {
+    command: process.execPath,
+    args: [path.join(projectRoot, "src", "server.mjs")],
+    cwd: workspace,
+    configRoot,
+  });
+  assert.deepEqual(sourceClient.getServerVersion(), {
+    name: "sprut-agent",
+    version: deliveryVersion,
+  });
+
+  const manifest = JSON.parse(
+    await readFile(
+      path.join(installedRoot, ".claude-plugin", "plugin.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(manifest.version, deliveryVersion);
+  const configured = manifest.mcpServers["sprut-agent"];
+  const pluginClient = await connectWithoutHub(t, {
+    command: configured.command,
+    args: configured.args.map((argument) =>
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the client placeholder under test.
+      argument.replaceAll("${CLAUDE_PLUGIN_ROOT}", installedRoot),
+    ),
+    cwd: workspace,
+    configRoot,
+  });
+  assert.deepEqual(pluginClient.getServerVersion(), {
+    name: "sprut-agent",
+    version: deliveryVersion,
+  });
+});
+
+async function connectWithoutHub(t, { command, args, cwd, configRoot }) {
+  const transport = new StdioClientTransport({
+    command,
+    args,
+    cwd,
+    env: {
+      PATH: process.env.PATH,
+      XDG_CONFIG_HOME: configRoot,
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({
+    name: "mcp-package-version-test",
+    version: "1.0.0",
+  });
+  t.after(() => client.close());
+  await client.connect(transport);
+  return client;
+}
