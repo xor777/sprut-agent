@@ -8395,6 +8395,272 @@ test("a rejected pause retries the same absolute window before it expires", asyn
   );
 });
 
+test("restoring an unapplied action pause does not accuse a controller change or cancel later apply", async (t) => {
+  await t.test(
+    "prepare without apply, restore across restart, then explicit apply",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const actionPointer = "/targets/0/then/1";
+      const originalData = hub.state.scenarios[0].data;
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_action_pause",
+          target_ref: scenarioRef,
+          action_pointer: actionPointer,
+          duration_seconds: 120,
+          reason: "Подготовить временную паузу без записи",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      assert.equal(prepared.structuredContent.status, "prepared");
+      assert.equal(prepared.structuredContent.native_write_sent, false);
+      const writesBeforeRestore = scenarioWriteCount(hub);
+
+      const restored = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(restored, {
+        tool: "restore_native_change",
+        hub,
+        writesBefore: writesBeforeRestore,
+        originalData,
+      });
+
+      const observed = await client.callTool({
+        name: "get_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(observed, {
+        tool: "get_native_change",
+        hub,
+        writesBefore: writesBeforeRestore,
+        originalData,
+      });
+
+      await client.close();
+      const recoveredClient = await startClient(t, hub, stateDirectory);
+      const restoredAgain = await recoveredClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(restoredAgain, {
+        tool: "restore_native_change after restart",
+        hub,
+        writesBefore: writesBeforeRestore,
+        originalData,
+      });
+
+      const applied = await recoveredClient.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.isError, undefined, applied.content[0]?.text);
+      assert.equal(applied.structuredContent.status, "applied");
+      assert.ok(
+        scenarioWriteCount(hub) > writesBeforeRestore,
+        "later apply of the same draft must still write",
+      );
+      assert.equal(
+        JSON.stringify(hub.state.scenarios[0].data).includes(
+          "sprut-agent:block-action-pause",
+        ),
+        true,
+      );
+
+      const restoredApplied = await recoveredClient.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(restoredApplied.structuredContent.status, "restored");
+      assert.equal(
+        JSON.stringify(hub.state.scenarios[0].data).includes(
+          "sprut-agent:block-action-pause",
+        ),
+        false,
+      );
+      assert.equal(
+        blockNodeAtPointer(
+          JSON.parse(hub.state.scenarios[0].data),
+          actionPointer,
+        ).time,
+        60_000,
+      );
+    },
+  );
+
+  await t.test(
+    "a matching foreign wrapper is not taken as this unsent draft",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const actionPointer = "/targets/0/then/1";
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_action_pause",
+          target_ref: scenarioRef,
+          action_pointer: actionPointer,
+          duration_seconds: 120,
+          reason: "Не присваивать чужой контроллер неприменённому черновику",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      const changeId = prepared.structuredContent.change_ref.split("/").at(-1);
+      const forged = JSON.parse(hub.state.scenarios[0].data);
+      const originalAction = structuredClone(
+        blockNodeAtPointer(forged, actionPointer),
+      );
+      forged.targets[0].then[1] = {
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            {
+              type: "code",
+              code: `return Date.now() >= ${Date.now() + 120_000}; /* sprut-agent:block-action-pause:${changeId} */`,
+            },
+          ],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [originalAction],
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      };
+      hub.state.scenarios[0].data = JSON.stringify(forged);
+      const forgedData = hub.state.scenarios[0].data;
+      const writesBefore = scenarioWriteCount(hub);
+
+      const restored = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(restored, {
+        tool: "restore against a matching foreign wrapper",
+        hub,
+        writesBefore,
+        originalData: forgedData,
+      });
+      assert.equal(
+        JSON.stringify(hub.state.scenarios[0].data).includes(
+          `sprut-agent:block-action-pause:${changeId}`,
+        ),
+        true,
+        "unsent draft must not delete a coincidental matching controller",
+      );
+    },
+  );
+
+  await t.test(
+    "a later manual edit or missing target does not write through the unsent draft",
+    async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const actionPointer = "/targets/0/then/1";
+      const originalData = hub.state.scenarios[0].data;
+      const editedDraft = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_action_pause",
+          target_ref: scenarioRef,
+          action_pointer: actionPointer,
+          duration_seconds: 120,
+          reason: "Не затирать ручную правку неприменённым черновиком",
+        },
+      });
+      assert.equal(
+        editedDraft.isError,
+        undefined,
+        editedDraft.content[0]?.text,
+      );
+      const writesBeforeEditRestore = scenarioWriteCount(hub);
+      const editedRestore = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: editedDraft.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(editedRestore, {
+        tool: "restore before a manual BLOCK edit",
+        hub,
+        writesBefore: writesBeforeEditRestore,
+        originalData,
+      });
+      const edited = JSON.parse(originalData);
+      blockNodeAtPointer(edited, actionPointer).time = 90_000;
+      hub.state.scenarios[0].data = JSON.stringify(edited);
+      const writesBeforeManual = scenarioWriteCount(hub);
+      const manualApply = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: editedDraft.structuredContent.change_ref },
+      });
+      assert.equal(manualApply.structuredContent.status, "conflict");
+      assert.equal(
+        manualApply.structuredContent.conflict_reason,
+        "baseline_changed",
+      );
+      assert.equal(scenarioWriteCount(hub), writesBeforeManual);
+      assert.equal(
+        blockNodeAtPointer(
+          JSON.parse(hub.state.scenarios[0].data),
+          actionPointer,
+        ).time,
+        90_000,
+      );
+
+      hub.state.scenarios[0].data = originalData;
+      const missingDraft = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_action_pause",
+          target_ref: scenarioRef,
+          action_pointer: actionPointer,
+          duration_seconds: 120,
+          reason: "Не создавать чужой BLOCK из неприменённого черновика",
+        },
+      });
+      assert.equal(
+        missingDraft.isError,
+        undefined,
+        missingDraft.content[0]?.text,
+      );
+      const writesBeforeMissingRestore = scenarioWriteCount(hub);
+      const preparedMissingRestore = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: missingDraft.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(preparedMissingRestore, {
+        tool: "restore before the target BLOCK disappeared",
+        hub,
+        writesBefore: writesBeforeMissingRestore,
+        originalData,
+      });
+      hub.state.scenarios = [];
+      const writesBeforeMissing = scenarioWriteCount(hub);
+      const missingRestore = await client.callTool({
+        name: "restore_native_change",
+        arguments: { change_ref: missingDraft.structuredContent.change_ref },
+      });
+      assertUnappliedPauseRestore(missingRestore, {
+        tool: "restore after the target BLOCK disappeared",
+        hub,
+        writesBefore: writesBeforeMissing,
+        scenariosBefore: 0,
+      });
+      const missingApply = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: missingDraft.structuredContent.change_ref },
+      });
+      assert.equal(missingApply.structuredContent.status, "conflict");
+      assert.equal(hub.state.scenarios.length, 0);
+      assert.equal(scenarioWriteCount(hub), writesBeforeMissing);
+    },
+  );
+});
+
 test("BLOCK update restore preserves an active pause and records its explicit removal", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -15572,6 +15838,35 @@ function scenarioWriteCount(hub) {
   return hub.requests.filter(
     ({ scenario }) => scenario?.create || scenario?.update || scenario?.delete,
   ).length;
+}
+
+function assertUnappliedPauseRestore(
+  result,
+  { tool, hub, writesBefore, originalData, scenariosBefore = 1 },
+) {
+  assertUnappliedScenarioRestore(result, {
+    tool,
+    hub,
+    writesBefore,
+    scenariosBefore,
+  });
+  assert.equal(
+    result.structuredContent.native_write_sent,
+    false,
+    `${tool} must not record a hub send`,
+  );
+  assert.equal(
+    result.structuredContent.pause_effect.status,
+    "not_started",
+    tool,
+  );
+  if (originalData !== undefined) {
+    assert.equal(
+      hub.state.scenarios[0]?.data,
+      originalData,
+      `${tool} must keep the original BLOCK rule`,
+    );
+  }
 }
 
 function assertUnappliedScenarioRestore(
