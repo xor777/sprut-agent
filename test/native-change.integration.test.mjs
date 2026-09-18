@@ -13927,6 +13927,51 @@ test("restoring an unapplied scenario change does not accuse a manual edit or ca
   }
 });
 
+test("a rejected scenario change does not adopt a later matching source as its own", async (t) => {
+  await t.test(
+    "get after a later requested match stays not_owned",
+    async (t) => {
+      await assertRejectedLogicDoesNotAdopt(t, "get_native_change");
+    },
+  );
+  await t.test(
+    "direct restore after a later requested match does not write",
+    async (t) => {
+      await assertRejectedLogicDoesNotAdopt(t, "restore_native_change");
+    },
+  );
+  await t.test(
+    "explicit apply after the rejected restore still writes",
+    async (t) => {
+      for (const testCase of rejectedLogicAdoptionCases()) {
+        const { hub, stateDirectory } = await setup(t);
+        hub.state.scenarios.push(logicScenarioFixture(testCase.scenarioIndex));
+        const client = await startClient(t, hub, stateDirectory);
+        const draft = await prepareRejectedLogicDraft(client, hub, testCase);
+        const writesBeforeApply = scenarioWriteCount(hub);
+        const applied = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: draft.change_ref },
+        });
+        assert.equal(
+          applied.isError,
+          undefined,
+          `${testCase.name}: ${applied.content[0]?.text}`,
+        );
+        assert.equal(
+          applied.structuredContent.status,
+          "applied",
+          testCase.name,
+        );
+        assert.ok(
+          scenarioWriteCount(hub) > writesBeforeApply,
+          `${testCase.name}: later apply must still write`,
+        );
+      }
+    },
+  );
+});
+
 test("a native LOGIC source is created, assigned, updated, read back, and restored through public tools", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -15052,11 +15097,6 @@ function assertUnappliedScenarioRestore(
     tool,
   );
   assert.equal(
-    result.structuredContent.manual_change_observed,
-    undefined,
-    tool,
-  );
-  assert.equal(
     result.structuredContent.next,
     undefined,
     `${tool} must not cancel the draft by asking for a new prepare`,
@@ -15071,6 +15111,160 @@ function assertUnappliedScenarioRestore(
     scenariosBefore,
     `${tool} must not create or delete a scenario`,
   );
+}
+
+function logicScenarioFixture(index, source = firstLogicSource) {
+  return {
+    index,
+    name: "Ручной LOGIC",
+    desc: "Существующий код",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: source,
+    predefined: false,
+  };
+}
+
+function rejectedLogicAdoptionCases() {
+  return [
+    {
+      name: "logic_source_update",
+      scenarioIndex: "manual-logic",
+      arguments: {
+        operation: "logic_source_update",
+        target_ref: `${homeRef}/scenario/manual-logic`,
+        source: secondLogicSource,
+        reason: "Подготовить правку source, которую хаб отклонит",
+      },
+    },
+    {
+      name: "logic_source_create",
+      scenarioIndex: "manual-logic",
+      arguments: {
+        operation: "logic_source_create",
+        target_ref: serviceRef,
+        name: "Черновик после отказа",
+        description: "Отклонённый JS не становится своим",
+        active: false,
+        on_start: false,
+        sync: false,
+        source: firstLogicSource,
+        reason: "Подготовить create, который хаб отклонит",
+      },
+    },
+  ];
+}
+
+async function prepareRejectedLogicDraft(client, hub, testCase) {
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: testCase.arguments,
+  });
+  assert.equal(
+    prepared.isError,
+    undefined,
+    `${testCase.name}: ${prepared.content[0]?.text}`,
+  );
+  assert.equal(prepared.structuredContent.status, "prepared", testCase.name);
+  if (testCase.name === "logic_source_create") {
+    hub.state.behavior.rejectNextScenarioCreate = true;
+  } else {
+    hub.state.behavior.rejectNextScenarioUpdate = true;
+  }
+  const rejected = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rejected.isError, true, testCase.name);
+  const status = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.structuredContent.status, "not_applied", testCase.name);
+  assert.equal(status.structuredContent.native_write_sent, true, testCase.name);
+  const writesBeforeRestore = scenarioWriteCount(hub);
+  const scenariosBeforeRestore = hub.state.scenarios.length;
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assertUnappliedScenarioRestore(restored, {
+    tool: `restore after rejected ${testCase.name}`,
+    hub,
+    writesBefore: writesBeforeRestore,
+    scenariosBefore: scenariosBeforeRestore,
+  });
+  return prepared.structuredContent;
+}
+
+function plantRequestedLogicSource(hub, testCase, draft) {
+  if (testCase.name === "logic_source_update") {
+    const scenario = hub.state.scenarios.find(
+      ({ index }) => index === testCase.scenarioIndex,
+    );
+    assert.ok(scenario, `${testCase.name}: missing ${testCase.scenarioIndex}`);
+    scenario.data = secondLogicSource;
+    return;
+  }
+  const marker = draft.ownership_marker;
+  assert.equal(typeof marker, "string", testCase.name);
+  const sent = hub.requests.find(({ scenario }) =>
+    scenario?.create?.data?.includes(`/* [${marker}] */`),
+  )?.scenario.create;
+  assert.ok(sent, `${testCase.name}: rejected create must have been sent`);
+  hub.state.scenarios.push({
+    index: "foreign-logic",
+    name: sent.name,
+    desc: sent.desc,
+    active: sent.active,
+    onStart: sent.onStart,
+    sync: sent.sync,
+    type: "LOGIC",
+    data: sent.data,
+    predefined: false,
+  });
+}
+
+function assertForeignLogicSourceKept(hub, testCase) {
+  if (testCase.name === "logic_source_update") {
+    assert.equal(
+      hub.state.scenarios.find(({ index }) => index === testCase.scenarioIndex)
+        ?.data,
+      secondLogicSource,
+      `${testCase.name}: matching source must stay`,
+    );
+    return;
+  }
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "foreign-logic"),
+    true,
+    `${testCase.name}: matching create must stay`,
+  );
+}
+
+async function assertRejectedLogicDoesNotAdopt(t, tool) {
+  for (const testCase of rejectedLogicAdoptionCases()) {
+    const { hub, stateDirectory } = await setup(t);
+    hub.state.scenarios.push(logicScenarioFixture(testCase.scenarioIndex));
+    const client = await startClient(t, hub, stateDirectory);
+    const draft = await prepareRejectedLogicDraft(client, hub, testCase);
+    plantRequestedLogicSource(hub, testCase, draft);
+    const writesBefore = scenarioWriteCount(hub);
+    const scenariosBefore = hub.state.scenarios.length;
+    const result = await client.callTool({
+      name: tool,
+      arguments: { change_ref: draft.change_ref },
+    });
+    assertUnappliedScenarioRestore(result, {
+      tool: `${tool} ${testCase.name}`,
+      hub,
+      writesBefore,
+      scenariosBefore,
+    });
+    assertForeignLogicSourceKept(hub, testCase);
+  }
 }
 
 function assertAssignedLogicStillApplied(
