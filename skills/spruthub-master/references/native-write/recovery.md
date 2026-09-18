@@ -28,7 +28,10 @@
 Сохранённое намерение различает apply и restore, а ACK относится только к
 текущей попытке. `verification.fresh=false` означает отсутствие нового
 readback: прошлый outcome и последнее наблюдение могут быть показаны, но не
-считаются текущей проверкой. Для BLOCK/LOGIC conflict без сохранённого
+считаются текущей проверкой. Restore ещё не применённого BLOCK/LOGIC change
+без proven apply и без сохранённого conflict даёт
+`not_owned`/`change_was_not_applied` без записи и не запрещает последующий
+apply того же черновика. Для BLOCK/LOGIC conflict без сохранённого
 applied snapshot совпадение с requested не восстанавливает право записи:
 get, restore и повторный apply остаются `conflict`, `restore_supported=false`,
 а следующий шаг — новый prepare на текущем baseline. Подтверждённый apply

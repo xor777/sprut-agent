@@ -33,7 +33,10 @@
   и применённый снимок до restore остаются строгими guards ручной правки. После
   обратной записи readback подтверждает точный исходный source и снова сохраняет
   наблюдённые metadata. Predefined source доступен для чтения и клонирования, но
-  не изменяется. Restore update не затирает ручную правку. Conflict без
+  не изменяется. Restore ещё не применённого create/update даёт
+  `not_owned`/`change_was_not_applied`, не пишет в хаб и не отменяет
+  последующий apply того же черновика: это не ручная правка. Restore
+  update не затирает ручную правку. Conflict без
   applied snapshot не становится applied по совпадению с requested, а
   повторный apply уже подтверждённого change не перезаписывает ручной откат;
   новое намерение идёт через свежий prepare. Restore create перед delete сканирует текущие

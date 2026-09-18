@@ -13868,7 +13868,7 @@ test("restoring an unapplied scenario change does not accuse a manual edit or ca
       arguments: {
         operation: "block_data_update",
         target_ref: scenarioRef,
-        data: dailyIntervalBlockData(),
+        data: blockData({ delay: 90_000 }),
         reason: "Подготовить замену data без записи",
       },
     },
@@ -15040,14 +15040,22 @@ function assertUnappliedScenarioRestore(
   result,
   { tool, hub, writesBefore, scenariosBefore },
 ) {
-  assert.equal(result.isError, undefined, `${tool}: ${result.content[0]?.text}`);
+  assert.equal(
+    result.isError,
+    undefined,
+    `${tool}: ${result.content[0]?.text}`,
+  );
   assert.equal(result.structuredContent.status, "not_owned", tool);
   assert.equal(
     result.structuredContent.conflict_reason,
     "change_was_not_applied",
     tool,
   );
-  assert.equal(result.structuredContent.manual_change_observed, undefined, tool);
+  assert.equal(
+    result.structuredContent.manual_change_observed,
+    undefined,
+    tool,
+  );
   assert.equal(
     result.structuredContent.next,
     undefined,

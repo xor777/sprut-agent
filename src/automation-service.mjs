@@ -4908,19 +4908,22 @@ export class AutomationService {
     ) {
       return this.#observeProvenScenarioChange(change, current);
     }
-    if (scenarioLacksProvenApply(change) || !applied.matches) {
-      // Keep unproven baseline_changed; a proven snapshot mismatch is a fresh
-      // manual_change, not a leftover assignment list.
+    if (
+      change.applied_snapshot === undefined &&
+      !scenarioLacksProvenApply(change)
+    ) {
+      // A draft was never written; missing applied snapshot is not an owner edit.
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        ...scenarioChangeObservation(change, current, "baseline").fields,
+      });
+    }
+    if (scenarioLacksProvenApply(change)) {
+      // Keep unproven baseline_changed; a later requested match is not restore
+      // rights, and next remains a new prepare.
       return this.#finishNative(change, "conflict", undefined, {
-        ...(scenarioLacksProvenApply(change)
-          ? scenarioUnprovenApplyFields(change, current)
-          : applied.fields),
-        conflict_reason: scenarioLacksProvenApply(change)
-          ? (change.conflict_reason ?? "manual_change")
-          : "manual_change",
-        ...(scenarioLacksProvenApply(change)
-          ? {}
-          : { logic_assignments: undefined }),
+        ...scenarioUnprovenApplyFields(change, current),
+        conflict_reason: change.conflict_reason ?? "manual_change",
       });
     }
     if (change.kind === "block_data_update") {
