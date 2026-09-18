@@ -35,6 +35,11 @@ readback: прошлый outcome и последнее наблюдение мо
 apply того же черновика. Неотправленный `block_action_pause` не ищет чужой
 controller и не объявляет conflict: неизвестная отправка, доказанный эффект
 и ручная правка после apply остаются прежними исходами.
+Сохранённый conflict `block_action_pause` restore не переводит в
+`not_owned` и не открывает apply после возврата baseline: get, restore и
+повторный apply остаются `conflict`, следующий шаг — новый prepare.
+Журнал 0.1.41, застрявший в `conflict/pause_controller_changed` без proven
+apply, этим restore не лечится.
 `not_owned` после отклонённой отправки не становится
 `applied` и не даёт restore по позднему совпадению с requested: чужой source
 остаётся чужим, пока агент явно не применит тот же черновик на текущем

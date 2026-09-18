@@ -4705,6 +4705,14 @@ export class AutomationService {
       // Proven non-send: there is no controller to remove. Missing wrapper is
       // not a manual edit, and a coincidental match is not this draft's own.
       const current = await this.#observeScenarioChange(change);
+      if (scenarioLacksProvenApply(change)) {
+        // Saved unproven conflict stays closed; a later baseline match is not
+        // a new apply grant. Legacy pause_controller_changed is not healed.
+        return this.#finishNative(change, "conflict", undefined, {
+          ...scenarioUnprovenApplyFields(change, current),
+          conflict_reason: change.conflict_reason ?? "manual_change",
+        });
+      }
       return this.#finishNative(change, "not_owned", undefined, {
         conflict_reason: "change_was_not_applied",
         ...scenarioChangeObservation(change, current, "baseline").fields,
