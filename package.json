@@ -1,6 +1,6 @@
 {
   "name": "sprut-agent",
-  "version": "0.1.42",
+  "version": "0.1.43",
   "description": "Agent-first tools for configuring and debugging a SprutHub home",
   "private": true,
   "type": "module",

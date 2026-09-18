@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import packageMetadata from "../package.json" with { type: "json" };
 import { AutomationService } from "./automation-service.mjs";
 import { ConfigurationPointService } from "./configuration-point-service.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
@@ -12,7 +13,7 @@ import {
 } from "./spruthub-connection.mjs";
 
 const server = new McpServer(
-  { name: "sprut-agent", version: "0.1.5" },
+  { name: "sprut-agent", version: packageMetadata.version },
   {
     instructions:
       "Start with list_homes. Choose an exact returned home_ref for home-qualified reads such as inspect_home and read_services, and follow executable next tool calls from responses. If a tool requires a pinned home, follow list_homes selection.pin locally, restart the same MCP application, and retry. Keep SprutHub credentials only in the local connection.env described by credential_setup; never ask for or echo credential values. The optional spruthub-master skill provides deeper SprutHub advice beyond this basic MCP entry path.",
