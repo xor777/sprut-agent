@@ -916,6 +916,148 @@ function conditionGroup(leaf, mode = "AND") {
   };
 }
 
+const workModeValues = [
+  { key: "DAY", name: "День", value: 0 },
+  { key: "EVENING", name: "Вечер", value: 1 },
+  { key: "NIGHT", name: "Ночь", value: 2 },
+  { key: "OFF", name: "Выкл.", value: 3 },
+];
+const workModeRef = `${homeRef}/accessory/50/service/13/characteristic/15`;
+const workModeDay = {
+  kind: "intValue",
+  value: 0,
+  key: "DAY",
+  name: "День",
+};
+const workModeEvening = {
+  kind: "intValue",
+  value: 1,
+  key: "EVENING",
+  name: "Вечер",
+};
+const workModeNight = {
+  kind: "intValue",
+  value: 2,
+  key: "NIGHT",
+  name: "Ночь",
+};
+const workModeOff = {
+  kind: "intValue",
+  value: 3,
+  key: "OFF",
+  name: "Выкл.",
+};
+
+function installEnumAccessory(hub, { id, name, hs, hc, values, current = 0 }) {
+  hub.state.accessories.push(
+    boundAccessory({
+      id,
+      roomId: 1,
+      name,
+      service: {
+        sId: 13,
+        name,
+        type: hs,
+        cId: 15,
+        characteristicName: name,
+        characteristicType: hc,
+        value: { intValue: current },
+      },
+    }),
+  );
+  hub.state.accessories.find(
+    (accessory) => accessory.id === id,
+  ).services[0].characteristics[0].control.validValues = values.map((item) => ({
+    key: item.key,
+    name: item.name,
+    value: { intValue: item.value },
+  }));
+}
+
+function installWorkModeAccessory(hub) {
+  installEnumAccessory(hub, {
+    id: 50,
+    name: "Режим работы",
+    hs: "Fan",
+    hc: "C_WorkMode",
+    values: workModeValues,
+  });
+}
+
+function enumEquals({ aId, hs, hc, value, trigger = true }) {
+  return {
+    type: "characteristic",
+    aId,
+    sId: 13,
+    cId: 15,
+    hs,
+    hc,
+    trigger,
+    cond: "=",
+    value: String(value),
+    timeCond: "",
+    time: 0,
+  };
+}
+
+function workModeEquals(value, trigger = true) {
+  return enumEquals({
+    aId: 50,
+    hs: "Fan",
+    hc: "C_WorkMode",
+    value,
+    trigger,
+  });
+}
+
+function rootIfBlockData({ when, thenValue = "true", elseValue }) {
+  return {
+    targets: [
+      everyIf({
+        when,
+        thenActions: [setAction({ value: thenValue })],
+        elseActions:
+          elseValue === undefined ? [] : [setAction({ value: elseValue })],
+      }),
+    ],
+  };
+}
+
+function accessoryGetIds(hub) {
+  return hub.requests
+    .filter((params) => params.accessory?.get)
+    .map((params) => params.accessory.get.id);
+}
+
+async function prepareBlockCreate(client, { name, data, reason }) {
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name,
+      description: name,
+      active: true,
+      on_start: false,
+      sync: false,
+      data,
+      reason,
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  return prepared;
+}
+
+function previewAction(prepared, pointer, value) {
+  const action = prepared.structuredContent.block_action_preview.actions.find(
+    (item) =>
+      item.configuration_pointer === pointer && item.command.value === value,
+  );
+  assert.ok(action, `missing preview action ${pointer} ${value}`);
+  return action;
+}
+
 function singleCharacteristicPredicateBlockData({
   predicate = characteristicCondition(),
   nestedPredicate = characteristicCondition({ trigger: false }),
@@ -6288,6 +6430,342 @@ test("prepared BLOCK observations preserve offline availability beside cached fa
         comparison_to_observation: "different",
       },
     ],
+  );
+});
+
+test("prepared BLOCK preview names extra enum values covered by else", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installWorkModeAccessory(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const dayElseData = rootIfBlockData({
+    when: conditionGroup(workModeEquals(0)),
+    elseValue: "false",
+  });
+  const getsBeforeDayElse = accessoryGetIds(hub).length;
+
+  const dayElse = await prepareBlockCreate(firstClient, {
+    name: "Днём включить, иначе выключить",
+    data: dayElseData,
+    reason: "Показать, что else покрывает не только ночь",
+  });
+  const dayOn = previewAction(
+    dayElse,
+    "/targets/0/then/0/characteristics/0",
+    true,
+  );
+  const extraOff = previewAction(
+    dayElse,
+    "/targets/0/else/0/characteristics/0",
+    false,
+  );
+  assert.deepEqual(dayOn.branch, {
+    when: "condition_true",
+    condition_pointer: "/targets/0/if",
+    coverage: {
+      status: "known_enum",
+      source_ref: workModeRef,
+      comparison: "=",
+      compared: workModeDay,
+      values: [workModeDay],
+    },
+  });
+  assert.deepEqual(extraOff.branch, {
+    when: "condition_false",
+    condition_pointer: "/targets/0/if",
+    coverage: {
+      status: "known_enum",
+      source_ref: workModeRef,
+      comparison: "=",
+      compared: workModeDay,
+      values: [workModeEvening, workModeNight, workModeOff],
+    },
+  });
+  assert.deepEqual(
+    extraOff.branch.coverage.values.map(({ value }) => value).sort(),
+    [1, 2, 3],
+  );
+  assert.equal(
+    extraOff.branch.coverage.values.some(
+      (item) => item.key === "EVENING" && item.name === "Вечер",
+    ),
+    true,
+    "else OFF must name the extra known mode that a day/night pair never asked to command",
+  );
+  assert.equal(
+    dayElse.structuredContent.diff.configuration.to.data.targets[0].else[0]
+      .characteristics[0].value,
+    "false",
+  );
+  const dayElseGets = accessoryGetIds(hub).slice(getsBeforeDayElse);
+  assert.deepEqual(
+    [...new Set(dayElseGets)].sort((left, right) => left - right),
+    [34, 50],
+  );
+  assert.equal(
+    dayElseGets.length,
+    new Set(dayElseGets).size,
+    "preview must reuse the validation accessory reads instead of fetching the enum again",
+  );
+
+  const orLeaf = await prepareBlockCreate(firstClient, {
+    name: "Тот же день через OR из одного листа",
+    data: rootIfBlockData({
+      when: conditionGroup(workModeEquals(0), "OR"),
+      elseValue: "false",
+    }),
+    reason: "Нормализованный одиночный OR совпадает с AND",
+  });
+  assert.deepEqual(
+    previewAction(orLeaf, "/targets/0/else/0/characteristics/0", false).branch,
+    extraOff.branch,
+  );
+
+  const directLeaf = await prepareBlockCreate(firstClient, {
+    name: "Тот же день прямой characteristic",
+    data: rootIfBlockData({
+      when: workModeEquals(0),
+      elseValue: "false",
+    }),
+    reason: "Обёртка одиночного листа не меняет покрытие",
+  });
+  assert.deepEqual(
+    previewAction(directLeaf, "/targets/0/else/0/characteristics/0", false)
+      .branch,
+    extraOff.branch,
+  );
+  assert.equal(
+    directLeaf.structuredContent.diff.configuration.to.data.targets[0].if.mode,
+    "AND",
+  );
+
+  const explicitBranches = await prepareBlockCreate(firstClient, {
+    name: "Отдельные ветви дня и ночи",
+    data: {
+      targets: [
+        everyIf({
+          when: conditionGroup(workModeEquals(0)),
+          thenActions: [setAction({ value: "true" })],
+        }),
+        everyIf({
+          when: conditionGroup(workModeEquals(2, false)),
+          thenActions: [setAction({ value: "false" })],
+        }),
+      ],
+    },
+    reason: "Не приписывать командам остальные режимы",
+  });
+  const explicitOn = previewAction(
+    explicitBranches,
+    "/targets/0/then/0/characteristics/0",
+    true,
+  );
+  const explicitOff = previewAction(
+    explicitBranches,
+    "/targets/1/then/0/characteristics/0",
+    false,
+  );
+  assert.deepEqual(explicitOn.branch.coverage.values, [workModeDay]);
+  assert.deepEqual(explicitOff.branch.coverage.values, [workModeNight]);
+  assert.equal(
+    explicitBranches.structuredContent.block_action_preview.actions.some(
+      (action) =>
+        action.branch.coverage.values?.some((item) =>
+          [1, 3].includes(item.value),
+        ),
+    ),
+    false,
+    "separate day and night branches must not attach commands to evening or off",
+  );
+
+  const remaining = await prepareBlockCreate(firstClient, {
+    name: "Ночью выключить, в остальных включить",
+    data: rootIfBlockData({
+      when: conditionGroup(workModeEquals(2)),
+      thenValue: "false",
+      elseValue: "true",
+    }),
+    reason: "Явный else по остальным остаётся возможным",
+  });
+  assert.deepEqual(
+    previewAction(remaining, "/targets/0/then/0/characteristics/0", false)
+      .branch.coverage.values,
+    [workModeNight],
+  );
+  assert.deepEqual(
+    previewAction(remaining, "/targets/0/else/0/characteristics/0", true).branch
+      .coverage.values,
+    [workModeDay, workModeEvening, workModeOff],
+  );
+
+  const modeElse = await prepareBlockCreate(firstClient, {
+    name: "Строковый режим лампы",
+    data: rootIfBlockData({
+      when: conditionGroup({
+        type: "characteristic",
+        aId: 34,
+        sId: 13,
+        cId: 18,
+        hs: "Lightbulb",
+        hc: "TargetMode",
+        trigger: true,
+        cond: "=",
+        value: "home",
+        timeCond: "",
+        time: 0,
+      }),
+      elseValue: "false",
+    }),
+    reason: "Покрытие берётся у прочитанного enum, не у домашней сигнализации",
+  });
+  const modeOff = previewAction(
+    modeElse,
+    "/targets/0/else/0/characteristics/0",
+    false,
+  );
+  assert.deepEqual(modeOff.branch.coverage, {
+    status: "known_enum",
+    source_ref: `${homeRef}/accessory/34/service/13/characteristic/18`,
+    comparison: "=",
+    compared: {
+      kind: "stringValue",
+      value: "home",
+      key: "home",
+      name: "Дома",
+    },
+    values: [
+      { kind: "stringValue", value: "away", key: "away", name: "Вне дома" },
+    ],
+  });
+  assert.equal(
+    modeOff.branch.coverage.values.some((item) =>
+      [0, 1, 2, 3].includes(item.value),
+    ),
+    false,
+  );
+
+  const capturedPreview = structuredClone(
+    dayElse.structuredContent.block_action_preview,
+  );
+  hub.state.accessories.find(
+    ({ id }) => id === 50,
+  ).services[0].characteristics[0].control.validValues = [
+    { key: "DAY", name: "День", value: { intValue: 0 } },
+    { key: "NIGHT", name: "Ночь", value: { intValue: 2 } },
+  ];
+  const getsBeforeRestart = accessoryGetIds(hub).length;
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const persisted = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: dayElse.structuredContent.change_ref },
+  });
+  assert.deepEqual(persisted.structuredContent.block_action_preview, {
+    ...capturedPreview,
+    snapshot: { ...capturedPreview.snapshot, fresh: false },
+  });
+  assert.deepEqual(
+    previewAction(persisted, "/targets/0/else/0/characteristics/0", false)
+      .branch.coverage.values,
+    [workModeEvening, workModeNight, workModeOff],
+  );
+  assert.equal(accessoryGetIds(hub).length, getsBeforeRestart);
+});
+
+test("prepared BLOCK preview leaves unknown and nested condition domains undisclosed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installWorkModeAccessory(hub);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const unknown = await prepareBlockCreate(client, {
+    name: "Булево условие без enum",
+    data: rootIfBlockData({
+      when: conditionGroup(characteristicCondition()),
+      elseValue: "false",
+    }),
+    reason: "Отсутствующий домен не выдавать за пустой",
+  });
+  const unknownOff = previewAction(
+    unknown,
+    "/targets/0/else/0/characteristics/0",
+    false,
+  );
+  assert.deepEqual(unknownOff.branch, {
+    when: "condition_false",
+    condition_pointer: "/targets/0/if",
+    coverage: { status: "undisclosed", reason: "unknown_domain" },
+  });
+  assert.equal("values" in unknownOff.branch.coverage, false);
+
+  const compound = await prepareBlockCreate(client, {
+    name: "Составное условие дня и движения",
+    data: rootIfBlockData({
+      when: {
+        type: "condition",
+        mode: "AND",
+        conditions: [
+          workModeEquals(0),
+          characteristicCondition({ trigger: false }),
+        ],
+      },
+      elseValue: "false",
+    }),
+    reason: "Не угадывать дополнение составного условия",
+  });
+  const compoundOff = previewAction(
+    compound,
+    "/targets/0/else/0/characteristics/0",
+    false,
+  );
+  assert.deepEqual(compoundOff.branch.coverage, {
+    status: "undisclosed",
+    reason: "compound_condition",
+  });
+  assert.equal("values" in compoundOff.branch.coverage, false);
+  assert.equal(
+    compound.structuredContent.diff.configuration.to.data.targets[0].if
+      .conditions.length,
+    2,
+  );
+
+  const nested = await prepareBlockCreate(client, {
+    name: "Вложенное условие движения днём",
+    data: {
+      targets: [
+        everyIf({
+          when: conditionGroup(workModeEquals(0)),
+          thenActions: [
+            everyIf({
+              when: conditionGroup(characteristicCondition({ trigger: false })),
+              thenActions: [setAction({ value: "true" })],
+            }),
+          ],
+        }),
+      ],
+    },
+    reason: "Не игнорировать родительское ограничение",
+  });
+  const nestedOn = previewAction(
+    nested,
+    "/targets/0/then/0/then/0/characteristics/0",
+    true,
+  );
+  assert.deepEqual(nestedOn.branch, {
+    when: "condition_true",
+    condition_pointer: "/targets/0/then/0/if",
+    parent_condition_pointers: ["/targets/0/if"],
+    coverage: { status: "undisclosed", reason: "nested_condition" },
+  });
+  assert.equal("values" in nestedOn.branch.coverage, false);
+
+  const scheduled = await prepareBlockCreate(client, {
+    name: "Интервал без enum",
+    data: dailyIntervalBlockData({ inside: "true", outside: "false" }),
+    reason: "Не раскрывать расписание как enum",
+  });
+  assert.deepEqual(
+    previewAction(scheduled, "/targets/0/else/0/characteristics/0", false)
+      .branch.coverage,
+    { status: "undisclosed", reason: "inapplicable_form" },
   );
 });
 
