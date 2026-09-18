@@ -29,12 +29,12 @@
 текущей попытке. `verification.fresh=false` означает отсутствие нового
 readback: прошлый outcome и последнее наблюдение могут быть показаны, но не
 считаются текущей проверкой. Restore ещё не применённого `block_create`,
-`block_data_update`, `logic_source_create` или `logic_source_update`
-без proven apply и без сохранённого conflict даёт
+`block_data_update`, `block_action_pause`, `logic_source_create` или
+`logic_source_update` без proven apply и без сохранённого conflict даёт
 `not_owned`/`change_was_not_applied` без записи и не запрещает последующий
-apply того же черновика. Исключение: restore неприменённого `block_action_pause`
-пока возвращает ложный `conflict/pause_controller_changed` и блокирует его
-последующий apply; не используй restore как отмену такого черновика.
+apply того же черновика. Неотправленный `block_action_pause` не ищет чужой
+controller и не объявляет conflict: неизвестная отправка, доказанный эффект
+и ручная правка после apply остаются прежними исходами.
 `not_owned` после отклонённой отправки не становится
 `applied` и не даёт restore по позднему совпадению с requested: чужой source
 остаётся чужим, пока агент явно не применит тот же черновик на текущем

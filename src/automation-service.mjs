@@ -4701,6 +4701,15 @@ export class AutomationService {
         ? this.#reconcileScenarioRestore(change, false)
         : this.#reconcileScenarioApply(change, false);
     }
+    if (pauseHasNoProvenHubEffect(change)) {
+      // Proven non-send: there is no controller to remove. Missing wrapper is
+      // not a manual edit, and a coincidental match is not this draft's own.
+      const current = await this.#observeScenarioChange(change);
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        ...scenarioChangeObservation(change, current, "baseline").fields,
+      });
+    }
     const current = await this.#observeScenarioChange(change);
     if (current.scenario === null) {
       return this.#finishNative(change, "conflict", undefined, {
@@ -8862,6 +8871,16 @@ function blockSnapshotObservation(change, scenario, snapshot) {
       ),
     },
   };
+}
+
+function pauseHasNoProvenHubEffect(change) {
+  // Deadline and native_write_sent are stored before the hub RPC. Either is
+  // evidence apply started; a missing wrapper is then not "never applied".
+  return (
+    change.native_write_sent !== true &&
+    change.applied_snapshot === undefined &&
+    !Number.isSafeInteger(change.pause_expires_at_ms)
+  );
 }
 
 function scenarioLacksProvenApply(change) {
