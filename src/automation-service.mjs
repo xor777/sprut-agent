@@ -958,6 +958,7 @@ export class AutomationService {
       },
       block_action_preview: blockActionPreview(
         validation,
+        data,
         configuredHomeRef(this.hubSerial),
         now,
       ),
@@ -1044,6 +1045,7 @@ export class AutomationService {
       requested_snapshot: requested,
       block_action_preview: blockActionPreview(
         validation,
+        data,
         configuredHomeRef(this.hubSerial),
         now,
       ),
@@ -6057,6 +6059,7 @@ function blockContract() {
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
+      "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage.",
     ],
   };
 }
@@ -6234,6 +6237,13 @@ async function validateBlockData(
     }
     const value = parseBlockValue(reference.value, contract.kind);
     if (reference.role === "action") reference.parsed_value = value;
+    if (reference.role === "condition") {
+      reference.parsed_value = value;
+      reference.contract_kind = contract.kind;
+      if (Object.hasOwn(contract, "valid_values")) {
+        reference.valid_values = contract.valid_values;
+      }
+    }
     validateCharacteristicValue(value, contract);
     if (
       reference.role === "condition" &&
@@ -6284,7 +6294,7 @@ function observableBlockValue(value) {
   return validation.valid ? validation.value : null;
 }
 
-function blockActionPreview(validation, homeRef, capturedAt) {
+function blockActionPreview(validation, data, homeRef, capturedAt) {
   return {
     snapshot: {
       source: "accessory_read_during_preparation",
@@ -6302,6 +6312,7 @@ function blockActionPreview(validation, homeRef, capturedAt) {
         status: observationAvailable ? "available" : "unavailable",
         ...(action.observed_value ?? {}),
       };
+      const branch = actionBranchPreview(action, data, validation, homeRef);
       return {
         configuration_pointer: blockPathToPointer(action.path),
         characteristic_ref: `${homeRef}/accessory/${action.aId}/service/${action.sId}/characteristic/${action.cId}`,
@@ -6314,8 +6325,163 @@ function blockActionPreview(validation, homeRef, capturedAt) {
             ? "equal"
             : "different"
           : "unknown",
+        ...(branch ? { branch } : {}),
       };
     }),
+  };
+}
+
+function actionBranchPreview(action, data, validation, homeRef) {
+  const enclosing = enclosingBlockIfs(data, action.path);
+  if (enclosing.length === 0) return undefined;
+
+  const immediate = enclosing[enclosing.length - 1];
+  const arm = blockIfArm(action.path, immediate.path);
+  const branch = {
+    condition_pointer: blockPathToPointer(`${immediate.path}.if`),
+    ...(enclosing.length > 1
+      ? {
+          parent_condition_pointers: enclosing
+            .slice(0, -1)
+            .map((ancestor) => blockPathToPointer(`${ancestor.path}.if`)),
+        }
+      : {}),
+  };
+  if (arm === "then") branch.when = "condition_true";
+  else if (arm === "else") branch.when = "condition_false";
+  if (enclosing.length > 1) {
+    // Inner equality is not the whole gate; keep the ancestor pointers.
+    return {
+      ...branch,
+      coverage: { status: "undisclosed", reason: "nested_condition" },
+    };
+  }
+  if (arm === null || !/^root\.targets\[\d+\]$/.test(immediate.path)) {
+    return {
+      ...branch,
+      coverage: { status: "undisclosed", reason: "inapplicable_form" },
+    };
+  }
+
+  const disclosed = simpleRootEqualityEnumCoverage(
+    immediate.node,
+    immediate.path,
+    arm,
+    validation,
+    homeRef,
+  );
+  if (disclosed.status === "known_enum") {
+    return { ...branch, coverage: disclosed };
+  }
+  return {
+    ...branch,
+    coverage: { status: "undisclosed", reason: disclosed.reason },
+  };
+}
+
+function enclosingBlockIfs(data, actionPath) {
+  const ifs = [];
+  visitKnownBlockNodes(data, (node, kind, path) => {
+    if (kind !== "if") return;
+    if (
+      actionPath.startsWith(`${path}.then[`) ||
+      actionPath.startsWith(`${path}.else[`)
+    ) {
+      ifs.push({ node, path });
+    }
+  });
+  return ifs.sort((left, right) => left.path.length - right.path.length);
+}
+
+function blockIfArm(actionPath, ifPath) {
+  if (actionPath.startsWith(`${ifPath}.then[`)) return "then";
+  if (actionPath.startsWith(`${ifPath}.else[`)) return "else";
+  return null;
+}
+
+function simpleRootEqualityEnumCoverage(
+  ifNode,
+  ifPath,
+  arm,
+  validation,
+  homeRef,
+) {
+  const predicate = ifNode.if;
+  if (!isRecord(predicate)) return { reason: "inapplicable_form" };
+
+  let leaf;
+  let leafPath;
+  if (predicate.type === "characteristic") {
+    leaf = predicate;
+    leafPath = `${ifPath}.if`;
+  } else if (predicate.type === "condition") {
+    if (
+      !Array.isArray(predicate.conditions) ||
+      predicate.conditions.length !== 1
+    ) {
+      return { reason: "compound_condition" };
+    }
+    const only = predicate.conditions[0];
+    if (!isRecord(only) || only.type === "condition") {
+      return { reason: "compound_condition" };
+    }
+    if (only.type !== "characteristic") {
+      return { reason: "inapplicable_form" };
+    }
+    leaf = only;
+    leafPath = `${ifPath}.if.conditions[0]`;
+  } else {
+    return { reason: "inapplicable_form" };
+  }
+  if (leaf.cond !== "=") return { reason: "inapplicable_form" };
+
+  const condition = validation.conditions.find(
+    (candidate) => candidate.path === leafPath,
+  );
+  if (!condition) return { reason: "inapplicable_form" };
+  if (
+    !Array.isArray(condition.valid_values) ||
+    condition.valid_values.length === 0
+  ) {
+    // Missing listed values are unknown, not an empty else set.
+    return { reason: "unknown_domain" };
+  }
+  const comparedEntry = condition.valid_values.find(
+    (candidate) =>
+      candidate.kind === condition.contract_kind &&
+      Object.is(candidate.value, condition.parsed_value),
+  );
+  if (!comparedEntry) return { reason: "unknown_domain" };
+
+  const values =
+    arm === "then"
+      ? [comparedEntry]
+      : condition.valid_values.filter(
+          (candidate) =>
+            !(
+              candidate.kind === comparedEntry.kind &&
+              Object.is(candidate.value, comparedEntry.value)
+            ),
+        );
+  return {
+    status: "known_enum",
+    source_ref: `${homeRef}/accessory/${condition.aId}/service/${condition.sId}/characteristic/${condition.cId}`,
+    comparison: "=",
+    compared: publicEnumCoverageValue(comparedEntry),
+    values: values.map(publicEnumCoverageValue),
+  };
+}
+
+function publicEnumCoverageValue(entry) {
+  return {
+    kind: entry.kind,
+    value: entry.value,
+    ...(typeof entry.key === "string" && entry.key.length > 0
+      ? { key: entry.key }
+      : {}),
+    ...(typeof entry.name === "string" && entry.name.length > 0
+      ? { name: entry.name }
+      : {}),
   };
 }
 
@@ -9345,6 +9511,7 @@ function publicNativeChange(
               "Every listed service/set remains a write when its enclosing action runs; equality with the preparation observation is not a no-op or a manual-control guarantee.",
               "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
               "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
+              "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
             ]
           : []),
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",

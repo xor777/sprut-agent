@@ -6186,6 +6186,11 @@ test("prepared BLOCK changes preserve typed branch commands and their preparatio
           value: false,
         },
         comparison_to_observation: "equal",
+        branch: {
+          when: "condition_true",
+          condition_pointer: "/targets/0/if",
+          coverage: { status: "undisclosed", reason: "inapplicable_form" },
+        },
       },
       {
         configuration_pointer: "/targets/0/then/1/characteristics/0",
@@ -6199,6 +6204,11 @@ test("prepared BLOCK changes preserve typed branch commands and their preparatio
         },
         observation: { status: "unavailable" },
         comparison_to_observation: "unknown",
+        branch: {
+          when: "condition_true",
+          condition_pointer: "/targets/0/if",
+          coverage: { status: "undisclosed", reason: "inapplicable_form" },
+        },
       },
       {
         configuration_pointer: "/targets/0/else/0/characteristics/0",
@@ -6216,6 +6226,11 @@ test("prepared BLOCK changes preserve typed branch commands and their preparatio
           value: false,
         },
         comparison_to_observation: "different",
+        branch: {
+          when: "condition_false",
+          condition_pointer: "/targets/0/if",
+          coverage: { status: "undisclosed", reason: "inapplicable_form" },
+        },
       },
     ],
   );
