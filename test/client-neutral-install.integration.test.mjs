@@ -135,6 +135,87 @@ test("MCP initialize reports the published package version from source and a cop
   });
 });
 
+test("every MCP config shipped in the plugin starts the server from a foreign cwd", async (t) => {
+  // Claude-compatible clients (Claude Code, Grok) discover the manifest's
+  // inline mcpServers and any root .mcp.json, expand ${CLAUDE_PLUGIN_ROOT},
+  // and spawn from the session cwd; a "cwd" field is not applied to the
+  // plugin root (observed with grok 1.0.34 on 2026-09-19). Codex spawns the
+  // file named by .codex-plugin/plugin.json with cwd at the plugin root.
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-shipped-mcp-"));
+  const installedRoot = path.join(scratch, "installed", "sprut-agent");
+  const workspace = path.join(scratch, "workspace");
+  const configRoot = path.join(scratch, "config");
+  t.after(() => rm(scratch, { recursive: true }));
+  await Promise.all([
+    cp(path.join(projectRoot, "dist", "plugin"), installedRoot, {
+      recursive: true,
+    }),
+    mkdir(workspace, { recursive: true }),
+    mkdir(configRoot, { recursive: true }),
+  ]);
+
+  const configs = await shippedMcpConfigs(installedRoot, workspace);
+  const sources = configs.map(({ source }) => source);
+  assert.ok(sources.includes(".claude-plugin/plugin.json"), sources);
+  assert.ok(sources.includes(".codex-plugin/plugin.json"), sources);
+  for (const { source, command, args, cwd } of configs) {
+    const client = await connectWithoutHub(t, {
+      command,
+      args,
+      cwd,
+      configRoot,
+    }).catch((error) => {
+      throw new Error(
+        `${source} does not start the shipped server: ${error.message}`,
+      );
+    });
+    assert.equal(client.getServerVersion().name, "sprut-agent", source);
+  }
+});
+
+async function shippedMcpConfigs(installedRoot, sessionCwd) {
+  const expand = (argument) =>
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the client placeholder under test.
+    argument.replaceAll("${CLAUDE_PLUGIN_ROOT}", installedRoot);
+  const readJson = async (relative) =>
+    JSON.parse(await readFile(path.join(installedRoot, relative), "utf8"));
+  const configs = [];
+
+  const claudeManifest = await readJson(".claude-plugin/plugin.json");
+  for (const server of Object.values(claudeManifest.mcpServers ?? {})) {
+    configs.push({
+      source: ".claude-plugin/plugin.json",
+      command: server.command,
+      args: server.args.map(expand),
+      cwd: sessionCwd,
+    });
+  }
+  const rootConfig = await readJson(".mcp.json").catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  for (const server of Object.values(rootConfig?.mcpServers ?? {})) {
+    configs.push({
+      source: ".mcp.json",
+      command: server.command,
+      args: server.args.map(expand),
+      cwd: sessionCwd,
+    });
+  }
+
+  const codexManifest = await readJson(".codex-plugin/plugin.json");
+  const codexConfig = await readJson(codexManifest.mcpServers);
+  for (const server of Object.values(codexConfig.mcpServers)) {
+    configs.push({
+      source: ".codex-plugin/plugin.json",
+      command: server.command,
+      args: server.args,
+      cwd: path.resolve(installedRoot, server.cwd ?? "."),
+    });
+  }
+  return configs;
+}
+
 async function connectWithoutHub(t, { command, args, cwd, configRoot }) {
   const transport = new StdioClientTransport({
     command,
