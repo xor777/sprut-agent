@@ -23,5 +23,5 @@
       "Покажи комнаты и доступные устройства моего дома."
     ]
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.codex-plugin/mcp.json"
 }

@@ -24,15 +24,6 @@ const claudeMarketplaceSource = withDeliveryVersion(
   deliveryVersion,
 );
 const outputPath = path.join(pluginRoot, "dist", "server.mjs");
-const pluginMcpConfig = {
-  mcpServers: {
-    "sprut-agent": {
-      command: "node",
-      args: ["./dist/server.mjs"],
-      cwd: ".",
-    },
-  },
-};
 const claudePluginManifest = {
   name: "sprut-agent",
   version: deliveryVersion,
@@ -68,13 +59,13 @@ await Promise.all([
   bundle("src/read-api.mjs", path.join(pluginRoot, "dist", "read.mjs")),
 ]);
 await Promise.all([
+  // Codex reads its MCP config from .codex-plugin/mcp.json with cwd at the
+  // plugin root. Claude Code and Grok read the inline manifest below and expand
+  // ${CLAUDE_PLUGIN_ROOT}; a root .mcp.json with a relative path would be
+  // resolved against the session cwd by Grok and fail to start.
   cp(path.resolve(".codex-plugin"), path.join(pluginRoot, ".codex-plugin"), {
     recursive: true,
   }),
-  writeFile(
-    path.join(pluginRoot, ".mcp.json"),
-    `${JSON.stringify(pluginMcpConfig, null, 2)}\n`,
-  ),
   writeFile(
     path.join(pluginRoot, ".claude-plugin", "plugin.json"),
     `${JSON.stringify(claudePluginManifest, null, 2)}\n`,

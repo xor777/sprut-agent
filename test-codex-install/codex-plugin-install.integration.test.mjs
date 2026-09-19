@@ -88,7 +88,7 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   assert.notEqual(path.resolve(installedRoot), path.resolve(marketplaceRoot));
   await Promise.all([
     stat(path.join(installedRoot, ".codex-plugin", "plugin.json")),
-    stat(path.join(installedRoot, ".mcp.json")),
+    stat(path.join(installedRoot, ".codex-plugin", "mcp.json")),
     stat(path.join(installedRoot, "dist", "server.mjs")),
     stat(path.join(installedRoot, "dist", "read.mjs")),
     stat(path.join(installedRoot, "check-install.mjs")),
