@@ -158,6 +158,8 @@ test("every MCP config shipped in the plugin starts the server from a foreign cw
   const sources = configs.map(({ source }) => source);
   assert.ok(sources.includes(".claude-plugin/plugin.json"), sources);
   assert.ok(sources.includes(".codex-plugin/plugin.json"), sources);
+  // The pi MCP adapter reads only a Claude plugin's root .mcp.json.
+  assert.ok(sources.includes(".mcp.json"), sources);
   for (const { source, command, args, cwd } of configs) {
     const client = await connectWithoutHub(t, {
       command,

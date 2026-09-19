@@ -59,13 +59,17 @@ await Promise.all([
   bundle("src/read-api.mjs", path.join(pluginRoot, "dist", "read.mjs")),
 ]);
 await Promise.all([
-  // Codex reads its MCP config from .codex-plugin/mcp.json with cwd at the
-  // plugin root. Claude Code and Grok read the inline manifest below and expand
-  // ${CLAUDE_PLUGIN_ROOT}; a root .mcp.json with a relative path would be
-  // resolved against the session cwd by Grok and fail to start.
+  // Codex reads .codex-plugin/mcp.json with cwd at the plugin root. Claude
+  // Code, Grok and the pi MCP adapter read the root .mcp.json or the inline
+  // manifest, expand ${CLAUDE_PLUGIN_ROOT} and spawn from the session cwd, so
+  // those two carry the absolute form without cwd.
   cp(path.resolve(".codex-plugin"), path.join(pluginRoot, ".codex-plugin"), {
     recursive: true,
   }),
+  writeFile(
+    path.join(pluginRoot, ".mcp.json"),
+    `${JSON.stringify({ mcpServers: claudePluginManifest.mcpServers }, null, 2)}\n`,
+  ),
   writeFile(
     path.join(pluginRoot, ".claude-plugin", "plugin.json"),
     `${JSON.stringify(claudePluginManifest, null, 2)}\n`,
