@@ -706,14 +706,16 @@ export class SprutHubClient {
         { next: { tool: "home_overview", arguments: {} } },
       );
     }
-    let response;
-    try {
-      response = await this.#request(
-        { log: { list: { count } } },
-        Date.now() + this.timeoutMs,
-        { serial },
-      );
-    } catch (error) {
+    const deadline = Date.now() + this.timeoutMs;
+    const [logRead, timeZone] = await Promise.all([
+      this.#request({ log: { list: { count } } }, deadline, { serial }).then(
+        (response) => ({ response }),
+        (error) => ({ error }),
+      ),
+      this.#hubTimeZone(serial, deadline),
+    ]);
+    const { response, error } = logRead;
+    if (error) {
       if (
         error instanceof SprutHubError &&
         ["unsupported", "request_rejected"].includes(error.code)
@@ -741,8 +743,9 @@ export class SprutHubClient {
     return {
       status: "ok",
       home_ref: homeRef(serial),
+      time_zone: timeZone,
       entries: nativeEntries
-        .map(normalizeHubLogEntry)
+        .map((entry) => normalizeHubLogEntry(entry, timeZone))
         .sort((a, b) => b.native_time - a.native_time),
       native: {
         operation: "log.list",
@@ -752,6 +755,34 @@ export class SprutHubClient {
       },
       freshness: freshness(response.responseReceivedAt),
     };
+  }
+
+  // The hub's time zone: TimeZone in the home settings window, which
+  // window.get returns for the root key "" (hub optionsWindow was "" on the
+  // live hub, research/protocol/2026-09-16-home-settings-window.md). null
+  // when the hub gives no single zone this process can apply; the caller
+  // then keeps UTC rather than guess an offset.
+  async #hubTimeZone(serial, deadline) {
+    let response;
+    try {
+      response = await this.#request(
+        { window: { get: { windowKey: "" } } },
+        deadline,
+        { serial },
+      );
+    } catch (error) {
+      if (error instanceof SprutHubError) return null;
+      throw error;
+    }
+    const options = response.result?.window?.get?.options;
+    const zones = Array.isArray(options)
+      ? options.filter((option) => option?.key === "TimeZone")
+      : [];
+    const zone = zones.length === 1 ? zones[0].value?.stringValue : undefined;
+    return typeof zone === "string" &&
+      zoneOffsetMinutes(Date.now(), zone) !== null
+      ? zone
+      : null;
   }
 
   async inspectAutomation({ source, target }) {
@@ -3135,11 +3166,51 @@ function nativeLogTimestamp(time) {
   return Number.isNaN(date.valueOf()) ? null : date.toISOString();
 }
 
+// An instant as ISO 8601 on the wall clock of timeZone with that zone's
+// offset at the instant (2026-09-25T09:42:00.118+03:00); UTC with Z when
+// timeZone is null or its offset there is not whole minutes.
+function zonedTimestamp(time, timeZone) {
+  const utc = nativeLogTimestamp(time);
+  const offset =
+    utc === null || timeZone === null
+      ? null
+      : zoneOffsetMinutes(time, timeZone);
+  if (offset === null) return utc;
+  const wallClock = new Date(time + offset * 60_000).toISOString().slice(0, -1);
+  const minutes = Math.abs(offset);
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${wallClock}${offset < 0 ? "-" : "+"}${hh}:${mm}`;
+}
+
+// The UTC offset of timeZone at an instant in minutes, or null for a zone
+// this process does not know.
+function zoneOffsetMinutes(time, timeZone) {
+  let name;
+  try {
+    name = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      timeZoneName: "longOffset",
+    })
+      .formatToParts(new Date(time))
+      .find(({ type }) => type === "timeZoneName")?.value;
+  } catch {
+    return null;
+  }
+  const match = /^GMT(?:([+-])(\d{2}):(\d{2}))?$/.exec(name ?? "");
+  if (!match) return null;
+  if (match[1] === undefined) return 0;
+  return (
+    (match[1] === "-" ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3]))
+  );
+}
+
 // A missing level, path or message stays null (protobuf JSON may omit a
 // default); a present value of another form is not a readable log entry.
-function normalizeHubLogEntry(log) {
+// time is on the hub's clock when its zone is known, else UTC.
+function normalizeHubLogEntry(log, timeZone) {
   if (!isPlainObject(log)) throw incompatibleHubLog();
-  const time = nativeLogTimestamp(log.time);
+  const time = zonedTimestamp(log.time, timeZone);
   const level = log.level === undefined ? null : LOG_LEVEL_NAMES.get(log.level);
   if (
     time === null ||
