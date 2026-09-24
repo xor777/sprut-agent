@@ -1052,10 +1052,15 @@ test("a broader rule that also runs on start still blocks a duplicate", async (t
 });
 
 // The requested rule as the owner made it in the SprutHub interface: the web
-// client leaves out mode and branch delays and writes else null or nothing
+// client leaves out mode and branch delays, writes else null or nothing and
+// creates the condition group with mode OR
 // (research/protocol/2026-09-24-web-client-evidence.md); the hub numbers the
 // nodes and keeps a runtime state on the if.
-function interfaceOfficeMotionRule({ runtime = {}, noElse = {} } = {}) {
+function interfaceOfficeMotionRule({
+  runtime = {},
+  noElse = {},
+  groupMode = "OR",
+} = {}) {
   return {
     index: "interface-motion-light",
     name: "Свет в офисе по движению",
@@ -1076,7 +1081,7 @@ function interfaceOfficeMotionRule({ runtime = {}, noElse = {} } = {}) {
           if: {
             type: "condition",
             blockId: 2,
-            mode: "AND",
+            mode: groupMode,
             conditions: [
               {
                 type: "characteristic",
@@ -1129,6 +1134,15 @@ test("the same rule made in the SprutHub interface is reused or reported, never 
       },
     ],
     [
+      "turned on, the owner switched the group to AND",
+      interfaceOfficeMotionRule({ groupMode: "AND" }),
+      {
+        differences: [],
+        status: "already_present",
+        reason: previewArguments.reason,
+      },
+    ],
+    [
       "turned off, without else",
       interfaceOfficeMotionRule({ runtime: { active: false } }),
       {
@@ -1158,38 +1172,39 @@ test("the same rule made in the SprutHub interface is reused or reported, never 
 
       const prepared = await preview(client);
       assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
-      assert.deepEqual(prepared.structuredContent.existing_rules, [
-        {
-          ref: interfaceRuleRef,
-          name: "Свет в офисе по движению",
-          relation: "equivalent",
-          differences: expected.differences,
-        },
-      ]);
       const applied = await client.callTool({
         name: "apply_automation_change",
         arguments: { change_ref: prepared.structuredContent.change_ref },
       });
       assert.equal(applied.isError, undefined, applied.content[0]?.text);
+      // What the hub holds afterwards, not only what apply answered.
       assert.deepEqual(
         {
+          existing_rules: prepared.structuredContent.existing_rules,
           status: applied.structuredContent.status,
           reason: applied.structuredContent.reason,
           scenario_index: applied.structuredContent.scenario_index,
           owned: applied.structuredContent.owned,
+          create_sent: hub.requests.some(({ scenario }) => scenario?.create),
+          scenarios: hub.state.scenarios,
         },
         {
+          existing_rules: [
+            {
+              ref: interfaceRuleRef,
+              name: "Свет в офисе по движению",
+              relation: "equivalent",
+              differences: expected.differences,
+            },
+          ],
           status: expected.status,
           reason: expected.reason,
           scenario_index: "interface-motion-light",
           owned: false,
+          create_sent: false,
+          scenarios: scenariosBefore,
         },
       );
-      assert.equal(
-        hub.requests.some(({ scenario }) => scenario?.create),
-        false,
-      );
-      assert.deepEqual(hub.state.scenarios, scenariosBefore);
     });
   }
 });
