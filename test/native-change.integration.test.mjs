@@ -934,12 +934,10 @@ function assembleTimeTriggerFromContract(
   return {
     type: "cron",
     mode: selectedMode,
-    cron: form.cron
-      .split(" ")
-      .map((token) =>
-        Object.hasOwn(tokens, token) ? String(tokens[token]) : token,
-      )
-      .join(" "),
+    // Placeholders are upper-case words, also inside a field such as 0/N.
+    cron: form.cron.replace(/[A-Z]+/g, (token) =>
+      Object.hasOwn(tokens, token) ? String(tokens[token]) : token,
+    ),
     offset,
   };
 }
@@ -9252,6 +9250,134 @@ test("time triggers outside the published forms are refused with a repairable re
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
     false,
+  );
+});
+
+test("every-N and every-day time triggers take the web client's cron form", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+
+  // «Каждые 15 минут» и «по будням каждые 2 часа».
+  const everyQuarterHour = assembleTimeTriggerFromContract(
+    contract,
+    "every_n_minutes",
+    { N: 15, DAYS: "*" },
+  );
+  const everyTwoHoursOnWeekdays = assembleTimeTriggerFromContract(
+    contract,
+    "every_n_hours",
+    { N: 2, DAYS: "MON,TUE,WED,THU,FRI" },
+  );
+  assert.deepEqual(
+    [everyQuarterHour, everyTwoHoursOnWeekdays],
+    [
+      { type: "cron", mode: "NONE", cron: "0 0/15 * ? * * *", offset: 0 },
+      {
+        type: "cron",
+        mode: "NONE",
+        cron: "0 0 0/2 ? * MON,TUE,WED,THU,FRI *",
+        offset: 0,
+      },
+    ],
+  );
+  // The web client writes all seven days as "*", never as a list of names.
+  const everyDayByName = {
+    type: "cron",
+    mode: "NONE",
+    cron: "0 0 7 ? * MON,TUE,WED,THU,FRI,SAT,SUN *",
+    offset: 0,
+  };
+  const data = {
+    targets: [
+      everyIf({
+        when: conditionGroup(everyQuarterHour),
+        thenActions: [setAction()],
+      }),
+      everyIf({
+        when: conditionGroup(everyTwoHoursOnWeekdays),
+        thenActions: [setAction({ cId: 16, hc: "Brightness", value: "80" })],
+      }),
+      everyIf({
+        when: conditionGroup(everyDayByName),
+        thenActions: [setAction({ cId: 18, hc: "TargetMode", value: "home" })],
+      }),
+    ],
+  };
+  const prepared = await prepareBlockCreate(client, {
+    name: "Периодический свет",
+    data,
+    reason: "Каждые 15 минут, по будням каждые 2 часа и ежедневно в 7:00",
+  });
+  const everyDay = "0 0 7 ? * * *";
+  assert.equal(
+    prepared.structuredContent.diff.configuration.to.data.targets[2].if
+      .conditions[0].cron,
+    everyDay,
+  );
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  const stored = scenarioData(hub, created.structuredContent.scenario_index);
+  assert.deepEqual(
+    stored.targets.map((target) => target.if.conditions[0].cron),
+    ["0 0/15 * ? * * *", "0 0 0/2 ? * MON,TUE,WED,THU,FRI *", everyDay],
+  );
+
+  const refusals = [];
+  for (const [name, cron] of [
+    ["every 7 minutes", "0 0/7 * ? * * *"],
+    ["every 5 hours", "0 0 0/5 ? * * *"],
+    ["every 45 seconds", "0/45 * * ? * * *"],
+  ]) {
+    const refused = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name,
+        description: name,
+        active: true,
+        on_start: false,
+        sync: false,
+        data: {
+          targets: [
+            everyIf({
+              when: conditionGroup({
+                type: "cron",
+                mode: "NONE",
+                cron,
+                offset: 0,
+              }),
+              thenActions: [setAction()],
+            }),
+          ],
+        },
+        reason: "Период вне списка редактора",
+      },
+    });
+    refusals.push({
+      name,
+      code: refused.structuredContent?.error?.code,
+      explained: /time trigger/.test(
+        refused.structuredContent?.error?.message ?? "",
+      ),
+    });
+  }
+  assert.deepEqual(
+    refusals,
+    ["every 7 minutes", "every 5 hours", "every 45 seconds"].map((name) => ({
+      name,
+      code: "invalid_block_data",
+      explained: true,
+    })),
   );
 });
 
