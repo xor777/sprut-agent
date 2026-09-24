@@ -311,6 +311,14 @@ export class HomeReads {
       }
       listed.push(item);
     }
+    // Grouped by room in the home's room order: the hub may list devices of
+    // one room apart. Rooms missing from the room list come last.
+    const roomOrder = new Map(
+      catalog.rooms.map(({ id }, index) => [id, index]),
+    );
+    const orderOf = ({ accessory }) =>
+      roomOrder.get(accessory.roomId) ?? catalog.rooms.length;
+    listed.sort((left, right) => orderOf(left) - orderOf(right));
     const slots = listed.map((item) => {
       const room = roomsById.get(item.accessory.roomId);
       return {
