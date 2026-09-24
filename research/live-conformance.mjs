@@ -6,16 +6,21 @@
 // start with the run prefix, rooms and one virtual Lightbulb without links
 // named with the short run name (the hub keeps 30 characters of those), and
 // may change or restore only objects it created in this run. By the owner's
-// rule of 2026-09-24 a BLOCK may act only on that virtual accessory and start
-// only on a one-date cron in FAR_FUTURE_YEAR or later; it is created turned
-// off with onStart=false and is turned on only with such a trigger. The
-// owner's devices, scenarios, rooms and settings are only read. Everything
-// created is restored (deleted) in reverse order and the final home snapshot
-// must equal the initial one. A final sweep then deletes, through the product
-// client, every inert object of this run that the product owns but its
-// restore left behind, and the run's own unlinked virtual accessory, and
-// fails the run for it.
-// `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep.
+// rules a BLOCK may act only on that virtual accessory and start only on a
+// one-date cron in FAR_FUTURE_YEAR or later or on one daily time; it is
+// created turned off with onStart=false. A run BLOCK may be turned on; a run
+// LOGIC, whose source is an info object and an empty trigger, may be on only
+// while it is not assigned, and is assigned only to the virtual accessory
+// while it is off. The owner's devices, scenarios, rooms and settings are only
+// read. Everything created is restored (deleted) in reverse order and the
+// final home snapshot must equal the initial one. A final sweep then deletes,
+// through the product client, every inert object of this run that the
+// product owns but its restore left behind, the run's own unlinked virtual
+// accessory and its one directly created room, and fails the run for each
+// unless a step left that object to it on purpose.
+// `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep;
+// `--read-only` runs only the read steps and refuses every write;
+// `--only <ids>` runs the named steps (STEPS below).
 //
 // Output: a JSON report in a new temporary directory and a console table.
 // Hub names are stored only as SHA-256; credentials never pass through here.
@@ -31,6 +36,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocket } from "ws";
 import { AutomationStore } from "../src/automation-store.mjs";
+import { canonicalBlock } from "../src/block-model.mjs";
 import { SprutHubConnection } from "../src/spruthub-connection.mjs";
 
 const REPO_ROOT = path.resolve(
@@ -49,6 +55,21 @@ const PROBE_DESCRIPTION = "sprut-agent live conformance probe; safe to delete";
 const WATCH_MS = 6_000;
 const POLL_MS = 500;
 const DAY_MS = 86_400_000;
+// How long scenario.get and the options window may disagree on active.
+const AGREE_MS = 5_000;
+const AGREE_POLL_MS = 250;
+// The firing BLOCK of step 6t starts on the first whole minute at least
+// FIRE_LEAD_MS ahead of the hub clock and is watched until FIRE_MARGIN_MS
+// after it, never longer than FIRE_WAIT_MAX_MS.
+const FIRE_LEAD_MS = 90_000;
+const FIRE_MARGIN_MS = 30_000;
+const FIRE_WAIT_MAX_MS = 200_000;
+const FIRE_POLL_MS = 2_000;
+// The web client's days_at_time trigger for every day (src/block-model.mjs).
+const DAILY_TIME_CRON = /^0 ([0-5]?\d) ([01]?\d|2[0-3]) \? \* \* \*$/;
+// A probe room name starts with the run's short name. The hub cut room names
+// to 30 characters; step 1n sends longer ones on purpose.
+const ROOM_NAME_PROBE_MAX = 40;
 const REASON =
   "Owner-authorized live conformance probe; only objects created by this run are changed and all are removed.";
 const PROBE_PREFIX = /^zz-sprut-agent-probe-\d{8}T\d{6}Z$/;
@@ -77,7 +98,9 @@ const PREPARE_OPERATIONS = new Set([
   "window_option",
   "logic_source_create",
   "logic_source_update",
+  "logic_assignment",
   "scenario_run",
+  "virtual_light_group",
 ]);
 
 export class GuardError extends Error {}
@@ -94,17 +117,30 @@ class ProbeFailure extends Error {
 export class GuardedHub {
   #client;
   #listClient = null;
-  constructor(client, prefix) {
+  #listClientGiven;
+  // productClient: the product client for raw reads (lists, a LOGIC's window
+  // and types); without it one is opened from this process's connection env.
+  constructor(client, prefix, { readOnly = false, productClient } = {}) {
     this.#client = client;
+    this.#listClient = productClient ?? null;
+    this.#listClientGiven = productClient !== undefined;
     this.prefix = prefix;
+    this.readOnly = readOnly;
     this.homeRef = null;
-    this.anchors = new Set();
+    this.settingsWindowRef = null;
+    // ref -> { kind: room|block|logic, ... } for every object of this run.
     this.created = new Map();
     this.changes = new Map();
     this.calls = [];
-    // The run's virtual accessory ids and its BLOCKs' options windows.
+    // The run's virtual accessory ids and the rooms that hold it.
     this.virtualAIds = new Set();
+    this.virtualRooms = new Set();
+    // Options windows of this run's BLOCKs and LOGICs: window ref -> scenario.
     this.ownWindows = new Map();
+    this.logicWindows = new Map();
+    this.directRoomSent = false;
+    // Run objects a step leaves to the final sweep on purpose: ref -> reason.
+    this.sweepExpected = new Map();
   }
 
   async read(tool, args) {
@@ -117,15 +153,13 @@ export class GuardedHub {
   // The MCP reads answer questions, not full listings, so these lists are
   // read with the product client, as the sweep does.
   async lists() {
-    this.#listClient ??= await new SprutHubConnection({
-      env: serverEnvironment(report.state_directory),
-    }).getClient();
+    const client = await this.#productClient();
     const serial = decodeURIComponent(this.homeRef.split("/").at(-1));
     const [rooms, scenarios, accessories, extensions] = await Promise.all([
-      this.#listClient.listRooms(),
-      this.#listClient.listScenarios(),
-      this.#listClient.listAccessories(),
-      this.#listClient.nativeExtensions(serial, Date.now() + 10_000),
+      client.listRooms(),
+      client.listScenarios(),
+      client.listAccessories(),
+      client.nativeExtensions(serial, Date.now() + 10_000),
     ]);
     return {
       accessories,
@@ -144,54 +178,141 @@ export class GuardedHub {
   }
 
   async closeListClient() {
+    if (this.#listClientGiven) return;
     await this.#listClient?.close();
     this.#listClient = null;
   }
 
+  async #productClient() {
+    this.#listClient ??= await new SprutHubConnection({
+      env: serverEnvironment(report.state_directory),
+    }).getClient();
+    return this.#listClient;
+  }
+
   async prepare(input) {
+    this.#writable(input.operation);
     this.#checkPrepare(input);
+    if (input.operation === "logic_assignment") {
+      await this.#checkAssignedType(input.target_ref);
+    }
     const result = await this.#call("prepare_native_change", {
       reason: REASON,
       ...input,
     });
+    const owned = this.created.get(input.target_ref);
+    if (
+      input.operation === "scenario_active" &&
+      input.value === false &&
+      result.status === "already_desired" &&
+      owned?.kind === "logic"
+    ) {
+      owned.on.clear();
+    }
     if (typeof result.change_ref === "string") {
       this.changes.set(result.change_ref, {
         operation: input.operation,
         target_ref: input.target_ref,
+        value: input.value,
+        active: input.active,
+        // Product-created BLOCKs passed probeBlockViolation and act only on
+        // the virtual accessory, so they may be turned on.
         activatable:
-          input.operation === "block_create" &&
-          input.on_start === false &&
-          onlyFarFutureOneDateTriggers(input.data),
+          input.operation === "block_create" && input.on_start === false,
         // The product's path to a BLOCK's Active window option is only
-        // prepared, to learn whether it is offered; the hub write is direct.
-        prepareOnly: this.ownWindows.has(input.target_ref),
+        // prepared, to learn whether it is offered; a virtual light group is
+        // only prepared, to see its duplicate check.
+        prepareOnly:
+          this.ownWindows.has(input.target_ref) ||
+          input.operation === "virtual_light_group",
+        logicRef:
+          input.operation === "logic_assignment"
+            ? this.#assignedLogic(input.target_ref)
+            : undefined,
       });
     }
     return result;
   }
 
   async apply(changeRef) {
+    this.#writable("apply");
     const change = this.#ownChange(changeRef);
     if (change.prepareOnly)
       throw new GuardError(`${changeRef} is prepare-only`);
+    // Recorded before the write: a lost answer may still have switched or
+    // assigned the LOGIC.
+    const owned = this.created.get(change.target_ref);
+    if (
+      change.operation === "scenario_active" &&
+      change.value === true &&
+      owned?.kind === "logic"
+    ) {
+      owned.on.add(changeRef);
+    }
+    if (change.operation === "logic_assignment") {
+      this.created.get(change.logicRef).assignments.add(changeRef);
+    }
     const result = await this.#call("apply_native_change", {
       change_ref: changeRef,
     });
-    this.#trackCreated(change, result);
+    this.#trackCreated(change, result, changeRef);
+    if (
+      change.operation === "scenario_active" &&
+      change.value === false &&
+      owned?.kind === "logic" &&
+      result.status === "applied"
+    ) {
+      owned.on.clear();
+    }
     return result;
   }
 
   async restore(changeRef) {
-    this.#ownChange(changeRef);
-    return this.#call("restore_native_change", { change_ref: changeRef });
+    this.#writable("restore");
+    const change = this.#ownChange(changeRef);
+    const result = await this.#call("restore_native_change", {
+      change_ref: changeRef,
+    });
+    if (result.status === "restored") {
+      const owned = this.created.get(change.target_ref);
+      if (change.operation === "scenario_active" && owned?.kind === "logic") {
+        owned.on.delete(changeRef);
+      }
+      if (change.operation === "logic_assignment") {
+        this.created.get(change.logicRef)?.assignments.delete(changeRef);
+      }
+    }
+    return result;
   }
 
   async get(changeRef) {
     const result = await this.read("get_native_change", {
       change_ref: changeRef,
     });
-    this.#trackCreated(this.changes.get(changeRef), result);
+    this.#trackCreated(this.changes.get(changeRef), result, changeRef);
     return result;
+  }
+
+  // Lets window_option reach the options window of a LOGIC of this run. The
+  // product names only a BLOCK's window, so the key is read here from the
+  // scenario itself.
+  async registerLogicWindow(scenarioRef) {
+    if (this.created.get(scenarioRef)?.kind !== "logic") {
+      throw new GuardError(
+        `${relativeRef(scenarioRef)} is no LOGIC of this run`,
+      );
+    }
+    const scenario = await (await this.#productClient()).getScenario(
+      scenarioIndex(scenarioRef),
+    );
+    if (typeof scenario?.optionsWindow !== "string") return null;
+    const windowRef = `${this.homeRef}/window/${encodeURIComponent(scenario.optionsWindow)}`;
+    this.logicWindows.set(windowRef, scenarioRef);
+    return windowRef;
+  }
+
+  #writable(what) {
+    if (this.readOnly) throw new GuardError(`${what}: this run is read-only`);
   }
 
   #ownChange(changeRef) {
@@ -200,21 +321,78 @@ export class GuardedHub {
     return change;
   }
 
-  #trackCreated(change, result) {
+  #trackCreated(change, result, changeRef) {
     if (!change) return;
     if (change.operation === "room_create" && result?.room?.ref) {
       this.created.set(result.room.ref, { kind: "room" });
     }
     if (
-      ["block_create", "logic_source_create"].includes(change.operation) &&
-      typeof result?.scenario_ref === "string" &&
-      !this.created.has(result.scenario_ref)
+      !["block_create", "logic_source_create"].includes(change.operation) ||
+      typeof result?.scenario_ref !== "string"
     ) {
-      this.created.set(result.scenario_ref, {
-        kind: change.operation === "block_create" ? "block" : "logic",
-        activatable: change.activatable === true,
-      });
+      return;
     }
+    if (!this.created.has(result.scenario_ref)) {
+      this.created.set(
+        result.scenario_ref,
+        change.operation === "block_create"
+          ? { kind: "block", activatable: change.activatable === true }
+          : {
+              kind: "logic",
+              type: null,
+              // Changes that may have left it on, and its assignments.
+              on: new Set(change.active === true ? [changeRef] : []),
+              assignments: new Set(),
+            },
+      );
+    }
+    const owned = this.created.get(result.scenario_ref);
+    if (
+      owned.kind === "logic" &&
+      typeof result.native_logic_type === "string"
+    ) {
+      owned.type = result.native_logic_type;
+    }
+  }
+
+  // The LOGIC of this run whose native type a logic ref names.
+  #assignedLogic(logicRef) {
+    const match = /\/logic\/([^/]+)$/.exec(logicRef ?? "");
+    if (!match) return undefined;
+    const type = decodeURIComponent(match[1]);
+    for (const [ref, owned] of this.created) {
+      if (owned.kind === "logic" && owned.type === type) return ref;
+    }
+    return undefined;
+  }
+
+  // The product maps a LOGIC to the one new type on its anchor. A LOGIC the
+  // owner created meanwhile could be that type; the type's entry must name
+  // a scenario of this run.
+  async #checkAssignedType(logicRef) {
+    const match = /\/accessory\/(\d+)\/service\/(\d+)\/logic\/([^/]+)$/.exec(
+      logicRef,
+    );
+    const type = decodeURIComponent(match[3]);
+    const types = await (await this.#productClient()).listLogicTypes({
+      aId: Number(match[1]),
+      sId: Number(match[2]),
+    });
+    const entry = types.find((item) => item.type === type);
+    if (!String(entry?.name).startsWith(this.prefix)) {
+      throw new GuardError(
+        `refused logic_assignment on ${logicRef}: the type does not name a scenario of this run`,
+      );
+    }
+  }
+
+  #isVirtualService(ref) {
+    const match = /^(.*)\/accessory\/(\d+)\/service\/\d+$/.exec(ref ?? "");
+    return (
+      match !== null &&
+      match[1] === this.homeRef &&
+      this.virtualAIds.has(Number(match[2]))
+    );
   }
 
   #checkPrepare(input) {
@@ -224,14 +402,14 @@ export class GuardedHub {
     };
     if (!PREPARE_OPERATIONS.has(op)) refuse("operation is not allowed");
     const owned = this.created.get(target);
-    if (["room_create", "block_create"].includes(op)) {
+    if (["room_create", "block_create", "virtual_light_group"].includes(op)) {
       if (target !== this.homeRef) refuse("target must be the home ref");
     }
     if (op === "block_create" && !input.name?.startsWith(this.prefix)) {
       refuse("name lacks prefix");
     }
-    if (op === "room_create" && !isShortProbeName(input.name, this.prefix)) {
-      refuse("room name lacks the short run name or is too long");
+    if (op === "room_create" && !isProbeRoomName(input.name, this.prefix)) {
+      refuse("room name lacks the short run name");
     }
     if (op === "block_create") {
       if (input.active !== false || input.on_start !== false) {
@@ -243,49 +421,91 @@ export class GuardedHub {
       if (violation) refuse(violation);
     }
     if (op === "logic_source_create") {
-      if (!this.anchors.has(target)) refuse("not the chosen anchor service");
+      if (!this.#isVirtualService(target)) {
+        refuse("the anchor is not the run's virtual accessory");
+      }
       if (!input.name?.startsWith(this.prefix)) refuse("name lacks prefix");
-      if (input.active !== false || input.on_start !== false) {
-        refuse("LOGIC must be created off with onStart=false");
+      if (typeof input.active !== "boolean" || input.on_start !== false) {
+        refuse("LOGIC needs an explicit active and onStart=false");
       }
     }
-    if (op === "room_name") {
-      if (owned?.kind !== "room") refuse("room not created by this run");
-      if (!isShortProbeName(input.value, this.prefix)) {
-        refuse("room name lacks the short run name or is too long");
-      }
-    }
-    if (op === "block_data_update") {
-      if (owned?.kind !== "block") refuse("BLOCK not created by this run");
-      if (owned.activatable && !onlyFarFutureOneDateTriggers(input.data)) {
-        refuse("an activatable BLOCK must keep only far-future triggers");
-      }
-    }
-    if (op === "window_option" && this.ownWindows.has(target)) {
-      if (input.option_key !== "Active" || input.value !== false) {
-        refuse("only Active=false on a probe BLOCK window");
-      }
-    } else if (op === "window_option") {
-      if (owned?.kind !== "block") refuse("BLOCK not created by this run");
-      if (!["Name", "Desc"].includes(input.option_key)) refuse("option key");
-      if (
-        input.option_key === "Name" &&
-        !String(input.value).startsWith(this.prefix)
-      ) {
-        refuse("name prefix");
-      }
-    }
-    if (op === "scenario_active") {
-      if (!owned || owned.kind === "room") refuse("not created by this run");
-      if (input.value === true && !owned.activatable) {
-        refuse("turning this scenario on is not allowed");
+    if (["logic_source_create", "logic_source_update"].includes(op)) {
+      // On and unassigned, such a LOGIC still runs nothing.
+      if (!isInertProbeLogic(input.source, this.prefix)) {
+        refuse("the source is not an info object with an empty trigger");
       }
     }
     if (op === "logic_source_update" && owned?.kind !== "logic") {
       refuse("LOGIC not created by this run");
     }
+    if (op === "room_name") {
+      if (owned?.kind !== "room" || owned.direct) {
+        refuse("room not created by this run");
+      }
+      if (!isProbeRoomName(input.value, this.prefix)) {
+        refuse("room name lacks the short run name");
+      }
+    }
+    if (op === "block_data_update" && owned?.kind !== "block") {
+      refuse("BLOCK not created by this run");
+    }
+    if (op === "window_option") this.#checkWindowOption(input, owned, refuse);
+    if (op === "scenario_active") {
+      if (!owned || owned.kind === "room") refuse("not created by this run");
+      if (
+        input.value === true &&
+        owned.kind === "block" &&
+        !owned.activatable
+      ) {
+        refuse("turning this BLOCK on is not allowed");
+      }
+      if (
+        input.value === true &&
+        owned.kind === "logic" &&
+        owned.assignments.size > 0
+      ) {
+        refuse("an assigned LOGIC stays off");
+      }
+    }
+    if (op === "logic_assignment") {
+      const service = /^(.*)\/logic\/[^/]+$/.exec(target ?? "")?.[1];
+      if (!this.#isVirtualService(service)) {
+        refuse("only on the run's virtual accessory");
+      }
+      const logicRef = this.#assignedLogic(target);
+      if (!logicRef) refuse("not the type of a LOGIC of this run");
+      if (this.created.get(logicRef).on.size > 0) {
+        refuse("a LOGIC that may be on is not assigned");
+      }
+    }
+    if (op === "virtual_light_group") {
+      if (input.name !== probeShortName(this.prefix)) {
+        refuse("name is not the run's virtual accessory name");
+      }
+      if (!this.virtualRooms.has(input.room_ref)) {
+        refuse("room is not the run's virtual accessory room");
+      }
+    }
     if (op === "scenario_run" && owned?.kind !== "block") {
       refuse("BLOCK not created by this run");
+    }
+  }
+
+  #checkWindowOption(input, owned, refuse) {
+    const target = input.target_ref;
+    const namePrefixed = String(input.value).startsWith(this.prefix);
+    if (this.ownWindows.has(target)) {
+      if (input.option_key !== "Active" || input.value !== false) {
+        refuse("only Active=false on a probe BLOCK window");
+      }
+    } else if (this.logicWindows.has(target) || owned?.kind === "logic") {
+      if (input.option_key !== "Name" || !namePrefixed) {
+        refuse("only a Name with the run prefix on a probe LOGIC");
+      }
+    } else {
+      if (owned?.kind !== "block") refuse("BLOCK not created by this run");
+      if (!["Name", "Desc"].includes(input.option_key)) refuse("option key");
+      if (input.option_key === "Name" && !namePrefixed) refuse("name prefix");
     }
   }
 
@@ -296,9 +516,10 @@ export class GuardedHub {
       undefined,
       { timeout: CALL_TIMEOUT_MS },
     );
-    const result =
-      response.structuredContent ??
-      JSON.parse(response.content?.[0]?.text ?? "null");
+    const text = (response.content ?? [])
+      .map((item) => item.text ?? "")
+      .join("");
+    const result = response.structuredContent ?? JSON.parse(text || "null");
     this.calls.push({
       tool,
       ...(args.operation ? { operation: args.operation } : {}),
@@ -308,15 +529,19 @@ export class GuardedHub {
       status: result?.status ?? null,
       ...(result?.error?.code ? { error: result.error.code } : {}),
       ms: Date.now() - started,
+      // What an agent reads: the text content of the tool result.
+      bytes: Buffer.byteLength(text),
     });
     return result;
   }
 }
 
 // The only path for writes that bypass the MCP server, through the product
-// client: the run's virtual accessory (create, set, delete), a run of this
-// run's BLOCK, and the Active option of such a BLOCK's own options window.
-// history.list is the only raw read; the client has no method for it.
+// client: the run's virtual accessory (create, set, delete), turned-off
+// BLOCKs made directly, a run of this run's BLOCK, the Active option of such
+// a BLOCK's own options window and one directly created room. Its reads are
+// raw hub reads (scenario, window, room, logic types) that the MCP answers
+// only in part; history.list has no client method at all.
 export class ProbeClient {
   #client;
   #hub;
@@ -346,6 +571,8 @@ export class ProbeClient {
     return this.#client.close();
   }
 
+  // --- reads ---
+
   getAccessoryOrNull(id) {
     return this.#client.getAccessoryOrNull(id);
   }
@@ -362,7 +589,83 @@ export class ProbeClient {
     return this.#client.getCharacteristic(target);
   }
 
+  getRoom(id) {
+    return this.#client.getRoom(id);
+  }
+
+  listScenarios() {
+    return this.#client.listScenarios();
+  }
+
+  getScenario(index) {
+    return this.#client.getScenario(index);
+  }
+
+  getWindow(windowKey) {
+    return this.#client.getWindow(windowKey);
+  }
+
+  listLogicTypes(target) {
+    return this.#client.listLogicTypes(target);
+  }
+
+  listLogics(target) {
+    return this.#client.listLogics(target);
+  }
+
+  // The stored BLOCK data exactly as scenario.get returns it.
+  async storedBlockData(scenarioRef) {
+    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
+    return {
+      active: scenario?.active,
+      data:
+        typeof scenario?.data === "string"
+          ? JSON.parse(scenario.data)
+          : scenario?.data,
+    };
+  }
+
+  // scenario.get's active and the Active option of the scenario's options
+  // window, read one right after the other; no other value is kept.
+  async activeView(scenarioRef) {
+    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
+    if (scenario === null) return null;
+    const windowKey =
+      typeof scenario.optionsWindow === "string"
+        ? scenario.optionsWindow
+        : null;
+    let window = null;
+    let windowError = null;
+    if (windowKey !== null) {
+      try {
+        window = await this.#client.getWindow(windowKey);
+      } catch (error) {
+        windowError = error.code ?? error.message;
+      }
+    }
+    const option = window?.options.find(({ key }) => key === "Active");
+    return {
+      active: scenario.active,
+      name: scenario.name,
+      windowKey,
+      windowError,
+      keys: window?.options.map(optionShape) ?? [],
+      option: option
+        ? { ...optionShape(option), value: option.value?.boolValue }
+        : null,
+    };
+  }
+
+  // --- writes ---
+
+  #writable(what) {
+    if (this.#hub.readOnly) {
+      throw new GuardError(`${what}: this run is read-only`);
+    }
+  }
+
   async createVirtualAccessory(roomRef, optional) {
+    this.#writable("accessory.create");
     if (this.#hub.created.get(roomRef)?.kind !== "room") {
       throw new GuardError("the accessory room was not created by this run");
     }
@@ -375,12 +678,14 @@ export class ProbeClient {
       roomId: Number(roomRef.split("/").at(-1)),
       services: [{ name, type: "Lightbulb", optional }],
     });
-    await recordProbeAccessory(this.#stateDirectory, accessory.id);
+    await recordProbeId(this.#stateDirectory, PROBE_ACCESSORIES, accessory.id);
     this.#hub.virtualAIds.add(accessory.id);
+    this.#hub.virtualRooms.add(roomRef);
     return accessory;
   }
 
   deleteVirtualAccessory(id) {
+    this.#writable("accessory.delete");
     if (!this.#hub.virtualAIds.has(id)) {
       throw new GuardError(`accessory ${id} is not the run's virtual one`);
     }
@@ -388,6 +693,7 @@ export class ProbeClient {
   }
 
   setVirtualValue(target, value) {
+    this.#writable("characteristic.update");
     if (!this.#hub.virtualAIds.has(target.aId)) {
       throw new GuardError(
         `accessory ${target.aId} is not the run's virtual one`,
@@ -396,11 +702,47 @@ export class ProbeClient {
     return this.#client.updateCharacteristic({ ...target, value });
   }
 
+  // One direct room.create per run, to see what the hub keeps of a name the
+  // product refuses. It carries the run's short name, and its id, written
+  // right after the hub's answer, proves it for the sweep.
+  async createRoomDirect(name) {
+    this.#writable("room.create");
+    if (!isProbeRoomName(name, this.#hub.prefix)) {
+      throw new GuardError("refused direct room.create: not a probe name");
+    }
+    if (this.#hub.directRoomSent) {
+      throw new GuardError("refused direct room.create: one was sent");
+    }
+    this.#hub.directRoomSent = true;
+    const room = await this.#client.createRoom(name);
+    await recordProbeId(this.#stateDirectory, PROBE_ROOMS, room.id);
+    const ref = `${this.#hub.homeRef}/room/${room.id}`;
+    this.#hub.created.set(ref, { kind: "room", direct: true });
+    return { ref, id: room.id, name: room.name };
+  }
+
+  async deleteDirectRoom(roomRef) {
+    this.#writable("room.delete");
+    const owned = this.#hub.created.get(roomRef);
+    if (owned?.kind !== "room" || owned.direct !== true) {
+      throw new GuardError(`${relativeRef(roomRef)} was not made directly`);
+    }
+    const id = Number(roomRef.split("/").at(-1));
+    if ((await this.#client.listAccessoriesInRoom(id)).length > 0) {
+      return { failure: new Error("the room is not empty"), gone: false };
+    }
+    return deleteChecked(
+      () => this.#client.deleteRoom(id),
+      () => this.#client.getRoom(id),
+    );
+  }
+
   // The product creates an action-only BLOCK only turned on; this is the
   // turned-off form an owner can have. Same rule as every probe BLOCK.
   // A marker of the sweep's form in desc lets the sweep delete this BLOCK if
   // its own cleanup fails; it is not a product change and has no journal.
   async createTurnedOffBlock(name, data) {
+    this.#writable("scenario.create");
     const violation = probeBlockViolation(data, this.#hub.virtualAIds);
     if (!name.startsWith(this.#hub.prefix) || violation) {
       throw new GuardError(`refused direct BLOCK: ${violation ?? "name"}`);
@@ -424,36 +766,20 @@ export class ProbeClient {
     return ref;
   }
 
-  // The stored BLOCK data exactly as scenario.get returns it.
-  async storedBlockData(scenarioRef) {
-    if (!this.#hub.created.get(scenarioRef)?.direct) {
-      throw new GuardError(`${relativeRef(scenarioRef)} was not made directly`);
-    }
-    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
-    return {
-      active: scenario?.active,
-      data:
-        typeof scenario?.data === "string"
-          ? JSON.parse(scenario.data)
-          : scenario?.data,
-    };
-  }
-
   async deleteDirectBlock(scenarioRef) {
+    this.#writable("scenario.delete");
     if (!this.#hub.created.get(scenarioRef)?.direct) {
       throw new GuardError(`${relativeRef(scenarioRef)} was not made directly`);
     }
     const index = scenarioIndex(scenarioRef);
-    let failure;
-    try {
-      await this.#client.deleteScenario(index);
-    } catch (error) {
-      failure = error;
-    }
-    return { failure, gone: (await this.#client.getScenario(index)) === null };
+    return deleteChecked(
+      () => this.#client.deleteScenario(index),
+      () => this.#client.getScenario(index),
+    );
   }
 
   runBlock(scenarioRef) {
+    this.#writable("scenario.run");
     if (this.#hub.created.get(scenarioRef)?.kind !== "block") {
       throw new GuardError(`${relativeRef(scenarioRef)} is not a probe BLOCK`);
     }
@@ -461,6 +787,7 @@ export class ProbeClient {
   }
 
   async setBlockActiveByWindow(scenarioRef, active) {
+    this.#writable("window.update");
     const owned = this.#hub.created.get(scenarioRef);
     if (owned?.kind !== "block" || (active && !owned.activatable)) {
       throw new GuardError(`${relativeRef(scenarioRef)} may not be set here`);
@@ -513,37 +840,65 @@ export class ProbeClient {
   }
 }
 
-function isShortProbeName(name, prefix) {
+// A window option's shape without its value or label.
+function optionShape(option) {
+  return {
+    key: option.key,
+    type: option.type ?? null,
+    input_type: option.inputType ?? null,
+    read: option.read ?? null,
+    write: option.write ?? null,
+    disabled: option.disabled ?? null,
+  };
+}
+
+// A delete without a clear answer may still have happened; only the
+// readback decides.
+async function deleteChecked(remove, read) {
+  let failure;
+  try {
+    await remove();
+  } catch (error) {
+    failure = error;
+  }
+  return { failure, gone: (await read()) === null };
+}
+
+function isProbeRoomName(name, prefix) {
   return (
     typeof name === "string" &&
     name.startsWith(probeShortName(prefix)) &&
-    [...name].length <= SHORT_NAME_MAX
+    [...name].length <= ROOM_NAME_PROBE_MAX
   );
+}
+
+// The probe LOGIC: an info object literal with no call, and a trigger whose
+// body holds only comments, optionally followed by the product's marker.
+// Such a LOGIC runs nothing even while it is on.
+function isInertProbeLogic(source, prefix) {
+  if (typeof source !== "string") return false;
+  const body = source.replace(
+    /\n\n\/\* \[sprut-agent:native:[0-9a-f]{24}\] \*\/$/,
+    "",
+  );
+  const match =
+    /^info = (\{\n[\s\S]*?\n\});\n\nfunction trigger\(source, value, variables, options, context\) \{\n((?: {2}\/\/[^\n]*\n)*)\}$/.exec(
+      body,
+    );
+  if (!match || /[()`=]/.test(match[1])) return false;
+  const name = /^ {2}name: ("[^"\n]*"),$/m.exec(match[1])?.[1];
+  return name !== undefined && JSON.parse(name).startsWith(prefix);
 }
 
 function scenarioIndex(scenarioRef) {
   return decodeURIComponent(scenarioRef.split("/").at(-1));
 }
 
-// A BLOCK may be turned on only if nothing but a far-future one-date cron can
-// start it: no characteristic, interval or code node at all.
-function onlyFarFutureOneDateTriggers(data) {
-  let farFuture = 0;
-  let other = 0;
-  walkNodes(data, (node) => {
-    if (node.type === "cron") {
-      if (isFarFutureOneDate(node)) farFuture += 1;
-      else other += 1;
-    }
-    if (["characteristic", "interval", "code"].includes(node.type)) other += 1;
-  });
-  return farFuture > 0 && other === 0;
-}
-
 // The owner's rule for every BLOCK of this run: act only on the run's virtual
-// accessory, start only on a far-future one-date cron, run no code and no
-// other scenario. A characteristic may only be read (trigger=false), and
-// only on the virtual accessory. Returns the first violation or null.
+// accessory, start only on a far-future one-date cron or at one daily time,
+// run no code and no other scenario. A characteristic may only be read
+// (trigger=false), and only on the virtual accessory. Such a BLOCK may be
+// turned on. Returns the first violation or null.
 function probeBlockViolation(data, virtualAIds) {
   let violation = null;
   walkNodes(data, (node) => {
@@ -554,14 +909,26 @@ function probeBlockViolation(data, virtualAIds) {
     ) {
       violation = `${node.type} on accessory ${node.aId} is not the run's virtual accessory`;
     } else if (node.type === "characteristic" && node.trigger !== false) {
-      violation = "a characteristic trigger is not a far-future one-date cron";
-    } else if (node.type === "cron" && !isFarFutureOneDate(node)) {
-      violation = `cron ${node.mode} ${node.cron} is not a far-future one-date cron`;
+      violation = "a characteristic trigger is not a time trigger";
+    } else if (
+      node.type === "cron" &&
+      !isFarFutureOneDate(node) &&
+      !isDailyTime(node)
+    ) {
+      violation = `cron ${node.mode} ${node.cron} is neither a far-future one-date cron nor one daily time`;
     } else if (["interval", "code", "scenario"].includes(node.type)) {
       violation = `${node.type} nodes are not allowed`;
     }
   });
   return violation;
+}
+
+function isDailyTime(node) {
+  return (
+    node.mode === "NONE" &&
+    node.offset === 0 &&
+    DAILY_TIME_CRON.test(node.cron ?? "")
+  );
 }
 
 function isFarFutureOneDate(node) {
@@ -616,8 +983,36 @@ function abort(reason) {
   abortReason ??= reason;
 }
 
+// Every step by its --only id, in run order. Read steps send no write and are
+// the only ones --read-only runs. A step that needs an earlier one reports
+// itself blocked when that one did not run.
+const STEPS = [
+  ["1", stepRoom],
+  ["1n", stepRoomNames],
+  ["V", stepVirtualAccessory],
+  ["Vp", stepPhysicalAccessory, "read"],
+  ["Vd", stepVirtualDuplicate],
+  ["2", stepBlockStorage],
+  ["2i", stepIfForms],
+  ["2w", stepOwnerWindows, "read"],
+  ["3", stepPartialUpdates],
+  ["4", stepLogic],
+  ["6", stepManualRun],
+  ["6t", stepTimeTrigger],
+  ["7", stepHistory, "read"],
+  ["8", stepTiming, "read"],
+];
+
 async function main() {
   if (process.argv.includes("--sweep-only")) return sweepOnly();
+  const only = optionValue("--only")?.split(",");
+  const unknown = only?.filter((id) => !STEPS.some(([step]) => step === id));
+  if (unknown?.length > 0) {
+    console.error(
+      `--only: unknown step ${unknown.join(", ")}; steps: ${STEPS.map(([id]) => id).join(", ")}`,
+    );
+    return 2;
+  }
   const prefix = `zz-sprut-agent-probe-${new Date()
     .toISOString()
     .replace(/[-:]/g, "")
@@ -653,11 +1048,11 @@ async function main() {
   });
   await client.connect(transport);
   report.sprut_agent.version = client.getServerVersion()?.version;
-  const hub = new GuardedHub(client, prefix);
+  const readOnly = process.argv.includes("--read-only");
+  const hub = new GuardedHub(client, prefix, { readOnly });
   const cleanup = [];
   let exitCode = 0;
   let probe;
-  const readOnly = process.argv.includes("--read-only");
   try {
     const overview = await hub.read("home_overview", {});
     expectOk(overview, "home_overview");
@@ -667,6 +1062,7 @@ async function main() {
       );
     }
     hub.homeRef = overview.home.ref;
+    hub.settingsWindowRef = overview.home.options_window_ref ?? null;
     report.hub = {
       firmware: overview.home.firmware,
       model: overview.home.model,
@@ -689,30 +1085,13 @@ async function main() {
     run.before = before;
     const ctx = { hub, probe, targets, before, cleanup, prefix };
 
-    if (readOnly) {
-      // Rehearses discovery, the history reads and both snapshots without
-      // any write.
-      row("1-6", "-", "-", "--read-only: no write sent", "skipped");
-      await guardedStep(ctx, "7", stepHistory);
-    } else {
-      // --only 2i,7 runs just those steps; a step that needs an earlier one
-      // reports itself blocked.
-      const only = optionValue("--only")?.split(",");
-      for (const [id, step] of [
-        ["1", stepRoom],
-        ["V", stepVirtualAccessory],
-        ["2", stepBlockStorage],
-        ["2i", stepIfForms],
-        ["3", stepPartialUpdates],
-        ["4", stepLogic],
-        ["6", stepManualRun],
-        ["7", stepHistory],
-      ]) {
-        if (only && !only.includes(id)) {
-          row(id, "-", "-", "not selected by --only", "skipped");
-        } else {
-          await guardedStep(ctx, id, step);
-        }
+    for (const [id, step, kind] of STEPS) {
+      if (readOnly && kind !== "read") {
+        row(id, "-", "-", "--read-only: no write sent", "skipped");
+      } else if (only && !only.includes(id)) {
+        row(id, "-", "-", "not selected by --only", "skipped");
+      } else {
+        await guardedStep(ctx, id, step);
       }
     }
   } catch (error) {
@@ -729,8 +1108,18 @@ async function main() {
           stateDirectory,
           homeRef: hub.homeRef,
           sweptIsFailure: true,
+          expected: hub.sweepExpected,
         });
-        if (entries?.length !== 0) exitCode = 1;
+        // Only an object a step left to the sweep on purpose may be swept.
+        if (
+          entries === null ||
+          entries.some(
+            ({ ref, outcome }) =>
+              outcome !== "deleted" || !hub.sweepExpected.has(ref),
+          )
+        ) {
+          exitCode = 1;
+        }
       }
       if (hub.homeRef) {
         const ok = await finalChecks(hub);
@@ -809,7 +1198,7 @@ async function discoverTargets(hub) {
   const lamp =
     lamps.find(({ on }) => on.current_value.value === false) ?? lamps[0];
   if (!lamp) throw new Error("No Lightbulb with writable On and Brightness.");
-  return { lamp };
+  return { lamp, lamps };
 }
 
 // The first readable sensor characteristic of this type in the home, or
@@ -1250,6 +1639,170 @@ async function stepRoom(ctx) {
   if (!deleted.verified) abort("created room was not removed");
 }
 
+// Steps that create a room rely on step 1 having proved that the product
+// removes a room it created.
+function roomRemovalProved() {
+  return rows.some(
+    (item) => item.step === "1d restore create" && item.verdict === "match",
+  );
+}
+
+// --- step 1n: room names beyond ASCII -----------------------------------------
+
+// The product refuses a room name over 30 UTF-16 units (name_too_long); the
+// hub cut a 42-character ASCII name to 30. What the hub keeps of Cyrillic and
+// emoji is unknown: in UTF-8 a Cyrillic letter is 2 bytes and an emoji 4, in
+// UTF-16 an emoji is 2 units. Each name starts with the run's short name
+// (25 ASCII characters), so a cut name is still the run's.
+function roomNameCases(short) {
+  return [
+    { id: "cyrillic_30", name: `${short}абвгд` },
+    { id: "cyrillic_31", name: `${short}абвгде` },
+    { id: "emoji_30_units", name: `${short}абв🙂` },
+    { id: "emoji_30_chars", name: `${short}аб🙂🙂🙂` },
+  ];
+}
+
+function nameLengths(name) {
+  if (typeof name !== "string") return null;
+  return {
+    chars: [...name].length,
+    utf16: name.length,
+    utf8: Buffer.byteLength(name),
+  };
+}
+
+function lengthsText(name) {
+  const lengths = nameLengths(name);
+  return lengths
+    ? `${lengths.chars} chars/${lengths.utf16} UTF-16/${lengths.utf8} bytes`
+    : "no name";
+}
+
+async function stepRoomNames(ctx) {
+  const { hub, probe, prefix } = ctx;
+  if (!roomRemovalProved()) {
+    row(
+      "1n room names",
+      "room.create",
+      "step 1 proved that a created room is removed",
+      "not run: room removal was not proved",
+      "blocked",
+    );
+    return;
+  }
+  const short = probeShortName(prefix);
+  for (const { id, name } of roomNameCases(short)) {
+    const tooLong = name.length > 30;
+    const result = await prepareAndApply(hub, {
+      operation: "room_create",
+      target_ref: hub.homeRef,
+      name,
+    });
+    const expected = tooLong
+      ? `refused name_too_long (${lengthsText(name)})`
+      : `created, stored exactly (${lengthsText(name)})`;
+    if (!result.applied) {
+      const code = result.prepared.error?.code;
+      row(
+        `1n ${id}`,
+        "prepare room_create",
+        expected,
+        describe(result),
+        tooLong && code === "name_too_long" ? "match" : "mismatch",
+      );
+      continue;
+    }
+    const roomRef = result.applied.room?.ref;
+    const entry = roomRef
+      ? pushCleanup(ctx, {
+          label: `room ${id}`,
+          changeRef: result.changeRef,
+          verify: async () => (await roomName(hub, roomRef)) === null,
+        })
+      : undefined;
+    const stored = roomRef
+      ? (await probe.getRoom(Number(roomRef.split("/").at(-1))))?.name
+      : undefined;
+    row(
+      `1n ${id}`,
+      "room.create{name}",
+      expected,
+      `${result.applied.status}; stored ${JSON.stringify(stored ?? null)} (${lengthsText(stored)})`,
+      tooLong || result.applied.status !== "applied"
+        ? "mismatch"
+        : stored === name
+          ? "match"
+          : "hub-normalized",
+      { sent: name, stored: stored ?? null, product: result.applied.room },
+    );
+    if (!entry) {
+      if (result.applied.native_write_sent) abort(`room ${id} not confirmed`);
+      continue;
+    }
+    const deleted = await runRestore(hub, entry);
+    row(
+      `1n ${id} restore`,
+      "room.delete{id}",
+      "room absent",
+      deleted.observed,
+      deleted.verified ? "match" : "mismatch",
+    );
+    if (!deleted.verified) {
+      abort(`room ${id} was not removed`);
+      return;
+    }
+  }
+
+  // The product refuses 31 characters, so one direct room.create shows what
+  // the hub keeps of them. Its id is recorded for the sweep at once.
+  const direct = `${short}абвгде`;
+  let room;
+  try {
+    room = await probe.createRoomDirect(direct);
+  } catch (error) {
+    if (error instanceof GuardError) throw error;
+    row(
+      "1n direct cyrillic_31",
+      "room.create{name} (direct)",
+      "record what the hub keeps",
+      `${error.code ?? error.message}`,
+      "rejected",
+    );
+    abort("direct room.create without a clear answer");
+    return;
+  }
+  const entry = pushCleanup(ctx, {
+    label: "room direct cyrillic_31",
+    run: async () => {
+      const { failure, gone } = await probe.deleteDirectRoom(room.ref);
+      return {
+        verified: gone,
+        status: gone ? "deleted" : "left",
+        observed: `${failure ? `delete error ${failure.code ?? failure.message}` : "room.delete acknowledged"}; verified ${gone}`,
+      };
+    },
+  });
+  const stored = (await probe.getRoom(room.id))?.name;
+  row(
+    "1n direct cyrillic_31",
+    "room.create{name} (direct)",
+    `record what the hub keeps of ${lengthsText(direct)}`,
+    `answer ${JSON.stringify(room.name)}; stored ${JSON.stringify(stored ?? null)} (${lengthsText(stored)})`,
+    "observed",
+    { sent: direct, answered: room.name, stored: stored ?? null },
+  );
+  const deleted = await runRestore(hub, entry);
+  row(
+    "1n direct restore",
+    "room.delete{id} (direct)",
+    "room absent",
+    deleted.observed,
+    deleted.verified ? "match" : "mismatch",
+  );
+  if (!deleted.verified) abort("the direct room was not removed");
+}
+
 // --- step V: the run's virtual accessory -------------------------------------
 
 // Every BLOCK of the run acts only on this accessory: a virtual Lightbulb
@@ -1260,11 +1813,7 @@ async function stepVirtualAccessory(ctx) {
   const { hub, probe, prefix } = ctx;
   // The accessory room is removed by the same room_create restore that step 1
   // has to prove first.
-  if (
-    !rows.some(
-      (item) => item.step === "1d restore create" && item.verdict === "match",
-    )
-  ) {
+  if (!roomRemovalProved()) {
     row(
       "V virtual accessory",
       "room.create, accessory.create",
@@ -1377,6 +1926,7 @@ async function stepVirtualAccessory(ctx) {
   }
   const valueKind = (item) => Object.keys(item.control.value ?? {})[0];
   ctx.virtual = {
+    roomRef,
     serviceRef: `${hub.homeRef}/accessory/${id}/service/${service.sId}`,
     on: { ids: { aId: id, sId: service.sId, cId: on.cId } },
     brightness: {
@@ -1386,7 +1936,6 @@ async function stepVirtualAccessory(ctx) {
     hue: { ids: { aId: id, sId: service.sId, cId: hue.cId } },
   };
   ctx.virtual.initial = await virtualState(probe, ctx.virtual);
-  hub.anchors.add(ctx.virtual.serviceRef);
   report.targets.virtual_accessory = {
     ref: `accessory/${id}`,
     initial: ctx.virtual.initial,
@@ -1472,6 +2021,108 @@ function virtualChange(from, seen) {
     ? ` (first change after ${seen.firstChange.after_ms} ms)`
     : "";
   return `On ${from.on}→${final.on}, Brightness ${from.brightness}→${final.brightness}${first}`;
+}
+
+// --- step Vp: virtual flag of a physical accessory (read-only) ---------------
+
+// The product tells virtual accessories by accessory.get's `virtual`
+// (accessory.list has none on 3.0.0). Field names only, no values.
+async function stepPhysicalAccessory(ctx) {
+  const { probe, targets } = ctx;
+  const read = [];
+  for (const lamp of targets.lamps) {
+    const accessory = await probe.getAccessoryOrNull(lamp.on.ids.aId);
+    if (!accessory) continue;
+    read.push(accessory);
+    if (accessory.virtual !== true) break;
+  }
+  const accessory = read.at(-1);
+  if (!accessory || accessory.virtual === true) {
+    row(
+      "Vp physical accessory.get",
+      "accessory.get{id}",
+      "virtual false or absent on a physical accessory",
+      `no physical Lightbulb accessory among ${read.length} read`,
+      "skipped",
+    );
+    return;
+  }
+  const present = Object.hasOwn(accessory, "virtual");
+  row(
+    "Vp physical accessory.get",
+    "accessory.get{id}",
+    "virtual false or absent on a physical accessory",
+    `accessory/${accessory.id}: virtual ${present ? JSON.stringify(accessory.virtual) : "absent"}`,
+    "observed",
+    { fields: Object.keys(accessory).sort() },
+  );
+}
+
+// --- step Vd: the duplicate check of virtual_light_group (prepare only) ------
+
+// A virtual light group of the run's accessory name in its room must be
+// refused as a duplicate. Prepare writes nothing; it is never applied.
+async function stepVirtualDuplicate(ctx) {
+  const { hub, probe, virtual, targets, prefix } = ctx;
+  if (!virtual) {
+    row(
+      "Vd virtual duplicate",
+      "prepare virtual_light_group",
+      "the run's virtual accessory exists",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
+  const members = targets.lamps.slice(0, 2);
+  if (members.length < 2) {
+    row(
+      "Vd virtual duplicate",
+      "prepare virtual_light_group",
+      "two Lightbulb services with On and Brightness",
+      `not run: ${members.length} found`,
+      "blocked",
+    );
+    return;
+  }
+  const state = async () => ({
+    accessories: (await probe.listAccessories())
+      .map(({ id }) => id)
+      .sort((a, b) => a - b),
+    links: await Promise.all(
+      members
+        .flatMap(({ on, brightness }) => [on.ids, brightness.ids])
+        .map((ids) => probe.listLinks(pick(ids, ["aId", "sId", "cId"]))),
+    ),
+  });
+  const before = await state();
+  const result = await hub.prepare({
+    operation: "virtual_light_group",
+    target_ref: hub.homeRef,
+    name: probeShortName(prefix),
+    room_ref: virtual.roomRef,
+    member_service_refs: members.map(({ serviceRef }) => serviceRef),
+    characteristic_types: ["On", "Brightness"],
+  });
+  const unchanged = isDeepStrictEqual(before, await state());
+  const named = (result.matching_accessories ?? []).map(({ ref }) =>
+    relativeRef(ref),
+  );
+  const own = `accessory/${virtual.on.ids.aId}`;
+  row(
+    "Vd virtual duplicate",
+    "prepare virtual_light_group (never applied)",
+    `conflict matching_virtual_accessory_exists naming ${own}; nothing written`,
+    `${result.status}${result.conflict_reason ? ` (${result.conflict_reason})` : ""}${result.error ? ` ${result.error.code}: ${result.error.message}` : ""}; names [${named.join(", ")}]; native_write_sent ${result.native_write_sent}; accessories and member links ${unchanged ? "unchanged" : "changed"}`,
+    result.status === "conflict" &&
+      result.conflict_reason === "matching_virtual_accessory_exists" &&
+      named.includes(own) &&
+      result.native_write_sent === false &&
+      unchanged
+      ? "match"
+      : "mismatch",
+  );
+  if (!unchanged) abort("preparing a virtual light group changed the home");
 }
 
 // --- step 2: BLOCK storage conformance ---------------------------------------
@@ -1626,8 +2277,14 @@ function blockFamilies(virtual) {
 // Forms of the first run (research/protocol/2026-09-24-live-conformance.md,
 // all stored as sent) that this run's BLOCK rule does not allow.
 const RULE_EXCLUDED_FAMILIES = [
-  ["weekday_cron", "a weekday cron trigger is not a far-future one-date cron"],
-  ["sunset_offset", "a SUNSET cron trigger is not a far-future one-date cron"],
+  [
+    "weekday_cron",
+    "a weekday cron trigger is neither a far-future one-date cron nor one daily time",
+  ],
+  [
+    "sunset_offset",
+    "a SUNSET cron trigger is neither a far-future one-date cron nor one daily time",
+  ],
   [
     "scenario_fire",
     "a scenario FIRE action targets a scenario, not the virtual accessory",
@@ -2009,6 +2666,92 @@ async function stepIfForms(ctx) {
   report.if_forms = stored;
 }
 
+// --- step 2w: options windows of the owner's scenarios (read-only) ----------
+
+// The product finds a scenario's options window through scenario.list's
+// optionsWindow (schema; never seen live). One LOGIC, one GLOBAL and one
+// predefined scenario of the home: option keys, types and access only,
+// never a value; nothing is written.
+async function stepOwnerWindows(ctx) {
+  const { hub, probe, prefix } = ctx;
+  const scenarios = (await probe.listScenarios()).filter(
+    ({ name }) => !isProbeName(name, prefix),
+  );
+  const byType = new Map();
+  for (const scenario of scenarios) {
+    const key = `${scenario.type}${scenario.predefined === true ? " predefined" : ""}`;
+    const count = byType.get(key) ?? { total: 0, window: 0 };
+    count.total += 1;
+    if (typeof scenario.optionsWindow === "string") count.window += 1;
+    byType.set(key, count);
+  }
+  const counts = [...byType].map(
+    ([key, { total, window }]) => `${key} ${window}/${total}`,
+  );
+  row(
+    "2w scenario.list optionsWindow",
+    "scenario.list",
+    "every scenario carries optionsWindow (the product's window guard relies on it)",
+    counts.join(", ") || "no scenarios",
+    [...byType.values()].every(({ total, window }) => total === window)
+      ? "match"
+      : "mismatch",
+  );
+  for (const [label, chosen] of [
+    ["LOGIC", ({ type, predefined }) => type === "LOGIC" && !predefined],
+    ["GLOBAL", ({ type }) => type === "GLOBAL"],
+    ["predefined", ({ predefined }) => predefined === true],
+  ]) {
+    const listed = scenarios.find(chosen);
+    if (!listed) {
+      row(`2w window ${label}`, "-", "-", `no ${label} scenario`, "skipped");
+      continue;
+    }
+    const ref = `${hub.homeRef}/scenario/${encodeURIComponent(listed.index)}`;
+    // The full scenario (with its data) is read only for optionsWindow.
+    const got = await probe.getScenario(listed.index);
+    const windowKey =
+      typeof got?.optionsWindow === "string" ? got.optionsWindow : null;
+    let options = [];
+    let windowError = null;
+    if (windowKey !== null) {
+      try {
+        options = (await probe.getWindow(windowKey)).options.map(optionShape);
+      } catch (error) {
+        windowError = error.code ?? error.message;
+      }
+    }
+    const entity = await hub.read("get_entity", {
+      entity_ref: ref,
+      max_bytes: 4_096,
+    });
+    const active = options.find(({ key }) => key === "Active");
+    row(
+      `2w window ${label}`,
+      "scenario.get, window.get",
+      "record option keys and input types (no values)",
+      windowKey === null
+        ? "no optionsWindow in scenario.get"
+        : windowError
+          ? `window.get failed: ${windowError}`
+          : `${options.map(({ key, input_type }) => `${key}:${input_type}`).join(", ")}; ${active ? `Active ${active.type}, read ${active.read}, write ${active.write}, disabled ${active.disabled}` : "no Active"}`,
+      "observed",
+      {
+        scenario: relativeRef(ref),
+        type: listed.type,
+        predefined: listed.predefined === true,
+        list_window_key: typeof listed.optionsWindow === "string",
+        get_window_key: windowKey !== null,
+        same_key: windowKey === listed.optionsWindow,
+        product_window_ref:
+          typeof (entity.entity ?? entity.identity)?.options_window_ref ===
+          "string",
+        options,
+      },
+    );
+  }
+}
+
 // --- step 3: partial updates on a probe BLOCK -------------------------------
 
 const SCENARIO_FIELDS = [
@@ -2079,6 +2822,25 @@ async function stepPartialUpdates(ctx) {
   } else {
     await windowActive("3 window before turn on", false);
   }
+  // Raw scenario.get and window.get, one right after the other.
+  const windowKeys = [];
+  const offBefore = await activeAgreement(
+    ctx,
+    "3 agreement before turn on",
+    ref,
+    false,
+  );
+  windowKeys.push(...offBefore.keys);
+  const option = offBefore.view?.option;
+  row(
+    "3 Active option",
+    "window.get{windowKey}",
+    "record the option's type and access",
+    option
+      ? `type ${option.type}, input ${option.input_type}, read ${option.read}, write ${option.write}, disabled ${option.disabled}`
+      : "no Active option",
+    option ? "observed" : "mismatch",
+  );
 
   const check = async (
     step,
@@ -2145,6 +2907,9 @@ async function stepPartialUpdates(ctx) {
   );
   if (abortReason) return;
   if (windowRef) await windowActive("3a window after turn on", true);
+  windowKeys.push(
+    ...(await activeAgreement(ctx, "3a agreement", ref, true)).keys,
+  );
   const newName = `${prefix}-block-partial-renamed`;
   await check(
     "3b rename",
@@ -2185,10 +2950,67 @@ async function stepPartialUpdates(ctx) {
     { active: false },
   );
   if (windowRef) await windowActive("3e window after turn off", false);
+  windowKeys.push(
+    ...(await activeAgreement(ctx, "3e agreement", ref, false)).keys,
+  );
+  const distinct = new Set(windowKeys);
+  row(
+    "3 window key",
+    "scenario.get{index}",
+    "optionsWindow stays the same across reads",
+    `${distinct.size} key(s) in ${windowKeys.length} read(s)`,
+    distinct.size === 1 && !distinct.has(null) ? "match" : "mismatch",
+  );
+}
+
+// Reads scenario.get and the scenario's Active window option until they
+// agree, at most AGREE_MS, and records whether they agreed at once and on
+// the expected value. Returns the last view and every window key seen.
+async function activeAgreement(ctx, step, scenarioRef, expected) {
+  const started = Date.now();
+  const keys = [];
+  let first;
+  let view;
+  for (;;) {
+    view = await ctx.probe.activeView(scenarioRef);
+    first ??= view;
+    keys.push(view?.windowKey ?? null);
+    if (
+      !view?.option ||
+      view.active === view.option.value ||
+      Date.now() - started >= AGREE_MS
+    ) {
+      break;
+    }
+    await sleep(AGREE_POLL_MS);
+  }
+  const elapsed = Date.now() - started;
+  const agreeAtOnce = first?.option && first.active === first.option.value;
+  const agreed = view?.option && view.active === view.option.value;
+  row(
+    step,
+    "scenario.get, window.get",
+    `active=${expected} in scenario.get and window Active at once`,
+    !first?.option
+      ? `no Active option (window ${first?.windowKey ?? "none"}${first?.windowError ? `: ${first.windowError}` : ""})`
+      : `first read scenario.get ${first.active}, window ${first.option.value}; ${agreeAtOnce ? "agree at once" : agreed ? `agree after ${elapsed} ms (${keys.length} reads)` : `still differ after ${elapsed} ms`}`,
+    agreeAtOnce && first.active === expected
+      ? "match"
+      : agreed && view.active === expected
+        ? "observed"
+        : "mismatch",
+  );
+  return { view, keys };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // --- step 4: LOGIC source lifecycle ------------------------------------------
 
+// The probe LOGIC runs nothing, on or off, assigned or not: an info object
+// and an empty trigger (the guard's isInertProbeLogic).
 function logicSource(name, version) {
   return `info = {
   name: ${JSON.stringify(name)},
@@ -2202,12 +3024,15 @@ function logicSource(name, version) {
 };
 
 function trigger(source, value, variables, options, context) {
-  // Intentionally empty: this probe is never assigned to a service.
+  // Intentionally empty: this probe runs nothing.
 }`;
 }
 
+// How a user LOGIC's native type is linked to its scenario: a LOGIC created
+// off (restore, then on to see its type, renamed, off, assigned while off,
+// restore again), then a LOGIC created on, turned off and deleted.
 async function stepLogic(ctx) {
-  const { hub, virtual, prefix } = ctx;
+  const { virtual } = ctx;
   if (!virtual) {
     row(
       "4 LOGIC",
@@ -2218,10 +3043,30 @@ async function stepLogic(ctx) {
     );
     return;
   }
+  const anchor = pick(virtual.on.ids, ["aId", "sId"]);
+  const off = await turnedOffLogic(ctx, anchor);
+  if (abortReason) return;
+  // A LOGIC created on is turned off through its Active window option; the
+  // turned-off LOGIC showed whether a LOGIC has one.
+  if (!off?.hasActive) {
+    row(
+      "4m LOGIC created on",
+      "scenario.create{LOGIC,active:true}",
+      "created on, turned off and deleted in this step",
+      "not run: the turned-off LOGIC showed no Active option to turn it off",
+      "skipped",
+    );
+    return;
+  }
+  await createdOnLogic(ctx, anchor);
+}
+
+async function turnedOffLogic(ctx, anchor) {
+  const { hub, probe, virtual, prefix } = ctx;
   const name = `${prefix}-logic`;
   const source = logicSource(name, "1.0");
-  // The anchor only lets the product map the new LOGIC type; the LOGIC is
-  // never assigned to it.
+  const typesBefore = await probe.listLogicTypes(anchor);
+  // The anchor only lets the product map the new LOGIC type.
   const create = await prepareAndApply(hub, {
     operation: "logic_source_create",
     target_ref: virtual.serviceRef,
@@ -2242,7 +3087,7 @@ async function stepLogic(ctx) {
       "rejected",
     );
     if (create.applied?.native_write_sent) abort("LOGIC create not confirmed");
-    return;
+    return null;
   }
   const markerComment = `/* [${create.prepared.ownership_marker}] */`;
   const createdSource = `${source}\n\n${markerComment}`;
@@ -2284,14 +3129,15 @@ async function stepLogic(ctx) {
   );
   if (create.applied.status !== "applied") {
     abort("LOGIC create not applied");
-    return;
+    return null;
   }
+  const mapped = create.applied.logic_mapping_status === "mapped";
   row(
     "4b LOGIC type on anchor",
     "logic.types{aId,sId}",
     "turned-off LOGIC type is listed for its source service",
-    `mapping ${create.applied.logic_mapping_status ?? "none"}${create.applied.native_logic_type ? ` type ${create.applied.native_logic_type}` : ""}${create.applied.logic_mapping_reason ? ` (${create.applied.logic_mapping_reason})` : ""}`,
-    create.applied.logic_mapping_status === "mapped" ? "match" : "mismatch",
+    mappingText(create.applied),
+    mapped ? "match" : "mismatch",
   );
 
   const updatedSource = `${logicSource(name, "1.1")}\n\n${markerComment}`;
@@ -2344,18 +3190,469 @@ async function stepLogic(ctx) {
     );
     if (!restored.verified) {
       abort("LOGIC update was not restored");
-      return;
+      return null;
     }
   }
-  const deleted = await runRestore(hub, createEntry);
+
+  // Read before the first restore, which deletes the LOGIC if it is mapped.
+  const view = await probe.activeView(ref);
+  const hasActive = Boolean(view?.option);
   row(
-    "4e restore create",
-    "scenario.delete{index}",
-    "LOGIC absent",
-    deleted.observed,
-    deleted.verified ? "match" : "mismatch",
+    "4f LOGIC options window",
+    "scenario.get, window.get",
+    "record whether a LOGIC has an options window with Active",
+    !view || view.windowKey === null
+      ? "no optionsWindow in scenario.get"
+      : view.windowError
+        ? `window.get failed: ${view.windowError}`
+        : view.keys
+            .map(({ key, input_type }) => `${key}:${input_type}`)
+            .join(", ") || "no options",
+    "observed",
+    { active_option: view?.option ?? null },
   );
-  if (!deleted.verified) abort("created LOGIC was not removed");
+
+  const first = await logicCreateRestore(
+    ctx,
+    "4e restore create",
+    createEntry,
+    ref,
+    mapped
+      ? "LOGIC deleted"
+      : "refused with logic_type_not_visible; LOGIC kept",
+    (outcome, present) =>
+      mapped
+        ? outcome.verified
+        : present && outcome.result?.error?.code === "logic_type_not_visible",
+  );
+  if (first.deleted) return { hasActive };
+  if (!hasActive) {
+    leaveForSweep(
+      ctx,
+      createEntry,
+      ref,
+      "a turned-off LOGIC without an Active option; its type is not seen",
+    );
+    row(
+      "4g LOGIC turn on",
+      "-",
+      "-",
+      "not run: no Active option; the LOGIC is left to the sweep",
+      "skipped",
+    );
+    return { hasActive };
+  }
+
+  // On while unassigned: its source runs nothing.
+  const on = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: ref,
+    value: true,
+  });
+  const onEntry = on.applied
+    ? pushCleanup(ctx, {
+        label: "LOGIC turn on",
+        parent: createEntry,
+        changeRef: on.changeRef,
+        verify: async () => (await probe.activeView(ref))?.active === false,
+      })
+    : undefined;
+  row(
+    "4g LOGIC turn on",
+    "window.update{windowKey,options:[Active=true]}",
+    "applied",
+    describe(on),
+    on.applied?.status === "applied" ? "match" : "rejected",
+  );
+  await activeAgreement(ctx, "4g agreement", ref, true);
+  if (on.applied?.status === "applied") {
+    await logicTypeWhileOn(ctx, "4h", {
+      ref,
+      anchor,
+      typesBefore,
+      changeRef: create.changeRef,
+    });
+    await renameLogic(ctx, {
+      ref,
+      anchor,
+      typesBefore,
+      name,
+      markerComment,
+      createEntry,
+    });
+    if (abortReason) return { hasActive };
+  }
+  if (onEntry) {
+    const offOutcome = await runRestore(hub, onEntry);
+    row(
+      "4j LOGIC turn off",
+      "restore scenario_active",
+      "restored; active=false",
+      offOutcome.observed,
+      offOutcome.verified ? "match" : "mismatch",
+    );
+    await activeAgreement(ctx, "4j agreement", ref, false);
+    if (!offOutcome.verified) {
+      abort("the probe LOGIC was not turned off");
+      return { hasActive };
+    }
+  }
+
+  await assignmentWhileOff(ctx, { ref, anchor, createEntry });
+  if (abortReason) return { hasActive };
+
+  const second = await logicCreateRestore(
+    ctx,
+    "4l retry restore create",
+    createEntry,
+    ref,
+    "record whether restore now maps and deletes the LOGIC",
+    null,
+  );
+  if (!second.deleted) {
+    leaveForSweep(
+      ctx,
+      createEntry,
+      ref,
+      "restore did not delete the turned-off LOGIC after it was on",
+    );
+  }
+  return { hasActive };
+}
+
+// A LOGIC created on, as an agent may create it: the product may see its
+// type at apply. Turned off and deleted in this step.
+async function createdOnLogic(ctx, anchor) {
+  const { hub, probe, virtual, prefix } = ctx;
+  const name = `${prefix}-logic-on`;
+  const typesBefore = await probe.listLogicTypes(anchor);
+  const create = await prepareAndApply(hub, {
+    operation: "logic_source_create",
+    target_ref: virtual.serviceRef,
+    name,
+    description: PROBE_DESCRIPTION,
+    active: true,
+    on_start: false,
+    sync: false,
+    source: logicSource(name, "1.0"),
+  });
+  const ref = create.applied?.scenario_ref;
+  if (!ref) {
+    row(
+      "4m LOGIC create on",
+      "scenario.create{LOGIC,active:true}",
+      "created",
+      describe(create),
+      "rejected",
+    );
+    if (create.applied?.native_write_sent) {
+      abort("LOGIC created on not confirmed");
+    }
+    return;
+  }
+  const createEntry = pushCleanup(ctx, {
+    label: "LOGIC created on",
+    scenario: true,
+    changeRef: create.changeRef,
+    verify: async () => !(await scenarioPresent(hub, ref)),
+  });
+  const view = await probe.activeView(ref);
+  row(
+    "4m LOGIC create on",
+    "scenario.create{LOGIC,active:true}",
+    "created on; record whether the product maps its type at apply",
+    `${create.applied.status}; active ${view?.active}; ${mappingText(create.applied)}`,
+    create.applied.status === "applied" && view?.active === true
+      ? "observed"
+      : "mismatch",
+  );
+  await logicTypeWhileOn(ctx, "4m", {
+    ref,
+    anchor,
+    typesBefore,
+    changeRef: create.changeRef,
+  });
+  // Restoring this change would turn the LOGIC on again.
+  const off = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: ref,
+    value: false,
+  });
+  if (off.applied) {
+    pushCleanup(ctx, {
+      label: "4m turn off",
+      parent: createEntry,
+      changeRef: off.changeRef,
+      restoreOptional: true,
+    });
+  }
+  row(
+    "4m turn off",
+    "window.update{windowKey,options:[Active=false]}",
+    "applied",
+    describe(off),
+    off.applied?.status === "applied" ? "match" : "mismatch",
+  );
+  const agreement = await activeAgreement(ctx, "4m agreement", ref, false);
+  const deleted = await logicCreateRestore(
+    ctx,
+    "4m restore create",
+    createEntry,
+    ref,
+    "LOGIC deleted",
+    (outcome) => outcome.verified,
+  );
+  if (deleted.deleted) return;
+  if (agreement.view?.active === false) {
+    leaveForSweep(
+      ctx,
+      createEntry,
+      ref,
+      "restore did not delete a LOGIC created on, turned off since",
+    );
+  } else {
+    abort("a LOGIC created on is neither off nor deleted");
+  }
+}
+
+function mappingText(change) {
+  return `mapping ${change.logic_mapping_status ?? "none"}${change.native_logic_type ? ` type ${change.native_logic_type}` : ""}${change.logic_mapping_reason ? ` (${change.logic_mapping_reason})` : ""}`;
+}
+
+// One restore of a LOGIC create. `ok(outcome, present)` gives the verdict;
+// without it the row only records what happened.
+async function logicCreateRestore(ctx, step, entry, ref, expected, ok) {
+  const outcome = await runRestore(ctx.hub, entry);
+  const present = await scenarioPresent(ctx.hub, ref);
+  const product = outcome.result ?? {};
+  row(
+    step,
+    "scenario.delete{index}",
+    expected,
+    `${outcome.observed}${product.logic_mapping_status ? `; ${mappingText(product)}` : ""}; present ${present}`,
+    ok ? (ok(outcome, present) ? "match" : "mismatch") : "observed",
+  );
+  return { deleted: outcome.verified && !present };
+}
+
+function newLogicTypes(before, after) {
+  const known = new Set(before.map(({ type }) => type));
+  return after.filter(({ type }) => !known.has(type));
+}
+
+// How a native type names its scenario. The entry is the run's own.
+function typeRelation(entry, scenario, index) {
+  const type = String(entry.type);
+  const marker = /sprut-agent:native:([0-9a-f]{24})/.exec(
+    scenario?.data ?? "",
+  )?.[1];
+  const hasIndex = new RegExp(`(^|\\D)${index}(\\D|$)`).test(type);
+  return [
+    `type ${JSON.stringify(type)}`,
+    `index ${index} ${hasIndex ? "in the type" : "not in the type"}`,
+    ...(scenario?.name && type.includes(scenario.name)
+      ? ["scenario name in the type"]
+      : []),
+    ...(marker && type.includes(marker) ? ["marker in the type"] : []),
+    `name ${entry.name === scenario?.name ? "= scenario name" : `≠ scenario name (${JSON.stringify(entry.name ?? null)})`}`,
+    `fields [${Object.keys(entry).sort().join(", ")}]`,
+  ].join(", ");
+}
+
+async function logicTypeWhileOn(
+  ctx,
+  step,
+  { ref, anchor, typesBefore, changeRef },
+) {
+  const { hub, probe } = ctx;
+  const index = scenarioIndex(ref);
+  const scenario = await probe.getScenario(index);
+  const entries = newLogicTypes(
+    typesBefore,
+    await probe.listLogicTypes(anchor),
+  );
+  // get_native_change reads logic.types again and may map the type now.
+  const product = await hub.get(changeRef);
+  row(
+    `${step} LOGIC type while on`,
+    "logic.types{aId,sId}",
+    "record the new type, all its fields and how it names the scenario",
+    `${entries.length === 0 ? "no new type on the anchor" : entries.map((entry) => typeRelation(entry, scenario, index)).join("; ")}; product ${mappingText(product)}`,
+    "observed",
+    { new_types: entries, scenario_index: index },
+  );
+  return entries;
+}
+
+// Renames the LOGIC while it is on and reads logic.types again: does the
+// type's name follow? The product's BLOCK path (window_option Name on the
+// scenario ref) first, then the LOGIC's own window, then info.name.
+async function renameLogic(
+  ctx,
+  { ref, anchor, typesBefore, name, markerComment, createEntry },
+) {
+  const { hub, probe, prefix } = ctx;
+  const renamed = `${prefix}-logic-renamed`;
+  const refused = [];
+  let rename;
+  let path;
+  const attempt = async (label, input) => {
+    if (rename?.applied) return;
+    rename = await prepareAndApply(hub, input);
+    path = label;
+    if (!rename.applied) refused.push(`${label}: ${describe(rename)}`);
+  };
+  await attempt("window_option Name on the scenario ref", {
+    operation: "window_option",
+    target_ref: ref,
+    option_key: "Name",
+    value: renamed,
+  });
+  const windowRef = rename.applied ? null : await hub.registerLogicWindow(ref);
+  if (windowRef) {
+    await attempt("window_option Name on the LOGIC's window", {
+      operation: "window_option",
+      target_ref: windowRef,
+      option_key: "Name",
+      value: renamed,
+    });
+  }
+  await attempt("logic_source_update of info.name", {
+    operation: "logic_source_update",
+    target_ref: ref,
+    source: `${logicSource(renamed, "1.0")}\n\n${markerComment}`,
+  });
+  row(
+    "4i LOGIC rename paths",
+    "prepare_native_change",
+    "record which product path renames a LOGIC",
+    `${rename.applied ? `renamed by ${path}` : "none renamed it"}${refused.length ? `; refused: ${refused.join("; ")}` : ""}`,
+    "observed",
+  );
+  if (!rename.applied) return;
+  const entry = pushCleanup(ctx, {
+    label: "LOGIC rename",
+    parent: createEntry,
+    changeRef: rename.changeRef,
+    verify: async () =>
+      (await probe.getScenario(scenarioIndex(ref)))?.name === name,
+  });
+  const scenario = await probe.getScenario(scenarioIndex(ref));
+  const entries = newLogicTypes(
+    typesBefore,
+    await probe.listLogicTypes(anchor),
+  );
+  row(
+    "4i LOGIC rename",
+    path,
+    "scenario renamed; record whether the type's name follows",
+    `${rename.applied.status}; scenario name ${scenario?.name === renamed ? "renamed" : scenario?.name === name ? "unchanged" : JSON.stringify(scenario?.name ?? null)}; type name ${
+      entries
+        .map((item) =>
+          item.name === renamed
+            ? "follows"
+            : item.name === name
+              ? "stays"
+              : JSON.stringify(item.name ?? null),
+        )
+        .join(", ") || "no new type"
+    }`,
+    rename.applied.status === "applied" ? "observed" : "mismatch",
+    { new_types: entries },
+  );
+  const back = await runRestore(hub, entry);
+  row(
+    "4i restore rename",
+    "restore_native_change",
+    "former name back",
+    back.observed,
+    back.verified ? "match" : "mismatch",
+  );
+  if (!back.verified) abort("the LOGIC rename was not restored");
+}
+
+// Assigns the turned-off LOGIC to the run's virtual accessory, reads
+// logic.list and removes the assignment.
+async function assignmentWhileOff(ctx, { ref, anchor, createEntry }) {
+  const { hub, probe, virtual } = ctx;
+  const step = "4k assignment while off";
+  const expected = "listed on the virtual accessory while the LOGIC is off";
+  const type = hub.created.get(ref)?.type;
+  if (!type) {
+    row(
+      step,
+      "logic.create",
+      expected,
+      "not run: the product has no type for it",
+      "skipped",
+    );
+    return;
+  }
+  const listed = (await probe.listLogicTypes(anchor)).some(
+    (entry) => entry.type === type,
+  );
+  if (!listed) {
+    row(
+      step,
+      "logic.create",
+      expected,
+      `not run: the anchor does not list ${type} while the LOGIC is off`,
+      "skipped",
+    );
+    return;
+  }
+  const assign = await prepareAndApply(hub, {
+    operation: "logic_assignment",
+    target_ref: `${virtual.serviceRef}/logic/${encodeURIComponent(type)}`,
+  });
+  if (!assign.applied) {
+    row(step, "logic.create", expected, describe(assign), "rejected");
+    return;
+  }
+  const entry = pushCleanup(ctx, {
+    label: "LOGIC assignment",
+    parent: createEntry,
+    changeRef: assign.changeRef,
+    verify: async () =>
+      !(await probe.listLogics(anchor)).some((item) => item.type === type),
+  });
+  const found = (await probe.listLogics(anchor)).find(
+    (item) => item.type === type,
+  );
+  row(
+    step,
+    "logic.create{aId,sId,type}, logic.list",
+    expected,
+    `${assign.applied.status}; logic.list ${found ? `lists it, active ${found.active}` : "does not list it"}`,
+    found ? "match" : "mismatch",
+  );
+  const removed = await runRestore(hub, entry);
+  row(
+    "4k restore assignment",
+    "logic.delete{aId,sId,type}",
+    "assignment absent",
+    removed.observed,
+    removed.verified ? "match" : "mismatch",
+  );
+  if (!removed.verified) abort("the LOGIC assignment was not removed");
+}
+
+// A run object that its restore cannot remove and that cannot act (off,
+// unassigned, marked): the final sweep deletes it, and that is planned.
+function leaveForSweep(ctx, entry, ref, reason) {
+  entry.done = true;
+  entry.outcome = {
+    verified: false,
+    status: "left_for_sweep",
+    observed: `left for the sweep: ${reason}`,
+  };
+  ctx.hub.sweepExpected.set(ref, reason);
+  report.cleanup.push({
+    label: entry.label,
+    change_ref: entry.changeRef,
+    status: "left_for_sweep",
+    reason,
+  });
 }
 
 // --- step 6: manual run of a turned-off and a turned-on BLOCK ----------------
@@ -2484,7 +3781,7 @@ async function stepManualRun(ctx) {
     "6g turn on",
     "window.update{windowKey,options:[Active=true]}",
     "applied; record whether turning on writes",
-    `${on.applied?.status ?? describe(on)}; ${virtualChange(base, afterOn)}`,
+    `${describe(on)}; ${virtualChange(base, afterOn)}`,
     on.applied?.status === "applied" ? "observed" : "rejected",
   );
   if (on.applied?.status !== "applied") return;
@@ -2500,7 +3797,7 @@ async function stepManualRun(ctx) {
     "6h product run, turned on",
     "scenario.run{index}",
     "applied; record the effect",
-    `${run.applied?.status ?? describe(run)}; ${virtualChange(base, afterRun)}`,
+    `${describe(run)}; ${virtualChange(base, afterRun)}`,
     run.applied?.status === "applied" ? "observed" : "rejected",
     {
       product_effect: run.applied?.effect ?? run.prepared?.effect ?? null,
@@ -2618,6 +3915,275 @@ async function directRun(ctx, step, block, base) {
     "record whether the hub runs it",
     `${ack}; ${virtualChange(base, seen)}; active ${after.active}, execution_error ${after.execution_error}`,
     "observed",
+  );
+}
+
+// --- step 6t: a daily time trigger fires once ---------------------------------
+
+// Does the hub add fields such as nextRun to a time trigger of a turned-on
+// BLOCK, before or after it fires, that the product's canonical BLOCK form
+// keeps (a false manual_change)? The BLOCK sets the run's virtual accessory
+// On at the first whole minute at least FIRE_LEAD_MS ahead of the hub clock
+// (home settings window), and that change is the firing evidence.
+async function stepTimeTrigger(ctx) {
+  const { hub, probe, virtual: v } = ctx;
+  if (!v) {
+    row(
+      "6t time trigger",
+      "scenario.create{BLOCK}",
+      "the virtual accessory as the only target",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
+  const clock = await readHubClock(ctx);
+  if (clock.error) {
+    row(
+      "6t hub clock",
+      'window.get{""} Time',
+      "hub local time from the home settings window",
+      `not run: ${clock.error}`,
+      "blocked",
+    );
+    return;
+  }
+  const target = Math.ceil((clock.local + FIRE_LEAD_MS) / 60_000) * 60_000;
+  const at = new Date(target);
+  const hhmm = at.toISOString().slice(11, 16);
+  const cron = `0 ${at.getUTCMinutes()} ${at.getUTCHours()} ? * * *`;
+  const fireAt = clock.readAt + (target - clock.local);
+  row(
+    "6t hub clock",
+    'window.get{""} Time, TimeZone',
+    "hub local time and zone",
+    `hub ${clock.text}${clock.zone ? ` ${clock.zone}` : ""}; hub UTC ${Math.round((clock.utc - clock.readAt) / 1000)} s from this machine; trigger ${hhmm} hub time in ${Math.round((fireAt - Date.now()) / 1000)} s`,
+    "observed",
+  );
+  const base = { on: false, brightness: v.initial.brightness };
+  await setVirtual(probe, v, base);
+  const block = await createBlock(ctx, {
+    label: "fire",
+    data: {
+      targets: [
+        ifNode("EVERY", cronCondition("NONE", cron, 0), [setLamp(v, true)]),
+      ],
+    },
+  });
+  blockRow("6t BLOCK create", block, `stored as sent; cron "${cron}"`);
+  if (!block.scenarioRef || abortReason) return;
+  const ref = block.scenarioRef;
+  const atCreate = (await probe.storedBlockData(ref)).data;
+  if (Date.now() > fireAt - 15_000) {
+    row(
+      "6t turn on",
+      "-",
+      "-",
+      "not run: too close to the trigger time after create",
+      "skipped",
+    );
+    return;
+  }
+  // The create restore deletes the BLOCK whether it is on or off.
+  const on = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: ref,
+    value: true,
+  });
+  if (on.applied) {
+    pushCleanup(ctx, {
+      label: "6t turn on",
+      parent: block.cleanupEntry,
+      changeRef: on.changeRef,
+      restoreOptional: true,
+    });
+  }
+  row(
+    "6t turn on",
+    "window.update{windowKey,options:[Active=true]}",
+    "applied",
+    describe(on),
+    on.applied?.status === "applied" ? "match" : "rejected",
+  );
+  await activeAgreement(ctx, "6t agreement on", ref, true);
+  if (!on.applied) return;
+  const afterOn = (await probe.storedBlockData(ref)).data;
+  storedChangeRow("6t stored after turn on", atCreate, afterOn);
+  await productViewRow(ctx, "6t product view after turn on", block, on);
+
+  const deadline = Math.min(
+    fireAt + FIRE_MARGIN_MS,
+    Date.now() + FIRE_WAIT_MAX_MS,
+  );
+  const seen = await watchUntil(
+    probe,
+    v,
+    (state) => state.on === true,
+    deadline,
+  );
+  row(
+    "6t fire",
+    "cron trigger (hub runtime)",
+    `On false→true at ${hhmm} hub time`,
+    seen.reached
+      ? `On true ${((seen.at - fireAt) / 1000).toFixed(1)} s after the trigger time`
+      : `no change by ${Math.round((seen.at - fireAt) / 1000)} s after the trigger time: ${JSON.stringify(seen.state)}`,
+    seen.reached ? "match" : "mismatch",
+  );
+  // A field the hub adds after a run may come a moment later.
+  if (seen.reached) await sleep(3_000);
+  const afterFire = (await probe.storedBlockData(ref)).data;
+  storedChangeRow("6t stored after fire", afterOn, afterFire);
+  storedChangeRow("6t stored after fire vs create", atCreate, afterFire);
+  await productViewRow(ctx, "6t product view after fire", block, on);
+
+  // Restoring the off change would turn the BLOCK on again.
+  const off = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: ref,
+    value: false,
+  });
+  if (off.applied) {
+    pushCleanup(ctx, {
+      label: "6t turn off",
+      parent: block.cleanupEntry,
+      changeRef: off.changeRef,
+      restoreOptional: true,
+    });
+  }
+  row(
+    "6t turn off",
+    "window.update{windowKey,options:[Active=false]}",
+    "applied",
+    describe(off),
+    off.applied?.status === "applied" ? "match" : "mismatch",
+  );
+  const agreement = await activeAgreement(ctx, "6t agreement off", ref, false);
+  if (agreement.view?.active !== false) {
+    await probe.setBlockActiveByWindow(ref, false);
+    const again = await probe.activeView(ref);
+    row(
+      "6t fallback turn off",
+      "window.update{windowKey,options:[Active=false]} (direct)",
+      "active=false",
+      `active ${again?.active}`,
+      again?.active === false ? "match" : "mismatch",
+    );
+  }
+  // A hub field the product takes for a manual change also stops this
+  // restore; the turned-off BLOCK is then left to the sweep.
+  const deleted = await runRestore(hub, block.cleanupEntry);
+  row(
+    "6t restore create",
+    "scenario.delete{index}",
+    "BLOCK deleted",
+    deleted.observed,
+    deleted.verified ? "match" : "mismatch",
+  );
+  if (!deleted.verified) {
+    if ((await probe.activeView(ref))?.active === false) {
+      leaveForSweep(
+        ctx,
+        block.cleanupEntry,
+        ref,
+        "restore did not delete the fired BLOCK, turned off since",
+      );
+    } else {
+      abort("the fired BLOCK is neither off nor deleted");
+    }
+  }
+  await setVirtual(probe, v, v.initial);
+}
+
+// The home settings window's Time status, e.g.
+// "2026-09-16 - 09:17:28 (GMT+03:00)" (2026-09-16-home-settings-window.md).
+// `local` is the hub's wall clock as a UTC timestamp, `readAt` this
+// machine's time of the read; only their difference schedules the wait.
+async function readHubClock(ctx) {
+  const ref = ctx.hub.settingsWindowRef;
+  if (typeof ref !== "string") {
+    return { error: "home_overview gave no options_window_ref" };
+  }
+  const window = await readWindow(ctx.hub, ref);
+  const readAt = Date.now();
+  const text = window.value("Time");
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2}) - (\d{2}):(\d{2}):(\d{2}) \(GMT([+-])(\d{2}):(\d{2})\)$/.exec(
+      typeof text === "string" ? text : "",
+    );
+  if (!match) {
+    return {
+      error: `Time ${text === undefined ? "absent" : "not in the observed form"}`,
+    };
+  }
+  const [year, month, day, hour, minute, second] = match
+    .slice(1, 7)
+    .map(Number);
+  const local = Date.UTC(year, month - 1, day, hour, minute, second);
+  const offset =
+    (match[7] === "-" ? -1 : 1) *
+    (Number(match[8]) * 60 + Number(match[9])) *
+    60_000;
+  const zone = window.value("TimeZone");
+  return {
+    text,
+    zone: typeof zone === "string" ? zone : null,
+    local,
+    utc: local - offset,
+    readAt,
+  };
+}
+
+async function watchUntil(probe, virtual, done, deadline) {
+  for (;;) {
+    const state = await virtualState(probe, virtual);
+    if (done(state)) return { reached: true, state, at: Date.now() };
+    if (Date.now() >= deadline)
+      return { reached: false, state, at: Date.now() };
+    await sleep(Math.min(FIRE_POLL_MS, Math.max(0, deadline - Date.now())));
+  }
+}
+
+// What changed in the stored data between two reads, and whether the
+// product's canonical BLOCK form sees it.
+function storedChangeRow(step, from, to) {
+  const diff = structuralDiff(from, to);
+  const canonicalSame = isDeepStrictEqual(
+    canonicalBlock(from),
+    canonicalBlock(to),
+  );
+  row(
+    step,
+    "scenario.get{index}",
+    "record fields the hub adds or changes",
+    diff.length === 0
+      ? "no difference"
+      : `${diff.length} difference(s): ${diff
+          .slice(0, 4)
+          .map((entry) => `${entry.kind} ${entry.path}`)
+          .join(
+            "; ",
+          )}; canonical form ${canonicalSame ? "unchanged" : "changed"}`,
+    diff.length === 0 ? "match" : canonicalSame ? "hub-normalized" : "mismatch",
+    diff.length > 0 ? { differences: diff } : undefined,
+  );
+}
+
+// The product's own view of the create and the turn-on: a hub field the
+// canonical form keeps would show up here as a manual change.
+async function productViewRow(ctx, step, block, on) {
+  const created = await ctx.hub.get(block.changeRef);
+  const switched = on.changeRef ? await ctx.hub.get(on.changeRef) : null;
+  row(
+    step,
+    "get_native_change",
+    "create applied with configuration_matches; turn on applied",
+    `create ${created.status}${created.conflict_reason ? ` (${created.conflict_reason})` : ""}, configuration_matches ${created.configuration_matches}; turn on ${switched?.status ?? "-"}${switched?.conflict_reason ? ` (${switched.conflict_reason})` : ""}`,
+    created.status === "applied" &&
+      created.configuration_matches !== false &&
+      switched?.status === "applied"
+      ? "match"
+      : "mismatch",
   );
 }
 
@@ -2780,6 +4346,29 @@ async function historyShape(probe, request) {
   };
 }
 
+// --- step 8: time and size of the first reads (read-only) --------------------
+
+// The first calls an agent makes, at this home's scale: time and the bytes
+// of the text an agent reads.
+async function stepTiming(ctx) {
+  for (const [label, tool, args] of [
+    ["home_overview", "home_overview", {}],
+    ["find_devices", "find_devices", {}],
+    ["find_devices light on", "find_devices", { kind: "light", state: "on" }],
+  ]) {
+    const result = await ctx.hub.read(tool, args);
+    const call = ctx.hub.calls.at(-1);
+    row(
+      `8 ${label}`,
+      `${tool} ${JSON.stringify(args)}`,
+      "record time and size at this home's scale",
+      `${result?.status ?? "no status"}${result?.error ? ` ${result.error.code}` : ""}; ${call.ms} ms; ${call.bytes} bytes${result?.next ? "; next page offered" : ""}`,
+      result?.status === "ok" ? "observed" : "rejected",
+      { ms: call.ms, bytes: call.bytes },
+    );
+  }
+}
+
 // --- cleanup -----------------------------------------------------------------
 
 function pushCleanup(ctx, entry) {
@@ -2809,6 +4398,7 @@ async function runRestore(hub, entry) {
   entry.outcome = {
     verified,
     observed: `${result.status ?? "error"}${result.conflict_reason ? ` (${result.conflict_reason})` : ""}${result.error ? ` ${result.error.code}: ${result.error.message}` : ""}; verified ${verified}`,
+    result,
   };
   report.cleanup.push({
     label: entry.label,
@@ -2830,8 +4420,8 @@ async function runCleanup(hub, cleanup) {
     // Turning a probe back on to replay its history adds nothing: the create
     // restore ignores active, and the probe was left off.
     // A change of an object that is already verified deleted has nothing
-    // left to restore.
-    if (entry.restoreOptional || entry.parent?.done) {
+    // left to restore; one left to the sweep still has.
+    if (entry.restoreOptional || entry.parent?.outcome?.verified === true) {
       entry.done = true;
       report.cleanup.push({
         label: entry.label,
@@ -2981,7 +4571,14 @@ async function sweepOnly() {
 
 // Runs the sweep through its own product client and records one row per
 // object. Returns the entries, or null when the sweep could not finish.
-async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
+// `expected` names the run objects that a step left to the sweep on purpose.
+async function runSweep({
+  prefix,
+  stateDirectory,
+  homeRef,
+  sweptIsFailure,
+  expected = new Map(),
+}) {
   let entries;
   try {
     const client = await new SprutHubConnection({
@@ -2999,7 +4596,8 @@ async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
         client,
         prefix,
         changes: await readJournal(client, stateDirectory),
-        accessoryIds: await readProbeAccessories(stateDirectory),
+        accessoryIds: await readProbeIds(stateDirectory, PROBE_ACCESSORIES),
+        roomIds: await readProbeIds(stateDirectory, PROBE_ROOMS),
       });
     } finally {
       await client.close();
@@ -3023,49 +4621,55 @@ async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
   }
   for (const entry of entries) {
     const deleted = entry.outcome === "deleted";
+    const planned = expected.get(entry.ref);
     row(
       `5 sweep ${relativeRef(entry.ref)}`,
       `${entry.kind}.delete`,
       "nothing left",
-      deleted
-        ? "deleted by the sweep; restore had left it"
-        : `left: ${entry.reason}`,
-      deleted && !sweptIsFailure ? "match" : "mismatch",
+      !deleted
+        ? `left: ${entry.reason}`
+        : planned
+          ? `deleted by the sweep, as step planned: ${planned}`
+          : "deleted by the sweep; restore had left it",
+      deleted && (!sweptIsFailure || planned) ? "match" : "mismatch",
     );
   }
   return entries;
 }
 
-// The run's proof that it created a virtual accessory: its id, written to the
-// state directory right after the hub acknowledged the create.
-const PROBE_ACCESSORIES_FILE = "probe-accessories.json";
+// The run's proof that it created a virtual accessory or a room directly:
+// its id, written to the state directory right after the hub acknowledged
+// the create.
+const PROBE_ACCESSORIES = {
+  file: "probe-accessories.json",
+  key: "accessory_ids",
+};
+const PROBE_ROOMS = { file: "probe-rooms.json", key: "room_ids" };
 
-async function readProbeAccessories(stateDirectory) {
+async function readProbeIds(stateDirectory, { file, key }) {
   if (!stateDirectory) return null;
   try {
     const record = JSON.parse(
-      await readFile(path.join(stateDirectory, PROBE_ACCESSORIES_FILE), "utf8"),
+      await readFile(path.join(stateDirectory, file), "utf8"),
     );
-    return Array.isArray(record.accessory_ids) ? record.accessory_ids : null;
+    return Array.isArray(record[key]) ? record[key] : null;
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
 }
 
-async function recordProbeAccessory(stateDirectory, id) {
-  const ids = (await readProbeAccessories(stateDirectory)) ?? [];
+async function recordProbeId(stateDirectory, record, id) {
+  const ids = (await readProbeIds(stateDirectory, record)) ?? [];
   await writeFile(
-    path.join(stateDirectory, PROBE_ACCESSORIES_FILE),
-    `${JSON.stringify({ accessory_ids: [...ids, id] })}\n`,
+    path.join(stateDirectory, record.file),
+    `${JSON.stringify({ [record.key]: [...ids, id] })}\n`,
     { mode: 0o600 },
   );
 }
 
 // The hub cuts accessory names (2026-09-11) and room names (2026-09-24) to
 // 30 characters, so accessories and rooms carry this short run name.
-const SHORT_NAME_MAX = 30;
-
 function probeShortName(prefix) {
   return `zz-probe-${prefix.slice("zz-sprut-agent-probe-".length)}`;
 }
@@ -3094,20 +4698,22 @@ async function readJournal(client, stateDirectory) {
 }
 
 // Deletes, directly through the product client, every room and scenario of
-// the run (name starts with prefix) that the product provably created and
-// that cannot act: a scenario with the product's marker and active=false, a
-// room from the run's room_create with no accessories. It also deletes the
-// run's virtual accessory (probeShortName) when its id is in
-// `accessoryIds` and none of its characteristics has a link. Everything else
-// with those names is left and reported. `changes` is the run's change
-// journal and `accessoryIds` the run's accessory record; either is null when
-// it is not available. The product's restore is not used: the sweep exists
-// for objects that restore could not remove.
+// the run (name starts with prefix) that the run provably created and that
+// cannot act: a scenario with the product's marker and active=false, a room
+// with no accessories from the run's room_create or with its id in
+// `roomIds`. It also deletes the run's virtual accessory (probeShortName)
+// when its id is in `accessoryIds` and none of its characteristics has a
+// link. Everything else with those names is left and reported. `changes` is
+// the run's change journal, `accessoryIds` and `roomIds` the run's records of
+// objects it created directly; each is null when it is not available. The
+// product's restore is not used: the sweep exists for objects that restore
+// could not remove.
 export async function sweepProbeObjects({
   client,
   prefix,
   changes,
   accessoryIds = null,
+  roomIds = null,
 }) {
   const entries = [];
   const homeRef = `spruthub://hub/${encodeURIComponent(client.serial)}`;
@@ -3140,7 +4746,7 @@ export async function sweepProbeObjects({
       ref: room.ref,
       name: room.name,
       ...(await settle(() =>
-        sweepRoom(client, Number(room.ref.split("/").at(-1)), changes),
+        sweepRoom(client, Number(room.ref.split("/").at(-1)), changes, roomIds),
       )),
     });
   }
@@ -3184,14 +4790,18 @@ async function sweepAccessory(client, id, accessoryIds) {
   );
 }
 
-async function sweepRoom(client, id, changes) {
-  if (changes === null) return left("journal_unavailable");
-  const created = changes.some(
-    (change) =>
-      change.kind === "room_create" &&
-      change.room_creation_owned === true &&
-      change.created_room_id === id,
-  );
+async function sweepRoom(client, id, changes, roomIds) {
+  if (changes === null && roomIds === null) {
+    return left("journal_unavailable");
+  }
+  const created =
+    roomIds?.includes(id) ||
+    changes?.some(
+      (change) =>
+        change.kind === "room_create" &&
+        change.room_creation_owned === true &&
+        change.created_room_id === id,
+    );
   if (!created) return left("no_ownership_marker");
   if ((await client.listAccessoriesInRoom(id)).length > 0) {
     return left("not_empty");
@@ -3205,13 +4815,8 @@ async function sweepRoom(client, id, changes) {
 // A delete without a clear answer may still have happened; only a readback
 // decides, and a failed readback leaves the object reported, not deleted.
 async function deleteAndVerify(remove, read) {
-  let failure;
-  try {
-    await remove();
-  } catch (error) {
-    failure = error;
-  }
-  if ((await read()) === null) return { outcome: "deleted" };
+  const { failure, gone } = await deleteChecked(remove, read);
+  if (gone) return { outcome: "deleted" };
   return left(
     failure
       ? `delete_failed ${failure.code ?? failure.message}`
@@ -3253,7 +4858,9 @@ function describe(result) {
   const failed = result.applied ?? result.prepared;
   if (!failed) return "no result";
   if (failed.error) return `${failed.error.code}: ${failed.error.message}`;
-  return `${failed.status}${failed.conflict_reason ? ` (${failed.conflict_reason})` : ""}`;
+  // A readback that failed, e.g. scenario_active_mismatch.
+  const unread = failed.verification?.error?.code;
+  return `${failed.status}${failed.conflict_reason ? ` (${failed.conflict_reason})` : ""}${unread ? ` [readback ${unread}]` : ""}`;
 }
 
 function expectOk(result, what) {

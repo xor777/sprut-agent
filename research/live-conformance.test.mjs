@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -30,6 +30,17 @@ const prefix = "zz-sprut-agent-probe-20260924T121158Z";
 // name, and the product refuses a longer one.
 const roomName = "zz-probe-20260924T121158Z";
 const runFile = promisify(execFile);
+
+// No test here may reach a real hub: a connection built from this process's
+// environment, as the probe builds one, finds no credentials.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith("SPRUTHUB_")) delete process.env[name];
+}
+const noCredentials = await mkdtemp(
+  path.join(tmpdir(), "sprut-agent-no-credentials-"),
+);
+process.env.XDG_CONFIG_HOME = noCredentials;
+after(() => rm(noCredentials, { recursive: true, force: true }));
 
 async function setup(t) {
   const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
@@ -484,9 +495,12 @@ test("--sweep-only removes what a run left and fails a prefix of another kind", 
 
 async function guardSetup(t, options) {
   const ctx = await setup(t);
-  const guard = new conformance.GuardedHub(ctx.mcp, prefix, options);
-  guard.homeRef = ctx.homeRef;
   const client = await productClient(t, ctx.hub);
+  const guard = new conformance.GuardedHub(ctx.mcp, prefix, {
+    ...options,
+    productClient: client,
+  });
+  guard.homeRef = ctx.homeRef;
   const probe = new conformance.ProbeClient(client, guard, ctx.stateDirectory);
   return { ...ctx, guard, probe, client };
 }
@@ -828,4 +842,31 @@ test("a read-only probe refuses every write before it reaches the product", asyn
   );
   assert.deepEqual(sweepWrites(g.hub, before), []);
   assert.deepEqual(await journal(g.client, g.stateDirectory), []);
+});
+
+// The owner allows a read-only pass before any live write: every read step
+// runs through the shipped server and nothing but reads reaches the hub.
+test("--read-only runs the read steps and sends the hub no write", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-agent-read-only-"));
+  t.after(async () => {
+    await hub.close();
+    await rm(scratch, { recursive: true, force: true });
+  });
+  const result = await runFile(process.execPath, [script, "--read-only"], {
+    cwd: repoRoot,
+    env: {
+      PATH: process.env.PATH,
+      HOME: scratch,
+      TMPDIR: scratch,
+      ...hub.connectionEnv(),
+      SPRUTHUB_TIMEOUT_MS: "5000",
+    },
+  }).catch((error) => error);
+  assert.equal(result.code ?? 0, 0, result.stdout);
+  // history.list is a read the simulator does not know.
+  assert.deepEqual(
+    [...new Set(hub.writes().map(({ method }) => method))],
+    ["history.list"],
+  );
 });
