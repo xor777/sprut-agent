@@ -132,7 +132,9 @@ const blockData = {
 };
 
 // One prepared change per native write lifecycle, with the write its apply
-// sends first and the write its restore sends first.
+// sends first and the write its restore sends first. scenario_active writes
+// the Active option of a scenario's options window, which the simulator does
+// not show; native-change.integration.test.mjs covers its refusals.
 const lifecycles = [
   {
     name: "characteristic value",
@@ -141,16 +143,6 @@ const lifecycles = [
       operation: "characteristic_value",
       target_ref: `${homeRef}/accessory/16/service/13/characteristic/15`,
       value: 30,
-    },
-  },
-  {
-    name: "scenario active flag",
-    applyMethod: "scenario.update",
-    restoreMethod: "scenario.update",
-    input: {
-      operation: "scenario_active",
-      target_ref: `${homeRef}/scenario/3`,
-      value: false,
     },
   },
   {

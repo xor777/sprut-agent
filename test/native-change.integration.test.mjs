@@ -322,7 +322,10 @@ function climateControl(hub, type) {
     .find(({ control }) => control.type === type).control;
 }
 
-function scenarioOptionsWindow({ name, desc, windowKey }) {
+// The owner's hub (3.0.0, 2026-09-24) showed a scenario's options window with
+// Name, Active (CHECKBOX), OnStart, Sync and Desc; this fake keeps the three
+// options the product touches.
+function scenarioOptionsWindow({ name, desc, windowKey, active = false }) {
   return {
     windowKey,
     label: { text: "Настройки сценария" },
@@ -336,6 +339,16 @@ function scenarioOptionsWindow({ name, desc, windowKey }) {
         write: true,
         disabled: false,
         value: { stringValue: name },
+      },
+      {
+        key: "Active",
+        name: "Активен",
+        type: "GenericBoolean",
+        inputType: "CHECKBOX",
+        read: true,
+        write: true,
+        disabled: false,
+        value: { boolValue: active },
       },
       {
         key: "Desc",
@@ -356,7 +369,7 @@ function windowByKey(state, windowKey) {
   return state.windows[windowKey] ?? null;
 }
 
-function syncScenarioMetadataFromWindow(state, window) {
+function syncScenarioMetadataFromWindow(state, window, updates) {
   const scenario = state.scenarios.find(
     (candidate) => candidate.optionsWindow === window.windowKey,
   );
@@ -367,6 +380,53 @@ function syncScenarioMetadataFromWindow(state, window) {
     ?.stringValue;
   if (typeof name === "string") scenario.name = name;
   if (typeof desc === "string") scenario.desc = desc;
+  // The web client turns a scenario on or off only through this option.
+  const active = updates.find(({ key }) => key === "Active")?.value?.boolValue;
+  if (
+    typeof active === "boolean" &&
+    !state.behavior.windowActiveStaysInWindow
+  ) {
+    scenario.active = active;
+  }
+}
+
+// Active of a scenario's options window shows the scenario's active flag,
+// including a flag a test sets by hand.
+function scenarioWindowView(state, window) {
+  const view = structuredClone(window);
+  const scenario = state.scenarios.find(
+    (candidate) => candidate.optionsWindow === window.windowKey,
+  );
+  const active = view.options.find(({ key }) => key === "Active");
+  if (
+    scenario &&
+    active &&
+    typeof scenario.active === "boolean" &&
+    !state.behavior.windowActiveStaysInWindow
+  ) {
+    active.value = { boolValue: scenario.active };
+  }
+  return view;
+}
+
+// Gives a scenario installed or created without one an options window, as
+// the web client opens for a scenario of any type.
+function addScenarioOptionsWindow(hub, scenario) {
+  const windowKey = `opaque-${scenario.type.toLowerCase()}-window-${scenario.index}`;
+  scenario.optionsWindow = windowKey;
+  hub.state.windows[windowKey] = scenarioOptionsWindow({
+    name: scenario.name,
+    desc: scenario.desc,
+    windowKey,
+    active: scenario.active === true,
+  });
+  return windowKey;
+}
+
+function scenarioWindowActiveUpdates(hub) {
+  return windowUpdates(hub)
+    .map(({ window }) => window.update)
+    .filter(({ options }) => options.some(({ key }) => key === "Active"));
 }
 
 function setScenarioMetadata(hub, { name, desc, index = "existing-block" }) {
@@ -1601,6 +1661,7 @@ async function startHub(port = 0) {
       failWindowGetAfterUpdate: false,
       failNextScenarioGet: false,
       rejectNextWindowUpdate: false,
+      windowActiveStaysInWindow: false,
       ignoreNextUpdate: false,
       invalidNextScenarioList: false,
       missingScenarioGetAsNotFoundError: false,
@@ -1831,7 +1892,9 @@ async function startHub(port = 0) {
         result = { characteristic: { setOptions: {} } };
       } else if (params.window?.get) {
         const window = windowByKey(state, params.window.get.windowKey);
-        result = { window: { get: structuredClone(window) ?? null } };
+        result = {
+          window: { get: window ? scenarioWindowView(state, window) : null },
+        };
       } else if (params.window?.update) {
         if (state.behavior.rejectNextWindowUpdate) {
           state.behavior.rejectNextWindowUpdate = false;
@@ -1849,7 +1912,11 @@ async function startHub(port = 0) {
             const option = window.options.find(({ key }) => key === update.key);
             if (option) option.value = structuredClone(update.value);
           }
-          syncScenarioMetadataFromWindow(state, window);
+          syncScenarioMetadataFromWindow(
+            state,
+            window,
+            params.window.update.options,
+          );
         }
         state.behavior.dropNextWindowUpdate = false;
         if (state.behavior.holdNextWindowUpdate) {
@@ -2155,6 +2222,7 @@ async function startHub(port = 0) {
             name: created.name,
             desc: created.desc,
             windowKey,
+            active: created.active === true,
           });
         }
         state.scenarios.push(created);
@@ -2207,6 +2275,9 @@ async function startHub(port = 0) {
                   ([key]) =>
                     key !== "index" &&
                     key !== "expand" &&
+                    // The owner's hub (3.0.0, 2026-09-24) acknowledged
+                    // active here and kept the flag.
+                    key !== "active" &&
                     !(
                       scenario.type === "BLOCK" &&
                       (key === "name" || key === "desc")
@@ -20700,6 +20771,7 @@ const scenarioActiveCases = [
         data: firstLogicSource,
       };
       hub.state.scenarios.push(scenario);
+      addScenarioOptionsWindow(hub, scenario);
       return scenario;
     },
   },
@@ -20717,10 +20789,18 @@ const scenarioActiveCases = [
         data: 'log.info("helpers ready");',
       };
       hub.state.scenarios.push(scenario);
+      addScenarioOptionsWindow(hub, scenario);
       return scenario;
     },
   },
 ];
+
+function activeWindowUpdate(scenario, active) {
+  return {
+    windowKey: scenario.optionsWindow,
+    options: [{ key: "Active", value: { boolValue: active } }],
+  };
+}
 
 function scenarioRefFor(scenario) {
   return `${homeRef}/scenario/${encodeURIComponent(scenario.index)}`;
@@ -20760,7 +20840,9 @@ async function callChangeTool(client, name, changeRef) {
   return result.structuredContent;
 }
 
-test("an existing scenario of any type is turned off and back on through its active flag only", async (t) => {
+// SprutHub 3.0.0 acknowledged scenario.update {active} and kept the flag; the
+// fake hub does the same, so only the options window can switch a scenario.
+test("an existing scenario of any type is turned off and back on through the Active option of its window only", async (t) => {
   for (const scenarioCase of scenarioActiveCases) {
     await t.test(scenarioCase.type, async (subtest) => {
       const { hub, stateDirectory } = await setup(subtest);
@@ -20787,7 +20869,7 @@ test("an existing scenario of any type is turned off and back on through its act
       assert.deepEqual(prepared.diff, {
         value: { from: true, to: false, kind: "boolValue" },
       });
-      assert.deepEqual(scenarioUpdates(hub), []);
+      assert.deepEqual(windowUpdates(hub), []);
 
       const applied = await callChangeTool(
         firstClient,
@@ -20800,9 +20882,11 @@ test("an existing scenario of any type is turned off and back on through its act
         value: false,
         kind: "boolValue",
       });
-      assert.deepEqual(scenarioUpdates(hub), [
-        { index: scenario.index, active: false },
-      ]);
+      assert.deepEqual(
+        windowUpdates(hub).map(({ window }) => window.update),
+        [activeWindowUpdate(scenario, false)],
+      );
+      assert.deepEqual(scenarioUpdates(hub), []);
       assert.equal(scenario.active, false);
       assert.deepEqual(scenarioWithoutActive(scenario), configuration);
 
@@ -20835,10 +20919,14 @@ test("an existing scenario of any type is turned off and back on through its act
         prepared.change_ref,
       );
       assert.equal(restored.status, "restored");
-      assert.deepEqual(scenarioUpdates(hub), [
-        { index: scenario.index, active: false },
-        { index: scenario.index, active: true },
-      ]);
+      assert.deepEqual(
+        windowUpdates(hub).map(({ window }) => window.update),
+        [
+          activeWindowUpdate(scenario, false),
+          activeWindowUpdate(scenario, true),
+        ],
+      );
+      assert.deepEqual(scenarioUpdates(hub), []);
       assert.equal(scenario.active, true);
       assert.deepEqual(scenarioWithoutActive(scenario), configuration);
     });
@@ -20860,7 +20948,7 @@ test("a hand-toggled scenario is neither overwritten on apply nor reclaimed on r
   );
   assert.equal(refused.status, "conflict");
   assert.equal(refused.conflict_reason, "baseline_changed");
-  assert.deepEqual(scenarioUpdates(hub), []);
+  assert.deepEqual(windowUpdates(hub), []);
 
   scenario.active = true;
   const prepared = await prepareScenarioActive(client, targetRef, false);
@@ -20887,13 +20975,13 @@ test("a hand-toggled scenario is neither overwritten on apply nor reclaimed on r
   );
   assert.equal(restored.status, "conflict");
   assert.equal(restored.conflict_reason, "manual_change");
-  assert.deepEqual(scenarioUpdates(hub), [
-    { index: scenario.index, active: false },
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), [
+    activeWindowUpdate(scenario, false),
   ]);
   assert.equal(scenario.active, false);
 });
 
-test("a lost scenario.update response is settled by readback without a second update", async (t) => {
+test("a lost Active window.update response is settled by readback without a second update", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const scenario = scenarioActiveCases[0].install(hub);
   const firstClient = await startClient(t, hub, stateDirectory);
@@ -20902,7 +20990,7 @@ test("a lost scenario.update response is settled by readback without a second up
     scenarioRefFor(scenario),
     false,
   );
-  hub.state.behavior.closeAfterScenarioUpdate = true;
+  hub.state.behavior.closeAfterWindowUpdate = true;
 
   const applied = await callChangeTool(
     firstClient,
@@ -20921,8 +21009,8 @@ test("a lost scenario.update response is settled by readback without a second up
     prepared.change_ref,
   );
   assert.equal(repeated.status, "applied");
-  assert.deepEqual(scenarioUpdates(hub), [
-    { index: scenario.index, active: false },
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), [
+    activeWindowUpdate(scenario, false),
   ]);
   assert.equal(scenario.active, false);
 });
@@ -20953,6 +21041,7 @@ test("an already inactive scenario creates no change or write", async (t) => {
     arguments: { home_ref: homeRef, entity_ref: scenarioRefFor(scenario) },
   });
   assert.deepEqual(history.structuredContent.changes, []);
+  assert.deepEqual(windowUpdates(hub), []);
   assert.deepEqual(scenarioUpdates(hub), []);
 });
 
@@ -21031,7 +21120,7 @@ test("a scenario whose active state SprutHub omits is neither switched nor resto
       arguments: { change_ref: pending.change_ref },
     }),
   );
-  assert.deepEqual(scenarioUpdates(hub), []);
+  assert.deepEqual(windowUpdates(hub), []);
 
   scenario.active = true;
   const applied = await callChangeTool(
@@ -21047,9 +21136,227 @@ test("a scenario whose active state SprutHub omits is neither switched nor resto
       arguments: { change_ref: pending.change_ref },
     }),
   );
-  assert.deepEqual(scenarioUpdates(hub), [
-    { index: scenario.index, active: false },
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), [
+    activeWindowUpdate(scenario, false),
   ]);
+});
+
+test("scenario_active refuses a scenario without an Active option in its options window before any write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const windowless = scenarioActiveCases[2].install(hub);
+  delete hub.state.windows[windowless.optionsWindow];
+  delete windowless.optionsWindow;
+  const withoutActive = scenarioActiveCases[1].install(hub);
+  const window = hub.state.windows[withoutActive.optionsWindow];
+  window.options = window.options.filter(({ key }) => key !== "Active");
+  const client = await startClient(t, hub, stateDirectory);
+
+  for (const [scenario, code] of [
+    [windowless, "options_window_unavailable"],
+    [withoutActive, "window_option_not_found"],
+  ]) {
+    const targetRef = scenarioRefFor(scenario);
+    const refusals = [
+      await client.callTool({
+        name: "get_native_change_contract",
+        arguments: { operation: "scenario_active", target_ref: targetRef },
+      }),
+      await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "scenario_active",
+          target_ref: targetRef,
+          value: false,
+          reason: "Выключить сценарий, у которого нет флажка активности",
+        },
+      }),
+    ];
+    for (const refused of refusals) {
+      assert.equal(refused.isError, true, refused.content[0]?.text);
+      assert.equal(
+        refused.structuredContent.error.code,
+        code,
+        refused.content[0]?.text,
+      );
+    }
+    const history = await client.callTool({
+      name: "list_native_changes",
+      arguments: { home_ref: homeRef, entity_ref: targetRef },
+    });
+    assert.deepEqual(history.structuredContent.changes, []);
+    assert.equal(scenario.active, true);
+  }
+  assert.deepEqual(windowUpdates(hub), []);
+  assert.deepEqual(scenarioUpdates(hub), []);
+});
+
+test("an Active option that SprutHub does not carry to the scenario flag is not reported as applied", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  hub.state.windows[scenario.optionsWindow].options.find(
+    ({ key }) => key === "Active",
+  ).value = { boolValue: true };
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareScenarioActive(
+    client,
+    scenarioRefFor(scenario),
+    false,
+  );
+  hub.state.behavior.windowActiveStaysInWindow = true;
+
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "uncertain");
+  assert.equal(applied.verification.error.code, "scenario_active_mismatch");
+  assert.equal(scenario.active, true);
+
+  // The hub brings both reads to the requested flag later.
+  hub.state.behavior.windowActiveStaysInWindow = false;
+  scenario.active = false;
+  const settled = await callChangeTool(
+    client,
+    "get_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(settled.status, "applied");
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), [
+    activeWindowUpdate(scenario, false),
+  ]);
+});
+
+test("a scenario_active change an earlier version sent as scenario.update is settled by readback and retried only through the window", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareScenarioActive(
+    firstClient,
+    scenarioRefFor(scenario),
+    false,
+  );
+  await firstClient.close();
+  // The record an earlier version saved after SprutHub acknowledged
+  // scenario.update {index, active:false} and kept the flag.
+  const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
+  const journal = JSON.parse(await readFile(journalFile, "utf8"));
+  const id = prepared.change_ref.slice("spruthub-change://native/".length);
+  const sentAt = new Date().toISOString();
+  const record = journal.changes[id];
+  journal.changes[id] = {
+    id: record.id,
+    kind: "scenario_active",
+    status: "uncertain",
+    home_ref: record.home_ref,
+    reason: record.reason,
+    target_ref: record.target_ref,
+    target: { index: scenario.index },
+    contract: {
+      type: "ScenarioActive",
+      kind: "boolValue",
+      confirmation: "separate_scenario_get_readback",
+    },
+    baseline_value: { value: true, kind: "boolValue" },
+    requested_value: { value: false, kind: "boolValue" },
+    native_write_sent: true,
+    native_acknowledged: true,
+    last_verification: {
+      fresh: true,
+      checked_at: sentAt,
+      result: "requested_value_missing",
+    },
+    created_at: record.created_at,
+    updated_at: sentAt,
+    history: [
+      ...record.history,
+      { status: "applying", at: sentAt },
+      { status: "uncertain", at: sentAt },
+    ],
+    write_intent: {
+      direction: "apply",
+      phase: "needs_reconciliation",
+      acknowledged: true,
+      at: sentAt,
+    },
+    observed_value: { value: true, kind: "boolValue" },
+    conflict_reason: "ack_without_requested_result",
+  };
+  await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const read = await callChangeTool(
+    client,
+    "get_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(read.status, "uncertain");
+  assert.deepEqual(read.observed_value, { value: true, kind: "boolValue" });
+  assert.deepEqual(windowUpdates(hub), []);
+
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  assert.equal(scenario.active, false);
+
+  const restored = await callChangeTool(
+    client,
+    "restore_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(restored.status, "restored");
+  assert.equal(scenario.active, true);
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), [
+    activeWindowUpdate(scenario, false),
+    activeWindowUpdate(scenario, true),
+  ]);
+  assert.deepEqual(scenarioUpdates(hub), []);
+});
+
+test("a refused Active window.update leaves the scenario and its change as they were", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  const client = await startClient(t, hub, stateDirectory);
+  const refusedApply = await prepareScenarioActive(client, targetRef, false);
+  hub.state.behavior.rejectNextWindowUpdate = true;
+
+  const applyRefusal = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: refusedApply.change_ref },
+  });
+  assert.equal(applyRefusal.isError, true, applyRefusal.content[0]?.text);
+  assert.equal(applyRefusal.structuredContent.hub_effect, "not_applied");
+  assert.equal(
+    (await callChangeTool(client, "get_native_change", refusedApply.change_ref))
+      .status,
+    "not_applied",
+  );
+  assert.equal(scenario.active, true);
+
+  const prepared = await prepareScenarioActive(client, targetRef, false);
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  hub.state.behavior.rejectNextWindowUpdate = true;
+  const restoreRefusal = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.change_ref },
+  });
+  assert.equal(restoreRefusal.isError, true, restoreRefusal.content[0]?.text);
+  assert.equal(restoreRefusal.structuredContent.hub_effect, "not_applied");
+  assert.equal(
+    (await callChangeTool(client, "get_native_change", prepared.change_ref))
+      .status,
+    "applied",
+  );
+  assert.equal(scenario.active, false);
 });
 
 async function turnScenarioOffWithChange(client, targetRef) {
@@ -21274,6 +21581,7 @@ test("a LOGIC source change stays restorable after its scenario is turned off", 
     const scenario = hub.state.scenarios.find(
       ({ index }) => index === created.scenario_index,
     );
+    addScenarioOptionsWindow(hub, scenario);
 
     await turnScenarioOffWithChange(client, created.scenario_ref);
     assert.equal(scenario.active, false);
@@ -21300,6 +21608,7 @@ test("a LOGIC source change stays restorable after its scenario is turned off", 
     const { hub, stateDirectory } = await setup(subtest);
     const scenario = logicScenarioFixture("evening-logic");
     hub.state.scenarios.push(scenario);
+    addScenarioOptionsWindow(hub, scenario);
     const targetRef = scenarioRefFor(scenario);
     const client = await startClient(subtest, hub, stateDirectory);
     const prepared = await client.callTool({
