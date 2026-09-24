@@ -3358,6 +3358,59 @@ test("scenario run refuses changed targets and never retries an unknown delivery
   );
 });
 
+test("a scenario run is not sent when a target changed after preparation although the scenario did not", async (t) => {
+  const secondOn = (hub) =>
+    hub.state.accessories
+      .find(({ id }) => id === 36)
+      .services.find(({ sId }) => sId === 13);
+  for (const [title, change] of [
+    [
+      "the target service is now another type",
+      (hub) => {
+        secondOn(hub).type = "Switch";
+      },
+    ],
+    [
+      "the target characteristic is now read-only",
+      (hub) => {
+        secondOn(hub).characteristics.find(
+          ({ cId }) => cId === 15,
+        ).control.write = false;
+      },
+    ],
+  ]) {
+    await t.test(title, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const fixture = installNativeCommandFixture(hub);
+      const scenario = hub.state.scenarios.find(
+        ({ index }) => index === "all-off-command",
+      );
+      const configuration = structuredClone(scenario);
+      const client = await startClient(subtest, hub, stateDirectory);
+      const prepared = await prepareScenarioRun(
+        client,
+        fixture.scenarioRef,
+        scenario.name,
+      );
+      assert.equal(prepared.targets_known, true);
+
+      change(hub);
+      const conflict = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(conflict.status, "conflict");
+      assert.equal(conflict.conflict_reason, "scenario_changed");
+      assert.deepEqual(scenarioRuns(hub), []);
+      assert.deepEqual(scenario, configuration);
+      assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+        boolValue: true,
+      });
+    });
+  }
+});
+
 test("a rejected scenario run remains rejected after inspection and restart", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const fixture = installNativeCommandFixture(hub);
