@@ -366,6 +366,36 @@ test("the sweep deletes a recorded, unlinked virtual accessory before its room",
   assert.equal(ids.includes(linked.id), true);
 });
 
+// SprutHub 3.0.0 cut a 42-character room name to 30 characters on
+// 2026-09-24, so the probe names its rooms with the short run name.
+test("the sweep finds a probe room by the run's short name", async (t) => {
+  const ctx = await setup(t);
+  const room = await createRoom(ctx, `${accessoryName}-v`);
+  const client = await productClient(t, ctx.hub);
+  const writesBefore = ctx.hub.writes().length;
+
+  const entries = await conformance.sweepProbeObjects({
+    client,
+    prefix,
+    changes: await journal(client, ctx.stateDirectory),
+  });
+
+  assert.deepEqual(entries, [
+    {
+      kind: "room",
+      ref: room.ref,
+      name: `${accessoryName}-v`,
+      outcome: "deleted",
+    },
+  ]);
+  assert.deepEqual(sweepWrites(ctx.hub, writesBefore), [
+    {
+      method: "room.delete",
+      params: { room: { delete: { id: room.id } } },
+    },
+  ]);
+});
+
 test("without the run's journal a probe room is reported, not deleted", async (t) => {
   const ctx = await setup(t);
   const room = await createRoom(ctx, `${prefix}-room`);
