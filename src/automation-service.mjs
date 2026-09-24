@@ -40,12 +40,15 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
 ]);
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
-// SprutHub 3.0.0 kept only the first 30 characters of a longer ASCII room
-// name on room.create and room.update (owner hub, 2026-09-24). Whether it
-// counts characters or bytes of a Cyrillic name is not checked; UTF-16 code
-// units are counted here.
-const ROOM_NAME_MAX_LENGTH = 30;
-const ROOM_NAME_LIMIT_NOTE = `SprutHub cut a longer room name to ${ROOM_NAME_MAX_LENGTH} (checked on ASCII names; not checked for Cyrillic), so a name longer than ${ROOM_NAME_MAX_LENGTH} characters is refused before any write.`;
+// SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
+// Latin alike (characters, not bytes), and drops emoji; the room.create
+// answer already carries the kept name (owner hub, 2026-09-24,
+// research/protocol/2026-09-24-live-conformance-3.md). Characters are
+// counted as Unicode code points; characters outside the Basic Multilingual
+// Plane, where the emoji are, are refused, since the one emoji tried was
+// dropped. Which other characters the hub drops was not checked.
+const ROOM_NAME_MAX_LENGTH = 32;
+const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and drops emoji, so a longer name, or one with emoji or other characters outside the Basic Multilingual Plane, is refused before any write. A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -2002,7 +2005,8 @@ export class AutomationService {
     if (roomCreationOutcomeUnknown(change)) {
       return this.#recordUnownedRoomCandidates(change);
     }
-    // A change prepared before the limit was known may carry a longer name.
+    // A change prepared by an earlier version may carry a name the hub
+    // would not keep.
     roomNameWithinLimit(change.requested_name);
     const candidates = await this.#matchingRooms(change);
     if (candidates.length > 0) {
@@ -5811,7 +5815,7 @@ function accessoryPlacementContract(accessory) {
 function roomCreateContract() {
   return {
     write: "room.create({name})",
-    name: { min_length: 1, max_length: ROOM_NAME_MAX_LENGTH },
+    name: { min_length: 1, ...roomNameLimits() },
     response: "RoomMessage",
     confirmation: "separate_room_get",
     restore:
@@ -9765,19 +9769,43 @@ async function readRoomName(client, target) {
     value: { value: room.name, kind: "stringValue" },
     contract: {
       ...nativeNameContract("RoomName", "separate_room_get_readback"),
-      max_length: ROOM_NAME_MAX_LENGTH,
+      ...roomNameLimits(),
     },
   };
 }
 
-// A longer name is refused before any write instead of being cut.
+function roomNameLimits() {
+  return {
+    max_length: ROOM_NAME_MAX_LENGTH,
+    length_unit: "unicode_code_points",
+    refused_characters:
+      "outside the Basic Multilingual Plane (U+10000 and above), such as emoji",
+  };
+}
+
+// A name the hub would not keep whole is refused before any write instead
+// of being cut or stripped.
 function roomNameWithinLimit(name) {
-  if (name.length <= ROOM_NAME_MAX_LENGTH) return name;
+  const characters = [...name];
+  const unsupported = [
+    ...new Set(
+      characters.filter((character) => character.codePointAt(0) > 0xffff),
+    ),
+  ];
+  if (unsupported.length > 0) {
+    throw new SprutHubError(
+      "name_characters_unsupported",
+      `This name has ${unsupported.join(" ")}, which SprutHub drops from a room name (emoji and other characters outside the Basic Multilingual Plane). Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
+      "prepare_native_change",
+      { unsupported_characters: unsupported },
+    );
+  }
+  if (characters.length <= ROOM_NAME_MAX_LENGTH) return name;
   throw new SprutHubError(
     "name_too_long",
-    `This name has ${name.length} characters. ${ROOM_NAME_LIMIT_NOTE} Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    `This name has ${characters.length} characters, and SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
     "prepare_native_change",
-    { max_length: ROOM_NAME_MAX_LENGTH, name_length: name.length },
+    { max_length: ROOM_NAME_MAX_LENGTH, name_length: characters.length },
   );
 }
 
@@ -11055,7 +11083,9 @@ function publicNativeChange(
       reason: change.reason,
       target_ref: change.target_ref,
       diff: { room: { from: null, to: { name: change.requested_name } } },
-      ...(room ? { room } : {}),
+      ...(room
+        ? { room, name_normalized: room.name !== change.requested_name }
+        : {}),
       room_creation_owned: change.room_creation_owned === true,
       ...(change.candidate_rooms
         ? {
@@ -11088,6 +11118,11 @@ function publicNativeChange(
         "Deletion is allowed only for a confirmed created room whose configuration is unchanged and which contains no accessories.",
         "A later applied room_name change of this room is named by restore_first_change_ref; restoring it first brings back the created name.",
         ROOM_NAME_LIMIT_NOTE,
+        ...(room && room.name !== change.requested_name
+          ? [
+              "SprutHub stored the room under another name than requested (name_normalized): room.name is the stored one, diff.room.to.name the requested one. The room is this change's, and restore deletes it by what was stored.",
+            ]
+          : []),
       ],
     };
   }
