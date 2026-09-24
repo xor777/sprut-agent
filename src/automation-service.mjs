@@ -4025,11 +4025,15 @@ export class AutomationService {
       const delivery = classifyScenarioRunDelivery(error);
       change.run_delivery = delivery;
       if (delivery.status !== "unknown") {
+        // A refused or unsent run is terminal: apply never sends it again.
         change.native_write_sent = delivery.status !== "not_sent";
-        await this.#finishNative(change, "not_applied", undefined, {
-          last_verification: failedVerification(error),
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "not_applied",
+          error,
+          undefined,
+          { last_verification: failedVerification(error) },
+        );
       }
       const observations = await this.#readScenarioRunTargets(change);
       return this.#finishNative(change, "uncertain", undefined, {
@@ -9330,12 +9334,7 @@ function classifyScenarioRunDelivery(error) {
     error.action = "restore_connection_then_prepare_native_change";
     return { status: "not_sent", failure: scenarioRunFailure(error) };
   }
-  if (
-    error instanceof SprutHubError &&
-    ["authentication_failed", "request_rejected", "unsupported"].includes(
-      error.code,
-    )
-  ) {
+  if (writeRejection(error)) {
     return { status: "rejected", rejection: scenarioRunFailure(error) };
   }
   return { status: "unknown" };
