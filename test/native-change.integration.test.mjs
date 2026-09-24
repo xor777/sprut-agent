@@ -11370,9 +11370,21 @@ test("an update that grows a web client's one-condition OR group warns that any 
     );
     return {
       warnings: (shown.warnings ?? []).map(({ message: _, ...rest }) => rest),
-      written_mode: diff.data.to.targets[0].if.mode,
+      written_mode: diff.data.to.targets.at(-1).if.mode,
     };
   };
+  const withoutBlockIds = (value) =>
+    JSON.parse(
+      JSON.stringify(value, (key, child) =>
+        key === "blockId" ? undefined : child,
+      ),
+    );
+  // «Днём выключай свет»: a rule of its own, with a one-condition group.
+  const offByDay = () =>
+    everyIf({
+      when: conditionGroup(workModeEquals(workModeDay.value)),
+      thenActions: [setAction({ value: "false" })],
+    });
 
   const outcomes = {
     grown_or: await preview((data) => {
@@ -11387,6 +11399,29 @@ test("an update that grows a web client's one-condition OR group warns that any 
     action_added: await preview((data) => {
       data.targets[0].then.push(
         setAction({ cId: 16, hc: "Brightness", value: "30" }),
+      );
+      return data;
+    }),
+    // Without blockIds the rules pair by position: the new first rule takes
+    // the place of the stored one, whose group grows in the second rule.
+    grown_or_after_new_rule_without_block_ids: await preview((data) => {
+      const edited = withoutBlockIds(data);
+      edited.targets[0].if.conditions.push(atNight);
+      edited.targets.unshift(offByDay());
+      return edited;
+    }),
+    // A new rule the agent writes with OR over the stored rule's condition
+    // grows nothing: the stored group stays as it is.
+    new_or_rule_beside_kept_group: await preview((data) => {
+      data.targets.push(
+        everyIf({
+          when: {
+            type: "condition",
+            mode: "OR",
+            conditions: [characteristicCondition(), atNight],
+          },
+          thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
+        }),
       );
       return data;
     }),
@@ -11406,6 +11441,18 @@ test("an update that grows a web client's one-condition OR group warns that any 
     },
     grown_and: { warnings: [], written_mode: "AND" },
     action_added: { warnings: [], written_mode: "OR" },
+    grown_or_after_new_rule_without_block_ids: {
+      warnings: [
+        {
+          code: "or_group_grown",
+          pointer: "/targets/1/if",
+          mode: "OR",
+          conditions: 2,
+        },
+      ],
+      written_mode: "OR",
+    },
+    new_or_rule_beside_kept_group: { warnings: [], written_mode: "OR" },
   });
 });
 
