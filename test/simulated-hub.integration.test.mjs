@@ -1171,3 +1171,91 @@ test("the simulator lists accessories without virtual, reads it on each accessor
   });
   assert.equal(await roomName(7), "Кабинет с видом на старый яблоне");
 });
+
+// The BLOCK forms written from the web client's code (action map D6, D10,
+// D13, D15, D16, D17) are not yet seen stored by a hub. A run whose write
+// carries one reports it as schema_only, so a pass that rests on it shows.
+test("the simulator reports BLOCK writes of forms not seen on a hub as schema_only", async (t) => {
+  const { hub, send } = await rawSession(t);
+  const lamp = (characteristics) => ({
+    type: "service",
+    aId: 26,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics,
+  });
+  const when = (cron, then, rest = {}) => ({
+    type: "if",
+    mode: "EVERY",
+    if: {
+      type: "condition",
+      mode: "AND",
+      conditions: [{ type: "cron", mode: "NONE", cron, offset: 0 }],
+    },
+    then,
+    else: [],
+    then_delay: 0,
+    else_delay: 0,
+    ...rest,
+  });
+  const daily = "0 0 7 ? * * *";
+  const off = lamp([{ type: "set", cId: 14, hc: "On", value: "false" }]);
+  const forms = {
+    observed: when(daily, [off]),
+    "every N cron": when("0 0/15 * ? * * *", [off]),
+    "branch repeat": when(daily, [off], { then_delay: 60_000 }),
+    "scenario mode": when(daily, [
+      { type: "scenario", index: "14", mode: "DEACTIVATE" },
+    ]),
+    notify: when(daily, [
+      { type: "notify", text: "Утро", mode: "PUSH", to: null },
+    ]),
+    http: when(daily, [
+      { type: "http", method: "GET", url: "http://127.0.0.1:9/" },
+    ]),
+    from: when(daily, [
+      lamp([
+        {
+          type: "from",
+          cId: 15,
+          hc: "Brightness",
+          value: "",
+          from_aId: 14,
+          from_sId: 13,
+          from_cId: 15,
+          from_hs: "Lightbulb",
+          from_hc: "Brightness",
+        },
+      ]),
+    ]),
+  };
+  let index;
+  for (const [form, node] of Object.entries(forms)) {
+    const data = JSON.stringify({ targets: [node] });
+    const created = await send({
+      scenario: {
+        create: {
+          type: "BLOCK",
+          name: form,
+          desc: "",
+          active: false,
+          onStart: false,
+          sync: false,
+          data,
+        },
+      },
+    });
+    index ??= created.result.scenario.create.index;
+    await send({ scenario: { update: { index, data } } });
+  }
+  const levels = Object.fromEntries(
+    hub.touchedMethods().map(({ method, level }) => [method, level]),
+  );
+  assert.equal(levels["scenario.create"], "observed");
+  assert.equal(levels["scenario.update"], "observed");
+  for (const form of Object.keys(forms).filter((key) => key !== "observed")) {
+    for (const method of ["scenario.create", "scenario.update"]) {
+      assert.equal(levels[`${method} {${form}}`], "schema_only", form);
+    }
+  }
+});
