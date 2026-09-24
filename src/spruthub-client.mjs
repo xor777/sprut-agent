@@ -2592,34 +2592,33 @@ export class SprutHubClient {
     this.#pending.delete(message.id);
 
     if (message.error) {
+      let error;
       if (message.error.code === 401) {
-        pending.reject(
-          new SprutHubError(
-            "authentication_failed",
-            "SprutHub rejected the configured credentials.",
-            "check_credentials",
-            { capability_status: "insufficient_access" },
-          ),
+        error = new SprutHubError(
+          "authentication_failed",
+          "SprutHub rejected the configured credentials.",
+          "check_credentials",
+          { capability_status: "insufficient_access" },
         );
       } else if (message.error.code === -32601) {
-        pending.reject(
-          new SprutHubError(
-            "unsupported",
-            "SprutHub does not support this operation on the selected home.",
-            "inspect_home",
-            { capability_status: "unsupported" },
-          ),
+        error = new SprutHubError(
+          "unsupported",
+          "SprutHub does not support this operation on the selected home.",
+          "inspect_home",
+          { capability_status: "unsupported" },
         );
       } else {
-        pending.reject(
-          new SprutHubError(
-            "request_rejected",
-            "SprutHub rejected the request.",
-            undefined,
-            { protocolErrorCode: message.error.code },
-          ),
+        error = new SprutHubError(
+          "request_rejected",
+          "SprutHub rejected the request.",
+          undefined,
+          { protocolErrorCode: message.error.code },
         );
       }
+      // An error reply to this request id is the hub's own answer: it received
+      // the request and refused it. Keep its code and bounded text as data.
+      error.hubError = hubErrorReply(message.error, this.token);
+      pending.reject(error);
       return;
     }
     message.responseReceivedAt = new Date().toISOString();
@@ -3011,6 +3010,29 @@ function isNativeNotFoundCandidate(error) {
     error.code === "request_rejected" &&
     error.protocolErrorCode === -32603
   );
+}
+
+const HUB_ERROR_MESSAGE_MAX_LENGTH = 500;
+
+// The hub's error text is untrusted data that may be saved in the journal, so
+// it is bounded and never carries the connection token or a credential.
+function hubErrorReply(error, token) {
+  const code =
+    typeof error?.code === "number" || typeof error?.code === "string"
+      ? error.code
+      : null;
+  if (typeof error?.message !== "string") return { code };
+  const message = error.message.includes(token)
+    ? "[REDACTED]"
+    : redactSensitiveText(error.message);
+  const characters = [...message];
+  return {
+    code,
+    message:
+      characters.length > HUB_ERROR_MESSAGE_MAX_LENGTH
+        ? `${characters.slice(0, HUB_ERROR_MESSAGE_MAX_LENGTH).join("")}…`
+        : message,
+  };
 }
 
 function extractEntityArray(response, path, missingMeansEmpty = false) {

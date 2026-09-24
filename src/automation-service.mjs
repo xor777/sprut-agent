@@ -1284,8 +1284,12 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "not_applied", current);
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "not_applied",
+          error,
+          current,
+        );
       }
       return this.#reconcileValueAfterWrite(change, "apply");
     }
@@ -1641,10 +1645,13 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "not_applied", undefined, {
-          observed_snapshot: current,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "not_applied",
+          error,
+          undefined,
+          { observed_snapshot: current },
+        );
       }
       return (await this.#reconcileAccessoryApply(change, false)).result;
     }
@@ -1859,10 +1866,13 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "applied",
+          error,
+          undefined,
+          { observed_snapshot: current },
+        );
       }
       return (await this.#reconcileAccessoryRestore(change, false)).result;
     }
@@ -1971,7 +1981,7 @@ export class AutomationService {
     if (change.created_room_id !== undefined) {
       return this.#observeOwnedRoom(change);
     }
-    if (change.native_write_sent) {
+    if (roomCreationOutcomeUnknown(change)) {
       return this.#recordUnownedRoomCandidates(change);
     }
     const candidates = await this.#matchingRooms(change);
@@ -1992,8 +2002,7 @@ export class AutomationService {
       change.room_creation_owned = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "not_applied");
-        throw error;
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
       }
       return this.#recordUnownedRoomCandidates(change);
     }
@@ -2005,7 +2014,7 @@ export class AutomationService {
     if (change.created_room_id !== undefined) {
       return this.#observeOwnedRoom(change);
     }
-    if (change.native_write_sent) {
+    if (roomCreationOutcomeUnknown(change)) {
       return this.#recordUnownedRoomCandidates(change);
     }
     const candidates = await this.#matchingRooms(change);
@@ -2148,10 +2157,13 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied", undefined, {
-          observed_room: snapshot,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "applied",
+          error,
+          undefined,
+          { observed_room: snapshot },
+        );
       }
     }
     try {
@@ -2223,8 +2235,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           change.progress.creation.sent = false;
-          await this.#finishNative(change, "not_applied");
-          throw error;
+          throw await this.#finishRefusedWrite(change, "not_applied", error);
         }
         return this.#recordUnownedVirtualLightCandidates(change);
       }
@@ -2370,8 +2381,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           link.sent = false;
-          await this.#finishNative(change, "not_applied");
-          throw error;
+          throw await this.#finishRefusedWrite(change, "not_applied", error);
         }
       }
       const after = await this.client.listLinks(source);
@@ -2437,8 +2447,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           setting.sent = false;
-          await this.#finishNative(change, "not_applied");
-          throw error;
+          throw await this.#finishRefusedWrite(change, "not_applied", error);
         }
       }
       const after = await this.client.getAccessory(change.created_accessory_id);
@@ -2669,10 +2678,13 @@ export class AutomationService {
           removal.uncertain_retry_sent = undefined;
           removal.physical_links_before = undefined;
           removal.physical_links_after = undefined;
-          await this.#finishNative(change, "applied", undefined, {
-            observed_snapshot: current,
-          });
-          throw error;
+          throw await this.#finishRefusedWrite(
+            change,
+            "applied",
+            error,
+            undefined,
+            { observed_snapshot: current },
+          );
         }
       }
       const after = await this.client.listLinks(source);
@@ -2738,10 +2750,13 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           setting.sent = false;
-          await this.#finishNative(change, "applied", undefined, {
-            observed_snapshot: current,
-          });
-          throw error;
+          throw await this.#finishRefusedWrite(
+            change,
+            "applied",
+            error,
+            undefined,
+            { observed_snapshot: current },
+          );
         }
       }
       const after = await this.client.getAccessory(change.created_accessory_id);
@@ -2781,10 +2796,13 @@ export class AutomationService {
       change.native_acknowledged = virtualLightAllWritesAcknowledged(change);
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "applied",
+          error,
+          undefined,
+          { observed_snapshot: current },
+        );
       }
     }
     change.native_acknowledged = virtualLightAllWritesAcknowledged(change);
@@ -3346,10 +3364,13 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "not_applied", undefined, {
-          configuration_matches: true,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "not_applied",
+          error,
+          undefined,
+          { configuration_matches: true },
+        );
       }
       return this.#reconcileLogicAssignmentApply(change, false);
     }
@@ -3486,10 +3507,13 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied", undefined, {
-          configuration_matches: true,
-        });
-        throw error;
+        throw await this.#finishRefusedWrite(
+          change,
+          "applied",
+          error,
+          undefined,
+          { configuration_matches: true },
+        );
       }
       return this.#reconcileLogicAssignmentRestore(change, false);
     }
@@ -3718,8 +3742,7 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied", current);
-        throw error;
+        throw await this.#finishRefusedWrite(change, "applied", error, current);
       }
       return this.#reconcileValueAfterWrite(change, "restore");
     }
@@ -3825,6 +3848,29 @@ export class AutomationService {
       saved,
       "restore_state_storage_then_get_native_change",
     );
+  }
+
+  // A write that did not reach an uncertain outcome ends in the definite
+  // status of its direction. When the hub itself refused it, the refusal is
+  // kept on the write intent and returned with the error, so the agent sees
+  // why instead of an unknown outcome to reconcile.
+  async #finishRefusedWrite(change, status, error, observedValue, extra = {}) {
+    const rejection = writeRejection(error);
+    await this.#finishNative(change, status, observedValue, {
+      ...extra,
+      ...(rejection && change.write_intent
+        ? { write_intent: { ...change.write_intent, rejection } }
+        : {}),
+    });
+    if (rejection) {
+      error.details = {
+        ...error.details,
+        change_ref: `spruthub-change://native/${change.id}`,
+        hub_effect: "not_applied",
+        rejection,
+      };
+    }
+    return error;
   }
 
   async #recordNativeObservation(change, observedValue, result) {
@@ -4146,8 +4192,7 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "not_applied");
-        throw error;
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
       }
       return this.#reconcileScenarioApply(change, false);
     }
@@ -4419,8 +4464,7 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied");
-        throw error;
+        throw await this.#finishRefusedWrite(change, "applied", error);
       }
       return this.#reconcileScenarioRestore(change, false);
     }
@@ -4673,8 +4717,7 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        await this.#finishNative(change, "applied");
-        throw error;
+        throw await this.#finishRefusedWrite(change, "applied", error);
       }
       return this.#reconcileScenarioRestore(change, false);
     }
@@ -4905,6 +4948,7 @@ export class AutomationService {
             change,
             changeReference,
             "prepared",
+            error,
             "restore_state_storage_then_preview_boolean_automation",
           );
           throw error;
@@ -5007,6 +5051,7 @@ export class AutomationService {
             change,
             changeReference,
             "applied",
+            error,
           );
           throw error;
         }
@@ -5172,14 +5217,18 @@ export class AutomationService {
     change,
     changeReference,
     status,
+    error,
     persistenceAction,
   ) {
+    const rejection = writeRejection(error);
     return this.#finish(
       change,
       { status },
       () => ({
+        ...error.details,
         change_ref: changeReference,
         hub_effect: "not_applied",
+        ...(rejection ? { rejection } : {}),
       }),
       persistenceAction,
     );
@@ -11555,10 +11604,33 @@ function uncertainResult(change) {
   };
 }
 
+// A sent create is unknown until the room is identified, unless the hub
+// refused the request (or it was never delivered): then no room was created.
+function roomCreationOutcomeUnknown(change) {
+  return change.native_write_sent === true && change.status !== "not_applied";
+}
+
+// An error reply to the write request means the hub received it and refused
+// it, whatever the code. Only a transport-level unknown after sending (timeout,
+// closed connection, unreadable or unrecognized reply) may have changed the
+// home.
 function isUncertainWriteError(error) {
   return (
     error instanceof SprutHubError &&
     error.requestSent === true &&
-    !["authentication_failed", "request_rejected"].includes(error.code)
+    error.hubError === undefined
   );
+}
+
+function writeRejection(error) {
+  if (!(error instanceof SprutHubError) || error.hubError === undefined) {
+    return undefined;
+  }
+  return {
+    code: error.code,
+    protocol_code: error.hubError.code,
+    ...(error.hubError.message !== undefined
+      ? { hub_message: error.hubError.message }
+      : {}),
+  };
 }

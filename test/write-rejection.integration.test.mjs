@@ -84,7 +84,7 @@ function assertRefused(result, changeRef, rejection) {
 function assertRecordedRejection(change, { status, direction, rejection }) {
   assert.equal(change.status, status, JSON.stringify(change));
   assert.equal(change.native_write_sent, true);
-  assert.equal(change.native_acknowledged, false);
+  assert.equal(change.write_intent.acknowledged, false);
   assert.equal(change.write_intent.direction, direction);
   assert.equal(change.write_intent.phase, "reconciled");
   assert.deepEqual(change.write_intent.rejection, rejection);
