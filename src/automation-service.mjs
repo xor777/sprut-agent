@@ -9903,6 +9903,25 @@ function blockCreateSnapshot(change) {
   };
 }
 
+// Flags of the first readback after create. active may differ from the
+// request without costing ownership: it belongs to scenario_active.
+function blockCreateObservedFlags(change) {
+  const observed = change.applied_snapshot;
+  if (!observed) return {};
+  const requested = change.requested_snapshot;
+  return {
+    observed_at_create: {
+      active: observed.active,
+      onStart: observed.onStart,
+      sync: observed.sync,
+    },
+    flags_exact_match:
+      observed.active === requested.active &&
+      observed.onStart === requested.onStart &&
+      observed.sync === requested.sync,
+  };
+}
+
 function blockMatchesRequested(change, scenario) {
   if (!scenario) return false;
   const current = scenarioSnapshot(scenario);
@@ -10629,6 +10648,8 @@ function publicNativeChange(
     };
   }
   if (!isNativeValueChange(change)) {
+    const createFlags =
+      change.kind === "block_create" ? blockCreateObservedFlags(change) : {};
     const diff =
       change.kind === "block_create"
         ? {
@@ -10636,6 +10657,7 @@ function publicNativeChange(
               changed: true,
               from: null,
               to: blockCreateSnapshot(change),
+              ...createFlags,
             },
           }
         : blockDataUpdateDiff(change);
@@ -10687,6 +10709,11 @@ function publicNativeChange(
               "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
               "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
               "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. A condition with a hold time is left undisclosed (held_condition). Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
+            ]
+          : []),
+        ...(createFlags.flags_exact_match === false
+          ? [
+              "SprutHub stored runtime flags other than requested at create (observed_at_create); this does not affect ownership or restore. Turning the scenario on or off is a separate scenario_active change.",
             ]
           : []),
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
