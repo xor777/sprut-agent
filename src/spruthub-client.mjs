@@ -3,6 +3,7 @@ import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
 import { inspectBlockRelations } from "./block-model.mjs";
+import { blockBindings, blockSummary, decodeBlock } from "./block-summary.mjs";
 import {
   inspectNativeOption,
   isSelectableNativeValidValue,
@@ -2205,13 +2206,12 @@ export class SprutHubClient {
   }
 
   async #readScenarioEntity(parsed, requested, deadline) {
+    // The summary needs the stored data even when configuration is not
+    // requested; the raw data reaches the agent only through that include.
     const scenario = await this.#getScenarioRecord(
       parsed.scenarioIndex,
       deadline,
-      {
-        serial: parsed.serial,
-        ...(requested.has("configuration") ? { expand: "data" } : {}),
-      },
+      { serial: parsed.serial, expand: "data" },
     );
     if (!scenario) {
       throw entityNotFound("scenario", {
@@ -2227,6 +2227,11 @@ export class SprutHubClient {
     // Runtime execution error is not editable configuration and must not be
     // folded into configuration.value or treated as a failed save.
     entity.execution_error = scenario.error === true;
+    entity.summary = await this.#scenarioSummary(
+      parsed.serial,
+      scenario,
+      deadline,
+    );
     if (requested.has("configuration")) {
       entity.configuration = normalizeScenarioConfiguration(scenario);
     }
@@ -2267,6 +2272,97 @@ export class SprutHubClient {
       }
     }
     return { kind: "scenario", ...entity };
+  }
+
+  async #scenarioSummary(serial, scenario, deadline) {
+    if (scenario.type !== "BLOCK") return codeScenarioSummary(scenario);
+    if (typeof scenario.data !== "string") {
+      return { format: "block", status: "data_not_returned" };
+    }
+    let data;
+    try {
+      data = sanitizeNativeData(JSON.parse(scenario.data));
+    } catch {
+      return { format: "block", status: "invalid_json" };
+    }
+    const context = await this.#blockNameContext(
+      serial,
+      blockBindings(data),
+      deadline,
+    );
+    return blockSummary(decodeBlock(data, context), context);
+  }
+
+  // Names for a decoded BLOCK: one accessory catalog read (the hub has no
+  // read by a list of ids), room names, and the scenario catalog only when
+  // the BLOCK runs another scenario. A failed read leaves refs unnamed
+  // instead of failing the entity read.
+  async #blockNameContext(serial, { accessoryIds, scenarioIndexes }, deadline) {
+    const needAccessories = accessoryIds.size > 0;
+    const needScenarios = scenarioIndexes.size > 0;
+    const [accessoriesRead, roomsRead, scenariosRead] = await Promise.all([
+      needAccessories
+        ? this.#readRelationSource(
+            { accessory: { list: { expand: "services,characteristics" } } },
+            deadline,
+            serial,
+            (response) =>
+              extractEntityArray(response, [
+                "accessory",
+                "list",
+                "accessories",
+              ]),
+          )
+        : null,
+      needAccessories
+        ? this.#readRelationSource(
+            { room: { list: {} } },
+            deadline,
+            serial,
+            (response) =>
+              extractEntityArray(response, ["room", "list", "rooms"]),
+          )
+        : null,
+      needScenarios
+        ? this.#readRelationSource(
+            { scenario: { list: {} } },
+            deadline,
+            serial,
+            extractScenarioCatalog,
+          )
+        : null,
+    ]);
+    const accessories = accessoriesRead?.ok
+      ? new Map(
+          accessoriesRead.value
+            .filter((accessory) => accessoryIds.has(accessory?.id))
+            .map((accessory) => [accessory.id, accessory]),
+        )
+      : null;
+    const rooms = roomsRead?.ok
+      ? new Map(
+          roomsRead.value
+            .filter((room) => typeof room?.name === "string")
+            .map((room) => [room.id, room.name]),
+        )
+      : null;
+    const scenarios = scenariosRead?.ok
+      ? new Map(
+          scenariosRead.value
+            .filter((item) => scenarioIndexes.has(item?.index))
+            .map((item) => [item.index, item]),
+        )
+      : null;
+    return {
+      homeRef: homeRef(serial),
+      accessories,
+      rooms,
+      scenarios,
+      isSensitiveControl: (control) => isSensitiveNativeNode(control),
+      namesResolved:
+        (!needAccessories || accessoriesRead.ok) &&
+        (!needScenarios || scenariosRead.ok),
+    };
   }
 
   async #readExtensionEntity(parsed, requested, deadline) {
@@ -4531,6 +4627,19 @@ function publicNativeOptionChange(
         option_key: option.key,
       },
     },
+  };
+}
+
+function codeScenarioSummary(scenario) {
+  return {
+    format: "code",
+    type: scenario.type,
+    targets_known: false,
+    ...(scenario.type === "LOGIC" ? { assigned_to: "not_read" } : {}),
+    limitation:
+      scenario.type === "LOGIC"
+        ? "Code is not analyzed: its triggers, conditions and targets are unknown. A LOGIC runs for the services it is assigned to; get_entity on a service lists its assigned_logics."
+        : "Code is not analyzed: its triggers, conditions and targets are unknown.",
   };
 }
 

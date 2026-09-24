@@ -62,12 +62,9 @@ async function read(client, args) {
   };
 }
 
-function assertReadOnly(hub) {
+function assertReadOnly(hub, baseline = hub.initialSnapshot()) {
   assert.deepEqual(hub.writes(), []);
-  assert.deepEqual(
-    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
-    [],
-  );
+  assert.deepEqual(diffHomeSnapshots(baseline, hub.snapshot()), []);
   assert.deepEqual(
     hub.requests
       .filter(({ error }) => error?.code === -32601)
@@ -286,7 +283,6 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
       onStart: false,
       sync: false,
       error: false,
-      optionsWindow: "",
       data: JSON.stringify({
         blockId: 0,
         targets: [
@@ -369,6 +365,7 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
       }),
     });
   });
+  const baseline = hub.snapshot();
   const pointer = "/configuration/value/targets/0";
 
   const result = await read(client, { entity_ref: `${homeRef}/scenario/40` });
@@ -469,5 +466,5 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
     { pointer: `${pointer}/if/conditions/4`, native_type: "cron" },
     { pointer: `${pointer}/then/1`, native_type: "notify" },
   ]);
-  assertReadOnly(hub);
+  assertReadOnly(hub, baseline);
 });

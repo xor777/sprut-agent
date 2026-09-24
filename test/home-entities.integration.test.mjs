@@ -3332,7 +3332,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(scenarioGets.length, 1);
   assert.equal(scenarioGets[0].serial, "home/A");
   assert.equal(scenarioGets[0].params.scenario.get.index, "deleted-50");
-  assert.equal("expand" in scenarioGets[0].params.scenario.get, false);
+  assert.equal(scenarioGets[0].params.scenario.get.expand, "data");
   assert.equal(scenarioLists.length, 1);
   assert.equal(scenarioLists[0].serial, "home/A");
   assert.deepEqual(scenarioLists[0].params.scenario.list, {});
