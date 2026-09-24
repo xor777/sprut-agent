@@ -3,6 +3,7 @@ import {
   isScenarioLogMessage,
   parseEntityRef,
   SprutHubError,
+  sanitizeAgentOutput,
 } from "./spruthub-client.mjs";
 
 const MAX_NATIVE_COUNT = 500;
@@ -19,8 +20,8 @@ const LEVEL_RANK = new Map(
 export function hubLogRead(input) {
   let request;
   return {
-    async read(client) {
-      request = hubLogRequest(input);
+    async read(client, secrets) {
+      request = hubLogRequest(input, secrets);
       const boundary = request.cursor?.entries.length ?? 0;
       return client.readHubLog({
         homeRef: request.homeRef,
@@ -34,15 +35,18 @@ export function hubLogRead(input) {
   };
 }
 
-function hubLogRequest({
-  home_ref: homeRef,
-  count,
-  max_bytes: maxBytes,
-  before,
-  min_level: minLevel,
-  contains,
-  scenario_ref: scenarioRef,
-}) {
+function hubLogRequest(
+  {
+    home_ref: homeRef,
+    count,
+    max_bytes: maxBytes,
+    before,
+    min_level: minLevel,
+    contains,
+    scenario_ref: scenarioRef,
+  },
+  secrets,
+) {
   const home = parseEntityRef(homeRef);
   if (home.kind !== "home") {
     throw new SprutHubError(
@@ -67,6 +71,18 @@ function hubLogRequest({
       );
     }
     scenarioIndex = scenario.scenarioIndex;
+  }
+  // The page echoes contains in filters and next after redaction. Text the
+  // redaction would hide is also hidden in the log, so it cannot match.
+  if (
+    contains !== undefined &&
+    sanitizeAgentOutput(contains, secrets) !== contains
+  ) {
+    throw new SprutHubError(
+      "invalid_log_filter",
+      "contains holds a credential or credential-shaped text. The log shows such text as [REDACTED], so this filter cannot match; search for other words of the line.",
+      "change_log_filter",
+    );
   }
   const filters = Object.fromEntries(
     Object.entries({
@@ -93,7 +109,9 @@ function hubLogRequest({
 // The cursor keeps the oldest consumed native_time T and fingerprints of
 // consumed entries at T and T+1. The next log.list asks lastTime=T+1: an
 // exclusive or inclusive hub reading then returns every unread entry at T,
-// and the fingerprints drop the ones already returned.
+// and the fingerprints drop the ones already returned. Both readings also
+// return the consumed entries at T and nothing after T+1; presentHubLog
+// refuses any other answer, which could hide or repeat entries.
 function decodeCursor(before, request) {
   try {
     const parsed = JSON.parse(Buffer.from(before, "base64url").toString());
@@ -143,20 +161,14 @@ function encodeCursor(request, time, entries) {
 }
 
 function presentHubLog(result, request) {
-  if (
-    request.cursor &&
-    result.entries.some(
-      ({ native_time: time }) => time > request.cursor.time + 1,
-    )
-  ) {
-    throw unsupportedLogPaging(request);
-  }
+  const { cursor } = request;
   const skipped = new Map();
-  for (const { time, fingerprint } of request.cursor?.entries ?? []) {
+  for (const { time, fingerprint } of cursor?.entries ?? []) {
     const key = `${time}:${fingerprint}`;
     skipped.set(key, (skipped.get(key) ?? 0) + 1);
   }
   let overlapSkipped = 0;
+  let boundaryReturned = 0;
   const unread = [];
   for (const entry of result.entries) {
     const item = {
@@ -175,9 +187,18 @@ function presentHubLog(result, request) {
     if (skipped.get(key) > 0) {
       skipped.set(key, skipped.get(key) - 1);
       overlapSkipped += 1;
+      if (item.time === cursor.time) boundaryReturned += 1;
     } else {
       unread.push(item);
     }
+  }
+  if (
+    cursor &&
+    (result.entries.some(({ native_time: time }) => time > cursor.time + 1) ||
+      boundaryReturned <
+        cursor.entries.filter(({ time }) => time === cursor.time).length)
+  ) {
+    throw unsupportedLogPaging(request);
   }
 
   const state = {
@@ -255,19 +276,16 @@ function hubLogPage(result, request, state) {
   let next = null;
   let endReason = null;
   const last = state.consumed.at(-1);
+  const boundary = [...(request.cursor?.entries ?? []), ...state.consumed]
+    .filter(({ time }) => time === last?.time || time === last?.time + 1)
+    .map(({ time, fingerprint }) => ({ time, fingerprint }));
   if (allRead && !hubMayHaveOlder) {
     endReason = "hub_returned_fewer_than_requested";
-  } else if (!last) {
-    endReason = "boundary_not_advanced";
+  } else if (!last || boundary.length > MAX_BOUNDARY_ENTRIES) {
+    // No cursor can name every consumed entry at the boundary time.
+    endReason = "older_entries_unreachable";
   } else {
-    const boundary = [...(request.cursor?.entries ?? []), ...state.consumed]
-      .filter(({ time }) => time === last.time || time === last.time + 1)
-      .map(({ time, fingerprint }) => ({ time, fingerprint }));
-    if (boundary.length > MAX_BOUNDARY_ENTRIES) {
-      endReason = "boundary_too_dense";
-    } else {
-      next = hubLogCall(request, encodeCursor(request, last.time, boundary));
-    }
+    next = hubLogCall(request, encodeCursor(request, last.time, boundary));
   }
   return {
     status: "ok",
@@ -299,6 +317,11 @@ function hubLogPage(result, request, state) {
       ...(request.cursor
         ? [
             "Paging assumes log.list lastTime returns entries at or before it; not yet confirmed on a live hub.",
+          ]
+        : []),
+      ...(endReason === "older_entries_unreachable"
+        ? [
+            `Older entries remain on the hub, but next cannot continue without gaps: more than ${MAX_BOUNDARY_ENTRIES} read entries share this page's oldest native_time. A first page with larger count and max_bytes may cross it.`,
           ]
         : []),
     ],
@@ -342,7 +365,7 @@ function hubLogCall(request, before) {
 function unsupportedLogPaging(request) {
   return new SprutHubError(
     "unsupported_log_paging",
-    "SprutHub returned entries newer than the continuation boundary, so older log pages cannot be read reliably. Read the first page again without before.",
+    "SprutHub did not answer this continuation with the newest entries at or before its boundary, so older log pages could hide or repeat entries. Read the first page again without before.",
     "restart_read_hub_log",
     { capability_status: "unknown", next: hubLogCall(request) },
   );
