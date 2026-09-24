@@ -1669,21 +1669,23 @@ const HANDLERS = {
   },
 
   "extension.list": (state) => ({
-    extensions: state.extensions.map(({ spaces: _spaces, ...summary }) => ({
-      ...summary,
-      childCount: extensionChildren(state, summary.extensionKey).length,
-    })),
+    extensions: state.extensions.map(
+      ({ spaces: _spaces, children: _children, ...summary }) => ({
+        ...summary,
+        childCount: extensionChildren(state, summary.extensionKey).length,
+      }),
+    ),
   }),
   "extension.get": (state, { extensionKey }) => {
     const extension = state.extensions.find(
       (candidate) => candidate.extensionKey === extensionKey,
     );
-    return extension
-      ? {
-          ...extension,
-          childCount: extensionChildren(state, extensionKey).length,
-        }
-      : null;
+    if (!extension) return null;
+    const { children: _children, ...detail } = extension;
+    return {
+      ...detail,
+      childCount: extensionChildren(state, extensionKey).length,
+    };
   },
   "extensionChild.list": (state, { extensionKey }) => ({
     children: extensionChildren(state, extensionKey).map(
@@ -2802,8 +2804,23 @@ function logicOptions(state, { aId, sId, type }) {
   return state.logicOptionValues[key];
 }
 
+// Children of an extension: the recipients a fixture declares on a
+// notification service (the owner's web service lists one, id "2", on
+// 2026-09-24), then the devices of a controller.
 function extensionChildren(state, extensionKey) {
-  return state.accessories
+  const declared = (
+    state.extensions.find(
+      (extension) => extension.extensionKey === extensionKey,
+    )?.children ?? []
+  ).map((child) => ({
+    extensionKey,
+    id: child.id,
+    spaceKey: "main",
+    name: child.name,
+    online: child.online ?? true,
+    optionsWindow: child.optionsWindow ?? "",
+  }));
+  const devices = state.accessories
     .filter(
       (accessory) =>
         accessory.extensionKey === extensionKey && accessory.virtual !== true,
@@ -2818,6 +2835,7 @@ function extensionChildren(state, extensionKey) {
       description: `Устройство ${accessory.deviceId}`,
       status: accessory.online ? "В сети" : "Не в сети",
     }));
+  return [...declared, ...devices];
 }
 
 // accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual

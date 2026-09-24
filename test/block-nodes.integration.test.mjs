@@ -307,3 +307,148 @@ test("switching scenarios is checked for runs back to the edited BLOCK and keeps
   );
   assert.ok(hub.state.scenarios.some((item) => item.index === b.index));
 });
+
+// Notification services as on the owner's hub on 2026-09-24: a Telegram
+// service in state FAILED without recipients and a web service with one.
+function withNotificationServices(fixture) {
+  const telegram = fixture.extensions.find(
+    (extension) => extension.extensionKey === "Notification:telegram",
+  );
+  Object.assign(telegram, { enabled: true, state: "FAILED" });
+  fixture.extensions.push({
+    extensionKey: "Notification:web",
+    type: "web",
+    index: "web",
+    bundleType: "NOTIFICATION",
+    name: "Веб-уведомления",
+    optionsWindow: "Notification/web/",
+    enabled: true,
+    state: "LOADED",
+    children: [{ id: "2", name: "Браузер владельца" }],
+  });
+}
+
+test("a scenario sends a notification when the bathroom leaks", async (t) => {
+  const { hub, client } = await setup(t, withNotificationServices);
+  // «Пришли уведомление, если протечка»: through every notification service,
+  // and to the owner's browser by name.
+  const everywhere = {
+    type: "notify",
+    text: "Протечка в ванной!",
+    mode: "PUSH",
+    to: null,
+  };
+  const browser = {
+    type: "notify",
+    text: "Протечка: закрой воду",
+    mode: "PUSH",
+    to: [{ index: "web", clients: ["2"] }],
+  };
+  const data = { targets: [whenLeak([everywhere, browser])] };
+  const { prepared, index } = await createBlock(client, data);
+  const services = {
+    telegram: {
+      ref: `${homeRef}/extension/Notification%3Atelegram`,
+      name: "Telegram",
+      enabled: true,
+      state: "FAILED",
+    },
+    web: {
+      ref: `${homeRef}/extension/Notification%3Aweb`,
+      name: "Веб-уведомления",
+      enabled: true,
+      state: "LOADED",
+    },
+  };
+  assert.deepEqual(prepared.block_action_preview.notifications, [
+    {
+      configuration_pointer: "/targets/0/then/0",
+      mode: "PUSH",
+      text: "Протечка в ванной!",
+      delivery: "all_notification_services",
+      services: [
+        { ...services.telegram, recipients: "all" },
+        { ...services.web, recipients: "all" },
+      ],
+    },
+    {
+      configuration_pointer: "/targets/0/then/1",
+      mode: "PUSH",
+      text: "Протечка: закрой воду",
+      delivery: "listed_services",
+      services: [
+        {
+          ...services.web,
+          recipients: [
+            {
+              ref: `${homeRef}/extension/Notification%3Aweb/child/2`,
+              name: "Браузер владельца",
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+  assert.deepEqual(storedData(hub, index), data);
+
+  const summary = (
+    await call(client, "get_entity", { entity_ref: scenarioRef(index) })
+  ).entity.summary;
+  assert.deepEqual(summary.steps[0].then, [
+    { type: "notify", mode: "PUSH", text: "Протечка в ванной!", to: "all" },
+    {
+      type: "notify",
+      mode: "PUSH",
+      text: "Протечка: закрой воду",
+      to: [{ service_index: "web", clients: ["2"] }],
+    },
+  ]);
+  // A notification names no device: the leak sensor is the only one used.
+  const relations = (
+    await call(client, "get_entity", {
+      entity_ref: `${homeRef}/accessory/37/service/13/characteristic/14`,
+      include: ["relations"],
+    })
+  ).entity.relations;
+  assert.deepEqual(
+    relations.scenario_roles.map(({ scenario_ref, role }) => ({
+      scenario_ref,
+      role,
+    })),
+    [{ scenario_ref: scenarioRef(index), role: "trigger" }],
+  );
+  assert.equal(relations.other_roles_count, 0);
+
+  // Each wrong part is refused where it is.
+  const notify = (fields) => ({
+    type: "notify",
+    text: "Протечка",
+    mode: "PUSH",
+    to: null,
+    ...fields,
+  });
+  const refused = await prepareCreate(client, {
+    targets: [
+      whenLeak([
+        notify({ text: "" }),
+        notify({ mode: "SMS" }),
+        notify({ mode: "MESSAGE", to: [{ index: "web", clients: null }] }),
+        notify({ to: [{ index: "sms", clients: null }] }),
+        notify({ to: [{ index: "web", clients: ["99"] }] }),
+        notify({ to: [] }),
+        // What sprut-agent shows in place of credential-shaped text is not
+        // the owner's text.
+        notify({ text: "[REDACTED]" }),
+      ]),
+    ],
+  });
+  assert.deepEqual(problemsOf(refused).sort(), [
+    "/targets/0/then/0/text",
+    "/targets/0/then/1/mode",
+    "/targets/0/then/2/to",
+    "/targets/0/then/3/to/0/index",
+    "/targets/0/then/4/to/0/clients/0",
+    "/targets/0/then/5/to",
+    "/targets/0/then/6/text",
+  ]);
+});
