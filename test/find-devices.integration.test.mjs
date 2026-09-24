@@ -1048,6 +1048,41 @@ test("a room read sees devices moved or added in the SprutHub app after the cata
   );
 });
 
+test("a room deleted in the SprutHub app is not found on the first call", async (t) => {
+  const { hub, call, callError, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  // In the SprutHub app, after the catalog: the empty balcony is deleted,
+  // the study's devices move to the living room and the study is deleted.
+  const deleteRoom = (id) =>
+    hub.state.rooms.splice(
+      hub.state.rooms.findIndex((room) => room.id === id),
+      1,
+    );
+  deleteRoom(30);
+  for (const accessory of hub.state.accessories) {
+    if (accessory.roomId === 7) accessory.roomId = 3;
+  }
+  deleteRoom(7);
+
+  const balcony = await callError("find_devices", {
+    room_ref: `${home}/room/30`,
+    kind: "light",
+  });
+  assert.equal(balcony.error.code, "room_not_found");
+  assert.deepEqual(balcony.next, {
+    tool: "home_overview",
+    arguments: { home_ref: home },
+  });
+  const study = await callError("find_devices", {
+    room_ref: `${home}/room/7`,
+    state: "on",
+  });
+  assert.equal(study.error.code, "room_not_found");
+});
+
 test("refresh re-reads names changed in the SprutHub app that a query cannot notice", async (t) => {
   const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
   const first = await call("find_devices", { query: "лампа" });
