@@ -11415,6 +11415,72 @@ test("a manual edit of a created BLOCK is still a conflict when the hub writes o
   assert.equal(hub.state.scenarios.includes(scenario), false);
 });
 
+test("the owner switching a created BLOCK's condition group to OR is an edit only over several conditions", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // The web client offers AND and OR for every condition group
+  // (research/protocol/2026-09-24-web-client-evidence.md); over one
+  // condition both mean that condition.
+  const cases = [
+    ["one condition", [characteristicCondition()]],
+    [
+      "two conditions",
+      [characteristicCondition(), characteristicCondition({ trigger: false })],
+    ],
+  ];
+  const outcomes = [];
+  for (const [name, conditions] of cases) {
+    const prepared = await prepareBlockCreate(client, {
+      name: `Свет по движению: ${name}`,
+      data: {
+        targets: [
+          everyIf({
+            when: { type: "condition", mode: "AND", conditions },
+            thenActions: [setAction()],
+          }),
+        ],
+      },
+      reason: "Включать свет по движению",
+    });
+    const changeRef = prepared.structuredContent.change_ref;
+    const applied = await client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    assert.equal(applied.structuredContent.status, "applied");
+    const scenario = hub.state.scenarios.find(
+      ({ index }) => index === applied.structuredContent.scenario_index,
+    );
+    const edited = JSON.parse(scenario.data);
+    edited.targets[0].if.mode = "OR";
+    scenario.data = JSON.stringify(edited);
+    const restored = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    outcomes.push({
+      name,
+      status: restored.structuredContent.status,
+      conflict_reason: restored.structuredContent.conflict_reason,
+      left_on_hub: hub.state.scenarios.includes(scenario),
+    });
+  }
+  assert.deepEqual(outcomes, [
+    {
+      name: "one condition",
+      status: "restored",
+      conflict_reason: undefined,
+      left_on_hub: false,
+    },
+    {
+      name: "two conditions",
+      status: "conflict",
+      conflict_reason: "manual_change",
+      left_on_hub: true,
+    },
+  ]);
+});
+
 test("an update names the stored nodes it removes and warns when hub code goes with them", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
