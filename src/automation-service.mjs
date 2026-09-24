@@ -5956,7 +5956,7 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written as stored wherever it sits in its array; each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a condition group of one condition with mode OR as AND, and an inc/dec step as a number; any other difference is an edit. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written as stored wherever it sits in its array; each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a condition group of one condition with mode OR as AND, and an inc/dec step as a number; any other difference is an edit. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
@@ -6296,11 +6296,12 @@ async function validateBlockData(
 // kept when a stored subtree reached through the same parent fields and node
 // types is the same in canonicalBlock form. It may sit at another position of
 // its array, and each stored subtree is kept at most once. Other requested
-// nodes pair, in order, with the remaining stored nodes of the same type in
-// the same array, so that their children are compared in turn; a node
-// without a pair is new, and so is everything below it. A stored node that
-// is neither kept nor paired is removed by the edit with everything below
-// it; removed holds its path in the stored data.
+// nodes pair with the remaining stored nodes of the same type in the same
+// array, first by identity (BLOCK_NODE_IDENTITIES), then in order by
+// position, so that their children are compared in turn; a node without a
+// pair is new, and so is everything below it. A stored node that is neither
+// kept nor paired is removed by the edit with everything below it; removed
+// holds its path in the stored data.
 function keptBlockSubtrees(data, stored) {
   const kept = new WeakSet();
   const counterparts = new WeakMap();
@@ -6345,22 +6346,44 @@ function keptBlockSubtrees(data, stored) {
         edited.push(child);
       }
     }
-    let next = 0;
-    for (const child of edited) {
-      if (!isRecord(child) || !Object.hasOwn(BLOCK_ALLOWED_KEYS, child.type)) {
-        continue;
+    const pairable = edited.filter(
+      (child) =>
+        isRecord(child) && Object.hasOwn(BLOCK_ALLOWED_KEYS, child.type),
+    );
+    const available = (candidate, child) =>
+      !candidate.used &&
+      isRecord(candidate.child) &&
+      candidate.child.type === child.type;
+    const pairs = new Map();
+    for (const identity of BLOCK_NODE_IDENTITIES) {
+      for (const child of pairable) {
+        const key = pairs.has(child) ? undefined : identity(child);
+        if (key === undefined) continue;
+        const candidate = candidates.find(
+          (storedChild) =>
+            available(storedChild, child) &&
+            identity(storedChild.child) === key,
+        );
+        if (!candidate) continue;
+        candidate.used = true;
+        pairs.set(child, candidate);
       }
+    }
+    let next = 0;
+    for (const child of pairable) {
+      if (pairs.has(child)) continue;
       const index = candidates.findIndex(
         (candidate, position) =>
-          position >= next &&
-          !candidate.used &&
-          isRecord(candidate.child) &&
-          candidate.child.type === child.type,
+          position >= next && available(candidate, child),
       );
       if (index === -1) continue;
       candidates[index].used = true;
       next = index + 1;
-      pair(child, candidates[index].child, child.type, candidates[index].path);
+      pairs.set(child, candidates[index]);
+    }
+    for (const child of pairable) {
+      const candidate = pairs.get(child);
+      if (candidate) pair(child, candidate.child, child.type, candidate.path);
     }
     for (const { child, path, used } of candidates) {
       if (!used && isRecord(child)) removed.push({ path, node: child });
@@ -6369,6 +6392,34 @@ function keptBlockSubtrees(data, stored) {
   if (isRecord(data) && isRecord(stored)) pair(data, stored, "root", "root");
   return { kept, counterparts, removed };
 }
+
+// What names an edited node's stored original besides its position, first
+// match wins; undefined when the node has no such key. The blockId the hub
+// gave a node comes back from get_entity and stays in an edit made from that
+// read; it is the only name of an if, a condition group, an interval, a cron
+// or code. Without it, native ids name a device action, a condition, a
+// scenario run or a delay.
+const BLOCK_NODE_IDENTITIES = [
+  (node) => (Number.isSafeInteger(node.blockId) ? node.blockId : undefined),
+  (node) => {
+    if (node.type === "service") {
+      const actions = Array.isArray(node.characteristics)
+        ? node.characteristics.map((action) => action?.cId)
+        : [];
+      return JSON.stringify([node.aId, node.sId, actions]);
+    }
+    if (node.type === "characteristic") {
+      return JSON.stringify([node.aId, node.sId, node.cId]);
+    }
+    if (SERVICE_ACTION_KINDS.includes(node.type)) {
+      return JSON.stringify([node.cId]);
+    }
+    if (["scenario", "delay", "clear_delay"].includes(node.type)) {
+      return JSON.stringify([node.index]);
+    }
+    return undefined;
+  },
+];
 
 // Stored nodes an edit removes, with what below each of them this contract
 // cannot write.
