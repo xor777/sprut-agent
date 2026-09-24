@@ -6198,6 +6198,9 @@ function blockRunShape(data) {
       ) {
         shape.conditions = true;
       }
+      // Hub code runs while the condition is evaluated and can write any
+      // device, so literal actions are not the whole target list.
+      if (kind === "code") shape.complete = false;
       if (kind === "delay") shape.delays = true;
       // Another scenario's writes are not read here.
       if (kind === "scenario") shape.complete = false;
