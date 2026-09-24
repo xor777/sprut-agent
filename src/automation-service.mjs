@@ -4982,7 +4982,7 @@ export class AutomationService {
       context: normalizeContext(context, change.home_ref),
       limitations: [
         "Preview does not change the hub and is not an atomic reservation.",
-        "existing_rules covers BLOCK scenarios that fire on this trigger and write this target. Apply reuses an equivalent rule and creates nothing next to a superset; a conflict is only reported, so the requested rule would run next to it.",
+        "existing_rules covers BLOCK scenarios that fire on this trigger and write this target. Apply reuses an equivalent rule and creates nothing next to a superset; a conflict is only reported, so the requested rule would run next to it. An inactive_superset is a turned-off rule that would do this and more: apply creates the requested rule, and turning that rule on instead would also bring back its extra behavior.",
         "Scenario associations come from the accessory index and do not establish a direction or cover arbitrary code and bridges.",
         ...(autoOff
           ? [
@@ -11703,6 +11703,7 @@ function relatedRules(scenarios, change, homeReference) {
 // superset: it already sets the target to the requested value on this
 // trigger, with the requested auto-off if any, and does more (for example
 // turns the target off later); a new rule would duplicate it.
+// inactive_superset: such a rule that is turned off; it does not block.
 // conflict: the same trigger and target with other behavior.
 function existingRuleRelation(scenario, change) {
   if (scenario.type !== "BLOCK" || typeof scenario.data !== "string") {
@@ -11761,7 +11762,13 @@ function existingRuleRelation(scenario, change) {
   differences.push(...runtime);
   const superset =
     immediateMatches && autoOffCovered && existing.shape.length === 0;
-  return { relation: superset ? "superset" : "conflict", differences };
+  if (!superset) return { relation: "conflict", differences };
+  // A turned-off rule fires nothing, so a new rule would not duplicate it;
+  // on start or sync it still fires on the trigger.
+  return {
+    relation: scenario.active === false ? "inactive_superset" : "superset",
+    differences,
+  };
 }
 
 // The first top-level `if` of a BLOCK whose conditions include the requested

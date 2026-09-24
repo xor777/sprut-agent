@@ -203,7 +203,7 @@ server.registerTool(
   {
     title: "Preview a native boolean SprutHub automation",
     description:
-      "Plans one BLOCK scenario: when a boolean characteristic becomes source_value, set another to target_value (e.g. motion turns a light on). Does not write to the hub. existing_rules lists scenarios that already fire on this trigger and write this target, each as equivalent (the same rule), superset (does this and more, e.g. also turns the light off later) or conflict (other behavior), with its differences; context lists the scenarios, logic and links tied to the two devices. Returns a change_ref for apply_automation_change. For other scenarios and writes use prepare_native_change.",
+      "Plans one BLOCK scenario: when a boolean characteristic becomes source_value, set another to target_value (e.g. motion turns a light on). Does not write to the hub. existing_rules lists scenarios that already fire on this trigger and write this target, each as equivalent (the same rule), superset (does this and more, e.g. also turns the light off later), inactive_superset (such a rule that is turned off) or conflict (other behavior), with its differences; context lists the scenarios, logic and links tied to the two devices. Returns a change_ref for apply_automation_change. For other scenarios and writes use prepare_native_change.",
     inputSchema: {
       name: z.string().min(1),
       reason: z.string().min(1),
@@ -240,7 +240,7 @@ server.registerTool(
   {
     title: "Apply a prepared SprutHub automation change",
     description:
-      "Writes to the hub: creates the scenario planned by preview_boolean_automation after rechecking bindings and existing rules. An equivalent rule is reused (already_present) and nothing is created; an equivalent rule that is turned off or runs on start or sync, and a superset rule, are a conflict with nothing created: reuse or adjust that rule instead. A rule listed as conflict in the preview does not block the create. Calling again after an interruption reconciles instead of creating a duplicate. Inspect with get_automation_change; undo with rollback_automation_change.",
+      "Writes to the hub: creates the scenario planned by preview_boolean_automation after rechecking bindings and existing rules. An equivalent rule is reused (already_present) and nothing is created; an equivalent rule that is turned off or runs on start or sync, and a superset rule that is on, are a conflict with nothing created: reuse or adjust that rule instead. A rule listed as conflict or inactive_superset in the preview does not block the create. Calling again after an interruption reconciles instead of creating a duplicate. Inspect with get_automation_change; undo with rollback_automation_change.",
     inputSchema: { change_ref: z.string().min(1) },
     annotations: {
       readOnlyHint: false,
