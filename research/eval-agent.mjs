@@ -3,6 +3,7 @@
 // not part of `npm run check`; see DEVELOPMENT.md.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -379,10 +380,13 @@ function stayedInBounds({ toolCalls, allowedRoots, forbiddenRoots }) {
   for (const call of toolCalls.filter(({ mcp }) => !mcp)) {
     const text = JSON.stringify(call.input ?? "");
     for (const [file] of text.matchAll(/\/[^\s"'`<>|;&()\\]+/g)) {
+      // Judged where the path leads: .. and symlinks resolved.
+      const target = canonicalPath(file);
       const forbidden =
         /(?:^|\/)auth\.json$/.test(file) ||
-        (forbiddenRoots.some((root) => within(file, root)) &&
-          !allowedRoots.some((root) => within(file, root)));
+        /(?:^|\/)auth\.json$/.test(target) ||
+        (forbiddenRoots.some((root) => within(target, root)) &&
+          !allowedRoots.some((root) => within(target, root)));
       if (forbidden) violations.push(`${call.name}: ${file}`);
     }
   }
@@ -1204,6 +1208,23 @@ async function prepareEvidenceRoot(requested) {
   }
   await mkdir(root, { recursive: true });
   return root;
+}
+
+// The real path of a file, or of its nearest existing ancestor joined with
+// the rest when the file does not exist.
+function canonicalPath(file) {
+  let existing = path.resolve(file);
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(existing), ...rest);
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) return path.resolve(file);
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
 }
 
 // Each path and, when it exists, its real path (macOS temp dirs live under
