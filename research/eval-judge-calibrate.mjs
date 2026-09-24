@@ -19,7 +19,7 @@ const USAGE = `Usage: npm run eval:judge-calibrate -- [options]
 Options:
   --model <id>          Judge model id (default: ${DEFAULT_JUDGE_MODEL})
   --case <names>        Only these cases, comma-separated
-  --ids <ids>           Only these labels, e.g. why-night-light/3,whats-on/12
+  --ids <ids>           Only these labels, e.g. why-night-light/no-time,whats-on/desk-lamp-off
   --concurrency <n>     Judge calls at once (default: 4)
   --out <file>          Also write every judgement as JSON`;
 
@@ -48,19 +48,31 @@ export async function main(
   }
   const cases = values.case?.split(",") ?? null;
   const ids = values.ids?.split(",") ?? null;
-  const items = Object.entries(LABELS)
-    .flatMap(([caseName, labels]) =>
-      labels.map((label, at) => ({
-        id: `${caseName}/${at + 1}`,
+  // Ids are written in the labels, so commits and notes can cite them
+  // while labels are added; each names one label.
+  const all = Object.entries(LABELS).flatMap(([caseName, labels]) =>
+    labels.map((label) => {
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(label.id ?? "")) {
+        throw new Error(`A ${caseName} label has no id or a malformed one`);
+      }
+      return {
+        ...label,
+        id: `${caseName}/${label.id}`,
         caseName,
         fixture: label.fixture ?? "apartment",
-        ...label,
-      })),
-    )
-    .filter(
-      ({ id, caseName }) =>
-        (!cases || cases.includes(caseName)) && (!ids || ids.includes(id)),
-    );
+      };
+    }),
+  );
+  const known = new Set(all.map(({ id }) => id));
+  if (known.size !== all.length) throw new Error("Two labels share an id");
+  const unknown = ids?.filter((id) => !known.has(id)) ?? [];
+  if (unknown.length > 0) {
+    throw new Error(`No label has the id ${unknown.join(", ")}`);
+  }
+  const items = all.filter(
+    ({ id, caseName }) =>
+      (!cases || cases.includes(caseName)) && (!ids || ids.includes(id)),
+  );
   for (const { caseName } of items) {
     if (!CASES[caseName]?.judge) {
       throw new Error(`Labels name ${caseName}, which has no judged answer`);

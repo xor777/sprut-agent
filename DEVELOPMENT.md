@@ -100,7 +100,7 @@ Code CLI (у 2.1.150 `opus` давал claude-opus-4-7), поэтому для �
 ```sh
 npm run eval:judge-calibrate                            # все метки, claude-sonnet-5
 npm run eval:judge-calibrate -- --case whats-on --model claude-opus-5-5
-npm run eval:judge-calibrate -- --ids why-night-light/13,whats-on/2
+npm run eval:judge-calibrate -- --ids why-night-light/no-time,whats-on/desk-lamp-off
 ```
 
 Команда печатает согласие по задачам (отдельно для меток `ambiguous`) и
