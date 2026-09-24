@@ -1,7 +1,8 @@
 // Runs the answer judge on the labelled answers of
 // research/eval-judge-labels.mjs and prints how often it agrees, per case,
 // with every disagreement. Each label is judged against its case's rubric
-// on its home as the simulator starts it (nothing done during the run).
+// on its home as the simulator starts it, after the native requests the
+// label's run sent (sent), if any.
 // It calls a model for every label, so it is not part of `npm test`; see
 // DEVELOPMENT.md.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -80,17 +81,21 @@ export async function main(
   }
 
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-judge-calibrate-"));
+  // One hub per case, home and what the label's run sent it.
+  const hubKey = ({ caseName, fixture, sent }) =>
+    `${caseName}@${fixture}@${JSON.stringify(sent ?? [])}`;
   const hubs = new Map();
   let judged;
   try {
-    for (const { caseName, fixture } of items) {
-      const key = `${caseName}@${fixture}`;
-      if (!hubs.has(key)) {
-        hubs.set(key, await startCaseHub(CASES[caseName], fixture));
-      }
+    for (const item of items) {
+      if (hubs.has(hubKey(item))) continue;
+      const hub = await startCaseHub(CASES[item.caseName], item.fixture);
+      hubs.set(hubKey(item), hub);
+      for (const params of item.sent ?? []) hub.request(params);
+      hub.settle();
     }
     judged = await mapLimit(items, concurrency, async (item) => {
-      const hub = hubs.get(`${item.caseName}@${item.fixture}`);
+      const hub = hubs.get(hubKey(item));
       const { graders, metrics } = await judgeCase(
         CASES[item.caseName],
         collectEvidence(hub, item.answer),

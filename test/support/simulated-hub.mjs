@@ -949,6 +949,22 @@ export async function startSimulatedHub(
     initialState,
     requests,
     writes: () => requests.filter(({ write }) => write),
+    // Handles native params as a request of a client without a socket, for
+    // replaying what a run sent; returns the reply, null if it is dropped.
+    request: (params) =>
+      handleMessage(
+        state,
+        requests,
+        token,
+        JSON.stringify({
+          id: requests.length + 1,
+          token,
+          serial: state.hub.serial,
+          cid,
+          params,
+        }),
+        refusals,
+      ),
     refuseNext: (method, error) => {
       const queue = refusals.get(method) ?? [];
       queue.push(
