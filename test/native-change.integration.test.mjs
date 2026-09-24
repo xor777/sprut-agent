@@ -9015,8 +9015,18 @@ function heldMotionLightData() {
 
 test("a window held open, a one-time branch and a continued timer are created, read back and removed", async (t) => {
   const { hub, stateDirectory } = await setup(t);
-  installClimateFixture(hub);
   installWindowSensor(hub);
+  installEnumAccessory(hub, {
+    id: 71,
+    name: "Кондиционер",
+    hs: "HeaterCooler",
+    hc: "Active",
+    values: [
+      { key: "INACTIVE", name: "Выключен", value: 0 },
+      { key: "ACTIVE", name: "Включён", value: 1 },
+    ],
+    current: 1,
+  });
   const client = await startClient(t, hub, stateDirectory);
   const contract = (
     await client.callTool({
@@ -9024,12 +9034,12 @@ test("a window held open, a one-time branch and a continued timer are created, r
       arguments: { operation: "block_create" },
     })
   ).structuredContent.contract;
-  const climateModeRef = `${climateServiceRef}/characteristic/31`;
+  const acActiveRef = `${homeRef}/accessory/71/service/13/characteristic/15`;
   const [
     windowService,
     windowState,
-    climateService,
-    climateMode,
+    acService,
+    acActive,
     motionService,
     motion,
     lampService,
@@ -9038,8 +9048,8 @@ test("a window held open, a one-time branch and a continued timer are created, r
     [
       `${homeRef}/accessory/70/service/13`,
       windowStateRef,
-      climateServiceRef,
-      climateModeRef,
+      `${homeRef}/accessory/71/service/13`,
+      acActiveRef,
       `${homeRef}/accessory/32/service/13`,
       motionCharacteristicRef,
       serviceRef,
@@ -9082,9 +9092,9 @@ test("a window held open, a one-time branch and a continued timer are created, r
         when: assembleConditionFromContract(contract, [windowOpenFiveMinutes]),
         thenActions: [
           assembleServiceSetFromContract(contract, {
-            ref: climateModeRef,
-            service: climateService,
-            characteristic: climateMode,
+            ref: acActiveRef,
+            service: acService,
+            characteristic: acActive,
             value: 0,
           }),
         ],

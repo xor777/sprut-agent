@@ -5,6 +5,7 @@ import {
   BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
+  CHARACTERISTIC_HOLD,
   publishedBlockNodes,
   SERVICE_ACTION_KINDS,
   TIME_TRIGGER,
@@ -5551,18 +5552,17 @@ function blockContract() {
     update: "scenario.update({index,data})",
     supported: {
       root: { required: ["targets"] },
-      target_types: ["if", "service", "delay", "scenario"],
+      target_types: ["if", "service", "delay", "scenario", "clear_delay"],
       condition_modes: ["AND", "OR"],
-      if_modes: ["EVERY"],
+      if_modes: ["EVERY", "ONCE"],
       action_types: ["set", "toggle", "inc", "dec"],
-      delay_modes: ["RESET"],
+      delay_modes: ["RESET", "CONTINUE"],
       delay_index: { type: "integer", minimum: 1, unique: true },
       characteristic_conditions: {
         boolean: ["="],
         string_or_enum: ["=", "!="],
         number: ["=", "!=", ">", ">=", "<", "<="],
-        time: 0,
-        time_condition: "",
+        hold: structuredClone(CHARACTERISTIC_HOLD),
       },
       daily_interval: {
         local_time: "HH:mm",
@@ -5629,6 +5629,8 @@ function blockContract() {
       "The same characteristic cannot be both a condition and an action in this slice.",
       "toggle (boolean), inc and dec (numeric, value is a positive step in the characteristic's unit) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow the official editor schema; a hub has not been observed running them. ONCE follows the SprutHub Wiki; what CONTINUE keeps, timeCond ">" and milliseconds as the hold unit are assumptions.',
+      "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
@@ -5764,6 +5766,7 @@ async function validateBlockData(
     intervalBoundaries: new WeakSet(),
     triggers: 0,
     scenarioRuns: [],
+    clearDelays: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
       allowedIntentId: allowedPauseIntentId,
     }),
@@ -5783,6 +5786,14 @@ async function validateBlockData(
     !(allowActionOnly && isLiteralActionOnlyBlock(data))
   ) {
     throw invalidBlock("targets", "at least one trigger=true is required");
+  }
+  for (const clear of context.clearDelays) {
+    if (!context.delayIndexes.has(clear.index)) {
+      throw invalidBlock(
+        clear.path,
+        `clear_delay index ${clear.index} has no delay with that index in this BLOCK`,
+      );
+    }
   }
 
   const scenarios = new Map();
@@ -6316,7 +6327,7 @@ function validateBlockNode(node, kind, path, context) {
       return;
     }
     if (
-      node.mode !== "EVERY" ||
+      !["EVERY", "ONCE"].includes(node.mode) ||
       node.then_delay !== 0 ||
       node.else_delay !== 0 ||
       !blockNode(node.if) ||
@@ -6325,7 +6336,7 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       throw invalidBlock(
         path,
-        "only EVERY with a condition and zero-delay branches is supported",
+        "if needs mode EVERY or ONCE, a condition and zero-delay branches",
       );
     }
     return;
@@ -6367,11 +6378,23 @@ function validateBlockNode(node, kind, path, context) {
       typeof node.hc !== "string" ||
       typeof node.trigger !== "boolean" ||
       typeof node.cond !== "string" ||
-      typeof node.value !== "string" ||
-      node.timeCond !== "" ||
-      node.time !== 0
+      typeof node.value !== "string"
     ) {
       throw invalidBlock(path, "characteristic condition is incomplete");
+    }
+    const { none, held_for: heldFor } = CHARACTERISTIC_HOLD;
+    if (
+      !(node.timeCond === none.timeCond && node.time === none.time) &&
+      !(
+        node.timeCond === heldFor.timeCond &&
+        Number.isSafeInteger(node.time) &&
+        node.time >= heldFor.time.minimum
+      )
+    ) {
+      throw invalidBlock(
+        path,
+        `characteristic hold needs timeCond "" with time 0, or timeCond "${heldFor.timeCond}" with a positive time in ${heldFor.time.unit}`,
+      );
     }
     if (node.trigger) context.triggers += 1;
     context.conditions.push({
@@ -6470,21 +6493,31 @@ function validateBlockNode(node, kind, path, context) {
     return;
   }
   if (kind === "delay") {
+    if (!["RESET", "CONTINUE"].includes(node.mode)) {
+      throw invalidBlock(path, "delay mode must be RESET or CONTINUE");
+    }
     if (
       !Number.isSafeInteger(node.index) ||
       node.index <= 0 ||
       context.delayIndexes.has(node.index) ||
-      node.mode !== "RESET" ||
       !Number.isSafeInteger(node.time) ||
       node.time <= 0 ||
       !blockNodeArray(node.targets)
     ) {
       throw invalidBlock(
         path,
-        "RESET delay index must be a positive unique integer; time must be a positive integer",
+        "delay index must be a positive unique integer; time must be a positive integer",
       );
     }
     context.delayIndexes.add(node.index);
+    return;
+  }
+  if (kind === "clear_delay") {
+    if (!Number.isSafeInteger(node.index)) {
+      throw invalidBlock(path, "clear_delay needs the index of a delay");
+    }
+    // The delay may come later in the tree; checked after the walk.
+    context.clearDelays.push({ path, index: node.index });
     return;
   }
   throw invalidBlock(path, `node type ${kind ?? "missing"} is not supported`);

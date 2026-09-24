@@ -40,6 +40,16 @@
   `comparison_to_observation=not_applicable`: значение хаб вычислит при
   исполнении. Формы взяты из схемы редактора и на хабе не наблюдались: упор
   шага в границы диапазона и запуск выключенного сценария не проверены.
+- «Дольше N минут» — удержание условия characteristic: вместо
+  `timeCond=""`, `time=0` пиши `supported.characteristic_conditions.hold.held_for`,
+  например `"timeCond":">","time":300000` для 5 минут. `if.mode=ONCE`
+  выполняет ветку только при смене результата условия (Wiki), `EVERY` — при
+  каждой проверке. `delay.mode=CONTINUE` рядом с `RESET`; узел
+  `{"type":"clear_delay","index":1}` в любой ветке отменяет delay этого BLOCK с
+  тем же `index`, такой delay обязан быть в data. На хабе эти формы не
+  наблюдались: `timeCond=">"`, миллисекунды удержания и поведение `CONTINUE`
+  при повторном входе — допущения, после первого срабатывания проверь
+  `read_hub_log`.
 - В каждую ветвь включай только те разрешённые `service/set` значения, которые
   эта ветвь должна записать. Равное текущему значение остаётся будущей командой,
   а не сохранением ручного выбора: при исполнении ветви оно снова будет записано.
@@ -102,9 +112,10 @@
   [карточку паузы](block-action-pause.md): полная замена также может
   восстановить или убрать этот контроллер.
 
-- Точную native форму поддержанных узлов `root`, `if`, `condition`,
-  `characteristic`, `service`, `set`, `delay`, `interval` и `cron` возвращает
-  свежий контракт в `supported.nodes`: обязательные поля и константы,
+- Точную native форму поддержанных узлов (`root`, `if`, `condition`,
+  `characteristic`, `service`, `set`, `toggle`, `inc`, `dec`, `delay`,
+  `clear_delay`, `scenario`, `interval`, `cron`) возвращает
+  свежий контракт в `supported.nodes`: обязательные поля, режимы и константы,
   scalar/array children, native types, строковые значения и отдельно
   `editor_optional` (`blockId`). `if.state` — серверное `hub_assigned` поле,
   при create его опускают. `hs`/`hc` берутся из `get_entity.entity.type`
@@ -119,10 +130,11 @@
   не заменяет live same-index update. Не копируй чужой BLOCK как образец
   синтаксиса: актуальные поля даёт контракт, а не эта карточка.
 - BLOCK manifest версии `2026-09-24` допускает `root.targets`, вложенные `if`
-  (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
-  опубликованными comparisons, daily interval с вложенными cron-границами,
-  cron-trigger, service/set, toggle, inc, dec, target scenario `FIRE` и delay
-  `RESET`. Условной форме нужен хотя бы один
+  (`EVERY` или `ONCE`, нулевые branch delays), `AND`/`OR`, characteristic
+  conditions с опубликованными comparisons и удержанием, daily interval с
+  вложенными cron-границами, cron-trigger, service/set, toggle, inc, dec,
+  target scenario `FIRE`, delay `RESET` или `CONTINUE` и `clear_delay`.
+  Условной форме нужен хотя бы один
   characteristic или interval с `trigger=true` либо cron-trigger; action-only
   форме разрешены только корневые
   literal `Lightbulb On=false` service/set targets. Одна характеристика не может

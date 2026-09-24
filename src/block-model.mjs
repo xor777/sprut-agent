@@ -1,4 +1,4 @@
-const TARGET_KINDS = ["if", "service", "delay", "scenario"];
+const TARGET_KINDS = ["if", "service", "delay", "clear_delay", "scenario"];
 
 // Service actions that the preview and relations interpret.
 export const SERVICE_ACTION_KINDS = ["set", "toggle", "inc", "dec"];
@@ -77,6 +77,7 @@ export const BLOCK_ALLOWED_KEYS = {
   inc: new Set(["type", "blockId", "cId", "hc", "value"]),
   dec: new Set(["type", "blockId", "cId", "hc", "value"]),
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
+  clear_delay: new Set(["type", "blockId", "index"]),
   scenario: new Set(["type", "blockId", "index", "mode"]),
 };
 
@@ -93,6 +94,7 @@ const BLOCK_CREATE_NODE_KINDS = [
   "inc",
   "dec",
   "delay",
+  "clear_delay",
   "scenario",
 ];
 
@@ -104,12 +106,29 @@ const NATIVE_SCALAR_AS_STRING = {
   string: "literal",
 };
 
+// The editor schema gives characteristic.timeCond (string) and time
+// (integer) without values. ">" and milliseconds, the unit of the observed
+// delay.time, are assumptions that still need a live check.
+export const CHARACTERISTIC_HOLD = {
+  none: { timeCond: "", time: 0 },
+  held_for: {
+    timeCond: ">",
+    time: { type: "integer", minimum: 1, unit: "milliseconds" },
+  },
+};
+
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
     editor_optional: ["blockId"],
   },
   if: {
-    constants: { mode: "EVERY", then_delay: 0, else_delay: 0 },
+    // ONCE follows the editor schema and SprutHub Wiki; not observed on a hub.
+    fields: { mode: ["EVERY", "ONCE"] },
+    modes: {
+      EVERY: "run_the_chosen_branch_on_every_check",
+      ONCE: "run_a_branch_only_when_the_condition_result_changes",
+    },
+    constants: { then_delay: 0, else_delay: 0 },
     editor_optional: ["blockId"],
     hub_assigned: { state: "omit_on_create" },
   },
@@ -126,7 +145,7 @@ const BLOCK_NODE_CONSTRAINTS = {
       cond: "string",
       value: "string",
     },
-    constants: { timeCond: "", time: 0 },
+    hold: CHARACTERISTIC_HOLD,
     value_encoding: NATIVE_SCALAR_AS_STRING,
     editor_optional: ["blockId"],
   },
@@ -188,11 +207,23 @@ const BLOCK_NODE_CONSTRAINTS = {
     editor_optional: ["blockId"],
   },
   delay: {
-    constants: { mode: "RESET" },
     fields: {
+      // CONTINUE follows the editor schema; not observed on a hub.
+      mode: ["RESET", "CONTINUE"],
       index: { type: "integer", minimum: 1, unique: true },
       // Native delay.time is milliseconds; auto_off_after_seconds stays a separate public unit.
       time: { type: "integer", minimum: 1, unit: "milliseconds" },
+    },
+    modes: {
+      RESET: "new_entry_restarts_the_full_delay",
+      CONTINUE: "new_entry_keeps_the_running_delay_expected_not_observed",
+    },
+    editor_optional: ["blockId"],
+  },
+  // Follows the editor schema; not observed on a hub.
+  clear_delay: {
+    fields: {
+      index: { type: "integer", refers_to: "index of a delay in this BLOCK" },
     },
     editor_optional: ["blockId"],
   },
@@ -300,7 +331,7 @@ export function publishedBlockNodes() {
   const children = publishedBlockChildren();
   const nodes = {};
   for (const kind of BLOCK_CREATE_NODE_KINDS) {
-    const constraints = BLOCK_NODE_CONSTRAINTS[kind] ?? {};
+    const constraints = structuredClone(BLOCK_NODE_CONSTRAINTS[kind] ?? {});
     const nodeChildren = children[kind];
     nodes[kind] = {
       ...(kind === "root" ? {} : { type: kind }),
