@@ -261,10 +261,23 @@ function decodeCharacteristicCondition(node, pointer, chain, state) {
     const value = unrecognized(state, pointer, node, "invalid_reference");
     return { value, text: "unrecognized condition" };
   }
+  const trigger = node.trigger === true;
+  if (target.sensitive) {
+    // Like its own detail read: no ref, name or compared value.
+    if (trigger) state.triggers.push(REDACTED_TEXT);
+    state.records.push(
+      sensitiveRecord(
+        target,
+        node.aId,
+        pointer,
+        trigger ? "trigger" : "condition",
+      ),
+    );
+    return { value: REDACTED, text: REDACTED_TEXT };
+  }
   const op = typeof node.cond === "string" ? node.cond : null;
   const compared = decodeValue(node.value, target);
   const held = decodeHeld(node);
-  const trigger = node.trigger === true;
   const text = `${targetText(target)} ${op ?? "?"} ${valueText(compared)}${held ? ` ${held.text}` : ""}`;
   if (trigger) state.triggers.push(text);
   state.records.push({
@@ -321,6 +334,11 @@ function decodeService(node, pointer, chain, delay, state) {
       );
       return;
     }
+    if (target.sensitive) {
+      actions.push(REDACTED);
+      records.push(sensitiveRecord(target, node.aId, actionPointer, "action"));
+      return;
+    }
     const op = ACTION_OPS[action.type];
     const value =
       action.type === "toggle"
@@ -351,13 +369,19 @@ function decodeService(node, pointer, chain, delay, state) {
   for (const record of records) {
     const siblings = records
       .filter((other) => other !== record)
-      .map(({ characteristic, op, value, unit, value_name: valueName }) => ({
-        characteristic,
-        op,
-        ...(value === undefined ? {} : { value }),
-        ...(unit === undefined ? {} : { unit }),
-        ...(valueName === undefined ? {} : { value_name: valueName }),
-      }));
+      .map((other) =>
+        other.sensitive
+          ? REDACTED
+          : {
+              characteristic: other.characteristic,
+              op: other.op,
+              ...(other.value === undefined ? {} : { value: other.value }),
+              ...(other.unit === undefined ? {} : { unit: other.unit }),
+              ...(other.value_name === undefined
+                ? {}
+                : { value_name: other.value_name }),
+            },
+      );
     if (siblings.length > 0) record.same_device_actions = siblings;
     state.records.push(record);
   }
@@ -387,6 +411,7 @@ function decodeScenarioRun(node, state) {
 // selected entity, in which branch, under which conditions and after which
 // delay. `when` joins the enclosing if conditions, time included.
 export function relationRole(record) {
+  if (record.sensitive) return REDACTED;
   const grouped = record.chain.length > 1;
   const when = record.chain
     .map(({ text, branch }) => {
@@ -644,7 +669,6 @@ function targetText(target) {
 }
 
 function decodeValue(raw, target, { numeric = false } = {}) {
-  if (target.sensitive) return { value: REDACTED };
   if (typeof raw !== "string") {
     return { value: raw === undefined ? null : raw, value_status: "not_text" };
   }
@@ -679,8 +703,12 @@ function decodeValue(raw, target, { numeric = false } = {}) {
 }
 
 function valueText({ value, unit, value_name: valueName }) {
-  if (isRecord(value)) return "[REDACTED]";
-  const base = `${typeof value === "string" ? JSON.stringify(value) : String(value)}${unit ? ` ${unit}` : ""}`;
+  // Quoted strings stay distinct from numbers and booleans.
+  const shown =
+    typeof value === "string" || (value !== null && typeof value === "object")
+      ? JSON.stringify(value)
+      : String(value);
+  const base = `${shown}${unit ? ` ${unit}` : ""}`;
   return valueName ? `${base} (${valueName})` : base;
 }
 
@@ -719,6 +747,13 @@ function withoutText({ text: _text, ...rest }) {
 }
 
 const REDACTED = { redacted: true, reason: "sensitive_native_data" };
+const REDACTED_TEXT = "[REDACTED] condition";
+
+// A role on a sensitive characteristic still counts for the entity it
+// belongs to, but reads only as the redacted marker.
+function sensitiveRecord(target, accessoryId, pointer, role) {
+  return { ref: target.ref, accessoryId, sensitive: true, role, pointer };
+}
 
 function isRedacted(value) {
   return (
