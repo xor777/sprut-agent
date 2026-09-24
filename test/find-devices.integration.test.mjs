@@ -574,21 +574,23 @@ test("kind=light lists lamps and counts every relay that is on, with a call for 
   );
 });
 
-// Independent of the product: refs of the simulator's services that pass
-// keep, which gets the service, its accessory and the words of the service,
-// device and room names.
+// Independent of the product: refs of the simulator's non-technical
+// services that pass keep, which gets the service, its accessory and the
+// words of the service, device and room names.
 function servicesWhere(state, home, keep) {
   return state.accessories.flatMap((accessory) => {
     const room = state.rooms.find(({ id }) => id === accessory.roomId);
     return accessory.services
-      .filter((service) =>
-        keep({
-          service,
-          accessory,
-          words: `${service.name} ${accessory.name} ${room?.name ?? ""}`
-            .toLowerCase()
-            .split(/[^\p{L}\p{N}]+/u),
-        }),
+      .filter(
+        (service) =>
+          !["AccessoryInformation", "BatteryService"].includes(service.type) &&
+          keep({
+            service,
+            accessory,
+            words: `${service.name} ${accessory.name} ${room?.name ?? ""}`
+              .toLowerCase()
+              .split(/[^\p{L}\p{N}]+/u),
+          }),
       )
       .map(({ sId }) => `${home}/accessory/${accessory.id}/service/${sId}`);
   });
@@ -690,9 +692,12 @@ test("a light word classifies the question: lamps are found by type, not by the 
   const stairsLight = hub.state.accessories.find(
     ({ name }) => name === "Подсветка лестницы",
   );
+  const stairsLamp = stairsLight.services.find(
+    ({ type }) => type === "Lightbulb",
+  );
   assert(
     stairs.includes(
-      `${home}/accessory/${stairsLight.id}/service/${stairsLight.services[0].sId}`,
+      `${home}/accessory/${stairsLight.id}/service/${stairsLamp.sId}`,
     ),
   );
 });
@@ -1274,22 +1279,23 @@ test("a room deleted in the SprutHub app is not found on the first call", async 
 
 test("refresh re-reads names changed in the SprutHub app that a query cannot notice", async (t) => {
   const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
-  const first = await call("find_devices", { query: "лампа" });
+  // A name word, not a light word: "лампа" alone would ask for every lamp.
+  const first = await call("find_devices", { query: "настольная" });
   assert.deepEqual(
     listed(first.body).map(({ device }) => device.name),
     ["Настольная лампа"],
   );
-  addLampInHub(hub, 60, 5, "Лампа у кровати");
+  addLampInHub(hub, 60, 5, "Настольный светильник");
   hub.state.rooms.find(({ id }) => id === 5).name = "Спальня родителей";
 
   const refreshed = await call("find_devices", {
-    query: "лампа",
+    query: "настольная",
     refresh: true,
   });
   assert.deepEqual(
     listed(refreshed.body).map(({ room, device }) => [room.name, device.name]),
     [
-      ["Спальня родителей", "Лампа у кровати"],
+      ["Спальня родителей", "Настольный светильник"],
       ["Кабинет", "Настольная лампа"],
     ],
   );

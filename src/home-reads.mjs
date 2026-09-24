@@ -476,6 +476,11 @@ function findSelection(input, serial) {
   const query = input.query ?? null;
   const words = query === null ? [] : queryWords(query);
   const otherWords = words.filter(({ word }) => !LIGHT_WORD.test(word));
+  // A light question lists beside its answer the standalone relays and
+  // sockets that match its filters without its light words.
+  const lightQuestion =
+    input.kind === "light" ||
+    (input.kind === undefined && otherWords.length < words.length);
   const limit = input.limit ?? DEFAULT_LIMIT;
   const maxBytes = input.maxBytes ?? DEFAULT_MAX_BYTES;
   const args = {
@@ -501,11 +506,13 @@ function findSelection(input, serial) {
     query,
     words,
     stems: query === null ? null : words.map(({ stem }) => stem),
-    // A light question lists beside its answer the standalone relays and
-    // sockets that match its filters without its light words.
-    lightQuestion:
-      input.kind === "light" ||
-      (input.kind === undefined && otherWords.length < words.length),
+    // In a light question the light words name no device: every lamp that
+    // matches the other words is listed, all lamps when none are left.
+    lampStems:
+      lightQuestion && query !== null
+        ? otherWords.map(({ stem }) => stem)
+        : null,
+    lightQuestion,
     otherWords,
     kind: input.kind ?? null,
     state: input.state ?? null,
@@ -521,6 +528,9 @@ function findSelection(input, serial) {
   };
 }
 
+// The services that pass the filters. With a query, a service's names must
+// match every word; in a light question a lamp need match only the words
+// other than light words (lampStems).
 function selectCandidates(catalog, selection) {
   const candidates = [];
   for (const accessory of catalog.accessories) {
@@ -531,14 +541,14 @@ function selectCandidates(catalog, selection) {
       const kind = serviceKind(service);
       if (kind === "technical" && !selection.includeTechnical) continue;
       if (selection.kind !== null && kind !== selection.kind) continue;
-      if (
-        selection.stems !== null &&
-        !matchesStems(
-          selection.stems,
-          deviceText(service, accessory, catalog.rooms),
-        )
-      ) {
-        continue;
+      if (selection.stems !== null) {
+        const text = deviceText(service, accessory, catalog.rooms);
+        const lamp =
+          kind === "light" &&
+          selection.lampStems !== null &&
+          (selection.lampStems.length === 0 ||
+            matchesStems(selection.lampStems, text));
+        if (!lamp && !matchesStems(selection.stems, text)) continue;
       }
       candidates.push({
         accessory,
@@ -638,16 +648,20 @@ function switchesOnPage({ next, ...section }, limit) {
   };
 }
 
-// Why a query of several words found nothing: how many services match all
-// its words before a state filter, and how many each word matches alone,
-// with the other filters.
+// Why a query of several words found nothing: how many services the query
+// matches before a state filter, and how many names each word matches
+// alone, with the other filters.
 function queryWordMatches(catalog, selection, evaluated) {
   return {
     matching_all: evaluated.length,
     matching_each: Object.fromEntries(
       selection.words.map(({ word, stem }) => [
         word,
-        selectCandidates(catalog, { ...selection, stems: [stem] }).length,
+        selectCandidates(catalog, {
+          ...selection,
+          stems: [stem],
+          lampStems: null,
+        }).length,
       ]),
     ),
   };
@@ -1474,9 +1488,11 @@ export function queryStems(query) {
 }
 
 // A query word that asks about light in general ("свет", "освещение",
-// "лампы", "подсветка"): then the answer lists the relays beside it. It
-// classifies the question, never a device. A lamp's own name ("торшер")
-// asks for that device and brings no relay list.
+// "лампы", "подсветка"): then the answer lists every lamp that matches the
+// other words, whatever its names, and the relays beside them. It
+// classifies the question, never a device; a service whose names match all
+// the words is listed as well. A lamp's own name ("торшер") asks for that
+// device and brings no relay list.
 const LIGHT_WORD = /^(?:свет|подсвет|освещ|ламп|light|lamp)/;
 
 // Every stem must start a word of the text: "не" does not match inside
