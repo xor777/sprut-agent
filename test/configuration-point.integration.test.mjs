@@ -1302,6 +1302,69 @@ test("a later agent follows get_configuration_point next to a compared change of
   assert.equal(hubWriteRequests(hub.requests).length, 0);
 });
 
+test("a BLOCK kept with or without the web client's if defaults compares unchanged", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  // The web client leaves out if mode, branch delays and else
+  // (research/protocol/2026-09-24-web-client-evidence.md); the same BLOCK
+  // saved again may hold them written out.
+  const interfaceForm = officeBlockData();
+  for (const key of ["mode", "then_delay", "else_delay", "else"]) {
+    delete interfaceForm.targets[0][key];
+  }
+  hub.state.scenarios[0].data = JSON.stringify(interfaceForm);
+  const client = await startClient(t, hub, stateDirectory);
+  const saved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
+    }),
+  );
+  const compare = async () =>
+    comparisonFor(
+      toolResult(
+        await client.callTool({
+          name: "get_configuration_point",
+          arguments: { point_ref: saved.point_ref, compare: true },
+        }),
+      ),
+      scenarioRef,
+    );
+
+  hub.state.scenarios[0].data = JSON.stringify(officeBlockData({ blockId: 8 }));
+  const writtenOut = await compare();
+  assert.deepEqual([writtenOut.status, writtenOut.changes], ["unchanged", []]);
+
+  // A point saved before this form was compared as one kept the if as read.
+  const pointDir = (await readdir(stateDirectory)).find((name) =>
+    name.startsWith("configuration-points-"),
+  );
+  const pointFile = path.join(
+    stateDirectory,
+    pointDir,
+    `${saved.point_ref.split("/").at(-1)}.json`,
+  );
+  const point = JSON.parse(await readFile(pointFile, "utf8"));
+  const earlierCapture = structuredClone(interfaceForm);
+  delete earlierCapture.blockId;
+  for (const target of earlierCapture.targets) {
+    delete target.blockId;
+    delete target.if.blockId;
+  }
+  point.captured[0].settings.configuration.value = earlierCapture;
+  await writeFile(pointFile, `${JSON.stringify(point, null, 2)}\n`);
+  const fromEarlierPoint = await compare();
+  assert.deepEqual(
+    [fromEarlierPoint.status, fromEarlierPoint.changes],
+    ["unchanged", []],
+  );
+
+  hub.state.scenarios[0].data = JSON.stringify(officeBlockData({ delay: 5 }));
+  const realChange = await compare();
+  assert.deepEqual(realChange.changes, [
+    { path: thenDelayPath, from: 0, to: 5 },
+  ]);
+});
+
 test("incomplete logic and window options are not compared as added, removed, or equal", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

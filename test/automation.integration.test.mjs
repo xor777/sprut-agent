@@ -262,6 +262,11 @@ function respond(state, params) {
       index: `created-${state.nextScenario++}`,
       predefined: false,
     };
+    if (state.compactStoredIf) {
+      scenario.data = JSON.stringify(
+        withoutIfDefaults(JSON.parse(scenario.data)),
+      );
+    }
     state.scenarios.push(scenario);
     return { scenario: { create: scenario } };
   }
@@ -350,6 +355,26 @@ function respond(state, params) {
     };
   }
   throw new Error(`Unexpected operation: ${JSON.stringify(params)}`);
+}
+
+// A hub that keeps an if without the defaults the official web client also
+// leaves out: mode EVERY, zero branch delays and an empty else
+// (research/protocol/2026-09-24-web-client-evidence.md). Which form SprutHub
+// stores is not observed; the rule means the same either way.
+function withoutIfDefaults(data) {
+  const visit = (node) => {
+    if (node?.type !== "if") return;
+    if (node.mode === "EVERY") delete node.mode;
+    for (const key of ["then_delay", "else_delay"]) {
+      if (node[key] === 0) delete node[key];
+    }
+    if (Array.isArray(node.else) && node.else.length === 0) delete node.else;
+    for (const child of [...(node.then ?? []), ...(node.else ?? [])]) {
+      visit(child);
+    }
+  };
+  for (const target of data.targets) visit(target);
+  return data;
 }
 
 async function startClient(t, hub, stateDirectory) {
@@ -1024,6 +1049,183 @@ test("a broader rule that also runs on start still blocks a duplicate", async (t
   );
   assert.equal(applied.structuredContent.created, false);
   assert.deepEqual(hub.state.scenarios, scenariosBefore);
+});
+
+// The requested rule as the owner made it in the SprutHub interface: the web
+// client leaves out mode and branch delays and writes else null or nothing
+// (research/protocol/2026-09-24-web-client-evidence.md); the hub numbers the
+// nodes and keeps a runtime state on the if.
+function interfaceOfficeMotionRule({ runtime = {}, noElse = {} } = {}) {
+  return {
+    index: "interface-motion-light",
+    name: "Свет в офисе по движению",
+    desc: "Настроено в интерфейсе",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    ...runtime,
+    data: JSON.stringify({
+      blockId: 0,
+      targets: [
+        {
+          type: "if",
+          blockId: 1,
+          state: false,
+          if: {
+            type: "condition",
+            blockId: 2,
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                blockId: 3,
+                aId: 32,
+                sId: 13,
+                cId: 15,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                cond: "=",
+                value: "true",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+          then: [
+            {
+              type: "service",
+              blockId: 4,
+              aId: 34,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", blockId: 5, cId: 15, hc: "On", value: "true" },
+              ],
+            },
+          ],
+          ...noElse,
+        },
+      ],
+    }),
+  };
+}
+
+test("the same rule made in the SprutHub interface is reused or reported, never duplicated", async (t) => {
+  const interfaceRuleRef =
+    "spruthub://hub/automation-test-hub/scenario/interface-motion-light";
+  for (const [name, rule, expected] of [
+    [
+      "turned on, without else",
+      interfaceOfficeMotionRule(),
+      { differences: [], status: "already_present" },
+    ],
+    [
+      "turned off, without else",
+      interfaceOfficeMotionRule({ runtime: { active: false } }),
+      {
+        differences: [{ field: "active", existing: false, requested: true }],
+        status: "conflict",
+        reason: "equivalent_rule_runtime_mismatch",
+      },
+    ],
+    [
+      "turned off, else null",
+      interfaceOfficeMotionRule({
+        runtime: { active: false },
+        noElse: { else: null },
+      }),
+      {
+        differences: [{ field: "active", existing: false, requested: true }],
+        status: "conflict",
+        reason: "equivalent_rule_runtime_mismatch",
+      },
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      hub.state.scenarios.push(rule);
+      const scenariosBefore = structuredClone(hub.state.scenarios);
+      const client = await startClient(t, hub, stateDirectory);
+
+      const prepared = await preview(client);
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      assert.deepEqual(prepared.structuredContent.existing_rules, [
+        {
+          ref: interfaceRuleRef,
+          name: "Свет в офисе по движению",
+          relation: "equivalent",
+          differences: expected.differences,
+        },
+      ]);
+      const applied = await client.callTool({
+        name: "apply_automation_change",
+        arguments: { change_ref: prepared.structuredContent.change_ref },
+      });
+      assert.equal(applied.isError, undefined, applied.content[0]?.text);
+      assert.deepEqual(
+        {
+          status: applied.structuredContent.status,
+          reason: applied.structuredContent.reason,
+          scenario_index: applied.structuredContent.scenario_index,
+          owned: applied.structuredContent.owned,
+        },
+        {
+          status: expected.status,
+          reason: expected.reason,
+          scenario_index: "interface-motion-light",
+          owned: false,
+        },
+      );
+      assert.equal(
+        hub.requests.some(({ scenario }) => scenario?.create),
+        false,
+      );
+      assert.deepEqual(hub.state.scenarios, scenariosBefore);
+    });
+  }
+});
+
+test("a created rule stays owned and is rolled back when the hub leaves out its if defaults", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.compactStoredIf = true;
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.owned, true);
+  const index = applied.structuredContent.scenario_index;
+  const stored = JSON.parse(
+    hub.state.scenarios.find((scenario) => scenario.index === index).data,
+  ).targets[0];
+  assert.deepEqual(
+    ["mode", "then_delay", "else_delay", "else"].filter((key) =>
+      Object.hasOwn(stored, key),
+    ),
+    [],
+  );
+
+  const status = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.structuredContent.status, "applied");
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rollback.structuredContent.status, "rolled_back");
+  assert.equal(
+    hub.state.scenarios.some((scenario) => scenario.index === index),
+    false,
+  );
 });
 
 test("apply reconciles a dropped create response without sending create twice", async (t) => {

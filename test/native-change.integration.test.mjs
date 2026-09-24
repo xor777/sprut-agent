@@ -1299,6 +1299,59 @@ function withRuntimeBlockFields(data) {
   return visit(data, "root");
 }
 
+// Which form SprutHub keeps for the if defaults of the official web client
+// (no mode, no branch delays, else null or left out;
+// research/protocol/2026-09-24-web-client-evidence.md) is not observed.
+// "explicit" stores mode EVERY, zero branch delays and else [] where the data
+// leaves them out; "compact" leaves out those equal to the defaults. Either
+// way the BLOCK means what was sent.
+function withStoredIfForm(data, form) {
+  if (form === undefined) return data;
+  const childFields = {
+    root: ["targets"],
+    if: ["if", "then", "else"],
+    condition: ["conditions"],
+    interval: ["start", "end"],
+    service: ["characteristics"],
+    delay: ["targets"],
+  };
+  const visit = (node, kind) => {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) {
+      return;
+    }
+    if (kind === "if" && form === "explicit") {
+      if (!Object.hasOwn(node, "mode")) node.mode = "EVERY";
+      for (const key of ["then_delay", "else_delay"]) {
+        if (!Object.hasOwn(node, key)) node[key] = 0;
+      }
+      if (node.else === undefined || node.else === null) node.else = [];
+    }
+    if (kind === "if" && form === "compact") {
+      if (node.mode === "EVERY") delete node.mode;
+      for (const key of ["then_delay", "else_delay"]) {
+        if (node[key] === 0) delete node[key];
+      }
+      if (
+        node.else === null ||
+        (Array.isArray(node.else) && node.else.length === 0)
+      ) {
+        delete node.else;
+      }
+    }
+    for (const key of childFields[kind] ?? []) {
+      const value = node[key];
+      if (Array.isArray(value)) {
+        for (const child of value) visit(child, child?.type);
+      } else {
+        visit(value, value?.type);
+      }
+    }
+  };
+  const stored = structuredClone(data);
+  visit(stored, "root");
+  return stored;
+}
+
 function scenarioBindingProjection(data, accessories) {
   const rooms = new Set();
   const iconsIf = [];
@@ -1567,6 +1620,8 @@ async function startHub(port = 0) {
       rejectNextRoomGetAsInternalError: false,
       recalculateBlockRooms: false,
       projectBlockDerivedFields: false,
+      // See withStoredIfForm.
+      storedIfForm: undefined,
     },
   };
   state.accessories[1].services[0].characteristics.push(state.characteristic);
@@ -2079,8 +2134,11 @@ async function startHub(port = 0) {
           data:
             params.scenario.create.type === "BLOCK"
               ? JSON.stringify(
-                  withRuntimeBlockFields(
-                    JSON.parse(params.scenario.create.data),
+                  withStoredIfForm(
+                    withRuntimeBlockFields(
+                      JSON.parse(params.scenario.create.data),
+                    ),
+                    state.behavior.storedIfForm,
                   ),
                 )
               : params.scenario.create.data,
@@ -2163,7 +2221,10 @@ async function startHub(port = 0) {
           ) {
             const requestedData = JSON.parse(params.scenario.update.data);
             scenario.data = JSON.stringify(
-              withRuntimeBlockFields(requestedData),
+              withStoredIfForm(
+                withRuntimeBlockFields(requestedData),
+                state.behavior.storedIfForm,
+              ),
             );
             if (
               state.behavior.recalculateBlockRooms ||
@@ -9761,14 +9822,16 @@ test("a step that SprutHub stores as a number keeps the created BLOCK owned and 
   assert.equal(created.structuredContent.status, "applied");
   assert.equal(created.structuredContent.configuration_matches, true);
   const createdIndex = created.structuredContent.scenario_index;
-  const stored = scenarioData(hub, createdIndex);
-  assert.deepEqual(
-    [
-      stored.targets[0].then[0].characteristics[0].value,
-      stored.targets[1].then[0].characteristics[0].value,
-    ],
-    [10, 10],
+  const stepsOf = (data) => [
+    data.targets[0].then[0].characteristics[0].value,
+    data.targets[1].then[0].characteristics[0].value,
+  ];
+  // Both steps are sent as the number the hub keeps.
+  const sent = JSON.parse(
+    hub.requests.find(({ scenario }) => scenario?.create).scenario.create.data,
   );
+  assert.deepEqual(stepsOf(sent), [10, 10]);
+  assert.deepEqual(stepsOf(scenarioData(hub, createdIndex)), [10, 10]);
 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
@@ -9853,6 +9916,17 @@ test("relative actions and scenario runs outside the contract are refused before
       lampAction({ type: "inc", cId: 16, hc: "Brightness" }),
       /characteristics\/0\/value: inc value must be a positive step/,
     ],
+    // A step is a number or a plain decimal string; how the hub reads other
+    // spellings is not observed.
+    ...[
+      ["hex step", "0xA"],
+      ["exponent step", "1e1"],
+      ["padded step", " 10 "],
+    ].map(([name, value]) => [
+      name,
+      lampAction({ type: "inc", cId: 16, hc: "Brightness", value }),
+      /characteristics\/0\/value: inc value must be a positive step/,
+    ]),
     [
       "copy another value",
       lampAction({
@@ -11011,6 +11085,316 @@ test("a new BLOCK may leave out else and branch delays as the web client does", 
     scenarioData(hub, created.structuredContent.scenario_index),
     withRuntimeBlockFields(data),
   );
+});
+
+// An if as the web client creates it: without mode or branch delays, and
+// with else null or without else.
+function motionLightIf(...leftOut) {
+  const rule = everyIf({
+    when: conditionGroup(characteristicCondition()),
+    thenActions: [setAction()],
+  });
+  for (const key of leftOut) delete rule[key];
+  return rule;
+}
+
+const IF_DEFAULT_KEYS = ["mode", "then_delay", "else_delay", "else"];
+
+test("a BLOCK with the web client's if defaults stays owned and restorable whichever form the hub stores", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    ["explicit", "no mode", motionLightIf("mode")],
+    ["explicit", "no branch delays", motionLightIf("then_delay", "else_delay")],
+    ["explicit", "else null", { ...motionLightIf(), else: null }],
+    ["explicit", "no else", motionLightIf("else")],
+    ["compact", "every default written out", motionLightIf()],
+  ];
+  const outcomes = [];
+  for (const [form, name, rule] of cases) {
+    hub.state.behavior.storedIfForm = form;
+    const prepared = await prepareBlockCreate(client, {
+      name: `Свет по движению: ${name}`,
+      data: { targets: [rule] },
+      reason: "Включать свет по движению",
+    });
+    const changeRef = prepared.structuredContent.change_ref;
+    const applied = await client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    const index = applied.structuredContent.scenario_index;
+    const stored = scenarioData(hub, index).targets[0];
+    const observed = await client.callTool({
+      name: "get_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    const restored = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    outcomes.push({
+      name,
+      applied: applied.structuredContent.status,
+      configuration_matches: applied.structuredContent.configuration_matches,
+      // The fake hub really stored another form than was sent.
+      stored_defaults: IF_DEFAULT_KEYS.filter((key) =>
+        Object.hasOwn(stored, key),
+      ).map((key) => [key, stored[key]]),
+      observed: observed.structuredContent.status,
+      restored: restored.structuredContent.status,
+      left_on_hub: hub.state.scenarios.some(
+        (scenario) => scenario.index === index,
+      ),
+    });
+  }
+  assert.deepEqual(
+    outcomes,
+    cases.map(([form, name]) => ({
+      name,
+      applied: "applied",
+      configuration_matches: true,
+      stored_defaults:
+        form === "explicit"
+          ? [
+              ["mode", "EVERY"],
+              ["then_delay", 0],
+              ["else_delay", 0],
+              ["else", []],
+            ]
+          : [],
+      observed: "applied",
+      restored: "restored",
+      left_on_hub: false,
+    })),
+  );
+});
+
+test("an update that adds an if with the web client's defaults applies and restores when the hub writes them out", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.storedIfForm = "explicit";
+  const original = scenarioData(hub, "existing-block");
+
+  const edited = await readBlockConfiguration(client);
+  // «Пока есть движение, яркость 20», added as the web client adds an if.
+  edited.targets.push({
+    type: "if",
+    if: conditionGroup(characteristicCondition({ trigger: false }), "OR"),
+    // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+    then: [setAction({ cId: 16, hc: "Brightness", value: "20" })],
+    else: null,
+  });
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Пока есть движение, держать яркость 20",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const added = scenarioData(hub, "existing-block").targets[1];
+  assert.deepEqual(
+    IF_DEFAULT_KEYS.map((key) => added[key]),
+    ["EVERY", 0, 0, []],
+  );
+
+  const observed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "applied");
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(original),
+  );
+});
+
+test("an action pause stays owned when the hub leaves out the if defaults of its controller", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.storedIfForm = "compact";
+  const actionPointer = "/targets/0/then/1";
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: actionPointer,
+      duration_seconds: 120,
+      reason: "Два часа не выключать свет",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.pause_effect.status, "active");
+  const controller = blockNodeAtPointer(
+    scenarioData(hub, "existing-block"),
+    actionPointer,
+  );
+  assert.deepEqual(
+    IF_DEFAULT_KEYS.filter((key) => Object.hasOwn(controller, key)),
+    [],
+  );
+
+  const observed = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "applied");
+  assert.equal(observed.structuredContent.pause_effect.status, "active");
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    blockNodeAtPointer(scenarioData(hub, "existing-block"), actionPointer).type,
+    "delay",
+  );
+});
+
+test("a manual edit of a created BLOCK is still a conflict when the hub writes out the if defaults", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.storedIfForm = "explicit";
+  const prepared = await prepareBlockCreate(client, {
+    name: "Свет по движению",
+    data: { targets: [motionLightIf(...IF_DEFAULT_KEYS)] },
+    reason: "Включать свет по движению",
+  });
+  const changeRef = prepared.structuredContent.change_ref;
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: changeRef },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  const appliedData = scenario.data;
+
+  // Edits the owner can make in the SprutHub interface, also of the fields
+  // whose defaults the web client leaves out.
+  const edits = [
+    ["condition value", (rule) => (rule.if.conditions[0].value = "false")],
+    ["mode ONCE", (rule) => (rule.mode = "ONCE")],
+    ["repeat period", (rule) => (rule.then_delay = 1000)],
+    ["else action", (rule) => (rule.else = [setAction({ value: "false" })])],
+  ];
+  const outcomes = [];
+  for (const [name, edit] of edits) {
+    const data = JSON.parse(appliedData);
+    edit(data.targets[0]);
+    scenario.data = JSON.stringify(data);
+    const refused = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    });
+    outcomes.push({
+      name,
+      status: refused.structuredContent.status,
+      conflict_reason: refused.structuredContent.conflict_reason,
+    });
+  }
+  assert.deepEqual(
+    outcomes,
+    edits.map(([name]) => ({
+      name,
+      status: "conflict",
+      conflict_reason: "manual_change",
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario: request }) => request?.delete),
+    false,
+  );
+
+  scenario.data = appliedData;
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: changeRef },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.state.scenarios.includes(scenario), false);
+});
+
+test("an update names the stored nodes it removes and warns when hub code goes with them", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const removal = (result) => {
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return {
+      removed_nodes:
+        result.structuredContent.block_action_preview.removed_nodes,
+      deletion_warnings: result.structuredContent.limitations.filter((line) =>
+        /\/targets\/0\/then\/\d/.test(line),
+      ),
+    };
+  };
+
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(webClientCodeBlock()),
+  );
+  const replaced = await readBlockConfiguration(client);
+  replaced.targets[0].then.splice(0, 1, setAction());
+  const codeRemoved = await prepareBlockUpdate(
+    client,
+    replaced,
+    "Включать свет вместо записи в журнал",
+  );
+  const unchanged = await readBlockConfiguration(client);
+  unchanged.targets[0].if.conditions[0].value = "false";
+  const nothingRemoved = await prepareBlockUpdate(
+    client,
+    unchanged,
+    "Писать в журнал, когда движение прекратилось",
+  );
+
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(blockData()),
+  );
+  const withoutDelay = await readBlockConfiguration(client);
+  withoutDelay.targets[0].then.splice(1, 1);
+  const delayRemoved = await prepareBlockUpdate(
+    client,
+    withoutDelay,
+    "Не выключать свет через минуту",
+  );
+
+  const [code, nothing, delay] = [
+    codeRemoved,
+    nothingRemoved,
+    delayRemoved,
+  ].map(removal);
+  assert.deepEqual(code.removed_nodes, [
+    { pointer: "/targets/0/then/0", type: "code" },
+  ]);
+  assert.equal(code.deletion_warnings.length, 1);
+  assert.match(code.deletion_warnings[0], /code at \/targets\/0\/then\/0/);
+  assert.deepEqual(nothing, { removed_nodes: [], deletion_warnings: [] });
+  assert.deepEqual(delay, {
+    removed_nodes: [{ pointer: "/targets/0/then/1", type: "delay" }],
+    deletion_warnings: [],
+  });
+  const stored = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: codeRemoved.structuredContent.change_ref },
+  });
+  assert.deepEqual(removal(stored), code);
 });
 
 test("a clear_delay for all delays of the BLOCK is created and read back", async (t) => {
