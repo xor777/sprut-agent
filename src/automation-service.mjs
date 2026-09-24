@@ -14,6 +14,7 @@ import {
   CLEAR_ALL_DELAYS,
   canonicalBlock,
   canonicalBlockNode,
+  HTTP_METHODS,
   isBlockTrigger,
   NOTIFY_MODES,
   normalizeBlockRequest,
@@ -22,6 +23,7 @@ import {
   SCENARIO_TARGET_MODES,
   SERVICE_ACTION_KINDS,
   scenarioTargetRuns,
+  shownHttpUrl,
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
@@ -690,6 +692,7 @@ export class AutomationService {
       pauseChanges,
       Date.now(),
     );
+    restoreHiddenBlockStrings(prepared.data, baseline.data);
     normalizeBlockRequest(prepared.data);
     const data = withKeptSubtreesAsStored(prepared.data, baseline.data);
     // Runtime flags belong to the owner here: this operation never writes
@@ -5992,11 +5995,11 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code, http and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
-      "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
+      "Daily interval and time_trigger times use the selected hub's local wall clock. The hub's time zone (TimeZone) and current time (Time) are in the home settings window: get_entity on the home's options_window_ref from home_overview. Convert a time given in another zone only after reading them.",
       "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, and a days_at_time for every day fired at its minute of the hub clock; firing of the other forms is not observed, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
@@ -6005,6 +6008,7 @@ function blockContract() {
       "A scenario target names an existing scenario of this home by its index and a mode from the web client: FIRE runs it, ACTIVATE turns it on, DEACTIVATE turns it off, ACTIVATE_AND_FIRE turns it on and runs it, RESET resets it (known only from the editor label «Сбросить»). A target that runs (FIRE, ACTIVATE_AND_FIRE) must not run its own BLOCK, directly or through running scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. A BLOCK may turn itself off. The modes follow the official editor; a hub has not been observed running any of them, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null for all of them, or [{index, clients}] with a service's index and clients null for all its recipients or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled and state as read at preparation: a service that is not enabled or not LOADED may deliver nothing, so tell the owner. The hub has not been observed storing or sending a notify.",
+      "http makes a request with a method from the web client's list to an absolute http or https URL, with no body or headers, as the web client writes it. Any such URL is accepted: what the BLOCK calls, such as a device on the home network or a webhook, is the owner's request. A URL with a user name or password is refused, since answers would repeat it. block_action_preview.http_requests and the summary show method, scheme, host and path of each request, not the query or fragment; answers show a URL whose query carries a credential-shaped parameter such as api_key as [REDACTED], and an edit that sends [REDACTED] back for a node with the same blockId keeps the stored URL. The hub has not been observed storing or sending a request; a scenario_run of a BLOCK with a request has no known targets.",
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6157,6 +6161,7 @@ async function validateBlockData(
     scenarioRuns: [],
     notifications: [],
     notificationServices: [],
+    httpRequests: [],
     clearDelays: [],
     uncheckedActions: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
@@ -6439,6 +6444,50 @@ function keptBlockSubtrees(data, stored) {
   };
   if (isRecord(data) && isRecord(stored)) pair(data, stored, "root", "root");
   return { kept, keptAs, counterparts, removed };
+}
+
+// get_entity shows credential-shaped text of a stored BLOCK, such as a URL
+// with ?api_key=, as [REDACTED]. An edit made from that read sends the mark
+// back; where the node with the same blockId and type holds, at the same
+// field, a string the answers hide, the stored string is put back so that
+// the node stays as stored. A mark anywhere else stays and is refused or
+// written as sent.
+function restoreHiddenBlockStrings(data, stored) {
+  const storedNodes = new Map();
+  const collect = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (Number.isSafeInteger(value.blockId) && typeof value.type === "string") {
+      storedNodes.set(value.blockId, value);
+    }
+    for (const child of Object.values(value)) collect(child);
+  };
+  collect(stored);
+  const restore = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) restore(item);
+      return;
+    }
+    if (!isRecord(value)) return;
+    const original = storedNodes.get(value.blockId);
+    if (original !== undefined && original.type === value.type) {
+      for (const [key, field] of Object.entries(value)) {
+        const hidden = original[key];
+        if (
+          field === REDACTED_MARK &&
+          typeof hidden === "string" &&
+          sanitizeNativeData(hidden, key) === REDACTED_MARK
+        ) {
+          value[key] = hidden;
+        }
+      }
+    }
+    for (const child of Object.values(value)) restore(child);
+  };
+  restore(data);
 }
 
 // The data an edit writes: each subtree it keeps is replaced by the stored
@@ -6894,6 +6943,18 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
             ),
         }
       : {}),
+    // Requests this change adds or changes; the query is not shown.
+    ...(validation.httpRequests.some(({ kept }) => !kept)
+      ? {
+          http_requests: validation.httpRequests
+            .filter(({ kept }) => !kept)
+            .map(({ path, method, url }) => ({
+              configuration_pointer: blockPathToPointer(path),
+              method,
+              ...shownHttpUrl(url),
+            })),
+        }
+      : {}),
     // Kept actions whose rights or value this contract would refuse.
     ...(validation.uncheckedActions.length > 0
       ? { unchecked_actions: structuredClone(validation.uncheckedActions) }
@@ -7149,6 +7210,8 @@ function blockRunShape(data) {
       if (kind === "delay") shape.delays = true;
       // Another scenario's writes are not read here.
       if (kind === "scenario") shape.complete = false;
+      // A request may switch a device on the home network.
+      if (kind === "http") shape.complete = false;
       if (kind !== "service" || !Array.isArray(node.characteristics)) return;
       for (const action of node.characteristics) {
         // Non-records reach the invalid-child callback below.
@@ -7522,6 +7585,26 @@ function validateBlockNode(node, kind, path, context) {
     }
     return;
   }
+  if (kind === "http") {
+    if (!HTTP_METHODS.includes(node.method)) {
+      report(
+        field("method"),
+        `http method must be one of ${HTTP_METHODS.join(", ")}`,
+      );
+    }
+    // Messages never repeat the URL: it may carry a key or a password.
+    const problem = httpUrlProblem(node.url);
+    if (problem) report(field("url"), problem);
+    if (valid) {
+      context.httpRequests.push({
+        path,
+        kept,
+        method: node.method,
+        url: node.url,
+      });
+    }
+    return;
+  }
   if (kind === "delay") {
     if (!["RESET", "CONTINUE"].includes(node.mode)) {
       report(field("mode"), "delay mode must be RESET or CONTINUE");
@@ -7559,6 +7642,30 @@ function validateBlockNode(node, kind, path, context) {
 // (redactSensitiveText in spruthub-client.mjs). A BLOCK read through
 // get_entity may carry it; it is never the owner's text or URL.
 const REDACTED_MARK = "[REDACTED]";
+
+// Why a request URL cannot be written, or null. See HTTP_URL in
+// block-model.mjs for what is accepted and why.
+function httpUrlProblem(url) {
+  const absolute = "url must be an absolute http or https URL";
+  if (typeof url !== "string" || url === "") return absolute;
+  if (url.includes(REDACTED_MARK)) {
+    return `url contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; write the URL itself`;
+  }
+  if (/\s/.test(url)) return `${absolute} without spaces`;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return absolute;
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return "url scheme must be http or https";
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return "a URL with a user name or password is refused: sprut-agent would repeat it in its answers; set up such a request in the SprutHub interface";
+  }
+  return null;
+}
 
 // The recipients of one notify node: null for every notification service,
 // or its entries {index, clients}. The services and their recipients are
@@ -11345,6 +11452,9 @@ function publicBlockActionPreview(change, fresh) {
       : {}),
     ...(preview.notifications
       ? { notifications: structuredClone(preview.notifications) }
+      : {}),
+    ...(preview.http_requests
+      ? { http_requests: structuredClone(preview.http_requests) }
       : {}),
     ...(preview.unchecked_actions
       ? { unchecked_actions: structuredClone(preview.unchecked_actions) }

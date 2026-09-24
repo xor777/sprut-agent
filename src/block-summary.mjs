@@ -7,7 +7,7 @@
 // local wall clock, weekday names in field 5, "0/N" for every N, sun offset
 // in seconds; characteristic hold time and delay time in milliseconds.
 
-import { SERVICE_ACTION_KINDS } from "./block-model.mjs";
+import { SERVICE_ACTION_KINDS, shownHttpUrl } from "./block-model.mjs";
 
 const BASE_POINTER = "/configuration/value";
 const VALUE_FIELDS = [
@@ -145,7 +145,43 @@ function decodeStep(node, pointer, chain, delay, state) {
     return [decodeScenarioRun(node, state)];
   }
   if (node.type === "notify") return [decodeNotify(node)];
+  if (node.type === "http") {
+    // The query may carry a key: only scheme, host and path are shown.
+    const shown = shownHttpUrl(node.url);
+    return [
+      {
+        type: "http",
+        method: textOrNull(node.method),
+        url: shown?.url ?? textOrNull(node.url),
+        ...(shown?.query || node.query === HIDDEN_QUERY
+          ? { query: HIDDEN_QUERY }
+          : {}),
+      },
+    ];
+  }
   return [unrecognized(state, pointer, node)];
+}
+
+const HIDDEN_QUERY = "not_shown";
+
+// BLOCK data with each request URL cut to scheme, host and path before the
+// data is redacted for a summary: redaction hides a whole URL whose query
+// carries a key, and the summary would lose where the request goes.
+export function withShownHttpUrls(value) {
+  if (Array.isArray(value)) return value.map(withShownHttpUrls);
+  if (!isRecord(value)) return value;
+  const copy = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      withShownHttpUrls(child),
+    ]),
+  );
+  const shown = copy.type === "http" ? shownHttpUrl(copy.url) : null;
+  if (shown) {
+    copy.url = shown.url;
+    if (shown.query) copy.query = HIDDEN_QUERY;
+  }
+  return copy;
 }
 
 // A notification names no device. Its text is the owner's message: data.

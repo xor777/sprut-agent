@@ -7,6 +7,7 @@ import {
   blockSummary,
   decodeBlock,
   relationRole,
+  withShownHttpUrls,
 } from "./block-summary.mjs";
 import {
   inspectNativeOption,
@@ -2350,7 +2351,7 @@ export class SprutHubClient {
     }
     let data;
     try {
-      data = sanitizeNativeData(JSON.parse(scenario.data));
+      data = sanitizeNativeData(withShownHttpUrls(JSON.parse(scenario.data)));
     } catch {
       return { format: "block", status: "invalid_json" };
     }

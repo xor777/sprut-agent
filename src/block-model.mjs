@@ -5,6 +5,7 @@ const TARGET_KINDS = [
   "clear_delay",
   "scenario",
   "notify",
+  "http",
 ];
 
 // Service actions that the preview and relations interpret.
@@ -89,6 +90,7 @@ export const BLOCK_ALLOWED_KEYS = {
   clear_delay: new Set(["type", "blockId", "index"]),
   scenario: new Set(["type", "blockId", "index", "mode"]),
   notify: new Set(["type", "blockId", "text", "mode", "to"]),
+  http: new Set(["type", "blockId", "method", "url"]),
 };
 
 const BLOCK_CREATE_NODE_KINDS = [
@@ -107,6 +109,7 @@ const BLOCK_CREATE_NODE_KINDS = [
   "clear_delay",
   "scenario",
   "notify",
+  "http",
 ];
 
 const NATIVE_SCALAR_AS_STRING = {
@@ -205,6 +208,46 @@ export const NOTIFY_RECIPIENTS = {
   ],
   with_mode_MESSAGE: "null_or_omitted",
 };
+
+// The web client's Http node: a method from its list and the URL as typed,
+// with no body or headers. Any absolute http or https URL is accepted, as in
+// the editor: what the BLOCK calls (a device on the home network, a webhook)
+// is the owner's request. A user name or password in the URL is refused:
+// every answer would repeat it, and redaction does not recognize it there.
+export const HTTP_METHODS = [
+  "GET",
+  "POST",
+  "HEAD",
+  "PUT",
+  "DELETE",
+  "CONNECT",
+  "OPTIONS",
+  "TRACE",
+  "PATCH",
+];
+export const HTTP_URL = {
+  form: "absolute_url_as_typed",
+  schemes: ["http", "https"],
+  user_name_or_password: "refused",
+  shown_in_answers:
+    "scheme, host and path; the query and fragment are not shown",
+};
+
+// The part of a request URL that answers show: scheme, host, port and path.
+// Returns null for a URL that does not parse.
+export function shownHttpUrl(url) {
+  if (typeof url !== "string") return null;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  return {
+    url: `${parsed.origin}${parsed.pathname}`,
+    ...(parsed.search || parsed.hash ? { query: "not_shown" } : {}),
+  };
+}
 
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
@@ -334,6 +377,10 @@ const BLOCK_NODE_CONSTRAINTS = {
     },
     modes: NOTIFY_MODES,
     when_omitted: { to: null },
+    editor_optional: ["blockId"],
+  },
+  http: {
+    fields: { method: HTTP_METHODS, url: HTTP_URL },
     editor_optional: ["blockId"],
   },
   // The web client offers index 0 as "All delays"; stored as sent on
