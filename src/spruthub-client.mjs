@@ -671,24 +671,12 @@ export class SprutHubClient {
     if (!isPlainObject(list) || !Array.isArray(nativeEntries)) {
       throw incompatibleHubLog();
     }
-    const entries = nativeEntries
-      .map(normalizeHubLogEntry)
-      .sort((a, b) => b.native_time - a.native_time);
-    if (
-      lastTime !== null &&
-      entries.some(({ native_time: time }) => time > lastTime)
-    ) {
-      throw new SprutHubError(
-        "unsupported_log_paging",
-        "SprutHub returned entries newer than the continuation boundary, so older log pages cannot be read reliably. Read the first page again without before.",
-        "restart_read_hub_log",
-        { capability_status: "unknown" },
-      );
-    }
     return {
       status: "ok",
       home_ref: homeRef(serial),
-      entries,
+      entries: nativeEntries
+        .map(normalizeHubLogEntry)
+        .sort((a, b) => b.native_time - a.native_time),
       native: {
         operation: "log.list",
         requested_count: count,

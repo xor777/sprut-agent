@@ -22,21 +22,11 @@ export function hubLogRead(input) {
     async read(client) {
       request = hubLogRequest(input);
       const boundary = request.cursor?.entries.length ?? 0;
-      try {
-        return await client.readHubLog({
-          homeRef: request.homeRef,
-          count: Math.min(MAX_NATIVE_COUNT, request.count + boundary),
-          lastTime: request.cursor ? request.cursor.time + 1 : null,
-        });
-      } catch (error) {
-        if (
-          error instanceof SprutHubError &&
-          error.code === "unsupported_log_paging"
-        ) {
-          error.details = { ...error.details, next: hubLogCall(request) };
-        }
-        throw error;
-      }
+      return client.readHubLog({
+        homeRef: request.homeRef,
+        count: Math.min(MAX_NATIVE_COUNT, request.count + boundary),
+        lastTime: request.cursor ? request.cursor.time + 1 : null,
+      });
     },
     present(result) {
       return presentHubLog(result, request);
@@ -153,6 +143,14 @@ function encodeCursor(request, time, entries) {
 }
 
 function presentHubLog(result, request) {
+  if (
+    request.cursor &&
+    result.entries.some(
+      ({ native_time: time }) => time > request.cursor.time + 1,
+    )
+  ) {
+    throw unsupportedLogPaging(request);
+  }
   const skipped = new Map();
   for (const { time, fingerprint } of request.cursor?.entries ?? []) {
     const key = `${time}:${fingerprint}`;
@@ -339,6 +337,15 @@ function hubLogCall(request, before) {
       ...(before ? { before } : {}),
     },
   };
+}
+
+function unsupportedLogPaging(request) {
+  return new SprutHubError(
+    "unsupported_log_paging",
+    "SprutHub returned entries newer than the continuation boundary, so older log pages cannot be read reliably. Read the first page again without before.",
+    "restart_read_hub_log",
+    { capability_status: "unknown", next: hubLogCall(request) },
+  );
 }
 
 function pageTooSmall(request, state, result) {
