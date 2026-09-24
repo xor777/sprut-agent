@@ -144,6 +144,34 @@ const RELATIVE_STEP = {
 
 export const CLEAR_ALL_DELAYS = 0;
 
+// A branch repeat period (then_delay/else_delay): 0 runs the branch once; a
+// positive period repeats it («Каждые» in the web client's TimeDelay, which
+// writes minutes and seconds as milliseconds and starts at 1000). A period
+// under a second is refused so that a repeated write cannot flood a device.
+// How long the repetition lasts on a hub is not observed.
+export const BRANCH_REPEAT = {
+  type: "integer",
+  unit: "milliseconds",
+  no_repeat: 0,
+  minimum: 1_000,
+};
+
+// Scenario target modes of the web client's RunScenario. FIRE and
+// ACTIVATE_AND_FIRE run the target, so they are followed for a chain back to
+// the BLOCK being written; the others switch or reset it without a run.
+export const SCENARIO_TARGET_MODES = {
+  FIRE: "run_the_scenario",
+  ACTIVATE: "turn_the_scenario_on",
+  DEACTIVATE: "turn_the_scenario_off",
+  ACTIVATE_AND_FIRE: "turn_the_scenario_on_and_run_it",
+  RESET: "reset_the_scenario_meaning_known_only_from_the_editor_label",
+};
+const SCENARIO_RUN_MODES = new Set(["FIRE", "ACTIVATE_AND_FIRE"]);
+
+export function scenarioTargetRuns(mode) {
+  return SCENARIO_RUN_MODES.has(mode);
+}
+
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
     editor_optional: ["blockId"],
@@ -152,13 +180,20 @@ const BLOCK_NODE_CONSTRAINTS = {
     // The web client creates an if without mode and shows it as EVERY; ONCE
     // was stored as sent on SprutHub 3.0.0, its run is not observed. It may
     // also leave out then_delay and else_delay.
-    fields: { mode: ["EVERY", "ONCE"] },
+    fields: {
+      mode: ["EVERY", "ONCE"],
+      then_delay: BRANCH_REPEAT,
+      else_delay: BRANCH_REPEAT,
+    },
     when_omitted: { mode: "EVERY", then_delay: 0, else_delay: 0 },
     modes: {
       EVERY: "run_the_chosen_branch_on_every_check",
       ONCE: "run_a_branch_only_when_the_condition_result_changes",
     },
-    constants: { then_delay: 0, else_delay: 0 },
+    repeat: {
+      then_delay: "repeats_then_every_period_while_it_is_the_chosen_branch",
+      else_delay: "repeats_else_every_period_while_it_is_the_chosen_branch",
+    },
     editor_optional: ["blockId"],
     hub_assigned: { state: "omit_on_create" },
   },
@@ -232,8 +267,11 @@ const BLOCK_NODE_CONSTRAINTS = {
     editor_optional: ["blockId"],
   },
   scenario: {
-    constants: { mode: "FIRE" },
-    fields: { index: "existing_scenario_index_from_scenario_ref" },
+    fields: {
+      index: "existing_scenario_index_from_scenario_ref",
+      mode: Object.keys(SCENARIO_TARGET_MODES),
+    },
+    modes: SCENARIO_TARGET_MODES,
     editor_optional: ["blockId"],
   },
   delay: {
@@ -646,9 +684,16 @@ export function blockDataHasTrigger(data) {
   return found;
 }
 
-// Scenario targets with mode FIRE anywhere in BLOCK data, including under
-// nodes outside this contract, with JSON pointers relative to the data.
+// Scenario targets that run their scenario (FIRE, ACTIVATE_AND_FIRE).
 export function blockScenarioRuns(data) {
+  return blockScenarioTargets(data).filter(({ mode }) =>
+    scenarioTargetRuns(mode),
+  );
+}
+
+// Scenario targets of any mode anywhere in BLOCK data, including under nodes
+// outside this contract, with JSON pointers relative to the data.
+export function blockScenarioTargets(data) {
   const runs = [];
   const visit = (value, pointer) => {
     if (Array.isArray(value)) {
@@ -658,12 +703,8 @@ export function blockScenarioRuns(data) {
       return;
     }
     if (!isRecord(value)) return;
-    if (
-      value.type === "scenario" &&
-      value.mode === "FIRE" &&
-      typeof value.index === "string"
-    ) {
-      runs.push({ index: value.index, pointer });
+    if (value.type === "scenario" && typeof value.index === "string") {
+      runs.push({ index: value.index, mode: value.mode, pointer });
     }
     for (const [key, child] of Object.entries(value)) {
       visit(

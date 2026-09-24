@@ -9689,9 +9689,10 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
     ).types.includes("scenario"),
     true,
   );
-  assert.deepEqual(publishedBlockNode(contract, "scenario").constants, {
-    mode: "FIRE",
-  });
+  assert.equal(
+    publishedBlockNode(contract, "scenario").fields.mode.includes("FIRE"),
+    true,
+  );
 
   const data = {
     targets: [
@@ -9774,6 +9775,7 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
   const expectedRuns = [
     {
       configuration_pointer: "/targets/3/then/0",
+      mode: "FIRE",
       scenario: {
         ref: `${homeRef}/scenario/all-off`,
         name: "Всё выключить",
@@ -10046,9 +10048,9 @@ test("relative actions and scenario runs outside the contract are refused before
       /no-such-scenario/,
     ],
     [
-      "activate a scenario",
-      { type: "scenario", index: "all-off", mode: "ACTIVATE" },
-      /FIRE/,
+      "a scenario mode the editor lacks",
+      { type: "scenario", index: "all-off", mode: "STOP" },
+      /scenario mode must be one of FIRE, ACTIVATE, DEACTIVATE/,
     ],
   ];
   const results = [];
@@ -11109,7 +11111,7 @@ test("a BLOCK refusal lists every failing rule with its pointer", async (t) => {
   const client = await startClient(t, hub, stateDirectory);
   const data = heldMotionLightData();
   data.targets[0].mode = "SOMETIMES";
-  data.targets[0].then_delay = 1000;
+  data.targets[0].then_delay = 500;
   data.targets[0].else[0].index = 0;
   const refused = await client.callTool({
     name: "prepare_native_change",
@@ -11134,7 +11136,7 @@ test("a BLOCK refusal lists every failing rule with its pointer", async (t) => {
     {
       pointer: "/targets/0/then_delay",
       message:
-        "then_delay must be 0 or omitted; a repeat period is not supported",
+        "then_delay is the branch repeat period: 0 or omitted for no repeat, or whole milliseconds from 1000",
     },
     {
       pointer: "/targets/0/else/0/index",

@@ -4,9 +4,11 @@ import { AutomationStore } from "./automation-store.mjs";
 import {
   BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
+  BRANCH_REPEAT,
   blockAffectedRefs,
   blockDataHasTrigger,
   blockScenarioRuns,
+  blockScenarioTargets,
   blockSubgraphHasTrigger,
   CHARACTERISTIC_HOLD,
   CLEAR_ALL_DELAYS,
@@ -16,7 +18,9 @@ import {
   normalizeBlockRequest,
   publishedBlockNodes,
   relativeStepNumber,
+  SCENARIO_TARGET_MODES,
   SERVICE_ACTION_KINDS,
+  scenarioTargetRuns,
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
@@ -5997,15 +6001,15 @@ function blockContract() {
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice, unless the edit keeps both as stored.",
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0; a hub has not been observed running them, including whether a step clamps at the characteristic's range. A step is a number or a plain decimal string such as \"10\", and is sent as a number, the form the hub stores.",
-      "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
-      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
+      "A scenario target names an existing scenario of this home by its index and a mode from the web client: FIRE runs it, ACTIVATE turns it on, DEACTIVATE turns it off, ACTIVATE_AND_FIRE turns it on and runs it, RESET resets it (known only from the editor label «Сбросить»). A target that runs (FIRE, ACTIVATE_AND_FIRE) must not run its own BLOCK, directly or through running scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. A BLOCK may turn itself off. The modes follow the official editor; a hub has not been observed running any of them, including for a turned-off scenario.",
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
       "Restore does not delete a created BLOCK or LOGIC that another BLOCK runs with a scenario target: the result is conflict scenario_targets_present naming those targets; change or remove them first, then restore again. After this scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict).",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
-      "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, held, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage. block_action_preview.scenario_runs names the scenario each scenario target runs.",
+      "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, held, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage. block_action_preview.scenario_runs names the scenario each scenario target runs, switches or resets, with its mode.",
     ],
   };
 }
@@ -6237,8 +6241,10 @@ async function validateBlockData(
 
   const scenarios = new Map();
   for (const run of context.scenarioRuns) {
-    // A BLOCK that fires itself would rerun its own targets without end.
-    if (run.index === scenarioIndex) {
+    // A BLOCK that fires itself would rerun its own targets without end;
+    // switching itself off or resetting itself runs nothing.
+    const runs = scenarioTargetRuns(run.mode);
+    if (runs && run.index === scenarioIndex) {
       report(run.path, "a BLOCK cannot run itself");
       continue;
     }
@@ -6256,7 +6262,7 @@ async function validateBlockData(
       type: record.type,
       ...(typeof record.active === "boolean" ? { active: record.active } : {}),
     };
-    if (scenarioIndex !== undefined) {
+    if (runs && scenarioIndex !== undefined) {
       const loop = await scenarioRunLoop(run, scenarioIndex, scenarios, client);
       if (loop) report(run.path, loop);
     }
@@ -6676,9 +6682,10 @@ function checkBlockReference(reference, accessory, control) {
   }
 }
 
-// Scenario targets of other BLOCKs that run this scenario. Deleting it would
-// leave them pointing at nothing, so restore names them instead. BLOCK data
-// that cannot be parsed runs nothing the hub could resolve and is skipped.
+// Scenario targets of other BLOCKs that run, switch or reset this scenario.
+// Deleting it would leave them pointing at nothing, so restore names them
+// instead. BLOCK data that cannot be parsed runs nothing the hub could
+// resolve and is skipped.
 async function scenarioTargetReferences(client, homeRef, index) {
   const references = [];
   for (const summary of await client.listScenarios()) {
@@ -6691,7 +6698,7 @@ async function scenarioTargetReferences(client, homeRef, index) {
       continue;
     }
     const scenarioRef = `${homeRef}/scenario/${encodeURIComponent(summary.index)}`;
-    for (const run of blockScenarioRuns(data)) {
+    for (const run of blockScenarioTargets(data)) {
       if (run.index !== index) continue;
       const pointer = `/configuration/value${run.pointer}`;
       references.push({
@@ -6860,6 +6867,7 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
       ? {
           scenario_runs: validation.scenarioRuns.map((run) => ({
             configuration_pointer: blockPathToPointer(run.path),
+            mode: run.mode,
             scenario: {
               ref: `${homeRef}/scenario/${encodeURIComponent(run.index)}`,
               ...run.scenario,
@@ -7270,10 +7278,15 @@ function validateBlockNode(node, kind, path, context) {
       );
     }
     for (const key of ["then_delay", "else_delay"]) {
-      if (Object.hasOwn(node, key) && node[key] !== 0) {
+      const period = node[key];
+      if (
+        Object.hasOwn(node, key) &&
+        period !== BRANCH_REPEAT.no_repeat &&
+        !(Number.isSafeInteger(period) && period >= BRANCH_REPEAT.minimum)
+      ) {
         report(
           field(key),
-          `${key} must be 0 or omitted; a repeat period is not supported`,
+          `${key} is the branch repeat period: 0 or omitted for no repeat, or whole milliseconds from ${BRANCH_REPEAT.minimum}`,
         );
       }
     }
@@ -7451,10 +7464,15 @@ function validateBlockNode(node, kind, path, context) {
         "scenario index must be the index of an existing scenario, the last segment of its scenario_ref",
       );
     }
-    if (node.mode !== "FIRE") {
-      report(field("mode"), "scenario mode must be FIRE");
+    if (!Object.hasOwn(SCENARIO_TARGET_MODES, node.mode)) {
+      report(
+        field("mode"),
+        `scenario mode must be one of ${Object.keys(SCENARIO_TARGET_MODES).join(", ")}`,
+      );
     }
-    if (valid) context.scenarioRuns.push({ path, index: node.index });
+    if (valid) {
+      context.scenarioRuns.push({ path, index: node.index, mode: node.mode });
+    }
     return;
   }
   if (kind === "delay") {
@@ -11067,8 +11085,15 @@ function publicBlockActionPreview(change, fresh) {
   return {
     snapshot: { ...structuredClone(preview.snapshot), fresh },
     actions: structuredClone(preview.actions),
+    // A change prepared before scenario modes held only FIRE targets.
     ...(preview.scenario_runs
-      ? { scenario_runs: structuredClone(preview.scenario_runs) }
+      ? {
+          scenario_runs: preview.scenario_runs.map((run) => ({
+            configuration_pointer: run.configuration_pointer,
+            mode: run.mode ?? "FIRE",
+            scenario: structuredClone(run.scenario),
+          })),
+        }
       : {}),
     ...(preview.unchecked_actions
       ? { unchecked_actions: structuredClone(preview.unchecked_actions) }
@@ -11679,7 +11704,7 @@ function publicNativeChange(
               "Every listed service/set remains a write when its enclosing action runs; equality with the preparation observation is not a no-op or a manual-control guarantee.",
               "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
               "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
-              "scenario_runs names the scenario each scenario target runs, as read at preparation; what that scenario writes is not listed.",
+              "scenario_runs names the scenario each scenario target runs, switches or resets (mode), as read at preparation; what that scenario writes is not listed.",
               "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. A condition with a hold time is left undisclosed (held_condition). Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
             ]
           : []),
