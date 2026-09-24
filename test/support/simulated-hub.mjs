@@ -76,7 +76,10 @@ export const METHOD_EVIDENCE = {
   "room.create": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
   "room.delete": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
   "room.update": [SCHEMA_ONLY, "RoomUpdateRequest in 51547-Room.proto"],
-  "accessory.list": [OBSERVED, "2026-09-09-motion-reading"],
+  "accessory.list": [
+    OBSERVED,
+    "2026-09-09-motion-reading; an empty room omits accessories (owner hub, 2026-09-24)",
+  ],
   "accessory.get": [
     OBSERVED,
     "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24",
@@ -109,7 +112,10 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "2026-09-09-automations; active seen in an owner-hub read on 2026-09-24",
   ],
-  "scenario.create": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.create": [
+    OBSERVED,
+    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24)",
+  ],
   "scenario.update": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
@@ -993,12 +999,30 @@ function handleMessage(
     }
     return {
       id: message.id,
-      result: { [domain]: { [operation]: structuredClone(value) } },
+      result: {
+        [domain]: {
+          [operation]: structuredClone(
+            operation === "list" ? withoutEmptyLists(value) : value,
+          ),
+        },
+      },
     };
   } catch (error) {
     if (error instanceof SimulatorError) return fail(error);
     return fail(new SimulatorError(-32603, `Internal error: ${error.message}`));
   }
+}
+
+// A live hub omits an empty repeated field from a list reply (owner hub,
+// 2026-09-24: accessory.list {roomId} of an empty room; earlier
+// extensionChild.list), as protobuf JSON does.
+function withoutEmptyLists(value) {
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([, item]) => !(Array.isArray(item) && item.length === 0),
+    ),
+  );
 }
 
 function methodOf(params) {
@@ -1927,6 +1951,16 @@ function normalizeBlockData(data) {
             ...structuredClone(rest),
             ...(kind === "if" ? { state: false } : {}),
           };
+    // The hub stores inc/dec values as numbers even when sent as strings;
+    // set values stay strings (owner hub, 2026-09-24).
+    if (
+      (kind === "inc" || kind === "dec") &&
+      typeof normalized.value === "string" &&
+      normalized.value.trim() !== "" &&
+      Number.isFinite(Number(normalized.value))
+    ) {
+      normalized.value = Number(normalized.value);
+    }
     for (const key of BLOCK_CHILDREN[kind] ?? []) {
       if (Array.isArray(node[key])) {
         normalized[key] = node[key].map((child) => visit(child, child?.type));

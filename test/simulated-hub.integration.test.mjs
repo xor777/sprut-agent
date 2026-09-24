@@ -778,7 +778,7 @@ test("the simulator omits empty native lists and stores BLOCK values as the hub 
   assert.deepEqual(await list({ accessory: { list: { roomId: 30 } } }), {});
   assert.deepEqual(await list({ logic: { list: { aId: 35, sId: 13 } } }), {});
   assert.deepEqual(
-    await list({ link: { list: { aId: 35, sId: 13, cId: 14 } } }),
+    await list({ link: { list: { aId: 38, sId: 13, cId: 14 } } }),
     {},
   );
   assert.deepEqual(
@@ -787,7 +787,7 @@ test("the simulator omits empty native lists and stores BLOCK values as the hub 
     }),
     {},
   );
-  assert.deepEqual(await list({ scenario: { list: { aId: 30 } } }), {});
+  assert.deepEqual(await list({ scenario: { list: { aId: 36 } } }), {});
   assert.equal(
     (await list({ accessory: { list: { roomId: 8 } } })).accessories.length,
     4,
