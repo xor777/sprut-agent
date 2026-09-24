@@ -101,7 +101,10 @@
   service/set и delay `RESET`. Условной форме нужен хотя бы один characteristic
   или interval с `trigger=true`; action-only форме разрешены только корневые
   literal `Lightbulb On=false` service/set targets. Одна характеристика не может
-  быть условием и действием.
+  быть условием и действием. Отказ из-за узла вне контракта (`notify`, `http`,
+  `code`) называет его тип в `error.message`: такой существующий BLOCK
+  `block_data_update` не меняет, скажи владельцу, какой блок мешает, и
+  предложи правку в интерфейсе SprutHub.
 - Все `aId/sId/cId` и native types проверяются в настроенном доме. Новый BLOCK
   не принимает неизвестные поля; update обязан сохранить их без изменений.
   Подготовленный change возвращает `block_action_preview`: для каждого

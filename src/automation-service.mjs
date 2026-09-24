@@ -6272,7 +6272,7 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       throw invalidBlock(
         path,
-        "only an owned absolute pause condition is supported",
+        "node type code is not supported by this contract; only sprut-agent's own action pause uses it",
       );
     }
     return;

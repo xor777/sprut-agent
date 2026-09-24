@@ -162,10 +162,7 @@ function publishedBlockChildren() {
   for (const [kind, fields] of Object.entries(BLOCK_CHILD_FIELDS)) {
     children[kind] = {};
     for (const [key, rule] of Object.entries(fields)) {
-      const types = [...rule.kinds].filter(
-        (type) =>
-          !(kind === "condition" && key === "conditions" && type === "code"),
-      );
+      const types = publishedChildTypes(rule);
       const minItems =
         (kind === "root" && key === "targets") ||
         (kind === "condition" && key === "conditions") ||
@@ -340,16 +337,28 @@ export function inspectBlockRelations(
   return { roles, unresolved };
 }
 
+// code is read only as sprut-agent's own pause condition; writers never get it.
+function publishedChildTypes(rule) {
+  return [...rule.kinds].filter((type) => type !== "code");
+}
+
 function visitBlockChild(child, path, rule, visit, invalidChild) {
   if (!isRecord(child) || !rule.kinds.has(child.type)) {
-    invalidChild?.(
-      path,
-      `child type must be one of ${[...rule.kinds].join(", ")}`,
-      child,
-    );
+    invalidChild?.(path, unsupportedChildMessage(child, rule), child);
     return;
   }
   visit(child, child.type, path);
+}
+
+// The node type lets the agent tell the owner which block to edit by hand.
+function unsupportedChildMessage(child, rule) {
+  const allowed = publishedChildTypes(rule).join(", ");
+  if (!isRecord(child) || typeof child.type !== "string") {
+    return `child type must be one of ${allowed}`;
+  }
+  return BLOCK_CREATE_NODE_KINDS.includes(child.type)
+    ? `node type ${child.type} is not allowed here; allowed here: ${allowed}`
+    : `node type ${child.type} is not supported by this contract; allowed here: ${allowed}`;
 }
 
 function invalidReference(scenarioRef, path) {
