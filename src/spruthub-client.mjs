@@ -2805,26 +2805,40 @@ export class SprutHubClient {
 
 function normalizeScenarioLog(log, scenarioIndex) {
   if (!log || typeof log !== "object" || Array.isArray(log)) return null;
-  const separator = SCENARIO_LOG_PREFIX_BY_PATH.get(log.path);
+  const sourceTimestamp = nativeLogTimestamp(log.time);
   if (
-    separator === undefined ||
+    !isScenarioLogMessage(log.path, log.message, scenarioIndex) ||
     !LOG_LEVELS.has(log.level) ||
-    typeof log.message !== "string" ||
-    !log.message.startsWith(`Сценарий ${scenarioIndex}${separator}`) ||
-    !Number.isSafeInteger(log.time) ||
-    log.time < 0
+    sourceTimestamp === null
   ) {
     return null;
   }
-  const sourceDate = new Date(log.time);
-  if (Number.isNaN(sourceDate.valueOf())) return null;
   return {
     timeMs: log.time,
-    sourceTimestamp: sourceDate.toISOString(),
+    sourceTimestamp,
     level: log.level,
     path: log.path,
     message: log.message,
   };
+}
+
+// LogMessage.time is read as Unix epoch milliseconds, as the observation path
+// has done since O20260911; its trigger text CLOUD[0]_<epoch seconds> agrees.
+function nativeLogTimestamp(time) {
+  if (!Number.isSafeInteger(time) || time < 0) return null;
+  const date = new Date(time);
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
+}
+
+// Only these observed path/prefix pairs identify one scenario index; the
+// separator keeps "Сценарий 230" out of scenario 23.
+function isScenarioLogMessage(path, message, scenarioIndex) {
+  const separator = SCENARIO_LOG_PREFIX_BY_PATH.get(path);
+  return (
+    separator !== undefined &&
+    typeof message === "string" &&
+    message.startsWith(`Сценарий ${scenarioIndex}${separator}`)
+  );
 }
 
 function extractArray(response, path, missingMeansEmpty = false) {
