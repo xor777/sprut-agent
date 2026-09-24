@@ -545,6 +545,18 @@ function canonicalNode(node, kind) {
       canonical.else = [];
     }
   }
+  if (
+    kind === "condition" &&
+    canonical.mode === "OR" &&
+    Array.isArray(canonical.conditions) &&
+    canonical.conditions.length === 1
+  ) {
+    // Client code (research/protocol/2026-09-24-web-client-evidence.md): the
+    // web client creates every condition group with mode OR, the agent writes
+    // AND; over one condition both mean that condition. A group of none or of
+    // several keeps its mode.
+    canonical.mode = "AND";
+  }
   if ((kind === "inc" || kind === "dec") && Object.hasOwn(canonical, "value")) {
     // Live-observed: a step sent as "10" is stored as 10 (relativeStepNumber).
     canonical.value = relativeStepNumber(canonical.value) ?? canonical.value;
