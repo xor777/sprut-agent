@@ -109,26 +109,14 @@ export const CASES = {
   },
   "turn-off-room": {
     prompt: "Выключи весь свет в гостиной",
-    graders: [
-      {
-        name: "living_room_lights_off",
-        grade: ({ after, initialState }) => {
-          const keys = roomLightKeys(initialState, LIVING_ROOM);
-          const stillOn = keys.filter((key) => after[key] !== false);
-          return result(
-            keys.length > 0 && stillOn.length === 0,
-            stillOn.length === 0
-              ? `all ${keys.length} off`
-              : `still on: ${stillOn.join(", ")}`,
-          );
-        },
-      },
-      onlyChanges(
-        ({ key, after }, { initialState }) =>
-          after === false &&
-          roomLightKeys(initialState, LIVING_ROOM).includes(key),
-      ),
-    ],
+    graders: livingRoomLightsOff(),
+  },
+  // Without «весь» the light of a room is still every light in it: the
+  // request names the room, so a question about which lamp is over-asking
+  // and leaves the lights on.
+  "room-light-off": {
+    prompt: "Выключи свет в гостиной",
+    graders: livingRoomLightsOff(),
   },
   "dim-floor-lamp": {
     prompt: "Поставь торшер на 30%",
@@ -721,6 +709,30 @@ export function gradeCase(definition, evidence) {
 
 function result(pass, detail) {
   return { pass: Boolean(pass), detail };
+}
+
+// Every light of the living room off, and nothing else changed.
+function livingRoomLightsOff() {
+  return [
+    {
+      name: "living_room_lights_off",
+      grade: ({ after, initialState }) => {
+        const keys = roomLightKeys(initialState, LIVING_ROOM);
+        const stillOn = keys.filter((key) => after[key] !== false);
+        return result(
+          keys.length > 0 && stillOn.length === 0,
+          stillOn.length === 0
+            ? `all ${keys.length} off`
+            : `still on: ${stillOn.join(", ")}`,
+        );
+      },
+    },
+    onlyChanges(
+      ({ key, after }, { initialState }) =>
+        after === false &&
+        roomLightKeys(initialState, LIVING_ROOM).includes(key),
+    ),
+  ];
 }
 
 function noWrites() {

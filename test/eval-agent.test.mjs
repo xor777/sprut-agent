@@ -1825,6 +1825,28 @@ test("the house variant of turn-off-room grades the larger home", async (t) => {
   );
 });
 
+// Asking which lamp is meant leaves the lights on and fails the control
+// case for over-asking; switching every living room light off passes.
+test("room-light-off needs every living room light off, so a question fails it", async (t) => {
+  const asked = await nativeSession(t);
+  assert.equal(
+    asked.grade(
+      "room-light-off",
+      "В гостиной горят люстра и торшер. Какой свет выключить?",
+    ).living_room_lights_off,
+    false,
+  );
+
+  const done = await nativeSession(t);
+  await done.send(setOn(15, 13, false));
+  await done.send(setOn(16, 13, false));
+  assert.deepEqual(done.grade("room-light-off", "Выключил люстру и торшер."), {
+    living_room_lights_off: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+});
+
 // A case's hub with its patch and faults; a reply that never comes (a
 // dropped reply) resolves to null.
 async function caseSession(t, caseName, fixture = "apartment") {
