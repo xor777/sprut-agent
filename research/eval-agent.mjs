@@ -11,7 +11,6 @@ import {
   mkdtemp,
   readdir,
   readFile,
-  realpath,
   rm,
   stat,
   symlink,
@@ -383,7 +382,13 @@ function stayedInBounds({ toolCalls, allowedRoots, forbiddenRoots }) {
   const within = (file, root) => file === root || file.startsWith(`${root}/`);
   const violations = [];
   for (const call of toolCalls.filter(({ mcp }) => !mcp)) {
-    const text = JSON.stringify(call.input ?? "");
+    // ~ and $HOME are read as the owner's home: that is where the Read tool
+    // and a shell without a scratch HOME take them, and where the
+    // repository lives.
+    const text = JSON.stringify(call.input ?? "").replace(
+      /(^|[\s"'=:(])(?:~|\$HOME|\$\{HOME\})(?=\/)/g,
+      (_, before) => `${before}${homedir()}`,
+    );
     for (const [file] of text.matchAll(/\/[^\s"'`<>|;&()\\]+/g)) {
       // Judged where the path leads: .. and symlinks resolved.
       const target = canonicalPath(file);
@@ -1222,13 +1227,14 @@ async function prepareEvidenceRoot(requested) {
 }
 
 // The real path of a file, or of its nearest existing ancestor joined with
-// the rest when the file does not exist.
+// the rest when the file does not exist. The native realpath also gives the
+// stored letter case, which a case-insensitive volume (macOS) ignores.
 function canonicalPath(file) {
   let existing = path.resolve(file);
   const rest = [];
   for (;;) {
     try {
-      return path.join(realpathSync(existing), ...rest);
+      return path.join(realpathSync.native(existing), ...rest);
     } catch {
       const parent = path.dirname(existing);
       if (parent === existing) return path.resolve(file);
@@ -1245,7 +1251,7 @@ async function withRealPaths(paths) {
   for (const item of paths) {
     all.add(path.resolve(item));
     try {
-      all.add(await realpath(item));
+      all.add(realpathSync.native(item));
     } catch {}
   }
   return [...all];
