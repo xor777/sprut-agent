@@ -857,6 +857,17 @@ function deviceEntry(serial, item) {
 function serviceEntry(serial, item, selection) {
   const { accessory, service, onState: on } = item;
   const ref = serviceRef(serial, accessory.id, service.sId);
+  const values =
+    selection.values !== "none" && item.valuesRead
+      ? characteristicValues(
+          serial,
+          accessory,
+          service,
+          selection.values === "on_off"
+            ? [on?.basis, ...VALUES_OF_STATE]
+            : null,
+        )
+      : [];
   return {
     ref,
     name: service.name,
@@ -878,17 +889,10 @@ function serviceEntry(serial, item, selection) {
           ...(on.on === null ? { on_unknown: on.reason } : {}),
         }
       : {}),
-    ...(selection.values !== "none" && item.valuesRead
-      ? {
-          values: characteristicValues(
-            serial,
-            accessory,
-            service,
-            selection.values === "on_off"
-              ? [on?.basis, ...VALUES_OF_STATE]
-              : null,
-          ),
-        }
+    // A sensor, cover or button has no on/off value for a state answer to
+    // show; its refs stay so the agent can still read it.
+    ...(values.length > 0
+      ? { values }
       : { characteristics: characteristicRefs(serial, accessory, service) }),
   };
 }

@@ -164,7 +164,7 @@ server.registerTool(
         .boolean()
         .optional()
         .describe(
-          "Omitted: every value, but with state only the on/off value and Brightness (values_shown, all_values). true: every value. false: names and characteristic refs without values.",
+          "Omitted: every value, but with state only the on/off value and Brightness (values_shown, all_values); a service with neither lists its characteristic refs. true: every value. false: names and characteristic refs without values.",
         ),
       include_technical: z
         .boolean()
