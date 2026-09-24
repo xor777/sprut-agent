@@ -1070,7 +1070,7 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
   }
 });
 
-test("an incomplete explicit profile uses the file without replacing an empty value", async (t) => {
+test("an incomplete explicit profile takes missing and blank values from the file", async (t) => {
   const hub = await startHub(t);
   const directory = await mkdtemp(
     path.join(tmpdir(), "sprut incomplete profile-"),
@@ -1120,32 +1120,102 @@ test("an incomplete explicit profile uses the file without replacing an empty va
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   await partialClient.close();
 
-  const connectionCount = hub.connectionCount;
-  const emptyClient = new Client({
-    name: "empty-explicit-value-test",
+  const passwordAnswers = () =>
+    hub.requests.filter(
+      ({ params }) => params.account?.answer?.data === password,
+    ).length;
+  const answeredBefore = passwordAnswers();
+  const blankClient = new Client({
+    name: "blank-explicit-value-test",
     version: "1.0.0",
   });
-  await emptyClient.connect(
+  await blankClient.connect(
     new StdioClientTransport(
       launch({
-        SPRUTHUB_LOGIN: "",
-        SPRUT_AGENT_SESSION_FILE: path.join(directory, "empty-session.json"),
+        SPRUTHUB_PASSWORD: "",
+        SPRUT_AGENT_SESSION_FILE: path.join(directory, "blank-session.json"),
       }),
     ),
   );
-  t.after(() => emptyClient.close());
-  const rejected = await emptyClient.callTool({
+  t.after(() => blankClient.close());
+  const blankHomes = await blankClient.callTool({
     name: "list_homes",
     arguments: {},
   });
-  assert.equal(rejected.isError, true);
-  assert.equal(rejected.structuredContent.error.code, "configuration");
+  assert.equal(blankHomes.isError, undefined, blankHomes.content[0]?.text);
   assert.equal(
-    rejected.structuredContent.error.action,
-    "configure_credentials",
+    blankHomes.structuredContent.homes[0].ref,
+    "spruthub://hub/home%2FA",
   );
-  assert.equal(rejected.structuredContent.missing_field, "SPRUTHUB_LOGIN");
-  assert.equal(hub.connectionCount, connectionCount);
+  assert.equal(passwordAnswers(), answeredBefore + 1);
+  for (const secret of [login, password, token]) {
+    assert.equal(JSON.stringify(blankHomes).includes(secret), false);
+  }
+});
+
+test("a client template with blank connection variables uses the filled file", async (t) => {
+  const hub = await startHub(t, {
+    homes: [home("home/A", "Дом A"), home("home B", "Дом B")],
+  });
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut blank template-"));
+  t.after(() => rm(directory, { recursive: true }));
+  const configRoot = path.join(directory, "xdg config");
+  const connectionFile = path.join(configRoot, "sprut-agent", "connection.env");
+  await mkdir(path.dirname(connectionFile), { recursive: true });
+  await writeFile(
+    connectionFile,
+    [
+      `SPRUTHUB_LOGIN=${login}`,
+      `SPRUTHUB_PASSWORD=${password}`,
+      `SPRUTHUB_URL=${hub.url}`,
+      "SPRUTHUB_SERIAL=home B",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const client = new Client({ name: "blank-template-test", version: "1.0.0" });
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [path.join(projectRoot, "src", "server.mjs")],
+      cwd: directory,
+      env: {
+        PATH: process.env.PATH,
+        HOME: directory,
+        XDG_CONFIG_HOME: configRoot,
+        SPRUTHUB_LOGIN: "",
+        SPRUTHUB_PASSWORD: "",
+        SPRUTHUB_TOKEN: "",
+        SPRUTHUB_URL: "",
+        SPRUTHUB_SERIAL: "",
+        SPRUTHUB_CID: "",
+        SPRUTHUB_TIMEOUT_MS: "",
+      },
+      stderr: "pipe",
+    }),
+  );
+  t.after(() => client.close());
+
+  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+
+  assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  assert.deepEqual(homes.structuredContent.selection, {
+    required: false,
+    default_home_ref: "spruthub://hub/home%20B",
+    options: [
+      { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
+      { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
+    ],
+  });
+  assert.equal(
+    hub.requests.filter(
+      ({ params }) => params.account?.answer?.data === password,
+    ).length,
+    1,
+  );
+  for (const secret of [login, password, token]) {
+    assert.equal(JSON.stringify(homes).includes(secret), false);
+  }
 });
 
 test("an unsafe credential file returns one fixable local error", async (t) => {
