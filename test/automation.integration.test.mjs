@@ -481,30 +481,7 @@ test("automation preview explains current mechanisms without writing to the hub"
     sync: false,
     else_actions: [],
   });
-  assert.deepEqual(
-    result.structuredContent.context.scenarios.map(
-      ({ name, type, predefined, active }) => ({
-        name,
-        type,
-        predefined,
-        active,
-      }),
-    ),
-    [
-      {
-        name: "Существующий сценарий",
-        type: "BLOCK",
-        predefined: false,
-        active: true,
-      },
-      {
-        name: "Встроенная логика",
-        type: "LOGIC",
-        predefined: true,
-        active: true,
-      },
-    ],
-  );
+  assert.deepEqual(result.structuredContent.existing_rules, []);
   assert.deepEqual(result.structuredContent.context.target.assigned_logics, [
     {
       type: "LightbulbControl",
@@ -532,25 +509,19 @@ test("automation preview explains current mechanisms without writing to the hub"
     Object.hasOwn(result.structuredContent.context.source, "direct_scenarios"),
     false,
   );
-  assert.deepEqual(result.structuredContent.context.source.options, [
-    {
-      key: "SwitchOffTime",
-      name: "Выключить через (сек.)",
-      type: "GenericDouble",
-      value: 180,
-      read: true,
-      write: true,
-    },
-  ]);
-  assert.deepEqual(
-    result.structuredContent.context.extensions.map(
-      ({ bundle_type, state }) => ({ bundle_type, state }),
-    ),
-    [
-      { bundle_type: "CONTROLLER", state: "LOADED" },
-      { bundle_type: "NOTIFICATION", state: "FAILED" },
-    ],
-  );
+  // The decision needs the rules and mechanisms of these two devices, not
+  // the catalogs of the whole home: other scenarios, extensions, logic types
+  // and characteristic options stay out of the preview.
+  const text = result.content[0].text;
+  for (const unrelated of [
+    "Встроенная логика",
+    "ZigBee",
+    "Telegram",
+    "Адаптивное освещение",
+    "Выключить через (сек.)",
+  ]) {
+    assert.equal(text.includes(unrelated), false, unrelated);
+  }
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.delete),
     false,
@@ -804,6 +775,22 @@ test("different auto-off behavior is not treated as the requested rule", async (
           name: `Запрошенное правило после изменения: ${name}`,
         },
       });
+      assert.deepEqual(
+        requested.structuredContent.existing_rules.map(
+          ({ ref, relation, differences }) => [
+            ref,
+            relation,
+            differences.map(({ field }) => field),
+          ],
+        ),
+        [
+          [
+            `spruthub://hub/automation-test-hub/scenario/${originalApply.structuredContent.scenario_index}`,
+            "conflict",
+            ["auto_off"],
+          ],
+        ],
+      );
 
       const result = await client.callTool({
         name: "apply_automation_change",
@@ -819,6 +806,143 @@ test("different auto-off behavior is not treated as the requested rule", async (
       );
     });
   }
+});
+
+test("an existing rule that also turns the light off later is reported and not duplicated", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push({
+    index: "motion-light",
+    name: "Свет в офисе по движению",
+    desc: "Настроено вручную",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: 32,
+                sId: 13,
+                cId: 15,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                cond: "=",
+                value: "true",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+          then: [
+            {
+              type: "service",
+              aId: 34,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 15, hc: "On", value: "true" },
+              ],
+            },
+            {
+              type: "delay",
+              index: 1,
+              mode: "RESET",
+              time: 120_000,
+              targets: [
+                {
+                  type: "service",
+                  aId: 34,
+                  sId: 13,
+                  hs: "Lightbulb",
+                  characteristics: [
+                    { type: "set", cId: 15, hc: "On", value: "false" },
+                  ],
+                },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+        },
+      ],
+    }),
+  });
+  const scenariosBefore = structuredClone(hub.state.scenarios);
+  const client = await startClient(t, hub, stateDirectory);
+  const existingRule = {
+    ref: "spruthub://hub/automation-test-hub/scenario/motion-light",
+    name: "Свет в офисе по движению",
+    relation: "superset",
+    differences: [
+      {
+        field: "auto_off",
+        existing: [
+          {
+            after_seconds: 120,
+            timer_mode: "RESET",
+            target_value: false,
+            timer_index: 1,
+          },
+        ],
+        requested: [],
+      },
+    ],
+  };
+
+  const prepared = await preview(client);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent.existing_rules, [existingRule]);
+
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "conflict");
+  assert.equal(
+    applied.structuredContent.conflict_reason,
+    "existing_rule_superset",
+  );
+  assert.equal(applied.structuredContent.created, false);
+  assert.equal(applied.structuredContent.owned, false);
+  assert.equal(applied.structuredContent.scenario_index, "motion-light");
+  assert.deepEqual(applied.structuredContent.existing_rule, existingRule);
+  const repeated = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(repeated.structuredContent.status, "conflict");
+  const status = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.structuredContent.status, "conflict");
+  assert.equal(
+    status.structuredContent.conflict_reason,
+    "existing_rule_superset",
+  );
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rollback.structuredContent.status, "conflict");
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.delete),
+    false,
+  );
+  assert.deepEqual(hub.state.scenarios, scenariosBefore);
 });
 
 test("apply reconciles a dropped create response without sending create twice", async (t) => {
@@ -1141,6 +1265,14 @@ test("an equivalent rule under another name is reused without transferring owner
     name: "preview_boolean_automation",
     arguments: { ...previewArguments, name: "Другое название той же связи" },
   });
+  assert.deepEqual(second.structuredContent.existing_rules, [
+    {
+      ref: `spruthub://hub/automation-test-hub/scenario/${firstApply.structuredContent.scenario_index}`,
+      name: previewArguments.name,
+      relation: "equivalent",
+      differences: [],
+    },
+  ]);
 
   const secondApply = await client.callTool({
     name: "apply_automation_change",
@@ -1263,6 +1395,19 @@ test("a matching rule with different runtime properties is an explicit conflict"
           name: `Повтор при ${property}=${value}`,
         },
       });
+      assert.deepEqual(
+        second.structuredContent.existing_rules.map(
+          ({ relation, differences }) => ({ relation, differences }),
+        ),
+        [
+          {
+            relation: "equivalent",
+            differences: [
+              { field: property, existing: value, requested: !value },
+            ],
+          },
+        ],
+      );
 
       const result = await client.callTool({
         name: "apply_automation_change",
