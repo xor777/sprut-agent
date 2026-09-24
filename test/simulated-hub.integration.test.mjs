@@ -593,7 +593,7 @@ test("the shipped hub log, room rename and service hide work on the simulated ho
   const touched = Object.fromEntries(
     hub.touchedMethods().map(({ method, level }) => [method, level]),
   );
-  assert.equal(touched["room.update"], "schema_only");
+  assert.equal(touched["room.update"], "observed");
   assert.equal(touched["service.update"], "schema_only");
   assert.equal(touched["accessory.get"], "observed");
 });
@@ -693,6 +693,23 @@ async function rawSession(t, options, fixture) {
 
 const setValue = (aId, cId, value) => ({
   characteristic: { update: { aId, sId: 13, cId, control: { value } } },
+});
+
+// SprutHub 3.0.0 acknowledged scenario.run of a turned-off BLOCK and ran
+// none of its actions; turned on, it ran them (live-conformance-3).
+test("a manual run of a turned-off BLOCK is acknowledged and changes nothing", async (t) => {
+  const { hub, send } = await rawSession(t);
+  const allOff = hub.state.scenarios.find(({ index }) => index === "11");
+  allOff.active = false;
+  const before = hub.snapshot();
+
+  const reply = await send({ scenario: { run: { index: "11" } } });
+  assert.deepEqual(reply.result, { scenario: { run: {} } });
+  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
+
+  allOff.active = true;
+  await send({ scenario: { run: { index: "11" } } });
+  assert.notDeepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
 });
 
 test("a delayed readback acknowledges a write before its value appears", async (t) => {
@@ -1036,7 +1053,7 @@ test("the simulator gives every scenario type the live options window and refuse
       .touchedMethods()
       .map(({ method, level, errors }) => [method, [level, errors]]),
   );
-  assert.deepEqual(levels["window.update {Active}"], ["schema_only", 0]);
+  assert.deepEqual(levels["window.update {Active}"], ["observed", 0]);
   assert.deepEqual(levels["window.update {OnStart}"], ["unsupported", 2]);
   for (const key of ["Sync", "Remove", "Name", "Desc"]) {
     assert.deepEqual(levels[`window.update {${key}}`], ["unsupported", 1]);

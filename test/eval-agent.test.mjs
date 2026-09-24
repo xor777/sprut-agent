@@ -279,21 +279,42 @@ test("a scripted agent that turns off only living room lights passes through the
 });
 
 test("a pass that rests on simulator behavior not seen on a live hub is marked", async (t) => {
+  // service.update is known from the protocol schema only.
+  const hidden = await scriptedRun(t, {
+    caseName: "hide-service",
+    turnOff: [
+      {
+        operation: "service_visible",
+        target: "accessory/17/service/13",
+        value: false,
+      },
+    ],
+    answer: "Скрыл ленту в гостиной.",
+  });
+  assert.equal(hidden.outcome.pass, true);
+  assert.deepEqual(hidden.saved.unverified_methods, ["service.update"]);
+  assert.match(
+    summaryLine(hidden.outcome),
+    /^PASS\* \(unverified: service\.update\) hide-service@apartment /,
+  );
+});
+
+// SprutHub 3.0.0 renamed a room with room.update and switched a BLOCK and a
+// LOGIC through the Active option of their options windows, both ways
+// (live-conformance-3), so passes that rest on these writes are verified.
+test("a pass that renames a room or switches a scenario through its window is verified", async (t) => {
   const renamed = await scriptedRun(t, {
     caseName: "rename-room",
     turnOff: [{ operation: "room_name", target: "room/7", value: "Офис" }],
     answer: "Переименовал кабинет в «Офис».",
   });
   assert.equal(renamed.outcome.pass, true);
-  assert.deepEqual(renamed.saved.unverified_methods, ["room.update"]);
-  assert.match(
-    summaryLine(renamed.outcome),
-    /^PASS\* \(unverified: room\.update\) rename-room@apartment /,
-  );
+  assert.deepEqual(renamed.saved.unverified_methods, []);
+  assert.match(summaryLine(renamed.outcome), /^PASS rename-room@apartment /);
 
   // SprutHub 3.0.0 acknowledged scenario.update {active} and kept the flag,
   // so the product switches a scenario only through the Active option of its
-  // options window. That write has not been read back on a live hub yet.
+  // options window.
   const disabled = await scriptedRun(t, {
     caseName: "disable-scenario",
     turnOff: [
@@ -315,14 +336,12 @@ test("a pass that rests on simulator behavior not seen on a live hub is marked",
       level,
     ]),
   );
-  assert.equal(levels["window.update {Active}"], "schema_only");
+  assert.equal(levels["window.update {Active}"], "observed");
   assert.equal(levels["scenario.update {active}"], undefined);
-  assert.deepEqual(disabled.saved.unverified_methods, [
-    "window.update {Active}",
-  ]);
+  assert.deepEqual(disabled.saved.unverified_methods, []);
   assert.match(
     summaryLine(disabled.outcome),
-    /^PASS\* \(unverified: window\.update \{Active\}\) disable-scenario@apartment /,
+    /^PASS disable-scenario@apartment /,
   );
 });
 
@@ -730,7 +749,7 @@ test("the summary keeps PASS* and failed runs apart from verified passes", () =>
   const summary = summarizeRuns(
     [
       run("apartment", true, 4),
-      run("apartment", true, 6, ["room.update"]),
+      run("apartment", true, 6, ["service.update"]),
       run("apartment", false, 40),
       run("house", true, 10),
       run("house", false, 100),
