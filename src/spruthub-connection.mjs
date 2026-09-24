@@ -49,6 +49,7 @@ export class SprutHubConnection {
   #secrets = new Set();
 
   constructor({ env = process.env } = {}) {
+    env = withoutBlankConnectionValues(env);
     this.#env = env;
     this.#homeSelectionSource =
       (Object.hasOwn(env, "SPRUTHUB_SERIAL") &&
@@ -631,6 +632,17 @@ function shellQuote(value) {
 function resolveConfigRoot(env) {
   if (env.XDG_CONFIG_HOME) return path.resolve(env.XDG_CONFIG_HOME);
   return path.join(env.HOME ? path.resolve(env.HOME) : homedir(), ".config");
+}
+
+// MCP clients often pass an unfilled config placeholder as an empty string.
+// Treat it as unset, so connection.env or the default still applies instead
+// of a blank value that no edit of the file could replace.
+function withoutBlankConnectionValues(env) {
+  const normalized = { ...env };
+  for (const name of CONNECTION_ENV_FIELDS) {
+    if (normalized[name] === "") delete normalized[name];
+  }
+  return normalized;
 }
 
 function hasCompleteExplicitConnection(env) {
