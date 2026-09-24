@@ -4,8 +4,9 @@
 // It talks only through dist/plugin/dist/server.mjs over stdio. Every write
 // goes through a guard: it may create BLOCK and LOGIC scenarios whose names
 // start with the run prefix, rooms and one virtual Lightbulb without links
-// named with the short run name (the hub keeps 30 characters of those), and
-// may change or restore only objects it created in this run. By the owner's
+// named with the short run name (the hub keeps 30 characters of an accessory
+// name and 32 of a room name), and may change or restore only objects it
+// created in this run. By the owner's
 // rules a BLOCK may act only on that virtual accessory and start only on a
 // one-date cron in FAR_FUTURE_YEAR or later or on one daily time; it is
 // created turned off with onStart=false. A run BLOCK may be turned on; a run
@@ -67,8 +68,8 @@ const FIRE_WAIT_MAX_MS = 200_000;
 const FIRE_POLL_MS = 2_000;
 // The web client's days_at_time trigger for every day (src/block-model.mjs).
 const DAILY_TIME_CRON = /^0 ([0-5]?\d) ([01]?\d|2[0-3]) \? \* \* \*$/;
-// A probe room name starts with the run's short name. The hub cut room names
-// to 30 characters; step 1n sends longer ones on purpose.
+// A probe room name starts with the run's short name. The hub keeps 32
+// characters of a room name; step 1n sends longer ones on purpose.
 const ROOM_NAME_PROBE_MAX = 40;
 const REASON =
   "Owner-authorized live conformance probe; only objects created by this run are changed and all are removed.";
@@ -270,12 +271,30 @@ export class GuardedHub {
   async restore(changeRef) {
     this.#writable("restore");
     const change = this.#ownChange(changeRef);
+    const owned = this.created.get(change.target_ref);
+    // Restoring a change that turned a run LOGIC off turns it on again.
+    const turnsLogicOn =
+      change.operation === "scenario_active" &&
+      change.value === false &&
+      owned?.kind === "logic";
+    if (turnsLogicOn) {
+      if (owned.assignments.size > 0) {
+        throw new GuardError(
+          `refused restore of ${changeRef}: an assigned LOGIC stays off`,
+        );
+      }
+      // Recorded before the write: a lost answer may still have switched it.
+      owned.on.add(changeRef);
+    }
     const result = await this.#call("restore_native_change", {
       change_ref: changeRef,
     });
     if (result.status === "restored") {
-      const owned = this.created.get(change.target_ref);
-      if (change.operation === "scenario_active" && owned?.kind === "logic") {
+      if (
+        change.operation === "scenario_active" &&
+        change.value === true &&
+        owned?.kind === "logic"
+      ) {
         owned.on.delete(changeRef);
       }
       if (change.operation === "logic_assignment") {
@@ -339,19 +358,15 @@ export class GuardedHub {
           ? { kind: "block", activatable: change.activatable === true }
           : {
               kind: "logic",
-              type: null,
-              // Changes that may have left it on, and its assignments.
+              // A user LOGIC's native type is its scenario index (SprutHub
+              // 3.0.0, 2026-09-24).
+              type: scenarioIndex(result.scenario_ref),
+              // Changes and direct writes that may have left it on, and its
+              // assignments.
               on: new Set(change.active === true ? [changeRef] : []),
               assignments: new Set(),
             },
       );
-    }
-    const owned = this.created.get(result.scenario_ref);
-    if (
-      owned.kind === "logic" &&
-      typeof result.native_logic_type === "string"
-    ) {
-      owned.type = result.native_logic_type;
     }
   }
 
@@ -366,9 +381,8 @@ export class GuardedHub {
     return undefined;
   }
 
-  // The product maps a LOGIC to the one new type on its anchor. A LOGIC the
-  // owner created meanwhile could be that type; the type's entry must name
-  // a scenario of this run.
+  // The type's entry on the service must name a scenario of this run, as
+  // the anchor names a turned-on LOGIC's type after its scenario.
   async #checkAssignedType(logicRef) {
     const match = /\/accessory\/(\d+)\/service\/(\d+)\/logic\/([^/]+)$/.exec(
       logicRef,
@@ -798,6 +812,98 @@ export class ProbeClient {
       key: "Active",
       value: { boolValue: active },
     });
+  }
+
+  // Step 4m: an assignment of a run LOGIC while it is off, sent directly.
+  // The product assigns only a type its anchor lists, and SprutHub does not
+  // list a turned-off LOGIC (2026-09-24). The type is the LOGIC's scenario
+  // index; the target is the run's virtual accessory. The assignment is
+  // recorded on the LOGIC before the write, so the guard keeps it off while
+  // the assignment may exist; an explicit hub refusal clears that record.
+  async assignLogicWhileOff(scenarioRef, target) {
+    this.#writable("logic.create");
+    const { owned, type, key } = this.#runLogicAssignment(scenarioRef, target);
+    if (owned.on.size > 0) {
+      throw new GuardError(
+        `${relativeRef(scenarioRef)} may be on; it is assigned only while off`,
+      );
+    }
+    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
+    if (scenario?.active !== false) {
+      throw new GuardError(`${relativeRef(scenarioRef)} does not read off`);
+    }
+    owned.assignments.add(key);
+    try {
+      return await this.#client.createLogic({ ...target, type });
+    } catch (error) {
+      if (error.hubError !== undefined) owned.assignments.delete(key);
+      throw error;
+    }
+  }
+
+  // Whether logic.list and logic.get of the target show the run LOGIC's
+  // assignment; a read that fails is reported as its error.
+  async logicAssignmentSeen(scenarioRef, target) {
+    const { type } = this.#runLogicAssignment(scenarioRef, target);
+    const seen = {};
+    try {
+      seen.list = (await this.#client.listLogics(target)).some(
+        (item) => item?.type === type,
+      );
+    } catch (error) {
+      seen.list = null;
+      seen.list_error = error.code ?? error.message;
+    }
+    try {
+      seen.get = (await this.#client.getLogic({ ...target, type })) !== null;
+    } catch (error) {
+      seen.get = null;
+      seen.get_error = error.code ?? error.message;
+    }
+    return seen;
+  }
+
+  // Deletes that assignment. The guard lets the LOGIC be turned on again
+  // only when a read saw the assignment before the delete and none after.
+  async removeLogicAssignment(scenarioRef, target) {
+    this.#writable("logic.delete");
+    const { owned, type, key } = this.#runLogicAssignment(scenarioRef, target);
+    const before = await this.logicAssignmentSeen(scenarioRef, target);
+    let failure;
+    try {
+      await this.#client.deleteLogic({ ...target, type });
+    } catch (error) {
+      failure = error;
+    }
+    const after = await this.logicAssignmentSeen(scenarioRef, target);
+    const verified =
+      (before.list === true || before.get === true) &&
+      after.list === false &&
+      after.get === false;
+    if (verified) owned.assignments.delete(key);
+    return { failure, before, after, verified };
+  }
+
+  #runLogicAssignment(scenarioRef, target) {
+    const owned = this.#hub.created.get(scenarioRef);
+    if (owned?.kind !== "logic") {
+      throw new GuardError(
+        `${relativeRef(scenarioRef)} is no LOGIC of this run`,
+      );
+    }
+    if (
+      !this.#hub.virtualAIds.has(target?.aId) ||
+      !Number.isInteger(target?.sId)
+    ) {
+      throw new GuardError(
+        `accessory ${target?.aId} is not the run's virtual one`,
+      );
+    }
+    return {
+      owned,
+      type: String(scenarioIndex(scenarioRef)),
+      key: `direct:${target.aId}.${target.sId}`,
+    };
   }
 
   // One JSON-RPC request on its own socket, in the product client's envelope.
@@ -1673,18 +1779,25 @@ function roomRemovalProved() {
 
 // --- step 1n: room names beyond ASCII -----------------------------------------
 
-// The product refuses a room name over 30 UTF-16 units (name_too_long); the
-// hub cut a 42-character ASCII name to 30. What the hub keeps of Cyrillic and
-// emoji is unknown: in UTF-8 a Cyrillic letter is 2 bytes and an emoji 4, in
-// UTF-16 an emoji is 2 units. Each name starts with the run's short name
-// (25 ASCII characters), so a cut name is still the run's.
+// The hub keeps the first 32 characters of a room name, Cyrillic and Latin
+// alike, and drops emoji (2026-09-24). The product refuses a longer name
+// (name_too_long) and one with characters outside the Basic Multilingual
+// Plane (name_characters_unsupported). Each name starts with the run's short
+// name (25 ASCII characters), so a cut name is still the run's.
 function roomNameCases(short) {
   return [
-    { id: "cyrillic_30", name: `${short}абвгд` },
-    { id: "cyrillic_31", name: `${short}абвгде` },
-    { id: "emoji_30_units", name: `${short}абв🙂` },
-    { id: "emoji_30_chars", name: `${short}аб🙂🙂🙂` },
+    { id: "cyrillic_32", name: `${short}абвгдеж` },
+    { id: "cyrillic_33", name: `${short}абвгдежз` },
+    { id: "emoji", name: `${short}абв🙂` },
   ];
+}
+
+// The product's refusal of a room name, or null for a name it sends.
+function roomNameRefusal(name) {
+  if ([...name].some((character) => character.codePointAt(0) > 0xffff)) {
+    return "name_characters_unsupported";
+  }
+  return [...name].length > 32 ? "name_too_long" : null;
 }
 
 function nameLengths(name) {
@@ -1717,14 +1830,14 @@ async function stepRoomNames(ctx) {
   }
   const short = probeShortName(prefix);
   for (const { id, name } of roomNameCases(short)) {
-    const tooLong = name.length > 30;
+    const refusal = roomNameRefusal(name);
     const result = await prepareAndApply(hub, {
       operation: "room_create",
       target_ref: hub.homeRef,
       name,
     });
-    const expected = tooLong
-      ? `refused name_too_long (${lengthsText(name)})`
+    const expected = refusal
+      ? `refused ${refusal} (${lengthsText(name)})`
       : `created, stored exactly (${lengthsText(name)})`;
     if (!result.applied) {
       const code = result.prepared.error?.code;
@@ -1733,7 +1846,7 @@ async function stepRoomNames(ctx) {
         "prepare room_create",
         expected,
         describe(result),
-        tooLong && code === "name_too_long" ? "match" : "mismatch",
+        refusal && code === refusal ? "match" : "mismatch",
       );
       continue;
     }
@@ -1753,7 +1866,7 @@ async function stepRoomNames(ctx) {
       "room.create{name}",
       expected,
       `${result.applied.status}; stored ${JSON.stringify(stored ?? null)} (${lengthsText(stored)})`,
-      tooLong || result.applied.status !== "applied"
+      refusal || result.applied.status !== "applied"
         ? "mismatch"
         : stored === name
           ? "match"
@@ -1778,16 +1891,16 @@ async function stepRoomNames(ctx) {
     }
   }
 
-  // The product refuses 31 characters, so one direct room.create shows what
+  // The product refuses 33 characters, so one direct room.create shows what
   // the hub keeps of them. Its id is recorded for the sweep at once.
-  const direct = `${short}абвгде`;
+  const direct = `${short}абвгдежз`;
   let room;
   try {
     room = await probe.createRoomDirect(direct);
   } catch (error) {
     if (error instanceof GuardError) throw error;
     row(
-      "1n direct cyrillic_31",
+      "1n direct cyrillic_33",
       "room.create{name} (direct)",
       "record what the hub keeps",
       `${error.code ?? error.message}`,
@@ -1797,7 +1910,7 @@ async function stepRoomNames(ctx) {
     return;
   }
   const entry = pushCleanup(ctx, {
-    label: "room direct cyrillic_31",
+    label: "room direct cyrillic_33",
     run: async () => {
       const { failure, gone } = await probe.deleteDirectRoom(room.ref);
       return {
@@ -1809,7 +1922,7 @@ async function stepRoomNames(ctx) {
   });
   const stored = (await probe.getRoom(room.id))?.name;
   row(
-    "1n direct cyrillic_31",
+    "1n direct cyrillic_33",
     "room.create{name} (direct)",
     `record what the hub keeps of ${lengthsText(direct)}`,
     `answer ${JSON.stringify(room.name)}; stored ${JSON.stringify(stored ?? null)} (${lengthsText(stored)})`,
@@ -3052,9 +3165,11 @@ function trigger(source, value, variables, options, context) {
 }`;
 }
 
-// How a user LOGIC's native type is linked to its scenario: a LOGIC created
-// off (restore, then on to see its type, renamed, off, assigned while off,
-// restore again), then a LOGIC created on, turned off and deleted.
+// A user LOGIC's native type is its scenario index, listed on its anchor only
+// while it is on (2026-09-24). A LOGIC created off (restore, then on to see
+// its type, renamed, off, assigned while off, restore again), then a LOGIC
+// created on, turned off, assigned directly while off to learn whether
+// logic.list shows that, turned on again and deleted.
 async function stepLogic(ctx) {
   const { virtual } = ctx;
   if (!virtual) {
@@ -3090,7 +3205,7 @@ async function turnedOffLogic(ctx, anchor) {
   const name = `${prefix}-logic`;
   const source = logicSource(name, "1.0");
   const typesBefore = await probe.listLogicTypes(anchor);
-  // The anchor only lets the product map the new LOGIC type.
+  // The anchor lists the LOGIC's type while it is on.
   const create = await prepareAndApply(hub, {
     operation: "logic_source_create",
     target_ref: virtual.serviceRef,
@@ -3155,13 +3270,21 @@ async function turnedOffLogic(ctx, anchor) {
     abort("LOGIC create not applied");
     return null;
   }
-  const mapped = create.applied.logic_mapping_status === "mapped";
+  const index = scenarioIndex(ref);
+  const listedOff = (await probe.listLogicTypes(anchor)).some(
+    (entry) => entry.type === index,
+  );
   row(
     "4b LOGIC type on anchor",
     "logic.types{aId,sId}",
-    "turned-off LOGIC type is listed for its source service",
-    mappingText(create.applied),
-    mapped ? "match" : "mismatch",
+    "type = scenario index, not listed while off; assignment not ready",
+    `${mappingText(create.applied)}; anchor ${listedOff ? "lists" : "does not list"} ${index}`,
+    create.applied.logic_mapping_status === "mapped" &&
+      create.applied.native_logic_type === index &&
+      create.applied.logic_assignment_ready === false &&
+      !listedOff
+      ? "match"
+      : "mismatch",
   );
 
   const updatedSource = `${logicSource(name, "1.1")}\n\n${markerComment}`;
@@ -3218,7 +3341,8 @@ async function turnedOffLogic(ctx, anchor) {
     }
   }
 
-  // Read before the first restore, which deletes the LOGIC if it is mapped.
+  // Read before the first restore, which would delete the LOGIC if the
+  // product allowed it while off.
   const view = await probe.activeView(ref);
   const hasActive = Boolean(view?.option);
   row(
@@ -3241,13 +3365,8 @@ async function turnedOffLogic(ctx, anchor) {
     "4e restore create",
     createEntry,
     ref,
-    mapped
-      ? "LOGIC deleted"
-      : "refused with logic_type_not_visible; LOGIC kept",
-    (outcome, present) =>
-      mapped
-        ? outcome.verified
-        : present && outcome.result?.error?.code === "logic_type_not_visible",
+    "refused with logic_off_assignments_unverified; LOGIC kept",
+    refusedWhileOff,
   );
   if (first.deleted) return { hasActive };
   if (!hasActive) {
@@ -3330,22 +3449,32 @@ async function turnedOffLogic(ctx, anchor) {
     "4l retry restore create",
     createEntry,
     ref,
-    "record whether restore now maps and deletes the LOGIC",
-    null,
+    "refused again while off; LOGIC kept",
+    refusedWhileOff,
   );
   if (!second.deleted) {
     leaveForSweep(
       ctx,
       createEntry,
       ref,
-      "restore did not delete the turned-off LOGIC after it was on",
+      "restore does not delete a turned-off LOGIC (logic_off_assignments_unverified)",
     );
   }
   return { hasActive };
 }
 
-// A LOGIC created on, as an agent may create it: the product may see its
-// type at apply. Turned off and deleted in this step.
+// The product's restore of a turned-off created LOGIC: refused, LOGIC kept.
+function refusedWhileOff(outcome, present) {
+  return (
+    present &&
+    outcome.result?.error?.code === "logic_off_assignments_unverified"
+  );
+}
+
+// A LOGIC created on, as an agent may create it: the product maps its type
+// (its scenario index) and may assign it at once. Turned off, assigned
+// directly while off (4n), and deleted after it is on again, as the
+// product's refusal while off asks.
 async function createdOnLogic(ctx, anchor) {
   const { hub, probe, virtual, prefix } = ctx;
   const name = `${prefix}-logic-on`;
@@ -3384,10 +3513,13 @@ async function createdOnLogic(ctx, anchor) {
   row(
     "4m LOGIC create on",
     "scenario.create{LOGIC,active:true}",
-    "created on; record whether the product maps its type at apply",
+    "created on; type = scenario index, assignment ready",
     `${create.applied.status}; active ${view?.active}; ${mappingText(create.applied)}`,
-    create.applied.status === "applied" && view?.active === true
-      ? "observed"
+    create.applied.status === "applied" &&
+      view?.active === true &&
+      create.applied.native_logic_type === scenarioIndex(ref) &&
+      create.applied.logic_assignment_ready === true
+      ? "match"
       : "mismatch",
   );
   await logicTypeWhileOn(ctx, "4m", {
@@ -3396,20 +3528,22 @@ async function createdOnLogic(ctx, anchor) {
     typesBefore,
     changeRef: create.changeRef,
   });
-  // Restoring this change would turn the LOGIC on again.
+  // Cleanup does not restore it: that would turn the LOGIC on again. This
+  // step restores it to turn the LOGIC on before the delete.
   const off = await prepareAndApply(hub, {
     operation: "scenario_active",
     target_ref: ref,
     value: false,
   });
-  if (off.applied) {
-    pushCleanup(ctx, {
-      label: "4m turn off",
-      parent: createEntry,
-      changeRef: off.changeRef,
-      restoreOptional: true,
-    });
-  }
+  const offEntry = off.applied
+    ? pushCleanup(ctx, {
+        label: "4m turn off",
+        parent: createEntry,
+        changeRef: off.changeRef,
+        restoreOptional: true,
+        verify: async () => (await probe.activeView(ref))?.active === true,
+      })
+    : undefined;
   row(
     "4m turn off",
     "window.update{windowKey,options:[Active=false]}",
@@ -3418,6 +3552,43 @@ async function createdOnLogic(ctx, anchor) {
     off.applied?.status === "applied" ? "match" : "mismatch",
   );
   const agreement = await activeAgreement(ctx, "4m agreement", ref, false);
+  if (agreement.view?.active !== false) {
+    abort("a LOGIC created on did not turn off");
+    return;
+  }
+  await offAssignment(ctx, { ref, anchor });
+  if (abortReason) return;
+
+  const whileOff = await logicCreateRestore(
+    ctx,
+    "4m restore create while off",
+    createEntry,
+    ref,
+    "refused with logic_off_assignments_unverified; LOGIC kept",
+    refusedWhileOff,
+  );
+  if (whileOff.deleted) return;
+  if (!offEntry || hub.created.get(ref).assignments.size > 0) {
+    leaveForSweep(
+      ctx,
+      createEntry,
+      ref,
+      offEntry
+        ? "its direct assignment was not read back as removed, so it stays off"
+        : "it could not be turned on again for the product's delete",
+    );
+    return;
+  }
+  // The product's next step: turn it on, then restore.
+  const on = await runRestore(hub, offEntry);
+  row(
+    "4m turn on",
+    "restore scenario_active",
+    "restored; active=true",
+    on.observed,
+    on.verified ? "match" : "mismatch",
+  );
+  await activeAgreement(ctx, "4m on agreement", ref, true);
   const deleted = await logicCreateRestore(
     ctx,
     "4m restore create",
@@ -3427,16 +3598,113 @@ async function createdOnLogic(ctx, anchor) {
     (outcome) => outcome.verified,
   );
   if (deleted.deleted) return;
-  if (agreement.view?.active === false) {
+  // Not deleted and maybe on: off again, it is left to the sweep.
+  const offAgain = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: ref,
+    value: false,
+  });
+  if (offAgain.applied) {
+    pushCleanup(ctx, {
+      label: "4m turn off again",
+      parent: createEntry,
+      changeRef: offAgain.changeRef,
+      restoreOptional: true,
+    });
+  }
+  if ((await probe.activeView(ref))?.active === false) {
     leaveForSweep(
       ctx,
       createEntry,
       ref,
-      "restore did not delete a LOGIC created on, turned off since",
+      "restore did not delete a LOGIC created on, turned on again",
     );
   } else {
     abort("a LOGIC created on is neither off nor deleted");
   }
+}
+
+// 4n: does logic.list show the assignment of a turned-off LOGIC? Until it is
+// known, the product does not delete a turned-off LOGIC
+// (logic_off_assignments_unverified). The product assigns only a listed
+// type, so the probe assigns the run's LOGIC, off, directly to the run's
+// virtual accessory (its anchor) by its scenario index, reads logic.list and
+// logic.get, and removes the assignment. Each answer is recorded, not judged.
+async function offAssignment(ctx, { ref, anchor }) {
+  const { hub, probe } = ctx;
+  const type = scenarioIndex(ref);
+  const listed = (await probe.listLogicTypes(anchor)).some(
+    (entry) => entry.type === type,
+  );
+  row(
+    "4n type while off",
+    "logic.types{aId,sId}",
+    `record whether the anchor lists ${type} while the LOGIC is off`,
+    listed ? "listed" : "not listed",
+    "observed",
+  );
+  let answer;
+  let refusal;
+  try {
+    answer = await probe.assignLogicWhileOff(ref, anchor);
+  } catch (error) {
+    if (error instanceof GuardError) throw error;
+    refusal = error;
+  }
+  const assignedMaybe = hub.created.get(ref).assignments.size > 0;
+  row(
+    "4n assign while off",
+    "logic.create{aId,sId,type} (direct)",
+    "record whether the hub assigns a turned-off LOGIC",
+    answer
+      ? `acknowledged; answer active ${answer.active ?? "absent"}`
+      : `${refusal.hubError ? "refused" : "no clear answer"}: ${refusal.code ?? refusal.message}${refusal.hubError?.message ? ` (${refusal.hubError.message})` : ""}`,
+    "observed",
+    refusal?.hubError ? { hub_error: refusal.hubError } : undefined,
+  );
+  if (!assignedMaybe) return;
+  const entry = pushCleanup(ctx, {
+    label: "4n direct assignment",
+    run: async () => {
+      const removal = await probe.removeLogicAssignment(ref, anchor);
+      return {
+        // Unreadable while off: recorded, not a failed cleanup.
+        verified: true,
+        status: removal.verified ? "deleted" : "sent_unverifiable",
+        observed: removalText(removal),
+        removal,
+      };
+    },
+  });
+  const seen = await probe.logicAssignmentSeen(ref, anchor);
+  row(
+    "4n visible while off",
+    "logic.list{aId,sId}, logic.get{aId,sId,type}",
+    "record whether logic.list shows the turned-off LOGIC's assignment",
+    `logic.list ${seenText(seen.list, seen.list_error)}; logic.get ${seenText(seen.get, seen.get_error)}`,
+    "observed",
+    { seen },
+  );
+  const removed = await runRestore(hub, entry);
+  row(
+    "4n remove assignment",
+    "logic.delete{aId,sId,type} (direct)",
+    "assignment removed; read back when it was visible",
+    removed.observed,
+    "observed",
+  );
+}
+
+function seenText(value, error) {
+  return value === null
+    ? `failed: ${error}`
+    : value
+      ? "shows it"
+      : "does not show it";
+}
+
+function removalText({ failure, before, after, verified }) {
+  return `${failure ? `delete error ${failure.code ?? failure.message}` : "logic.delete acknowledged"}; before: list ${seenText(before.list, before.list_error)}, get ${seenText(before.get, before.get_error)}; after: list ${seenText(after.list, after.list_error)}, get ${seenText(after.get, after.get_error)}; ${verified ? "removal read back" : "removal not verifiable"}`;
 }
 
 function mappingText(change) {
@@ -3952,9 +4220,10 @@ async function directRun(ctx, step, block, base) {
 
 // --- step 6t: a daily time trigger fires once ---------------------------------
 
-// Does the hub add fields such as nextRun to a time trigger of a turned-on
-// BLOCK, before or after it fires, that the product's canonical BLOCK form
-// keeps (a false manual_change)? The BLOCK sets the run's virtual accessory
+// A time trigger of a turned-on BLOCK fires once. On 2026-09-24 the hub
+// added if.state when it fired, and no nextRun; the product's canonical
+// BLOCK form leaves state out, so the change stays applied rather than a
+// false manual_change. This step keeps checking that. The BLOCK sets the run's virtual accessory
 // On at the first whole minute at least FIRE_LEAD_MS ahead of the hub clock
 // (home settings window), and that change is the firing evidence.
 async function stepTimeTrigger(ctx) {
@@ -4705,8 +4974,8 @@ async function recordProbeId(stateDirectory, record, id) {
   );
 }
 
-// The hub cuts accessory names (2026-09-11) and room names (2026-09-24) to
-// 30 characters, so accessories and rooms carry this short run name.
+// The hub cuts accessory names to 30 characters (2026-09-11) and room names
+// to 32 (2026-09-24), so accessories and rooms carry this short run name.
 function probeShortName(prefix) {
   return `zz-probe-${prefix.slice("zz-sprut-agent-probe-".length)}`;
 }

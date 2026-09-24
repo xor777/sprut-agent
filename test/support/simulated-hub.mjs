@@ -1516,6 +1516,7 @@ const HANDLERS = {
         throw invalidParams("LOGIC scenario requires source text");
       }
       scenario.data = input.data;
+      scenario.name = logicSourceName(input.data) ?? scenario.name;
       scenario.desc = logicSourceDescription(input.data) ?? scenario.desc;
     } else {
       throw invalidParams(`Scenario type ${input.type} is not supported`);
@@ -1547,6 +1548,7 @@ const HANDLERS = {
           throw invalidParams("LOGIC scenario requires source text");
         }
         scenario.data = input.data;
+        scenario.name = logicSourceName(input.data) ?? scenario.name;
         scenario.desc = logicSourceDescription(input.data) ?? scenario.desc;
       }
     }
@@ -2695,6 +2697,13 @@ function runRuleActions(run, nodes) {
 // native type is the string of its scenario index.
 function logicTypeForScenario(index) {
   return String(index);
+}
+
+// The hub takes a LOGIC's name and description from info in its source: a
+// create kept info.name (2026-09-24-live-conformance-2) and a source update
+// of info.name renamed the scenario (2026-09-24-live-conformance-3).
+function logicSourceName(source) {
+  return /\bname\s*:\s*"([^"]*)"/.exec(source)?.[1];
 }
 
 function logicSourceDescription(source) {

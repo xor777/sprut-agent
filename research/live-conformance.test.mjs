@@ -26,7 +26,7 @@ const repoRoot = path.resolve(
 );
 const script = path.join(repoRoot, "research", "live-conformance.mjs");
 const prefix = "zz-sprut-agent-probe-20260924T121158Z";
-// Rooms carry the run's short name: SprutHub keeps 30 characters of a room
+// Rooms carry the run's short name: SprutHub keeps 32 characters of a room
 // name, and the product refuses a longer one.
 const roomName = "zz-probe-20260924T121158Z";
 const runFile = promisify(execFile);
@@ -380,8 +380,8 @@ test("the sweep deletes a recorded, unlinked virtual accessory before its room",
   assert.equal(ids.includes(linked.id), true);
 });
 
-// SprutHub 3.0.0 cut a 42-character room name to 30 characters on
-// 2026-09-24, so the probe names its rooms with the short run name.
+// SprutHub 3.0.0 keeps 32 characters of a room name (2026-09-24), so the
+// probe names its rooms with the short run name.
 test("the sweep finds a probe room by the run's short name", async (t) => {
   const ctx = await setup(t);
   const room = await createRoom(ctx, `${accessoryName}-v`);
