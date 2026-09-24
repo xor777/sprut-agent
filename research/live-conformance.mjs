@@ -10,15 +10,16 @@
 // rules a BLOCK may act only on that virtual accessory and start only on a
 // one-date cron in FAR_FUTURE_YEAR or later or on one daily time; it is
 // created turned off with onStart=false. A run BLOCK may be turned on; a run
-// LOGIC, whose source is an info object and an empty trigger, may be on only
-// while it is not assigned, and is assigned only to the virtual accessory
-// while it is off. The owner's devices, scenarios, rooms and settings are only
-// read. Everything created is restored (deleted) in reverse order and the
-// final home snapshot must equal the initial one. A final sweep then deletes,
-// through the product client, every inert object of this run that the
-// product owns but its restore left behind, the run's own unlinked virtual
-// accessory and its one directly created room, and fails the run for each
-// unless a step left that object to it on purpose.
+// LOGIC, whose source is an info object and an empty trigger, runs nothing,
+// so it may be on and may be assigned, only to the virtual accessory; its
+// stored source is read back as that inert form before it is assigned or
+// turned on while assigned. The owner's devices, scenarios, rooms and
+// settings are only read. Everything created is restored (deleted) in
+// reverse order and the final home snapshot must equal the initial one. A
+// final sweep then deletes, through the product client, every inert object
+// of this run that the product owns but its restore left behind, the run's
+// own unlinked virtual accessory and its one directly created room, and
+// fails the run for each unless a step left that object to it on purpose.
 // `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep;
 // `--read-only` runs only the read steps and refuses every write;
 // `--only <ids>` runs the named steps (STEPS below).
@@ -197,25 +198,16 @@ export class GuardedHub {
     if (input.operation === "logic_assignment") {
       await this.#checkAssignedType(input.target_ref);
     }
+    await this.#checkLogicMayRun(input);
     const result = await this.#call("prepare_native_change", {
       reason: REASON,
       ...input,
     });
-    const owned = this.created.get(input.target_ref);
-    if (
-      input.operation === "scenario_active" &&
-      input.value === false &&
-      result.status === "already_desired" &&
-      owned?.kind === "logic"
-    ) {
-      owned.on.clear();
-    }
     if (typeof result.change_ref === "string") {
       this.changes.set(result.change_ref, {
         operation: input.operation,
         target_ref: input.target_ref,
         value: input.value,
-        active: input.active,
         // Product-created BLOCKs passed probeBlockViolation and act only on
         // the virtual accessory, so they may be turned on.
         activatable:
@@ -240,66 +232,33 @@ export class GuardedHub {
     const change = this.#ownChange(changeRef);
     if (change.prepareOnly)
       throw new GuardError(`${changeRef} is prepare-only`);
-    // Recorded before the write: a lost answer may still have switched or
-    // assigned the LOGIC.
-    const owned = this.created.get(change.target_ref);
-    if (
-      change.operation === "scenario_active" &&
-      change.value === true &&
-      owned?.kind === "logic"
-    ) {
-      owned.on.add(changeRef);
-    }
+    await this.#checkLogicMayRun(change);
+    // Recorded before the write: a lost answer may still have assigned it.
     if (change.operation === "logic_assignment") {
       this.created.get(change.logicRef).assignments.add(changeRef);
     }
     const result = await this.#call("apply_native_change", {
       change_ref: changeRef,
     });
-    this.#trackCreated(change, result, changeRef);
-    if (
-      change.operation === "scenario_active" &&
-      change.value === false &&
-      owned?.kind === "logic" &&
-      result.status === "applied"
-    ) {
-      owned.on.clear();
-    }
+    this.#trackCreated(change, result);
     return result;
   }
 
   async restore(changeRef) {
     this.#writable("restore");
     const change = this.#ownChange(changeRef);
-    const owned = this.created.get(change.target_ref);
     // Restoring a change that turned a run LOGIC off turns it on again.
-    const turnsLogicOn =
-      change.operation === "scenario_active" &&
-      change.value === false &&
-      owned?.kind === "logic";
-    if (turnsLogicOn) {
-      if (owned.assignments.size > 0) {
-        throw new GuardError(
-          `refused restore of ${changeRef}: an assigned LOGIC stays off`,
-        );
-      }
-      // Recorded before the write: a lost answer may still have switched it.
-      owned.on.add(changeRef);
+    if (change.operation === "scenario_active" && change.value === false) {
+      await this.#checkLogicMayRun({ ...change, value: true });
     }
     const result = await this.#call("restore_native_change", {
       change_ref: changeRef,
     });
-    if (result.status === "restored") {
-      if (
-        change.operation === "scenario_active" &&
-        change.value === true &&
-        owned?.kind === "logic"
-      ) {
-        owned.on.delete(changeRef);
-      }
-      if (change.operation === "logic_assignment") {
-        this.created.get(change.logicRef)?.assignments.delete(changeRef);
-      }
+    if (
+      result.status === "restored" &&
+      change.operation === "logic_assignment"
+    ) {
+      this.created.get(change.logicRef)?.assignments.delete(changeRef);
     }
     return result;
   }
@@ -308,7 +267,7 @@ export class GuardedHub {
     const result = await this.read("get_native_change", {
       change_ref: changeRef,
     });
-    this.#trackCreated(this.changes.get(changeRef), result, changeRef);
+    this.#trackCreated(this.changes.get(changeRef), result);
     return result;
   }
 
@@ -340,7 +299,7 @@ export class GuardedHub {
     return change;
   }
 
-  #trackCreated(change, result, changeRef) {
+  #trackCreated(change, result) {
     if (!change) return;
     if (change.operation === "room_create" && result?.room?.ref) {
       this.created.set(result.room.ref, { kind: "room" });
@@ -361,9 +320,7 @@ export class GuardedHub {
               // A user LOGIC's native type is its scenario index (SprutHub
               // 3.0.0, 2026-09-24).
               type: scenarioIndex(result.scenario_ref),
-              // Changes and direct writes that may have left it on, and its
-              // assignments.
-              on: new Set(change.active === true ? [changeRef] : []),
+              // The assignment changes that may have assigned it.
               assignments: new Set(),
             },
       );
@@ -396,6 +353,34 @@ export class GuardedHub {
     if (!String(entry?.name).startsWith(this.prefix)) {
       throw new GuardError(
         `refused logic_assignment on ${logicRef}: the type does not name a scenario of this run`,
+      );
+    }
+  }
+
+  // A run LOGIC runs on the services it is assigned to while it is on. It is
+  // assigned only to the run's virtual accessory (#checkPrepare), and before
+  // it is assigned or turned on while assigned, its stored source must read
+  // as the inert probe form.
+  async #checkLogicMayRun({ operation, target_ref: target, value }) {
+    const logicRef =
+      operation === "logic_assignment"
+        ? this.#assignedLogic(target)
+        : operation === "scenario_active" &&
+            value === true &&
+            this.created.get(target)?.kind === "logic" &&
+            this.created.get(target).assignments.size > 0
+          ? target
+          : undefined;
+    if (logicRef === undefined) return;
+    const scenario = await (await this.#productClient()).getScenario(
+      scenarioIndex(logicRef),
+    );
+    if (
+      scenario?.type !== "LOGIC" ||
+      !isInertProbeLogic(scenario.data, this.prefix)
+    ) {
+      throw new GuardError(
+        `refused ${operation} of ${relativeRef(logicRef)}: its stored source is not the inert probe LOGIC`,
       );
     }
   }
@@ -473,23 +458,14 @@ export class GuardedHub {
       ) {
         refuse("turning this BLOCK on is not allowed");
       }
-      if (
-        input.value === true &&
-        owned.kind === "logic" &&
-        owned.assignments.size > 0
-      ) {
-        refuse("an assigned LOGIC stays off");
-      }
     }
     if (op === "logic_assignment") {
       const service = /^(.*)\/logic\/[^/]+$/.exec(target ?? "")?.[1];
       if (!this.#isVirtualService(service)) {
         refuse("only on the run's virtual accessory");
       }
-      const logicRef = this.#assignedLogic(target);
-      if (!logicRef) refuse("not the type of a LOGIC of this run");
-      if (this.created.get(logicRef).on.size > 0) {
-        refuse("a LOGIC that may be on is not assigned");
+      if (!this.#assignedLogic(target)) {
+        refuse("not the type of a LOGIC of this run");
       }
     }
     if (op === "virtual_light_group") {
@@ -554,8 +530,8 @@ export class GuardedHub {
 // client: the run's virtual accessory (create, set, delete), turned-off
 // BLOCKs made directly, a run of this run's BLOCK, the Active option of such
 // a BLOCK's own options window and one directly created room. Its reads are
-// raw hub reads (scenario, window, room, logic types) that the MCP answers
-// only in part; history.list has no client method at all.
+// raw hub reads (scenario, window, room, logic types and assignments) that
+// the MCP answers only in part; history.list has no client method at all.
 export class ProbeClient {
   #client;
   #hub;
@@ -814,37 +790,11 @@ export class ProbeClient {
     });
   }
 
-  // Step 4m: an assignment of a run LOGIC while it is off, sent directly.
-  // The product assigns only a type its anchor lists, and SprutHub does not
-  // list a turned-off LOGIC (2026-09-24). The type is the LOGIC's scenario
-  // index; the target is the run's virtual accessory. The assignment is
-  // recorded on the LOGIC before the write, so the guard keeps it off while
-  // the assignment may exist; an explicit hub refusal clears that record.
-  async assignLogicWhileOff(scenarioRef, target) {
-    this.#writable("logic.create");
-    const { owned, type, key } = this.#runLogicAssignment(scenarioRef, target);
-    if (owned.on.size > 0) {
-      throw new GuardError(
-        `${relativeRef(scenarioRef)} may be on; it is assigned only while off`,
-      );
-    }
-    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
-    if (scenario?.active !== false) {
-      throw new GuardError(`${relativeRef(scenarioRef)} does not read off`);
-    }
-    owned.assignments.add(key);
-    try {
-      return await this.#client.createLogic({ ...target, type });
-    } catch (error) {
-      if (error.hubError !== undefined) owned.assignments.delete(key);
-      throw error;
-    }
-  }
-
-  // Whether logic.list and logic.get of the target show the run LOGIC's
-  // assignment; a read that fails is reported as its error.
+  // Whether logic.list and logic.get of the target show the assignment of a
+  // LOGIC (its type is its scenario index); a read that fails is reported
+  // as its error.
   async logicAssignmentSeen(scenarioRef, target) {
-    const { type } = this.#runLogicAssignment(scenarioRef, target);
+    const type = scenarioIndex(scenarioRef);
     const seen = {};
     try {
       seen.list = (await this.#client.listLogics(target)).some(
@@ -861,49 +811,6 @@ export class ProbeClient {
       seen.get_error = error.code ?? error.message;
     }
     return seen;
-  }
-
-  // Deletes that assignment. The guard lets the LOGIC be turned on again
-  // only when a read saw the assignment before the delete and none after.
-  async removeLogicAssignment(scenarioRef, target) {
-    this.#writable("logic.delete");
-    const { owned, type, key } = this.#runLogicAssignment(scenarioRef, target);
-    const before = await this.logicAssignmentSeen(scenarioRef, target);
-    let failure;
-    try {
-      await this.#client.deleteLogic({ ...target, type });
-    } catch (error) {
-      failure = error;
-    }
-    const after = await this.logicAssignmentSeen(scenarioRef, target);
-    const verified =
-      (before.list === true || before.get === true) &&
-      after.list === false &&
-      after.get === false;
-    if (verified) owned.assignments.delete(key);
-    return { failure, before, after, verified };
-  }
-
-  #runLogicAssignment(scenarioRef, target) {
-    const owned = this.#hub.created.get(scenarioRef);
-    if (owned?.kind !== "logic") {
-      throw new GuardError(
-        `${relativeRef(scenarioRef)} is no LOGIC of this run`,
-      );
-    }
-    if (
-      !this.#hub.virtualAIds.has(target?.aId) ||
-      !Number.isInteger(target?.sId)
-    ) {
-      throw new GuardError(
-        `accessory ${target?.aId} is not the run's virtual one`,
-      );
-    }
-    return {
-      owned,
-      type: String(scenarioIndex(scenarioRef)),
-      key: `direct:${target.aId}.${target.sId}`,
-    };
   }
 
   // One JSON-RPC request on its own socket, in the product client's envelope.
@@ -3175,8 +3082,8 @@ function trigger(source, value, variables, options, context) {
 // A user LOGIC's native type is its scenario index, listed on its anchor only
 // while it is on (2026-09-24). A LOGIC created off (restore, then on to see
 // its type, renamed, off, assigned while off, restore again), then a LOGIC
-// created on, turned off, assigned directly while off to learn whether
-// logic.list shows that, turned on again and deleted.
+// created on, assigned while on, turned off to learn whether logic.list still
+// shows that assignment, turned on again, unassigned and deleted.
 async function stepLogic(ctx) {
   const { virtual } = ctx;
   if (!virtual) {
@@ -3479,9 +3386,10 @@ function refusedWhileOff(outcome, present) {
 }
 
 // A LOGIC created on, as an agent may create it: the product maps its type
-// (its scenario index) and may assign it at once. Turned off, assigned
-// directly while off (4n), and deleted after it is on again, as the
-// product's refusal while off asks.
+// (its scenario index) and may assign it at once. 4n assigns it while on,
+// turns it off and records what logic.list and logic.get show and what the
+// product's restore of the create answers then. It is turned on again, its
+// assignment removed and the LOGIC deleted.
 async function createdOnLogic(ctx, anchor) {
   const { hub, probe, virtual, prefix } = ctx;
   const name = `${prefix}-logic-on`;
@@ -3535,8 +3443,11 @@ async function createdOnLogic(ctx, anchor) {
     typesBefore,
     changeRef: create.changeRef,
   });
-  // Cleanup does not restore it: that would turn the LOGIC on again. This
-  // step restores it to turn the LOGIC on before the delete.
+  const assignment = await assignWhileOn(ctx, { ref, anchor, createEntry });
+  if (abortReason) return;
+  // Cleanup restores it before the assignment and the create: the
+  // assignment's removal is read back, and the create deleted, only while
+  // the LOGIC is on.
   const off = await prepareAndApply(hub, {
     operation: "scenario_active",
     target_ref: ref,
@@ -3547,7 +3458,6 @@ async function createdOnLogic(ctx, anchor) {
         label: "4m turn off",
         parent: createEntry,
         changeRef: off.changeRef,
-        restoreOptional: true,
         verify: async () => (await probe.activeView(ref))?.active === true,
       })
     : undefined;
@@ -3563,30 +3473,32 @@ async function createdOnLogic(ctx, anchor) {
     abort("a LOGIC created on did not turn off");
     return;
   }
-  await offAssignment(ctx, { ref, anchor });
-  if (abortReason) return;
-
+  const seen = assignment ? await visibleWhileOff(ctx, { ref, anchor }) : null;
+  // The product scans the home with logic.list before it refuses a
+  // turned-off LOGIC: an assignment it shows blocks the delete.
+  const shown = seen?.list === true;
   const whileOff = await logicCreateRestore(
     ctx,
     "4m restore create while off",
     createEntry,
     ref,
-    "refused with logic_off_assignments_unverified; LOGIC kept",
-    refusedWhileOff,
+    shown
+      ? "conflict logic_assignments_present; LOGIC kept"
+      : "refused with logic_off_assignments_unverified; LOGIC kept",
+    shown ? assignedWhileOff : refusedWhileOff,
   );
   if (whileOff.deleted) return;
-  if (!offEntry || hub.created.get(ref).assignments.size > 0) {
+  if (!offEntry) {
     leaveForSweep(
       ctx,
       createEntry,
       ref,
-      offEntry
-        ? "its direct assignment was not read back as removed, so it stays off"
-        : "it could not be turned on again for the product's delete",
+      "it could not be turned on again for the product's delete",
     );
     return;
   }
-  // The product's next step: turn it on, then restore.
+  // The product's next step, with the owner's consent: turn it on. The
+  // run's LOGIC runs nothing and is assigned only to the virtual accessory.
   const on = await runRestore(hub, offEntry);
   row(
     "4m turn on",
@@ -3596,6 +3508,16 @@ async function createdOnLogic(ctx, anchor) {
     on.verified ? "match" : "mismatch",
   );
   await activeAgreement(ctx, "4m on agreement", ref, true);
+  if (assignment) {
+    const removed = await runRestore(hub, assignment);
+    row(
+      "4n remove assignment",
+      "logic.delete{aId,sId,type}",
+      "assignment removed; logic.list no longer shows it",
+      removed.observed,
+      removed.verified ? "match" : "mismatch",
+    );
+  }
   const deleted = await logicCreateRestore(
     ctx,
     "4m restore create",
@@ -3631,75 +3553,71 @@ async function createdOnLogic(ctx, anchor) {
   }
 }
 
-// 4n: does logic.list show the assignment of a turned-off LOGIC? Until it is
-// known, the product does not delete a turned-off LOGIC
-// (logic_off_assignments_unverified). The product assigns only a listed
-// type, so the probe assigns the run's LOGIC, off, directly to the run's
-// virtual accessory (its anchor) by its scenario index, reads logic.list and
-// logic.get, and removes the assignment. Each answer is recorded, not judged.
-async function offAssignment(ctx, { ref, anchor }) {
-  const { hub, probe } = ctx;
+// The product's restore of a turned-off created LOGIC whose assignment
+// logic.list shows: conflict, LOGIC kept.
+function assignedWhileOff(outcome, present) {
+  return (
+    present &&
+    outcome.result?.status === "conflict" &&
+    outcome.result.conflict_reason === "logic_assignments_present"
+  );
+}
+
+// 4n: whether an assignment stays visible after its LOGIC is turned off
+// decides whether the product may delete a turned-off LOGIC
+// (logic_off_assignments_unverified). SprutHub refuses to assign a
+// turned-off LOGIC (live-conformance-3), so the run's LOGIC is assigned
+// while it is on, through the product, to the run's virtual accessory (its
+// anchor); it runs nothing. Returns the assignment's cleanup entry.
+async function assignWhileOn(ctx, { ref, anchor, createEntry }) {
+  const { hub, probe, virtual } = ctx;
   const type = scenarioIndex(ref);
-  const listed = (await probe.listLogicTypes(anchor)).some(
-    (entry) => entry.type === type,
-  );
-  row(
-    "4n type while off",
-    "logic.types{aId,sId}",
-    `record whether the anchor lists ${type} while the LOGIC is off`,
-    listed ? "listed" : "not listed",
-    "observed",
-  );
-  let answer;
-  let refusal;
-  try {
-    answer = await probe.assignLogicWhileOff(ref, anchor);
-  } catch (error) {
-    if (error instanceof GuardError) throw error;
-    refusal = error;
+  const assign = await prepareAndApply(hub, {
+    operation: "logic_assignment",
+    target_ref: `${virtual.serviceRef}/logic/${encodeURIComponent(type)}`,
+  });
+  if (!assign.applied) {
+    row(
+      "4n assign while on",
+      "logic.create{aId,sId,type}",
+      "assigned to the run's virtual accessory",
+      describe(assign),
+      "rejected",
+    );
+    return null;
   }
-  const assignedMaybe = hub.created.get(ref).assignments.size > 0;
-  row(
-    "4n assign while off",
-    "logic.create{aId,sId,type} (direct)",
-    "record whether the hub assigns a turned-off LOGIC",
-    answer
-      ? `acknowledged; answer active ${answer.active ?? "absent"}`
-      : `${refusal.hubError ? "refused" : "no clear answer"}: ${refusal.code ?? refusal.message}${refusal.hubError?.message ? ` (${refusal.hubError.message})` : ""}`,
-    "observed",
-    refusal?.hubError ? { hub_error: refusal.hubError } : undefined,
-  );
-  if (!assignedMaybe) return;
   const entry = pushCleanup(ctx, {
-    label: "4n direct assignment",
-    run: async () => {
-      const removal = await probe.removeLogicAssignment(ref, anchor);
-      return {
-        // Unreadable while off: recorded, not a failed cleanup.
-        verified: true,
-        status: removal.verified ? "deleted" : "sent_unverifiable",
-        observed: removalText(removal),
-        removal,
-      };
-    },
+    label: "4n LOGIC assignment",
+    parent: createEntry,
+    changeRef: assign.changeRef,
+    verify: async () =>
+      !(await probe.listLogics(anchor)).some((item) => item.type === type),
   });
   const seen = await probe.logicAssignmentSeen(ref, anchor);
   row(
+    "4n assign while on",
+    "logic.create{aId,sId,type}, logic.list, logic.get",
+    "assigned; logic.list and logic.get show it",
+    `${assign.applied.status}; logic.list ${seenText(seen.list, seen.list_error)}; logic.get ${seenText(seen.get, seen.get_error)}`,
+    assign.applied.status === "applied" && seen.list && seen.get
+      ? "match"
+      : "mismatch",
+    { seen },
+  );
+  return entry;
+}
+
+async function visibleWhileOff(ctx, { ref, anchor }) {
+  const seen = await ctx.probe.logicAssignmentSeen(ref, anchor);
+  row(
     "4n visible while off",
     "logic.list{aId,sId}, logic.get{aId,sId,type}",
-    "record whether logic.list shows the turned-off LOGIC's assignment",
+    "record whether logic.list and logic.get still show the assignment",
     `logic.list ${seenText(seen.list, seen.list_error)}; logic.get ${seenText(seen.get, seen.get_error)}`,
     "observed",
     { seen },
   );
-  const removed = await runRestore(hub, entry);
-  row(
-    "4n remove assignment",
-    "logic.delete{aId,sId,type} (direct)",
-    "assignment removed; read back when it was visible",
-    removed.observed,
-    "observed",
-  );
+  return seen;
 }
 
 function seenText(value, error) {
@@ -3708,10 +3626,6 @@ function seenText(value, error) {
     : value
       ? "shows it"
       : "does not show it";
-}
-
-function removalText({ failure, before, after, verified }) {
-  return `${failure ? `delete error ${failure.code ?? failure.message}` : "logic.delete acknowledged"}; before: list ${seenText(before.list, before.list_error)}, get ${seenText(before.get, before.get_error)}; after: list ${seenText(after.list, after.list_error)}, get ${seenText(after.get, after.get_error)}; ${verified ? "removal read back" : "removal not verifiable"}`;
 }
 
 function mappingText(change) {
