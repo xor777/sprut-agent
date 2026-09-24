@@ -639,6 +639,128 @@ test("the guard lets a run BLOCK fire at a daily time only on the run's virtual 
   assert.equal(scenario("7").active, false);
 });
 
+// Step 2 stores the node forms taken from the web client's code: a
+// notification, an HTTP request, every N minutes, a target that switches
+// another scenario. Created off, none of them acts; the guard keeps such a
+// BLOCK off for the whole run and lets it reach only the run's own objects
+// and a request address that goes nowhere.
+test("the guard keeps a BLOCK with a notification, request, every-N time or scenario target off and within the run", async (t) => {
+  const g = await guardSetup(t);
+  const virtual = await runVirtual(g);
+  const oneDate = {
+    type: "cron",
+    mode: "NONE",
+    cron: "0 0 12 1 1 ? 2030",
+    offset: 0,
+  };
+  const offBlock = (then, conditions = [oneDate]) => ({
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: { type: "condition", mode: "AND", conditions },
+        then,
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  });
+  const target = await guardApply(
+    g.guard,
+    probeBlock(g.homeRef, timedOn(virtual, "0 5 12 ? * * *")),
+  );
+  const targetIndex = target.applied.scenario_ref.split("/").at(-1);
+  const before = g.hub.writes().length;
+
+  for (const data of [
+    // A request to a device of the home.
+    offBlock([
+      {
+        type: "http",
+        method: "GET",
+        url: "http://192.168.1.50/relay/0?turn=on",
+      },
+    ]),
+    // The owner's lamp as a source.
+    offBlock([
+      {
+        type: "service",
+        aId: virtual.aId,
+        sId: virtual.sId,
+        hs: "Lightbulb",
+        characteristics: [
+          {
+            type: "from",
+            cId: virtual.onCId,
+            hc: "On",
+            value: "",
+            from_aId: 12,
+            from_sId: 13,
+            from_cId: 14,
+            from_hs: "Lightbulb",
+            from_hc: "On",
+          },
+        ],
+      },
+    ]),
+    // The owner's scenario.
+    offBlock([{ type: "scenario", index: "7", mode: "DEACTIVATE" }]),
+  ]) {
+    await assert.rejects(
+      g.guard.prepare(probeBlock(g.homeRef, data)),
+      conformance.GuardError,
+    );
+  }
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  const everyQuarterHour = {
+    type: "cron",
+    mode: "NONE",
+    cron: "0 0/15 * ? * * *",
+    offset: 0,
+  };
+  const stayOff = await guardApply(
+    g.guard,
+    probeBlock(
+      g.homeRef,
+      offBlock(
+        [
+          { type: "notify", text: "Проба", mode: "MESSAGE" },
+          { type: "http", method: "GET", url: "http://127.0.0.1:9/" },
+          { type: "scenario", index: targetIndex, mode: "DEACTIVATE" },
+        ],
+        [oneDate, everyQuarterHour],
+      ),
+    ),
+  );
+  const ref = stayOff.applied.scenario_ref;
+  const writes = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.prepare({
+      operation: "scenario_active",
+      target_ref: ref,
+      value: true,
+    }),
+    conformance.GuardError,
+  );
+  await assert.rejects(
+    g.guard.prepare({ operation: "scenario_run", target_ref: ref }),
+    conformance.GuardError,
+  );
+  assert.throws(() => g.probe.runBlock(ref), conformance.GuardError);
+  await assert.rejects(
+    g.probe.setBlockActiveByWindow(ref, true),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, writes), []);
+  const index = ref.split("/").at(-1);
+  assert.equal(
+    g.hub.state.scenarios.find((item) => item.index === index).active,
+    false,
+  );
+});
+
 // The probe LOGIC of step 4, created on through the guard; it runs nothing.
 async function runLogic(g, virtual) {
   const name = `${prefix}-logic`;
