@@ -1,6 +1,11 @@
+const TARGET_KINDS = ["if", "service", "delay", "scenario"];
+
+// Service actions that the preview and relations interpret.
+export const SERVICE_ACTION_KINDS = ["set", "toggle", "inc", "dec"];
+
 export const BLOCK_CHILD_FIELDS = {
   root: {
-    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+    targets: { shape: "array", kinds: new Set(TARGET_KINDS) },
   },
   if: {
     if: {
@@ -8,8 +13,8 @@ export const BLOCK_CHILD_FIELDS = {
       kinds: new Set(["condition", "characteristic"]),
     },
     // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
-    then: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
-    else: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+    then: { shape: "array", kinds: new Set(TARGET_KINDS) },
+    else: { shape: "array", kinds: new Set(TARGET_KINDS) },
   },
   condition: {
     conditions: {
@@ -28,10 +33,10 @@ export const BLOCK_CHILD_FIELDS = {
     end: { shape: "single", kinds: new Set(["cron"]) },
   },
   service: {
-    characteristics: { shape: "array", kinds: new Set(["set"]) },
+    characteristics: { shape: "array", kinds: new Set(SERVICE_ACTION_KINDS) },
   },
   delay: {
-    targets: { shape: "array", kinds: new Set(["if", "service", "delay"]) },
+    targets: { shape: "array", kinds: new Set(TARGET_KINDS) },
   },
 };
 
@@ -68,7 +73,11 @@ export const BLOCK_ALLOWED_KEYS = {
   cron: new Set(["type", "blockId", "mode", "cron", "offset"]),
   service: new Set(["type", "blockId", "aId", "sId", "hs", "characteristics"]),
   set: new Set(["type", "blockId", "cId", "hc", "value"]),
+  toggle: new Set(["type", "blockId", "cId", "hc"]),
+  inc: new Set(["type", "blockId", "cId", "hc", "value"]),
+  dec: new Set(["type", "blockId", "cId", "hc", "value"]),
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
+  scenario: new Set(["type", "blockId", "index", "mode"]),
 };
 
 const BLOCK_CREATE_NODE_KINDS = [
@@ -80,7 +89,11 @@ const BLOCK_CREATE_NODE_KINDS = [
   "cron",
   "service",
   "set",
+  "toggle",
+  "inc",
+  "dec",
   "delay",
+  "scenario",
 ];
 
 const NATIVE_SCALAR_AS_STRING = {
@@ -143,6 +156,35 @@ const BLOCK_NODE_CONSTRAINTS = {
     native_ids: ["cId"],
     fields: { hc: "characteristic_type_from_get_entity", value: "string" },
     value_encoding: NATIVE_SCALAR_AS_STRING,
+    editor_optional: ["blockId"],
+  },
+  // toggle, inc and dec follow the editor schema; not observed on a hub.
+  toggle: {
+    native_ids: ["cId"],
+    fields: { hc: "characteristic_type_from_get_entity" },
+    characteristic_kind: ["boolValue"],
+    omitted: ["value"],
+    editor_optional: ["blockId"],
+  },
+  inc: {
+    native_ids: ["cId"],
+    fields: { hc: "characteristic_type_from_get_entity", value: "string" },
+    characteristic_kind: ["intValue", "longValue", "doubleValue"],
+    value_meaning: "positive_step_in_characteristic_unit",
+    value_encoding: NATIVE_SCALAR_AS_STRING,
+    editor_optional: ["blockId"],
+  },
+  dec: {
+    native_ids: ["cId"],
+    fields: { hc: "characteristic_type_from_get_entity", value: "string" },
+    characteristic_kind: ["intValue", "longValue", "doubleValue"],
+    value_meaning: "positive_step_in_characteristic_unit",
+    value_encoding: NATIVE_SCALAR_AS_STRING,
+    editor_optional: ["blockId"],
+  },
+  scenario: {
+    constants: { mode: "FIRE" },
+    fields: { index: "existing_scenario_index_from_scenario_ref" },
     editor_optional: ["blockId"],
   },
   delay: {
@@ -405,7 +447,7 @@ export function inspectBlockRelations(
       }
       if (kind !== "service") return;
       for (const [index, action] of (node.characteristics ?? []).entries()) {
-        if (action?.type !== "set") continue;
+        if (!SERVICE_ACTION_KINDS.includes(action?.type)) continue;
         const entityRef = characteristicRef(
           homeRef,
           node.aId,
@@ -417,6 +459,12 @@ export function inspectBlockRelations(
           unresolved.push(invalidReference(scenarioRef, actionPath));
           continue;
         }
+        const valueSource =
+          action.type === "set"
+            ? typeof action.value === "string"
+              ? "literal"
+              : undefined
+            : RELATIVE_VALUE_SOURCES[action.type];
         roles.push({
           scenario_ref: scenarioRef,
           scenario_active: scenarioActive,
@@ -424,11 +472,9 @@ export function inspectBlockRelations(
           role: "action_target",
           entity_ref: entityRef,
           ...blockRelationLocation(scenarioRef, actionPath),
-          ...(typeof action.value === "string"
-            ? { value_source: "literal" }
-            : {}),
+          ...(valueSource ? { value_source: valueSource } : {}),
         });
-        if (typeof action.value !== "string") {
+        if (!valueSource) {
           unresolved.push({
             area: "action_value_source",
             outcome: "unknown",
@@ -453,6 +499,12 @@ export function inspectBlockRelations(
 function publishedChildTypes(rule) {
   return [...rule.kinds].filter((type) => type !== "code");
 }
+
+const RELATIVE_VALUE_SOURCES = {
+  toggle: "toggle",
+  inc: "increment",
+  dec: "decrement",
+};
 
 function visitBlockChild(child, path, rule, visit, invalidChild) {
   if (!isRecord(child) || !rule.kinds.has(child.type)) {

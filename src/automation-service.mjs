@@ -6,6 +6,7 @@ import {
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
   publishedBlockNodes,
+  SERVICE_ACTION_KINDS,
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
@@ -665,6 +666,7 @@ export class AutomationService {
       allowUnknownFrom: baseline.data,
       allowedPauses: pauseChanges,
       allowActionOnly: true,
+      scenarioIndex: target.index,
     });
     requireActionOnlyRuntime(baseline, validation);
     const requested = {
@@ -4002,6 +4004,8 @@ export class AutomationService {
         allowedPauseIntentId:
           change.kind === "block_action_pause" ? change.id : undefined,
         allowActionOnly: change.kind !== "block_action_pause",
+        scenarioIndex:
+          change.kind === "block_data_update" ? change.target.index : undefined,
       });
     }
 
@@ -5547,10 +5551,10 @@ function blockContract() {
     update: "scenario.update({index,data})",
     supported: {
       root: { required: ["targets"] },
-      target_types: ["if", "service", "delay"],
+      target_types: ["if", "service", "delay", "scenario"],
       condition_modes: ["AND", "OR"],
       if_modes: ["EVERY"],
-      action_types: ["set"],
+      action_types: ["set", "toggle", "inc", "dec"],
       delay_modes: ["RESET"],
       delay_index: { type: "integer", minimum: 1, unique: true },
       characteristic_conditions: {
@@ -5623,6 +5627,8 @@ function blockContract() {
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
+      "toggle (boolean), inc and dec (numeric, value is a positive step in the characteristic's unit) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
+      "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
@@ -5643,7 +5649,7 @@ function scenarioRunContract() {
       targets:
         "literal service/set actions of a BLOCK that resolve to writable characteristics",
       targets_known:
-        "false for LOGIC, GLOBAL and other types, and for BLOCK code, non-literal values, unresolved bindings, or uninterpreted nodes and fields",
+        "false for LOGIC, GLOBAL and other types, and for BLOCK code, toggle/inc/dec actions, scenario targets, non-literal values, unresolved bindings, or uninterpreted nodes and fields",
       predicted:
         "true only for a BLOCK with known targets and no conditions, delays, or repeated targets; otherwise effect.reasons names what the hub decides during the run",
     },
@@ -5725,6 +5731,7 @@ async function validateBlockData(
     allowedPauses = [],
     allowedPauseIntentId,
     allowActionOnly = false,
+    scenarioIndex,
   },
 ) {
   if (
@@ -5756,6 +5763,7 @@ async function validateBlockData(
     intervals: 0,
     intervalBoundaries: new WeakSet(),
     triggers: 0,
+    scenarioRuns: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
       allowedIntentId: allowedPauseIntentId,
     }),
@@ -5775,6 +5783,23 @@ async function validateBlockData(
     !(allowActionOnly && isLiteralActionOnlyBlock(data))
   ) {
     throw invalidBlock("targets", "at least one trigger=true is required");
+  }
+
+  const scenarios = new Map();
+  for (const run of context.scenarioRuns) {
+    // A BLOCK that fires itself would rerun its own targets without end.
+    if (run.index === scenarioIndex) {
+      throw invalidBlock(run.path, "a BLOCK cannot run itself");
+    }
+    if (!scenarios.has(run.index)) {
+      scenarios.set(run.index, await client.getScenario(run.index));
+    }
+    if (!scenarios.get(run.index)) {
+      throw invalidBlock(
+        run.path,
+        `scenario ${run.index} does not exist in this home`,
+      );
+    }
   }
 
   const accessories = new Map();
@@ -5809,6 +5834,10 @@ async function validateBlockData(
       reference.observed_value = observableBlockValue(
         characteristic.control.value,
       );
+    }
+    if (RELATIVE_ACTIONS.includes(reference.operation)) {
+      validateRelativeAction(reference, contract.kind);
+      continue;
     }
     const value = parseBlockValue(reference.value, contract.kind);
     if (reference.role === "action") reference.parsed_value = value;
@@ -5861,6 +5890,32 @@ async function validateBlockData(
   return context;
 }
 
+// The hub computes these values at run time from the characteristic.
+const RELATIVE_ACTIONS = ["toggle", "inc", "dec"];
+
+function validateRelativeAction(action, kind) {
+  if (action.operation === "toggle") {
+    if (kind !== "boolValue") {
+      throw invalidBlock(action.path, "toggle needs a boolean characteristic");
+    }
+    return;
+  }
+  if (!["intValue", "longValue", "doubleValue"].includes(kind)) {
+    throw invalidBlock(
+      action.path,
+      `${action.operation} needs a numeric characteristic`,
+    );
+  }
+  const step = parseBlockValue(action.value, kind);
+  if (!(step > 0)) {
+    throw invalidBlock(
+      action.path,
+      `${action.operation} step must be a positive number`,
+    );
+  }
+  action.parsed_value = step;
+}
+
 function observableBlockValue(value) {
   const typed = typedNativeValue(value);
   const validation = validateNativeScalarValue(typed.value, {
@@ -5876,11 +5931,21 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
       captured_at: capturedAt,
     },
     actions: validation.actions.map((action) => {
-      const command = {
-        value: action.parsed_value,
-        kind: action.contract_kind,
-        execution: "write_if_action_runs",
-      };
+      const relative = RELATIVE_ACTIONS.includes(action.operation);
+      const command = relative
+        ? {
+            operation: action.operation,
+            ...(action.operation === "toggle"
+              ? {}
+              : { step: action.parsed_value }),
+            kind: action.contract_kind,
+            execution: "write_if_action_runs",
+          }
+        : {
+            value: action.parsed_value,
+            kind: action.contract_kind,
+            execution: "write_if_action_runs",
+          };
       const observationAvailable =
         action.observation_available === true && action.observed_value !== null;
       const observation = {
@@ -5895,11 +5960,14 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
         characteristic_type: action.hc,
         command,
         observation,
-        comparison_to_observation: observationAvailable
-          ? valuesEqual(command, action.observed_value)
-            ? "equal"
-            : "different"
-          : "unknown",
+        // A relative command writes a value derived at run time.
+        comparison_to_observation: relative
+          ? "not_applicable"
+          : observationAvailable
+            ? valuesEqual(command, action.observed_value)
+              ? "equal"
+              : "different"
+            : "unknown",
         ...(branch ? { branch } : {}),
       };
     }),
@@ -6120,10 +6188,17 @@ function blockRunShape(data) {
         shape.conditions = true;
       }
       if (kind === "delay") shape.delays = true;
+      // Another scenario's writes are not read here.
+      if (kind === "scenario") shape.complete = false;
       if (kind !== "service" || !Array.isArray(node.characteristics)) return;
       for (const action of node.characteristics) {
-        // Other child types reach the invalid-child callback below.
-        if (!isRecord(action) || action.type !== "set") continue;
+        // Non-records reach the invalid-child callback below.
+        if (!isRecord(action)) continue;
+        // toggle, inc and dec values are computed by the hub during the run.
+        if (action.type !== "set") {
+          shape.complete = false;
+          continue;
+        }
         if (
           typeof action.value !== "string" ||
           ![node.aId, node.sId, action.cId].every(
@@ -6355,18 +6430,19 @@ function validateBlockNode(node, kind, path, context) {
       throw invalidBlock(path, "service action is incomplete");
     }
     node.characteristics.forEach((action, index) => {
+      // Other types are named by the child check after this node.
+      if (!SERVICE_ACTION_KINDS.includes(action.type)) return;
       const actionPath = `${path}.characteristics[${index}]`;
       if (
-        !isRecord(action) ||
-        action.type !== "set" ||
         !stableNativeId(action.cId) ||
         typeof action.hc !== "string" ||
-        typeof action.value !== "string"
+        (action.type !== "toggle" && typeof action.value !== "string")
       ) {
-        throw invalidBlock(actionPath, "set action is incomplete");
+        throw invalidBlock(actionPath, `${action.type} action is incomplete`);
       }
       context.actions.push({
         role: "action",
+        operation: action.type,
         path: actionPath,
         aId: node.aId,
         sId: node.sId,
@@ -6378,7 +6454,21 @@ function validateBlockNode(node, kind, path, context) {
     });
     return;
   }
-  if (kind === "set") return;
+  if (SERVICE_ACTION_KINDS.includes(kind)) return;
+  if (kind === "scenario") {
+    if (
+      typeof node.index !== "string" ||
+      node.index.length === 0 ||
+      node.mode !== "FIRE"
+    ) {
+      throw invalidBlock(
+        path,
+        "scenario target needs mode FIRE and the index of an existing scenario",
+      );
+    }
+    context.scenarioRuns.push({ path, index: node.index });
+    return;
+  }
   if (kind === "delay") {
     if (
       !Number.isSafeInteger(node.index) ||

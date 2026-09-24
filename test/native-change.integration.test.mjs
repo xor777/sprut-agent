@@ -2169,7 +2169,11 @@ async function startHub(port = 0) {
         const data = scenario.type === "BLOCK" ? JSON.parse(scenario.data) : {};
         const simulated =
           Array.isArray(data.targets) &&
-          data.targets.every(({ type }) => type === "service");
+          data.targets.every(
+            ({ type, characteristics }) =>
+              type === "service" &&
+              characteristics.every((action) => action.type === "set"),
+          );
         for (const target of simulated ? data.targets : []) {
           const service = state.accessories
             .find(({ id }) => id === target.aId)
@@ -3764,6 +3768,39 @@ const runnableScenarioCases = [
     },
     targetsKnown: false,
     targets: [{ characteristic_ref: characteristicRef, value: false }],
+    effect: { predicted: false, reasons: ["targets_unknown"] },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
+    key: "relative",
+    title: "BLOCK whose only action toggles a lamp",
+    install(hub) {
+      const scenario = {
+        index: "toggle-lamp",
+        name: "Переключить лампу",
+        desc: "",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            {
+              type: "service",
+              aId: 34,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [{ type: "toggle", cId: 15, hc: "On" }],
+            },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    // The hub picks the toggled value during the run.
+    targetsKnown: false,
+    targets: [],
     effect: { predicted: false, reasons: ["targets_unknown"] },
     verification: "command_acknowledged_effect_not_predicted",
   },

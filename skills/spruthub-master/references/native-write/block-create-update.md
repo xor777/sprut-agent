@@ -29,6 +29,17 @@
   восхода/заката и минуты offset — допущения; после первого ожидаемого момента
   проверь `read_hub_log`. Дату «завтра» считай по часам хаба; прошедшая дата не
   сработает.
+- Кроме `set` действие сервиса бывает `toggle` (boolean, без `value`) и
+  `inc`/`dec` (число; `value` — положительный шаг строкой в единицах
+  характеристики): «прибавь яркость на 10» —
+  `{"type":"inc","cId":16,"hc":"Brightness","value":"10"}`. Запуск другого
+  сценария — target `{"type":"scenario","index":"<index>","mode":"FIRE"}`,
+  где index — последний сегмент `scenario_ref` существующего сценария этого
+  дома; BLOCK не запускает сам себя. В `block_action_preview` у
+  toggle/inc/dec есть `operation` и `step`, а
+  `comparison_to_observation=not_applicable`: значение хаб вычислит при
+  исполнении. Формы взяты из схемы редактора и на хабе не наблюдались: упор
+  шага в границы диапазона и запуск выключенного сценария не проверены.
 - В каждую ветвь включай только те разрешённые `service/set` значения, которые
   эта ветвь должна записать. Равное текущему значение остаётся будущей командой,
   а не сохранением ручного выбора: при исполнении ветви оно снова будет записано.
@@ -110,7 +121,8 @@
 - BLOCK manifest версии `2026-09-24` допускает `root.targets`, вложенные `if`
   (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
   опубликованными comparisons, daily interval с вложенными cron-границами,
-  cron-trigger, service/set и delay `RESET`. Условной форме нужен хотя бы один
+  cron-trigger, service/set, toggle, inc, dec, target scenario `FIRE` и delay
+  `RESET`. Условной форме нужен хотя бы один
   characteristic или interval с `trigger=true` либо cron-trigger; action-only
   форме разрешены только корневые
   literal `Lightbulb On=false` service/set targets. Одна характеристика не может
