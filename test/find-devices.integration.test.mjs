@@ -1108,6 +1108,22 @@ test("unknown values, unavailable devices and hidden services are reported, not 
   assert(
     listed(unavailable.body).every(({ device }) => device.available === false),
   );
+  // Sensors have no on/off to show; their entries still carry the refs the
+  // agent reads or diagnoses them by.
+  const windowSensor = listed(unavailable.body).find(
+    ({ device }) => device.name === "Датчик окна в кабинете",
+  );
+  assert.deepEqual(windowSensor.service.characteristics, [
+    {
+      type: "ContactSensorState",
+      ref: `${home}/accessory/34/service/13/characteristic/14`,
+    },
+  ]);
+  assert(
+    listed(unavailable.body).every(({ service }) =>
+      (service.values ?? service.characteristics).some(({ ref }) => ref),
+    ),
+  );
 });
 
 test("pages come from one snapshot, stay within max_bytes and drill down by room", async (t) => {
