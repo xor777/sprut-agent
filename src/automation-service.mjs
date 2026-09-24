@@ -8015,6 +8015,7 @@ const NATIVE_VALUE_KINDS = {
     read: (service, change) => readRoomName(service.client, change.target),
     write: (service, change, value) =>
       service.client.renameRoom(change.target.id, value.value),
+    limitations: nativeNameLimitations,
   },
   service_name: {
     restoration: scalarValueRestoration,
@@ -8030,6 +8031,7 @@ const NATIVE_VALUE_KINDS = {
     read: (service, change) => readServiceName(service.client, change.target),
     write: (service, change, value) =>
       service.client.updateService(change.target, { name: value.value }),
+    limitations: nativeNameLimitations,
   },
   service_visible: {
     restoration: scalarValueRestoration,
@@ -8665,6 +8667,14 @@ function nativeNameDraft(state, value, operation) {
     ...state,
     requested: validateCharacteristicValue(name, state.contract),
   };
+}
+
+// knownSetting stays false for names: SprutHub may store a normalized name,
+// and that readback must not look like the owner's edit.
+function nativeNameLimitations(change) {
+  return [
+    `SprutHub may store a different name than requested. Such a readback stays uncertain, not a manual change, and this change does not write the name again; to set it again, prepare a new ${change.kind} change from the stored name.`,
+  ];
 }
 
 function nativeNameContract(type, confirmation) {
