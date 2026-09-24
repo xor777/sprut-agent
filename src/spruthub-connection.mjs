@@ -15,6 +15,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { argon2id } from "hash-wasm";
 import { WebSocket } from "ws";
 import {
+  extractNativeList,
   parseSprutHubMessage,
   SprutHubClient,
   SprutHubError,
@@ -236,8 +237,11 @@ async function authenticate({ url, login, password, timeoutMs, remember }) {
           },
           deadline,
         );
-        const homes = homesResponse.result?.hub?.list?.hubs;
-        if (!Array.isArray(homes)) throw incompatibleAuthResponse();
+        const homes = extractNativeList(
+          homesResponse,
+          ["hub", "list", "hubs"],
+          incompatibleAuthResponse,
+        );
         return { cid, token: account.token, homes };
       }
       rejectAccountStatus(account);

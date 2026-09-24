@@ -158,13 +158,13 @@ export class SprutHubClient {
         this.#request({ scenario: { list: {} } }, deadline, { serial }),
         this.#request({ extension: { list: {} } }, deadline, { serial }),
       ]);
-    const rooms = extractEntityArray(roomsResponse, ["room", "list", "rooms"]);
-    const scenarios = extractEntityArray(scenariosResponse, [
+    const rooms = extractNativeList(roomsResponse, ["room", "list", "rooms"]);
+    const scenarios = extractNativeList(scenariosResponse, [
       "scenario",
       "list",
       "scenarios",
     ]);
-    const extensions = extractEntityArray(extensionsResponse, [
+    const extensions = extractNativeList(extensionsResponse, [
       "extension",
       "list",
       "extensions",
@@ -524,13 +524,15 @@ export class SprutHubClient {
       deadline,
       { serial: this.serial },
     );
-    const rooms = roomsResponse.result?.room?.list?.rooms;
-    if (!Array.isArray(rooms)) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible room list.",
-      );
-    }
+    const rooms = extractNativeList(
+      roomsResponse,
+      ["room", "list", "rooms"],
+      () =>
+        new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an incompatible room list.",
+        ),
+    );
 
     return {
       status: "ok",
@@ -659,14 +661,11 @@ export class SprutHubClient {
       }
       throw error;
     }
-    const list = response.result?.log?.list;
-    // Protobuf JSON omits an empty repeated field, so a list object without
-    // log is an empty answer; any other form is not a readable log.
-    const nativeEntries =
-      isPlainObject(list) && list.log === undefined ? [] : list?.log;
-    if (!isPlainObject(list) || !Array.isArray(nativeEntries)) {
-      throw incompatibleHubLog();
-    }
+    const nativeEntries = extractNativeList(
+      response,
+      ["log", "list", "log"],
+      incompatibleHubLog,
+    );
     return {
       status: "ok",
       home_ref: homeRef(serial),
@@ -699,11 +698,11 @@ export class SprutHubClient {
         { serial },
       ),
     ]);
-    const rooms = extractEntityArray(roomsResponse, ["room", "list", "rooms"]);
+    const rooms = extractNativeList(roomsResponse, ["room", "list", "rooms"]);
     rooms.forEach((room) => {
       validateRoom(room);
     });
-    const accessories = extractEntityArray(accessoriesResponse, [
+    const accessories = extractNativeList(accessoriesResponse, [
       "accessory",
       "list",
       "accessories",
@@ -776,7 +775,7 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
-    const accessories = extractEntityArray(accessoriesResponse, [
+    const accessories = extractNativeList(accessoriesResponse, [
       "accessory",
       "list",
       "accessories",
@@ -810,28 +809,28 @@ export class SprutHubClient {
         },
         deadline,
       );
-      const accessories =
-        accessoriesResponse.result?.accessory?.list?.accessories;
-      if (!Array.isArray(accessories)) throw incompleteAccessoryError();
+      const accessories = extractNativeList(accessoriesResponse, [
+        "accessory",
+        "list",
+        "accessories",
+      ]);
       accessories.forEach(validateAccessory);
 
-      const directScenarios = extractArray(
+      const directScenarios = extractNativeList(
         await this.#request(
           { scenario: { list: { aId: selected.aId } } },
           deadline,
         ),
         ["scenario", "list", "scenarios"],
-        true,
       );
-      const assignedLogics = extractArray(
+      const assignedLogics = extractNativeList(
         await this.#request(
           { logic: { list: { aId: selected.aId, sId: selected.sId } } },
           deadline,
         ),
         ["logic", "list", "logics"],
-        true,
       );
-      const links = extractArray(
+      const links = extractNativeList(
         await this.#request(
           {
             link: {
@@ -845,7 +844,6 @@ export class SprutHubClient {
           deadline,
         ),
         ["link", "list", "links"],
-        true,
       );
       selections[role] = {
         room,
@@ -969,7 +967,7 @@ export class SprutHubClient {
       { accessory: { list: { expand: "services,characteristics" } } },
       deadline,
     );
-    const accessories = extractEntityArray(response, [
+    const accessories = extractNativeList(response, [
       "accessory",
       "list",
       "accessories",
@@ -983,7 +981,7 @@ export class SprutHubClient {
       { service: { types: {} } },
       Date.now() + this.timeoutMs,
     );
-    const types = extractEntityArray(response, ["service", "types", "types"]);
+    const types = extractNativeList(response, ["service", "types", "types"]);
     return types.map((type) => {
       if (
         !type ||
@@ -1049,7 +1047,7 @@ export class SprutHubClient {
       { link: { list: { aId, sId, cId } } },
       Date.now() + this.timeoutMs,
     );
-    const links = extractEntityArray(response, ["link", "list", "links"], true);
+    const links = extractNativeList(response, ["link", "list", "links"]);
     return links.map(normalizeLink);
   }
 
@@ -1129,7 +1127,7 @@ export class SprutHubClient {
       response = await this.#request({ room: { get: { id } } }, deadline);
     } catch (error) {
       if (!isNativeNotFoundCandidate(error)) throw error;
-      const rooms = extractEntityArray(
+      const rooms = extractNativeList(
         await this.#request({ room: { list: {} } }, deadline),
         ["room", "list", "rooms"],
       );
@@ -1225,7 +1223,7 @@ export class SprutHubClient {
       { accessory: { list: { roomId } } },
       Date.now() + this.timeoutMs,
     );
-    const accessories = extractEntityArray(response, [
+    const accessories = extractNativeList(response, [
       "accessory",
       "list",
       "accessories",
@@ -1374,11 +1372,11 @@ export class SprutHubClient {
       { characteristic: { getOptions: { aId, sId, cId } } },
       Date.now() + this.timeoutMs,
     );
-    return extractEntityArray(
-      response,
-      ["characteristic", "getOptions", "options"],
-      true,
-    );
+    return extractNativeList(response, [
+      "characteristic",
+      "getOptions",
+      "options",
+    ]);
   }
 
   async setCharacteristicOption({ aId, sId, cId, key, value }) {
@@ -1464,7 +1462,7 @@ export class SprutHubClient {
       { logic: { types: { aId, sId } } },
       Date.now() + this.timeoutMs,
     );
-    return extractEntityArray(response, ["logic", "types", "logicTypes"], true);
+    return extractNativeList(response, ["logic", "types", "logicTypes"]);
   }
 
   async listLogics({ aId, sId }) {
@@ -1472,7 +1470,7 @@ export class SprutHubClient {
       { logic: { list: { aId, sId } } },
       Date.now() + this.timeoutMs,
     );
-    return extractEntityArray(response, ["logic", "list", "logics"], true);
+    return extractNativeList(response, ["logic", "list", "logics"]);
   }
 
   async getLogic({ aId, sId, type }) {
@@ -1485,10 +1483,9 @@ export class SprutHubClient {
       );
     } catch (error) {
       if (!isNativeNotFoundCandidate(error)) throw error;
-      const logics = extractEntityArray(
+      const logics = extractNativeList(
         await this.#request({ logic: { list: { aId, sId } } }, deadline),
         ["logic", "list", "logics"],
-        true,
       );
       if (logics.some((logic) => logic?.type === type)) throw error;
       return null;
@@ -1515,11 +1512,7 @@ export class SprutHubClient {
       { logic: { getOptions: { aId, sId, type } } },
       Date.now() + this.timeoutMs,
     );
-    return extractEntityArray(
-      response,
-      ["logic", "getOptions", "options"],
-      true,
-    );
+    return extractNativeList(response, ["logic", "getOptions", "options"]);
   }
 
   async createLogic({ aId, sId, type }) {
@@ -1644,13 +1637,15 @@ export class SprutHubClient {
     const response = await this.#request({ hub: { list: {} } }, deadline, {
       serial: null,
     });
-    const homes = response.result?.hub?.list?.hubs;
-    if (!Array.isArray(homes)) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible home list.",
-      );
-    }
+    const homes = extractNativeList(
+      response,
+      ["hub", "list", "hubs"],
+      () =>
+        new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an incompatible home list.",
+        ),
+    );
     homes.forEach(validateHome);
     return { homes, observedAt: response.responseReceivedAt };
   }
@@ -1717,7 +1712,7 @@ export class SprutHubClient {
     ]);
     const room = extractEntity(roomResponse, ["room", "get"], "room");
     validateRoom(room, parsed.roomId);
-    const accessories = extractEntityArray(accessoriesResponse, [
+    const accessories = extractNativeList(accessoriesResponse, [
       "accessory",
       "list",
       "accessories",
@@ -1883,7 +1878,7 @@ export class SprutHubClient {
         deadline,
         { serial: parsed.serial },
       );
-      entity.options = extractEntityArray(optionsResponse, [
+      entity.options = extractNativeList(optionsResponse, [
         "characteristic",
         "getOptions",
         "options",
@@ -1940,11 +1935,9 @@ export class SprutHubClient {
       serial,
       (response) =>
         uniqueByRef(
-          extractEntityArray(
-            response,
-            ["scenario", "list", "scenarios"],
-            true,
-          ).map((scenario) => normalizeScenarioSummary(serial, scenario)),
+          extractNativeList(response, ["scenario", "list", "scenarios"]).map(
+            (scenario) => normalizeScenarioSummary(serial, scenario),
+          ),
         ),
     );
     const logicPromises = services.map((service) =>
@@ -1953,7 +1946,7 @@ export class SprutHubClient {
         deadline,
         serial,
         (response) =>
-          extractEntityArray(response, ["logic", "list", "logics"], true).map(
+          extractNativeList(response, ["logic", "list", "logics"]).map(
             (logic) => normalizeLogic(serial, accessory.id, service.sId, logic),
           ),
       ),
@@ -1972,7 +1965,7 @@ export class SprutHubClient {
           deadline,
           serial,
           (response) =>
-            extractEntityArray(response, ["link", "list", "links"], true).map(
+            extractNativeList(response, ["link", "list", "links"]).map(
               normalizeLink,
             ),
         )
@@ -2181,7 +2174,7 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
-    return extractEntityArray(response, ["logic", "list", "logics"], true);
+    return extractNativeList(response, ["logic", "list", "logics"]);
   }
 
   async #readLogicTypes(serial, accessoryId, serviceId, deadline) {
@@ -2190,7 +2183,7 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
-    return extractEntityArray(response, ["logic", "types", "logicTypes"], true);
+    return extractNativeList(response, ["logic", "types", "logicTypes"]);
   }
 
   async #readPhysicalConfiguration(serial, accessory, requested, deadline) {
@@ -2322,13 +2315,11 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
-    // Native empty catalogs omit children on a valid list object; missing
-    // list/envelope, null, or a non-array remain incompatible.
-    const children = extractEntityArray(
-      response,
-      ["extensionChild", "list", "children"],
-      true,
-    );
+    const children = extractNativeList(response, [
+      "extensionChild",
+      "list",
+      "children",
+    ]);
     return normalizeExtensionChildren(serial, children, selectedExtensionKey);
   }
 
@@ -2941,19 +2932,12 @@ export function isScenarioLogMessage(path, message, scenarioIndex) {
   );
 }
 
-function extractArray(response, path, missingMeansEmpty = false) {
-  let value = response.result;
-  for (const key of path) value = value?.[key];
-  if (Array.isArray(value)) return value;
-  if (missingMeansEmpty && value === undefined) return [];
-  throw new SprutHubError(
-    "incompatible_response",
-    "SprutHub returned an incompatible automation response.",
-  );
-}
-
 function extractScenarioCatalog(response) {
-  const scenarios = extractArray(response, ["scenario", "list", "scenarios"]);
+  const scenarios = extractNativeList(response, [
+    "scenario",
+    "list",
+    "scenarios",
+  ]);
   for (const scenario of scenarios) {
     if (typeof scenario?.index !== "string") {
       throw new SprutHubError(
@@ -3000,33 +2984,32 @@ function hubErrorReply(error, token) {
   };
 }
 
-function extractEntityArray(response, path, missingMeansEmpty = false) {
-  let container = response.result;
+// SprutHub replies in proto3 JSON, which leaves out a repeated field that is
+// empty: a list object without its array is an empty list. Live hubs did this
+// for accessory.list{roomId}, extensionChild.list, logic.getOptions, log.list
+// and scenario.list{aId}. A missing envelope or list object, null or any
+// other non-array value is not a list and never reads as empty.
+export function extractNativeList(
+  response,
+  path,
+  incompatible = incompatibleEntityList,
+) {
+  let container = response?.result;
   for (const key of path.slice(0, -1)) {
-    if (
-      !container ||
-      typeof container !== "object" ||
-      Array.isArray(container) ||
-      !Object.hasOwn(container, key)
-    ) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible entity list.",
-      );
+    if (!isPlainObject(container) || !Object.hasOwn(container, key)) {
+      throw incompatible();
     }
     container = container[key];
   }
-  if (!container || typeof container !== "object" || Array.isArray(container)) {
-    throw new SprutHubError(
-      "incompatible_response",
-      "SprutHub returned an incompatible entity list.",
-    );
-  }
+  if (!isPlainObject(container)) throw incompatible();
   const key = path.at(-1);
-  const value = container[key];
-  if (Array.isArray(value)) return value;
-  if (missingMeansEmpty && !Object.hasOwn(container, key)) return [];
-  throw new SprutHubError(
+  if (!Object.hasOwn(container, key)) return [];
+  if (!Array.isArray(container[key])) throw incompatible();
+  return container[key];
+}
+
+function incompatibleEntityList() {
+  return new SprutHubError(
     "incompatible_response",
     "SprutHub returned an incompatible entity list.",
   );
