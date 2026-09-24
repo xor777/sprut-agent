@@ -77,8 +77,10 @@ if (process.env.SCRIPTED_AGENT_ROGUE) {
   await new Promise((resolve) => socket.once("message", resolve));
   socket.close();
 }
-for (const target of resumed ? [] : JSON.parse(process.env.SCRIPTED_AGENT_TURN_OFF)) {
-  const prepared = await call("prepare_native_change", { operation: "characteristic_value", target_ref: homeRef + "/" + target, value: false, reason: "scripted" });
+// A string turns that characteristic off; an object names another change.
+for (const change of resumed ? [] : JSON.parse(process.env.SCRIPTED_AGENT_TURN_OFF)) {
+  const { operation = "characteristic_value", target = change, value = false } = typeof change === "string" ? {} : change;
+  const prepared = await call("prepare_native_change", { operation, target_ref: homeRef + "/" + target, value, reason: "scripted" });
   await call("apply_native_change", { change_ref: prepared.change_ref });
 }
 await client.close();
@@ -121,10 +123,13 @@ async function scriptedEnvironment(
   return { directory, record };
 }
 
-async function scriptedRun(t, { definition, ...options }) {
+async function scriptedRun(
+  t,
+  { caseName = "turn-off-room", definition = CASES[caseName], ...options },
+) {
   const { directory, record } = await scriptedEnvironment(t, options);
   const outcome = await runCase({
-    caseName: "turn-off-room",
+    caseName,
     definition,
     harness: "claude",
     model: "sonnet",
@@ -200,6 +205,45 @@ test("a scripted agent that turns off only living room lights passes through the
   assert.equal(record.env.SPRUTHUB_URL, undefined);
   assert.equal(record.env.CLAUDECODE, undefined);
   assert.equal(record.env.CLAUDE_CODE_ENTRYPOINT, undefined);
+  // Every method this pass touched was observed on a live hub.
+  assert.match(summaryLine(outcome), /^PASS turn-off-room@apartment /);
+  assert.deepEqual(saved.unverified_methods, []);
+});
+
+test("a pass that rests on simulator behavior not seen on a live hub is marked", async (t) => {
+  const renamed = await scriptedRun(t, {
+    caseName: "rename-room",
+    turnOff: [{ operation: "room_name", target: "room/7", value: "Офис" }],
+    answer: "Переименовал кабинет в «Офис».",
+  });
+  assert.equal(renamed.outcome.pass, true);
+  assert.deepEqual(renamed.saved.unverified_methods, ["room.update"]);
+  assert.match(
+    summaryLine(renamed.outcome),
+    /^PASS\* \(unverified: room\.update\) rename-room@apartment /,
+  );
+
+  // scenario.update is observed for data; its active flag is not yet.
+  const disabled = await scriptedRun(t, {
+    caseName: "disable-scenario",
+    turnOff: [
+      { operation: "scenario_active", target: "scenario/5", value: false },
+    ],
+    answer: "Отключил «Ночной режим».",
+  });
+  assert.equal(disabled.outcome.pass, true);
+  const levels = Object.fromEntries(
+    disabled.saved.simulator_methods.map(({ method, level }) => [
+      method,
+      level,
+    ]),
+  );
+  assert.equal(levels["scenario.update {active}"], "schema_only");
+  assert.equal(levels["scenario.update"], undefined);
+  assert.match(
+    summaryLine(disabled.outcome),
+    /^PASS\* \(unverified: scenario\.update \{active\}\) disable-scenario@apartment /,
+  );
 });
 
 test("a case's faults reach the hub and a stuck light fails the result, not the report", async (t) => {
