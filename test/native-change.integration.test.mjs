@@ -17713,6 +17713,56 @@ test("a LOGIC source change stays restorable after its scenario is turned off", 
   });
 });
 
+test("scenario_active prepared with active instead of value points to value before touching the hub", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  const client = await startClient(t, hub, stateDirectory);
+  const reason = "Выключить ночник на время отъезда";
+
+  const misplaced = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_active",
+      target_ref: targetRef,
+      active: false,
+      reason,
+    },
+  });
+  assert.equal(misplaced.isError, true);
+  assert.equal(
+    misplaced.structuredContent.error.code,
+    "invalid_native_value",
+    misplaced.content[0]?.text,
+  );
+  assert.deepEqual(misplaced.structuredContent.next, {
+    tool: "prepare_native_change",
+    arguments: {
+      operation: "scenario_active",
+      target_ref: targetRef,
+      value: false,
+      reason,
+    },
+  });
+  assert.deepEqual(scenarioUpdates(hub), []);
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: targetRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+
+  const followed = await client.callTool({
+    name: misplaced.structuredContent.next.tool,
+    arguments: misplaced.structuredContent.next.arguments,
+  });
+  assert.equal(followed.isError, undefined, followed.content[0]?.text);
+  assert.equal(followed.structuredContent.status, "prepared");
+  assert.deepEqual(followed.structuredContent.diff, {
+    value: { from: true, to: false, kind: "boolValue" },
+  });
+  assert.equal(scenario.active, true);
+});
+
 const twoChannelSwitch = {
   id: 40,
   roomId: 1,
