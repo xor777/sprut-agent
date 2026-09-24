@@ -496,7 +496,9 @@ export function normalizeBlockRequest(data) {
 // form; it is never sent to the hub. It folds only what the hub or the
 // official web client write differently for the same meaning. Anything
 // else, a changed value, mode, delay, branch or field, stays a difference,
-// so a manual edit is still detected.
+// so a manual edit is still detected. An inc/dec step is compared as it is:
+// normalizeBlockRequest sends it as a number, and SprutHub 3.0.0 stored a
+// step sent as the string "10" as the number 10.
 export function canonicalBlock(data) {
   return canonicalNode(data, "root");
 }
@@ -556,10 +558,6 @@ function canonicalNode(node, kind) {
     // AND; over one condition both mean that condition. A group of none or of
     // several keeps its mode.
     canonical.mode = "AND";
-  }
-  if ((kind === "inc" || kind === "dec") && Object.hasOwn(canonical, "value")) {
-    // Live-observed: a step sent as "10" is stored as 10 (relativeStepNumber).
-    canonical.value = relativeStepNumber(canonical.value) ?? canonical.value;
   }
   return canonical;
 }
