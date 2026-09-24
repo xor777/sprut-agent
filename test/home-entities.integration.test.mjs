@@ -2300,33 +2300,27 @@ test("get_entity distinguishes unread, found, empty, and unapplied option scopes
   });
   assert.equal(accessory.isError, undefined, accessory.content[0]?.text);
   const nested = accessory.structuredContent.entity.services[0].characteristics;
-  assert.deepEqual(nested[0].option_scope, {
-    native_has_options: true,
-    status: "not_read",
-    next: {
-      tool: "get_entity",
-      arguments: {
-        entity_ref:
-          "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
-        include: ["options"],
-      },
-    },
-  });
+  assert.equal(nested[0].options_available, true);
   assert.deepEqual(nested[1], {
     redacted: true,
     reason: "sensitive_native_data",
   });
-  assert.deepEqual(nested[2].option_scope, {
-    native_has_options: null,
-    status: "not_read",
-    next: {
-      tool: "get_entity",
-      arguments: {
+  // The fake hub omits hasOptions here: unknown, not "no options".
+  assert.equal(nested[2].options_available, null);
+  assert.deepEqual(accessory.structuredContent.entity.options_next, {
+    tool: "get_entity",
+    candidates: [
+      {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+        include: ["options"],
+      },
+      {
         entity_ref:
           "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
         include: ["options"],
       },
-    },
+    ],
   });
   assert.deepEqual(accessory.structuredContent.entity.include_resolution, {
     requested: ["options"],
@@ -2342,13 +2336,13 @@ test("get_entity distinguishes unread, found, empty, and unapplied option scopes
               entity_ref:
                 "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
               include: ["options"],
-              native_has_options: true,
+              options_available: true,
             },
             {
               entity_ref:
                 "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/17",
               include: ["options"],
-              native_has_options: null,
+              options_available: null,
             },
           ],
         },
@@ -2384,10 +2378,11 @@ test("get_entity distinguishes unread, found, empty, and unapplied option scopes
   });
   assert.equal(found.isError, undefined, found.content[0]?.text);
   assert.equal(found.structuredContent.entity.options.length, 2);
-  assert.deepEqual(found.structuredContent.entity.option_scope, {
-    ...nested[0].option_scope,
-    status: "found",
-  });
+  assert.equal(found.structuredContent.entity.options_available, true);
+  assert.equal(
+    Object.hasOwn(found.structuredContent.entity, "options_next"),
+    false,
+  );
   assert.deepEqual(found.structuredContent.entity.include_resolution, {
     requested: ["options"],
     applied: ["options"],
@@ -2404,10 +2399,10 @@ test("get_entity distinguishes unread, found, empty, and unapplied option scopes
   });
   assert.equal(empty.isError, undefined, empty.content[0]?.text);
   assert.deepEqual(empty.structuredContent.entity.options, []);
-  assert.deepEqual(empty.structuredContent.entity.option_scope, {
-    ...nested[2].option_scope,
-    status: "checked_empty",
-  });
+  assert.equal(
+    Object.hasOwn(empty.structuredContent.entity, "options_next"),
+    false,
+  );
   assert.deepEqual(empty.structuredContent.entity.include_resolution, {
     requested: ["options"],
     applied: ["options"],
@@ -2466,10 +2461,6 @@ test("get_entity rejects incomplete option operations without turning them into 
     explicitEmpty.content[0]?.text,
   );
   assert.deepEqual(explicitEmpty.structuredContent.entity.options, []);
-  assert.equal(
-    explicitEmpty.structuredContent.entity.option_scope.status,
-    "checked_empty",
-  );
   assert.deepEqual(explicitEmpty.structuredContent.entity.include_resolution, {
     requested: ["options"],
     applied: ["options"],

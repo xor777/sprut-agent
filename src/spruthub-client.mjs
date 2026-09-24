@@ -232,16 +232,13 @@ export class SprutHubClient {
   async getEntity(entityReference, include = []) {
     const parsed = parseEntityRef(entityReference);
     const deadline = Date.now() + this.timeoutMs;
-    const { home, observedAt: homeObservedAt } = await this.#requireHome(
-      parsed.serial,
-      deadline,
-    );
+    await this.#requireHome(parsed.serial, deadline);
     const requested = new Set(include);
     const entity = await this.#readEntity(parsed, requested, deadline);
     const observedAt = new Date().toISOString();
     return {
       status: "ok",
-      home: normalizeHome(home, homeObservedAt),
+      home_ref: homeRef(parsed.serial),
       entity,
       freshness: freshness(observedAt),
     };
@@ -1760,6 +1757,12 @@ export class SprutHubClient {
         accessory,
         observedAt,
       );
+      Object.assign(
+        entity,
+        optionsNext(
+          entity.services.flatMap(({ characteristics }) => characteristics),
+        ),
+      );
       if (requested.has("relations")) {
         entity.relations = await this.#readAccessoryRelations(
           parsed.serial,
@@ -1797,14 +1800,16 @@ export class SprutHubClient {
           deadline,
         ),
       ]);
+      const detail = normalizeServiceDetail(
+        parsed.serial,
+        accessory,
+        service,
+        observedAt,
+      );
       return {
         entity: {
-          ...normalizeServiceDetail(
-            parsed.serial,
-            accessory,
-            service,
-            observedAt,
-          ),
+          ...detail,
+          ...optionsNext(detail.characteristics),
           assigned_logics: logics.map((logic) =>
             normalizeLogic(parsed.serial, accessory.id, service.sId, logic),
           ),
@@ -1889,8 +1894,11 @@ export class SprutHubClient {
           targetRef: entity.ref,
         }),
       );
-      entity.option_scope.status =
-        entity.options.length === 0 ? "checked_empty" : "found";
+    } else if (entity.options_available !== false) {
+      entity.options_next = {
+        tool: "get_entity",
+        arguments: { entity_ref: entity.ref, include: ["options"] },
+      };
     }
     if (requested.has("relations")) {
       entity.relations = await this.#readRelations(
@@ -4048,22 +4056,31 @@ function normalizeCharacteristicDetail(
           }
         : {}),
     },
-    option_scope: {
-      native_has_options:
-        typeof characteristic.hasOptions === "boolean"
-          ? characteristic.hasOptions
-          : null,
-      status: "not_read",
-      next: {
-        tool: "get_entity",
-        arguments: { entity_ref: ref, include: ["options"] },
-      },
-    },
+    // Native hasOptions; null when the hub did not say.
+    options_available:
+      typeof characteristic.hasOptions === "boolean"
+        ? characteristic.hasOptions
+        : null,
     freshness: {
       observed_at: observedAt,
       source_timestamp: null,
     },
   };
+}
+
+// One options call per container instead of one per characteristic: only
+// characteristics that report options (or did not say) are candidates.
+function optionsNext(characteristics) {
+  const candidates = characteristics
+    .filter(
+      (characteristic) =>
+        !isRedactedNode(characteristic) &&
+        characteristic.options_available !== false,
+    )
+    .map(({ ref }) => ({ entity_ref: ref, include: ["options"] }));
+  return candidates.length > 0
+    ? { options_next: { tool: "get_entity", candidates } }
+    : {};
 }
 
 function addIncludeResolution(entity, requested, ownerContext) {
@@ -4270,10 +4287,7 @@ function ownerCandidatesFromContainer(entity, include) {
           entity_ref: characteristic.ref,
           include: [include],
           ...(include === "options"
-            ? {
-                native_has_options:
-                  characteristic.option_scope.native_has_options,
-              }
+            ? { options_available: characteristic.options_available }
             : {}),
         })),
     );

@@ -137,7 +137,7 @@ export function presentEntityResult(
 function projectedResult(result, pointer, value, selectedComplete) {
   return {
     status: result.status,
-    home: result.home,
+    home_ref: result.home_ref,
     identity: entityIdentity(result.entity),
     selection: {
       pointer,
@@ -251,7 +251,7 @@ function containerOverviewResult(
   return withPage(
     {
       status: result.status,
-      home: result.home,
+      home_ref: result.home_ref,
       identity,
       ...(explicitlySelected
         ? {
@@ -383,7 +383,7 @@ function unreadIncludePointerError(outcome, pointer, result, entityRef) {
   const next = includeReadFailedNext(outcome.error_code, {
     entityRef,
     include: outcome.include,
-    homeRef: result.home?.ref,
+    homeRef: result.home_ref,
   });
   return new SprutHubError(
     outcome.error_code,
