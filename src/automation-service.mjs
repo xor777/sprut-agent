@@ -8888,6 +8888,7 @@ const NATIVE_VALUE_KINDS = {
       const { windowKey: _windowKey, ...state } = await readScenarioActive(
         service.client,
         target,
+        { beforeChangeRef: input.target_ref },
       );
       return { fields: { target }, ...state };
     },
@@ -9610,10 +9611,12 @@ async function readLogicActive(client, target) {
   return { value: logicActiveValue(logic), contract: logicActiveContract() };
 }
 
+// beforeChangeRef is the scenario ref of a contract or prepare read: no change
+// exists yet, so a mismatch points to that scenario instead of the change.
 async function readScenarioActive(
   client,
   target,
-  { requireWrite = true } = {},
+  { requireWrite = true, beforeChangeRef } = {},
 ) {
   const scenario = await client.getScenario(target.index);
   if (!scenario) throw scenarioNotFound();
@@ -9656,11 +9659,24 @@ async function readScenarioActive(
     );
   }
   if (option.value.value !== scenario.active) {
-    throw new SprutHubError(
-      "scenario_active_mismatch",
-      `SprutHub reports active=${scenario.active} in scenario.get but Active=${option.value.value} in the scenario's options window, so whether the scenario is on is unknown. Read the change again later; nothing more is sent until both agree.`,
-      "get_native_change",
-    );
+    const unknown = `SprutHub reports active=${scenario.active} in scenario.get but Active=${option.value.value} in the scenario's options window, so whether the scenario is on is unknown.`;
+    throw beforeChangeRef === undefined
+      ? new SprutHubError(
+          "scenario_active_mismatch",
+          `${unknown} Read the change again later; nothing more is sent until both agree.`,
+          "get_native_change",
+        )
+      : new SprutHubError(
+          "scenario_active_mismatch",
+          `${unknown} Nothing was prepared or sent; read the scenario again later and prepare once both agree.`,
+          "get_entity",
+          {
+            next: {
+              tool: "get_entity",
+              arguments: { entity_ref: beforeChangeRef },
+            },
+          },
+        );
   }
   return {
     value: { value: scenario.active, kind: "boolValue" },
