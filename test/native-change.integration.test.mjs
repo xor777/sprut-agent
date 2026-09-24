@@ -10561,6 +10561,43 @@ test("an existing BLOCK whose if has no mode is updated as EVERY and keeps that 
   );
 });
 
+test("a clear_delay for all delays of the BLOCK is created and read back", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+  // The web client's clear_delay list starts with "All delays", index 0.
+  const data = heldMotionLightData();
+  data.targets[0].then[1] = { type: "clear_delay", index: 0 };
+  const prepared = await prepareBlockCreate(client, {
+    name: "Сбросить все таймеры",
+    data,
+    reason: "Движение отменяет все отложенные выключения",
+  });
+  assert.equal(
+    publishedBlockNode(contract, "clear_delay").fields.index.all_delays,
+    0,
+  );
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.deepEqual(
+    scenarioData(hub, created.structuredContent.scenario_index),
+    withRuntimeBlockFields(data),
+  );
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+});
+
 test("an existing BLOCK with ONCE, a hold, CONTINUE and clear_delay is updated, read back and restored", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
