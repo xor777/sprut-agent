@@ -374,14 +374,14 @@ function syncScenarioMetadataFromWindow(state, window, updates) {
     (candidate) => candidate.optionsWindow === window.windowKey,
   );
   if (!scenario) return;
-  const name = window.options.find(({ key }) => key === "Name")?.value
-    ?.stringValue;
-  const desc = window.options.find(({ key }) => key === "Desc")?.value
-    ?.stringValue;
+  const updated = (optionKey) =>
+    updates.find(({ key }) => key === optionKey)?.value;
+  const name = updated("Name")?.stringValue;
+  const desc = updated("Desc")?.stringValue;
   if (typeof name === "string") scenario.name = name;
   if (typeof desc === "string") scenario.desc = desc;
   // The web client turns a scenario on or off only through this option.
-  const active = updates.find(({ key }) => key === "Active")?.value?.boolValue;
+  const active = updated("Active")?.boolValue;
   if (
     typeof active === "boolean" &&
     !state.behavior.windowActiveStaysInWindow

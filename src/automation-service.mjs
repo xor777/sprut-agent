@@ -8761,19 +8761,40 @@ const NATIVE_VALUE_KINDS = {
     knownSetting: () => false,
     async inspect(service, input) {
       const target = parseScenarioRef(input.target_ref, service.hubSerial);
-      return {
-        fields: { target },
-        ...(await readScenarioActive(service.client, target)),
-      };
+      const { windowKey: _windowKey, ...state } = await readScenarioActive(
+        service.client,
+        target,
+      );
+      return { fields: { target }, ...state };
     },
-    read: (service, change) =>
-      readScenarioActive(service.client, change.target),
-    // Only the flag is sent, so data, metadata and other flags of any
-    // scenario type stay as they are.
-    write: (service, change, value) =>
-      service.client.updateScenario(change.target.index, {
-        active: value.value,
-      }),
+    // The write goes to the options window this read found, so a change
+    // journaled before the window path gets it on its first read too.
+    async read(service, change, { requireWrite = false } = {}) {
+      const { windowKey, ...state } = await readScenarioActive(
+        service.client,
+        change.target,
+        { requireWrite },
+      );
+      change.options_window_key = windowKey;
+      return state;
+    },
+    // SprutHub 3.0.0 acknowledged scenario.update {active} and kept the flag
+    // (owner hub, 2026-09-24); the official web client switches a scenario
+    // only through the Active option of its options window. Only that option
+    // is sent, so data, metadata and other flags stay as they are.
+    write(service, change, value) {
+      if (typeof change.options_window_key !== "string") {
+        throw new Error("scenario_active is written only after a readback.");
+      }
+      return service.client.updateWindowOption({
+        windowKey: change.options_window_key,
+        key: "Active",
+        value: nativeScalarValue(value),
+      });
+    },
+    limitations: () => [
+      "The flag is written as the Active option of the scenario's options window, as the SprutHub web client does, and confirmed only when scenario.get and that window both show it. A change recorded while this operation sent scenario.update is settled by the same readback, and a retry uses the window.",
+    ],
   },
   room_name: {
     restoration: scalarValueRestoration,
@@ -9453,7 +9474,11 @@ async function readLogicActive(client, target) {
   return { value: logicActiveValue(logic), contract: logicActiveContract() };
 }
 
-async function readScenarioActive(client, target) {
+async function readScenarioActive(
+  client,
+  target,
+  { requireWrite = true } = {},
+) {
   const scenario = await client.getScenario(target.index);
   if (!scenario) throw scenarioNotFound();
   if (typeof scenario.active !== "boolean") {
@@ -9463,13 +9488,54 @@ async function readScenarioActive(client, target) {
       "get_entity",
     );
   }
+  if (
+    typeof scenario.optionsWindow !== "string" ||
+    scenario.optionsWindow.length === 0
+  ) {
+    throw new SprutHubError(
+      "options_window_unavailable",
+      "SprutHub returned no options window for this scenario. A scenario is turned on or off only through the Active option of that window, so nothing was sent; the owner can switch it in the SprutHub app.",
+      "get_entity",
+    );
+  }
+  const window = await client.getWindow(scenario.optionsWindow);
+  const options = window.options.filter(({ key }) => key === "Active");
+  if (options.length !== 1) {
+    throw new SprutHubError(
+      options.length === 0
+        ? "window_option_not_found"
+        : "incompatible_response",
+      options.length === 0
+        ? "The scenario's options window has no Active option, so this scenario cannot be turned on or off here; nothing was sent. The owner can switch it in the SprutHub app."
+        : "SprutHub returned the Active option of this scenario more than once.",
+      "get_entity",
+    );
+  }
+  const option = windowOptionState(options[0], { requireWrite });
+  if (option.contract.kind !== "boolValue") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "The Active option of this scenario is not an on/off setting.",
+      "get_entity",
+    );
+  }
+  if (option.value.value !== scenario.active) {
+    throw new SprutHubError(
+      "scenario_active_mismatch",
+      `SprutHub reports active=${scenario.active} in scenario.get but Active=${option.value.value} in the scenario's options window, so whether the scenario is on is unknown. Read the change again later; nothing more is sent until both agree.`,
+      "get_native_change",
+    );
+  }
   return {
     value: { value: scenario.active, kind: "boolValue" },
     contract: {
       type: "ScenarioActive",
       kind: "boolValue",
-      confirmation: "separate_scenario_get_readback",
+      write:
+        'window.update({windowKey: scenario.optionsWindow, options: [{key: "Active", value: {boolValue}}]})',
+      confirmation: "separate_scenario_get_and_window_get_readback",
     },
+    windowKey: scenario.optionsWindow,
   };
 }
 
