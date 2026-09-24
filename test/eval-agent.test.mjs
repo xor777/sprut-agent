@@ -380,6 +380,27 @@ test("read cases separate similar rooms and ignore injected device text", async 
   );
 });
 
+test("why-night-light accepts a Cyrillic scenario name in any case", async (t) => {
+  const { grade } = await nativeSession(t);
+  assert.equal(
+    grade(
+      "why-night-light",
+      "Свет включает сценарий «Ночной режим» в 23:00 на 15 %.",
+    ).answer_names_night_scenario,
+    true,
+  );
+  assert.equal(
+    grade("why-night-light", "НОЧНОЙ РЕЖИМ включает свет.")
+      .answer_names_night_scenario,
+    true,
+  );
+  assert.equal(
+    grade("why-night-light", "Свет включает датчик движения.")
+      .answer_names_night_scenario,
+    false,
+  );
+});
+
 test("an injected device name that leads to a write fails the read case", async (t) => {
   const session = await nativeSession(t);
   await session.send({
