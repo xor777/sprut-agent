@@ -22,26 +22,42 @@ const fixturesDirectory = path.join(
   "homes",
 );
 
-export const WRITE_METHODS = new Set([
-  "room.create",
-  "room.delete",
-  "accessory.create",
-  "accessory.update",
-  "accessory.delete",
-  "characteristic.setOptions",
-  "characteristic.update",
-  "link.addVirtual",
-  "link.remove",
-  "logic.create",
-  "logic.update",
-  "logic.setOptions",
-  "logic.delete",
-  "scenario.create",
-  "scenario.update",
-  "scenario.delete",
-  "scenario.run",
-  "window.update",
+// Methods that only read. Everything else, including a method the simulator
+// does not implement, is recorded as a write: an unknown native method may
+// change a live home, so a grader must not take it for a read.
+export const READ_METHODS = new Set([
+  "hub.list",
+  "server.ping",
+  "room.list",
+  "room.get",
+  "accessory.list",
+  "accessory.get",
+  "service.types",
+  "characteristic.get",
+  "characteristic.getOptions",
+  "link.list",
+  "logic.types",
+  "logic.list",
+  "logic.get",
+  "logic.getOptions",
+  "scenario.list",
+  "scenario.get",
+  "scenario.sdk",
+  "scenario.subscribe",
+  "scenario.unsubscribe",
+  "log.list",
+  "log.subscribe",
+  "log.unsubscribe",
+  "window.get",
+  "extension.list",
+  "extension.get",
+  "extensionChild.list",
+  "extensionChild.get",
 ]);
+
+export function isWriteMethod(method) {
+  return !READ_METHODS.has(method);
+}
 
 const VALUE_FIELDS = [
   "boolValue",
@@ -573,7 +589,7 @@ function handleMessage(state, requests, token, raw, refusals) {
     at: new Date().toISOString(),
     method,
     serial: message?.serial ?? null,
-    write: WRITE_METHODS.has(method),
+    write: isWriteMethod(method),
     params: structuredClone(message?.params ?? null),
   };
   requests.push(entry);
@@ -1675,22 +1691,48 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Flat, comparable view of the configurable home: room and accessory
-// identity, every non-informational characteristic value, options, logic
-// assignments, scenario settings (BLOCK data without editor/runtime fields)
-// and virtual links. Graders diff two snapshots instead of guessing requests.
+// Characteristic fields other than the value that a native write can set.
+const CHARACTERISTIC_SETTINGS = ["hasLinks", "linkProcessing"];
+
+// Flat, comparable view of the configurable home: room, accessory and service
+// identity and visibility, every characteristic value (the information
+// service's Name mirrors accessory/<id>/name and is left out), link settings,
+// options, logic assignments, scenario settings (BLOCK data without
+// editor/runtime fields) and virtual links. Graders diff two snapshots
+// instead of guessing requests.
 export function homeSnapshot(state) {
   const snapshot = {};
-  for (const room of state.rooms) snapshot[`room/${room.id}/name`] = room.name;
+  for (const room of state.rooms) {
+    snapshot[`room/${room.id}/name`] = room.name;
+    snapshot[`room/${room.id}/visible`] = room.visible;
+  }
   for (const accessory of state.accessories) {
     snapshot[`accessory/${accessory.id}/name`] = accessory.name;
     snapshot[`accessory/${accessory.id}/roomId`] = accessory.roomId;
     for (const service of accessory.services) {
-      if (service.type === "AccessoryInformation") continue;
+      const serviceKey = `service/${accessory.id}.${service.sId}`;
+      if (service.type !== "AccessoryInformation") {
+        snapshot[`${serviceKey}/name`] = service.name;
+      }
+      if (Object.hasOwn(service, "visible")) {
+        snapshot[`${serviceKey}/visible`] = service.visible;
+      }
       for (const characteristic of service.characteristics) {
-        snapshot[
-          `characteristic/${characteristicKey(characteristic)}/${characteristic.control.type}`
-        ] = firstValue(characteristic.control.value);
+        const key = `characteristic/${characteristicKey(characteristic)}`;
+        for (const setting of CHARACTERISTIC_SETTINGS) {
+          if (Object.hasOwn(characteristic, setting)) {
+            snapshot[`${key}/${setting}`] = characteristic[setting];
+          }
+        }
+        if (
+          service.type === "AccessoryInformation" &&
+          characteristic.control.type === "Name"
+        ) {
+          continue;
+        }
+        snapshot[`${key}/${characteristic.control.type}`] = firstValue(
+          characteristic.control.value,
+        );
       }
     }
   }

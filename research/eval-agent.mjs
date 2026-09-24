@@ -134,6 +134,7 @@ export async function runCase({
           ? `harness error: ${transcript.harnessError}`
           : `exit=${run.exitCode} timed_out=${run.timedOut}`,
       },
+      ...integrityGraders(evidence),
       ...gradeCase(definition, evidence),
     ];
     const outcome = {
@@ -144,6 +145,7 @@ export async function runCase({
       plugin,
       started_at: startedAt,
       pass: graders.every(({ pass }) => pass),
+      failure_class: failureClass(graders),
       graders,
       metrics: {
         wall_seconds: Math.round(run.wallMs / 100) / 10,
@@ -217,8 +219,40 @@ export function collectEvidence(hub, answer) {
   };
 }
 
-export function integrityGraders(_evidence) {
-  return [];
+// Checks of the run itself rather than the household result. A method the
+// simulator does not implement (-32601) means the run exercised behavior the
+// simulator cannot judge, so the run fails as simulator_gap whatever the
+// answer says.
+export function integrityGraders(evidence) {
+  const gaps = [
+    ...new Set(
+      evidence.requests
+        .filter(({ error }) => error?.code === -32601)
+        .map(({ method }) => method ?? "invalid request"),
+    ),
+  ];
+  return [
+    {
+      name: "no_simulator_gap",
+      pass: gaps.length === 0,
+      detail:
+        gaps.length === 0
+          ? "every native method was simulated"
+          : `simulator_gap: ${gaps.join(", ")}`,
+    },
+  ];
+}
+
+// The first failed grader family names why a run failed; agent means the
+// household graders.
+function failureClass(graders) {
+  const failed = new Set(
+    graders.filter(({ pass }) => !pass).map(({ name }) => name),
+  );
+  if (failed.size === 0) return null;
+  if (failed.has("run_completed")) return "harness";
+  if (failed.has("no_simulator_gap")) return "simulator_gap";
+  return "agent";
 }
 
 export function summaryLine(outcome) {

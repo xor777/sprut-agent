@@ -426,9 +426,10 @@ test("a run that reached a method the simulator lacks fails as a simulator gap",
   const covered = await nativeSession(t);
   await covered.send({ room: { list: {} } });
   assert.deepEqual(
-    integrityGraders(collectEvidence(covered.hub, "")).map(
-      ({ name, pass }) => [name, pass],
-    ),
+    integrityGraders(collectEvidence(covered.hub, "")).map(({ name, pass }) => [
+      name,
+      pass,
+    ]),
     [["no_simulator_gap", true]],
   );
 
