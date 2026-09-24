@@ -60,6 +60,14 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
     tools.tools.some(({ name }) => name === "home_overview"),
     true,
   );
+  // Claude Code shows at most 2048 characters of a tool description; each
+  // stays within 1000 so a client never cuts the rules at its end.
+  assert.deepEqual(
+    tools.tools
+      .filter(({ description }) => description.length > 1_000)
+      .map(({ name, description }) => `${name}: ${description.length}`),
+    [],
+  );
 
   const homes = await client.callTool({
     name: "home_overview",
