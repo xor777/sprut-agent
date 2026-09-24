@@ -267,10 +267,22 @@ export class HomeReads {
       if (fresh.stale && !refreshed) {
         read = await client.homeCatalog(serial, deadline, { refresh: true });
         catalog = read.catalog;
+        // Devices moved out of a room deleted in the SprutHub app.
+        if (selection.roomId !== null && !hasRoom(catalog, selection)) {
+          throw roomNotFound(selection);
+        }
         candidates = selectCandidates(catalog, selection);
         values = byId(catalog.accessories);
         observedAt = read.valuesObservedAt;
       } else {
+        // An empty room read agrees with an empty room of the catalog even
+        // after the room was deleted in the app; the room list tells.
+        if (selection.roomId !== null && fresh.accessories.length === 0) {
+          const { rooms } = await client.nativeRooms(serial, deadline);
+          if (!rooms.some(({ id }) => id === selection.roomId)) {
+            throw roomNotFound(selection);
+          }
+        }
         if (fresh.wholeHome) {
           catalog = client.rememberHomeCatalog(serial, {
             rooms: catalog.rooms,
