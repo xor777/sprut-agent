@@ -62,6 +62,35 @@ npm run eval:spruthub-master -- contact-option plugin
 а не продуктовый вердикт. Ручной сценарий неоднозначной комнаты:
 `node research/check-agent-room-ambiguity.mjs ambiguous`.
 
+## Бытовые задачи внешним агентом
+
+`eval:agent` даёт внешнему агенту бытовую просьбу и проверяет, справился ли он
+через поставляемый плагин и сколько контекста потратил. Хаб заменяет
+симулятор `test/support/simulated-hub.mjs` с домом
+`test/fixtures/homes/apartment.json`. Оценка детерминированная: по записям и
+итоговому состоянию симулятора и по тексту ответа. Прогон вызывает модель,
+поэтому в `npm run check` не входит; там проверяются только симулятор,
+грейдеры и связка раннера со скриптовым агентом.
+
+```sh
+npm run eval:agent -- read-temperature                 # Claude Code, sonnet
+npm run eval:agent -- all --harness codex
+npm run eval:agent -- turn-off-room --plugin-dir /path/to/other/dist/plugin
+npm run eval:agent -- --help                           # список задач и флагов
+```
+
+`claude` запускает `claude -p` с плагином из `--plugin-dir` (по умолчанию
+`dist/plugin`), без пользовательских настроек и чужих MCP; агенту доступны
+только инструменты `sprut-agent`, Skill и Read. Нужен действующий вход
+Claude Code CLI. `codex` ставит тот же каталог через временный marketplace в
+изолированный профиль и берёт `~/.codex/auth.json`. `--plugin-dir` на
+detached worktree другого коммита сравнивает две сборки.
+
+Каждый прогон пишет в каталог вне репозитория `result.json` (грейдеры, число
+вызовов, байты результатов инструментов, токены, время, версия и git sha
+плагина), транскрипт и запросы к симулятору и печатает строку-итог.
+Симулятор не настоящий SprutHub: успешный прогон не заменяет живую приёмку.
+
 ## Код, исполняемый на хабе
 
 Перед созданием LOGIC агент вызывает `get_scenario_sdk` и получает текущие

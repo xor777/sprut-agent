@@ -11,6 +11,7 @@
     "check:plugin-bundle": "npm run build:plugin && git diff --exit-code -- dist && test -z \"$(git ls-files --others --exclude-standard -- dist)\"",
     "format": "biome format --write .",
     "start": "node src/server.mjs",
+    "eval:agent": "node research/eval-agent.mjs",
     "eval:spruthub-master": "node research/evaluate-spruthub-master.mjs",
     "research:diff": "node research/compare-snapshots.mjs",
     "research:record": "node research/record-websocket.mjs",
