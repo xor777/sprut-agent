@@ -411,6 +411,24 @@ export function visitKnownBlockNodes(data, visitor, invalidChild) {
   visit(data, "root", "root");
 }
 
+// A node that starts its BLOCK: a characteristic or interval with
+// trigger=true, or a cron directly in condition.conditions (TIME_TRIGGER).
+// A cron in interval.start or interval.end only bounds its interval.
+export function isBlockTrigger(node, kind, path) {
+  if (kind === "characteristic" || kind === "interval") {
+    return node.trigger === true;
+  }
+  return kind === "cron" && /\.conditions\[\d+\]$/.test(path);
+}
+
+export function blockSubgraphHasTrigger(node) {
+  let found = false;
+  visitKnownBlockNodes({ targets: [node] }, (candidate, kind, path) => {
+    if (isBlockTrigger(candidate, kind, path)) found = true;
+  });
+  return found;
+}
+
 export function blockAffectedRefs(data, homeRef) {
   const refs = [];
   visitKnownBlockNodes(data, (node, kind) => {
@@ -471,7 +489,7 @@ export function inspectBlockRelations(
           scenario_ref: scenarioRef,
           scenario_active: scenarioActive,
           runtime_status: "not_observed",
-          role: node.trigger === true ? "trigger" : "condition",
+          role: isBlockTrigger(node, kind, path) ? "trigger" : "condition",
           entity_ref: entityRef,
           ...blockRelationLocation(scenarioRef, path),
         });

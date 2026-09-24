@@ -5,7 +5,9 @@ import {
   BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
+  blockSubgraphHasTrigger,
   CHARACTERISTIC_HOLD,
+  isBlockTrigger,
   publishedBlockNodes,
   SERVICE_ACTION_KINDS,
   TIME_TRIGGER,
@@ -5959,7 +5961,6 @@ async function validateBlockData(
     actions: [],
     delayIndexes: new Set(),
     intervals: 0,
-    intervalBoundaries: new WeakSet(),
     triggers: 0,
     scenarioRuns: [],
     clearDelays: [],
@@ -5972,6 +5973,7 @@ async function validateBlockData(
     data,
     (node, kind, path) => {
       validateBlockNode(node, kind, path, context);
+      if (isBlockTrigger(node, kind, path)) context.triggers += 1;
     },
     (path, message) => {
       throw invalidBlock(path, message);
@@ -5981,7 +5983,10 @@ async function validateBlockData(
     context.triggers === 0 &&
     !(allowActionOnly && isLiteralActionOnlyBlock(data))
   ) {
-    throw invalidBlock("targets", "at least one trigger=true is required");
+    throw invalidBlock(
+      "targets",
+      "at least one trigger is required: trigger=true or a time_trigger cron",
+    );
   }
   for (const clear of context.clearDelays) {
     if (!context.delayIndexes.has(clear.index)) {
@@ -6595,7 +6600,6 @@ function validateBlockNode(node, kind, path, context) {
         `characteristic hold needs timeCond "" with time 0, or timeCond "${heldFor.timeCond}" with a positive time in ${heldFor.time.unit}`,
       );
     }
-    if (node.trigger) context.triggers += 1;
     context.conditions.push({
       role: "condition",
       path,
@@ -6627,17 +6631,13 @@ function validateBlockNode(node, kind, path, context) {
     if (start.hour === end.hour && start.minute === end.minute) {
       throw invalidBlock(path, "daily interval start and end must differ");
     }
-    context.intervalBoundaries.add(node.start);
-    context.intervalBoundaries.add(node.end);
-    if (node.trigger) context.triggers += 1;
     return;
   }
   if (kind === "cron") {
     // Interval boundaries were checked above as daily crons.
-    if (context.intervalBoundaries.has(node)) return;
+    if (!isBlockTrigger(node, kind, path)) return;
     const problem = timeTriggerProblem(node);
     if (problem) throw invalidBlock(path, problem);
-    context.triggers += 1;
     return;
   }
   if (kind === "service") {
@@ -6956,20 +6956,11 @@ function inspectPauseOwnership(
 }
 
 function ensurePauseableTriggerScope(data, node, pointer) {
-  let containsTrigger = false;
-  visitKnownBlockNodes({ targets: [node] }, (candidate, kind) => {
-    if (
-      ["characteristic", "interval"].includes(kind) &&
-      candidate.trigger === true
-    ) {
-      containsTrigger = true;
-    }
-  });
-  if (!containsTrigger) return;
+  if (!blockSubgraphHasTrigger(node)) return;
   const nested = [...executableBlockActions(data).entries()].filter(
     ([candidatePointer, candidate]) =>
       candidatePointer.startsWith(`${pointer}/`) &&
-      !blockSubgraphContainsTrigger(candidate),
+      !blockSubgraphHasTrigger(candidate),
   );
   const shallowest = nested
     .filter(([candidatePointer]) =>
@@ -6982,23 +6973,10 @@ function ensurePauseableTriggerScope(data, node, pointer) {
     .map(([candidatePointer]) => candidatePointer);
   throw new SprutHubError(
     "unsupported_pause_trigger_scope",
-    "The selected BLOCK subgraph contains trigger=true, whose registration after nesting is not verified. Select an executable action below that trigger.",
+    "The selected BLOCK subgraph contains a trigger (trigger=true or a time_trigger cron), whose registration after nesting is not verified. Select an executable action below that trigger.",
     "get_entity",
     { suggested_action_pointers: shallowest },
   );
-}
-
-function blockSubgraphContainsTrigger(node) {
-  let containsTrigger = false;
-  visitKnownBlockNodes({ targets: [node] }, (candidate, kind) => {
-    if (
-      ["characteristic", "interval"].includes(kind) &&
-      candidate.trigger === true
-    ) {
-      containsTrigger = true;
-    }
-  });
-  return containsTrigger;
 }
 
 function pauseScopeOverlap(pointer, ownedPointer) {
