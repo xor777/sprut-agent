@@ -1,6 +1,8 @@
 // Runs household cases with an external agent CLI against the in-process
-// SprutHub simulator and grades the result deterministically. A model run is
-// not part of `npm run check`; see DEVELOPMENT.md.
+// SprutHub simulator. Facts of the result are graded deterministically; the
+// meaning of the final answer is graded by a model judge
+// (research/eval-judge.mjs). A model run is not part of `npm run check`;
+// see DEVELOPMENT.md.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -27,6 +29,11 @@ import {
   startSimulatedHub,
 } from "../test/support/simulated-hub.mjs";
 import { CASES, gradeCase } from "./eval-agent-cases.mjs";
+import {
+  DEFAULT_JUDGE_MODEL,
+  DEFAULT_JUDGE_TIMEOUT_MS,
+  judgeAnswer,
+} from "./eval-judge.mjs";
 
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const MCP_SERVER_NAME = "sprut-agent";
@@ -39,6 +46,8 @@ Cases: ${Object.keys(CASES).join(", ")}
 Options:
   --harness claude|codex   Agent CLI (default: claude)
   --model <name>           Model passed to the CLI (default: sonnet for claude)
+  --judge-model <id>       Model id of the answer judge, run through claude
+                           (default: ${DEFAULT_JUDGE_MODEL})
   --plugin-dir <path>      Plugin build to test (default: dist/plugin)
   --evidence-dir <path>    Where results are written (default: new temp dir)
   --timeout <seconds>      Per-case limit (default: 600)
@@ -57,6 +66,7 @@ export async function main(
     options: {
       harness: { type: "string", default: "claude" },
       model: { type: "string" },
+      "judge-model": { type: "string", default: DEFAULT_JUDGE_MODEL },
       "plugin-dir": { type: "string" },
       "evidence-dir": { type: "string" },
       timeout: { type: "string", default: "600" },
@@ -119,6 +129,7 @@ export async function main(
           plugin,
           evidenceRoot,
           timeoutMs,
+          judge: { model: values["judge-model"] },
         });
         outcomes.push(outcome);
         write(`${summaryLine(outcome)}\n`);
@@ -151,6 +162,7 @@ export async function runCase({
   plugin,
   evidenceRoot,
   timeoutMs,
+  judge = {},
 }) {
   const fixtureName = fixture ?? definition.fixture ?? "apartment";
   if (definition.harnesses && !definition.harnesses.includes(harness)) {
@@ -183,6 +195,11 @@ export async function runCase({
     hub.settle();
     const evidence = collectEvidence(hub, transcript.answer);
     const simulatorMethods = hub.touchedMethods();
+    const judged = await judgeCase(definition, evidence, {
+      ...judge,
+      request: [definition.prompt, ...(definition.followUps ?? [])].join("\n"),
+      cwd: await mkdtemp(path.join(scratch, "judge-")),
+    });
     const graders = [
       {
         name: "run_completed",
@@ -201,6 +218,7 @@ export async function runCase({
         forbiddenRoots: await withRealPaths([repo, evidenceRoot]),
       }),
       ...gradeCase(definition, evidence),
+      ...judged.graders,
     ];
     const outcome = {
       case: caseName,
@@ -228,6 +246,8 @@ export async function runCase({
         ),
         tokens: transcript.usage,
         cost_usd: transcript.costUsd ?? null,
+        // The judge's call, apart from the agent's tokens and cost.
+        judge: judged.metrics,
         turns: transcript.turns ?? null,
         hub_requests: hub.requests.length,
         hub_response_bytes: sum(hub.requests, "responseBytes"),
@@ -411,9 +431,11 @@ function stayedInBounds({ toolCalls, allowedRoots, forbiddenRoots }) {
 }
 
 // The first failed grader family names why a run failed; agent means the
-// household graders. grader_unsupported: the only failed graders could not
-// evaluate what the agent built (they return unsupported: true), so the
-// run neither passes nor counts against the agent.
+// household graders, the answer judge's verdict included. judge_error: the
+// judge's reply could not be checked (see research/eval-judge.mjs) and no
+// household grader failed. grader_unsupported: the only failed graders
+// could not evaluate what the agent built (they return unsupported: true).
+// Neither passes nor counts against the agent.
 export function failureClass(graders) {
   const failedGraders = graders.filter(({ pass }) => !pass);
   const failed = new Set(failedGraders.map(({ name }) => name));
@@ -426,10 +448,81 @@ export function failureClass(graders) {
     return "isolation";
   }
   if (failed.has("no_simulator_gap")) return "simulator_gap";
-  if (failedGraders.every(({ unsupported }) => unsupported === true)) {
-    return "grader_unsupported";
+  if (
+    failedGraders.some(
+      ({ unsupported, judge_error: judgeError }) =>
+        unsupported !== true && judgeError !== true,
+    )
+  ) {
+    return "agent";
   }
-  return "agent";
+  if (failedGraders.some(({ judge_error: judgeError }) => judgeError)) {
+    return "judge_error";
+  }
+  return "grader_unsupported";
+}
+
+// The answer_meaning grader of a case whose judge(evidence) gives a rubric:
+// one judge call with every criterion. No answer is the agent's failure,
+// not the judge's; a reply the judge module cannot check is a judge_error.
+export async function judgeCase(
+  definition,
+  evidence,
+  {
+    request = definition.prompt,
+    model = DEFAULT_JUDGE_MODEL,
+    command = process.env.SPRUT_EVAL_JUDGE_BIN ?? "claude",
+    timeoutMs = DEFAULT_JUDGE_TIMEOUT_MS,
+    cwd,
+  } = {},
+) {
+  const rubric = definition.judge?.(evidence) ?? null;
+  if (!rubric) return { graders: [], metrics: null };
+  if (!evidence.answer.trim()) {
+    return {
+      graders: [
+        { name: "answer_meaning", pass: false, detail: "no answer to judge" },
+      ],
+      metrics: null,
+    };
+  }
+  const verdict = await judgeAnswer({
+    request,
+    rubric,
+    answer: evidence.answer,
+    model,
+    command,
+    env: isolatedEnvironment({}),
+    cwd,
+    timeoutMs,
+  });
+  const judge = {
+    verdict: verdict.verdict,
+    quote: verdict.quote,
+    reason: verdict.reason,
+    error: verdict.error,
+    rubric,
+  };
+  return {
+    graders: [
+      {
+        name: "answer_meaning",
+        pass: verdict.verdict === "pass",
+        ...(verdict.error ? { judge_error: true } : {}),
+        detail: verdict.error
+          ? `judge_error: ${verdict.error}`
+          : `${verdict.verdict}: ${verdict.reason} | quote: ${verdict.quote}`,
+        judge,
+      },
+    ],
+    metrics: {
+      calls: 1,
+      model: verdict.model,
+      cost_usd: verdict.cost_usd,
+      tokens: verdict.tokens,
+      wall_seconds: verdict.wall_seconds,
+    },
+  };
 }
 
 // MCP calls and MCP result bytes are the cross-harness measure: the harness's
@@ -537,6 +630,21 @@ export function summarizeRuns(
       ].filter((value) => value !== null),
     },
     plugin,
+    // The answer judge's calls and cost over all runs, apart from the
+    // agent's.
+    judge: {
+      calls: sum(
+        outcomes.map(({ metrics }) => metrics.judge ?? {}),
+        "calls",
+      ),
+      cost_usd:
+        Math.round(
+          sum(
+            outcomes.map(({ metrics }) => metrics.judge ?? {}),
+            "cost_usd",
+          ) * 1e6,
+        ) / 1e6,
+    },
     cases,
     scale,
   };
@@ -581,6 +689,7 @@ function summaryTable(summary) {
       (entry) =>
         `SCALE ${entry.case} house/apartment (${entry.basis}) mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio} hub_requests=${entry.hub_requests_ratio} hub_bytes=${entry.hub_response_bytes_ratio}`,
     ),
+    `JUDGE calls=${summary.judge.calls} cost_usd=${summary.judge.cost_usd}`,
   ];
 }
 
@@ -636,7 +745,7 @@ const HOST_SESSION_VARIABLES = [
 // The agent's environment never carries real SprutHub settings: explicit
 // simulator variables win over the credential file, and XDG_CONFIG_HOME points
 // to an empty scratch directory in case a server looks for connection.env.
-function isolatedEnvironment(overrides) {
+export function isolatedEnvironment(overrides) {
   const env = { ...process.env };
   const nested = Object.hasOwn(env, "CLAUDECODE");
   for (const key of Object.keys(env)) {

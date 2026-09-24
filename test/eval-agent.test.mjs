@@ -1504,9 +1504,9 @@ test("a judged case passes or fails on the judge's verdict, not on answer patter
   assert.equal(flag("--tools"), "");
   assert.ok(call.args.includes("--strict-mcp-config"));
   assert.ok(call.args.includes("--no-session-persistence"));
-  assert.ok(
-    !realpathSync.native(call.cwd).startsWith(realpathSync.native(repo)),
-  );
+  // process.cwd() of the judge is already a real path; its directory is
+  // gone with the run's scratch.
+  assert.ok(!call.cwd.startsWith(realpathSync.native(repo)), call.cwd);
   assert.equal(call.claudecode, null);
   assert.ok(call.stdin.includes(answer));
   assert.match(call.stdin, /Свет в коридоре по движению/);
