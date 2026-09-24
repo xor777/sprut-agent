@@ -97,33 +97,29 @@ test("public read tools see the simulated apartment as a native home", async (t)
     ),
   );
 
-  const catalogAccessories = new Set();
-  let page = await call(client, "read_services", {
-    home_ref: homeRef,
-    representation: "catalog",
-  });
-  for (;;) {
-    for (const service of page.services) {
-      catalogAccessories.add(service.accessory.ref);
-    }
-    if (!page.next) break;
-    page = await call(client, page.next.tool, page.next.arguments);
-  }
-  assert.equal(catalogAccessories.size, hub.state.accessories.length);
+  const summary = await call(client, "find_devices", {});
+  const technical = new Set(["AccessoryInformation", "BatteryService"]);
+  assert.equal(
+    summary.services,
+    hub.state.accessories
+      .flatMap(({ services }) => services)
+      .filter(({ type }) => !technical.has(type)).length,
+  );
 
-  const bedroom = await call(client, "read_services", {
+  const bedroom = await call(client, "find_devices", {
     home_ref: homeRef,
     room_ref: `${homeRef}/room/5`,
-    service_types: ["TemperatureSensor"],
+    kind: "sensor",
   });
   assert.deepEqual(
-    bedroom.services.flatMap(({ accessory, readings }) =>
-      readings.map(({ type, value, unit }) => [
-        accessory.name,
-        type,
-        value,
-        unit,
-      ]),
+    bedroom.rooms.flatMap(({ devices }) =>
+      devices.flatMap(({ name, services }) =>
+        services
+          .filter(({ type }) => type === "TemperatureSensor")
+          .flatMap(({ values }) =>
+            values.map(({ type, value, unit }) => [name, type, value, unit]),
+          ),
+      ),
     ),
     [["Датчик климата в спальне", "CurrentTemperature", 21.4, "°C"]],
   );
@@ -205,21 +201,26 @@ test("the house fixture keeps the apartment and serves a double-scale home to th
   let pages = 0;
   let bytes = 0;
   const seen = new Set();
-  let page = await call(client, "read_services", { home_ref: houseRef });
+  let page = await call(client, "find_devices", {
+    home_ref: houseRef,
+    state: "off",
+  });
   for (;;) {
     pages += 1;
     bytes += JSON.stringify(page).length;
-    for (const service of page.services) seen.add(service.accessory.ref);
+    for (const room of page.rooms) {
+      for (const device of room.devices) seen.add(device.ref);
+    }
     if (!page.next) break;
     page = await call(client, page.next.tool, page.next.arguments);
   }
   assert.ok(pages > 1);
-  assert.ok(seen.size >= 160);
+  assert.ok(seen.size >= 100);
   const inspected = await call(client, "home_overview", { home_ref: houseRef });
   assert.equal(inspected.rooms.length, hub.state.rooms.length);
   assertEveryRequestSupported(hub);
   assert.deepEqual(hub.writes(), []);
-  t.diagnostic(`house read_services: ${pages} pages, ${bytes} bytes`);
+  t.diagnostic(`house devices that are off: ${pages} pages, ${bytes} bytes`);
 });
 
 test("a prepared characteristic value changes only that simulated characteristic", async (t) => {

@@ -458,7 +458,7 @@ test("ordinary reads stay available without changing an active observation home"
     },
     { name: "home_overview", arguments: { home_ref: homeRef } },
     {
-      name: "read_services",
+      name: "find_devices",
       arguments: {
         home_ref: homeRef,
         room_ref: `${homeRef}/room/1`,

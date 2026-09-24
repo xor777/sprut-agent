@@ -198,43 +198,12 @@ async function startHub(
       }
       if (params.accessory?.list) {
         reply(socket, request.id, {
-          accessory: {
-            list: {
-              accessories: [
-                {
-                  id: 7,
-                  roomId: 1,
-                  name: "Термометр",
-                  online: true,
-                  services: [
-                    {
-                      aId: 7,
-                      sId: 8,
-                      name: "Климат",
-                      type: "TemperatureSensor",
-                      characteristics: [
-                        {
-                          aId: 7,
-                          sId: 8,
-                          cId: 9,
-                          control: {
-                            name: "Температура",
-                            type: "CurrentTemperature",
-                            read: true,
-                            write: false,
-                            events: true,
-                            unit: "celsius",
-                            value: { doubleValue: 22.5 },
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
+          accessory: { list: { accessories: [thermometer()] } },
         });
+        return;
+      }
+      if (params.accessory?.get) {
+        reply(socket, request.id, { accessory: { get: thermometer() } });
         return;
       }
       if (params.scenario?.list) {
@@ -286,6 +255,39 @@ function answer(socket, id, operation, response) {
 
 function reply(socket, id, result) {
   socket.send(JSON.stringify({ id, result }));
+}
+
+function thermometer() {
+  return {
+    id: 7,
+    roomId: 1,
+    name: "Термометр",
+    online: true,
+    services: [
+      {
+        aId: 7,
+        sId: 8,
+        name: "Климат",
+        type: "TemperatureSensor",
+        characteristics: [
+          {
+            aId: 7,
+            sId: 8,
+            cId: 9,
+            control: {
+              name: "Температура",
+              type: "CurrentTemperature",
+              read: true,
+              write: false,
+              events: true,
+              unit: "celsius",
+              value: { doubleValue: 22.5 },
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function sendUnrelatedFrames(socket, requestId) {
@@ -356,9 +358,14 @@ async function withSessionPath(t) {
   return path.join(directory, "session.json");
 }
 
+function firstValue(result) {
+  return result.structuredContent.rooms[0].devices[0].services[0].values[0]
+    .value;
+}
+
 function readRoomServices(client, roomRef) {
   return client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: roomRef.replace(/\/room\/\d+$/, ""),
       room_ref: roomRef,
@@ -438,8 +445,8 @@ test("the checkout MCP config returns credential setup and reads a configured ho
     "spruthub://hub/home%2FA/room/1",
   );
   assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(room.structuredContent.services[0].accessory.name, "Термометр");
-  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
+  assert.equal(room.structuredContent.rooms[0].devices[0].name, "Термометр");
+  assert.equal(firstValue(room), 22.5);
   assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
   assert.equal(
     result.structuredContent.error.message,
@@ -514,6 +521,17 @@ test("an installed multi-home profile explains and completes explicit home selec
     homes.structuredContent.homes.map(({ ref }) => ref),
     ["spruthub://hub/home%2FA", "spruthub://hub/home%20B"],
   );
+  const blocked = await client.callTool({
+    name: "find_devices",
+    arguments: { query: "свет" },
+  });
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.structuredContent.error.code, "home_selection_required");
+  assert.equal(blocked.structuredContent.error.action, "home_overview");
+  assert.deepEqual(blocked.structuredContent.next, {
+    tool: "home_overview",
+    arguments: {},
+  });
   assert.equal(
     hub.requests.some(({ params }) => params.room?.list),
     false,
@@ -733,6 +751,13 @@ for (const omitEmptyHomeList of [false, true]) {
       reason: "no_available_homes",
     });
     assert.equal(Object.hasOwn(catalog.structuredContent, "home"), false);
+    const devices = await client.callTool({
+      name: "find_devices",
+      arguments: {},
+    });
+    assert.equal(devices.isError, true);
+    assert.equal(devices.structuredContent.error.code, "no_homes_available");
+    assert.equal(devices.structuredContent.error.action, "check_home_access");
   });
 }
 
@@ -1006,7 +1031,7 @@ test("explicit connection environment wins over conflicting file values", async 
   assert.equal(homes.structuredContent.home.ref, "spruthub://hub/home%2FA");
   const room = await readRoomServices(client, "spruthub://hub/home%2FA/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
+  assert.equal(firstValue(room), 22.5);
 });
 
 test("complete explicit credentials ignore an unsafe default file", async (t) => {
@@ -1093,7 +1118,7 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
         "spruthub://hub/home%2FA/room/1",
       );
       assert.equal(room.isError, undefined, room.content[0]?.text);
-      assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
+      assert.equal(firstValue(room), 22.5);
     });
   }
 });
@@ -1327,7 +1352,7 @@ test("challenge login serves concurrent public reads and a restart reuses the se
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
   const room = await readRoomServices(client, "spruthub://hub/home%2FA/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
-  assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
+  assert.equal(firstValue(room), 22.5);
 
   const authRequests = hub.requests.filter(({ params }) => params.account);
   assert.equal(
@@ -1475,20 +1500,18 @@ test("a write-bound home does not restrict explicit reads or follow their select
     ],
   });
 
+  const beforeRoom = hub.requests.length;
   const room = await readRoomServices(client, "spruthub://hub/home%20B/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
   assert.equal(
-    room.structuredContent.scope.room.ref,
+    room.structuredContent.rooms[0].ref,
     "spruthub://hub/home%20B/room/1",
   );
-  assert.deepEqual(
-    hub.requests
-      .filter(
-        ({ params }) => params.room?.get || params.accessory?.list?.roomId,
-      )
-      .map(({ serial }) => serial),
-    ["home B", "home B"],
-  );
+  const roomReads = hub.requests
+    .slice(beforeRoom)
+    .filter(({ params }) => !params.hub?.list);
+  assert(roomReads.length > 0);
+  assert(roomReads.every(({ serial }) => serial === "home B"));
 
   const defaultRooms = await client.callTool({
     name: "home_overview",
@@ -1507,9 +1530,7 @@ test("a write-bound home does not restrict explicit reads or follow their select
   assert.equal(inaccessible.isError, true);
   assert.equal(inaccessible.structuredContent.error.code, "home_not_found");
   assert.equal(
-    hub.requests.some(
-      ({ serial, params }) => serial === "home C" && params.room?.get,
-    ),
+    hub.requests.some(({ serial }) => serial === "home C"),
     false,
   );
 

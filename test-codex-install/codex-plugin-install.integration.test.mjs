@@ -140,25 +140,20 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     },
   ]);
   const catalog = await firstClient.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: homes.structuredContent.home.ref,
-      representation: "catalog",
+      kind: "sensor",
+      values: false,
     },
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.equal(catalog.structuredContent.representation, "catalog");
-  assert.equal(catalog.structuredContent.services[0].name, "Климат");
-  assert.equal(
-    catalog.structuredContent.services[0].readings_status,
-    "not_requested",
-  );
-  assert.equal(
-    Object.hasOwn(catalog.structuredContent.services[0], "readings"),
-    false,
-  );
+  const [catalogService] =
+    catalog.structuredContent.rooms[0].devices[0].services;
+  assert.equal(catalogService.name, "Климат");
+  assert.equal(Object.hasOwn(catalogService, "values"), false);
   const office = await firstClient.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: homes.structuredContent.home.ref,
       room_ref: rooms.structuredContent.rooms[0].ref,
@@ -166,11 +161,10 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
     },
   });
   assert.equal(office.isError, undefined, office.content[0]?.text);
-  assert.equal(office.structuredContent.services[0].readings[0].value, 22.5);
-  assert.equal(
-    office.structuredContent.services[0].readings[0].unit,
-    "celsius",
-  );
+  const [temperature] =
+    office.structuredContent.rooms[0].devices[0].services[0].values;
+  assert.equal(temperature.value, 22.5);
+  assert.equal(temperature.unit, "celsius");
   await firstClient.close();
 
   const secondInstall = JSON.parse(
@@ -686,43 +680,12 @@ async function startHub(t) {
       }
       if (params.accessory?.list) {
         reply(socket, request.id, {
-          accessory: {
-            list: {
-              accessories: [
-                {
-                  id: 7,
-                  roomId: 1,
-                  name: "Термометр",
-                  online: true,
-                  services: [
-                    {
-                      aId: 7,
-                      sId: 8,
-                      name: "Климат",
-                      type: "TemperatureSensor",
-                      characteristics: [
-                        {
-                          aId: 7,
-                          sId: 8,
-                          cId: 9,
-                          control: {
-                            name: "Температура",
-                            type: "CurrentTemperature",
-                            read: true,
-                            write: false,
-                            events: true,
-                            unit: "celsius",
-                            value: { doubleValue: 22.5 },
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
+          accessory: { list: { accessories: [thermometer()] } },
         });
+        return;
+      }
+      if (params.accessory?.get) {
+        reply(socket, request.id, { accessory: { get: thermometer() } });
         return;
       }
       if (params.scenario?.list || params.extension?.list) {
@@ -747,4 +710,37 @@ async function startHub(t) {
 
 function reply(socket, id, result) {
   socket.send(JSON.stringify({ id, result }));
+}
+
+function thermometer() {
+  return {
+    id: 7,
+    roomId: 1,
+    name: "Термометр",
+    online: true,
+    services: [
+      {
+        aId: 7,
+        sId: 8,
+        name: "Климат",
+        type: "TemperatureSensor",
+        characteristics: [
+          {
+            aId: 7,
+            sId: 8,
+            cId: 9,
+            control: {
+              name: "Температура",
+              type: "CurrentTemperature",
+              read: true,
+              write: false,
+              events: true,
+              unit: "celsius",
+              value: { doubleValue: 22.5 },
+            },
+          },
+        ],
+      },
+    ],
+  };
 }

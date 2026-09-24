@@ -911,95 +911,82 @@ test("home service catalog finds one target before reading only its values and r
     },
   ]);
   const client = await startClient(t, hub);
-  const argumentsBase = {
-    home_ref: "spruthub://hub/home%2FA",
-    service_types: ["Lightbulb"],
-    max_bytes: 16_000,
-  };
+  const home = "spruthub://hub/home%2FA";
+  const services = (body) =>
+    body.rooms.flatMap((room) =>
+      room.devices.flatMap((device) =>
+        device.services.map((service) => ({ room, device, ...service })),
+      ),
+    );
 
-  const readAll = async (representation, afterFirstPage) => {
-    const services = [];
-    let serializedBytes = 0;
-    let firstCursor;
-    let next = {
-      tool: "read_services",
-      arguments: { ...argumentsBase, representation },
-    };
+  const readAll = async (args) => {
+    const found = [];
+    let bytes = 0;
     let pages = 0;
+    let firstCursor;
+    let next = { tool: "find_devices", arguments: args };
     while (next) {
       const result = await client.callTool({
         name: next.tool,
         arguments: next.arguments,
       });
       assert.equal(result.isError, undefined, result.content[0]?.text);
-      assert.equal(result.structuredContent.representation, representation);
-      assert.equal(
-        Buffer.byteLength(result.content[0].text),
-        result.structuredContent.page.serialized_bytes,
-      );
-      services.push(...result.structuredContent.services);
-      serializedBytes += result.structuredContent.page.serialized_bytes;
+      assert(Buffer.byteLength(result.content[0].text) <= 16_000);
+      found.push(...services(result.structuredContent));
+      bytes += Buffer.byteLength(result.content[0].text);
       pages += 1;
-      if (pages === 1) {
-        firstCursor = result.structuredContent.page.next_cursor;
-        afterFirstPage?.();
-      }
       next = result.structuredContent.next;
-      if (next) assert.equal(next.arguments.representation, representation);
-      assert(pages < 20);
+      if (pages === 1) firstCursor = next?.arguments.cursor;
+      assert(pages < 30);
     }
-    return { services, serializedBytes, pages, firstCursor };
+    return { services: found, bytes, pages, firstCursor };
   };
 
-  const catalog = await readAll("catalog", () => {
-    state.accessories.push(light(200, 3));
-  });
-  assert.equal(catalog.services.length, 54);
-  assert.equal(
-    catalog.services.filter(({ name }) => name === "Димина лампа").length,
-    2,
-  );
+  // Names and refs only: the 1 KB report of every lamp stays out.
+  const names = await readAll({ home_ref: home, kind: "light", values: false });
+  assert.equal(names.services.length, 53);
   assert(
-    catalog.services.every(
+    names.services.every(
       (service) =>
-        service.readings_status === "not_requested" &&
-        !Object.hasOwn(service, "readings"),
+        !Object.hasOwn(service, "values") &&
+        service.characteristics.some(({ type }) => type === "On"),
     ),
   );
-  const selected = catalog.services.find(
-    ({ name, room }) => name === "Димина лампа" && room.name === "Спальня",
-  );
-  assert(selected);
-  assert.equal(selected.ref, "spruthub://hub/home%2FA/accessory/100/service/1");
-  assert.equal(
-    catalog.services.at(-1).ref,
-    "spruthub://hub/home%2FA/accessory/200/service/1",
-  );
-
-  const readings = await readAll("readings");
+  const readings = await readAll({ home_ref: home, kind: "light" });
   t.diagnostic(
-    `catalog ${catalog.serializedBytes} bytes/${catalog.pages} pages; readings ${readings.serializedBytes} bytes/${readings.pages} pages`,
+    `names ${names.bytes} bytes/${names.pages} pages; values ${readings.bytes} bytes/${readings.pages} pages`,
   );
-  assert.equal(readings.services.length, catalog.services.length);
-  assert(catalog.serializedBytes < readings.serializedBytes);
-  assert(catalog.pages < readings.pages);
+  assert.equal(readings.services.length, names.services.length);
+  assert(names.bytes < readings.bytes);
+  assert(names.pages < readings.pages);
 
-  const wrongRepresentation = await client.callTool({
-    name: "read_services",
-    arguments: {
-      ...argumentsBase,
-      representation: "readings",
-      cursor: catalog.firstCursor,
-    },
+  const matches = await client.callTool({
+    name: "find_devices",
+    arguments: { home_ref: home, query: "Димина лампа", values: false },
   });
-  assert.equal(wrongRepresentation.isError, true);
-  assert.equal(
-    wrongRepresentation.structuredContent.error.code,
-    "invalid_cursor",
+  assert.equal(matches.isError, undefined, matches.content[0]?.text);
+  assert.deepEqual(
+    services(matches.structuredContent).map(({ room, name }) => [
+      room.name,
+      name,
+    ]),
+    [
+      ["Спальня", "Димина лампа"],
+      ["Кабинет", "Димина лампа"],
+    ],
   );
-  assert.deepEqual(wrongRepresentation.structuredContent.next.arguments, {
-    ...argumentsBase,
-    representation: "readings",
+  const selected = services(matches.structuredContent)[0];
+  assert.equal(selected.ref, "spruthub://hub/home%2FA/accessory/100/service/1");
+
+  const otherFilters = await client.callTool({
+    name: "find_devices",
+    arguments: { home_ref: home, kind: "light", cursor: names.firstCursor },
+  });
+  assert.equal(otherFilters.isError, true);
+  assert.equal(otherFilters.structuredContent.error.code, "invalid_cursor");
+  assert.deepEqual(otherFilters.structuredContent.next.arguments, {
+    home_ref: home,
+    kind: "light",
   });
 
   const detail = await client.callTool({

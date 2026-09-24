@@ -675,7 +675,7 @@ test("relations of the corridor light list only its own roles with branch, value
   assertReadOnly(hub);
 });
 
-test("a large room gives its size and hands the device list to read_services", async (t) => {
+test("a large room gives its size and hands the device list to find_devices", async (t) => {
   const study = `${homeRef}/room/7`;
   const { hub, client } = await setup(t, (hub) => {
     // Seven more desk lamps (information + light service each) take the
@@ -712,11 +712,10 @@ test("a large room gives its size and hands the device list to read_services", a
   const large = await read(client, { entity_ref: study });
   t.diagnostic(`study with 21 services: ${large.bytes} bytes`);
   const catalog = {
-    tool: "read_services",
+    tool: "find_devices",
     arguments: {
       home_ref: homeRef,
       room_ref: study,
-      representation: "catalog",
     },
   };
   assert.deepEqual(large.entity, {
@@ -732,7 +731,9 @@ test("a large room gives its size and hands the device list to read_services", a
     arguments: catalog.arguments,
   });
   assert.equal(listed.isError, undefined, listed.content[0]?.text);
-  assert.equal(listed.structuredContent.services.length, 21);
+  // The seven lamp clones add a light each; device information and
+  // battery services stay out of the list.
+  assert.equal(listed.structuredContent.total, 10);
   assert.equal(listed.structuredContent.next, null);
 
   const withRelations = await read(client, {

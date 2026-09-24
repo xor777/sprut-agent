@@ -310,6 +310,23 @@ async function startHub(initialState = hubState) {
         return;
       }
 
+      if (request.params?.accessory?.get) {
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              accessory: {
+                get:
+                  state.accessories?.find(
+                    ({ id }) => id === request.params.accessory.get.id,
+                  ) ?? null,
+              },
+            },
+          }),
+        );
+        return;
+      }
+
       if (request.params?.scenario?.list || request.params?.extension?.list) {
         const [domain] = Object.keys(request.params);
         socket.send(
@@ -444,7 +461,7 @@ async function startMcpClient(t, hub, environment = {}) {
 
 function readRoomServices(client, roomRef) {
   return client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: roomRef.replace(/\/room\/\d+$/, ""),
       room_ref: roomRef,
@@ -453,9 +470,21 @@ function readRoomServices(client, roomRef) {
   });
 }
 
-function findReading(room, ref) {
-  return (room.services ?? room.devices.flatMap(({ services }) => services))
-    .flatMap(({ readings }) => readings)
+function servicesOf(body) {
+  return body.rooms.flatMap(({ devices }) =>
+    devices.flatMap(({ services }) => services),
+  );
+}
+
+function findDevice(body, ref) {
+  return body.rooms
+    .flatMap(({ devices }) => devices)
+    .find((device) => device.ref === ref);
+}
+
+function findReading(body, ref) {
+  return servicesOf(body)
+    .flatMap(({ values = [] }) => values)
     .find((reading) => reading.ref === ref);
 }
 
@@ -468,6 +497,7 @@ test("MCP discovers every room before reading the selected stable reference", as
     tools.tools.map(({ name }) => name),
     [
       "home_overview",
+      "find_devices",
       "get_entity",
       "preview_boolean_automation",
       "apply_automation_change",
@@ -487,16 +517,15 @@ test("MCP discovers every room before reading the selected stable reference", as
       "start_native_observation",
       "get_native_observation",
       "stop_native_observation",
-      "read_services",
       "read_hub_log",
     ],
   );
   for (const tool of tools.tools.filter(({ name }) =>
     [
       "home_overview",
+      "find_devices",
       "get_entity",
       "get_automation_change",
-      "read_services",
     ].includes(name),
   )) {
     assert.deepEqual(tool.annotations, {
@@ -526,7 +555,7 @@ test("MCP discovers every room before reading the selected stable reference", as
   const overviewRequests = hub.requests.length;
 
   const result = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/test-hub",
       room_ref: "spruthub://hub/test-hub/room/10",
@@ -542,59 +571,50 @@ test("MCP discovers every room before reading the selected stable reference", as
   const reading = result.structuredContent;
   assert.deepEqual(JSON.parse(result.content[0].text), reading);
   assert.equal(reading.status, "ok");
-  assert.deepEqual(reading.scope.room, {
-    ref: "spruthub://hub/test-hub/room/10",
-    name: " Кухня ",
-  });
-  const lamp = reading.services.find(
-    ({ accessory }) =>
-      accessory.ref === "spruthub://hub/test-hub/accessory/100",
+  assert.deepEqual(
+    reading.rooms.map(({ ref, name }) => ({ ref, name })),
+    [{ ref: "spruthub://hub/test-hub/room/10", name: " Кухня " }],
   );
-  assert.equal(lamp.accessory.name, "Лампа");
-  assert.equal(lamp.accessory.available, true);
-  assert.equal(lamp.ref, "spruthub://hub/test-hub/accessory/100/service/1");
-  assert.deepEqual(lamp.readings[0], {
-    ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
-    name: "Включена",
+  const lamp = findDevice(reading, "spruthub://hub/test-hub/accessory/100");
+  assert.equal(lamp.name, "Лампа");
+  assert.equal(lamp.available, true);
+  assert.equal(
+    lamp.services[0].ref,
+    "spruthub://hub/test-hub/accessory/100/service/1",
+  );
+  assert.deepEqual(lamp.services[0].values[0], {
     type: "On",
     value: false,
-    value_status: "known",
     unit: "boolean",
-    measured_at: null,
+    ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
   });
 
-  const thermometer = reading.services.find(
-    ({ accessory, type }) =>
-      accessory.ref === "spruthub://hub/test-hub/accessory/101" &&
-      type === "TemperatureSensor",
-  );
-  assert.equal(thermometer.readings[0].value, 23.5);
-  assert.equal(thermometer.readings[0].unit, "°C");
-  assert.equal(thermometer.readings[0].type, "CurrentTemperature");
-  assert.deepEqual(thermometer.readings[3], {
-    ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/4",
-    name: "Уставка температуры",
+  const thermometer = findDevice(
+    reading,
+    "spruthub://hub/test-hub/accessory/101",
+  ).services.find(({ type }) => type === "TemperatureSensor");
+  assert.equal(thermometer.values[0].value, 23.5);
+  assert.equal(thermometer.values[0].unit, "°C");
+  assert.equal(thermometer.values[0].type, "CurrentTemperature");
+  assert.deepEqual(thermometer.values[3], {
     type: "TargetTemperature",
     value: 22,
-    value_status: "known",
     unit: "°C",
-    measured_at: null,
+    ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/4",
   });
-  assert.deepEqual(thermometer.readings[4], {
+  assert.deepEqual(thermometer.values[4], {
     redacted: true,
     reason: "sensitive_native_data",
   });
   assert.doesNotMatch(result.content[0].text, /legacy-secret-must-not-leak/);
   assert.equal(
-    reading.services.some(
-      ({ accessory }) =>
-        accessory.ref === "spruthub://hub/test-hub/accessory/200",
-    ),
+    result.content[0].text.includes("spruthub://hub/test-hub/accessory/200"),
     false,
   );
-  assert.equal(reading.freshness.measurementAt, null);
-  assert.match(reading.freshness.hubResponseReceivedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(reading.observed_at, /^\d{4}-\d{2}-\d{2}T/);
 
+  // The overview left the home's names in the session catalog, so the room
+  // read asks the hub only for the values of its two devices.
   assert.deepEqual(
     hub.requests.slice(0, overviewRequests).map(({ params }) => params),
     [
@@ -605,29 +625,19 @@ test("MCP discovers every room before reading the selected stable reference", as
       { extension: { list: {} } },
     ],
   );
-  assert.deepEqual(hub.requests.slice(overviewRequests), [
-    {
-      id: overviewRequests + 1,
-      token: "synthetic-test-token",
-      serial: "test-hub",
-      cid: "sprut-agent-test",
-      params: { room: { get: { id: 10 } } },
-    },
-    {
-      id: overviewRequests + 2,
-      token: "synthetic-test-token",
-      serial: "test-hub",
-      cid: "sprut-agent-test",
-      params: {
-        accessory: {
-          list: { roomId: 10, expand: "services,characteristics" },
-        },
-      },
-    },
-  ]);
+  assert.deepEqual(
+    hub.requests.slice(overviewRequests).map(({ serial, params }) => ({
+      serial,
+      params,
+    })),
+    [
+      { serial: "test-hub", params: { accessory: { get: { id: 100 } } } },
+      { serial: "test-hub", params: { accessory: { get: { id: 101 } } } },
+    ],
+  );
 });
 
-test("read_services returns one complete mixed-room view without per-service reads", async (t) => {
+test("find_devices returns one complete mixed-room view without per-service reads", async (t) => {
   const state = structuredClone(hubState);
   state.accessories.push(
     thermostatAccessory({
@@ -650,7 +660,7 @@ test("read_services returns one complete mixed-room view without per-service rea
   const client = await startMcpClient(t, hub);
 
   const result = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/test-hub",
       room_ref: "spruthub://hub/test-hub/room/10",
@@ -661,29 +671,24 @@ test("read_services returns one complete mixed-room view without per-service rea
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const view = result.structuredContent;
   assert.equal(view.status, "ok");
-  assert.deepEqual(view.scope, {
-    home_ref: "spruthub://hub/test-hub",
-    room: { ref: "spruthub://hub/test-hub/room/10", name: " Кухня " },
-  });
-  assert.equal(view.scope_status, "non_empty");
-  assert.equal(view.match_status, "not_filtered");
-  assert.deepEqual(view.observed_service_types, [
-    "Lightbulb",
-    "TemperatureSensor",
-    "Diagnostics",
-    "Thermostat",
-  ]);
+  assert.equal(view.home_ref, "spruthub://hub/test-hub");
+  assert.deepEqual(
+    view.rooms.map(({ ref, name }) => ({ ref, name })),
+    [{ ref: "spruthub://hub/test-hub/room/10", name: " Кухня " }],
+  );
+  assert.deepEqual(
+    [...new Set(servicesOf(view).map(({ type }) => type))],
+    ["Lightbulb", "TemperatureSensor", "Diagnostics", "Thermostat"],
+  );
   assert.equal(
-    view.services.filter(({ type }) => type === "Thermostat").length,
+    servicesOf(view).filter(({ type }) => type === "Thermostat").length,
     2,
   );
-  const radiator = view.services.find(
-    ({ accessory }) => accessory.name === "Терморегулятор для радиатора",
-  );
-  assert.deepEqual(radiator.room, view.scope.room);
-  assert.equal(radiator.accessory.available, false);
+  const radiator = findDevice(view, "spruthub://hub/test-hub/accessory/111");
+  assert.equal(radiator.name, "Терморегулятор для радиатора");
+  assert.equal(radiator.available, false);
   assert.deepEqual(
-    radiator.readings.map(
+    radiator.services[0].values.map(
       ({ type, value, value_status, unit, enum: choice }) => ({
         type,
         value,
@@ -696,21 +701,21 @@ test("read_services returns one complete mixed-room view without per-service rea
       {
         type: "CurrentHeatingCoolingState",
         value: 1,
-        value_status: "known",
-        unit: null,
+        value_status: undefined,
+        unit: undefined,
         enum: { key: "HEAT", name: "Нагрев" },
       },
       {
         type: "CurrentTemperature",
         value: 21,
-        value_status: "known",
+        value_status: undefined,
         unit: "°C",
         enum: undefined,
       },
       {
         type: "TargetTemperature",
         value: 30,
-        value_status: "known",
+        value_status: undefined,
         unit: "°C",
         enum: undefined,
       },
@@ -718,8 +723,8 @@ test("read_services returns one complete mixed-room view without per-service rea
   );
 
   const readingByType = (type) =>
-    view.services
-      .flatMap(({ readings = [] }) => readings)
+    servicesOf(view)
+      .flatMap(({ values = [] }) => values)
       .find((reading) => reading.type === type);
   assert.deepEqual(
     {
@@ -729,62 +734,46 @@ test("read_services returns one complete mixed-room view without per-service rea
     },
     {
       off: {
-        ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
-        name: "Включена",
         type: "On",
         value: false,
-        value_status: "known",
         unit: "boolean",
-        measured_at: null,
+        ref: "spruthub://hub/test-hub/accessory/100/service/1/characteristic/1",
       },
       zero: {
-        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/2",
-        name: "Влажность",
         type: "CurrentHumidity",
         value: 0,
-        value_status: "known",
         unit: "%",
-        measured_at: null,
+        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/2",
       },
       unknown: {
-        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
-        name: "Качество воздуха",
         type: "AirQuality",
         value: null,
         value_status: "unknown",
-        unit: null,
-        measured_at: null,
+        ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
       },
     },
   );
   assert.deepEqual(
-    view.services
-      .flatMap(({ readings = [] }) => readings)
+    servicesOf(view)
+      .flatMap(({ values = [] }) => values)
       .find(({ redacted }) => redacted),
     { redacted: true, reason: "sensitive_native_data" },
   );
-  assert.equal(
-    Buffer.byteLength(result.content[0].text),
-    view.page.serialized_bytes,
-  );
-  assert(view.page.serialized_bytes <= view.page.max_bytes);
-  assert.equal(view.page.snapshot, false);
-  assert.equal(view.page.next_cursor, null);
+  assert(Buffer.byteLength(result.content[0].text) <= 32_768);
+  assert.equal(view.next, null);
   assert.doesNotMatch(result.content[0].text, /legacy-secret-must-not-leak/);
+  // Names and values come from the same two whole reads; no per-service
+  // reads follow.
   assert.deepEqual(
     hub.requests.map(({ params }) => params),
     [
-      { room: { get: { id: 10 } } },
-      {
-        accessory: {
-          list: { roomId: 10, expand: "services,characteristics" },
-        },
-      },
+      { room: { list: {} } },
+      { accessory: { list: { expand: "services,characteristics" } } },
     ],
   );
 });
 
-test("read_services filters exact native types across the home and distinguishes empty selection", async (t) => {
+test("find_devices filters by household kind across the home and keeps empty rooms apart", async (t) => {
   const state = structuredClone(hubState);
   state.accessories.push(
     thermostatAccessory({
@@ -827,69 +816,60 @@ test("read_services filters exact native types across the home and distinguishes
   const hub = await startHub(state);
   const client = await startMcpClient(t, hub);
 
-  const found = await client.callTool({
-    name: "read_services",
-    arguments: {
-      home_ref: "spruthub://hub/test-hub",
-      service_types: ["ContactSensor", "Thermostat"],
-      max_bytes: 32_768,
-    },
+  const climate = await client.callTool({
+    name: "find_devices",
+    arguments: { home_ref: "spruthub://hub/test-hub", kind: "climate" },
   });
-  assert.equal(found.isError, undefined, found.content[0]?.text);
-  assert.equal(found.structuredContent.match_status, "matched");
+  assert.equal(climate.isError, undefined, climate.content[0]?.text);
   assert.deepEqual(
-    found.structuredContent.services.map(({ type }) => type).sort(),
-    ["ContactSensor", "Thermostat"],
+    servicesOf(climate.structuredContent).map(({ type }) => type),
+    ["Thermostat"],
   );
   assert.deepEqual(
-    found.structuredContent.services.map(({ room }) => room.ref).sort(),
-    ["spruthub://hub/test-hub/room/20", "spruthub://hub/test-hub/room/41"],
+    climate.structuredContent.rooms.map(({ ref }) => ref),
+    ["spruthub://hub/test-hub/room/20"],
+  );
+  const sensors = await client.callTool({
+    name: "find_devices",
+    arguments: { home_ref: "spruthub://hub/test-hub", kind: "sensor" },
+  });
+  assert.deepEqual(
+    sensors.structuredContent.rooms.map(({ ref }) => ref),
+    ["spruthub://hub/test-hub/room/10", "spruthub://hub/test-hub/room/41"],
   );
   assert.equal(hub.requests.filter(({ params }) => params.room?.get).length, 0);
   assert.equal(
     hub.requests.filter(({ params }) => params.room?.list).length,
     1,
   );
-  assert.equal(
-    hub.requests.filter(({ params }) => params.accessory?.list).length,
-    1,
-  );
   assert.deepEqual(
     hub.requests.find(({ params }) => params.accessory?.list).params,
-    {
-      accessory: { list: { expand: "services,characteristics" } },
-    },
+    { accessory: { list: { expand: "services,characteristics" } } },
   );
 
   const noMatch = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/test-hub",
       room_ref: "spruthub://hub/test-hub/room/10",
-      service_types: ["NotARealNativeType"],
+      kind: "cover",
     },
   });
-  assert.equal(noMatch.structuredContent.scope_status, "non_empty");
-  assert.equal(noMatch.structuredContent.match_status, "no_matches");
-  assert.deepEqual(noMatch.structuredContent.services, []);
-  assert(
-    noMatch.structuredContent.observed_service_types.includes("Lightbulb"),
-  );
+  assert.equal(noMatch.structuredContent.total, 0);
+  assert.deepEqual(noMatch.structuredContent.rooms, []);
 
-  const empty = await client.callTool({
-    name: "read_services",
-    arguments: {
-      home_ref: "spruthub://hub/test-hub",
-      room_ref: "spruthub://hub/test-hub/room/40",
-    },
+  const summary = await client.callTool({
+    name: "find_devices",
+    arguments: { home_ref: "spruthub://hub/test-hub" },
   });
-  assert.equal(empty.structuredContent.scope_status, "empty");
-  assert.equal(empty.structuredContent.match_status, "not_filtered");
-  assert.deepEqual(empty.structuredContent.observed_service_types, []);
-  assert.deepEqual(empty.structuredContent.services, []);
+  const counts = Object.fromEntries(
+    summary.structuredContent.rooms.map(({ ref, services }) => [ref, services]),
+  );
+  assert.equal(counts["spruthub://hub/test-hub/room/40"], 0);
+  assert(counts["spruthub://hub/test-hub/room/10"] > 0);
 });
 
-test("read_services byte-bounded cursors return every complete service without substitution", async (t) => {
+test("find_devices pages one snapshot within max_bytes without substitution", async (t) => {
   const state = structuredClone(hubState);
   for (let id = 110; id < 118; id += 1) {
     state.accessories.push(
@@ -907,47 +887,38 @@ test("read_services byte-bounded cursors return every complete service without s
   const argumentsBase = {
     home_ref: "spruthub://hub/test-hub",
     room_ref: "spruthub://hub/test-hub/room/10",
-    service_types: ["Thermostat"],
-    max_bytes: 5_000,
+    kind: "climate",
+    max_bytes: 2_500,
   };
   const services = [];
-  let cursor;
+  let next = { tool: "find_devices", arguments: argumentsBase };
   let pageCount = 0;
-  do {
+  while (next) {
     const page = await client.callTool({
-      name: "read_services",
-      arguments: { ...argumentsBase, ...(cursor ? { cursor } : {}) },
+      name: next.tool,
+      arguments: next.arguments,
     });
     assert.equal(page.isError, undefined, page.content[0]?.text);
     assert(Buffer.byteLength(page.content[0].text) <= argumentsBase.max_bytes);
     assert.equal(page.content[0].text, JSON.stringify(page.structuredContent));
-    assert.equal(
-      Buffer.byteLength(page.content[0].text),
-      page.structuredContent.page.serialized_bytes,
-    );
-    services.push(...page.structuredContent.services);
-    cursor = page.structuredContent.page.next_cursor;
+    services.push(...servicesOf(page.structuredContent));
+    next = page.structuredContent.next;
     if (pageCount === 0) {
-      const removedAccessoryRef =
-        page.structuredContent.services[0].accessory.ref;
+      // The rest comes from the first read's snapshot, whatever the hub
+      // does meanwhile.
       hub.state.accessories = hub.state.accessories
-        .filter(
-          ({ id }) =>
-            `spruthub://hub/test-hub/accessory/${id}` !== removedAccessoryRef,
-        )
+        .filter(({ id }) => id !== 110)
         .reverse();
     }
-    if (cursor) {
-      assert.deepEqual(page.structuredContent.next, {
-        tool: "read_services",
-        arguments: { ...argumentsBase, cursor },
-      });
-    } else {
-      assert.equal(page.structuredContent.next, null);
+    if (next) {
+      assert.deepEqual(
+        Object.keys(next.arguments).sort(),
+        [...Object.keys(argumentsBase), "cursor"].sort(),
+      );
     }
     pageCount += 1;
     assert(pageCount < 20);
-  } while (cursor);
+  }
 
   assert(pageCount > 1);
   assert.deepEqual(
@@ -960,14 +931,14 @@ test("read_services byte-bounded cursors return every complete service without s
   );
   assert.deepEqual(
     services.map(
-      ({ readings }) =>
-        readings.find(({ type }) => type === "CurrentTemperature").value,
+      ({ values }) =>
+        values.find(({ type }) => type === "CurrentTemperature").value,
     ),
     Array.from({ length: 8 }, (_, index) => 20 + index),
   );
 });
 
-test("read_services reports a stale cursor when its last returned service disappeared", async (t) => {
+test("a cursor whose snapshot is gone asks for a restart", async (t) => {
   const state = structuredClone(hubState);
   for (let id = 110; id < 118; id += 1) {
     state.accessories.push(
@@ -985,37 +956,31 @@ test("read_services reports a stale cursor when its last returned service disapp
   const argumentsBase = {
     home_ref: "spruthub://hub/test-hub",
     room_ref: "spruthub://hub/test-hub/room/10",
-    service_types: ["Thermostat"],
-    max_bytes: 5_000,
+    kind: "climate",
+    limit: 3,
   };
   const first = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: argumentsBase,
   });
-  assert(first.structuredContent.page.next_cursor);
-  const anchor = first.structuredContent.services.at(-1);
-  hub.state.accessories = hub.state.accessories.filter(
-    ({ id }) =>
-      `spruthub://hub/test-hub/accessory/${id}` !== anchor.accessory.ref,
-  );
+  assert(first.structuredContent.next);
 
-  const next = await client.callTool({
-    name: "read_services",
-    arguments: {
-      ...argumentsBase,
-      cursor: first.structuredContent.page.next_cursor,
-    },
+  // A new MCP process holds no snapshot of the earlier one.
+  const restarted = await startMcpClient(t, hub);
+  const next = await restarted.callTool({
+    name: "find_devices",
+    arguments: first.structuredContent.next.arguments,
   });
 
   assert.equal(next.isError, true);
   assert.equal(next.structuredContent.error.code, "stale_cursor");
   assert.deepEqual(next.structuredContent.next, {
-    tool: "read_services",
+    tool: "find_devices",
     arguments: argumentsBase,
   });
 });
 
-test("read_services keeps the selected home and services whose room metadata is missing", async (t) => {
+test("find_devices keeps the selected home and services whose room metadata is missing", async (t) => {
   const state = structuredClone(hubState);
   state.homes = [
     { serial: "test-hub", name: "Configured home", online: true },
@@ -1035,22 +1000,30 @@ test("read_services keeps the selected home and services whose room metadata is 
   const client = await startMcpClient(t, hub);
 
   const result = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/neighbor-home",
-      service_types: ["Thermostat"],
+      kind: "climate",
       max_bytes: 32_768,
     },
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.equal(result.structuredContent.scope_status, "non_empty");
-  assert.equal(result.structuredContent.match_status, "matched");
-  assert.deepEqual(result.structuredContent.services[0].room, {
-    ref: "spruthub://hub/neighbor-home/room/999",
-    name: null,
-    metadata_status: "missing",
-  });
+  assert.equal(result.structuredContent.total, 1);
+  assert.deepEqual(
+    result.structuredContent.rooms.map(({ ref, name, metadata_status }) => ({
+      ref,
+      name,
+      metadata_status,
+    })),
+    [
+      {
+        ref: "spruthub://hub/neighbor-home/room/999",
+        name: null,
+        metadata_status: "missing",
+      },
+    ],
+  );
   assert.deepEqual(
     hub.requests.map(({ serial, params }) => ({
       serial: serial ?? null,
@@ -1069,7 +1042,7 @@ test("read_services keeps the selected home and services whose room metadata is 
   );
 });
 
-test("read_services points oversized detail to its exact entity instead of truncating a value", async (t) => {
+test("find_devices points oversized detail to its exact entity instead of truncating a value", async (t) => {
   const hugeValue = "x".repeat(8_000);
   const hub = await startHub({
     rooms: [{ id: 10, name: "Офис" }],
@@ -1107,7 +1080,7 @@ test("read_services points oversized detail to its exact entity instead of trunc
   const client = await startMcpClient(t, hub);
 
   const result = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/test-hub",
       room_ref: "spruthub://hub/test-hub/room/10",
@@ -1118,33 +1091,25 @@ test("read_services points oversized detail to its exact entity instead of trunc
   assert.equal(result.isError, undefined, result.content[0]?.text);
   assert(Buffer.byteLength(result.content[0].text) <= 2_048);
   assert.equal(result.content[0].text.includes(hugeValue), false);
-  assert.deepEqual(result.structuredContent.services[0], {
-    ref: "spruthub://hub/test-hub/accessory/100/service/1",
-    name: "Диагностика",
-    type: "Diagnostics",
-    room: {
-      ref: "spruthub://hub/test-hub/room/10",
-      name: "Офис",
-    },
-    accessory: {
-      ref: "spruthub://hub/test-hub/accessory/100",
-      name: "Большой сервис",
-      available: true,
-    },
-    observed_at: result.structuredContent.services[0].observed_at,
-    readings_status: "not_included",
-    reason: "service_exceeds_page_limit",
-    next: {
-      tool: "get_entity",
-      arguments: {
-        entity_ref: "spruthub://hub/test-hub/accessory/100/service/1",
+  assert.deepEqual(servicesOf(result.structuredContent), [
+    {
+      ref: "spruthub://hub/test-hub/accessory/100/service/1",
+      name: "Диагностика",
+      type: "Diagnostics",
+      kind: "other",
+      values_omitted: "exceeds_max_bytes",
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: "spruthub://hub/test-hub/accessory/100/service/1",
+        },
       },
     },
-  });
-  assert.equal(result.structuredContent.page.next_cursor, null);
+  ]);
+  assert.equal(result.structuredContent.next, null);
 });
 
-test("read_services rejects cross-home scope and restarts an invalid bounded room cursor without losing late services", async (t) => {
+test("find_devices rejects a foreign room and restarts an invalid cursor without losing services", async (t) => {
   const state = structuredClone(hubState);
   for (let id = 110; id < 118; id += 1) {
     state.accessories.push(
@@ -1165,7 +1130,7 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
   const client = await startMcpClient(t, hub);
 
   const crossHome = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       home_ref: "spruthub://hub/test-hub",
       room_ref: "spruthub://hub/neighbor-home/room/10",
@@ -1173,8 +1138,9 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
   });
   assert.equal(crossHome.isError, true);
   assert.deepEqual(crossHome.structuredContent.error, {
-    code: "invalid_service_scope",
-    message: "room_ref must identify a room in the selected home_ref.",
+    code: "invalid_room_ref",
+    message:
+      "room_ref must be a room ref of the selected home from home_overview.",
     retryable: false,
     action: "home_overview",
   });
@@ -1183,29 +1149,28 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
   const restartArguments = {
     home_ref: "spruthub://hub/test-hub",
     room_ref: "spruthub://hub/test-hub/room/10",
-    service_types: ["Lightbulb"],
+    kind: "light",
     max_bytes: 2_048,
   };
   const invalidCursor = await client.callTool({
-    name: "read_services",
+    name: "find_devices",
     arguments: {
       ...restartArguments,
-      cursor: "not-a-read-services-cursor",
+      cursor: "not-a-find-devices-cursor",
     },
   });
   assert.equal(invalidCursor.isError, true);
   assert.deepEqual(invalidCursor.structuredContent, {
     status: "error",
     next: {
-      tool: "read_services",
+      tool: "find_devices",
       arguments: restartArguments,
     },
     error: {
       code: "invalid_cursor",
-      message:
-        "Use the cursor returned by read_services for the same scope and filters.",
+      message: "Use the cursor returned by find_devices with the same filters.",
       retryable: false,
-      action: "restart_read_services",
+      action: "restart_find_devices",
     },
   });
   assert.equal(hub.requests.length, 0);
@@ -1221,14 +1186,15 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
     assert(
       Buffer.byteLength(page.content[0].text) <= restartArguments.max_bytes,
     );
-    services.push(...page.structuredContent.services);
+    services.push(
+      ...page.structuredContent.rooms.flatMap(({ devices }) =>
+        devices.map(({ name }) => name),
+      ),
+    );
     next = page.structuredContent.next;
   } while (next);
 
-  assert.deepEqual(
-    services.map(({ accessory }) => accessory.name),
-    ["Лампа", "Дашина лампа", "Свет"],
-  );
+  assert.deepEqual(services, ["Лампа", "Дашина лампа", "Свет"]);
 });
 
 function thermostatAccessory({
@@ -1344,14 +1310,14 @@ test("observed real-hub projection keeps both temperature service contexts", asy
   const result = await readRoomServices(client, roomRef);
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  const services = result.structuredContent.services;
+  const services = servicesOf(result.structuredContent);
   assert.deepEqual(
-    services.map(({ name, type, readings }) => ({
+    services.map(({ name, type, values }) => ({
       name,
       type,
-      readingType: readings[0].type,
-      value: readings[0].value,
-      unit: readings[0].unit,
+      readingType: values[0].type,
+      value: values[0].value,
+      unit: values[0].unit,
     })),
     [
       {
@@ -1370,8 +1336,11 @@ test("observed real-hub projection keeps both temperature service contexts", asy
       },
     ],
   );
-  assert.notEqual(services[0].readings[0].ref, services[1].readings[0].ref);
-  assert.deepEqual(hub.requests[1].params, accessoryExchange.params);
+  assert.notEqual(services[0].values[0].ref, services[1].values[0].ref);
+  assert.equal(
+    hub.requests[1].params.accessory.list.expand,
+    accessoryExchange.params.accessory.list.expand,
+  );
 });
 
 test("observed multisensor projection keeps readable native enum meaning", async (t) => {
@@ -1390,27 +1359,24 @@ test("observed multisensor projection keeps readable native enum meaning", async
   });
   const client = await startMcpClient(t, hub);
   const read = async () => {
-    const result = await readRoomServices(
-      client,
-      "spruthub://hub/test-hub/room/20",
-    );
+    const result = await client.callTool({
+      name: "find_devices",
+      arguments: {
+        home_ref: "spruthub://hub/test-hub",
+        room_ref: "spruthub://hub/test-hub/room/20",
+        include_technical: true,
+        max_bytes: 32_768,
+      },
+    });
     assert.equal(result.isError, undefined, result.content[0]?.text);
     return result.structuredContent;
   };
-  const readingByType = (view, type) => {
-    const reading = view.services
-      .flatMap(({ readings }) => readings)
+  const readingByType = (view, type) =>
+    servicesOf(view)
+      .flatMap(({ values }) => values)
       .find((reading) => reading.type === type);
-    return {
-      ref: reading.ref,
-      name: reading.name,
-      type: reading.type,
-      value: reading.value,
-      unit: reading.unit,
-      ...(Object.hasOwn(reading, "enum") ? { enum: reading.enum } : {}),
-      measured_at: reading.measured_at,
-    };
-  };
+  const ref = (sId, cId) =>
+    `spruthub://hub/test-hub/accessory/200/service/${sId}/characteristic/${cId}`;
 
   const chargingControl = hub.state.accessories[0].services
     .flatMap(({ characteristics = [] }) => characteristics)
@@ -1428,13 +1394,14 @@ test("observed multisensor projection keeps readable native enum meaning", async
   chargingControl.value = { intValue: 99 };
   const unknown = await read();
 
-  const initialReadings = initial.services.flatMap(({ readings }) => readings);
+  const initialReadings = servicesOf(initial).flatMap(({ values }) => values);
   assert.deepEqual(
     {
-      services: initial.services.map(({ ref, type, readings }) => ({
+      services: servicesOf(initial).map(({ ref, type, kind, values }) => ({
         ref,
         type,
-        readings: readings.map(({ ref, type, value, unit }) => ({
+        kind,
+        values: values.map(({ ref, type, value, unit }) => ({
           ref,
           type,
           value,
@@ -1443,9 +1410,10 @@ test("observed multisensor projection keeps readable native enum meaning", async
       })),
       readingCount: initialReadings.length,
       hasIdentify: initialReadings.some(({ type }) => type === "Identify"),
+      batteryPercent: initial.rooms[0].devices[0].battery_percent,
+      catalogName: readingByType(initial, "C_CatalogId").name,
       motion: readingByType(initial, "MotionDetected"),
       light: readingByType(initial, "CurrentAmbientLightLevel"),
-      batteryLevel: readingByType(initial, "BatteryLevel"),
       lowBattery: readingByType(initial, "StatusLowBattery"),
       charging: readingByType(initial, "ChargingState"),
       checkedMismatch: readingByType(checkedMismatch, "ChargingState"),
@@ -1456,87 +1424,72 @@ test("observed multisensor projection keeps readable native enum meaning", async
         {
           ref: "spruthub://hub/test-hub/accessory/200/service/10",
           type: "AccessoryInformation",
-          readings: [
+          kind: "technical",
+          values: [
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/501",
+              ref: ref(10, 501),
               type: "C_Room",
               value: "Room B",
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/503",
+              ref: ref(10, 503),
               type: "Manufacturer",
               value: "Aqara",
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/504",
+              ref: ref(10, 504),
               type: "Model",
               value: "RTCGQ14LM",
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/505",
-              type: "Name",
-              value: "Motion device B",
-              unit: null,
-            },
-            {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/506",
+              ref: ref(10, 506),
               type: "SerialNumber",
               value: "example-motion-device",
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/507",
+              ref: ref(10, 507),
               type: "FirmwareRevision",
               value: "11",
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/508",
+              ref: ref(10, 508),
               type: "C_Online",
               value: true,
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/10/characteristic/509",
+              ref: ref(10, 509),
               type: "C_CatalogId",
               value: 3987,
-              unit: null,
+              unit: undefined,
             },
           ],
         },
         {
           ref: "spruthub://hub/test-hub/accessory/200/service/20",
           type: "MotionSensor",
-          readings: [
+          kind: "sensor",
+          values: [
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/510",
+              ref: ref(20, 510),
               type: "MotionDetected",
               value: false,
-              unit: null,
-            },
-            {
-              ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/511",
-              type: "Name",
-              value: "Motion sensor",
-              unit: null,
+              unit: undefined,
             },
           ],
         },
         {
           ref: "spruthub://hub/test-hub/accessory/200/service/30",
           type: "LightSensor",
-          readings: [
+          kind: "sensor",
+          values: [
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/512",
-              type: "Name",
-              value: "Датчик освещенности",
-              unit: null,
-            },
-            {
-              ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/513",
+              ref: ref(30, 513),
               type: "CurrentAmbientLightLevel",
               value: 100,
               unit: "lux",
@@ -1546,95 +1499,58 @@ test("observed multisensor projection keeps readable native enum meaning", async
         {
           ref: "spruthub://hub/test-hub/accessory/200/service/40",
           type: "BatteryService",
-          readings: [
+          kind: "technical",
+          values: [
+            { ref: ref(40, 515), type: "BatteryLevel", value: 60, unit: "%" },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/514",
-              type: "Name",
-              value: "Батарея",
-              unit: null,
-            },
-            {
-              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/515",
-              type: "BatteryLevel",
-              value: 60,
-              unit: "%",
-            },
-            {
-              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/516",
+              ref: ref(40, 516),
               type: "StatusLowBattery",
               value: 0,
-              unit: null,
+              unit: undefined,
             },
             {
-              ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
+              ref: ref(40, 517),
               type: "ChargingState",
               value: 2,
-              unit: null,
+              unit: undefined,
             },
           ],
         },
       ],
-      readingCount: 16,
+      readingCount: 12,
       hasIdentify: false,
-      motion: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/20/characteristic/510",
-        name: "Обнаружено движение",
-        type: "MotionDetected",
-        value: false,
-        unit: null,
-        measured_at: null,
-      },
+      batteryPercent: 60,
+      catalogName: "Посмотреть в каталоге",
+      motion: { type: "MotionDetected", value: false, ref: ref(20, 510) },
       light: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/30/characteristic/513",
-        name: "Освещенность",
         type: "CurrentAmbientLightLevel",
         value: 100,
         unit: "lux",
-        measured_at: null,
-      },
-      batteryLevel: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/515",
-        name: "Уровень заряда",
-        type: "BatteryLevel",
-        value: 60,
-        unit: "%",
-        measured_at: null,
+        ref: ref(30, 513),
       },
       lowBattery: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/516",
-        name: "Батарея разряжена",
         type: "StatusLowBattery",
         value: 0,
-        unit: null,
         enum: { key: "BATTERY_LEVEL_NORMAL", name: "Нет" },
-        measured_at: null,
+        ref: ref(40, 516),
       },
       charging: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
-        name: "Идет зарядка",
         type: "ChargingState",
         value: 2,
-        unit: null,
         enum: { key: "NOT_CHARGEABLE", name: "Не заряжаемый" },
-        measured_at: null,
+        ref: ref(40, 517),
       },
       checkedMismatch: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
-        name: "Идет зарядка",
         type: "ChargingState",
         value: 1,
-        unit: null,
         enum: { key: "CHARGING", name: "Да" },
-        measured_at: null,
+        ref: ref(40, 517),
       },
       unknown: {
-        ref: "spruthub://hub/test-hub/accessory/200/service/40/characteristic/517",
-        name: "Идет зарядка",
         type: "FutureChargingState",
         value: 99,
-        unit: null,
         enum: null,
-        measured_at: null,
+        ref: ref(40, 517),
       },
     },
   );
@@ -1755,7 +1671,7 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     assert.deepEqual(invalid.structuredContent.error, {
       code: "invalid_entity_ref",
       message:
-        "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
+        "Use a home-qualified reference returned by home_overview, find_devices, or get_entity.",
       retryable: false,
       action: "home_overview",
     });
@@ -1805,10 +1721,10 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
     client,
     "spruthub://hub/test-hub/room/50",
   );
-  assert.equal(empty.isError, undefined);
+  assert.equal(empty.isError, undefined, empty.content[0]?.text);
   assert.equal(empty.structuredContent.status, "ok");
-  assert.equal(empty.structuredContent.scope_status, "empty");
-  assert.deepEqual(empty.structuredContent.services, []);
+  assert.equal(empty.structuredContent.total, 0);
+  assert.deepEqual(empty.structuredContent.rooms, []);
 
   const missing = await readRoomServices(
     client,
@@ -1817,6 +1733,10 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
   assert.equal(missing.isError, true);
   assert.deepEqual(missing.structuredContent, {
     status: "error",
+    next: {
+      tool: "home_overview",
+      arguments: { home_ref: "spruthub://hub/test-hub" },
+    },
     error: {
       code: "room_not_found",
       message: "The selected SprutHub room was not found.",
@@ -1833,16 +1753,17 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
     client,
     "spruthub://hub/test-hub/room/10",
   );
-  const unavailable = kitchen.structuredContent.services.find(
-    ({ accessory }) =>
-      accessory.ref === "spruthub://hub/test-hub/accessory/103",
+  const unavailable = findDevice(
+    kitchen.structuredContent,
+    "spruthub://hub/test-hub/accessory/103",
   );
-  assert.equal(unavailable.accessory.available, false);
-  assert.equal(unavailable.readings[0].value, false);
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.services[0].values[0].value, false);
 
+  const incompatibleClient = await startMcpClient(t, hub);
   hub.state.accessories = null;
   const incompatible = await readRoomServices(
-    client,
+    incompatibleClient,
     "spruthub://hub/test-hub/room/10",
   );
   assert.equal(incompatible.isError, true);
@@ -1919,34 +1840,18 @@ test("incomplete room and service identifiers never become stable references", a
     false,
   );
 
-  const incompleteSelectedRoomHub = await startHub();
-  incompleteSelectedRoomHub.state.roomGetResponse = {
-    name: "Selected room without id",
-  };
-  const incompleteSelectedRoomClient = await startMcpClient(
+  const incompleteListedRoomHub = await startHub();
+  incompleteListedRoomHub.state.rooms.push({ name: "Listed room without id" });
+  const incompleteListedRoomClient = await startMcpClient(
     t,
-    incompleteSelectedRoomHub,
+    incompleteListedRoomHub,
   );
-  const incompleteSelectedRoom = await readRoomServices(
-    incompleteSelectedRoomClient,
+  const incompleteListedRoom = await readRoomServices(
+    incompleteListedRoomClient,
     "spruthub://hub/test-hub/room/10",
   );
-  assert.equal(incompleteSelectedRoom.isError, true);
-  assert.deepEqual(incompleteSelectedRoom.structuredContent.error, {
-    code: "incompatible_response",
-    message: "SprutHub returned incomplete room data.",
-    retryable: false,
-  });
-
-  incompleteSelectedRoomHub.state.roomGetResponse = {
-    id: 11,
-    name: "Different room",
-  };
-  const mismatchedSelectedRoom = await readRoomServices(
-    incompleteSelectedRoomClient,
-    "spruthub://hub/test-hub/room/10",
-  );
-  assert.deepEqual(mismatchedSelectedRoom.structuredContent.error, {
+  assert.equal(incompleteListedRoom.isError, true);
+  assert.deepEqual(incompleteListedRoom.structuredContent.error, {
     code: "incompatible_response",
     message: "SprutHub returned incomplete room data.",
     retryable: false,
@@ -2159,13 +2064,19 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
   await handshakeHub.waitForNoConnections();
   assert.equal(handshakeHub.openConnections, 0);
 
+  // Another home of the account is checked first, so the room reads follow
+  // the home list inside the same budget.
   const slowHub = await startHub();
+  slowHub.state.homes = [
+    { serial: "test-hub", name: "Configured home", online: true },
+    { serial: "neighbor-home", name: "Other home", online: true },
+  ];
   slowHub.state.responseDelays = [160, 160];
   const slowClient = await startMcpClient(t, slowHub, STALL_HUB_TIMEOUT);
   const slowStartedAt = performance.now();
   const sequenceTimeout = await readRoomServices(
     slowClient,
-    "spruthub://hub/test-hub/room/10",
+    "spruthub://hub/neighbor-home/room/10",
   );
   assert(performance.now() - slowStartedAt < 1_000);
   assert.deepEqual(sequenceTimeout.structuredContent, {

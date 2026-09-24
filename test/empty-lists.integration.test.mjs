@@ -250,22 +250,23 @@ test("a room without devices reads as an empty room", async (t) => {
     { kind: "room", ref: storeRoomRef, name: "Кладовая", accessories: [] },
   );
 
-  const services = await call(client, "read_services", {
+  const services = await call(client, "find_devices", {
     home_ref: homeRef,
     room_ref: storeRoomRef,
   });
-  assert.deepEqual(services.scope.room, {
-    ref: storeRoomRef,
-    name: "Кладовая",
-  });
-  assert.deepEqual(services.services, []);
-  assert.equal(services.scope_status, "empty");
+  assert.equal(services.total, 0);
+  assert.deepEqual(services.rooms, []);
+  const summary = await call(client, "find_devices", { home_ref: homeRef });
+  assert.deepEqual(
+    summary.rooms.find(({ ref }) => ref === storeRoomRef),
+    { ref: storeRoomRef, name: "Кладовая", services: 0, on: 0, unavailable: 0 },
+  );
 
   // The hub really left the list field out, as the live hub did.
   const roomLists = hub
     .sent("accessory.list")
     .filter(({ params }) => params.roomId === 2);
-  assert.equal(roomLists.length, 2);
+  assert.equal(roomLists.length, 1);
   for (const { reply } of roomLists) {
     assert.deepEqual(reply.result, { accessory: { list: {} } });
   }
@@ -321,11 +322,11 @@ test("a home with nothing set up yet reads as empty", async (t) => {
   assert.deepEqual(home.extensions, []);
   assert.deepEqual(home.problems, []);
 
-  const services = await call(client, "read_services", {
+  const services = await call(client, "find_devices", {
     home_ref: homeRef,
   });
-  assert.deepEqual(services.services, []);
-  assert.equal(services.scope_status, "empty");
+  assert.equal(services.services, 0);
+  assert.deepEqual(services.rooms, []);
   assert.deepEqual(hub.sent("room.list")[0].reply.result, {
     room: { list: {} },
   });
