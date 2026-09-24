@@ -5997,7 +5997,7 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with a null field as left out (the hub drops null fields), an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a from action's value \"\" as left out, and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code, other nodes this contract cannot write and requests whose URL answers hide, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with a null field as left out (the hub drops null fields), an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a from action's value \"\" as left out, and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else for a device action one of the same device, first one that sets a characteristic it sets, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code, other nodes this contract cannot write and requests whose URL answers hide, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
@@ -6364,7 +6364,7 @@ async function validateBlockData(
 // types is the same in canonicalBlock form. It may sit at another position of
 // its array, and each stored subtree is kept at most once. Other requested
 // nodes pair with the remaining stored nodes of the same type in the same
-// array, first by identity (BLOCK_NODE_IDENTITIES), then in order by
+// array, first by identity (BLOCK_NODE_MATCHES), then in order by
 // position, so that their children are compared in turn; a node without a
 // pair is new, and so is everything below it. A stored node that is neither
 // kept nor paired is removed by the edit with everything below it; removed
@@ -6425,14 +6425,12 @@ function keptBlockSubtrees(data, stored) {
       isRecord(candidate.child) &&
       candidate.child.type === child.type;
     const pairs = new Map();
-    for (const identity of BLOCK_NODE_IDENTITIES) {
+    for (const matches of BLOCK_NODE_MATCHES) {
       for (const child of pairable) {
-        const key = pairs.has(child) ? undefined : identity(child);
-        if (key === undefined) continue;
+        if (pairs.has(child)) continue;
         const candidate = candidates.find(
           (storedChild) =>
-            available(storedChild, child) &&
-            identity(storedChild.child) === key,
+            available(storedChild, child) && matches(child, storedChild.child),
         );
         if (!candidate) continue;
         candidate.used = true;
@@ -6533,37 +6531,61 @@ function withKeptSubtreesAsStored(data, stored) {
   return rebuild(data);
 }
 
-// What names an edited node's stored original besides its position, first
-// match wins; undefined when the node has no such key. The blockId the hub
-// gave a node comes back from get_entity and stays in an edit made from that
-// read; it is the only name of an if, a condition group, an interval, a cron
-// or code. Without it, native ids name a device action, a condition, a
-// scenario run or a delay.
-const BLOCK_NODE_IDENTITIES = [
-  (node) => (Number.isSafeInteger(node.blockId) ? node.blockId : undefined),
-  (node) => {
-    if (node.type === "service") {
-      const actions = Array.isArray(node.characteristics)
-        ? node.characteristics.map((action) => action?.cId)
-        : [];
-      return JSON.stringify([node.aId, node.sId, actions]);
-    }
-    if (node.type === "characteristic") {
-      return JSON.stringify([node.aId, node.sId, node.cId]);
-    }
-    if (SERVICE_ACTION_KINDS.includes(node.type)) {
-      return JSON.stringify([node.cId]);
-    }
-    if (["scenario", "delay", "clear_delay"].includes(node.type)) {
-      return JSON.stringify([node.index]);
-    }
-    return undefined;
+// Whether a stored node is an edited node's original besides its position,
+// tried in order over all edited nodes of an array, first match wins. The
+// blockId the hub gave a node comes back from get_entity and stays in an
+// edit made from that read; it is the only name of an if, a condition
+// group, an interval, a cron or code. Without it, native ids name a device
+// action, a condition, a scenario run or a delay.
+const BLOCK_NODE_MATCHES = [
+  (node, stored) =>
+    Number.isSafeInteger(node.blockId) && node.blockId === stored.blockId,
+  (node, stored) => {
+    const key = nativeBlockNodeKey(node);
+    return key !== undefined && key === nativeBlockNodeKey(stored);
   },
   // A service action whose characteristic actions the edit changed still
-  // names its device.
-  (node) =>
-    node.type === "service" ? JSON.stringify([node.aId, node.sId]) : undefined,
+  // names its device: first a stored action of the device that sets one of
+  // the same characteristics, as when the edit adds a mode to a lamp's
+  // brightness and drops its On action, then any action of the device.
+  (node, stored) =>
+    sameServiceDevice(node, stored) &&
+    serviceActionCIds(node).some((cId) =>
+      serviceActionCIds(stored).includes(cId),
+    ),
+  (node, stored) => sameServiceDevice(node, stored),
 ];
+
+function nativeBlockNodeKey(node) {
+  if (node.type === "service") {
+    return JSON.stringify([node.aId, node.sId, serviceActionCIds(node)]);
+  }
+  if (node.type === "characteristic") {
+    return JSON.stringify([node.aId, node.sId, node.cId]);
+  }
+  if (SERVICE_ACTION_KINDS.includes(node.type)) {
+    return JSON.stringify([node.cId]);
+  }
+  if (["scenario", "delay", "clear_delay"].includes(node.type)) {
+    return JSON.stringify([node.index]);
+  }
+  return undefined;
+}
+
+function serviceActionCIds(node) {
+  return Array.isArray(node.characteristics)
+    ? node.characteristics.map((action) => action?.cId)
+    : [];
+}
+
+function sameServiceDevice(node, stored) {
+  return (
+    node.type === "service" &&
+    stored.type === "service" &&
+    JSON.stringify([node.aId, node.sId]) ===
+      JSON.stringify([stored.aId, stored.sId])
+  );
+}
 
 // Condition groups an edit grows from one condition to several while
 // their mode stays OR. The web client makes every group OR, which over one
