@@ -26,6 +26,9 @@ const repoRoot = path.resolve(
 );
 const script = path.join(repoRoot, "research", "live-conformance.mjs");
 const prefix = "zz-sprut-agent-probe-20260924T121158Z";
+// Rooms carry the run's short name: SprutHub keeps 30 characters of a room
+// name, and the product refuses a longer one.
+const roomName = "zz-probe-20260924T121158Z";
 const runFile = promisify(execFile);
 
 async function setup(t) {
@@ -173,10 +176,10 @@ function byName(left, right) {
 test("the sweep deletes only inert probe objects that the product owns", async (t) => {
   const ctx = await setup(t);
   const { hub } = ctx;
-  const ownedRoom = await createRoom(ctx, `${prefix}-room`);
+  const ownedRoom = await createRoom(ctx, `${roomName}-r`);
   const ownedBlock = await createBlock(ctx, `${prefix}-block`, false);
   const activeBlock = await createBlock(ctx, `${prefix}-active`, true);
-  const occupiedRoom = await createRoom(ctx, `${prefix}-occupied`);
+  const occupiedRoom = await createRoom(ctx, `${roomName}-o`);
   hub.state.accessories.find(({ id }) => id === 36).roomId = occupiedRoom.id;
   // The owner replaced the description, and with it the ownership marker.
   const editedBlock = await createBlock(ctx, `${prefix}-edited`, false);
@@ -200,6 +203,19 @@ test("the sweep deletes only inert probe objects that the product owns", async (
   });
 
   assert.deepEqual(entries.sort(byName), [
+    {
+      kind: "room",
+      ref: occupiedRoom.ref,
+      name: `${roomName}-o`,
+      outcome: "left",
+      reason: "not_empty",
+    },
+    {
+      kind: "room",
+      ref: ownedRoom.ref,
+      name: `${roomName}-r`,
+      outcome: "deleted",
+    },
     {
       kind: "scenario",
       ref: activeBlock.ref,
@@ -226,19 +242,6 @@ test("the sweep deletes only inert probe objects that the product owns", async (
       name: `${prefix}-foreign`,
       outcome: "left",
       reason: "no_ownership_marker",
-    },
-    {
-      kind: "room",
-      ref: occupiedRoom.ref,
-      name: `${prefix}-occupied`,
-      outcome: "left",
-      reason: "not_empty",
-    },
-    {
-      kind: "room",
-      ref: ownedRoom.ref,
-      name: `${prefix}-room`,
-      outcome: "deleted",
     },
   ]);
   assert.deepEqual(
@@ -291,7 +294,7 @@ async function recordAccessories(stateDirectory, ids) {
 test("the sweep deletes a recorded, unlinked virtual accessory before its room", async (t) => {
   const ctx = await setup(t);
   const { hub } = ctx;
-  const room = await createRoom(ctx, `${prefix}-vroom`);
+  const room = await createRoom(ctx, `${roomName}-v`);
   const client = await productClient(t, hub);
   const otherRoomId = hub.state.rooms[0].id;
   const owned = await createVirtual(client, room.id);
@@ -345,7 +348,7 @@ test("the sweep deletes a recorded, unlinked virtual accessory before its room",
       {
         kind: "room",
         ref: room.ref,
-        name: `${prefix}-vroom`,
+        name: `${roomName}-v`,
         outcome: "deleted",
       },
     ].sort((a, b) => a.ref.localeCompare(b.ref)),
@@ -398,7 +401,7 @@ test("the sweep finds a probe room by the run's short name", async (t) => {
 
 test("without the run's journal a probe room is reported, not deleted", async (t) => {
   const ctx = await setup(t);
-  const room = await createRoom(ctx, `${prefix}-room`);
+  const room = await createRoom(ctx, `${roomName}-r`);
   const client = await productClient(t, ctx.hub);
   const writesBefore = ctx.hub.writes().length;
 
@@ -412,7 +415,7 @@ test("without the run's journal a probe room is reported, not deleted", async (t
     {
       kind: "room",
       ref: room.ref,
-      name: `${prefix}-room`,
+      name: `${roomName}-r`,
       outcome: "left",
       reason: "journal_unavailable",
     },
@@ -422,7 +425,7 @@ test("without the run's journal a probe room is reported, not deleted", async (t
 
 test("--sweep-only removes what a run left and fails a prefix of another kind", async (t) => {
   const ctx = await setup(t);
-  const room = await createRoom(ctx, `${prefix}-room`);
+  const room = await createRoom(ctx, `${roomName}-r`);
   const block = await createBlock(ctx, `${prefix}-block`, false);
   // The room can go only after the run's recorded accessory in it.
   const client = await productClient(t, ctx.hub);
