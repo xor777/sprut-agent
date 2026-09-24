@@ -774,6 +774,35 @@
           ]
         }
       ]
+    },
+    {
+      "id": 39,
+      "roomId": 5,
+      "name": "Кнопка у кровати",
+      "extensionKey": "Controller:zigbee",
+      "deviceId": "00158d0004a1b239",
+      "manufacturer": "Aqara",
+      "model": "WXKG11LM",
+      "battery": 76,
+      "services": [
+        {
+          "sId": 13,
+          "type": "StatelessProgrammableSwitch",
+          "name": "Кнопка",
+          "characteristics": [
+            {
+              "cId": 14,
+              "type": "ProgrammableSwitchEvent",
+              "value": 0
+            },
+            {
+              "cId": 15,
+              "type": "ServiceLabelIndex",
+              "value": 1
+            }
+          ]
+        }
+      ]
     }
   ],
   "logicTypes": {
@@ -1329,6 +1358,174 @@
             "characteristics": [
               { "type": "set", "cId": 14, "hc": "On", "value": "false" }
             ]
+          }
+        ]
+      }
+    },
+    {
+      "index": "12",
+      "name": "Кнопка у кровати: ночник",
+      "desc": "Одно нажатие переключает ночник",
+      "type": "BLOCK",
+      "active": true,
+      "data": {
+        "targets": [
+          {
+            "type": "if",
+            "mode": "EVERY",
+            "if": {
+              "type": "condition",
+              "mode": "OR",
+              "conditions": [
+                {
+                  "type": "characteristic",
+                  "aId": 39,
+                  "sId": 13,
+                  "cId": 14,
+                  "hs": "StatelessProgrammableSwitch",
+                  "hc": "ProgrammableSwitchEvent",
+                  "cond": "=",
+                  "value": "0",
+                  "trigger": true,
+                  "time": 0,
+                  "timeCond": ""
+                }
+              ]
+            },
+            "then": [
+              {
+                "type": "code",
+                "code": "const on = Hub.getAccessory(26).getService(HS.Lightbulb).getCharacteristic(HC.On); on.setValue(!on.getValue());"
+              }
+            ],
+            "then_delay": 0,
+            "else_delay": 0
+          }
+        ]
+      }
+    },
+    {
+      "index": "13",
+      "name": "Кнопка у кровати: спать",
+      "desc": "Долгое нажатие гасит ночник и закрывает шторы",
+      "type": "BLOCK",
+      "active": true,
+      "data": {
+        "targets": [
+          {
+            "type": "if",
+            "mode": "EVERY",
+            "if": {
+              "type": "condition",
+              "mode": "OR",
+              "conditions": [
+                {
+                  "type": "characteristic",
+                  "aId": 39,
+                  "sId": 13,
+                  "cId": 14,
+                  "hs": "StatelessProgrammableSwitch",
+                  "hc": "ProgrammableSwitchEvent",
+                  "cond": "=",
+                  "value": "2",
+                  "trigger": true,
+                  "time": 0,
+                  "timeCond": ""
+                }
+              ]
+            },
+            "then": [
+              {
+                "type": "code",
+                "code": "Hub.getAccessory(26).getService(HS.Lightbulb).getCharacteristic(HC.On).setValue(false); Hub.getAccessory(27).getService(HS.WindowCovering).getCharacteristic(HC.TargetPosition).setValue(0);"
+              }
+            ],
+            "then_delay": 0,
+            "else_delay": 0
+          }
+        ]
+      }
+    },
+    {
+      "index": "14",
+      "name": "Вечерний свет в гостиной",
+      "desc": "",
+      "type": "BLOCK",
+      "active": true,
+      "data": {
+        "targets": [
+          {
+            "type": "if",
+            "mode": "EVERY",
+            "if": {
+              "type": "condition",
+              "mode": "AND",
+              "conditions": [
+                {
+                  "type": "interval",
+                  "start": {
+                    "type": "cron",
+                    "cron": "0 0 18 ? * * *",
+                    "mode": "NONE",
+                    "offset": 0
+                  },
+                  "end": {
+                    "type": "cron",
+                    "cron": "0 0 23 ? * * *",
+                    "mode": "NONE",
+                    "offset": 0
+                  },
+                  "trigger": false
+                },
+                {
+                  "type": "characteristic",
+                  "aId": 13,
+                  "sId": 20,
+                  "cId": 21,
+                  "hs": "LightSensor",
+                  "hc": "CurrentAmbientLightLevel",
+                  "cond": "<",
+                  "value": "30",
+                  "trigger": false,
+                  "time": 0,
+                  "timeCond": ""
+                }
+              ]
+            },
+            "then": [
+              {
+                "type": "service",
+                "aId": 17,
+                "sId": 13,
+                "hs": "Lightbulb",
+                "characteristics": [
+                  {
+                    "type": "set",
+                    "cId": 14,
+                    "hc": "On",
+                    "value": "true"
+                  }
+                ]
+              }
+            ],
+            "else": [
+              {
+                "type": "service",
+                "aId": 16,
+                "sId": 13,
+                "hs": "Lightbulb",
+                "characteristics": [
+                  {
+                    "type": "set",
+                    "cId": 14,
+                    "hc": "On",
+                    "value": "true"
+                  }
+                ]
+              }
+            ],
+            "then_delay": 0,
+            "else_delay": 0
           }
         ]
       }

@@ -2,7 +2,7 @@
 // scenario ids, so its cases grade unchanged) plus a second storey, service
 // rooms and a yard. Sizes follow the owner's home at double scale (2026-09-24:
 // 13 rooms, 80 accessories, 254 services, 23 scenarios; the home is expected
-// to double): 22 rooms, 172 accessories, 505 services, 42 scenarios, with
+// to double): 23 rooms, 173 accessories, 508 services, 50 scenarios, with
 // its service type mix. Names, ids and values are invented. New rooms avoid
 // the words the apartment cases rely on (спальня, гостиная, кухня, ванная,
 // коридор, кабинет), so a household request keeps one meaning.
@@ -444,6 +444,45 @@ function dailyWindow(start, end, targetId, sId, hs) {
   ]);
 }
 
+// The shape the SprutHub UI saves for a button rule (owner hub,
+// 2026-09-24): an OR group with one characteristic trigger, a code action
+// and no else key.
+function buttonRule(buttonId, sId, value, code) {
+  return block([
+    {
+      type: "if",
+      mode: "EVERY",
+      if: {
+        type: "condition",
+        mode: "OR",
+        conditions: [
+          {
+            type: "characteristic",
+            aId: buttonId,
+            sId,
+            cId: sId + 1,
+            hs: "StatelessProgrammableSwitch",
+            hc: "ProgrammableSwitchEvent",
+            cond: "=",
+            value,
+            trigger: true,
+            time: 0,
+            timeCond: "",
+          },
+        ],
+      },
+      // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+      then: [{ type: "code", code }],
+      then_delay: 0,
+      else_delay: 0,
+    },
+  ]);
+}
+
+function toggleCode(aId, service) {
+  return `const on = Hub.getAccessory(${aId}).getService(HS.${service}).getCharacteristic(HC.On); on.setValue(!on.getValue());`;
+}
+
 function actions(name, desc, targets) {
   return {
     name,
@@ -561,6 +600,61 @@ function scenarios(byName) {
         "Switch",
       ),
     },
+    {
+      name: "Кнопка у дивана: споты",
+      desc: "",
+      type: "BLOCK",
+      data: buttonRule(
+        id("Кнопка у дивана"),
+        13,
+        "0",
+        toggleCode(id("Выключатель гостиной"), "Switch"),
+      ),
+    },
+    {
+      name: "Кнопка у дивана: торшер",
+      desc: "",
+      type: "BLOCK",
+      data: buttonRule(
+        id("Кнопка у дивана"),
+        23,
+        "0",
+        toggleCode(16, "Lightbulb"),
+      ),
+    },
+    {
+      name: "Кнопка у дивана: кино",
+      desc: "Двойное нажатие гасит свет в гостиной",
+      type: "BLOCK",
+      data: buttonRule(
+        id("Кнопка у дивана"),
+        33,
+        "1",
+        "Hub.getAccessory(15).getService(HS.Lightbulb).getCharacteristic(HC.On).setValue(false);",
+      ),
+    },
+    {
+      name: "Кнопка у входа: свет",
+      desc: "",
+      type: "BLOCK",
+      data: buttonRule(
+        id("Кнопка у входа"),
+        13,
+        "0",
+        toggleCode(12, "Lightbulb"),
+      ),
+    },
+    {
+      name: "Кнопка у входа: уходя",
+      desc: "Долгое нажатие ставит охрану",
+      type: "BLOCK",
+      data: buttonRule(
+        id("Кнопка у входа"),
+        23,
+        "2",
+        `Hub.getAccessory(${id("Охрана")}).getService(HS.SecuritySystem).getCharacteristic(HC.SecuritySystemTargetState).setValue(1);`,
+      ),
+    },
     actions("Выключить второй этаж", "Гасит свет наверху", [
       [id("Люстра в холле"), 13, "Lightbulb", false],
       [id("Подсветка лестницы"), 13, "Lightbulb", false],
@@ -661,7 +755,7 @@ function scenarios(byName) {
     },
   ];
   return list.map((scenario, index) => ({
-    index: String(12 + index),
+    index: String(20 + index),
     active: scenario.active !== false,
     ...scenario,
   }));
@@ -675,7 +769,7 @@ export default async function house({ loadHomeFixture }) {
   return {
     ...fixture,
     description:
-      "Synthetic two-storey house: the apartment plus 14 rooms, 144 accessories and 36 scenarios, about double the owner's home. Built by test/fixtures/homes/house.mjs; names, ids and values are invented.",
+      "Synthetic two-storey house: the apartment plus 14 rooms, 144 accessories and 41 scenarios, about double the owner's home. Built by test/fixtures/homes/house.mjs; names, ids and values are invented.",
     hub: { ...fixture.hub, serial: "sim-house-01", name: "Дом в Сосновке" },
     rooms: [...fixture.rooms, ...ROOMS.map(([id, name]) => ({ id, name }))],
     accessories: [...fixture.accessories, ...added],

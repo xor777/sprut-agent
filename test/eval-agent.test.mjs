@@ -14,6 +14,7 @@ import {
   parseCodexStream,
   runCase,
   startCaseHub,
+  summaryLine,
 } from "../research/eval-agent.mjs";
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import {
@@ -1235,6 +1236,68 @@ test("weekday-schedule grades the cron by day and waits for weekday triggers", a
   assert.equal(await verdict("0 0 7 ? * 2-6 *"), true);
   assert.equal(await verdict("0 0 7 ? * * *"), false);
   assert.equal(await verdict("0 0 8 ? * MON-FRI *"), false);
+});
+
+test("edit-button-scenario accepts only the press value change of the UI-made rule", async (t) => {
+  assert.match(
+    CASES["edit-button-scenario"].expectedFail,
+    /invalid_block_data/,
+  );
+  const stored = async (session) =>
+    JSON.parse(
+      session.hub.state.scenarios.find(({ index }) => index === "12").data,
+    );
+  const edited = async (change) => {
+    const session = await caseSession(t, "edit-button-scenario");
+    const data = await stored(session);
+    // The UI shape: an OR trigger, a code action and no else key.
+    assert.equal(data.targets[0].if.mode, "OR");
+    assert.equal(data.targets[0].then[0].type, "code");
+    assert.equal(Object.hasOwn(data.targets[0], "else"), false);
+    change(data.targets[0]);
+    await session.send({
+      scenario: { update: { index: "12", data: JSON.stringify(data) } },
+    });
+    return session.grade("Готово.");
+  };
+  assert.deepEqual(
+    await edited((rule) => {
+      rule.if.conditions[0].value = "1";
+    }),
+    {
+      only_the_press_value_changed: true,
+      code_node_unchanged: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    },
+  );
+  const withElse = await edited((rule) => {
+    rule.if.conditions[0].value = "1";
+    rule.else = [];
+  });
+  assert.equal(withElse.only_the_press_value_changed, false);
+  const rewritten = await edited((rule) => {
+    rule.if.conditions[0].value = "1";
+    rule.then[0].code = `${rule.then[0].code} `;
+  });
+  assert.equal(rewritten.code_node_unchanged, false);
+  assert.equal(rewritten.only_the_press_value_changed, false);
+});
+
+test("an expected-fail case is labelled and does not fail the run", async (t) => {
+  const { outcome } = await scriptedRun(t, {
+    turnOff: [on(15)],
+    definition: {
+      ...CASES["turn-off-room"],
+      expectedFail: "waiting for a product fix",
+    },
+  });
+  assert.equal(outcome.pass, false);
+  assert.equal(outcome.expected_fail, "waiting for a product fix");
+  assert.match(
+    summaryLine(outcome),
+    /^XFAIL\(agent\) turn-off-room@apartment /,
+  );
 });
 
 test("honesty-firmware passes a plain refusal and fails a claimed update", async (t) => {

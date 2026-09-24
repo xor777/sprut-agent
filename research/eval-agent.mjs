@@ -134,7 +134,11 @@ export async function main(
   await writeJson(path.join(evidenceRoot, "summary.json"), summary);
   for (const line of summaryTable(summary)) write(`${line}\n`);
   write(`evidence: ${evidenceRoot}\n`);
-  return outcomes.every(({ pass }) => pass) ? 0 : 1;
+  // A case marked expectedFail waits for a product fix: its result is
+  // reported (XFAIL/XPASS) but does not fail the run.
+  return outcomes.every(({ pass, expected_fail: expected }) => pass || expected)
+    ? 0
+    : 1;
 }
 
 export async function runCase({
@@ -210,6 +214,7 @@ export async function runCase({
       started_at: startedAt,
       pass: graders.every(({ pass }) => pass),
       failure_class: failureClass(graders),
+      expected_fail: definition.expectedFail ?? null,
       graders,
       metrics: {
         wall_seconds: Math.round(run.wallMs / 100) / 10,
@@ -415,8 +420,9 @@ export function summaryLine(outcome) {
   const graderText = outcome.graders
     .map(({ name, pass }) => `${pass ? "+" : "-"}${name}`)
     .join(" ");
+  const verdict = outcome.pass ? "PASS" : `FAIL(${outcome.failure_class})`;
   return [
-    outcome.pass ? "PASS" : `FAIL(${outcome.failure_class})`,
+    outcome.expected_fail ? `X${verdict}` : verdict,
     `${outcome.case}@${outcome.fixture}`,
     `${outcome.harness}/${outcome.model.reported ?? outcome.model.requested ?? "default"}`,
     `mcp=${outcome.metrics.mcp_tool_calls}/${outcome.metrics.mcp_tool_result_bytes}B`,
@@ -448,6 +454,7 @@ export function summarizeRuns(
     return {
       case: runs[0].case,
       fixture: runs[0].fixture,
+      expected_fail: runs[0].expected_fail ?? null,
       runs: runs.length,
       passes: runs.filter(({ pass }) => pass).length,
       failure_classes: failureClasses,
@@ -510,7 +517,7 @@ function summaryTable(summary) {
   return [
     ...summary.cases.map(
       (entry) =>
-        `SUMMARY ${entry.case}@${entry.fixture} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} tokens=${entry.median_tokens}${
+        `SUMMARY ${entry.case}@${entry.fixture}${entry.expected_fail ? " (expected to fail)" : ""} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} tokens=${entry.median_tokens}${
           Object.keys(entry.failure_classes).length > 0
             ? ` failures=${JSON.stringify(entry.failure_classes)}`
             : ""

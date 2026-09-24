@@ -99,6 +99,9 @@ test("public read tools see the simulated apartment as a native home", async (t)
       ["Выключить свет в кабинете", "BLOCK", true],
       ["Защита от протечки", "LOGIC", true],
       ["Всё выключить", "BLOCK", true],
+      ["Кнопка у кровати: ночник", "BLOCK", true],
+      ["Кнопка у кровати: спать", "BLOCK", true],
+      ["Вечерний свет в гостиной", "BLOCK", true],
     ],
   );
   assert.ok(
