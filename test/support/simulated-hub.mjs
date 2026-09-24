@@ -2212,10 +2212,13 @@ function nativeText(value) {
 // the condition differs from its value before the change. A RESET delay
 // runs its steps when it ends inside windowMs after the change, so a
 // switch-off after 0 or 120 ms leaves the light off; a longer one is only
-// listed in skipped. Actions do not trigger further rules. Anything else
-// (a hold on a leaf, a repeating branch, another delay mode, interval,
-// cron, code, toggle, unknown refs) is reported as unsupported rather than
-// guessed. It is not a model of the hub's scheduler.
+// listed in skipped. Actions do not trigger further rules. A hold ">"
+// ("has not changed for") is false while its leaf does not hold, and false
+// inside the window on the changed characteristic when it is at least
+// windowMs long, since that value is younger. Anything else (another hold,
+// a repeating branch, another delay mode, interval, cron, code, toggle,
+// unknown refs) is reported as unsupported rather than guessed. It is not a
+// model of the hub's scheduler.
 const RULE_WINDOW_MS = 10_000;
 
 export function evaluateRulesOnChange(
@@ -2252,6 +2255,8 @@ export function evaluateRulesOnChange(
       index: scenario.index,
       now: 0,
       timers: [],
+      change,
+      windowMs,
     };
     runRuleActions(run, data.targets);
     // Timers that end inside the window run in the order they end.
@@ -2358,27 +2363,41 @@ function isTrigger(node, target) {
   );
 }
 
-// true, false, or null with the reason in unsupported (when given).
-function evaluateRuleCondition(home, node, unsupported, index) {
+// true, false, or null with the reason in unsupported (when given). within
+// is { change, windowMs } for the values inside the evaluation window, and
+// null for the values before the change, whose age is unknown.
+function evaluateRuleCondition(home, node, unsupported, index, within = null) {
   if (node?.type === "condition") {
     const values = (node.conditions ?? []).map((child) =>
-      evaluateRuleCondition(home, child, unsupported, index),
+      evaluateRuleCondition(home, child, unsupported, index, within),
     );
     if (values.includes(null)) return null;
     if (node.mode === "OR") return values.some(Boolean);
     if (node.mode === "AND") return values.every(Boolean);
   }
-  // A hold ("has not changed for", "changed back within") needs time the
-  // grader does not run.
   const held =
     node?.type === "characteristic" &&
     ((node.timeCond ?? "") !== "" || (node.time ?? 0) !== 0);
-  if (node?.type === "characteristic" && !held) {
+  if (node?.type === "characteristic") {
     const characteristic = findCharacteristic(home, node);
     const verdict = characteristic
       ? compareNative(nativeText(characteristic.control.value), node)
       : null;
-    if (verdict !== null) return verdict;
+    if (!held && verdict !== null) return verdict;
+    // "Has not changed for": false while the leaf does not hold, and false
+    // inside the window on the value that just changed when the hold is at
+    // least as long as the window. Other holds need time the grader does
+    // not run.
+    if (node.timeCond === ">" && verdict === false) return false;
+    if (
+      node.timeCond === ">" &&
+      verdict === true &&
+      within !== null &&
+      characteristicKey(node) === characteristicKey(within.change) &&
+      node.time >= within.windowMs
+    ) {
+      return false;
+    }
   }
   unsupported?.push({
     index,
@@ -2426,6 +2445,7 @@ function runRuleIf(run, node) {
     node.if,
     result.unsupported,
     index,
+    { change: run.change, windowMs: run.windowMs },
   );
   if (verdict === null) return;
   if (mode === "ONCE") {

@@ -935,8 +935,11 @@ function answerMatches(name, pattern) {
 
 // Motion on must leave the bathroom light on, motion off must not turn it
 // on, and neither may change anything else. Every active BLOCK rule of the
-// home takes part. A rule the evaluator cannot run fails as unsupported:
-// the grader does not know, so the run is not blamed on the agent.
+// home takes part. What the evaluator runs is judged first: a write to
+// another characteristic, the light switched off on motion or switched on
+// without it breaks the task whatever the rest does. Otherwise a rule part
+// the evaluator cannot run fails as unsupported: the grader does not know,
+// so the run is not blamed on the agent.
 function motionVerdict(state) {
   const light = (value) => ({ ...BATHROOM_LIGHT, value });
   const motion = (value) => ({ ...BATHROOM_MOTION, value });
@@ -948,14 +951,6 @@ function motionVerdict(state) {
     preset: [motion(true), light(false)],
     change: motion(false),
   });
-  const unsupported = [...start.unsupported, ...stop.unsupported];
-  if (unsupported.length > 0) {
-    return {
-      pass: false,
-      unsupported: true,
-      detail: `rule not evaluable: ${JSON.stringify(unsupported.slice(0, 3))}`,
-    };
-  }
   const lightKey = "35.13.14";
   const others = [
     ...new Set(
@@ -964,14 +959,27 @@ function motionVerdict(state) {
         .map(({ key }) => key),
     ),
   ];
-  const onWithMotion = start.after[lightKey] === true;
-  const offWithoutMotion = stop.after[lightKey] === false;
-  return result(
-    onWithMotion && others.length === 0 && offWithoutMotion,
-    `motion_on_light=${start.after[lightKey]} motion_off_light=${stop.after[lightKey]}${
-      others.length > 0 ? ` also_changed=${others.join(",")}` : ""
-    }`,
-  );
+  const offOnMotion =
+    start.after[lightKey] === false &&
+    start.writes.some(
+      ({ key, value }) => key === lightKey && value === "false",
+    );
+  const onWithoutMotion = stop.after[lightKey] !== false;
+  const detail = `motion_on_light=${start.after[lightKey]} motion_off_light=${stop.after[lightKey]}${
+    others.length > 0 ? ` also_changed=${others.join(",")}` : ""
+  }`;
+  if (others.length > 0 || offOnMotion || onWithoutMotion) {
+    return result(false, detail);
+  }
+  const unsupported = [...start.unsupported, ...stop.unsupported];
+  if (unsupported.length > 0) {
+    return {
+      pass: false,
+      unsupported: true,
+      detail: `rule not evaluable: ${JSON.stringify(unsupported.slice(0, 3))}; ${detail}`,
+    };
+  }
+  return result(start.after[lightKey] === true, detail);
 }
 
 function newScenarioIndexes(diff) {
