@@ -2,8 +2,9 @@
 // Live conformance probe of the shipped MCP server against a real SprutHub.
 //
 // It talks only through dist/plugin/dist/server.mjs over stdio. Every write
-// goes through a guard: it may create rooms, BLOCK and LOGIC scenarios whose
-// names start with the run prefix, one virtual Lightbulb without links, and
+// goes through a guard: it may create BLOCK and LOGIC scenarios whose names
+// start with the run prefix, rooms and one virtual Lightbulb without links
+// named with the short run name (the hub keeps 30 characters of those), and
 // may change or restore only objects it created in this run. By the owner's
 // rule of 2026-09-24 a BLOCK may act only on that virtual accessory and start
 // only on a one-date cron in FAR_FUTURE_YEAR or later; it is created turned
@@ -191,7 +192,12 @@ class GuardedHub {
     const owned = this.created.get(target);
     if (["room_create", "block_create"].includes(op)) {
       if (target !== this.homeRef) refuse("target must be the home ref");
-      if (!input.name?.startsWith(this.prefix)) refuse("name lacks prefix");
+    }
+    if (op === "block_create" && !input.name?.startsWith(this.prefix)) {
+      refuse("name lacks prefix");
+    }
+    if (op === "room_create" && !isShortProbeName(input.name, this.prefix)) {
+      refuse("room name lacks the short run name or is too long");
     }
     if (op === "block_create") {
       if (input.active !== false || input.on_start !== false) {
@@ -211,7 +217,9 @@ class GuardedHub {
     }
     if (op === "room_name") {
       if (owned?.kind !== "room") refuse("room not created by this run");
-      if (!String(input.value).startsWith(this.prefix)) refuse("name prefix");
+      if (!isShortProbeName(input.value, this.prefix)) {
+        refuse("room name lacks the short run name or is too long");
+      }
     }
     if (op === "block_data_update") {
       if (owned?.kind !== "block") refuse("BLOCK not created by this run");
@@ -331,7 +339,7 @@ class ProbeClient {
     if (this.#hub.virtualAIds.size > 0) {
       throw new GuardError("this run already has its virtual accessory");
     }
-    const name = probeAccessoryName(this.#hub.prefix);
+    const name = probeShortName(this.#hub.prefix);
     const accessory = await this.#client.createAccessory({
       name,
       roomId: Number(roomRef.split("/").at(-1)),
@@ -455,6 +463,14 @@ class ProbeClient {
       });
     });
   }
+}
+
+function isShortProbeName(name, prefix) {
+  return (
+    typeof name === "string" &&
+    name.startsWith(probeShortName(prefix)) &&
+    [...name].length <= SHORT_NAME_MAX
+  );
 }
 
 function scenarioIndex(scenarioRef) {
@@ -1023,7 +1039,7 @@ async function houseUnchanged(ctx, id) {
     ...inspect.entities.scenarios,
   ].filter(
     ({ ref, name }) =>
-      !ctx.hub.created.has(ref) && String(name).startsWith(ctx.prefix),
+      !ctx.hub.created.has(ref) && isProbeName(name, ctx.prefix),
   );
   if (!isDeepStrictEqual(current, expected) || unknown.length > 0) {
     const diff = snapshotDiff(expected, current);
@@ -1079,7 +1095,7 @@ async function stepRoom(ctx) {
     return;
   }
 
-  const name = `${prefix}-room`;
+  const name = `${probeShortName(prefix)}-r`;
   const create = await prepareAndApply(hub, {
     operation: "room_create",
     target_ref: hub.homeRef,
@@ -1111,7 +1127,7 @@ async function stepRoom(ctx) {
     created === name ? "match" : "hub-normalized",
   );
 
-  const renamed = `${prefix}-room-renamed`;
+  const renamed = `${probeShortName(prefix)}-r2`;
   const rename = await prepareAndApply(hub, {
     operation: "room_name",
     target_ref: roomRef,
@@ -1211,7 +1227,7 @@ async function stepVirtualAccessory(ctx) {
   );
   if (!exportFree) return;
 
-  const name = `${prefix}-vroom`;
+  const name = `${probeShortName(prefix)}-v`;
   const room = await prepareAndApply(hub, {
     operation: "room_create",
     target_ref: hub.homeRef,
@@ -1269,7 +1285,7 @@ async function stepVirtualAccessory(ctx) {
     "V accessory create",
     "accessory.create{name,roomId,services:[Lightbulb+Brightness,Hue]}",
     "virtual Lightbulb with On, Brightness and Hue, no links, in the probe room",
-    `accessory/${id}; name ${accessory?.name === probeAccessoryName(prefix) ? "as sent" : "changed"}; virtual ${accessory?.virtual}; On ${Boolean(on)}; Brightness ${Boolean(brightness)}; Hue ${Boolean(hue)}; links ${links.length}`,
+    `accessory/${id}; name ${accessory?.name === probeShortName(prefix) ? "as sent" : "changed"}; virtual ${accessory?.virtual}; On ${Boolean(on)}; Brightness ${Boolean(brightness)}; Hue ${Boolean(hue)}; links ${links.length}`,
     ok ? "match" : "mismatch",
   );
   row(
@@ -2739,11 +2755,11 @@ async function finalChecks(hub) {
   const leftovers = [
     ...inspect.entities.rooms,
     ...inspect.entities.scenarios,
-  ].filter(({ name }) => String(name).startsWith(report.prefix));
+  ].filter(({ name }) => isProbeName(name, report.prefix));
   row(
     "5 no probe objects",
     "inspect_home",
-    "no room or scenario with the run prefix",
+    "no room or scenario with the run prefix or short name",
     leftovers.length === 0
       ? "none left"
       : `left: ${leftovers.map(({ ref }) => relativeRef(ref)).join(", ")}`,
@@ -2938,10 +2954,20 @@ async function recordProbeAccessory(stateDirectory, id) {
   );
 }
 
-// The hub cuts accessory names to 30 characters (2026-09-11), so the
-// accessory carries the run stamp without the long prefix.
-function probeAccessoryName(prefix) {
+// The hub cuts accessory names (2026-09-11) and room names (2026-09-24) to
+// 30 characters, so accessories and rooms carry this short run name.
+const SHORT_NAME_MAX = 30;
+
+function probeShortName(prefix) {
   return `zz-probe-${prefix.slice("zz-sprut-agent-probe-".length)}`;
+}
+
+// Scenarios keep the full prefix; rooms and the accessory the short name.
+function isProbeName(name, prefix) {
+  return (
+    String(name).startsWith(prefix) ||
+    String(name).startsWith(probeShortName(prefix))
+  );
 }
 
 async function readJournal(client, stateDirectory) {
@@ -2963,7 +2989,7 @@ async function readJournal(client, stateDirectory) {
 // the run (name starts with prefix) that the product provably created and
 // that cannot act: a scenario with the product's marker and active=false, a
 // room from the run's room_create with no accessories. It also deletes the
-// run's virtual accessory (probeAccessoryName) when its id is in
+// run's virtual accessory (probeShortName) when its id is in
 // `accessoryIds` and none of its characteristics has a link. Everything else
 // with those names is left and reported. `changes` is the run's change
 // journal and `accessoryIds` the run's accessory record; either is null when
@@ -2987,7 +3013,7 @@ export async function sweepProbeObjects({
     });
   }
   // After the scenarios that act on it and before the room that holds it.
-  const accessoryName = probeAccessoryName(prefix);
+  const accessoryName = probeShortName(prefix);
   for (const accessory of await client.listAccessories()) {
     if (accessory.name !== accessoryName) continue;
     entries.push({
@@ -3000,7 +3026,7 @@ export async function sweepProbeObjects({
     });
   }
   for (const room of (await client.listRooms()).rooms) {
-    if (!room.name.startsWith(prefix)) continue;
+    if (!isProbeName(room.name, prefix)) continue;
     entries.push({
       kind: "room",
       ref: room.ref,
