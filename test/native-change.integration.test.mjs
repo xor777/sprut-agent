@@ -2442,6 +2442,8 @@ async function startHub(port = 0) {
         [params.scenario?.update, "afterUpdate"],
         [params.scenario?.run, "afterRun"],
         [params.scenario?.delete, "afterDelete"],
+        [params.scenario?.list, "afterScenarioList"],
+        [params.logic?.list, "afterLogicList"],
         [params.characteristic?.update, "afterCharacteristicUpdate"],
       ]) {
         if (matches && state.behavior[callbackName]) {
@@ -20660,6 +20662,101 @@ test("another LOGIC at the created LOGIC's index does not lend the change its ty
   assert.equal(restore.status, "conflict");
   assert.deepEqual(scenarioDeletes(hub), []);
   assert.equal(hub.state.scenarios[index].name, "Новый LOGIC владельца");
+});
+
+// Before a created scenario is deleted, restore scans the home: logic.list
+// on every service for a LOGIC's assignments (about 250 services now, twice
+// that later) and every BLOCK for a scenario target, one read after another.
+// A scenario that replaced the created one at its index meanwhile is someone
+// else's and is not deleted.
+test("restore does not delete a scenario that replaced the created one during the scan before the delete", async (t) => {
+  await t.test(
+    "LOGIC, replaced during the assignment scan",
+    async (subtest) => {
+      const { hub, client, changeRef } = await createOwnedLogic(subtest, {
+        active: true,
+      });
+      const index = hub.state.scenarios.findIndex(
+        (scenario) => scenario.index === "created-1",
+      );
+      const ownersLogic = {
+        index: "created-1",
+        name: "LOGIC владельца",
+        desc: "Set the initial brightness once",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "LOGIC",
+        data: firstLogicSource,
+        predefined: false,
+      };
+      hub.state.behavior.afterLogicList = () => {
+        hub.state.scenarios[index] = ownersLogic;
+      };
+
+      const restore = await callChangeTool(
+        client,
+        "restore_native_change",
+        changeRef,
+      );
+      assert.equal(restore.status, "conflict");
+      assert.equal(restore.restore_supported, false);
+      assert.deepEqual(scenarioDeletes(hub), []);
+      assert.equal(hub.state.scenarios[index], ownersLogic);
+    },
+  );
+
+  await t.test(
+    "BLOCK, replaced during the scenario target scan",
+    async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const client = await startClient(subtest, hub, stateDirectory);
+      const data = blockData();
+      delete data.vendorConfiguration;
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "block_create",
+          target_ref: homeRef,
+          name: "Свет по движению",
+          description: "Создан и потом отменяется",
+          active: false,
+          on_start: false,
+          sync: false,
+          data,
+          reason: "Создать BLOCK и потом отменить его",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      const changeRef = prepared.structuredContent.change_ref;
+      const created = await callChangeTool(
+        client,
+        "apply_native_change",
+        changeRef,
+      );
+      assert.equal(created.status, "applied");
+      const index = hub.state.scenarios.findIndex(
+        (scenario) => scenario.index === created.scenario_index,
+      );
+      const ownersBlock = {
+        ...structuredClone(hub.state.scenarios[index]),
+        name: "BLOCK владельца",
+        desc: "Ручная конфигурация",
+      };
+      hub.state.behavior.afterScenarioList = () => {
+        hub.state.scenarios[index] = ownersBlock;
+      };
+
+      const restore = await callChangeTool(
+        client,
+        "restore_native_change",
+        changeRef,
+      );
+      assert.equal(restore.status, "conflict");
+      assert.deepEqual(scenarioDeletes(hub), []);
+      assert.equal(hub.state.scenarios[index], ownersBlock);
+    },
+  );
 });
 
 // Earlier versions mapped the one new type seen by a later get and saved it.
