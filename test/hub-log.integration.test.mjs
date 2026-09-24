@@ -133,19 +133,23 @@ const expectedNewestFirst = [
 ];
 
 // The unconfirmed lastTime contract is modelled in each plausible direction,
-// so paging is checked against the hub rather than against one guess.
+// so paging is checked against the hub rather than against one guess. Every
+// fake answers a plain count with the newest entries.
 function listLog(log, { lastTime, count }, lastTimeSemantics) {
-  let candidates = log;
-  if (lastTime !== undefined) {
-    if (lastTimeSemantics === "before_exclusive") {
-      candidates = log.filter(({ time }) => time < lastTime);
-    } else if (lastTimeSemantics === "before_inclusive") {
-      candidates = log.filter(({ time }) => time <= lastTime);
-    } else if (lastTimeSemantics !== "ignored") {
-      assert.fail(`unknown lastTime semantics ${lastTimeSemantics}`);
-    }
-  }
-  return candidates.slice(-count);
+  if (lastTime === undefined) return log.slice(-count);
+  const window = {
+    before_exclusive: () =>
+      log.filter(({ time }) => time < lastTime).slice(-count),
+    before_inclusive: () =>
+      log.filter(({ time }) => time <= lastTime).slice(-count),
+    oldest_before_inclusive: () =>
+      log.filter(({ time }) => time <= lastTime).slice(0, count),
+    after_exclusive: () =>
+      log.filter(({ time }) => time > lastTime).slice(0, count),
+    ignored: () => log.slice(-count),
+  }[lastTimeSemantics];
+  assert(window, `unknown lastTime semantics ${lastTimeSemantics}`);
+  return window();
 }
 
 async function startHub({
@@ -337,82 +341,136 @@ function denseLog() {
   return log;
 }
 
-for (const lastTimeSemantics of ["before_exclusive", "before_inclusive"]) {
-  test(`read_hub_log pages toward older entries without loss or repeats when lastTime is ${lastTimeSemantics}`, async (t) => {
+// Pages must show the log newest first down to the oldest time shown, with
+// nothing skipped and nothing repeated. Equal native_time keeps the hub order
+// only inside one page, so order within a millisecond is not compared.
+// Fixture messages are unique.
+function assertNoGapOrRepeat(seen, log) {
+  const times = seen.map(({ time }) => time);
+  assert.deepEqual(
+    times,
+    times.toSorted((a, b) => b - a),
+    "pages are not newest first",
+  );
+  const messages = seen.map(({ message }) => message);
+  assert.equal(new Set(messages).size, messages.length, "an entry repeated");
+  const oldest = Math.min(...times);
+  assert.deepEqual(
+    messages.filter((_, index) => times[index] > oldest).toSorted(),
+    log
+      .filter(({ time }) => time > oldest)
+      .map(({ message }) => message)
+      .toSorted(),
+    "an entry newer than the oldest one shown was skipped",
+  );
+}
+
+function allMessages(log) {
+  return log.map(({ message }) => message).toSorted();
+}
+
+// Follows next the way an agent does and reports how paging ended.
+async function pageThrough(client, args) {
+  const seen = [];
+  let pages = 0;
+  for (;;) {
+    pages += 1;
+    assert(pages <= 60, "paging did not terminate");
+    const result = await readLog(client, args);
+    if (result.isError) return { seen, pages, error: result.structuredContent };
+    const { entries, next, page } = result.structuredContent;
+    assert(Buffer.byteLength(result.content[0].text) <= page.max_bytes);
+    seen.push(
+      ...entries.map(({ native_time: time, message }) => ({ time, message })),
+    );
+    if (next === null) return { seen, pages, endReason: page.end_reason };
+    assert.equal(next.tool, "read_hub_log");
+    args = next.arguments;
+  }
+}
+
+for (const [lastTimeSemantics, pagesToTheEnd] of [
+  ["before_exclusive", true],
+  ["before_inclusive", true],
+  ["oldest_before_inclusive", false],
+  ["after_exclusive", false],
+  ["ignored", false],
+]) {
+  test(`read_hub_log shows every entry once or refuses paging when log.list lastTime is ${lastTimeSemantics}`, async (t) => {
     const log = denseLog();
     const hub = await startHub({ log, lastTimeSemantics });
     const client = await startClient(t, hub);
-    const expected = log
-      .map((entry, position) => ({ ...entry, position }))
-      .sort((a, b) => b.time - a.time || a.position - b.position)
-      .map(({ message }) => message);
+    const firstPage = { home_ref: homeRef, count: 5, max_bytes: 2_048 };
 
-    const seen = [];
-    let args = { home_ref: homeRef, count: 5, max_bytes: 2_048 };
-    let pages = 0;
-    while (args) {
-      pages += 1;
-      assert(pages <= 60, "paging did not terminate");
-      const alreadySeen = [...seen];
-      const result = await readLog(client, args);
-      assert.equal(result.isError, undefined, result.content[0]?.text);
-      assert(Buffer.byteLength(result.content[0].text) <= 2_048);
-      const { lastTime, count } = hub.requests.at(-1).params.log.list;
-      if (pages === 1) {
-        assert.deepEqual(hub.requests.at(-1).params.log.list, { count: 5 });
-      } else {
-        // A continuation asks for the entries at or before the oldest one
-        // already returned and refetches that boundary so it can drop it.
-        const boundary = alreadySeen.filter(
-          ({ time }) => time === lastTime || time === lastTime - 1,
-        );
-        assert.equal(
-          Math.min(...alreadySeen.map(({ time }) => time)),
-          lastTime - 1,
-        );
-        assert.equal(count, 5 + boundary.length);
-      }
-      seen.push(
-        ...result.structuredContent.entries.map((entry) => ({
-          time: entry.native_time,
-          message: entry.message,
-        })),
-      );
-      args = result.structuredContent.next?.arguments;
-      if (result.structuredContent.next) {
-        assert.equal(result.structuredContent.next.tool, "read_hub_log");
-      }
-    }
-
-    assert.deepEqual(
-      seen.map(({ message }) => message),
-      expected,
+    const { seen, pages, error, endReason } = await pageThrough(
+      client,
+      firstPage,
     );
-    assert(pages > 2, `expected several pages, got ${pages}`);
+
+    // Whatever lastTime means, pages never skip or repeat an entry.
+    assertNoGapOrRepeat(seen, log);
     assert.equal(hub.requests.length, pages);
     assertOnlyLogListRequests(hub);
+    if (pagesToTheEnd) {
+      assert.equal(error, undefined, JSON.stringify(error));
+      assert.deepEqual(
+        seen.map(({ message }) => message).toSorted(),
+        allMessages(log),
+      );
+      assert.equal(endReason, "hub_returned_fewer_than_requested");
+      assert(pages > 2, `expected several pages, got ${pages}`);
+    } else {
+      assert.equal(
+        error?.error.code,
+        "unsupported_log_paging",
+        `paging ended with ${endReason} after ${seen.length} of ${log.length} entries`,
+      );
+      assert.equal(error.entries, undefined);
+      assert.deepEqual(error.next, {
+        tool: "read_hub_log",
+        arguments: firstPage,
+      });
+    }
   });
 }
 
-test("read_hub_log refuses a continuation when the hub does not page toward older entries", async (t) => {
-  const hub = await startHub({
-    log: denseLog(),
-    lastTimeSemantics: "ignored",
-  });
+test("read_hub_log does not present unreachable older entries as the end of the log", async (t) => {
+  const log = [];
+  let time = 1789120000000;
+  const add = (message) =>
+    log.push({
+      time,
+      level: "LOG_LEVEL_INFO",
+      path: "Scenario.ScenarioBlock.Target.jBlock",
+      message: `Сценарий 23: ${message}`,
+    });
+  for (let index = 0; index < 3; index += 1) {
+    time += 1;
+    add(`before burst ${index}`);
+  }
+  time += 1;
+  for (let index = 0; index < 70; index += 1) add(`burst ${index}`);
+  for (let index = 0; index < 2; index += 1) {
+    time += 10;
+    add(`after burst ${index}`);
+  }
+  const hub = await startHub({ log });
   const client = await startClient(t, hub);
 
-  const first = await readLog(client, { home_ref: homeRef, count: 5 });
-  assert.equal(first.isError, undefined, first.content[0]?.text);
-  assert.notEqual(first.structuredContent.next, null);
-
-  const second = await readLog(client, first.structuredContent.next.arguments);
-  assert.equal(second.isError, true);
-  assert.equal(second.structuredContent.error.code, "unsupported_log_paging");
-  assert.equal(second.structuredContent.entries, undefined);
-  assert.deepEqual(second.structuredContent.next, {
-    tool: "read_hub_log",
-    arguments: { home_ref: homeRef, count: 5, max_bytes: 16_000 },
+  const { seen, error, endReason } = await pageThrough(client, {
+    home_ref: homeRef,
+    count: 5,
   });
+
+  assert.equal(error, undefined, JSON.stringify(error));
+  assertNoGapOrRepeat(seen, log);
+  assert.equal(
+    endReason,
+    seen.length < log.length
+      ? "older_entries_unreachable"
+      : "hub_returned_fewer_than_requested",
+    `${seen.length} of ${log.length} entries shown`,
+  );
 });
 
 test("read_hub_log keeps progress when one message is larger than the page", async (t) => {
@@ -538,7 +596,7 @@ test("read_hub_log rejects an incompatible native log shape", async (t) => {
   }
 });
 
-test("read_hub_log rejects another home, a foreign scenario and a foreign cursor before reading the log", async (t) => {
+test("read_hub_log rejects another home, a foreign scenario, a secret filter and a foreign cursor before reading the log", async (t) => {
   const hub = await startHub({ log: denseLog() });
   const client = await startClient(t, hub);
 
@@ -555,6 +613,21 @@ test("read_hub_log rejects another home, a foreign scenario and a foreign cursor
     foreignScenario.structuredContent.error.code,
     "invalid_log_filter",
   );
+
+  // The filter is echoed in filters and next, so text the result would have
+  // to redact is refused; redacted log text could not match it anyway.
+  for (const contains of [
+    connectionToken,
+    "Authorization: Bearer account-secret-must-not-leak",
+  ]) {
+    const secretFilter = await readLog(client, { home_ref: homeRef, contains });
+    assert.equal(secretFilter.isError, true, secretFilter.content[0].text);
+    assert.equal(
+      secretFilter.structuredContent.error.code,
+      "invalid_log_filter",
+    );
+    assert.equal(secretFilter.content[0].text.includes("must-not-leak"), false);
+  }
 
   const garbage = await readLog(client, {
     home_ref: homeRef,
