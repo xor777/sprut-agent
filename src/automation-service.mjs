@@ -994,9 +994,9 @@ export class AutomationService {
     });
   }
 
-  // Several characteristic_value changes in one call: every command is
-  // validated before any is recorded or sent, then each one goes through the
-  // same journal record and apply lifecycle as prepare → apply.
+  // Several characteristic_value changes in one call: every command's
+  // contract is validated before any is recorded or sent, then each one goes
+  // through the same journal record and apply lifecycle as prepare → apply.
   async sendDeviceCommands({ home_ref: homeRef, commands, reason }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     const targets = parseDeviceCommandTargets(commands, this.hubSerial);
@@ -1029,6 +1029,7 @@ export class AutomationService {
         const draft = await characteristicValueDraft(this, input, inspected);
         items.push({
           command,
+          input,
           draft,
           name: await this.#deviceCommandName(accessories, targets[index]),
         });
@@ -1065,7 +1066,12 @@ export class AutomationService {
     );
   }
 
-  async #sendDeviceCommand({ command, draft, name }, changes, homeRef, reason) {
+  async #sendDeviceCommand(
+    { command, input, draft, name },
+    changes,
+    homeRef,
+    reason,
+  ) {
     const item = {
       target_ref: command.target_ref,
       name,
@@ -1074,6 +1080,7 @@ export class AutomationService {
     };
     let change;
     let earlierContext = {};
+    let previous = {};
     try {
       // A failure here still yields this item's result, so the results of
       // commands already sent in this call are never lost.
@@ -1104,32 +1111,39 @@ export class AutomationService {
           },
         };
       }
-      if (nativeValueAlreadyDesired(draft)) {
+      // No preview was shown for this call, so the value read at validation
+      // is not a baseline to defend: a link or scenario that changed this
+      // characteristic while earlier commands ran is not a conflict. The
+      // command is decided by a read right before its own write, and that
+      // same read is the change's baseline.
+      const current = await prepareCharacteristicValue(this, input);
+      if (nativeValueAlreadyDesired(current)) {
         return {
           ...item,
           status: "already_desired",
           sent: false,
-          observed_value: draft.value.value,
+          observed_value: current.value.value,
           change_ref: null,
           restore_supported: false,
         };
       }
-      change = await this.#recordValueChange(
-        {
-          operation: "characteristic_value",
-          target_ref: command.target_ref,
-          reason,
-        },
-        draft,
-      );
+      previous = { previous_value: current.value.value };
+      change = await this.#recordValueChange({ ...input, reason }, current);
       return {
         ...item,
-        ...deviceCommandOutcome(await this.#applyValueChange(change)),
+        ...previous,
+        ...deviceCommandOutcome(
+          await this.#applyValueChange(change, {
+            value: current.value,
+            contract: current.contract,
+          }),
+        ),
         ...earlierContext,
       };
     } catch (error) {
       return {
         ...item,
+        ...previous,
         ...deviceCommandFailure(change, error),
         ...earlierContext,
       };
@@ -1169,12 +1183,14 @@ export class AutomationService {
     };
   }
 
-  async #applyValueChange(change) {
+  // readState is a read the caller made right before this apply; it is used
+  // instead of a second read only for a change recorded from that same read.
+  async #applyValueChange(change, readState) {
     const lifecycle = nativeValueLifecycle(change);
     if (lifecycle.phase === "restore_completed") {
       return publicStoredNativeChange(change);
     }
-    let currentState;
+    let currentState = readState;
     if (lifecycle.phase === "unresolved_intent") {
       const pending = await this.#reconcilePendingValueChange(change, {
         requireWrite: true,
