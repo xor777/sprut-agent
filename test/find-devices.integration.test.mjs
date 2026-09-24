@@ -153,25 +153,14 @@ test("find_devices state=on lists every service that is on, air purifiers includ
   // The air conditioner is in mode OFF and the open curtains are not "on".
   assert.deepEqual(byDevice("Кондиционер"), []);
   assert.deepEqual(byDevice("Шторы в гостиной"), []);
-  // Devices without on/off are counted, not dropped or listed.
+  // Devices without on/off, the alarm included, are counted, not dropped
+  // or listed as unknown.
   assert(body.not_applicable.sensor > 0);
   assert(body.not_applicable.cover > 0);
   assert(body.not_applicable.button > 0);
-  assert.deepEqual(
-    body.not_evaluated.map(({ device, type, reason }) => ({
-      device,
-      type,
-      reason,
-    })),
-    [
-      {
-        device: "Охрана",
-        type: "SecuritySystem",
-        reason: "no_on_off_characteristic",
-      },
-    ],
-  );
-  assert.equal(body.not_evaluated_total, 1);
+  assert.equal(body.not_applicable.security, 1);
+  assert.deepEqual(body.not_evaluated, []);
+  assert.equal(body.not_evaluated_total, 0);
   assert.equal(JSON.stringify(body).includes("AccessoryInformation"), false);
   assert.match(body.observed_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.match(body.catalog_observed_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -491,6 +480,27 @@ test("without filters find_devices sums services, on and unavailable per room", 
 
 test("unknown values, unavailable devices and hidden services are reported, not dropped", async (t) => {
   const fixture = structuredClone(await loadHomeFixture("apartment"));
+  // Twelve alarm zones listed first by the hub: writable, without on/off.
+  for (let zone = 12; zone >= 1; zone -= 1) {
+    fixture.accessories.unshift({
+      id: 200 + zone,
+      roomId: 1,
+      name: `Охрана зона ${zone}`,
+      extensionKey: "Controller:zigbee",
+      deviceId: `00158d0004a1b${200 + zone}`,
+      services: [
+        {
+          sId: 13,
+          type: "SecuritySystem",
+          name: "Охрана",
+          characteristics: [
+            { cId: 14, type: "SecuritySystemCurrentState", value: 3 },
+            { cId: 15, type: "SecuritySystemTargetState", value: 3 },
+          ],
+        },
+      ],
+    });
+  }
   const bathroomLight = fixture.accessories.find(({ id }) => id === 35);
   bathroomLight.online = false;
   bathroomLight.services[0].characteristics[0].value = true;
@@ -529,6 +539,8 @@ test("unknown values, unavailable devices and hidden services are reported, not 
       },
     ],
   );
+  assert.equal(on.body.not_evaluated_total, 2);
+  assert.equal(on.body.not_applicable.security, 12);
 
   const nightLightRead = await call("find_devices", { query: "ночник" });
   const [entry] = listed(nightLightRead.body);
