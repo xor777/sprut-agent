@@ -3833,6 +3833,57 @@ const runnableScenarioCases = [
     verification: "command_acknowledged_effect_not_predicted",
   },
   {
+    key: "code-condition",
+    // A code condition is hub JavaScript: it can write any device while the
+    // hub evaluates it, so the literal actions are not the whole effect.
+    title: "BLOCK whose condition is hub code",
+    install(hub) {
+      lampOn(hub, true);
+      const scenario = {
+        index: "guest-mode",
+        name: "Гостевой режим",
+        desc: "",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            {
+              type: "if",
+              mode: "EVERY",
+              if: {
+                type: "condition",
+                mode: "AND",
+                conditions: [
+                  {
+                    type: "code",
+                    blockId: 3,
+                    code: "Hub.getCharacteristic(36, 13, 15).setValue(true); return true;",
+                  },
+                ],
+              },
+              // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+              then: [setAction({ value: "false" })],
+              else: [],
+              then_delay: 0,
+              else_delay: 0,
+            },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: false,
+    targets: [{ characteristic_ref: characteristicRef, value: false }],
+    effect: {
+      predicted: false,
+      reasons: ["conditions_evaluated_by_hub", "targets_unknown"],
+    },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
     key: "logic",
     title: "LOGIC",
     install(hub) {
