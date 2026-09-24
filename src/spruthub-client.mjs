@@ -2423,11 +2423,7 @@ export class SprutHubClient {
             deadline,
             serial,
             (response) =>
-              extractNativeList(response, [
-                "accessory",
-                "list",
-                "accessories",
-              ]),
+              extractNativeList(response, ["accessory", "list", "accessories"]),
           )
         : null,
       needAccessories && readRooms
