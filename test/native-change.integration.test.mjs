@@ -9594,6 +9594,146 @@ test("relative actions and scenario runs outside the contract are refused before
   );
 });
 
+function installFiringScenario(hub, index, data) {
+  hub.state.scenarios.push({
+    index,
+    name: `Сценарий ${index}`,
+    desc: "",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "BLOCK",
+    data: typeof data === "string" ? data : JSON.stringify(data),
+  });
+}
+
+function fire(index) {
+  return { type: "scenario", index, mode: "FIRE" };
+}
+
+function blockFiring(index) {
+  const data = blockData();
+  data.targets[0].then.push(fire(index));
+  return data;
+}
+
+test("a BLOCK update that would run itself through other scenarios is refused before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installAllOffScenario(hub);
+  // «Вечер» запускает этот BLOCK, «Ночь» запускает «Вечер».
+  installFiringScenario(hub, "evening", { targets: [fire("existing-block")] });
+  installFiringScenario(hub, "night", { targets: [fire("evening")] });
+  installFiringScenario(hub, "broken", "{");
+  installFiringScenario(hub, "via-broken", { targets: [fire("broken")] });
+  for (let step = 1; step <= 9; step += 1) {
+    installFiringScenario(hub, `step-${step}`, {
+      targets: step < 9 ? [fire(`step-${step + 1}`)] : [setAction()],
+    });
+  }
+  const client = await startClient(t, hub, stateDirectory);
+  const prepareFiring = (index) =>
+    client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_data_update",
+        target_ref: scenarioRef,
+        data: blockFiring(index),
+        reason: `Запускать ${index} после движения`,
+      },
+    });
+
+  const refusals = [];
+  for (const [index, reason] of [
+    ["evening", /existing-block -> evening -> existing-block/],
+    ["night", /existing-block -> night -> evening -> existing-block/],
+    ["via-broken", /broken.*unreadable/],
+    ["step-1", /more than 8/],
+  ]) {
+    const refused = await prepareFiring(index);
+    refusals.push({
+      index,
+      code: refused.structuredContent?.error?.code,
+      explained: reason.test(refused.structuredContent?.error?.message ?? ""),
+    });
+  }
+  assert.deepEqual(
+    refusals,
+    ["evening", "night", "via-broken", "step-1"].map((index) => ({
+      index,
+      code: "invalid_block_data",
+      explained: true,
+    })),
+  );
+
+  // A chain that ends elsewhere is accepted; a loop closed by hand before
+  // apply is refused at apply.
+  const allOff = await prepareFiring("all-off");
+  assert.equal(allOff.isError, undefined, allOff.content[0]?.text);
+  hub.state.scenarios.find(({ index }) => index === "all-off").data =
+    JSON.stringify({ targets: [fire("existing-block")] });
+  const closedLoop = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: allOff.structuredContent.change_ref },
+  });
+  assert.equal(closedLoop.isError, true, closedLoop.content[0]?.text);
+  assert.equal(closedLoop.structuredContent.error.code, "invalid_block_data");
+  assert.match(
+    closedLoop.structuredContent.error.message,
+    /existing-block -> all-off -> existing-block/,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update || scenario?.run),
+    false,
+  );
+});
+
+test("restoring a BLOCK update refuses to bring back a scenario run that now loops", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installAllOffScenario(hub);
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(blockFiring("all-off")),
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockData(),
+      reason: "Больше не запускать «Всё выключить»",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  // The owner then makes «Всё выключить» run this BLOCK.
+  hub.state.scenarios.find(({ index }) => index === "all-off").data =
+    JSON.stringify({ targets: [fire("existing-block")] });
+  const restore = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restore.isError, true, restore.content[0]?.text);
+  assert.equal(restore.structuredContent.error.code, "invalid_block_data");
+  assert.match(
+    restore.structuredContent.error.message,
+    /existing-block -> all-off -> existing-block/,
+  );
+  assert.equal(
+    hub.requests.filter(({ scenario }) => scenario?.update).length,
+    1,
+  );
+  const current = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(current.structuredContent.status, "applied");
+});
+
 const windowStateRef = `${homeRef}/accessory/70/service/13/characteristic/15`;
 
 function installWindowSensor(hub) {
