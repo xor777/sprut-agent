@@ -290,6 +290,51 @@ test("home_overview query finds rooms, scenarios and extensions by name", async 
   assert.equal(none.body.total, 0);
 });
 
+// A light word asks about light, never names a lamp: the device hint of a
+// query counts what its find_devices call lists, lamps without a light word
+// in their names and the relays beside them included.
+test("home_overview's device hint counts what its find_devices call lists", async (t) => {
+  const { hub, client } = await setup(t, await loadHomeFixture("apartment"));
+  const home = "spruthub://hub/sim-apartment-01";
+  // Independent of the product: the living room's lamps and sockets.
+  const livingRoom = hub.state.accessories.filter(({ roomId }) => roomId === 3);
+  const ofType = (types) =>
+    livingRoom.flatMap(({ services }) =>
+      services.filter(({ type }) => types.includes(type)),
+    ).length;
+
+  const lamps = ofType(["Lightbulb"]);
+  const sockets = ofType(["Switch", "Outlet"]);
+  assert.equal(lamps, 3);
+  const queries = ["лампы в гостиной", "свет в гостиной"];
+  const answers = [];
+  for (const query of queries) {
+    const { body } = await overview(client, { query });
+    const found = await client.callTool({
+      name: "find_devices",
+      arguments: { home_ref: home, query },
+    });
+    assert.equal(found.isError, undefined, found.content[0]?.text);
+    answers.push({
+      hint: body.devices ?? null,
+      listed: found.structuredContent.total,
+      switches: found.structuredContent.switches.total,
+    });
+  }
+  assert.deepEqual(
+    answers,
+    queries.map((query) => ({
+      hint: {
+        matches: lamps,
+        switches: sockets,
+        next: { tool: "find_devices", arguments: { home_ref: home, query } },
+      },
+      listed: lamps,
+      switches: sockets,
+    })),
+  );
+});
+
 test("home_overview query returns the ten best matches and the total", async (t) => {
   const fixture = structuredClone(await loadHomeFixture("apartment"));
   for (let index = 1; index <= 12; index += 1) {
