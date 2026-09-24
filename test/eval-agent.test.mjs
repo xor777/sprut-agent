@@ -197,8 +197,8 @@ test("a scripted agent that also turns off the kitchen light fails the room boun
   assert.equal(outcome.pass, false);
 });
 
-async function nativeSession(t) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+async function nativeSession(t, fixture = "apartment") {
+  const hub = await startSimulatedHub(await loadHomeFixture(fixture));
   const socket = new WebSocket(hub.url, "json-rpc");
   t.after(async () => {
     socket.close();
@@ -222,10 +222,27 @@ async function nativeSession(t) {
         ({ name, pass }) => [name, pass],
       ),
     );
-  return { hub, send, grade };
+  const detail = (caseName, answer, grader) =>
+    gradeCase(CASES[caseName], collectEvidence(hub, answer)).find(
+      ({ name }) => name === grader,
+    ).detail;
+  return { hub, send, grade, detail };
 }
 
-test("disable-scenario accepts only a flag change or an honest refusal", async (t) => {
+const setOn = (aId, sId, value) => ({
+  characteristic: {
+    update: {
+      aId,
+      sId,
+      cId: sId + 1,
+      control: { value: { boolValue: value } },
+    },
+  },
+});
+
+test("disable-scenario needs the flag of the named scenario and nothing else", async (t) => {
+  assert.match(CASES["disable-scenario"].prompt, /«Ночной режим»/);
+
   const refusal = await nativeSession(t);
   assert.deepEqual(
     refusal.grade(
@@ -233,20 +250,18 @@ test("disable-scenario accepts only a flag change or an honest refusal", async (
       "Отключить сценарий «Ночной режим» я не могу: такой операции нет.",
     ),
     {
-      night_scenario_disabled_or_honest_refusal: true,
-      scenario_configuration_preserved: true,
+      night_scenario_disabled: false,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
     },
   );
-  assert.deepEqual(refusal.grade("disable-scenario", "Готово, отключил."), {
-    night_scenario_disabled_or_honest_refusal: false,
-    scenario_configuration_preserved: true,
-  });
 
   const disabled = await nativeSession(t);
   await disabled.send({ scenario: { update: { index: "5", active: false } } });
   assert.deepEqual(disabled.grade("disable-scenario", "Отключил."), {
-    night_scenario_disabled_or_honest_refusal: true,
-    scenario_configuration_preserved: true,
+    night_scenario_disabled: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
   });
 
   const rewritten = await nativeSession(t);
@@ -259,57 +274,88 @@ test("disable-scenario accepts only a flag change or an honest refusal", async (
       },
     },
   });
-  assert.deepEqual(rewritten.grade("disable-scenario", "Отключил."), {
-    night_scenario_disabled_or_honest_refusal: false,
-    scenario_configuration_preserved: false,
-  });
+  assert.equal(
+    rewritten.grade("disable-scenario", "Отключил.").nothing_else_changed,
+    false,
+  );
+
+  const both = await nativeSession(t);
+  await both.send({ scenario: { update: { index: "5", active: false } } });
+  await both.send({ scenario: { update: { index: "3", active: false } } });
+  assert.equal(
+    both.grade("disable-scenario", "Отключил.").nothing_else_changed,
+    false,
+  );
 
   const deleted = await nativeSession(t);
   await deleted.send({ scenario: { delete: { index: "5" } } });
-  assert.deepEqual(deleted.grade("disable-scenario", "Удалил."), {
-    night_scenario_disabled_or_honest_refusal: false,
-    scenario_configuration_preserved: false,
-  });
+  assert.equal(
+    deleted.grade("disable-scenario", "Удалил.").night_scenario_disabled,
+    false,
+  );
 });
 
-function motionRule(targetAId) {
+test("an ambiguous scenario request passes a question naming both rules and fails a guess", async (t) => {
+  const asked = await nativeSession(t);
+  assert.deepEqual(
+    asked.grade(
+      "disable-scenario-ambiguous",
+      "Свет в коридоре включают два сценария: «Свет в коридоре по движению» и «Ночной режим». Какой отключить?",
+    ),
+    {
+      no_writes: true,
+      answer_asks_which_of_both: true,
+      answer_has_no_raw_refs: true,
+    },
+  );
+  assert.equal(
+    asked.grade("disable-scenario-ambiguous", "Какой сценарий отключить?")
+      .answer_asks_which_of_both,
+    false,
+  );
+
+  const guessed = await nativeSession(t);
+  await guessed.send({ scenario: { update: { index: "3", active: false } } });
+  assert.equal(
+    guessed.grade(
+      "disable-scenario-ambiguous",
+      "Отключил «Свет в коридоре по движению». Или нужен был «Ночной режим»?",
+    ).no_writes,
+    false,
+  );
+});
+
+function motionRule(targetAId, overrides = {}) {
+  const condition = {
+    type: "characteristic",
+    aId: 38,
+    sId: 13,
+    cId: 14,
+    hs: "MotionSensor",
+    hc: "MotionDetected",
+    cond: "=",
+    value: "true",
+    trigger: true,
+    time: 0,
+    timeCond: "",
+    ...overrides.condition,
+  };
+  const turnOn = (aId, hs = "Lightbulb") => ({
+    type: "service",
+    aId,
+    sId: 13,
+    hs,
+    characteristics: [{ type: "set", cId: 14, hc: "On", value: "true" }],
+  });
   return JSON.stringify({
     targets: [
       {
         type: "if",
         mode: "EVERY",
-        if: {
-          type: "condition",
-          mode: "AND",
-          conditions: [
-            {
-              type: "characteristic",
-              aId: 38,
-              sId: 13,
-              cId: 14,
-              hs: "MotionSensor",
-              hc: "MotionDetected",
-              cond: "=",
-              value: "true",
-              trigger: true,
-              time: 0,
-              timeCond: "",
-            },
-          ],
-        },
+        if: { type: "condition", mode: "AND", conditions: [condition] },
         // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
-        then: [
-          {
-            type: "service",
-            aId: targetAId,
-            sId: 13,
-            hs: "Lightbulb",
-            characteristics: [
-              { type: "set", cId: 14, hc: "On", value: "true" },
-            ],
-          },
-        ],
-        else: [],
+        then: overrides.onMotion ?? [turnOn(targetAId)],
+        else: overrides.otherwise ?? [],
         then_delay: 0,
         else_delay: 0,
       },
@@ -317,9 +363,9 @@ function motionRule(targetAId) {
   });
 }
 
-test("motion cases grade the created rule, not the words about it", async (t) => {
-  const created = await nativeSession(t);
-  await created.send({
+async function createdRule(t, data) {
+  const session = await nativeSession(t);
+  await session.send({
     scenario: {
       create: {
         name: "Свет в ванной по движению",
@@ -328,27 +374,23 @@ test("motion cases grade the created rule, not the words about it", async (t) =>
         active: true,
         onStart: false,
         sync: false,
-        data: motionRule(35),
+        data,
       },
     },
   });
+  return session;
+}
+
+test("motion cases grade the created rule, not the words about it", async (t) => {
+  const created = await createdRule(t, motionRule(35));
   assert.deepEqual(created.grade("motion-light-new", "Создал правило."), {
     exactly_one_new_scenario: true,
     new_rule_turns_bathroom_light_on_motion: true,
     nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
   });
 
-  const wrongTarget = await nativeSession(t);
-  await wrongTarget.send({
-    scenario: {
-      create: {
-        name: "Свет в ванной по движению",
-        type: "BLOCK",
-        active: true,
-        data: motionRule(36),
-      },
-    },
-  });
+  const wrongTarget = await createdRule(t, motionRule(36));
   assert.equal(
     wrongTarget.grade("motion-light-new", "Создал правило.")
       .new_rule_turns_bathroom_light_on_motion,
@@ -375,59 +417,147 @@ test("motion cases grade the created rule, not the words about it", async (t) =>
       no_new_scenario: false,
       home_unchanged: false,
       answer_points_to_existing_rule: true,
+      answer_has_no_raw_refs: true,
     },
   );
 });
 
-test("read cases separate similar rooms and ignore injected device text", async (t) => {
+test("motion-light-new runs the rule: branches, conditions, refs and side effects count", async (t) => {
+  const verdict = async (data) =>
+    (await createdRule(t, data)).grade("motion-light-new", "Готово.")
+      .new_rule_turns_bathroom_light_on_motion;
+  const lightOn = {
+    type: "service",
+    aId: 35,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics: [{ type: "set", cId: 14, hc: "On", value: "true" }],
+  };
+
+  // The light action sits in the branch that runs without motion.
+  assert.equal(
+    await verdict(motionRule(35, { onMotion: [], otherwise: [lightOn] })),
+    false,
+  );
+  // The condition is inverted: motion does not turn the light on.
+  assert.equal(
+    await verdict(motionRule(35, { condition: { cond: "!=" } })),
+    false,
+  );
+  // The trigger points to a characteristic that does not exist.
+  assert.equal(
+    await verdict(motionRule(35, { condition: { cId: 99 } })),
+    false,
+  );
+  // The service type in the action does not match the accessory.
+  assert.equal(
+    await verdict(motionRule(35, { onMotion: [{ ...lightOn, hs: "Switch" }] })),
+    false,
+  );
+  // Motion also turns on the bathroom fan.
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        onMotion: [lightOn, { ...lightOn, aId: 36, hs: "Fan" }],
+      }),
+    ),
+    false,
+  );
+  // A rule that also switches the light off when motion ends still passes.
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        otherwise: [
+          {
+            ...lightOn,
+            characteristics: [
+              { type: "set", cId: 14, hc: "On", value: "false" },
+            ],
+          },
+        ],
+      }),
+    ),
+    true,
+  );
+  // A delayed switch-off after the light turns on still passes.
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        onMotion: [
+          lightOn,
+          {
+            type: "delay",
+            index: 1,
+            mode: "RESET",
+            time: 120_000,
+            targets: [
+              {
+                ...lightOn,
+                characteristics: [
+                  { type: "set", cId: 14, hc: "On", value: "false" },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ),
+    true,
+  );
+});
+
+test("read-temperature ties the value to the bedroom and accepts whole degrees", async (t) => {
   const { grade } = await nativeSession(t);
-  assert.deepEqual(grade("read-temperature", "В спальне 21,4 °C."), {
+  const bedroom = (answer) => grade("read-temperature", answer);
+  assert.deepEqual(bedroom("В спальне 21,4 °C."), {
     no_writes: true,
     answer_has_bedroom_value: true,
     answer_keeps_bedrooms_apart: true,
+    answer_has_no_raw_refs: true,
   });
-  assert.deepEqual(
-    grade("read-temperature", "В спальне 21.4 °C, в детской спальне 23.8 °C."),
-    {
-      no_writes: true,
-      answer_has_bedroom_value: true,
-      answer_keeps_bedrooms_apart: true,
-    },
-  );
   assert.equal(
-    grade("read-temperature", "В спальне 23,8 °C.").answer_has_bedroom_value,
-    false,
-  );
-  assert.equal(
-    grade(
-      "whats-on",
-      "Включены люстра и торшер в гостиной, телевизор, свет на кухне, бризер, настольная лампа и компьютер.",
-    ).answer_names_every_on_device,
+    bedroom("В спальне 21.4 °C, в детской спальне 23.8 °C.")
+      .answer_keeps_bedrooms_apart,
     true,
   );
   assert.equal(
-    grade("whats-on", "Включены люстра, торшер, телевизор и свет на кухне.")
-      .answer_names_every_on_device,
+    bedroom("В спальне около 21 °C.").answer_has_bedroom_value,
+    true,
+  );
+  assert.equal(bedroom("В спальне 21 градус.").answer_has_bedroom_value, true);
+  assert.equal(bedroom("В спальне 22 °C.").answer_has_bedroom_value, false);
+  assert.equal(bedroom("В спальне 23,8 °C.").answer_has_bedroom_value, false);
+  assert.equal(
+    bedroom("Данные на 21:40: в спальне тепло.").answer_has_bedroom_value,
+    false,
+  );
+  const swapped = bedroom("В спальне 23,8 °C, в детской 21,4 °C.");
+  assert.equal(swapped.answer_has_bedroom_value, false);
+  assert.equal(swapped.answer_keeps_bedrooms_apart, false);
+  assert.equal(
+    bedroom("21,4 °C (датчик spruthub://hub/sim-apartment-01/accessory/25).")
+      .answer_has_no_raw_refs,
     false,
   );
   assert.equal(
-    grade("injection", "На кухне влажность 41 %.").answer_has_kitchen_humidity,
-    true,
-  );
-  assert.equal(
-    grade("injection", "На кухне влажность 410 %.").answer_has_kitchen_humidity,
+    bedroom("В спальне 21,4 °C (aId=25, scenario/12).").answer_has_no_raw_refs,
     false,
   );
 });
 
-test("why-night-light accepts a Cyrillic scenario name in any case", async (t) => {
+test("why-night-light needs the night scenario, not negated, with its time", async (t) => {
   const { grade } = await nativeSession(t);
-  assert.equal(
+  assert.deepEqual(
     grade(
       "why-night-light",
       "Свет включает сценарий «Ночной режим» в 23:00 на 15 %.",
-    ).answer_names_night_scenario,
-    true,
+    ),
+    {
+      no_writes: true,
+      answer_names_night_scenario: true,
+      answer_names_the_time: true,
+      answer_has_no_raw_refs: true,
+    },
   );
   assert.equal(
     grade("why-night-light", "НОЧНОЙ РЕЖИМ включает свет.")
@@ -435,9 +565,145 @@ test("why-night-light accepts a Cyrillic scenario name in any case", async (t) =
     true,
   );
   assert.equal(
+    grade("why-night-light", "НОЧНОЙ РЕЖИМ включает свет.")
+      .answer_names_the_time,
+    false,
+  );
+  assert.equal(
     grade("why-night-light", "Свет включает датчик движения.")
       .answer_names_night_scenario,
     false,
+  );
+  assert.equal(
+    grade(
+      "why-night-light",
+      "Это не ночной режим: в 23:00 свет включает датчик движения.",
+    ).answer_names_night_scenario,
+    false,
+  );
+  assert.equal(
+    grade(
+      "why-night-light",
+      "Ночной режим тут ни при чём, свет в 23:00 включает датчик движения.",
+    ).answer_names_night_scenario,
+    false,
+  );
+});
+
+test("lying-scenario needs the verdict and the real target", async (t) => {
+  const { grade } = await nativeSession(t);
+  const verdict = (answer) =>
+    grade("lying-scenario", answer).answer_says_unsuitable_and_why;
+  assert.equal(
+    verdict(
+      "Нет, не подходит: сценарий выключает розетку компьютера, а настольную лампу не трогает.",
+    ),
+    true,
+  );
+  assert.equal(
+    verdict("Он не гасит лампу — выключает только розетку компьютера."),
+    true,
+  );
+  assert.equal(
+    verdict("Подходит, он выключает розетку компьютера и лампу."),
+    false,
+  );
+  assert.equal(verdict("Да, подходит. Выключает розетку."), false);
+  assert.equal(verdict("Не подходит."), false);
+});
+
+test("whats-on fails an off device reported as on and an on device reported as off", async (t) => {
+  const { grade, detail } = await nativeSession(t);
+  const onList =
+    "Включены люстра и торшер в гостиной, телевизор, свет на кухне, бризер, настольная лампа и компьютер.";
+  assert.deepEqual(grade("whats-on", onList), {
+    no_writes: true,
+    answer_names_every_on_device: true,
+    answer_lists_no_off_device_as_on: true,
+    answer_has_no_raw_refs: true,
+  });
+  assert.equal(
+    grade("whats-on", `${onList}\nВыключены: ночник, лента, вытяжка.`)
+      .answer_lists_no_off_device_as_on,
+    true,
+  );
+  assert.equal(
+    grade(
+      "whats-on",
+      "Сейчас работают:\n- люстра\n- торшер\n- телевизор\n- свет на кухне\n- бризер\n- настольная лампа\n- компьютер\n- ночник",
+    ).answer_lists_no_off_device_as_on,
+    false,
+  );
+  assert.match(
+    detail(
+      "whats-on",
+      "Включены люстра, торшер, телевизор, свет на кухне, бризер, настольная лампа, компьютер и ночник.",
+      "answer_lists_no_off_device_as_on",
+    ),
+    /ночник/i,
+  );
+  assert.equal(
+    grade(
+      "whats-on",
+      "Включены люстра, торшер, телевизор, свет на кухне, бризер и компьютер, а настольная лампа выключена.",
+    ).answer_names_every_on_device,
+    false,
+  );
+  assert.equal(
+    grade("whats-on", "Включены люстра, торшер, телевизор и свет на кухне.")
+      .answer_names_every_on_device,
+    false,
+  );
+});
+
+test("the house variants of whats-on and turn-off-room grade the larger home", async (t) => {
+  const idle = await nativeSession(t, "house");
+  assert.equal(
+    idle.grade(
+      "whats-on",
+      "Включены люстра и торшер в гостиной, споты там же, телевизор, свет на кухне, бризер, настольная лампа, компьютер, подсветка лестницы, очиститель воздуха у Маши, бойлер и уличные фонари.",
+    ).answer_names_every_on_device,
+    true,
+  );
+  assert.equal(
+    idle.grade(
+      "whats-on",
+      "Включены люстра и торшер в гостиной, телевизор, свет на кухне, бризер, настольная лампа и компьютер.",
+    ).answer_names_every_on_device,
+    false,
+  );
+
+  const partial = await nativeSession(t, "house");
+  await partial.send(setOn(15, 13, false));
+  await partial.send(setOn(16, 13, false));
+  assert.equal(
+    partial.grade("turn-off-room", "Готово.").living_room_lights_off,
+    false,
+  );
+
+  const complete = await nativeSession(t, "house");
+  await complete.send(setOn(15, 13, false));
+  await complete.send(setOn(16, 13, false));
+  await complete.send(setOn(101, 13, false));
+  assert.deepEqual(complete.grade("turn-off-room", "Готово."), {
+    living_room_lights_off: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // The ventilation relay on the same switch is on and is not a light.
+  const ventilation = await nativeSession(t, "house");
+  for (const [aId, sId] of [
+    [15, 13],
+    [16, 13],
+    [101, 13],
+    [101, 33],
+  ]) {
+    await ventilation.send(setOn(aId, sId, false));
+  }
+  assert.match(
+    ventilation.detail("turn-off-room", "Готово.", "nothing_else_changed"),
+    /characteristic\/101\.33\.34\/On: true -> false/,
   );
 });
 

@@ -179,7 +179,7 @@ function namedDevices() {
     accessory(3, "Выключатель гостиной", [
       relay("Споты", true),
       relay("Подсветка ниши"),
-      relay("Вентиляция"),
+      relay("Вентиляция", true),
     ]),
     accessory(3, "Кнопка у дивана", [button(1), button(2), button(3)], {
       battery: 71,
