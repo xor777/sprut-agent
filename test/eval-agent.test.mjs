@@ -1302,6 +1302,40 @@ test("motion-light-new runs the rule: branches, conditions, refs and side effect
     assert.notEqual(rule.unsupported, true, label);
     assert.equal(failureClass(graders), "agent", label);
   }
+
+  // The vendor wiki («Триггеры в сценариях»): a trigger inside a nested
+  // «Если» runs only its own part, after the conditions above it. Where
+  // that and running the whole BLOCK disagree, the grader does not choose.
+  const dark = {
+    ...lightSensorHeld,
+    time: 0,
+    timeCond: "",
+  };
+  const nestedOnly = await ruleGraders(
+    block(ifNode([dark], [ifNode([motionHeld("true", "", 0)], [lightOn])])),
+  );
+  assert.equal(nestedOnly.rule.pass, true, nestedOnly.rule.detail);
+  const nestedBesideFan = await ruleGraders(
+    block(
+      { ...lightOn, aId: 36, hs: "Fan" },
+      ifNode([dark], [ifNode([motionHeld("true", "", 0)], [lightOn])]),
+    ),
+  );
+  assert.equal(nestedBesideFan.rule.pass, false);
+  assert.equal(
+    nestedBesideFan.rule.unsupported,
+    true,
+    nestedBesideFan.rule.detail,
+  );
+  assert.equal(failureClass(nestedBesideFan.graders), "grader_unsupported");
+  // A trigger of the top-level «Если» still runs the whole BLOCK.
+  const topLevelBesideFan = await ruleGraders(
+    block(
+      { ...lightOn, aId: 36, hs: "Fan" },
+      ifNode([motionHeld("true", "", 0)], [lightOn]),
+    ),
+  );
+  assert.equal(failureClass(topLevelBesideFan.graders), "agent");
 });
 
 test("read-temperature ties the value to the bedroom and accepts whole degrees", async (t) => {
