@@ -10410,6 +10410,18 @@ function refreshLogicAssignmentReady(change, currentTypes) {
     type !== undefined && currentTypes.includes(type);
 }
 
+// Restore sends a delete only after the type mapped at the create passes the
+// assignment check. A restored record without that type had its delete sent
+// by an earlier version after checking a type that version may have mapped
+// by a later read, so the LOGIC's own assignments were not ruled out.
+function logicDeleteAssignmentCheckUnproven(change) {
+  return (
+    change.kind === "logic_source_create" &&
+    change.status === "restored" &&
+    createdLogicMapping(change).type === undefined
+  );
+}
+
 function logicSourceContract(mode) {
   return {
     version: "2026-09-11",
@@ -11280,6 +11292,9 @@ function publicNativeChange(
       ...(mappingVisible && mapping.reason
         ? { logic_mapping_reason: mapping.reason }
         : {}),
+      ...(logicDeleteAssignmentCheckUnproven(change)
+        ? { logic_assignments_may_remain: true }
+        : {}),
       ...(logicRef ? { logic_ref: logicRef } : {}),
       ...(configurationMatches !== undefined
         ? { configuration_matches: configurationMatches }
@@ -11312,6 +11327,11 @@ function publicNativeChange(
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "Deletion requires the native logic type mapped at the create and scans its current assignments across the home and the scenario targets of BLOCKs. Without that mapping (the read right after the create failed, showed the LOGIC turned off, or showed no new type on the selected service or several) restore never deletes the LOGIC: logic.types is read per service, so an assignment on another service cannot be ruled out. The mapped type is the one new type on the selected service right after the create; if another LOGIC's type appeared there during the create while this LOGIC's own type was not listed, the check covers the wrong type. SprutHub exposes no compare-and-set after that check.",
+        ...(logicDeleteAssignmentCheckUnproven(change)
+          ? [
+              "An earlier version deleted this LOGIC after checking the assignments of a type not mapped at its create, so assignments of its own type may remain on devices (logic_assignments_may_remain).",
+            ]
+          : []),
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
           : change.owned_target_absent_observed === true
