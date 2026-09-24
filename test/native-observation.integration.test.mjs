@@ -17,9 +17,12 @@ const otherHomeRef = "spruthub://hub/home%2FB";
 const characteristicRef = `${homeRef}/accessory/34/service/13/characteristic/15`;
 const scenarioRef = `${homeRef}/scenario/23`;
 
+// timeZone is the TimeZone of the home settings window (window.get with the
+// root key ""), or null for a hub that refuses window.get.
 async function startHub({
   subscribeDelayMs = 0,
   logSubscribeErrorAt = null,
+  timeZone = null,
 } = {}) {
   const requests = [];
   const connections = [];
@@ -127,6 +130,28 @@ async function startHub({
         result = { log: { unsubscribe: {} } };
       } else if (request.params?.server?.ping) {
         result = { server: { ping: {} } };
+      } else if (request.params?.window?.get?.windowKey === "") {
+        if (timeZone === null) {
+          error = { code: -32601, message: "window.get refused" };
+        } else {
+          result = {
+            window: {
+              get: {
+                windowKey: "",
+                options: [
+                  {
+                    key: "TimeZone",
+                    type: "GenericString",
+                    inputType: "LIST",
+                    read: true,
+                    write: true,
+                    value: { stringValue: timeZone },
+                  },
+                ],
+              },
+            },
+          };
+        }
       } else {
         assert.fail(
           `unsupported test request: ${JSON.stringify(request.params)}`,
@@ -436,6 +461,75 @@ test("native observation preserves repeated partial events and filters its selec
       .filter(({ params }) => params.log?.unsubscribe)
       .map(({ params }) => params.log.unsubscribe),
     [{ uuid: "log-subscription-1" }],
+  );
+});
+
+// read_hub_log sends agents here to see a scenario run; UTC times read as
+// the owner's clock gave «06:42» for 09:42 hub time.
+test("native observation gives its times on the hub's clock with its UTC offset", async (t) => {
+  const onHubClock = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+03:00$/;
+  const utc = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const observe = async (timeZone) => {
+    const hub = await startHub({ timeZone });
+    const client = await startClient(t, hub);
+    const before = Date.now();
+    const started = await startObservation(client);
+    const after = Date.now();
+    hub.send({
+      event: { scenario: { index: "23", type: "FIRE", blockId: 7 } },
+    });
+    hub.send({
+      event: {
+        log: {
+          log: [
+            {
+              time: 1789120490692,
+              level: "LOG_LEVEL_INFO",
+              path: "Scenario.ScenarioBlock.Target.jBlock",
+              message:
+                "Сценарий 23: jTargetDelay_4 time=3000, mode=RESET, index=1",
+            },
+          ],
+        },
+      },
+    });
+    const completed = await getObservation(client, started.observation_ref, 2);
+    assert.equal(completed.status, "completed");
+    const startedAt = Date.parse(started.timing.started_at);
+    assert(
+      startedAt >= before && startedAt <= after,
+      started.timing.started_at,
+    );
+    return {
+      time_zone: [started.time_zone, completed.time_zone],
+      times: [
+        started.timing.started_at,
+        started.timing.planned_end_at,
+        completed.timing.started_at,
+        completed.timing.planned_end_at,
+        completed.timing.ended_at,
+        ...completed.events.map(({ received_at }) => received_at),
+      ],
+      source_timestamps: completed.events
+        .filter(({ kind }) => kind === "scenario_log")
+        .map(({ source_timestamp }) => source_timestamp),
+      limitations: completed.limitations,
+    };
+  };
+
+  const moscow = await observe("Europe/Moscow");
+  assert.deepEqual(moscow.time_zone, ["Europe/Moscow", "Europe/Moscow"]);
+  for (const time of moscow.times) assert.match(time, onHubClock);
+  assert.deepEqual(moscow.source_timestamps, ["2026-09-11T12:54:50.692+03:00"]);
+
+  // Without a zone the times stay UTC and the result says so.
+  const unknown = await observe(null);
+  assert.deepEqual(unknown.time_zone, [null, null]);
+  for (const time of unknown.times) assert.match(time, utc);
+  assert.deepEqual(unknown.source_timestamps, ["2026-09-11T09:54:50.692Z"]);
+  assert(
+    unknown.limitations.some((line) => /\bUTC\b/.test(line)),
+    JSON.stringify(unknown.limitations),
   );
 });
 
