@@ -547,3 +547,156 @@ test("a scenario makes an HTTP request without repeating its query or key", asyn
   ]);
   assert.equal(JSON.stringify(refused).includes("password1"), false);
 });
+
+test("a scenario sets a value from another characteristic", async (t) => {
+  const { hub, client } = await setup(t);
+  const corridorBrightness = `${homeRef}/accessory/14/service/13/characteristic/15`;
+  const nightLightBrightness = `${homeRef}/accessory/26/service/13/characteristic/15`;
+  // «Ночник — такой же яркости, как свет в коридоре, когда тот меняется.»
+  const fromCorridor = (fields = {}) => ({
+    type: "from",
+    cId: 15,
+    hc: "Brightness",
+    value: "",
+    from_aId: 14,
+    from_sId: 13,
+    from_cId: 15,
+    from_hs: "Lightbulb",
+    from_hc: "Brightness",
+    ...fields,
+  });
+  const nightLight = (action) => ({
+    type: "service",
+    aId: 26,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics: [action],
+  });
+  const corridorChanges = {
+    type: "condition",
+    mode: "AND",
+    conditions: [
+      {
+        type: "characteristic",
+        aId: 14,
+        sId: 13,
+        cId: 15,
+        hs: "Lightbulb",
+        hc: "Brightness",
+        trigger: true,
+        cond: ">",
+        value: "0",
+        timeCond: "",
+        time: 0,
+      },
+    ],
+  };
+  const rule = (then) => ({
+    type: "if",
+    mode: "EVERY",
+    if: corridorChanges,
+    then,
+    else: [],
+    then_delay: 0,
+    else_delay: 0,
+  });
+  const data = { targets: [rule([nightLight(fromCorridor())])] };
+  const { prepared, index } = await createBlock(client, data, "Ночник");
+  assert.deepEqual(prepared.block_action_preview.actions, [
+    {
+      configuration_pointer: "/targets/0/then/0/characteristics/0",
+      characteristic_ref: nightLightBrightness,
+      service_type: "Lightbulb",
+      characteristic_type: "Brightness",
+      command: {
+        operation: "from",
+        source: {
+          characteristic_ref: corridorBrightness,
+          service_type: "Lightbulb",
+          characteristic_type: "Brightness",
+          observation: { status: "available", value: 60, kind: "intValue" },
+        },
+        kind: "intValue",
+        execution: "write_if_action_runs",
+      },
+      observation: { status: "available", value: 20, kind: "intValue" },
+      comparison_to_observation: "not_applicable",
+      branch: {
+        condition_pointer: "/targets/0/if",
+        when: "condition_true",
+        coverage: { status: "undisclosed", reason: "inapplicable_form" },
+      },
+    },
+  ]);
+  assert.deepEqual(storedData(hub, index), data);
+
+  const summary = (
+    await call(client, "get_entity", { entity_ref: scenarioRef(index) })
+  ).entity.summary;
+  assert.deepEqual(summary.steps[0].then, [
+    {
+      op: "set_from",
+      device: "Ночник",
+      room: "Спальня",
+      service: "Ночник",
+      characteristic: "Яркость",
+      characteristic_type: "Brightness",
+      source: {
+        device: "Свет в коридоре",
+        room: "Коридор",
+        service: "Свет в коридоре",
+        characteristic: "Яркость",
+        characteristic_type: "Brightness",
+        ref: corridorBrightness,
+      },
+      ref: nightLightBrightness,
+    },
+  ]);
+  // The corridor light is read by the rule: its relations name it as the
+  // trigger and as the source of the night light's value.
+  const relations = (
+    await call(client, "get_entity", {
+      entity_ref: corridorBrightness,
+      include: ["relations"],
+    })
+  ).entity.relations;
+  assert.deepEqual(
+    relations.scenario_roles
+      .filter(({ scenario_ref }) => scenario_ref === scenarioRef(index))
+      .map(({ role, pointer }) => ({ role, pointer })),
+    [
+      {
+        role: "trigger",
+        pointer: "/configuration/value/targets/0/if/conditions/0",
+      },
+      {
+        role: "source",
+        pointer: "/configuration/value/targets/0/then/0/characteristics/0",
+      },
+    ],
+  );
+
+  const each = [];
+  for (const action of [
+    // On is a yes/no value, Brightness a number.
+    fromCorridor({ from_cId: 14, from_hc: "On" }),
+    fromCorridor({ from_cId: 99 }),
+    fromCorridor({ from_hs: "Fan" }),
+    fromCorridor({ value: "5" }),
+    // The night light's own brightness.
+    fromCorridor({ from_aId: 26 }),
+  ]) {
+    each.push(
+      problemsOf(
+        await prepareCreate(client, { targets: [rule([nightLight(action)])] }),
+      ),
+    );
+  }
+  assert.deepEqual(each, [
+    ["/targets/0/then/0/characteristics/0/from_cId"],
+    ["/targets/0/then/0/characteristics/0/from_cId"],
+    ["/targets/0/then/0/characteristics/0/from_hs"],
+    ["/targets/0/then/0/characteristics/0/value"],
+    ["/targets/0/then/0/characteristics/0/from_cId"],
+  ]);
+});
