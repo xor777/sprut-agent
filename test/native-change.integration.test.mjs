@@ -11253,6 +11253,62 @@ test("a BLOCK with the web client's if defaults stays owned and restorable which
   );
 });
 
+test("an if the edit keeps is written as the hub stores it, not as the agent tidied it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // «Свет по движению» made in the web client: an OR group, no mode, no
+  // branch delays, no else; the hub numbers it and keeps its state.
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields({
+      targets: [
+        {
+          ...motionLightIf(...IF_DEFAULT_KEYS),
+          if: conditionGroup(characteristicCondition(), "OR"),
+        },
+        everyIf({
+          when: conditionGroup(characteristicCondition({ trigger: false })),
+          thenActions: [setAction({ cId: 16, hc: "Brightness", value: "20" })],
+        }),
+      ],
+    }),
+  );
+  const storedIf = scenarioData(hub, "existing-block").targets[0];
+
+  const edited = await readBlockConfiguration(client);
+  // The agent writes every default of the first if out and drops what the
+  // hub assigned; it means the same rule.
+  const tidied = edited.targets[0];
+  delete tidied.blockId;
+  delete tidied.state;
+  delete tidied.if.blockId;
+  delete tidied.if.conditions[0].blockId;
+  tidied.if.mode = "AND";
+  Object.assign(tidied, { mode: "EVERY", then_delay: 0, else_delay: 0 });
+  tidied.else = [];
+  // The change the owner asked for: brightness 30 instead of 20.
+  edited.targets[1].then[0].characteristics[0].value = "30";
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Пока есть движение, держать яркость 30",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const [update] = hub.requests.filter(({ scenario }) => scenario?.update);
+  const written = JSON.parse(update.scenario.update.data);
+  assert.deepEqual(
+    {
+      kept_if: written.targets[0],
+      brightness: written.targets[1].then[0].characteristics[0].value,
+    },
+    { kept_if: storedIf, brightness: "30" },
+  );
+});
+
 test("an update that adds an if with the web client's defaults applies and restores when the hub writes them out", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

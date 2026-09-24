@@ -1319,6 +1319,18 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
       arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
     }),
   );
+  // The point shows the BLOCK as the hub holds it: no defaults the hub left
+  // out, its blockIds kept.
+  const shown = toolResult(
+    await client.callTool({
+      name: "get_configuration_point",
+      arguments: { point_ref: saved.point_ref },
+    }),
+  ).entity.entities.find(({ entity_ref }) => entity_ref === scenarioRef);
+  assert.deepEqual(shown.settings.configuration, {
+    format: "json",
+    value: interfaceForm,
+  });
   const compare = async () =>
     comparisonFor(
       toolResult(
@@ -1355,6 +1367,22 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
   const fromEarlierPoint = await compare();
   assert.deepEqual(
     [fromEarlierPoint.status, fromEarlierPoint.changes],
+    ["unchanged", []],
+  );
+  // A point saved by 0.1.44 holds the compared form: if defaults written out.
+  const comparedFormCapture = structuredClone(earlierCapture);
+  Object.assign(comparedFormCapture.targets[0], {
+    mode: "EVERY",
+    then_delay: 0,
+    else_delay: 0,
+    else: [],
+  });
+  point.captured[0].settings.configuration.value = comparedFormCapture;
+  await writeFile(pointFile, `${JSON.stringify(point, null, 2)}\n`);
+  hub.state.scenarios[0].data = JSON.stringify(interfaceForm);
+  const fromComparedFormPoint = await compare();
+  assert.deepEqual(
+    [fromComparedFormPoint.status, fromComparedFormPoint.changes],
     ["unchanged", []],
   );
 
