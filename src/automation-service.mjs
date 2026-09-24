@@ -4791,7 +4791,8 @@ export class AutomationService {
       // LOGIC is on is still listed by logic.list and logic.get once it is
       // off, and a turned-off LOGIC cannot be newly assigned (Not found). So
       // this scan finds every device that uses the LOGIC whether it is on or
-      // off, and with none found a turned-off LOGIC is deleted as it is.
+      // off, and with none found a turned-off LOGIC is deleted without being
+      // turned on.
       const type = createdLogicType(change);
       const assignments = await this.client.findLogicAssignments(type);
       if (assignments.length > 0) {
