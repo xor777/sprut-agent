@@ -30,6 +30,7 @@ const DEFAULT_MAX_BYTES = 16_000;
 const TARGETED_ACCESSORY_READS = 4;
 const TARGETED_ROOM_READS = 2;
 const NOT_EVALUATED_LIMIT = 10;
+const SWITCH_LIMIT = 10;
 const REMAINING_ROOM_LIMIT = 10;
 const SNAPSHOT_TTL_MS = 5 * 60_000;
 const SNAPSHOT_LIMIT = 20;
@@ -259,7 +260,7 @@ export class HomeReads {
         client,
         serial,
         catalog,
-        [...candidates, ...outletsNotNamedAsLights(catalog, selection)],
+        [...candidates, ...switchCandidates(catalog, selection, candidates)],
         deadline,
         selection.roomId,
       );
@@ -294,23 +295,19 @@ export class HomeReads {
       evaluateCandidate(candidate, values),
     );
     if (summary) return { ...base, ...roomSummary(serial, catalog, evaluated) };
-    const outlets = outletsNotNamedAsLights(catalog, selection)
+    const switches = switchCandidates(catalog, selection, candidates)
       .map((candidate) => evaluateCandidate(candidate, values))
-      .filter((item) => matchesState(item, selection.state)).length;
-    return this.#firstPage(base, serial, catalog, evaluated, selection, {
-      ...(outlets > 0
-        ? {
-            outlets_not_named_as_lights: {
-              matches: outlets,
-              note: "Relays and sockets matching these filters whose names do not say light; some may drive lamps.",
-              next: {
-                tool: "find_devices",
-                arguments: { ...selection.args, kind: "outlet" },
-              },
-            },
-          }
-        : {}),
-    });
+      .filter((item) => matchesState(item, selection.state));
+    return this.#firstPage(
+      base,
+      serial,
+      catalog,
+      evaluated,
+      selection,
+      switches.length > 0
+        ? { switches: switchesSection(serial, catalog, switches, selection) }
+        : {},
+    );
   }
 
   #firstPage(base, serial, catalog, evaluated, selection, hints) {
@@ -319,7 +316,14 @@ export class HomeReads {
     const listed = [];
     const notEvaluated = [];
     const notApplicable = {};
+    let deviceFunctions = 0;
     for (const item of evaluated) {
+      // An appliance's own setting is not a device that is on, off or
+      // unavailable of its own.
+      if (stateFilter !== null && item.appliance !== null) {
+        deviceFunctions += 1;
+        continue;
+      }
       if (stateFilter === "on" || stateFilter === "off") {
         if (!item.onState.applicable) {
           notApplicable[item.kind] = (notApplicable[item.kind] ?? 0) + 1;
@@ -378,6 +382,7 @@ export class HomeReads {
               not_applicable: notApplicable,
             }
           : {}),
+        ...(deviceFunctions > 0 ? { device_functions: deviceFunctions } : {}),
       },
     };
     const page = buildPage(snapshot, 0, selection);
@@ -454,6 +459,8 @@ function findSelection(input, serial) {
     roomId = parsed.roomId;
   }
   const query = input.query ?? null;
+  const words = query === null ? [] : queryWords(query);
+  const otherWords = words.filter(({ word }) => !LIGHT_WORD.test(word));
   const limit = input.limit ?? DEFAULT_LIMIT;
   const maxBytes = input.maxBytes ?? DEFAULT_MAX_BYTES;
   const args = {
@@ -477,7 +484,13 @@ function findSelection(input, serial) {
     // Not part of args: once read, the catalog is fresh for next pages.
     refresh: input.refresh === true,
     query,
-    stems: query === null ? null : queryStems(query),
+    stems: query === null ? null : words.map(({ stem }) => stem),
+    // A light question lists beside its answer the standalone relays and
+    // sockets that match its filters without its light words.
+    lightQuestion:
+      input.kind === "light" ||
+      (input.kind === undefined && otherWords.length < words.length),
+    otherWords,
     kind: input.kind ?? null,
     state: input.state ?? null,
     values: input.values !== false,
@@ -499,7 +512,7 @@ function selectCandidates(catalog, selection) {
       continue;
     }
     for (const service of accessory.services ?? []) {
-      const { kind, basis } = serviceKind(service, accessory);
+      const kind = serviceKind(service);
       if (kind === "technical" && !selection.includeTechnical) continue;
       if (selection.kind !== null && kind !== selection.kind) continue;
       if (
@@ -511,19 +524,102 @@ function selectCandidates(catalog, selection) {
       ) {
         continue;
       }
-      candidates.push({ accessory, service, kind, basis });
+      candidates.push({
+        accessory,
+        service,
+        kind,
+        appliance: applianceOf(service, accessory),
+      });
     }
   }
   return candidates;
 }
 
-// With kind=light: the Switch and Outlet services that match the other
-// filters but are not classed as lights. A relay's name may not say what it
-// drives, so a light question points to them instead of leaving them on.
-function outletsNotNamedAsLights(catalog, selection) {
-  return selection.kind === "light"
-    ? selectCandidates(catalog, { ...selection, kind: "outlet" })
-    : [];
+// For a light question: the relays and sockets that are not an appliance's
+// settings and match its filters without the light words, apart from those
+// the answer lists. A relay's name need not say that it drives a lamp; the
+// agent reads the names.
+function switchCandidates(catalog, selection, candidates) {
+  if (!selection.lightQuestion) return [];
+  const listed = new Set(
+    candidates.map(
+      ({ accessory, service }) => `${accessory.id}/${service.sId}`,
+    ),
+  );
+  const stems = selection.otherWords.map(({ stem }) => stem);
+  return selectCandidates(catalog, {
+    ...selection,
+    kind: "switch",
+    stems: stems.length > 0 ? stems : null,
+  }).filter(
+    ({ accessory, service, appliance }) =>
+      appliance === null && !listed.has(`${accessory.id}/${service.sId}`),
+  );
+}
+
+// The switches section of a light answer: how many, the first few with
+// their On ref, and the call that lists them all.
+function switchesSection(serial, catalog, items, selection) {
+  const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
+  const roomOrder = new Map(catalog.rooms.map(({ id }, index) => [id, index]));
+  const orderOf = ({ accessory }) =>
+    roomOrder.get(accessory.roomId) ?? catalog.rooms.length;
+  const { query: _query, ...args } = selection.args;
+  return {
+    total: items.length,
+    entries: [...items]
+      .sort((left, right) => orderOf(left) - orderOf(right))
+      .slice(0, SWITCH_LIMIT)
+      .map((item) => switchEntry(serial, roomsById, item)),
+    note: "Relays and sockets matching the other filters, not settings of an appliance; some may drive lamps: decide by name.",
+    next: {
+      tool: "find_devices",
+      arguments: {
+        ...args,
+        ...(selection.otherWords.length > 0
+          ? {
+              query: selection.otherWords.map(({ word }) => word).join(" "),
+            }
+          : {}),
+        kind: "switch",
+      },
+    },
+  };
+}
+
+function switchEntry(serial, roomsById, item) {
+  const { accessory, service, onState: on } = item;
+  const onControl = (service.characteristics ?? []).find(
+    ({ control }) => (control?.type ?? control?.key) === "On",
+  );
+  return {
+    ref: serviceRef(serial, accessory.id, service.sId),
+    name: service.name,
+    device: accessory.name,
+    room: roomsById.get(accessory.roomId)?.name ?? null,
+    ...(on?.applicable ? { on: on.on } : {}),
+    ...(onControl?.control.write === true
+      ? {
+          on_ref: characteristicRef(
+            serial,
+            accessory.id,
+            service.sId,
+            onControl.cId,
+          ),
+        }
+      : {}),
+  };
+}
+
+// The section as a page shows it: at most limit entries, and the call for
+// the rest only when some are left out.
+function switchesOnPage({ next, ...section }, limit) {
+  const entries = section.entries.slice(0, limit);
+  return {
+    ...section,
+    entries,
+    ...(entries.length < section.total ? { next } : {}),
+  };
 }
 
 // Whether an evaluated service passes a state filter; unknown on/off does
@@ -632,7 +728,7 @@ function evaluateCandidate(candidate, values) {
     accessory,
     service,
     kind: candidate.kind,
-    basis: candidate.basis,
+    appliance: candidate.appliance,
     valuesRead: fresh !== undefined,
     available: fresh === undefined ? null : fresh.online,
     onState:
@@ -667,6 +763,7 @@ function roomSummary(serial, catalog, evaluated) {
     }
     const row = rows.get(roomId);
     row.services += 1;
+    if (item.appliance !== null) continue;
     if (item.onState?.on === true) row.on += 1;
     if (item.available === false) row.unavailable += 1;
   }
@@ -697,7 +794,14 @@ function serviceEntry(serial, item, selection) {
     name: service.name,
     type: service.type,
     kind: item.kind,
-    ...(item.basis ? { kind_basis: item.basis } : {}),
+    ...(item.appliance === null
+      ? {}
+      : {
+          function_of: {
+            kind: serviceKind(item.appliance),
+            service_ref: serviceRef(serial, accessory.id, item.appliance.sId),
+          },
+        }),
     ...(service.visible === false ? { hidden: true } : {}),
     ...(on?.applicable
       ? {
@@ -853,6 +957,12 @@ function assemblePage(snapshot, offset, end, selection, compaction) {
   const extras = { ...snapshot.extras };
   if (compaction >= 2 && extras.not_evaluated) {
     extras.not_evaluated = extras.not_evaluated.slice(0, 3);
+  }
+  if (extras.switches) {
+    extras.switches = switchesOnPage(
+      extras.switches,
+      compaction >= 2 ? 3 : SWITCH_LIMIT,
+    );
   }
   return {
     ...snapshot.base,
@@ -1154,7 +1264,7 @@ function deviceMatchesHint(home, query, rooms, accessories) {
       count +
       (accessory.services ?? []).filter(
         (service) =>
-          serviceKind(service, accessory).kind !== "technical" &&
+          serviceKind(service) !== "technical" &&
           matchesStems(stems, deviceText(service, accessory, rooms.rooms)),
       ).length,
     0,
@@ -1313,19 +1423,30 @@ export function normalizeName(text) {
     .trim();
 }
 
-export function queryStems(query) {
+// The query's words that count, each with its stem.
+function queryWords(query) {
   return normalizeName(query)
     .split(" ")
     .filter((word) => word.length > 1 && !IGNORED_WORDS.has(word))
     .map((word) => {
-      if (word.length < 4 || !/[а-я]$/.test(word)) return word;
+      if (word.length < 4 || !/[а-я]$/.test(word)) return { word, stem: word };
       const ending = ENDINGS.find(
         (candidate) =>
           word.endsWith(candidate) && word.length - candidate.length >= 3,
       );
-      return ending ? word.slice(0, -ending.length) : word;
+      return { word, stem: ending ? word.slice(0, -ending.length) : word };
     });
 }
+
+export function queryStems(query) {
+  return queryWords(query).map(({ stem }) => stem);
+}
+
+// A query word that asks about light in general ("свет", "освещение",
+// "лампы", "подсветка"): then the answer lists the relays beside it. It
+// classifies the question, never a device. A lamp's own name ("торшер")
+// asks for that device and brings no relay list.
+const LIGHT_WORD = /^(?:свет|подсвет|освещ|ламп|light|lamp)/;
 
 export function matchesStems(stems, text) {
   const normalized = normalizeName(text);
@@ -1356,14 +1477,17 @@ function rankMatches(query, candidates) {
 
 // ---- kinds and on/off ------------------------------------------------------
 
-// Household kind of a native service type, in one place. SprutHub service
-// types are the HomeKit Accessory Protocol ones (service.types answers with
-// Apple HAP UUIDs, research/protocol/2026-09-09-type-catalog.json) plus the
-// hub's own C_* types. The owner's home on 2026-09-24 had
-// AccessoryInformation 80, Lightbulb 53, Switch 39 and
-// StatelessProgrammableSwitch 22 of 254 services. A type not listed is
-// "other"; AccessoryInformation and BatteryService are technical and hidden
-// unless asked for, the battery level shows on its device instead.
+// Household kind of a native service type, in one place, from the type
+// only: a name never changes it. SprutHub service types are the HomeKit
+// Accessory Protocol ones (service.types answers with Apple HAP UUIDs,
+// research/protocol/2026-09-09-type-catalog.json) plus the hub's own C_*
+// types. The owner's home on 2026-09-24 had AccessoryInformation 80,
+// Lightbulb 53, Switch 39 and StatelessProgrammableSwitch 22 of 254
+// services. Switch and Outlet share the kind switch: neither says what it
+// drives, and the service's type still tells a socket from a relay. A type
+// not listed is "other"; AccessoryInformation and BatteryService are
+// technical and hidden unless asked for, the battery level shows on its
+// device instead.
 const KIND_BY_TYPE = new Map(
   Object.entries({
     light: ["Lightbulb"],
@@ -1390,7 +1514,7 @@ const KIND_BY_TYPE = new Map(
       "C_WattMeter",
     ],
     cover: ["WindowCovering", "Window", "Door", "Slat", "GarageDoorOpener"],
-    outlet: ["Outlet", "Switch"],
+    switch: ["Switch", "Outlet"],
     security: ["SecuritySystem", "LockMechanism", "LockManagement"],
     button: ["StatelessProgrammableSwitch", "Doorbell"],
     technical: ["AccessoryInformation", "BatteryService"],
@@ -1401,7 +1525,7 @@ export const DEVICE_KINDS = [
   "climate",
   "sensor",
   "cover",
-  "outlet",
+  "switch",
   "air",
   "security",
   "button",
@@ -1410,42 +1534,31 @@ export const DEVICE_KINDS = [
 // Kinds without an on/off: they are counted, not listed, for state filters.
 const NO_ON_OFF_KINDS = new Set(["sensor", "cover", "button", "technical"]);
 
-// A relay or outlet drives whatever is wired to it, and owners name such
-// channels after their lamps. Its own name decides first. A switch of an
-// air conditioner, breezer, purifier or thermostat is one of that device's
-// own functions and takes its kind (the owner's hub on 2026-09-24: 36 of
-// its 41 Switch and Outlet services). Otherwise a generic channel name
-// ("Канал 1") takes the device's name unless it names another load.
-const DEVICE_FUNCTION_TYPES = new Set([
+export function serviceKind(service) {
+  return KIND_BY_TYPE.get(service.type) ?? "other";
+}
+
+// A Switch or Outlet on an accessory with one of these appliances is one of
+// the appliance's settings: display, sound, quiet mode (the owner's hub on
+// 2026-09-24: 36 of its 41 Switch and Outlet services, on Thermostat and
+// AirPurifier accessories). HAP requires of each of these types a measured
+// state, a temperature, a humidity or a purifier state, that a relay channel
+// cannot present. Fan and Fanv2 require only On or Active, so a relay
+// channel set to a fan is one of them, and its other channels stay relays.
+const APPLIANCE_TYPES = new Set([
   "Thermostat",
   "HeaterCooler",
   "AirPurifier",
-  "Fan",
-  "Fanv2",
   "HumidifierDehumidifier",
 ]);
-const LIGHT_NAME =
-  /свет|ламп|люстр|спот|лент|торшер|ночник|фонар|гирлянд|прожектор|софит|(?:^| )бра(?: |$)|(?:^| )led(?: |$)|light|lamp/;
-const OTHER_LOAD_NAME =
-  /вентил|вытяжк|насос|полив|нагрев|бойлер|обогрев|тепл|чайник|кондиц|увлажн|бризер|очистит|клапан|розетк/;
 
-export function serviceKind(service, accessory) {
-  const kind = KIND_BY_TYPE.get(service.type) ?? "other";
-  if (service.type === "Switch" || service.type === "Outlet") {
-    const own = normalizeName(service.name);
-    if (LIGHT_NAME.test(own)) return { kind: "light", basis: "name" };
-    const device = (accessory.services ?? []).find(({ type }) =>
-      DEVICE_FUNCTION_TYPES.has(type),
-    );
-    if (device) return { kind: KIND_BY_TYPE.get(device.type), basis: "device" };
-    if (
-      !OTHER_LOAD_NAME.test(own) &&
-      LIGHT_NAME.test(normalizeName(accessory.name))
-    ) {
-      return { kind: "light", basis: "name" };
-    }
-  }
-  return { kind };
+// The appliance service a switch belongs to, or null.
+function applianceOf(service, accessory) {
+  if (serviceKind(service) !== "switch") return null;
+  return (
+    (accessory.services ?? []).find(({ type }) => APPLIANCE_TYPES.has(type)) ??
+    null
+  );
 }
 
 // On/off of one service, first match wins:
