@@ -429,6 +429,36 @@ export function blockSubgraphHasTrigger(node) {
   return found;
 }
 
+// Scenario targets with mode FIRE anywhere in BLOCK data, including under
+// nodes outside this contract, with JSON pointers relative to the data.
+export function blockScenarioRuns(data) {
+  const runs = [];
+  const visit = (value, pointer) => {
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => {
+        visit(child, `${pointer}/${index}`);
+      });
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (
+      value.type === "scenario" &&
+      value.mode === "FIRE" &&
+      typeof value.index === "string"
+    ) {
+      runs.push({ index: value.index, pointer });
+    }
+    for (const [key, child] of Object.entries(value)) {
+      visit(
+        child,
+        `${pointer}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`,
+      );
+    }
+  };
+  visit(data, "");
+  return runs;
+}
+
 export function blockAffectedRefs(data, homeRef) {
   const refs = [];
   visitKnownBlockNodes(data, (node, kind) => {

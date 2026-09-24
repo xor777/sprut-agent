@@ -5,6 +5,7 @@ import {
   BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
+  blockScenarioRuns,
   blockSubgraphHasTrigger,
   CHARACTERISTIC_HOLD,
   isBlockTrigger,
@@ -4652,6 +4653,7 @@ export class AutomationService {
           allowUnknownFrom: scenarioSnapshot(current.scenario).data,
           allowedPauses: pauseChanges,
           allowActionOnly: true,
+          scenarioIndex: change.target.index,
         });
         // Validation reads current bindings and can outlast a short pause. Rebuild
         // from the immutable baseline immediately afterwards so that such a pause
@@ -5819,7 +5821,7 @@ function blockContract() {
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
       "toggle (boolean), inc and dec (numeric, value is a positive step in the characteristic's unit) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
-      "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
+      "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow the official editor schema; a hub has not been observed running them. ONCE follows the SprutHub Wiki; what CONTINUE keeps, timeCond ">" and milliseconds as the hold unit are assumptions.',
       "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
@@ -6013,6 +6015,11 @@ async function validateBlockData(
       );
     }
   }
+  if (scenarioIndex !== undefined) {
+    for (const run of context.scenarioRuns) {
+      await refuseScenarioRunLoop(run, scenarioIndex, scenarios, client);
+    }
+  }
 
   const accessories = new Map();
   for (const reference of [...context.conditions, ...context.actions]) {
@@ -6100,6 +6107,51 @@ async function validateBlockData(
     );
   }
   return context;
+}
+
+// Bounds the reads of one chain; a longer chain is refused, not assumed safe.
+const SCENARIO_RUN_CHAIN_LIMIT = 8;
+
+// Follows the FIRE targets of BLOCK scenarios from one run of the BLOCK being
+// written. A chain back to it would make the BLOCKs run each other without
+// end. Scenarios run from LOGIC code are not followed.
+async function refuseScenarioRunLoop(run, scenarioIndex, records, client) {
+  const explored = new Set();
+  const walk = async (chain) => {
+    const index = chain[chain.length - 1];
+    if (index === scenarioIndex) {
+      throw invalidBlock(
+        run.path,
+        `scenario ${run.index} runs this BLOCK again (${[scenarioIndex, ...chain].join(" -> ")}); remove a scenario target from that chain`,
+      );
+    }
+    if (explored.has(index)) return;
+    explored.add(index);
+    if (chain.length > SCENARIO_RUN_CHAIN_LIMIT) {
+      throw invalidBlock(
+        run.path,
+        `scenario targets from ${run.index} run more than ${SCENARIO_RUN_CHAIN_LIMIT} scenarios in a row (${chain.join(" -> ")}); a run back to this BLOCK cannot be ruled out`,
+      );
+    }
+    if (!records.has(index)) {
+      records.set(index, await client.getScenario(index));
+    }
+    const record = records.get(index);
+    if (record?.type !== "BLOCK") return;
+    let data;
+    try {
+      data = JSON.parse(record.data);
+    } catch {
+      throw invalidBlock(
+        run.path,
+        `scenario ${index} in the chain from ${run.index} has unreadable BLOCK data; a run back to this BLOCK cannot be ruled out`,
+      );
+    }
+    for (const next of blockScenarioRuns(data)) {
+      await walk([...chain, next.index]);
+    }
+  };
+  await walk([run.index]);
 }
 
 // The hub computes these values at run time from the characteristic.
