@@ -395,6 +395,9 @@ export class HomeReads {
             }
           : {}),
         ...(deviceFunctions > 0 ? { device_functions: deviceFunctions } : {}),
+        ...(listed.length === 0 && selection.words.length > 1
+          ? { query_words: queryWordMatches(catalog, selection, evaluated) }
+          : {}),
       },
     };
     const page = buildPage(snapshot, 0, selection);
@@ -496,6 +499,7 @@ function findSelection(input, serial) {
     // Not part of args: once read, the catalog is fresh for next pages.
     refresh: input.refresh === true,
     query,
+    words,
     stems: query === null ? null : words.map(({ stem }) => stem),
     // A light question lists beside its answer the standalone relays and
     // sockets that match its filters without its light words.
@@ -631,6 +635,21 @@ function switchesOnPage({ next, ...section }, limit) {
     ...section,
     entries,
     ...(entries.length < section.total ? { next } : {}),
+  };
+}
+
+// Why a query of several words found nothing: how many services match all
+// its words before a state filter, and how many each word matches alone,
+// with the other filters.
+function queryWordMatches(catalog, selection, evaluated) {
+  return {
+    matching_all: evaluated.length,
+    matching_each: Object.fromEntries(
+      selection.words.map(({ word, stem }) => [
+        word,
+        selectCandidates(catalog, { ...selection, stems: [stem] }).length,
+      ]),
+    ),
   };
 }
 

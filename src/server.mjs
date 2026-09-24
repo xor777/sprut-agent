@@ -141,7 +141,7 @@ server.registerTool(
         .max(200)
         .optional()
         .describe(
-          'Words that must each start a word of the service, device or room names, Russian word forms included and prepositions ignored, e.g. "свет на кухне".',
+          'Words that must each start a word of the service, device or room names, Russian word forms included and prepositions ignored, e.g. "свет на кухне". When several words find nothing, query_words counts the services matching all of them before the state filter and each word alone.',
         ),
       room_ref: z
         .string()
