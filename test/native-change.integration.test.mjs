@@ -9773,6 +9773,139 @@ test("restoring a BLOCK update refuses to bring back a scenario run that now loo
   assert.equal(current.structuredContent.status, "applied");
 });
 
+test("restoring a created scenario that a BLOCK runs names that BLOCK instead of deleting it", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const createdBlock = await prepareBlockCreate(client, {
+    name: "Вечерний свет",
+    data: rootIfBlockData({ when: conditionGroup(characteristicCondition()) }),
+    reason: "Включать свет по движению",
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: createdBlock.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  const createdIndex = created.structuredContent.scenario_index;
+
+  const runIt = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: blockFiring(createdIndex),
+      reason: "Запускать «Вечерний свет» после движения",
+    },
+  });
+  assert.equal(runIt.isError, undefined, runIt.content[0]?.text);
+  const ranBy = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: runIt.structuredContent.change_ref },
+  });
+  assert.equal(ranBy.structuredContent.status, "applied");
+
+  const blocked = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: createdBlock.structuredContent.change_ref },
+  });
+  assert.equal(blocked.isError, undefined, blocked.content[0]?.text);
+  assert.equal(blocked.structuredContent.status, "conflict");
+  assert.equal(
+    blocked.structuredContent.conflict_reason,
+    "scenario_targets_present",
+  );
+  const pointer = "/configuration/value/targets/0/then/2";
+  assert.deepEqual(blocked.structuredContent.referencing_scenario_targets, [
+    {
+      scenario_ref: scenarioRef,
+      name: "Существующий BLOCK",
+      configuration_pointer: pointer,
+      next: {
+        tool: "get_entity",
+        arguments: {
+          entity_ref: scenarioRef,
+          include: ["configuration"],
+          pointer,
+        },
+      },
+    },
+  ]);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === createdIndex),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.delete),
+    false,
+  );
+
+  // Once the running BLOCK no longer runs it, the created one is deleted.
+  const unrun = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: runIt.structuredContent.change_ref },
+  });
+  assert.equal(unrun.structuredContent.status, "restored");
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: createdBlock.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === createdIndex),
+    false,
+  );
+
+  // The same holds for a created LOGIC run by a BLOCK edited by hand.
+  const logic = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Логика для запуска",
+      description: "Запускается из BLOCK",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC, которую запустит BLOCK",
+    },
+  });
+  const logicCreated = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: logic.structuredContent.change_ref },
+  });
+  assert.equal(logicCreated.structuredContent.status, "applied");
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(
+      blockFiring(logicCreated.structuredContent.scenario_index),
+    ),
+  );
+  const logicBlocked = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: logic.structuredContent.change_ref },
+  });
+  assert.equal(logicBlocked.structuredContent.status, "conflict");
+  assert.equal(
+    logicBlocked.structuredContent.conflict_reason,
+    "scenario_targets_present",
+  );
+  assert.deepEqual(
+    logicBlocked.structuredContent.referencing_scenario_targets.map(
+      ({ scenario_ref, configuration_pointer }) => ({
+        scenario_ref,
+        configuration_pointer,
+      }),
+    ),
+    [{ scenario_ref: scenarioRef, configuration_pointer: pointer }],
+  );
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === logicCreated.structuredContent.scenario_index,
+    ),
+    true,
+  );
+});
+
 const windowStateRef = `${homeRef}/accessory/70/service/13/characteristic/15`;
 
 function installWindowSensor(hub) {
@@ -10690,11 +10823,13 @@ test("BLOCK create restore confirms real SprutHub not-found after restart withou
       2,
     "restore and post-restart observations must use fresh full catalogs",
   );
+  // Before the delete, restore reads each other BLOCK once for scenario
+  // targets that run the created one; the marker lookup reads none.
   assert.equal(
     hub.requests.filter(
       ({ scenario }) => scenario?.get?.index === "existing-block",
     ).length,
-    unrelatedScenarioReadsBeforeRestore,
+    unrelatedScenarioReadsBeforeRestore + 1,
     "marker lookup must not read unrelated scenario configurations",
   );
 });
