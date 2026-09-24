@@ -1157,6 +1157,27 @@ test("read-temperature ties the value to the bedroom and accepts whole degrees",
   );
 });
 
+test("an answer with a bare id or number sign fails answer_has_no_raw_refs", async (t) => {
+  const { grade } = await nativeSession(t);
+  const clean = (answer) => grade("turn-off-room", answer).answer_has_no_raw_refs;
+  for (const leaked of [
+    "Выключил люстру (id 15) и торшер.",
+    "Выключил люстру (ID: 15).",
+    "Выключил люстру, id=15.",
+    "Выключил свет сценарием #11.",
+    "Сценарий #7 отключён.",
+  ]) {
+    assert.equal(clean(leaked), false, leaked);
+  }
+  for (const plain of [
+    "# Итог\nВыключил люстру и торшер.",
+    "Выключил люстру (80 %) и торшер (55 %).",
+    "Выключил люстру и торшер в 23:00, это 2 устройства.",
+  ]) {
+    assert.equal(clean(plain), true, plain);
+  }
+});
+
 test("why-night-light needs the night scenario, not negated, with its time", async (t) => {
   const { grade } = await nativeSession(t);
   assert.deepEqual(
