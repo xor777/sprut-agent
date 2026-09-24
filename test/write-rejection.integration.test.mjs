@@ -444,6 +444,40 @@ test("a refused later step of a virtual light group reports the partial group it
   }
 });
 
+test("a refused scenario run is a recorded rejection that is never resent", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "scenario_run",
+    target_ref: `${homeRef}/scenario/11`,
+    reason: "Выключить всё",
+  });
+  hub.refuseNext("scenario.run");
+  const rejection = unsupported("scenario.run");
+
+  const refused = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.change_ref },
+  });
+
+  assertRefused(refused, prepared.change_ref, rejection);
+  const detail = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assertRecordedRejection(detail, {
+    status: "not_applied",
+    direction: "apply",
+    rejection,
+  });
+  assert.equal(detail.command_delivery.status, "rejected");
+  const repeated = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(repeated.status, "not_applied");
+  assert.equal(requestsTo(hub, "scenario.run").length, 1);
+  assert.deepEqual(hub.state.runs, []);
+});
+
 test("a device command the hub refuses reports the hub reason in its item", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
