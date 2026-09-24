@@ -109,10 +109,19 @@ export const METHOD_EVIDENCE = {
   "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
   "link.remove": [OBSERVED, "2026-09-11-virtual-light-group"],
   "logic.types": [OBSERVED, "2026-09-10-native-logic"],
-  "logic.list": [OBSERVED, "2026-09-10-native-logic"],
-  "logic.get": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.list": [
+    OBSERVED,
+    "2026-09-10-native-logic; an assignment made while its LOGIC is on is still listed once the LOGIC is off (2026-09-24-live-conformance-3, step 4n)",
+  ],
+  "logic.get": [
+    OBSERVED,
+    "2026-09-10-native-logic; answers for an assignment made while its LOGIC is on once the LOGIC is off (2026-09-24-live-conformance-3, step 4n)",
+  ],
   "logic.getOptions": [OBSERVED, "2026-09-10-native-logic"],
-  "logic.create": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.create": [
+    OBSERVED,
+    "2026-09-10-native-logic; the type of a turned-off user LOGIC is refused with Not found (2026-09-24-live-conformance-3)",
+  ],
   "logic.update": [OBSERVED, "2026-09-10-native-logic"],
   "logic.setOptions": [OBSERVED, "2026-09-10-native-logic"],
   "logic.delete": [OBSERVED, "2026-09-10-native-logic"],
@@ -1429,6 +1438,8 @@ const HANDLERS = {
       ({ options: _options, ...logicType }) => logicType,
     ),
   }),
+  // An assignment stays listed whether its LOGIC is on or off (owner hub,
+  // 2026-09-24, live-conformance-3).
   "logic.list": (state, { aId, sId }) => {
     requireService(state, aId, sId);
     return {
@@ -1447,7 +1458,21 @@ const HANDLERS = {
     const logicType = availableLogicTypes(state, service).find(
       (candidate) => candidate.type === type,
     );
-    if (!logicType) throw invalidParams(`Logic type ${type} is not available`);
+    if (!logicType) {
+      // SprutHub 3.0.0 answered Not found for the type of a turned-off user
+      // LOGIC (owner hub, 2026-09-24, live-conformance-3).
+      if (
+        state.scenarios.some(
+          (scenario) =>
+            scenario.type === "LOGIC" &&
+            scenario.active !== true &&
+            logicTypeForScenario(scenario.index) === type,
+        )
+      ) {
+        throw notFound(`Logic type: ${type}`);
+      }
+      throw invalidParams(`Logic type ${type} is not available`);
+    }
     if (findLogic(state, { aId, sId, type })) {
       throw invalidParams(`Logic ${type} is already assigned`);
     }

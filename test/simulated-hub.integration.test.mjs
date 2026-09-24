@@ -792,6 +792,59 @@ test("an active lamp logic switches the lamp with its brightness", async (t) => 
   );
 });
 
+// Owner's hub, 3.0.0, 2026-09-24 (live-conformance-3): a user LOGIC's type,
+// its scenario index, is listed and assignable only while the LOGIC is on,
+// and assigning a turned-off one answered Not found. An assignment made while
+// it was on was still listed by logic.list and logic.get once it was off.
+test("the simulator keeps a turned-off LOGIC's assignment listed and refuses a new one", async (t) => {
+  const { send } = await rawSession(t);
+  const created = (
+    await send({
+      scenario: {
+        create: {
+          type: "LOGIC",
+          active: true,
+          data: 'info = { name: "Свет по уровню", sourceServices: [HS.Lightbulb] };\n\nfunction trigger() {}',
+        },
+      },
+    })
+  ).result.scenario.create;
+  const type = created.index;
+  const types = async (aId) =>
+    (
+      await send({ logic: { types: { aId, sId: 13 } } })
+    ).result.logic.types.logicTypes.map((entry) => entry.type);
+  const assigned = async (aId) =>
+    (
+      (await send({ logic: { list: { aId, sId: 13 } } })).result.logic.list
+        .logics ?? []
+    ).filter((logic) => logic.type === type);
+  assert.ok((await types(16)).includes(type));
+  const assign = await send({ logic: { create: { aId: 16, sId: 13, type } } });
+  assert.equal(assign.error, undefined);
+
+  await send({
+    window: {
+      update: {
+        windowKey: created.optionsWindow,
+        options: [{ key: "Active", value: { boolValue: false } }],
+      },
+    },
+  });
+  assert.equal((await types(16)).includes(type), false);
+  assert.deepEqual(
+    (await assigned(16)).map((logic) => logic.type),
+    [type],
+  );
+  const read = await send({ logic: { get: { aId: 16, sId: 13, type } } });
+  assert.equal(read.result.logic.get.type, type);
+
+  const refused = await send({ logic: { create: { aId: 15, sId: 13, type } } });
+  assert.equal(refused.error?.code, -32603);
+  assert.match(refused.error.message, /^Not found/);
+  assert.deepEqual(await assigned(15), []);
+});
+
 test("the simulator omits empty native lists and stores BLOCK values as the hub does", async (t) => {
   const { send } = await rawSession(t);
   const list = async (params) => {
