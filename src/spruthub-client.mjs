@@ -35,8 +35,10 @@ const HOME_CATALOG_TTL_MS = 5 * 60_000;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
-// than hold back what was read.
-const HUB_TIME_ZONE_READ_MS = 2_000;
+// than hold back what was read. The window read itself keeps the request
+// deadline, so that its answer still comes and a request that runs out of
+// time does not close the connection under the others.
+const HUB_TIME_ZONE_WAIT_MS = 2_000;
 // A BLOCK names its devices from the home catalog; the ones the catalog
 // lacks are read one by one up to this many, past that the catalog is read.
 const REFERENCED_ACCESSORY_READS = 16;
@@ -125,6 +127,7 @@ export class SprutHubClient {
   #connectingSocket;
   #homeCatalogs = new Map();
   #hubTimeZones = new Map();
+  #hubTimeZoneReads = new Map();
   #nextRequestId = 1;
   #observation;
   #observationClient;
@@ -757,8 +760,8 @@ export class SprutHubClient {
       ["log", "list", "log"],
       incompatibleHubLog,
     );
-    // Read after the log: a zone read that runs out of time closes the
-    // connection, which must not cost the log already read.
+    // Read after the log, which a hub slow to give its settings window
+    // then does not hold back.
     const timeZone = await this.#hubTimeZone(serial, deadline);
     return {
       status: "ok",
@@ -778,9 +781,10 @@ export class SprutHubClient {
   }
 
   // The hub's time zone, kept per home as the home catalog is: for
-  // HOME_CATALOG_TTL_MS and until a write of this client. It is read within
-  // HUB_TIME_ZONE_READ_MS; a zone that is not read is not kept, so the next
-  // read asks again. null keeps UTC.
+  // HOME_CATALOG_TTL_MS and until a write of this client. A caller waits for
+  // it at most HUB_TIME_ZONE_WAIT_MS and then keeps UTC (null); the read goes
+  // on, later callers share it, and its answer is kept when it comes. A zone
+  // that is not read is not kept, so the next read asks again.
   async #hubTimeZone(serial, deadline) {
     const cached = this.#hubTimeZones.get(serial);
     if (
@@ -791,14 +795,42 @@ export class SprutHubClient {
       return cached.zone;
     }
     const generation = this.#writeGeneration;
-    const zone = await this.#readHubTimeZone(
-      serial,
-      Math.min(deadline, Date.now() + HUB_TIME_ZONE_READ_MS),
-    );
-    if (zone !== null && generation === this.#writeGeneration) {
-      this.#hubTimeZones.set(serial, { zone, generation, readAt: Date.now() });
+    let reading = this.#hubTimeZoneReads.get(serial);
+    if (reading?.generation !== generation) {
+      reading = {
+        generation,
+        zone: this.#readHubTimeZone(serial, deadline).then((zone) => {
+          if (zone !== null && generation === this.#writeGeneration) {
+            this.#hubTimeZones.set(serial, {
+              zone,
+              generation,
+              readAt: Date.now(),
+            });
+          }
+          return zone;
+        }),
+      };
+      this.#hubTimeZoneReads.set(serial, reading);
+      const forget = () => {
+        if (this.#hubTimeZoneReads.get(serial) === reading) {
+          this.#hubTimeZoneReads.delete(serial);
+        }
+      };
+      reading.zone.then(forget, forget);
     }
-    return zone;
+    let timer;
+    const gaveUp = new Promise((resolve) => {
+      timer = setTimeout(
+        resolve,
+        Math.max(0, Math.min(HUB_TIME_ZONE_WAIT_MS, deadline - Date.now())),
+        null,
+      );
+    });
+    try {
+      return await Promise.race([reading.zone, gaveUp]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // TimeZone in the home settings window, which window.get returns for the
