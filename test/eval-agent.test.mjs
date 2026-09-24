@@ -116,6 +116,7 @@ test("a scripted agent that turns off only living room lights passes through the
       ["no_simulator_gap", true],
       ["living_room_lights_off", true],
       ["nothing_else_changed", true],
+      ["answer_has_no_raw_refs", true],
     ],
   );
   assert.equal(outcome.pass, true);

@@ -1964,19 +1964,239 @@ function runScenario(state, scenario) {
         run.skipped.push({ type: action.type, blockId: action.blockId });
         continue;
       }
-      const [field] = Object.keys(characteristic.control.value);
-      characteristic.control.value = {
-        [field]:
-          field === "boolValue"
-            ? action.value === "true"
-            : field === "stringValue"
-              ? action.value
-              : Number(action.value),
-      };
+      characteristic.control.value = nativeValue(
+        characteristic.control.value,
+        action.value,
+      );
       run.executed.push({ aId: target.aId, sId: target.sId, cId: action.cId });
     }
   }
   return run;
+}
+
+// BLOCK set/condition values are native scalars as strings.
+function nativeValue(current, text) {
+  const [field] = Object.keys(current);
+  return {
+    [field]:
+      field === "boolValue"
+        ? text === "true"
+        : field === "stringValue"
+          ? text
+          : Number(text),
+  };
+}
+
+function nativeText(value) {
+  return String(firstValue(value));
+}
+
+// Grader-side evaluation of the home's active BLOCK rules for one
+// characteristic change: preset values are applied silently, then change is
+// applied and every active BLOCK whose condition tree has a trigger on that
+// characteristic runs once. Supported: if with condition groups (AND/OR),
+// characteristic leaves (=, ==, !=, <>, >, <, >=, <=), then/else branches,
+// nested if and service/set actions. Delays are skipped (a RESET delay is a
+// timer the grader does not run) and actions do not trigger further rules.
+// Any other node (interval, cron, code, unknown refs) is reported as
+// unsupported rather than guessed. It is not a model of the hub's scheduler.
+export function evaluateRulesOnChange(state, { preset = [], change }) {
+  const home = { accessories: structuredClone(state.accessories) };
+  const set = ({ aId, sId, cId, value }) => {
+    const characteristic = findCharacteristic(home, { aId, sId, cId });
+    if (!characteristic) {
+      throw new Error(`No characteristic ${aId}.${sId}.${cId}`);
+    }
+    characteristic.control.value = nativeValue(
+      characteristic.control.value,
+      String(value),
+    );
+  };
+  for (const value of preset) set(value);
+  const before = characteristicValues(home);
+  set(change);
+  const result = { fired: [], writes: [], skipped: [], unsupported: [] };
+  for (const scenario of state.scenarios) {
+    if (scenario.type !== "BLOCK" || scenario.active !== true) continue;
+    for (const target of JSON.parse(scenario.data).targets ?? []) {
+      if (target.type !== "if" || !hasTrigger(target.if, change)) continue;
+      result.fired.push(scenario.index);
+      runRuleIf(home, target, result, scenario.index);
+    }
+  }
+  const after = characteristicValues(home);
+  const eventKey = characteristicKey(change);
+  result.changed = Object.keys(after)
+    .filter((key) => key !== eventKey && before[key] !== after[key])
+    .map((key) => ({ key, before: before[key], after: after[key] }));
+  result.after = after;
+  return result;
+}
+
+// Refs of a BLOCK that do not resolve in the home, or whose hs/hc do not
+// match the service and characteristic types.
+export function blockRefProblems(state, data) {
+  const problems = [];
+  const home = { accessories: state.accessories };
+  for (const node of blockNodes(data)) {
+    if (node.type === "characteristic") {
+      const characteristic = findCharacteristic(home, node);
+      const service = findService(home, node);
+      if (!characteristic) {
+        problems.push(`characteristic ${characteristicKey(node)} is missing`);
+      } else if (
+        node.hc !== characteristic.control.type ||
+        node.hs !== service.type
+      ) {
+        problems.push(
+          `characteristic ${characteristicKey(node)} is ${service.type}.${characteristic.control.type}, not ${node.hs}.${node.hc}`,
+        );
+      }
+    }
+    if (node.type === "service") {
+      const service = findService(home, node);
+      if (!service) {
+        problems.push(`service ${node.aId}.${node.sId} is missing`);
+        continue;
+      }
+      if (node.hs !== service.type) {
+        problems.push(
+          `service ${node.aId}.${node.sId} is ${service.type}, not ${node.hs}`,
+        );
+      }
+      for (const action of node.characteristics ?? []) {
+        const characteristic = service.characteristics.find(
+          ({ cId }) => cId === action.cId,
+        );
+        if (!characteristic || characteristic.control.type !== action.hc) {
+          problems.push(
+            `set ${node.aId}.${node.sId}.${action.cId} ${action.hc} does not match`,
+          );
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+function findService(home, { aId, sId }) {
+  return (
+    home.accessories
+      .find((accessory) => accessory.id === aId)
+      ?.services.find((service) => service.sId === sId) ?? null
+  );
+}
+
+function characteristicValues(home) {
+  const values = {};
+  for (const accessory of home.accessories) {
+    for (const service of accessory.services) {
+      for (const characteristic of service.characteristics) {
+        values[characteristicKey(characteristic)] = firstValue(
+          characteristic.control.value,
+        );
+      }
+    }
+  }
+  return values;
+}
+
+function hasTrigger(node, target) {
+  if (!isRecord(node)) return false;
+  if (node.type === "characteristic") {
+    return (
+      node.trigger === true &&
+      node.aId === target.aId &&
+      node.sId === target.sId &&
+      node.cId === target.cId
+    );
+  }
+  return (node.conditions ?? []).some((child) => hasTrigger(child, target));
+}
+
+function evaluateRuleCondition(home, node, result, index) {
+  if (node?.type === "condition") {
+    const values = (node.conditions ?? []).map((child) =>
+      evaluateRuleCondition(home, child, result, index),
+    );
+    if (values.includes(null)) return null;
+    if (node.mode === "OR") return values.some(Boolean);
+    if (node.mode === "AND") return values.every(Boolean);
+  }
+  if (node?.type === "characteristic") {
+    const characteristic = findCharacteristic(home, node);
+    const verdict = characteristic
+      ? compareNative(nativeText(characteristic.control.value), node)
+      : null;
+    if (verdict !== null) return verdict;
+  }
+  result.unsupported.push({
+    index,
+    node: node?.type ?? null,
+    ...(node?.cond ? { cond: node.cond } : {}),
+  });
+  return null;
+}
+
+function compareNative(actual, { cond, value }) {
+  const expected = String(value);
+  const numbers = [Number(actual), Number(expected)];
+  const numeric =
+    actual.trim() !== "" &&
+    expected.trim() !== "" &&
+    numbers.every(Number.isFinite);
+  const equal = numeric ? numbers[0] === numbers[1] : actual === expected;
+  if (cond === "=" || cond === "==") return equal;
+  if (cond === "!=" || cond === "<>") return !equal;
+  if (!numeric) return null;
+  if (cond === ">") return numbers[0] > numbers[1];
+  if (cond === "<") return numbers[0] < numbers[1];
+  if (cond === ">=") return numbers[0] >= numbers[1];
+  if (cond === "<=") return numbers[0] <= numbers[1];
+  return null;
+}
+
+function runRuleIf(home, node, result, index) {
+  const verdict = evaluateRuleCondition(home, node.if, result, index);
+  if (verdict === null) return;
+  runRuleActions(home, verdict ? node.then : node.else, result, index);
+}
+
+function runRuleActions(home, nodes, result, index) {
+  for (const node of nodes ?? []) {
+    if (node.type === "if") {
+      runRuleIf(home, node, result, index);
+    } else if (node.type === "delay") {
+      result.skipped.push({ index, node: "delay", time: node.time });
+    } else if (node.type === "service") {
+      for (const action of node.characteristics ?? []) {
+        const characteristic = findCharacteristic(home, {
+          aId: node.aId,
+          sId: node.sId,
+          cId: action.cId,
+        });
+        if (action.type !== "set" || !characteristic) {
+          result.unsupported.push({ index, node: action.type ?? null });
+          continue;
+        }
+        characteristic.control.value = nativeValue(
+          characteristic.control.value,
+          String(action.value),
+        );
+        result.writes.push({
+          index,
+          key: characteristicKey({
+            aId: node.aId,
+            sId: node.sId,
+            cId: action.cId,
+          }),
+          value: String(action.value),
+        });
+      }
+    } else {
+      result.unsupported.push({ index, node: node.type ?? null });
+    }
+  }
 }
 
 function logicTypeForScenario(index) {
