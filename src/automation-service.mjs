@@ -5846,7 +5846,7 @@ function blockContract() {
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
       "Restore does not delete a created BLOCK or LOGIC that another BLOCK runs with a scenario target: the result is conflict scenario_targets_present naming those targets; change or remove them first, then restore again.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
-      "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage.",
+      "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, held, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage. block_action_preview.scenario_runs names the scenario each scenario target runs.",
     ],
   };
 }
