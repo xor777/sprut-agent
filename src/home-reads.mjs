@@ -795,6 +795,11 @@ function buildPage(snapshot, offset, selection) {
   for (let level = 1; bytes(page) > selection.maxBytes && level <= 3; level++) {
     page = assemblePage(snapshot, offset, end, selection, level);
   }
+  // Even the most compact page of one service is over max_bytes: return it,
+  // since the continuation must advance, and say so.
+  if (bytes(page) > selection.maxBytes) {
+    return { ...page, max_bytes_exceeded: true };
+  }
   while (end < snapshot.slots.length && end - offset < selection.limit) {
     const candidate = assemblePage(snapshot, offset, end + 1, selection, 0);
     if (bytes(candidate) > selection.maxBytes) break;
