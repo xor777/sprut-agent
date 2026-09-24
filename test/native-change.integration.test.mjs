@@ -10364,7 +10364,7 @@ test("restoring a created scenario that a BLOCK runs names that BLOCK instead of
       target_ref: serviceRef,
       name: "Логика для запуска",
       description: "Запускается из BLOCK",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,

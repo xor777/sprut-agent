@@ -4378,6 +4378,7 @@ export class AutomationService {
         change.new_logic_types_after_create = current.logicTypes.filter(
           (type) => !baseline.has(type),
         );
+        change.logic_active_after_create = current.scenario.active === true;
       }
       refreshLogicAssignmentReady(change, current.logicTypes);
     }
@@ -10364,14 +10365,25 @@ function logicSourceObservation(change, current, snapshot) {
 // and the product has not observed how a new one appears. The only evidence
 // kept is the read right after the create: the types that appeared on the
 // selected service since the pre-create read (apply requires that read to
-// equal baseline_logic_types). One such type is this LOGIC's. A type that
-// shows up later may be another LOGIC's, so no later read maps one. A record
-// without that evidence (the read after the create failed, or an earlier
-// version saved a type seen by a later read) stays unmapped.
+// equal baseline_logic_types), and the LOGIC's active flag in the same read.
+// SprutHub 3.0.0 did not list a turned-off LOGIC's type on its anchor (owner
+// hub, 2026-09-24), so a type that appears while it reads turned off is
+// another LOGIC's and nothing is mapped. For a turned-on LOGIC the single new
+// type is taken as its own, which is not proven: if its own type is not
+// listed there (whether a turned-on LOGIC's type is listed was not observed)
+// and another LOGIC's type appears between the two reads (the create
+// round-trip, or up to SPRUTHUB_TIMEOUT_MS when the create response is lost),
+// that type is mapped. A type that shows up later may be another LOGIC's, so
+// no later read maps one. A record without that evidence (the read after the
+// create failed, or an earlier version saved a type seen by a later read)
+// stays unmapped.
 function createdLogicMapping(change) {
   const types = change.new_logic_types_after_create;
   if (!Array.isArray(types)) {
     return { status: "missing", reason: "logic_type_not_mapped_at_create" };
+  }
+  if (change.logic_active_after_create !== true) {
+    return { status: "missing", reason: "logic_created_inactive" };
   }
   if (types.length === 0) {
     return { status: "missing", reason: "logic_type_not_visible_after_create" };
@@ -10414,14 +10426,14 @@ function logicSourceContract(mode) {
         : ["source"],
     assignment: {
       mapping:
-        "stored source ownership is independent from the native type; a created LOGIC's type is mapped only when exactly one new type appears on the selected service in the read right after the create, and a type that appears later is never mapped to it because it may be another LOGIC's",
+        "stored source ownership is independent from the native type; a created LOGIC's type is mapped only when the read right after the create shows the LOGIC turned on and exactly one new type on the selected service, and a type that appears later is never mapped to it because it may be another LOGIC's; the mapped type is not proven to be its own: if its own type is not listed on that service and another LOGIC's type appears there during the create, that type is mapped",
       separate_operation: "logic_assignment",
     },
     restore: {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario whose native type was mapped at the create, when no assignment of that type is found across the home and no BLOCK runs it with a scenario target; without that mapping (logic_type_not_visible, or ambiguous_logic_type when several types appeared) which type is this LOGIC's cannot be proven, so restore_supported stays false and restore never deletes it; the owner can delete it in the SprutHub app after checking that no device uses it",
+        "delete only the owned unchanged scenario whose native type was mapped at the create, when no assignment of that type is found across the home and no BLOCK runs it with a scenario target; without that mapping (logic_type_not_visible when the read right after the create failed, showed the LOGIC turned off or showed no new type; ambiguous_logic_type when it showed several) which type is this LOGIC's cannot be proven, so restore_supported stays false and restore never deletes it; the owner can delete it in the SprutHub app after checking that no device uses it; if the mapped type is another LOGIC's (see assignment.mapping), the check misses this LOGIC's own assignments",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
@@ -10778,7 +10790,9 @@ function unmappedLogicRestoreRefusal(change, scenario) {
       ? `SprutHub listed several new types on ${change.target_ref} right after the create (${mapping.candidates.join(", ")})`
       : mapping.reason === "logic_type_not_visible_after_create"
         ? `SprutHub listed no new type on ${change.target_ref} right after the create`
-        : "no type was mapped to it right after the create";
+        : mapping.reason === "logic_created_inactive"
+          ? "SprutHub read it turned off right after the create, and SprutHub has not listed a turned-off LOGIC's type, so no type seen then can be taken as its own"
+          : "no type was mapped to it right after the create";
   const message = `Which LOGIC type belongs to ${scenarioRef} cannot be proven: ${evidence}. So restore will not delete it; the LOGIC stays on the hub, turned ${scenario.active ? "on" : "off"}. The owner can delete it in the SprutHub app after checking that no device uses it.`;
   return mapping.status === "ambiguous"
     ? new SprutHubError("ambiguous_logic_type", message, "get_native_change", {
@@ -11297,7 +11311,7 @@ function publicNativeChange(
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "Deletion requires a mapped native logic type and scans its current assignments across the home and the scenario targets of BLOCKs. logic.types is read per service, so while the selected service lists no new type (seen for a turned-off LOGIC) or several, an assignment on another service cannot be ruled out and restore refuses without deleting. SprutHub exposes no compare-and-set after that check.",
+        "Deletion requires the native logic type mapped at the create and scans its current assignments across the home and the scenario targets of BLOCKs. Without that mapping (the read right after the create failed, showed the LOGIC turned off, or showed no new type on the selected service or several) restore never deletes the LOGIC: logic.types is read per service, so an assignment on another service cannot be ruled out. The mapped type is the one new type on the selected service right after the create; if another LOGIC's type appeared there during the create while this LOGIC's own type was not listed, the check covers the wrong type. SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
           : change.owned_target_absent_observed === true
