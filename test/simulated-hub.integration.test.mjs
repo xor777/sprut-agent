@@ -518,11 +518,10 @@ test("only allowlisted reads are reads, and link settings show in the home diff"
 test("the shipped hub log, room rename and service hide work on the simulated home", async (t) => {
   const { hub, client } = await setup(t);
 
-  // One page holds the whole 128-entry ring buffer; paging with lastTime is
-  // forward on a live hub, which the shipped continuation does not expect.
+  // One read covers the whole 128-entry ring buffer; the newest matches that
+  // fit max_bytes are shown, the rest is counted, never paged.
   const logPage = await call(client, "read_hub_log", {
     home_ref: homeRef,
-    count: 500,
     max_bytes: 32_768,
   });
   const times = logPage.entries.map(({ native_time: time }) => time);
@@ -531,10 +530,11 @@ test("the shipped hub log, room rename and service hide work on the simulated ho
     [...times].sort((left, right) => right - left),
   );
   assert.equal(new Set(times).size, times.length);
-  assert.equal(logPage.entries.length, 128);
-  assert.equal(logPage.next, null);
+  assert.equal(logPage.buffer_entries, 128);
+  assert.equal(logPage.page.matched_total, 128);
+  assert.equal(logPage.next, undefined);
   // About two and a half hours are kept: yesterday's night run was evicted.
-  assert.ok(Date.now() - Date.parse(logPage.entries.at(-1).time) < 3 * 3.6e6);
+  assert.ok(Date.now() - Date.parse(logPage.oldest_entry_at) < 3 * 3.6e6);
   assert.ok(
     !logPage.entries.some(({ message }) => message.startsWith("Сценарий 5:")),
   );
