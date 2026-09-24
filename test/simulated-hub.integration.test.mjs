@@ -640,3 +640,129 @@ test("log.list returns the newest entries by count, pages forward from lastTime 
   assert.equal(hub.state.log[0].time, oldestFirst[1]);
   assert.match(hub.state.log.at(-1).message, /^Сценарий 11:/);
 });
+
+// A raw native session for fault tests: replies are matched by id, and a
+// reply that never comes resolves to null after waitMs.
+async function rawSession(t, options) {
+  const hub = await startSimulatedHub(
+    await loadHomeFixture("apartment"),
+    options,
+  );
+  t.after(() => hub.close());
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  const waiting = new Map();
+  socket.on("message", (data) => {
+    const reply = JSON.parse(data.toString());
+    waiting.get(reply.id)?.(reply);
+  });
+  let id = 0;
+  const send = (params, waitMs = 1_000) => {
+    id += 1;
+    const current = id;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), waitMs);
+      waiting.set(current, (reply) => {
+        clearTimeout(timer);
+        resolve(reply);
+      });
+      socket.send(
+        JSON.stringify({
+          id: current,
+          token: hub.token,
+          serial: hub.serial,
+          params,
+        }),
+      );
+    });
+  };
+  const value = async (aId, cId) =>
+    (await send({ characteristic: { get: { aId, sId: 13, cId } } })).result
+      .characteristic.get.control.value;
+  return { hub, send, value };
+}
+
+const setValue = (aId, cId, value) => ({
+  characteristic: { update: { aId, sId: 13, cId, control: { value } } },
+});
+
+test("a delayed readback acknowledges a write before its value appears", async (t) => {
+  const { hub, send, value } = await rawSession(t, {
+    faults: { delayedReadback: [{ aId: 16, sId: 13, cId: 15, ms: 300 }] },
+  });
+  const reply = await send(setValue(16, 15, { intValue: 30 }));
+  assert.deepEqual(reply.result, { characteristic: { update: {} } });
+  assert.deepEqual(await value(16, 15), { intValue: 55 });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(await value(16, 15), { intValue: 30 });
+
+  await send(setValue(16, 15, { intValue: 40 }));
+  assert.deepEqual(await value(16, 15), { intValue: 30 });
+  hub.settle();
+  assert.deepEqual(await value(16, 15), { intValue: 40 });
+  assert.deepEqual(
+    hub.faultEvents().map(({ fault, method }) => [fault, method]),
+    [
+      ["delayed_readback", "characteristic.update"],
+      ["delayed_readback", "characteristic.update"],
+    ],
+  );
+});
+
+test("a dropped reply applies the write and never answers it", async (t) => {
+  const { hub, send, value } = await rawSession(t, {
+    faults: {
+      droppedReply: [{ method: "characteristic.update", aId: 36, times: 1 }],
+    },
+  });
+  assert.equal(await send(setValue(36, 14, { boolValue: true }), 300), null);
+  assert.deepEqual(await value(36, 14), { boolValue: true });
+  const second = await send(setValue(36, 14, { boolValue: false }));
+  assert.deepEqual(second.result, { characteristic: { update: {} } });
+  assert.deepEqual(
+    hub.faultEvents().map(({ fault }) => fault),
+    ["dropped_reply"],
+  );
+});
+
+test("an offline actuator acknowledges a write and keeps its value", async (t) => {
+  const { hub, send, value } = await rawSession(t, {
+    faults: { stuckActuators: [{ aId: 22 }] },
+  });
+  const accessory = await send({ accessory: { get: { id: 22 } } });
+  assert.equal(accessory.result.accessory.get.online, false);
+  const reply = await send(setValue(22, 14, { boolValue: false }));
+  assert.deepEqual(reply.result, { characteristic: { update: {} } });
+  assert.deepEqual(await value(22, 14), { boolValue: true });
+  assert.deepEqual(
+    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+    [],
+  );
+  assert.deepEqual(
+    hub.faultEvents().map(({ fault }) => fault),
+    ["stuck_actuator"],
+  );
+});
+
+test("an active lamp logic switches the lamp with its brightness", async (t) => {
+  const { hub, send, value } = await rawSession(t, {
+    faults: { lampLogic: [{ aId: 26, sId: 13 }] },
+  });
+  const logics = await send({ logic: { list: { aId: 26, sId: 13 } } });
+  assert.deepEqual(logics.result.logic.list.logics, [
+    {
+      type: "LightbulbControl",
+      name: "Связь включения и уровня",
+      active: true,
+    },
+  ]);
+  await send(setValue(26, 15, { intValue: 30 }));
+  assert.deepEqual(await value(26, 14), { boolValue: true });
+  await send(setValue(26, 15, { intValue: 0 }));
+  assert.deepEqual(await value(26, 14), { boolValue: false });
+  assert.deepEqual(
+    hub.faultEvents().map(({ fault }) => fault),
+    ["lamp_logic", "lamp_logic"],
+  );
+});

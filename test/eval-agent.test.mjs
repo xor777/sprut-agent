@@ -57,7 +57,7 @@ await client.close();
 emit({ type: "result", subtype: "success", is_error: false, result: process.env.SCRIPTED_AGENT_ANSWER, num_turns: id + 1, total_cost_usd: 0, usage: { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 5, output_tokens: 7 } });
 `;
 
-async function scriptedRun(t, { turnOff, answer = "Готово." }) {
+async function scriptedRun(t, { turnOff, answer = "Готово.", definition }) {
   const directory = await mkdtemp(
     path.join(tmpdir(), "sprut-eval-agent-test-"),
   );
@@ -87,6 +87,7 @@ async function scriptedRun(t, { turnOff, answer = "Готово." }) {
   });
   const outcome = await runCase({
     caseName: "turn-off-room",
+    definition,
     harness: "claude",
     model: "sonnet",
     plugin: { dir: path.join(repo, "dist", "plugin") },
@@ -153,6 +154,31 @@ test("a scripted agent that turns off only living room lights passes through the
   assert.equal(record.env.SPRUTHUB_URL, undefined);
   assert.equal(record.env.CLAUDECODE, undefined);
   assert.equal(record.env.CLAUDE_CODE_ENTRYPOINT, undefined);
+});
+
+test("a case's faults reach the hub and a stuck light fails the result, not the report", async (t) => {
+  const { outcome, saved } = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    answer: "Выключил люстру и торшер.",
+    definition: {
+      ...CASES["turn-off-room"],
+      faults: { stuckActuators: [{ aId: 15 }] },
+    },
+  });
+
+  const lightsOff = outcome.graders.find(
+    ({ name }) => name === "living_room_lights_off",
+  );
+  assert.equal(lightsOff.pass, false);
+  assert.match(lightsOff.detail, /15\.13\.14/);
+  assert.deepEqual(saved.faults, { stuckActuators: [{ aId: 15 }] });
+  assert.deepEqual(
+    saved.fault_events.map(({ fault, params }) => [
+      fault,
+      params.characteristic.update.aId,
+    ]),
+    [["stuck_actuator", 15]],
+  );
 });
 
 test("a scripted agent that also turns off the kitchen light fails the room boundary", async (t) => {
