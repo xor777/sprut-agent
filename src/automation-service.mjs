@@ -10581,7 +10581,7 @@ function logicSourceContract(mode) {
       create:
         "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; the scan runs while it is off too, and what it finds blocks the delete (logic_assignments_present, scenario_targets_present); after the scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict); a turned-off LOGIC with none found is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed. Turning it on makes it run on any device that uses it, so only with the owner's agreement: turn it on with scenario_active and restore again; if that restore finds assignments, the LOGIC stays on and restoring that scenario_active change turns it off again. Otherwise the owner deletes it in the SprutHub app. An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted either",
       active:
-        "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
+        "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata: restore never writes active and does not compare it with the snapshots; restore of a create reads it and does not delete a turned-off LOGIC (see create)",
     },
     limitations: [
       "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
