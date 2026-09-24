@@ -162,9 +162,9 @@ server.registerTool(
         ),
       values: z
         .boolean()
-        .default(true)
+        .optional()
         .describe(
-          "false returns names and characteristic refs without values.",
+          "Omitted: every value, but with state only the on/off value and Brightness (values_shown, all_values). true: every value. false: names and characteristic refs without values.",
         ),
       include_technical: z
         .boolean()

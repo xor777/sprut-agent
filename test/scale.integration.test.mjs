@@ -258,7 +258,10 @@ test("what lights are on fits one page at the owner's lamp count and at twice it
     assert.equal(body.switches.total, 3 * share);
     assert(body.switches.entries.every(({ on_ref: ref }) => ref));
 
-    const full = await client.callTool(body.all_values);
+    const full = await client.callTool({
+      name: body.all_values.tool,
+      arguments: body.all_values.arguments,
+    });
     assert.equal(full.isError, undefined, full.content[0]?.text);
     assert(
       listed(full.structuredContent).some(({ service }) =>

@@ -248,7 +248,7 @@ export class HomeReads {
     const needValues =
       summary ||
       selection.state !== null ||
-      selection.values ||
+      selection.values !== "none" ||
       selection.roomId !== null;
     let values = null;
     let observedAt = catalog.observedAt;
@@ -395,6 +395,15 @@ export class HomeReads {
             }
           : {}),
         ...(deviceFunctions > 0 ? { device_functions: deviceFunctions } : {}),
+        ...(selection.values === "on_off" && listed.length > 0
+          ? {
+              values_shown: "on_off_and_brightness",
+              all_values: {
+                tool: "find_devices",
+                arguments: { ...selection.args, values: true },
+              },
+            }
+          : {}),
         ...(listed.length === 0 && selection.words.length > 1
           ? { query_words: queryWordMatches(catalog, selection, evaluated) }
           : {}),
@@ -489,7 +498,7 @@ function findSelection(input, serial) {
     ...(roomId === null ? {} : { room_ref: input.roomRef }),
     ...(input.kind === undefined ? {} : { kind: input.kind }),
     ...(input.state === undefined ? {} : { state: input.state }),
-    ...(input.values === false ? { values: false } : {}),
+    ...(input.values === undefined ? {} : { values: input.values }),
     ...(input.includeTechnical === true ? { include_technical: true } : {}),
     ...(limit === DEFAULT_LIMIT ? {} : { limit }),
     ...(maxBytes === DEFAULT_MAX_BYTES ? {} : { max_bytes: maxBytes }),
@@ -516,7 +525,14 @@ function findSelection(input, serial) {
     otherWords,
     kind: input.kind ?? null,
     state: input.state ?? null,
-    values: input.values !== false,
+    // A state answer lists many services; by default each shows only what
+    // the agent acts on (VALUES_OF_STATE), values=true shows all.
+    values:
+      input.values === false
+        ? "none"
+        : input.values === true || input.state === undefined
+          ? "all"
+          : "on_off",
     includeTechnical: input.includeTechnical === true,
     limit,
     maxBytes,
@@ -862,15 +878,36 @@ function serviceEntry(serial, item, selection) {
           ...(on.on === null ? { on_unknown: on.reason } : {}),
         }
       : {}),
-    ...(selection.values && item.valuesRead
-      ? { values: characteristicValues(serial, accessory, service) }
+    ...(selection.values !== "none" && item.valuesRead
+      ? {
+          values: characteristicValues(
+            serial,
+            accessory,
+            service,
+            selection.values === "on_off"
+              ? [on?.basis, ...VALUES_OF_STATE]
+              : null,
+          ),
+        }
       : { characteristics: characteristicRefs(serial, accessory, service) }),
   };
 }
 
-function characteristicValues(serial, accessory, service) {
+// Besides the on/off characteristic (on_basis), the values a state answer
+// shows by default: a lamp's color, a relay's load and a thermostat's
+// temperatures are one call away with values=true. The owner's 11 lamps on
+// with every value were 13-15 KB on 2026-09-24, most of it color.
+const VALUES_OF_STATE = ["Brightness"];
+
+// Readable values of a service; with types, only those types.
+function characteristicValues(serial, accessory, service, types = null) {
   return (service.characteristics ?? [])
-    .filter(({ control }) => control.read === true && !isNameControl(control))
+    .filter(
+      ({ control }) =>
+        control.read === true &&
+        !isNameControl(control) &&
+        (types === null || types.includes(control.type ?? control.key)),
+    )
     .map((characteristic) => {
       const control = characteristic.control;
       if (isSensitiveNativeNode(control)) {
