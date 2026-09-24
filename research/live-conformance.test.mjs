@@ -653,21 +653,54 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
     sync: false,
     source,
   });
-  const created = await guardApply(
-    g.guard,
-    logicInput(false, inertLogic(name)),
-  );
+  // The product maps a LOGIC's type only when the read right after its
+  // create shows it on, so the probe creates it on; it runs nothing.
+  const created = await guardApply(g.guard, logicInput(true, inertLogic(name)));
   const logicRef = created.applied.scenario_ref;
   const type = created.applied.native_logic_type;
+  assert.equal(typeof type, "string");
   const assign = (serviceRef, logicType) => ({
     operation: "logic_assignment",
     target_ref: `${serviceRef}/logic/${encodeURIComponent(logicType)}`,
   });
-  const turnOn = {
+  const active = (value) => ({
     operation: "scenario_active",
     target_ref: logicRef,
-    value: true,
+    value,
+  });
+
+  // Whether a LOGIC has an options window with Active is not observed; the
+  // simulated LOGIC gets one here so that it can be switched.
+  const logic = g.hub.state.scenarios.find(
+    ({ index }) => index === logicRef.split("/").at(-1),
+  );
+  logic.optionsWindow = "scenario-options-probe-logic";
+  g.hub.state.windows[logic.optionsWindow] = {
+    windowKey: logic.optionsWindow,
+    label: { text: "Настройки сценария" },
+    options: [
+      {
+        key: "Active",
+        name: "Активен",
+        type: "GenericBoolean",
+        inputType: "CHECKBOX",
+        read: true,
+        write: true,
+        disabled: false,
+        value: { boolValue: true },
+      },
+    ],
   };
+
+  // While it may be on, it is not assigned.
+  const whileOn = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.prepare(assign(virtual.serviceRef, type)),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, whileOn), []);
+  await guardApply(g.guard, active(false));
+  assert.equal(logic.active, false);
   const before = g.hub.writes().length;
 
   // Only the run's LOGIC, only on the run's virtual accessory.
@@ -691,50 +724,24 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
   );
   assert.deepEqual(sweepWrites(g.hub, before), []);
 
+  // Off and unassigned: it may be assigned, and then it stays off.
   const assignment = await guardApply(
     g.guard,
     assign(virtual.serviceRef, type),
   );
-  await assert.rejects(g.guard.prepare(turnOn), conformance.GuardError);
+  await assert.rejects(g.guard.prepare(active(true)), conformance.GuardError);
   assert.equal(
     (await g.guard.restore(assignment.changeRef)).status,
     "restored",
   );
-
-  // Whether a LOGIC has an options window with Active is not observed; the
-  // simulated LOGIC gets one here so that it can be switched.
-  const logic = g.hub.state.scenarios.find(
-    ({ index }) => index === logicRef.split("/").at(-1),
-  );
-  logic.optionsWindow = "scenario-options-probe-logic";
-  g.hub.state.windows[logic.optionsWindow] = {
-    windowKey: logic.optionsWindow,
-    label: { text: "Настройки сценария" },
-    options: [
-      {
-        key: "Active",
-        name: "Активен",
-        type: "GenericBoolean",
-        inputType: "CHECKBOX",
-        read: true,
-        write: true,
-        disabled: false,
-        value: { boolValue: false },
-      },
-    ],
-  };
-  await guardApply(g.guard, turnOn);
-  assert.equal(logic.active, true);
-  const whileOn = g.hub.writes().length;
-  await assert.rejects(
-    g.guard.prepare(assign(virtual.serviceRef, type)),
-    conformance.GuardError,
-  );
-  assert.deepEqual(sweepWrites(g.hub, whileOn), []);
   assert.equal(
     g.hub.state.logics.some((item) => item.type === type),
     false,
   );
+
+  // Unassigned again: it may be turned on.
+  await guardApply(g.guard, active(true));
+  assert.equal(logic.active, true);
 });
 
 test("the probe sends one direct room.create under the run's short name and the sweep removes that room", async (t) => {
