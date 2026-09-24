@@ -1926,6 +1926,120 @@ test("get_entity relations preserve an inactive BLOCK state", async (t) => {
   assert.equal(detail.structuredContent.selection.value.type, "characteristic");
 });
 
+test("get_entity relations name toggled and stepped characteristics as action targets", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const block = {
+    index: "button-block",
+    name: "Кнопка управляет лампой",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: JSON.stringify({
+      blockId: 0,
+      targets: [
+        {
+          type: "if",
+          blockId: 1,
+          if: {
+            type: "condition",
+            blockId: 2,
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                blockId: 3,
+                aId: 32,
+                sId: 13,
+                cId: 15,
+                value: "true",
+                cond: "=",
+                trigger: true,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: this is the native SprutHub BLOCK key.
+          then: [
+            {
+              type: "service",
+              blockId: 4,
+              aId: 48,
+              sId: 21,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "toggle", blockId: 5, cId: 30, hc: "On" },
+                {
+                  type: "inc",
+                  blockId: 6,
+                  cId: 31,
+                  hc: "Brightness",
+                  value: "10",
+                },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+          mode: "EVERY",
+        },
+      ],
+    }),
+  };
+  state.scenarios.push(block);
+  state.scenarioAssociations.set(32, [block]);
+  const client = await startClient(t, hub);
+
+  const result = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref:
+        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+      include: ["relations"],
+    },
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const relations = result.structuredContent.entity.relations;
+  assert.deepEqual(
+    relations.scenario_roles
+      .filter(({ role }) => role === "action_target")
+      .map(({ entity_ref, configuration_pointer, value_source }) => ({
+        entity_ref,
+        configuration_pointer,
+        value_source,
+      })),
+    [
+      {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
+        configuration_pointer:
+          "/configuration/value/targets/0/then/0/characteristics/0",
+        value_source: "toggle",
+      },
+      {
+        entity_ref:
+          "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/31",
+        configuration_pointer:
+          "/configuration/value/targets/0/then/0/characteristics/1",
+        value_source: "increment",
+      },
+    ],
+  );
+  assert.equal(
+    relations.unresolved_areas.some(({ area }) =>
+      ["block_node", "action_value_source"].includes(area),
+    ),
+    false,
+  );
+});
+
 test("empty accessory scenario index stays bounded without claiming no influences", async (t) => {
   const hub = await startHub();
   const state = hub.states.get("home/A");

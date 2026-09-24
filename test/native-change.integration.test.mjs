@@ -7049,6 +7049,7 @@ test("versioned BLOCK contract prepares different supported compositions", async
     "if",
     "service",
     "delay",
+    "scenario",
   ]);
 
   const nestedData = blockData({ nested: true });
@@ -8529,6 +8530,369 @@ test("time triggers outside the published forms are refused with a repairable re
       name,
       code: "invalid_block_data",
       repairable: true,
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
+function installButton(hub) {
+  installEnumAccessory(hub, {
+    id: 60,
+    name: "Кнопка",
+    hs: "StatelessProgrammableSwitch",
+    hc: "ProgrammableSwitchEvent",
+    values: [
+      { key: "SINGLE", name: "Одно нажатие", value: 0 },
+      { key: "DOUBLE", name: "Двойное нажатие", value: 1 },
+      { key: "LONG", name: "Долгое нажатие", value: 2 },
+    ],
+  });
+  hub.state.accessories.find(
+    ({ id }) => id === 60,
+  ).services[0].characteristics[0].control.write = false;
+}
+
+function buttonPress(value) {
+  return enumEquals({
+    aId: 60,
+    hs: "StatelessProgrammableSwitch",
+    hc: "ProgrammableSwitchEvent",
+    value,
+  });
+}
+
+function lampAction(action) {
+  return {
+    type: "service",
+    aId: 34,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics: [action],
+  };
+}
+
+function installAllOffScenario(hub) {
+  hub.state.scenarios.push({
+    index: "all-off",
+    name: "Всё выключить",
+    desc: "",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "BLOCK",
+    data: JSON.stringify({ targets: [setAction({ value: "false" })] }),
+  });
+}
+
+test("a button toggles and steps a lamp and another trigger runs a scenario; created, updated and restored", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installButton(hub);
+  installAllOffScenario(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+  const serviceChildren = publishedChild(
+    publishedBlockNode(contract, "service"),
+    "characteristics",
+    "array",
+  ).types;
+  assert.deepEqual(
+    ["set", "toggle", "inc", "dec"].filter((type) =>
+      serviceChildren.includes(type),
+    ),
+    ["set", "toggle", "inc", "dec"],
+  );
+  assert.equal(
+    publishedChild(
+      publishedBlockNode(contract, "root"),
+      "targets",
+      "array",
+    ).types.includes("scenario"),
+    true,
+  );
+  assert.deepEqual(publishedBlockNode(contract, "scenario").constants, {
+    mode: "FIRE",
+  });
+
+  const data = {
+    targets: [
+      everyIf({
+        when: conditionGroup(buttonPress(0)),
+        thenActions: [lampAction({ type: "toggle", cId: 15, hc: "On" })],
+      }),
+      everyIf({
+        when: conditionGroup(buttonPress(1)),
+        thenActions: [
+          lampAction({ type: "inc", cId: 16, hc: "Brightness", value: "10" }),
+        ],
+      }),
+      everyIf({
+        when: conditionGroup(buttonPress(2)),
+        thenActions: [
+          lampAction({ type: "dec", cId: 16, hc: "Brightness", value: "10" }),
+        ],
+      }),
+      everyIf({
+        when: conditionGroup({ ...characteristicCondition(), value: "false" }),
+        thenActions: [{ type: "scenario", index: "all-off", mode: "FIRE" }],
+      }),
+    ],
+  };
+
+  const prepared = await prepareBlockCreate(client, {
+    name: "Кнопка у двери",
+    data,
+    reason:
+      "Нажатие переключает свет, двойное прибавляет яркость на 10, долгое убавляет; без движения запустить «Всё выключить»",
+  });
+  assert.deepEqual(prepared.structuredContent.diff.configuration.to.data, data);
+  const preview = prepared.structuredContent.block_action_preview.actions;
+  assert.deepEqual(
+    preview.map(
+      ({ configuration_pointer, command, comparison_to_observation }) => ({
+        configuration_pointer,
+        command,
+        comparison_to_observation,
+      }),
+    ),
+    [
+      {
+        configuration_pointer: "/targets/0/then/0/characteristics/0",
+        command: {
+          operation: "toggle",
+          kind: "boolValue",
+          execution: "write_if_action_runs",
+        },
+        comparison_to_observation: "not_applicable",
+      },
+      {
+        configuration_pointer: "/targets/1/then/0/characteristics/0",
+        command: {
+          operation: "inc",
+          step: 10,
+          kind: "intValue",
+          execution: "write_if_action_runs",
+        },
+        comparison_to_observation: "not_applicable",
+      },
+      {
+        configuration_pointer: "/targets/2/then/0/characteristics/0",
+        command: {
+          operation: "dec",
+          step: 10,
+          kind: "intValue",
+          execution: "write_if_action_runs",
+        },
+        comparison_to_observation: "not_applicable",
+      },
+    ],
+  );
+
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.configuration_matches, true);
+  const createdIndex = created.structuredContent.scenario_index;
+  assert.deepEqual(
+    scenarioData(hub, createdIndex),
+    withRuntimeBlockFields(data),
+  );
+
+  const run = await prepareScenarioRun(
+    client,
+    created.structuredContent.scenario_ref,
+    "Кнопка у двери",
+  );
+  assert.equal(run.targets_known, false);
+  assert.equal(run.effect.predicted, false);
+  assert.equal(run.effect.reasons.includes("targets_unknown"), true);
+
+  const read = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: created.structuredContent.scenario_ref,
+      include: ["configuration"],
+    },
+  });
+  const edited = structuredClone(
+    read.structuredContent.entity.configuration.value,
+  );
+  edited.targets[1].then[0].characteristics[0].value = "20";
+  const preparedUpdate = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: created.structuredContent.scenario_ref,
+      data: edited,
+      reason: "Прибавлять яркость на 20",
+    },
+  });
+  assert.equal(
+    preparedUpdate.isError,
+    undefined,
+    preparedUpdate.content[0]?.text,
+  );
+  const updated = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: preparedUpdate.structuredContent.change_ref },
+  });
+  assert.equal(updated.structuredContent.status, "applied");
+  assert.equal(updated.structuredContent.configuration_matches, true);
+  assert.equal(
+    scenarioData(hub, createdIndex).targets[1].then[0].characteristics[0].value,
+    "20",
+  );
+
+  const restoredUpdate = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: preparedUpdate.structuredContent.change_ref },
+  });
+  assert.equal(restoredUpdate.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, createdIndex),
+    withRuntimeBlockFields(data),
+  );
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.requests.some(
+      ({ characteristic, scenario }) => characteristic?.update || scenario?.run,
+    ),
+    false,
+  );
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "all-off"),
+    true,
+  );
+});
+
+test("relative actions and scenario runs outside the contract are refused before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installButton(hub);
+  installAllOffScenario(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  // Each refusal must say what to repair, not only that the data is invalid.
+  const cases = [
+    [
+      "toggle a number",
+      lampAction({ type: "toggle", cId: 16, hc: "Brightness" }),
+      /toggle .*boolean/,
+    ],
+    [
+      "step a switch",
+      lampAction({ type: "inc", cId: 15, hc: "On", value: "1" }),
+      /inc .*numeric/,
+    ],
+    [
+      "zero step",
+      lampAction({ type: "inc", cId: 16, hc: "Brightness", value: "0" }),
+      /inc step must be a positive number/,
+    ],
+    [
+      "negative step",
+      lampAction({ type: "dec", cId: 16, hc: "Brightness", value: "-5" }),
+      /dec step must be a positive number/,
+    ],
+    [
+      "no step",
+      lampAction({ type: "inc", cId: 16, hc: "Brightness" }),
+      /inc action is incomplete/,
+    ],
+    [
+      "copy another value",
+      lampAction({
+        type: "from",
+        cId: 16,
+        hc: "Brightness",
+        from_aId: 32,
+        from_sId: 13,
+        from_cId: 15,
+      }),
+      /node type from\b/,
+    ],
+    [
+      "missing scenario",
+      { type: "scenario", index: "no-such-scenario", mode: "FIRE" },
+      /no-such-scenario/,
+    ],
+    [
+      "activate a scenario",
+      { type: "scenario", index: "all-off", mode: "ACTIVATE" },
+      /FIRE/,
+    ],
+  ];
+  const results = [];
+  for (const [name, target, reason] of cases) {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name,
+        description: "Не сохранять неподдержанное действие",
+        active: true,
+        on_start: false,
+        sync: false,
+        data: {
+          targets: [
+            everyIf({
+              when: conditionGroup(buttonPress(0)),
+              thenActions: [target],
+            }),
+          ],
+        },
+        reason: "Проверить границу действий",
+      },
+    });
+    results.push({
+      name,
+      code: prepared.structuredContent?.error?.code,
+      explained: reason.test(prepared.structuredContent?.error?.message ?? ""),
+    });
+  }
+
+  const selfRun = structuredClone(blockData());
+  selfRun.targets[0].then.push({
+    type: "scenario",
+    index: "existing-block",
+    mode: "FIRE",
+  });
+  const selfRunUpdate = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: selfRun,
+      reason: "Сценарий не должен запускать сам себя",
+    },
+  });
+  results.push({
+    name: "run itself",
+    code: selfRunUpdate.structuredContent?.error?.code,
+    explained: /itself/.test(
+      selfRunUpdate.structuredContent?.error?.message ?? "",
+    ),
+  });
+
+  assert.deepEqual(
+    results,
+    [...cases.map(([name]) => name), "run itself"].map((name) => ({
+      name,
+      code: "invalid_block_data",
+      explained: true,
     })),
   );
   assert.equal(
