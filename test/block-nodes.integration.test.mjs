@@ -328,6 +328,14 @@ function withNotificationServices(fixture) {
   });
 }
 
+// Each notification of a preview with its warnings as code and service.
+function withWarningCodes(preview) {
+  return preview.notifications.map(({ warnings = [], ...notification }) => ({
+    ...notification,
+    warnings: warnings.map(({ code, service_ref }) => ({ code, service_ref })),
+  }));
+}
+
 test("a scenario sends a notification when the bathroom leaks", async (t) => {
   const { hub, client } = await setup(t, withNotificationServices);
   // «Пришли уведомление, если протечка»: through every notification service,
@@ -360,15 +368,21 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
       state: "LOADED",
     },
   };
-  assert.deepEqual(prepared.block_action_preview.notifications, [
+  assert.deepEqual(withWarningCodes(prepared.block_action_preview), [
     {
       configuration_pointer: "/targets/0/then/0",
       mode: "PUSH",
       text: "Протечка в ванной!",
       delivery: "all_notification_services",
       services: [
-        { ...services.telegram, recipients: "all" },
-        { ...services.web, recipients: "all" },
+        { ...services.telegram, recipients: "all", recipient_count: 0 },
+        { ...services.web, recipients: "all", recipient_count: 1 },
+      ],
+      // Telegram is FAILED and has no one to send to: the agent must not
+      // promise this notification through it.
+      warnings: [
+        { code: "service_not_ready", service_ref: services.telegram.ref },
+        { code: "no_recipients", service_ref: services.telegram.ref },
       ],
     },
     {
@@ -387,6 +401,7 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
           ],
         },
       ],
+      warnings: [],
     },
   ]);
   // The hub keeps a PUSH to every service without to.
@@ -454,6 +469,48 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
     "/targets/0/then/4/to/0/clients/0",
     "/targets/0/then/5/to",
     "/targets/0/then/6/text",
+  ]);
+});
+
+// The owner's Telegram service is FAILED and has no recipients
+// (2026-09-24). A notification sent through it alone reaches no one, and the
+// preview says so instead of "all" recipients.
+test("a notification through a service without recipients is named in the preview", async (t) => {
+  const { client } = await setup(t, withNotificationServices);
+  const telegramRef = `${homeRef}/extension/Notification%3Atelegram`;
+  const { prepared } = await createBlock(client, {
+    targets: [
+      whenLeak([
+        {
+          type: "notify",
+          text: "Протечка в ванной!",
+          mode: "PUSH",
+          to: [{ index: "telegram", clients: null }],
+        },
+      ]),
+    ],
+  });
+  assert.deepEqual(withWarningCodes(prepared.block_action_preview), [
+    {
+      configuration_pointer: "/targets/0/then/0",
+      mode: "PUSH",
+      text: "Протечка в ванной!",
+      delivery: "listed_services",
+      services: [
+        {
+          ref: telegramRef,
+          name: "Telegram",
+          enabled: true,
+          state: "FAILED",
+          recipients: "all",
+          recipient_count: 0,
+        },
+      ],
+      warnings: [
+        { code: "service_not_ready", service_ref: telegramRef },
+        { code: "no_recipients", service_ref: telegramRef },
+      ],
+    },
   ]);
 });
 
