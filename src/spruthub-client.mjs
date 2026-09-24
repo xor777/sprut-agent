@@ -618,7 +618,7 @@ export class SprutHubClient {
     return paginateServices(base, services, selection);
   }
 
-  async readHubLog({ homeRef: selectedHomeRef, count, lastTime = null }) {
+  async readHubLog({ homeRef: selectedHomeRef, count }) {
     const serial = parseHomeRef(selectedHomeRef);
     if (this.serial === null) {
       if (this.#availableHomeCount === 0) throw noHomesAvailable();
@@ -635,11 +635,7 @@ export class SprutHubClient {
     let response;
     try {
       response = await this.#request(
-        {
-          log: {
-            list: { ...(lastTime === null ? {} : { lastTime }), count },
-          },
-        },
+        { log: { list: { count } } },
         Date.now() + this.timeoutMs,
         { serial },
       );
@@ -680,10 +676,8 @@ export class SprutHubClient {
       native: {
         operation: "log.list",
         requested_count: count,
-        last_time: lastTime,
         returned_count: nativeEntries.length,
         time_unit: "unix_ms",
-        retention: "unknown",
       },
       freshness: freshness(response.responseReceivedAt),
     };
