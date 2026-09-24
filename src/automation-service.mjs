@@ -4296,12 +4296,14 @@ export class AutomationService {
       if (!isUncertainWriteError(error)) {
         throw await this.#finishRefusedWrite(change, "not_applied", error);
       }
-      return this.#reconcileScenarioApply(change, false);
+      return this.#reconcileScenarioApply(change, false, true);
     }
-    return this.#reconcileScenarioApply(change, true);
+    return this.#reconcileScenarioApply(change, true, true);
   }
 
-  async #reconcileScenarioApply(change, acknowledged) {
+  // readAfterWrite: this reconcile makes the first read after the write, in
+  // the apply call that sent it; only that read may map a created LOGIC type.
+  async #reconcileScenarioApply(change, acknowledged, readAfterWrite = false) {
     let current;
     try {
       current = await this.#observeScenarioChange(change);
@@ -4313,7 +4315,12 @@ export class AutomationService {
     }
     const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
-      this.#adoptRequestedLogicSource(change, current, requested);
+      this.#adoptRequestedLogicSource(
+        change,
+        current,
+        requested,
+        readAfterWrite,
+      );
       if (change.kind === "block_action_pause") {
         await this.#markReplacedPauseSuperseded(change);
       } else if (change.kind === "block_data_update") {
@@ -4350,7 +4357,7 @@ export class AutomationService {
     });
   }
 
-  #adoptRequestedLogicSource(change, current, requested) {
+  #adoptRequestedLogicSource(change, current, requested, readAfterCreate) {
     if (
       !isLogicSourceChange(change) ||
       change.applied_snapshot !== undefined ||
@@ -4366,7 +4373,13 @@ export class AutomationService {
     }
     if (change.kind === "logic_source_create") {
       change.scenario_index = current.scenario.index;
-      updateLogicTypeMapping(change, current.logicTypes);
+      if (readAfterCreate === true) {
+        const baseline = new Set(change.baseline_logic_types);
+        change.new_logic_types_after_create = current.logicTypes.filter(
+          (type) => !baseline.has(type),
+        );
+      }
+      refreshLogicAssignmentReady(change, current.logicTypes);
     }
     change.applied_snapshot = scenarioChangeSnapshot(change, current.scenario);
     change.logic_assignments = undefined;
@@ -4400,7 +4413,7 @@ export class AutomationService {
       change.applied_snapshot !== undefined &&
       current.scenario !== null
     ) {
-      updateLogicTypeMapping(change, current.logicTypes);
+      refreshLogicAssignmentReady(change, current.logicTypes);
     }
     if (change.applied_snapshot !== undefined) {
       return this.#observeProvenScenarioChange(change, current);
@@ -4708,7 +4721,7 @@ export class AutomationService {
       change.applied_snapshot !== undefined &&
       current.scenario !== null
     ) {
-      updateLogicTypeMapping(change, current.logicTypes);
+      refreshLogicAssignmentReady(change, current.logicTypes);
     }
     this.#adoptRequestedLogicSource(
       change,
@@ -4780,17 +4793,16 @@ export class AutomationService {
       }
     }
     if (change.kind === "logic_source_create") {
-      if (typeof change.native_logic_type !== "string") {
-        throw unmappedLogicRestoreRefusal(change);
+      const { type } = createdLogicMapping(change);
+      if (type === undefined) {
+        throw unmappedLogicRestoreRefusal(change, current.scenario);
       }
-      const assignments = await this.client.findLogicAssignments(
-        change.native_logic_type,
-      );
+      const assignments = await this.client.findLogicAssignments(type);
       if (assignments.length > 0) {
         return this.#finishNative(change, "conflict", undefined, {
           conflict_reason: "logic_assignments_present",
           logic_assignments: assignments.map(({ aId, sId, active }) => ({
-            ref: `${change.home_ref}/accessory/${aId}/service/${sId}/logic/${encodeURIComponent(change.native_logic_type)}`,
+            ref: `${change.home_ref}/accessory/${aId}/service/${sId}/logic/${encodeURIComponent(type)}`,
             active,
           })),
           ...applied.fields,
@@ -4856,7 +4868,6 @@ export class AutomationService {
         await this.#markPauseOutcomes(change, "restore");
       }
       return this.#finishNative(change, "restored", undefined, {
-        candidate_logic_types: undefined,
         logic_assignments: undefined,
         referencing_scenario_targets: undefined,
         ...baseline.fields,
@@ -10276,10 +10287,11 @@ function logicSourceObservation(change, current, snapshot) {
   let expected;
   if (snapshot === "baseline") {
     if (change.kind === "logic_source_create") {
+      const { type } = createdLogicMapping(change);
       matches =
         current.scenario === null &&
-        (change.native_logic_type
-          ? !current.logicTypes.includes(change.native_logic_type)
+        (type !== undefined
+          ? !current.logicTypes.includes(type)
           : isDeepStrictEqual(current.logicTypes, change.baseline_logic_types));
     } else {
       expected = change.baseline_snapshot;
@@ -10297,12 +10309,10 @@ function logicSourceObservation(change, current, snapshot) {
     if (change.kind === "logic_source_create") {
       // Restore deletes only a mapped LOGIC; a journal without a type is
       // settled by the absence of its own scenario.
+      const { type } = createdLogicMapping(change);
       matches =
         current.scenario === null &&
-        !(
-          typeof change.native_logic_type === "string" &&
-          current.logicTypes.includes(change.native_logic_type)
-        );
+        !(type !== undefined && current.logicTypes.includes(type));
     } else {
       expected = change.baseline_snapshot;
       matches = logicSourceWriteMatches(current.scenario, expected);
@@ -10350,40 +10360,42 @@ function logicSourceObservation(change, current, snapshot) {
   };
 }
 
-function newLogicTypeMapping(change, currentTypes) {
-  if (typeof change.native_logic_type === "string") {
+// SprutHub does not report which logic.types entry a LOGIC scenario defines,
+// and the product has not observed how a new one appears. The only evidence
+// kept is the read right after the create: the types that appeared on the
+// selected service since the pre-create read (apply requires that read to
+// equal baseline_logic_types). One such type is this LOGIC's. A type that
+// shows up later may be another LOGIC's, so no later read maps one. A record
+// without that evidence (the read after the create failed, or an earlier
+// version saved a type seen by a later read) stays unmapped.
+function createdLogicMapping(change) {
+  const types = change.new_logic_types_after_create;
+  if (!Array.isArray(types)) {
+    return { status: "missing", reason: "logic_type_not_mapped_at_create" };
+  }
+  if (types.length === 0) {
+    return { status: "missing", reason: "logic_type_not_visible_after_create" };
+  }
+  if (types.length > 1) {
     return {
-      status: "mapped",
-      type: change.native_logic_type,
-      assignmentReady: currentTypes.includes(change.native_logic_type),
+      status: "ambiguous",
+      reason: "ambiguous_logic_type",
+      candidates: types,
     };
   }
-  const baseline = new Set(change.baseline_logic_types);
-  const types = currentTypes.filter((type) => !baseline.has(type));
-  if (types.length === 0) return { status: "missing", types: [] };
-  if (types.length > 1) return { status: "ambiguous", types };
-  return { status: "mapped", type: types[0], assignmentReady: true };
+  const assignmentReady = change.logic_assignment_ready === true;
+  return {
+    status: "mapped",
+    type: types[0],
+    assignmentReady,
+    reason: assignmentReady ? undefined : "logic_type_not_available_on_target",
+  };
 }
 
-function updateLogicTypeMapping(change, currentTypes) {
-  const mapping = newLogicTypeMapping(change, currentTypes);
-  change.logic_mapping_status = mapping.status;
+function refreshLogicAssignmentReady(change, currentTypes) {
+  const { type } = createdLogicMapping(change);
   change.logic_assignment_ready =
-    mapping.status === "mapped" && mapping.assignmentReady;
-  if (mapping.status === "mapped") {
-    change.native_logic_type = mapping.type;
-    change.logic_mapping_reason = mapping.assignmentReady
-      ? undefined
-      : "logic_type_not_available_on_target";
-    change.candidate_logic_types = undefined;
-    return;
-  }
-  change.logic_mapping_reason =
-    mapping.status === "missing"
-      ? "logic_type_not_visible_after_create"
-      : "ambiguous_logic_type";
-  change.candidate_logic_types =
-    mapping.status === "ambiguous" ? mapping.types : undefined;
+    type !== undefined && currentTypes.includes(type);
 }
 
 function logicSourceContract(mode) {
@@ -10402,14 +10414,14 @@ function logicSourceContract(mode) {
         : ["source"],
     assignment: {
       mapping:
-        "stored source ownership is independent from a new type observed through logic.types on the selected service",
+        "stored source ownership is independent from the native type; a created LOGIC's type is mapped only when exactly one new type appears on the selected service in the read right after the create, and a type that appears later is never mapped to it because it may be another LOGIC's",
       separate_operation: "logic_assignment",
     },
     restore: {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario after its native type is mapped, no assignment of that type is found across the home, and no BLOCK runs it with a scenario target; while the selected service lists no new type (logic_type_not_visible) or several (ambiguous_logic_type), an assignment on another service cannot be ruled out, so restore_supported is false and restore refuses without deleting",
+        "delete only the owned unchanged scenario whose native type was mapped at the create, when no assignment of that type is found across the home and no BLOCK runs it with a scenario target; without that mapping (logic_type_not_visible, or ambiguous_logic_type when several types appeared) which type is this LOGIC's cannot be proven, so restore_supported stays false and restore never deletes it; the owner can delete it in the SprutHub app after checking that no device uses it",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
@@ -10742,39 +10754,43 @@ function scenarioRestoreSupported(change) {
   }
   if (
     change.kind === "logic_source_create" &&
-    typeof change.native_logic_type !== "string"
+    createdLogicMapping(change).status !== "mapped"
   ) {
     return false;
   }
   return true;
 }
 
-// logic.types is read per service. A type the selected service does not list
-// can still be assigned elsewhere: SprutHub 3.0.0 did not list a turned-off
-// LOGIC on its anchor (owner hub, 2026-09-24), and the anchor may not match
-// the LOGIC's sourceServices. Of several new types any may be this LOGIC's.
-// Either way its assignments cannot be found, so the scenario is not deleted.
-function unmappedLogicRestoreRefusal(change) {
+// Without the type mapped at the create, the LOGIC's assignments cannot be
+// found: logic.types is read per service, SprutHub 3.0.0 did not list a
+// turned-off LOGIC on its anchor (owner hub, 2026-09-24), the anchor may not
+// match the LOGIC's sourceServices, and a type seen later may be another
+// LOGIC's. Restore never deletes it; retrying cannot change that.
+function unmappedLogicRestoreRefusal(change, scenario) {
   const scenarioRef = `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`;
   const details = {
     change_ref: `spruthub-change://native/${change.id}`,
     scenario_ref: scenarioRef,
   };
-  if (change.logic_mapping_status === "ambiguous") {
-    const candidates = change.candidate_logic_types ?? [];
-    return new SprutHubError(
-      "ambiguous_logic_type",
-      `SprutHub lists several new LOGIC types on ${change.target_ref} (${candidates.join(", ")}), so which one is the LOGIC ${scenarioRef} is unknown and its assignments cannot be checked. Nothing was deleted. Restore again once get_native_change shows logic_mapping_status=mapped.`,
-      "get_native_change",
-      { ...details, candidate_logic_types: [...candidates] },
-    );
-  }
-  return new SprutHubError(
-    "logic_type_not_visible",
-    `SprutHub does not list the type of the LOGIC ${scenarioRef} on ${change.target_ref}, as seen for a turned-off LOGIC, so whether a device uses it cannot be checked. Nothing was deleted; the LOGIC stays on the hub. Restore checks again each time and deletes it only after SprutHub lists its type and no device uses it. The owner can also delete it in the SprutHub app after checking that no device uses it.`,
-    "get_native_change",
-    details,
-  );
+  const mapping = createdLogicMapping(change);
+  const evidence =
+    mapping.status === "ambiguous"
+      ? `SprutHub listed several new types on ${change.target_ref} right after the create (${mapping.candidates.join(", ")})`
+      : mapping.reason === "logic_type_not_visible_after_create"
+        ? `SprutHub listed no new type on ${change.target_ref} right after the create`
+        : "no type was mapped to it right after the create";
+  const message = `Which LOGIC type belongs to ${scenarioRef} cannot be proven: ${evidence}. So restore will not delete it; the LOGIC stays on the hub, turned ${scenario.active ? "on" : "off"}. The owner can delete it in the SprutHub app after checking that no device uses it.`;
+  return mapping.status === "ambiguous"
+    ? new SprutHubError("ambiguous_logic_type", message, "get_native_change", {
+        ...details,
+        candidate_logic_types: [...mapping.candidates],
+      })
+    : new SprutHubError(
+        "logic_type_not_visible",
+        message,
+        "get_native_change",
+        details,
+      );
 }
 
 function scenarioUnprovenApplyFields(change, current) {
@@ -11186,15 +11202,18 @@ function publicNativeChange(
       change.kind === "logic_source_create" &&
       change.applied_snapshot !== undefined &&
       change.status !== "restored";
+    const mapping =
+      change.kind === "logic_source_create"
+        ? createdLogicMapping(change)
+        : undefined;
     const scenarioRef = change.scenario_index
       ? `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`
       : change.kind === "logic_source_update"
         ? change.target_ref
         : undefined;
     const logicRef =
-      change.kind === "logic_source_create" &&
-      typeof change.native_logic_type === "string"
-        ? `${change.target_ref}/logic/${encodeURIComponent(change.native_logic_type)}`
+      mapping?.type !== undefined
+        ? `${change.target_ref}/logic/${encodeURIComponent(mapping.type)}`
         : undefined;
     return {
       status: change.status,
@@ -11235,17 +11254,17 @@ function publicNativeChange(
         ? { scenario_index: change.scenario_index }
         : {}),
       ...(scenarioRef ? { scenario_ref: scenarioRef } : {}),
-      ...(change.native_logic_type
-        ? { native_logic_type: change.native_logic_type }
+      ...(mapping?.type !== undefined
+        ? { native_logic_type: mapping.type }
         : {}),
-      ...(mappingVisible && change.logic_mapping_status
-        ? { logic_mapping_status: change.logic_mapping_status }
+      ...(mappingVisible
+        ? {
+            logic_mapping_status: mapping.status,
+            logic_assignment_ready: mapping.assignmentReady === true,
+          }
         : {}),
-      ...(mappingVisible && typeof change.logic_assignment_ready === "boolean"
-        ? { logic_assignment_ready: change.logic_assignment_ready }
-        : {}),
-      ...(mappingVisible && change.logic_mapping_reason
-        ? { logic_mapping_reason: change.logic_mapping_reason }
+      ...(mappingVisible && mapping.reason
+        ? { logic_mapping_reason: mapping.reason }
         : {}),
       ...(logicRef ? { logic_ref: logicRef } : {}),
       ...(configurationMatches !== undefined
@@ -11261,8 +11280,8 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
-      ...(mappingVisible && change.candidate_logic_types
-        ? { candidate_logic_types: [...change.candidate_logic_types] }
+      ...(mappingVisible && mapping.candidates
+        ? { candidate_logic_types: [...mapping.candidates] }
         : {}),
       ...(change.logic_assignments
         ? { logic_assignments: structuredClone(change.logic_assignments) }
@@ -11861,13 +11880,10 @@ function nativeAffectedRefs(change, homeRef) {
         `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
       );
     }
-    if (
-      change.kind === "logic_source_create" &&
-      typeof change.native_logic_type === "string"
-    ) {
-      refs.push(
-        `${change.target_ref}/logic/${encodeURIComponent(change.native_logic_type)}`,
-      );
+    const { type } =
+      change.kind === "logic_source_create" ? createdLogicMapping(change) : {};
+    if (type !== undefined) {
+      refs.push(`${change.target_ref}/logic/${encodeURIComponent(type)}`);
     }
   }
   return uniqueRefs(refs);
