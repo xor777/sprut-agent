@@ -7207,6 +7207,58 @@ test("each device command is decided by the value read right before its write", 
   }
 });
 
+test("a light level set on a lamp that stays off comes back with a warning and does not turn it on", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  currentCharacteristicValue(hub, lights.floor.on).boolValue = false;
+  currentCharacteristicValue(hub, lights.sconce.on).boolValue = false;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(
+    client,
+    [
+      { target_ref: lights.floor.brightness, value: 30 },
+      { target_ref: lights.chandelier.brightness, value: 30 },
+      { target_ref: lights.sconce.brightness, value: 30 },
+      { target_ref: lights.sconce.on, value: true },
+    ],
+    "Приглушить свет в гостиной до 30%",
+  );
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  assert.equal(sent.structuredContent.status, "ok");
+  const { results } = sent.structuredContent;
+  assert.deepEqual(
+    results.map(({ status, warning }) => ({
+      status,
+      warning: warning?.code ?? null,
+    })),
+    [
+      { status: "applied", warning: "device_off_level_stored" },
+      { status: "applied", warning: null },
+      // The same call turns the sconce on after its level.
+      { status: "applied", warning: null },
+      { status: "applied", warning: null },
+    ],
+  );
+  assert.equal(typeof results[0].warning.message, "string");
+  assert.deepEqual(currentCharacteristicValue(hub, lights.floor.on), {
+    boolValue: false,
+  });
+  assert.deepEqual(
+    deviceCommandUpdates(hub).map(({ aId, cId, control }) => ({
+      aId,
+      cId,
+      value: control.value,
+    })),
+    [
+      { aId: 41, cId: 16, value: { intValue: 30 } },
+      { aId: 40, cId: 16, value: { intValue: 30 } },
+      { aId: 42, cId: 16, value: { intValue: 30 } },
+      { aId: 42, cId: 15, value: { boolValue: true } },
+    ],
+  );
+});
+
 test("one invalid device command rejects the whole call before any write", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const lights = installLivingRoomLights(hub);
