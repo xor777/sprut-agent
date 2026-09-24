@@ -309,7 +309,7 @@ export class HomeReads {
     if (summary) return { ...base, ...roomSummary(serial, catalog, evaluated) };
     const switches = switchCandidates(catalog, selection, candidates)
       .map((candidate) => evaluateCandidate(candidate, values))
-      .filter((item) => matchesState(item, selection.state));
+      .filter((item) => keepsSwitch(item, selection.state));
     return this.#firstPage(
       base,
       serial,
@@ -583,16 +583,19 @@ function switchCandidates(catalog, selection, candidates) {
   );
 }
 
-// The switches section of a light answer: how many, the first few with
-// their On ref, and the call that lists them all.
+// The switches section of a light answer: how many, how many of them with
+// unknown on/off, the first few with their On ref, and the call that lists
+// them all.
 function switchesSection(serial, catalog, items, selection) {
   const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
   const roomOrder = new Map(catalog.rooms.map(({ id }, index) => [id, index]));
   const orderOf = ({ accessory }) =>
     roomOrder.get(accessory.roomId) ?? catalog.rooms.length;
   const { query: _query, ...args } = selection.args;
+  const unknown = items.filter(onUnknown).length;
   return {
     total: items.length,
+    ...(unknown > 0 ? { on_unknown_total: unknown } : {}),
     entries: [...items]
       .sort((left, right) => orderOf(left) - orderOf(right))
       .slice(0, SWITCH_LIMIT)
@@ -624,6 +627,7 @@ function switchEntry(serial, roomsById, item) {
     device: accessory.name,
     room: roomsById.get(accessory.roomId)?.name ?? null,
     ...(on?.applicable ? { on: on.on } : {}),
+    ...(onUnknown(item) ? { on_unknown: on.reason } : {}),
     ...(onControl?.control.write === true
       ? {
           on_ref: characteristicRef(
@@ -667,16 +671,19 @@ function queryWordMatches(catalog, selection, evaluated) {
   };
 }
 
-// Whether an evaluated service passes a state filter; unknown on/off does
-// not.
-function matchesState(item, state) {
+// Whether a relay stays in the switches section under a state filter: its
+// on/off or availability matches, or its on/off is unknown. An unknown
+// relay may be on; its entry says so instead of dropping it.
+function keepsSwitch(item, state) {
   if (state === "on" || state === "off") {
-    return (
-      item.onState?.applicable === true && item.onState.on === (state === "on")
-    );
+    return onUnknown(item) || item.onState?.on === (state === "on");
   }
   if (state === "unavailable") return item.available === false;
   return true;
+}
+
+function onUnknown({ onState }) {
+  return onState?.applicable === true && onState.on === null;
 }
 
 function hasRoom(catalog, selection) {
