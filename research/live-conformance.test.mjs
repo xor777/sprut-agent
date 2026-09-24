@@ -475,3 +475,357 @@ test("--sweep-only removes what a run left and fails a prefix of another kind", 
     false,
   );
 });
+
+// --- the guard of the live probe ---------------------------------------------
+//
+// Every write of the live probe goes through GuardedHub (MCP) or ProbeClient
+// (product client). These tests drive the guard against the simulated hub and
+// check what reaches the hub, not what the probe reports.
+
+async function guardSetup(t, options) {
+  const ctx = await setup(t);
+  const guard = new conformance.GuardedHub(ctx.mcp, prefix, options);
+  guard.homeRef = ctx.homeRef;
+  const client = await productClient(t, ctx.hub);
+  const probe = new conformance.ProbeClient(client, guard, ctx.stateDirectory);
+  return { ...ctx, guard, probe, client };
+}
+
+async function guardApply(guard, input) {
+  const prepared = await guard.prepare(input);
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  const applied = await guard.apply(prepared.change_ref);
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  return { changeRef: prepared.change_ref, applied };
+}
+
+// The run's room and its unlinked virtual Lightbulb, as step V makes them.
+async function runVirtual(g) {
+  const room = await guardApply(g.guard, {
+    operation: "room_create",
+    target_ref: g.homeRef,
+    name: `${roomName}-v`,
+  });
+  const roomRef = room.applied.room.ref;
+  const accessory = await g.probe.createVirtualAccessory(roomRef, [
+    "Brightness",
+  ]);
+  const service = accessory.services.find(({ type }) => type === "Lightbulb");
+  const on = service.characteristics.find(
+    ({ control }) => control?.type === "On",
+  );
+  return {
+    roomRef,
+    aId: accessory.id,
+    sId: service.sId,
+    onCId: on.cId,
+    serviceRef: `${g.homeRef}/accessory/${accessory.id}/service/${service.sId}`,
+  };
+}
+
+function timedOn(target, cron) {
+  return {
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [{ type: "cron", mode: "NONE", cron, offset: 0 }],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [
+          {
+            type: "service",
+            aId: target.aId,
+            sId: target.sId,
+            hs: "Lightbulb",
+            characteristics: [
+              { type: "set", cId: target.onCId, hc: "On", value: "true" },
+            ],
+          },
+        ],
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  };
+}
+
+function probeBlock(homeRef, data) {
+  return {
+    operation: "block_create",
+    target_ref: homeRef,
+    name: `${prefix}-fire`,
+    description: "Проба соответствия",
+    active: false,
+    on_start: false,
+    sync: false,
+    data,
+  };
+}
+
+// A LOGIC source of the probe's form: an info object and an empty trigger.
+function inertLogic(name, trigger = "  // Intentionally empty.\n") {
+  return `info = {
+  name: ${JSON.stringify(name)},
+  description: "Проба соответствия",
+  version: "1.0",
+  author: "sprut-agent",
+  onStart: false,
+  sourceServices: [HS.Lightbulb],
+  sourceCharacteristics: [HC.On],
+  options: {}
+};
+
+function trigger(source, value, variables, options, context) {
+${trigger}}`;
+}
+
+test("the guard lets a run BLOCK fire at a daily time only on the run's virtual accessory and turns on only run BLOCKs", async (t) => {
+  const g = await guardSetup(t);
+  const virtual = await runVirtual(g);
+  const lamp = { aId: 35, sId: 13, onCId: 14 };
+  const before = g.hub.writes().length;
+
+  await assert.rejects(
+    g.guard.prepare(probeBlock(g.homeRef, timedOn(lamp, "0 5 12 ? * * *"))),
+    conformance.GuardError,
+  );
+  // Every five minutes would repeat all day, not fire once.
+  await assert.rejects(
+    g.guard.prepare(probeBlock(g.homeRef, timedOn(virtual, "0 0/5 * ? * * *"))),
+    conformance.GuardError,
+  );
+  // The owner's turned-off BLOCK stays off.
+  await assert.rejects(
+    g.guard.prepare({
+      operation: "scenario_active",
+      target_ref: `${g.homeRef}/scenario/7`,
+      value: true,
+    }),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  const created = await guardApply(
+    g.guard,
+    probeBlock(g.homeRef, timedOn(virtual, "0 5 12 ? * * *")),
+  );
+  await guardApply(g.guard, {
+    operation: "scenario_active",
+    target_ref: created.applied.scenario_ref,
+    value: true,
+  });
+  const index = created.applied.scenario_ref.split("/").at(-1);
+  const scenario = (i) => g.hub.state.scenarios.find((s) => s.index === i);
+  assert.equal(scenario(index).active, true);
+  assert.equal(scenario("7").active, false);
+});
+
+test("the guard turns a probe LOGIC on only while unassigned and assigns it only to the run's virtual accessory while it is off", async (t) => {
+  const g = await guardSetup(t);
+  const virtual = await runVirtual(g);
+  const name = `${prefix}-logic`;
+  const logicInput = (active, source) => ({
+    operation: "logic_source_create",
+    target_ref: virtual.serviceRef,
+    name,
+    description: "Проба соответствия",
+    active,
+    on_start: false,
+    sync: false,
+    source,
+  });
+  const created = await guardApply(
+    g.guard,
+    logicInput(false, inertLogic(name)),
+  );
+  const logicRef = created.applied.scenario_ref;
+  const type = created.applied.native_logic_type;
+  const assign = (serviceRef, logicType) => ({
+    operation: "logic_assignment",
+    target_ref: `${serviceRef}/logic/${encodeURIComponent(logicType)}`,
+  });
+  const turnOn = {
+    operation: "scenario_active",
+    target_ref: logicRef,
+    value: true,
+  };
+  const before = g.hub.writes().length;
+
+  // Only the run's LOGIC, only on the run's virtual accessory.
+  await assert.rejects(
+    g.guard.prepare(assign(`${g.homeRef}/accessory/15/service/13`, type)),
+    conformance.GuardError,
+  );
+  await assert.rejects(
+    g.guard.prepare(assign(virtual.serviceRef, "AdaptiveLighting")),
+    conformance.GuardError,
+  );
+  // A LOGIC created on must run nothing.
+  await assert.rejects(
+    g.guard.prepare(
+      logicInput(
+        true,
+        inertLogic(name, "  Hub.getAccessory(35).getService(13);\n"),
+      ),
+    ),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  const assignment = await guardApply(
+    g.guard,
+    assign(virtual.serviceRef, type),
+  );
+  await assert.rejects(g.guard.prepare(turnOn), conformance.GuardError);
+  assert.equal(
+    (await g.guard.restore(assignment.changeRef)).status,
+    "restored",
+  );
+
+  // Whether a LOGIC has an options window with Active is not observed; the
+  // simulated LOGIC gets one here so that it can be switched.
+  const logic = g.hub.state.scenarios.find(
+    ({ index }) => index === logicRef.split("/").at(-1),
+  );
+  logic.optionsWindow = "scenario-options-probe-logic";
+  g.hub.state.windows[logic.optionsWindow] = {
+    windowKey: logic.optionsWindow,
+    label: { text: "Настройки сценария" },
+    options: [
+      {
+        key: "Active",
+        name: "Активен",
+        type: "GenericBoolean",
+        inputType: "CHECKBOX",
+        read: true,
+        write: true,
+        disabled: false,
+        value: { boolValue: false },
+      },
+    ],
+  };
+  await guardApply(g.guard, turnOn);
+  assert.equal(logic.active, true);
+  const whileOn = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.prepare(assign(virtual.serviceRef, type)),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, whileOn), []);
+  assert.equal(
+    g.hub.state.logics.some((item) => item.type === type),
+    false,
+  );
+});
+
+test("the probe sends one direct room.create under the run's short name and the sweep removes that room", async (t) => {
+  const g = await guardSetup(t);
+  const before = g.hub.writes().length;
+  await assert.rejects(
+    g.probe.createRoomDirect("Гостиная у окна"),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  // 31 characters: the product refuses it, so only a direct write shows
+  // what the hub keeps of a Cyrillic name.
+  const room = await g.probe.createRoomDirect(`${roomName}абвгде`);
+  await assert.rejects(
+    g.probe.createRoomDirect(`${roomName}-2`),
+    conformance.GuardError,
+  );
+  await assert.rejects(
+    g.probe.deleteDirectRoom(`${g.homeRef}/room/1`),
+    conformance.GuardError,
+  );
+  assert.deepEqual(
+    sweepWrites(g.hub, before).map(({ method }) => method),
+    ["room.create"],
+  );
+
+  await runFile(
+    process.execPath,
+    [script, "--sweep-only", prefix, "--state-dir", g.stateDirectory],
+    {
+      cwd: repoRoot,
+      env: {
+        PATH: process.env.PATH,
+        ...g.hub.connectionEnv(),
+        SPRUTHUB_TIMEOUT_MS: "5000",
+      },
+    },
+  );
+  assert.equal(
+    g.hub.state.rooms.some(({ id }) => id === room.id),
+    false,
+  );
+  assert.equal(
+    g.hub.state.rooms.some(({ id }) => id === 1),
+    true,
+  );
+});
+
+test("virtual_light_group is only prepared, for the run's virtual accessory name and room", async (t) => {
+  const g = await guardSetup(t);
+  const virtual = await runVirtual(g);
+  const group = (name, roomRef) => ({
+    operation: "virtual_light_group",
+    target_ref: g.homeRef,
+    name,
+    room_ref: roomRef,
+    member_service_refs: [
+      `${g.homeRef}/accessory/15/service/13`,
+      `${g.homeRef}/accessory/16/service/13`,
+    ],
+    characteristic_types: ["On", "Brightness"],
+  });
+  const before = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.prepare(group("Свет в гостиной", virtual.roomRef)),
+    conformance.GuardError,
+  );
+  await assert.rejects(
+    g.guard.prepare(group(accessoryName, `${g.homeRef}/room/3`)),
+    conformance.GuardError,
+  );
+  const duplicate = await g.guard.prepare(
+    group(accessoryName, virtual.roomRef),
+  );
+  assert.equal(duplicate.conflict_reason, "matching_virtual_accessory_exists");
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  // Without its accessory the same group is prepared, and never applied.
+  await g.probe.deleteVirtualAccessory(virtual.aId);
+  const prepared = await g.guard.prepare(group(accessoryName, virtual.roomRef));
+  assert.equal(prepared.status, "prepared");
+  const afterDelete = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.apply(prepared.change_ref),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, afterDelete), []);
+});
+
+test("a read-only probe refuses every write before it reaches the product", async (t) => {
+  const g = await guardSetup(t, { readOnly: true });
+  const before = g.hub.writes().length;
+  await assert.rejects(
+    g.guard.prepare({
+      operation: "room_create",
+      target_ref: g.homeRef,
+      name: `${roomName}-r`,
+    }),
+    conformance.GuardError,
+  );
+  await assert.rejects(
+    g.probe.createRoomDirect(`${roomName}-r`),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+  assert.deepEqual(await journal(g.client, g.stateDirectory), []);
+});
