@@ -5831,7 +5831,7 @@ function blockContract() {
       "A conditional BLOCK requires at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
       "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
       "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
-      "time_trigger forms follow the official editor schema; a hub has not been observed saving or firing them. Day names, the SUNRISE/SUNSET cron and minutes as the offset unit are assumptions, so check read_hub_log after the first expected moment.",
+      "time_trigger days_at_time and sun follow what the official web client writes: day names in field 5 and a SUNRISE/SUNSET offset in seconds (negative is before). A hub has not been observed saving or firing them, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",

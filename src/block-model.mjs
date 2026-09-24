@@ -242,16 +242,17 @@ const BLOCK_NODE_CONSTRAINTS = {
 // A cron in condition.conditions fires its BLOCK at its moment. Only the
 // daily form 0 MM HH ? * * * is observed on a hub
 // (research/protocol/2026-09-13-native-daily-interval.md). The other forms
-// read the official editor schema's seven-field cron as Quartz: seconds
-// first, "?" for the unused day field, year last. Day names avoid Quartz's
-// 1=SUN numbering. The SUNRISE/SUNSET cron and minutes as the offset unit
-// are assumptions that still need a live check.
+// follow what the official web client writes
+// (research/protocol/2026-09-24-web-client-evidence.md): a seven-field
+// Quartz cron with seconds first, day names in field 5, and for
+// SUNRISE/SUNSET the cron 0 0 0 ? * DAYS * with offset in seconds, negative
+// before the event, up to 12 hours. No hub has been observed firing them.
 const CRON_DAY_NAMES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
 const SUN_OFFSET = {
   type: "integer",
-  unit: "minutes",
-  minimum: -720,
-  maximum: 720,
+  unit: "seconds",
+  minimum: -43_200,
+  maximum: 43_200,
   negative: "before",
 };
 
