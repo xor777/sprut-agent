@@ -20542,6 +20542,72 @@ function logicListReads(hub) {
   return hub.requests.filter(({ logic }) => logic?.list).length;
 }
 
+// SprutHub 3.0.0 (owner hub, 2026-09-24, live-conformance-3, step 4n): an
+// assignment made while its LOGIC is on is still listed by logic.list and
+// logic.get after the LOGIC is turned off. Its change stays owned, and
+// restore removes it without turning the LOGIC on.
+test("an assignment whose LOGIC is turned off stays owned and its restore removes it", async (t) => {
+  const { hub, client, stateDirectory, created } = await createOwnedLogic(t, {
+    active: true,
+  });
+  assertIdentityMapping(created, { ready: true, reason: undefined });
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_assignment",
+      target_ref: created.logic_ref,
+      reason: "Назначить созданный LOGIC свету",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const assignmentRef = prepared.structuredContent.change_ref;
+  assert.equal(
+    (await callChangeTool(client, "apply_native_change", assignmentRef)).status,
+    "applied",
+  );
+  const logic = hub.state.scenarios.find(({ index }) => index === "created-1");
+  addScenarioOptionsWindow(hub, logic);
+  await turnScenarioOffWithChange(client, created.scenario_ref);
+  assert.equal(logic.active, false);
+  const activeWrites = scenarioWindowActiveUpdates(hub).length;
+
+  const restarted = await startClient(t, hub, stateDirectory);
+  const observed = await callChangeTool(
+    restarted,
+    "get_native_change",
+    assignmentRef,
+  );
+  assert.equal(observed.status, "applied");
+  assert.equal(observed.configuration_matches, true);
+  assert.equal(observed.assignment_ownership_lost, undefined);
+
+  const restored = await callChangeTool(
+    restarted,
+    "restore_native_change",
+    assignmentRef,
+  );
+  assert.equal(restored.status, "restored");
+  assert.equal(restored.configuration_matches, true);
+  assert.deepEqual(
+    hub.requests
+      .filter(({ logic }) => logic?.delete)
+      .map(({ logic }) => logic.delete),
+    [{ aId: 34, sId: 13, type: "created-1" }],
+  );
+  assert.deepEqual(
+    hub.state.logics.filter(({ type }) => type === "created-1"),
+    [],
+  );
+  assert.equal(logic.active, false, "the LOGIC was not turned on for it");
+  assert.equal(scenarioWindowActiveUpdates(hub).length, activeWrites);
+  const stored = await callChangeTool(
+    await startClient(t, hub, stateDirectory),
+    "get_native_change",
+    assignmentRef,
+  );
+  assert.equal(stored.status, "restored");
+});
+
 // The owner (or another process) can create or turn on a LOGIC on the same
 // service while this create is in flight. Its type is its own index, not
 // the created LOGIC's.
