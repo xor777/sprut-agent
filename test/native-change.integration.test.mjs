@@ -11291,6 +11291,7 @@ test("an if the edit keeps is written as the hub stores it, not as the agent tid
     }),
   );
   const storedIf = scenarioData(hub, "existing-block").targets[0];
+  const storedGroup = scenarioData(hub, "existing-block").targets[1].if;
 
   const edited = await readBlockConfiguration(client);
   // The agent writes every default of the first if out and drops what the
@@ -11303,8 +11304,13 @@ test("an if the edit keeps is written as the hub stores it, not as the agent tid
   tidied.if.mode = "AND";
   Object.assign(tidied, { mode: "EVERY", then_delay: 0, else_delay: 0 });
   tidied.else = [];
-  // The change the owner asked for: brightness 30 instead of 20.
+  // The change the owner asked for: brightness 30 instead of 20. The same
+  // if's one-condition group is tidied too: it stays as stored inside the
+  // edited if.
   edited.targets[1].then[0].characteristics[0].value = "30";
+  delete edited.targets[1].if.blockId;
+  delete edited.targets[1].if.conditions[0].blockId;
+  edited.targets[1].if.mode = "OR";
   const prepared = await prepareBlockUpdate(
     client,
     edited,
@@ -11321,9 +11327,10 @@ test("an if the edit keeps is written as the hub stores it, not as the agent tid
   assert.deepEqual(
     {
       kept_if: written.targets[0],
+      kept_group: written.targets[1].if,
       brightness: written.targets[1].then[0].characteristics[0].value,
     },
-    { kept_if: storedIf, brightness: "30" },
+    { kept_if: storedIf, kept_group: storedGroup, brightness: "30" },
   );
 });
 
