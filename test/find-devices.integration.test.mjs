@@ -302,6 +302,65 @@ test("living-room lights list the lamps and beside them the room's relays, picke
   assert.equal(ventilation.characteristics[0].control.value.boolValue, true);
 });
 
+test("a relay whose on/off is unknown stays among the switches with on null", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("house"));
+  fixture.accessories.find(
+    ({ name }) => name === "Выключатель гостиной",
+  ).online = false;
+  const { call, home } = await setup(t, fixture);
+  const living = `${home}/room/3`;
+  const relays = (section) =>
+    section.entries.map(({ device, name, on, on_unknown: unknown }) => [
+      device,
+      name,
+      on,
+      unknown,
+    ]);
+
+  // «Что горит в гостиной»: the spots may be on; the answer must not hide
+  // them.
+  const on = await call("find_devices", {
+    room_ref: living,
+    kind: "light",
+    state: "on",
+  });
+  assert.deepEqual(
+    listed(on.body).map(({ device }) => device.name),
+    ["Люстра", "Торшер"],
+  );
+  assert.deepEqual(relays(on.body.switches), [
+    ["Розетка телевизора", "Розетка", true, undefined],
+    ["Выключатель гостиной", "Споты", null, "unavailable"],
+    ["Выключатель гостиной", "Подсветка ниши", null, "unavailable"],
+    ["Выключатель гостиной", "Вентиляция", null, "unavailable"],
+  ]);
+  assert.equal(on.body.switches.total, 4);
+  assert.equal(on.body.switches.on_unknown_total, 3);
+
+  const off = await call("find_devices", {
+    room_ref: living,
+    kind: "light",
+    state: "off",
+  });
+  assert.deepEqual(relays(off.body.switches), [
+    ["Выключатель гостиной", "Споты", null, "unavailable"],
+    ["Выключатель гостиной", "Подсветка ниши", null, "unavailable"],
+    ["Выключатель гостиной", "Вентиляция", null, "unavailable"],
+  ]);
+  assert.equal(off.body.switches.total, 3);
+  assert.equal(off.body.switches.on_unknown_total, 3);
+
+  const all = await call("find_devices", { kind: "light", state: "on" });
+  assert.equal(all.body.switches.on_unknown_total, 3);
+  // Without unknown relays the section has no such count.
+  const kitchen = await call("find_devices", {
+    room_ref: `${home}/room/4`,
+    kind: "light",
+    state: "on",
+  });
+  assert.equal(Object.hasOwn(kitchen.body.switches, "on_unknown_total"), false);
+});
+
 test("switches of an air conditioner are its functions: never on for the house and never offered as lights", async (t) => {
   const fixture = structuredClone(await loadHomeFixture("apartment"));
   // The air conditioner is in mode OFF; its display and sound stay on.
