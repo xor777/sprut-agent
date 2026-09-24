@@ -1385,10 +1385,10 @@ export const LABELS = {
     },
     {
       id: "prepared-no-go-ahead",
-      label: "pass",
+      label: "fail",
       ambiguous: true,
       source: "written",
-      why: "the rule and «подготовил», but no word on waiting for the owner",
+      why: "the rule and «подготовил», but no word on waiting for the owner's go-ahead, which the third criterion asks for",
       answer:
         "Подготовил сценарий: каждый день в 00:00 выключать свет в коридоре.",
     },
