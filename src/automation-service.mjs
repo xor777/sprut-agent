@@ -5997,7 +5997,7 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with a null field as left out (the hub drops null fields), an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a from action's value \"\" as left out, and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else for a device action one of the same device, first one that sets a characteristic it sets, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code, other nodes this contract cannot write and requests whose URL answers hide, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with a null field as left out (the hub drops null fields), an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a from action's value \"\" as left out, and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else for a device action one of the same device, first one that sets a characteristic it sets, else for an if or a condition group the one that shares the most of its conditions, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code, other nodes this contract cannot write and requests whose URL answers hide, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
@@ -6154,7 +6154,7 @@ async function validateBlockData(
   const context = {
     kept,
     removedNodes: edit === null ? null : removedBlockNodes(edit),
-    grownOrGroups: edit === null ? [] : grownOrGroups(data, edit, editedFrom),
+    grownOrGroups: edit === null ? [] : grownOrGroups(data, edit),
     problems: [],
     conditions: [],
     actions: [],
@@ -6364,12 +6364,12 @@ async function validateBlockData(
 // types is the same in canonicalBlock form. It may sit at another position of
 // its array, and each stored subtree is kept at most once. Other requested
 // nodes pair with the remaining stored nodes of the same type in the same
-// array, first by identity (BLOCK_NODE_MATCHES), then in order by
-// position, so that their children are compared in turn; a node without a
-// pair is new, and so is everything below it. A stored node that is neither
-// kept nor paired is removed by the edit with everything below it; removed
-// holds its path in the stored data; keptAs maps the top node of each kept
-// subtree to the stored node it matches.
+// array, first by identity or shared content (BLOCK_NODE_MATCHES), then in
+// order by position, so that their children are compared in turn; a node
+// without a pair is new, and so is everything below it. A stored node that
+// is neither kept nor paired is removed by the edit with everything below
+// it; removed holds its path in the stored data; keptAs maps the top node of
+// each kept subtree to the stored node it matches.
 function keptBlockSubtrees(data, stored) {
   const kept = new WeakSet();
   const keptAs = new Map();
@@ -6426,13 +6426,20 @@ function keptBlockSubtrees(data, stored) {
       candidate.child.type === child.type;
     const pairs = new Map();
     for (const matches of BLOCK_NODE_MATCHES) {
+      const scored = [];
       for (const child of pairable) {
         if (pairs.has(child)) continue;
-        const candidate = candidates.find(
-          (storedChild) =>
-            available(storedChild, child) && matches(child, storedChild.child),
-        );
-        if (!candidate) continue;
+        for (const candidate of candidates) {
+          if (!available(candidate, child)) continue;
+          const score = Number(matches(child, candidate.child));
+          if (score > 0) scored.push({ child, candidate, score });
+        }
+      }
+      // The best pairs first; sort is stable, so equal ones keep the order
+      // of the edit, then of the stored array.
+      scored.sort((a, b) => b.score - a.score);
+      for (const { child, candidate } of scored) {
+        if (pairs.has(child) || candidate.used) continue;
         candidate.used = true;
         pairs.set(child, candidate);
       }
@@ -6532,11 +6539,13 @@ function withKeptSubtreesAsStored(data, stored) {
 }
 
 // Whether a stored node is an edited node's original besides its position,
-// tried in order over all edited nodes of an array, first match wins. The
-// blockId the hub gave a node comes back from get_entity and stays in an
-// edit made from that read; it is the only name of an if, a condition
-// group, an interval, a cron or code. Without it, native ids name a device
-// action, a condition, a scenario run or a delay.
+// tried in order over all edited nodes of an array. Each gives true or, for
+// shared content, the share the two nodes have in common; the best pair is
+// taken first, equal ones in order. The blockId the hub gave a node comes
+// back from get_entity and stays in an edit made from that read; it is the
+// only name of an if, a condition group, an interval, a cron or code.
+// Without it, native ids name a device action, a condition, a scenario run
+// or a delay, and the conditions it tests name an if or a condition group.
 const BLOCK_NODE_MATCHES = [
   (node, stored) =>
     Number.isSafeInteger(node.blockId) && node.blockId === stored.blockId,
@@ -6554,7 +6563,38 @@ const BLOCK_NODE_MATCHES = [
       serviceActionCIds(stored).includes(cId),
     ),
   (node, stored) => sameServiceDevice(node, stored),
+  // An if or a condition group the edit changed still tests some of its
+  // conditions, as when the edit adds «at night» to the motion rule and
+  // deletes the rule before it: the stored one that shares the most of
+  // them, counted over the conditions of both.
+  (node, stored) => {
+    if (node.type !== "if" && node.type !== "condition") return 0;
+    const leaves = conditionLeaves(node);
+    const storedLeaves = conditionLeaves(stored);
+    const shared = [...leaves].filter((leaf) => storedLeaves.has(leaf)).length;
+    const all = leaves.size + storedLeaves.size - shared;
+    return all === 0 ? 0 : shared / all;
+  },
 ];
+
+// The conditions an if or a condition group tests, below any groups, in
+// canonicalBlock form.
+function conditionLeaves(node) {
+  const leaves = new Set();
+  const collect = (condition) => {
+    if (
+      isRecord(condition) &&
+      condition.type === "condition" &&
+      Array.isArray(condition.conditions)
+    ) {
+      for (const child of condition.conditions) collect(child);
+    } else if (condition !== undefined && condition !== null) {
+      leaves.add(stableJson(canonicalBlockNode(condition)));
+    }
+  };
+  collect(node.type === "if" ? node.if : node);
+  return leaves;
+}
 
 function nativeBlockNodeKey(node) {
   if (node.type === "service") {
@@ -6591,34 +6631,9 @@ function sameServiceDevice(node, stored) {
 // their mode stays OR. The web client makes every group OR, which over one
 // condition means that condition; over several, any one of them runs the
 // branch, which the preview names so that the agent says so or sets AND.
-// A group without a stored counterpart, as when rules without blockIds
-// pair by position with another rule, grew from a stored one-condition OR
-// group the edit does not keep whose condition it holds.
-function grownOrGroups(data, edit, stored) {
-  const oneConditionOr = (group) =>
-    isRecord(group) &&
-    group.mode === "OR" &&
-    Array.isArray(group.conditions) &&
-    group.conditions.length <= 1;
-  const keptStored = new WeakSet();
-  const markKept = (value) => {
-    if (value === null || typeof value !== "object") return;
-    keptStored.add(value);
-    for (const child of Object.values(value)) markKept(child);
-  };
-  for (const node of edit.keptAs.values()) markKept(node);
-  // The conditions of stored one-condition OR groups the edit does not keep.
-  const sources = new Set();
-  visitKnownBlockNodes(stored, (node, kind) => {
-    if (
-      kind === "condition" &&
-      oneConditionOr(node) &&
-      node.conditions.length === 1 &&
-      !keptStored.has(node)
-    ) {
-      sources.add(stableJson(canonicalBlockNode(node.conditions[0])));
-    }
-  });
+// A group grew when the stored group it was edited from had one condition
+// with mode OR; a group without a stored counterpart is new.
+function grownOrGroups(data, edit) {
   const grown = [];
   visitKnownBlockNodes(data, (node, kind, path) => {
     if (
@@ -6631,13 +6646,12 @@ function grownOrGroups(data, edit, stored) {
       return;
     }
     const counterpart = edit.counterparts.get(node);
-    const grewFromStored =
-      counterpart === undefined
-        ? node.conditions.some((condition) =>
-            sources.has(stableJson(canonicalBlockNode(condition))),
-          )
-        : oneConditionOr(counterpart);
-    if (grewFromStored) {
+    if (
+      isRecord(counterpart) &&
+      counterpart.mode === "OR" &&
+      Array.isArray(counterpart.conditions) &&
+      counterpart.conditions.length <= 1
+    ) {
       grown.push({
         pointer: blockPathToPointer(path),
         conditions: node.conditions.length,

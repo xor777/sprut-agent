@@ -11492,6 +11492,15 @@ test("an update that grows a web client's one-condition OR group warns that any 
       },
       twoRules,
     ),
+    // The motion rule takes «night» from the rule it deletes: it shares one
+    // condition with each stored rule, and more of the motion rule's.
+    grown_or_with_a_condition_of_the_deleted_rule_without_block_ids:
+      await preview((data) => {
+        const edited = withoutBlockIds(data);
+        const [deleted] = edited.targets.splice(0, 1);
+        edited.targets[0].if.conditions.push(deleted.if.conditions[1]);
+        return edited;
+      }, twoRules),
     grown_or_in_reordered_rules_without_block_ids: await preview((data) => {
       const edited = withoutBlockIds(data);
       edited.targets.reverse();
@@ -11536,6 +11545,11 @@ test("an update that grows a web client's one-condition OR group warns that any 
       written_mode: "OR",
     },
     grown_or_after_deleting_the_rule_before_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [{ pointer: "/targets/0", type: "if" }],
+      written_mode: "OR",
+    },
+    grown_or_with_a_condition_of_the_deleted_rule_without_block_ids: {
       warnings: grownAt("/targets/0/if"),
       removed_nodes: [{ pointer: "/targets/0", type: "if" }],
       written_mode: "OR",
