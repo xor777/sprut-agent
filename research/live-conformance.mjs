@@ -3,15 +3,17 @@
 //
 // It talks only through dist/plugin/dist/server.mjs over stdio. Every write
 // goes through a guard: it may create rooms, BLOCK and LOGIC scenarios whose
-// names start with the run prefix, and may change or restore only objects it
-// created in this run. BLOCKs are created turned off with onStart=false; a
-// BLOCK is turned on only when its sole trigger is a one-date cron in
-// FAR_FUTURE_YEAR or later. The owner's devices, scenarios, rooms and settings
-// are only read. Everything created is restored (deleted) in reverse order and
-// the final home snapshot must equal the initial one. A final sweep then
-// deletes, through the product client, every inert object of this run that
-// the product owns but its restore left behind, and the run's own unlinked
-// virtual accessory, and fails the run for it.
+// names start with the run prefix, one virtual Lightbulb without links, and
+// may change or restore only objects it created in this run. By the owner's
+// rule of 2026-09-24 a BLOCK may act only on that virtual accessory and start
+// only on a one-date cron in FAR_FUTURE_YEAR or later; it is created turned
+// off with onStart=false and is turned on only with such a trigger. The
+// owner's devices, scenarios, rooms and settings are only read. Everything
+// created is restored (deleted) in reverse order and the final home snapshot
+// must equal the initial one. A final sweep then deletes, through the product
+// client, every inert object of this run that the product owns but its
+// restore left behind, and the run's own unlinked virtual accessory, and
+// fails the run for it.
 // `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep.
 //
 // Output: a JSON report in a new temporary directory and a console table.
@@ -26,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { WebSocket } from "ws";
 import { AutomationStore } from "../src/automation-store.mjs";
 import { SprutHubConnection } from "../src/spruthub-connection.mjs";
 
@@ -38,17 +41,13 @@ const CALL_TIMEOUT_MS = 300_000;
 const FAR_FUTURE_YEAR = 2030;
 const ONE_DATE_CRON = `0 0 12 1 1 ? ${FAR_FUTURE_YEAR}`;
 const ONE_DATE_CRON_UPDATED = `0 0 13 1 1 ? ${FAR_FUTURE_YEAR}`;
-const WEEKDAY_CRON = "0 30 7 ? * MON,TUE,WED,THU,FRI *";
-const SUN_CRON = "0 0 0 ? * * *";
-const SUNSET_OFFSET_MINUTES = -30;
 const HOLD_MS = 60_000;
 const DELAY_MS = 60_000;
 const PROBE_DESCRIPTION = "sprut-agent live conformance probe; safe to delete";
-// On 2026-09-24 SprutHub 3.0.0 stored inc/dec value "10" as 10; sprut-agent
-// 0.1.44 then saw a manual change and refused to delete its own BLOCK
-// (research/protocol/2026-09-24-live-conformance.md). These families are
-// created only with --include-orphaning, to check a product fix.
-const ORPHANING_FAMILIES = new Set(["inc", "dec"]);
+// How long a run or a turn-on is watched for a write to the virtual accessory.
+const WATCH_MS = 6_000;
+const POLL_MS = 500;
+const DAY_MS = 86_400_000;
 const REASON =
   "Owner-authorized live conformance probe; only objects created by this run are changed and all are removed.";
 const PROBE_PREFIX = /^zz-sprut-agent-probe-\d{8}T\d{6}Z$/;
@@ -79,6 +78,7 @@ const PREPARE_OPERATIONS = new Set([
   "window_option",
   "logic_source_create",
   "logic_source_update",
+  "scenario_run",
 ]);
 
 class GuardError extends Error {}
@@ -103,6 +103,9 @@ class GuardedHub {
     this.changes = new Map();
     this.calls = [];
     this.allowLogicActivation = false;
+    // The run's virtual accessory ids and its BLOCKs' options windows.
+    this.virtualAIds = new Set();
+    this.ownWindows = new Map();
   }
 
   async read(tool, args) {
@@ -124,6 +127,9 @@ class GuardedHub {
           input.operation === "block_create" &&
           input.on_start === false &&
           onlyFarFutureOneDateTriggers(input.data),
+        // The product's path to a BLOCK's Active window option is only
+        // prepared, to learn whether it is offered; the hub write is direct.
+        prepareOnly: this.ownWindows.has(input.target_ref),
       });
     }
     return result;
@@ -131,6 +137,8 @@ class GuardedHub {
 
   async apply(changeRef) {
     const change = this.#ownChange(changeRef);
+    if (change.prepareOnly)
+      throw new GuardError(`${changeRef} is prepare-only`);
     const result = await this.#call("apply_native_change", {
       change_ref: changeRef,
     });
@@ -190,6 +198,10 @@ class GuardedHub {
         refuse("a BLOCK must be created off with onStart=false");
       }
     }
+    if (["block_create", "block_data_update"].includes(op)) {
+      const violation = probeBlockViolation(input.data, this.virtualAIds);
+      if (violation) refuse(violation);
+    }
     if (op === "logic_source_create") {
       if (!this.anchors.has(target)) refuse("not the chosen anchor service");
       if (!input.name?.startsWith(this.prefix)) refuse("name lacks prefix");
@@ -207,7 +219,11 @@ class GuardedHub {
         refuse("an activatable BLOCK must keep only far-future triggers");
       }
     }
-    if (op === "window_option") {
+    if (op === "window_option" && this.ownWindows.has(target)) {
+      if (input.option_key !== "Active" || input.value !== false) {
+        refuse("only Active=false on a probe BLOCK window");
+      }
+    } else if (op === "window_option") {
       if (owned?.kind !== "block") refuse("BLOCK not created by this run");
       if (!["Name", "Desc"].includes(input.option_key)) refuse("option key");
       if (
@@ -229,6 +245,9 @@ class GuardedHub {
     }
     if (op === "logic_source_update" && owned?.kind !== "logic") {
       refuse("LOGIC not created by this run");
+    }
+    if (op === "scenario_run" && owned?.kind !== "block") {
+      refuse("BLOCK not created by this run");
     }
   }
 
@@ -256,33 +275,250 @@ class GuardedHub {
   }
 }
 
+// The only path for writes that bypass the MCP server, through the product
+// client: the run's virtual accessory (create, set, delete), a run of this
+// run's BLOCK, and the Active option of such a BLOCK's own options window.
+// history.list is the only raw read; the client has no method for it.
+class ProbeClient {
+  #client;
+  #hub;
+  #stateDirectory;
+
+  constructor(client, hub, stateDirectory) {
+    this.#client = client;
+    this.#hub = hub;
+    this.#stateDirectory = stateDirectory;
+  }
+
+  static async open(hub, stateDirectory) {
+    const client = await new SprutHubConnection({
+      env: serverEnvironment(stateDirectory),
+    }).getClient();
+    if (
+      client.serial === null ||
+      `spruthub://hub/${encodeURIComponent(client.serial)}` !== hub.homeRef
+    ) {
+      await client.close();
+      throw new Error("the product client did not select the probed home");
+    }
+    return new ProbeClient(client, hub, stateDirectory);
+  }
+
+  close() {
+    return this.#client.close();
+  }
+
+  getAccessoryOrNull(id) {
+    return this.#client.getAccessoryOrNull(id);
+  }
+
+  listAccessories() {
+    return this.#client.listAccessories();
+  }
+
+  listLinks(target) {
+    return this.#client.listLinks(target);
+  }
+
+  getCharacteristic(target) {
+    return this.#client.getCharacteristic(target);
+  }
+
+  async createVirtualAccessory(roomRef, optional) {
+    if (this.#hub.created.get(roomRef)?.kind !== "room") {
+      throw new GuardError("the accessory room was not created by this run");
+    }
+    if (this.#hub.virtualAIds.size > 0) {
+      throw new GuardError("this run already has its virtual accessory");
+    }
+    const name = probeAccessoryName(this.#hub.prefix);
+    const accessory = await this.#client.createAccessory({
+      name,
+      roomId: Number(roomRef.split("/").at(-1)),
+      services: [{ name, type: "Lightbulb", optional }],
+    });
+    await recordProbeAccessory(this.#stateDirectory, accessory.id);
+    this.#hub.virtualAIds.add(accessory.id);
+    return accessory;
+  }
+
+  deleteVirtualAccessory(id) {
+    if (!this.#hub.virtualAIds.has(id)) {
+      throw new GuardError(`accessory ${id} is not the run's virtual one`);
+    }
+    return this.#client.deleteAccessory(id);
+  }
+
+  setVirtualValue(target, value) {
+    if (!this.#hub.virtualAIds.has(target.aId)) {
+      throw new GuardError(
+        `accessory ${target.aId} is not the run's virtual one`,
+      );
+    }
+    return this.#client.updateCharacteristic({ ...target, value });
+  }
+
+  // The product creates an action-only BLOCK only turned on; this is the
+  // turned-off form an owner can have. Same rule as every probe BLOCK.
+  async createTurnedOffBlock(name, data) {
+    const violation = probeBlockViolation(data, this.#hub.virtualAIds);
+    if (!name.startsWith(this.#hub.prefix) || violation) {
+      throw new GuardError(`refused direct BLOCK: ${violation ?? "name"}`);
+    }
+    const created = await this.#client.createScenario({
+      name,
+      desc: PROBE_DESCRIPTION,
+      active: false,
+      onStart: false,
+      sync: false,
+      type: "BLOCK",
+      data: JSON.stringify(data),
+    });
+    const ref = `${this.#hub.homeRef}/scenario/${encodeURIComponent(created.index)}`;
+    this.#hub.created.set(ref, {
+      kind: "block",
+      activatable: false,
+      direct: true,
+    });
+    return ref;
+  }
+
+  async deleteDirectBlock(scenarioRef) {
+    if (!this.#hub.created.get(scenarioRef)?.direct) {
+      throw new GuardError(`${relativeRef(scenarioRef)} was not made directly`);
+    }
+    const index = scenarioIndex(scenarioRef);
+    let failure;
+    try {
+      await this.#client.deleteScenario(index);
+    } catch (error) {
+      failure = error;
+    }
+    return { failure, gone: (await this.#client.getScenario(index)) === null };
+  }
+
+  runBlock(scenarioRef) {
+    if (this.#hub.created.get(scenarioRef)?.kind !== "block") {
+      throw new GuardError(`${relativeRef(scenarioRef)} is not a probe BLOCK`);
+    }
+    return this.#client.runScenario(scenarioIndex(scenarioRef));
+  }
+
+  async setBlockActiveByWindow(scenarioRef, active) {
+    const owned = this.#hub.created.get(scenarioRef);
+    if (owned?.kind !== "block" || (active && !owned.activatable)) {
+      throw new GuardError(`${relativeRef(scenarioRef)} may not be set here`);
+    }
+    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
+    return this.#client.updateWindowOption({
+      windowKey: scenario.optionsWindow,
+      key: "Active",
+      value: { boolValue: active },
+    });
+  }
+
+  // One JSON-RPC request on its own socket, in the product client's envelope.
+  historyList(request) {
+    const client = this.#client;
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(client.url, "json-rpc");
+      const timer = setTimeout(() => {
+        socket.terminate();
+        reject(new Error("history.list timed out"));
+      }, 20_000);
+      socket.once("error", () => {
+        clearTimeout(timer);
+        reject(new Error("history.list connection failed"));
+      });
+      socket.once("open", () => {
+        socket.send(
+          JSON.stringify({
+            id: 1,
+            token: client.token,
+            serial: client.serial,
+            cid: client.cid,
+            params: { history: { list: request } },
+          }),
+        );
+      });
+      socket.on("message", (data) => {
+        let message;
+        try {
+          message = JSON.parse(String(data));
+        } catch {
+          return;
+        }
+        if (message.id !== 1) return;
+        clearTimeout(timer);
+        socket.close();
+        resolve(message);
+      });
+    });
+  }
+}
+
+function scenarioIndex(scenarioRef) {
+  return decodeURIComponent(scenarioRef.split("/").at(-1));
+}
+
 // A BLOCK may be turned on only if nothing but a far-future one-date cron can
 // start it: no characteristic, interval or code node at all.
 function onlyFarFutureOneDateTriggers(data) {
   let farFuture = 0;
   let other = 0;
-  const walk = (node) => {
-    if (Array.isArray(node)) return node.forEach(walk);
-    if (!isRecord(node)) return;
+  walkNodes(data, (node) => {
     if (node.type === "cron") {
-      const match = /^0 \d{1,2} \d{1,2} \d{1,2} \d{1,2} \? (\d{4})$/.exec(
-        node.cron ?? "",
-      );
-      if (
-        node.mode === "NONE" &&
-        match &&
-        Number(match[1]) >= FAR_FUTURE_YEAR
-      ) {
-        farFuture += 1;
-      } else {
-        other += 1;
-      }
+      if (isFarFutureOneDate(node)) farFuture += 1;
+      else other += 1;
     }
     if (["characteristic", "interval", "code"].includes(node.type)) other += 1;
-    for (const value of Object.values(node)) walk(value);
-  };
-  walk(data);
+  });
   return farFuture > 0 && other === 0;
+}
+
+// The owner's rule for every BLOCK of this run: act only on the run's virtual
+// accessory, start only on a far-future one-date cron, run no code and no
+// other scenario. A characteristic may only be read (trigger=false), and
+// only on the virtual accessory. Returns the first violation or null.
+function probeBlockViolation(data, virtualAIds) {
+  let violation = null;
+  walkNodes(data, (node) => {
+    if (violation) return;
+    if (
+      ["service", "characteristic"].includes(node.type) &&
+      !virtualAIds.has(node.aId)
+    ) {
+      violation = `${node.type} on accessory ${node.aId} is not the run's virtual accessory`;
+    } else if (node.type === "characteristic" && node.trigger !== false) {
+      violation = "a characteristic trigger is not a far-future one-date cron";
+    } else if (node.type === "cron" && !isFarFutureOneDate(node)) {
+      violation = `cron ${node.mode} ${node.cron} is not a far-future one-date cron`;
+    } else if (["interval", "code", "scenario"].includes(node.type)) {
+      violation = `${node.type} nodes are not allowed`;
+    }
+  });
+  return violation;
+}
+
+function isFarFutureOneDate(node) {
+  const match = /^0 \d{1,2} \d{1,2} \d{1,2} \d{1,2} \? (\d{4})$/.exec(
+    node.cron ?? "",
+  );
+  return (
+    node.mode === "NONE" &&
+    match !== null &&
+    Number(match[1]) >= FAR_FUTURE_YEAR
+  );
+}
+
+function walkNodes(node, visit) {
+  if (Array.isArray(node)) {
+    for (const item of node) walkNodes(item, visit);
+    return;
+  }
+  if (!isRecord(node)) return;
+  visit(node);
+  for (const value of Object.values(node)) walkNodes(value, visit);
 }
 
 const rows = [];
@@ -356,6 +592,7 @@ async function main() {
   const hub = new GuardedHub(client, prefix);
   const cleanup = [];
   let exitCode = 0;
+  let probe;
   const readOnly = process.argv.includes("--read-only");
   try {
     const homes = await hub.read("list_homes", {});
@@ -366,14 +603,15 @@ async function main() {
     hub.homeRef = homes.selection.default_home_ref;
     const home = homes.homes.find(({ ref }) => ref === hub.homeRef);
     report.hub = { firmware: home.firmware, model: home.model };
+    probe = await ProbeClient.open(hub, stateDirectory);
 
+    // The lamp is never a BLOCK target; its values and logic types are
+    // evidence that a real device stayed as it was.
     const targets = await discoverTargets(hub);
     report.targets = {
       lamp_service: relativeRef(targets.lamp.serviceRef),
-      sensor: relativeRef(targets.sensor.ref),
       lamp_values_before: await lampValues(hub, targets.lamp),
     };
-    hub.anchors.add(targets.lamp.serviceRef);
     const sdk = await hub.read("get_scenario_sdk", { home_ref: hub.homeRef });
     report.scenario_sdk = { sha256: sdk.sha256, complete: sdk.sdk_complete };
 
@@ -381,16 +619,21 @@ async function main() {
     report.snapshot.before_sha256 = sha256(stableJson(before));
     run.targets = targets;
     run.before = before;
-    const ctx = { hub, targets, before, cleanup, prefix };
+    const ctx = { hub, probe, targets, before, cleanup, prefix };
 
     if (readOnly) {
-      // Rehearses discovery and both snapshots without any write.
-      row("1-4", "-", "-", "--read-only: no write sent", "skipped");
+      // Rehearses discovery, the history reads and both snapshots without
+      // any write.
+      row("1-6", "-", "-", "--read-only: no write sent", "skipped");
+      await guardedStep(ctx, "7", stepHistory);
     } else {
       await guardedStep(ctx, "1", stepRoom);
+      await guardedStep(ctx, "V", stepVirtualAccessory);
       await guardedStep(ctx, "2", stepBlockStorage);
       await guardedStep(ctx, "3", stepPartialUpdates);
       await guardedStep(ctx, "4", stepLogic);
+      await guardedStep(ctx, "6", stepManualRun);
+      await guardedStep(ctx, "7", stepHistory);
     }
   } catch (error) {
     abort(`script error: ${error.message}`);
@@ -398,6 +641,7 @@ async function main() {
   } finally {
     try {
       const clean = await runCleanup(hub, cleanup);
+      await probe?.close();
       if (!clean) exitCode = 1;
       if (hub.homeRef && !readOnly) {
         const entries = await runSweep({
@@ -481,34 +725,26 @@ async function discoverTargets(hub) {
       lamps.push({ serviceRef: service.ref, on, brightness });
     }
   }
-  // An On=false lamp keeps the never-fired set action equal to its state.
   const lamp =
     lamps.find(({ on }) => on.current_value.value === false) ?? lamps[0];
   if (!lamp) throw new Error("No Lightbulb with writable On and Brightness.");
+  return { lamp };
+}
 
-  let sensor;
-  for (const [serviceType, characteristicType] of [
-    ["MotionSensor", "MotionDetected"],
-    ["OccupancySensor", "OccupancyDetected"],
-  ]) {
-    for (const service of await catalogServices(hub, [serviceType])) {
-      const entity = await hub.read("get_entity", {
-        entity_ref: service.ref,
-        max_bytes: 32_768,
-      });
-      const found =
-        entity.status === "ok" && entity.entity
-          ? characteristic(entity.entity, characteristicType, "boolean", false)
-          : undefined;
-      if (found) {
-        sensor = { ...found, serviceType };
-        break;
-      }
-    }
-    if (sensor) break;
+// The first readable characteristic of this type in the home, or undefined.
+async function firstCharacteristic(hub, serviceType, type, valueType) {
+  for (const service of await catalogServices(hub, [serviceType])) {
+    const entity = await hub.read("get_entity", {
+      entity_ref: service.ref,
+      max_bytes: 32_768,
+    });
+    const found =
+      entity.status === "ok" && entity.entity
+        ? characteristic(entity.entity, type, valueType, false)
+        : undefined;
+    if (found) return found;
   }
-  if (!sensor) throw new Error("No boolean motion or occupancy sensor.");
-  return { lamp, sensor };
+  return undefined;
 }
 
 function characteristic(service, type, valueType, writable = true) {
@@ -612,9 +848,19 @@ async function homeSnapshot(hub, targets) {
     entity_ref: targets.lamp.serviceRef,
     max_bytes: 32_768,
   });
+  // A bridge that exported the probe accessory would change its child count.
+  const extensions = (inspect.entities.extensions ?? [])
+    .map((extension, position) => ({
+      ref: `${extension.ref}#${extension.index ?? position}`,
+      bundle_type: extension.bundle_type ?? null,
+      enabled: extension.enabled ?? null,
+      child_count: extension.child_count ?? null,
+    }))
+    .sort(byRef);
   return {
     rooms,
     scenarios,
+    extensions,
     accessories: [...accessories.values()].sort(byRef),
     services: services.sort(byRef),
     anchor_logic_types: (anchor.entity?.available_logic_types ?? [])
@@ -704,6 +950,25 @@ async function readScenario(hub, ref) {
     window_desc: option("Desc"),
     configuration_sha256: sha256(stableJson(configuration.value)),
     data: configuration.value,
+    execution_error: entity.execution_error,
+    options_window_ref: entity.options_window_ref,
+  };
+}
+
+// One options window, read through get_entity (read-only).
+async function readWindow(hub, windowRef) {
+  const result = await hub.read("get_entity", {
+    entity_ref: windowRef,
+    max_bytes: 32_768,
+  });
+  if (result.status !== "ok" || !result.entity) {
+    throw new ProbeFailure("read options window", result);
+  }
+  const options = result.entity.options ?? [];
+  return {
+    keys: options.map(({ key, input_type }) => `${key}:${input_type}`),
+    value: (key) =>
+      options.find((option) => option.key === key)?.configured_value,
   };
 }
 
@@ -900,6 +1165,224 @@ async function stepRoom(ctx) {
   if (!deleted.verified) abort("created room was not removed");
 }
 
+// --- step V: the run's virtual accessory -------------------------------------
+
+// Every BLOCK of the run acts only on this accessory: a virtual Lightbulb
+// with On and Brightness and no links, in a probe room of its own. It is
+// created through the product client, as virtual_light_group does, but
+// without any link.
+async function stepVirtualAccessory(ctx) {
+  const { hub, probe, prefix } = ctx;
+  // The accessory room is removed by the same room_create restore that step 1
+  // has to prove first.
+  if (
+    !rows.some(
+      (item) => item.step === "1d restore create" && item.verdict === "match",
+    )
+  ) {
+    row(
+      "V virtual accessory",
+      "room.create, accessory.create",
+      "step 1 proved that a created room is removed",
+      "not run: room removal was not proved",
+      "blocked",
+    );
+    return;
+  }
+  // A bridge that adds new accessories by itself would export the probe to an
+  // outside home; the accessory is created only when none does.
+  const inspect = await hub.read("inspect_home", { home_ref: hub.homeRef });
+  expectOk(inspect, "inspect_home");
+  const bridges = (inspect.entities.extensions ?? []).filter(
+    (extension) => extension.bundle_type === "BRIDGE",
+  );
+  const autoAdd = [];
+  for (const bridge of bridges) {
+    const window = await readWindow(hub, bridge.options_window_ref);
+    autoAdd.push(window.value("AutoAddNewAccessory"));
+  }
+  const exportFree = autoAdd.every((value) => value === false);
+  row(
+    "V bridges",
+    "window.get{bridge optionsWindow}",
+    "AutoAddNewAccessory=false on every bridge",
+    `${bridges.length} bridge(s): ${JSON.stringify(autoAdd)}`,
+    exportFree ? "match" : "blocked",
+  );
+  if (!exportFree) return;
+
+  const name = `${prefix}-vroom`;
+  const room = await prepareAndApply(hub, {
+    operation: "room_create",
+    target_ref: hub.homeRef,
+    name,
+  });
+  const roomRef = room.applied?.room?.ref;
+  if (!roomRef || room.applied.status !== "applied") {
+    row(
+      "V room",
+      "room.create{name}",
+      "probe room created",
+      describe(room),
+      "rejected",
+    );
+    if (room.applied?.native_write_sent) abort("probe room not confirmed");
+    return;
+  }
+  pushCleanup(ctx, {
+    label: "virtual accessory room",
+    changeRef: room.changeRef,
+    verify: async () => (await roomName(hub, roomRef)) === null,
+  });
+
+  const created = await probe.createVirtualAccessory(roomRef, [
+    "Brightness",
+    "Hue",
+  ]);
+  const id = created.id;
+  pushCleanup(ctx, {
+    label: "virtual accessory",
+    run: () => deleteVirtualAccessory(ctx, id),
+  });
+  const accessory = await probe.getAccessoryOrNull(id);
+  const service = accessory?.services?.find(({ type }) => type === "Lightbulb");
+  const control = (type) =>
+    service?.characteristics?.find(({ control }) => control?.type === type);
+  const on = control("On");
+  const brightness = control("Brightness");
+  // Only read by BLOCK conditions: a condition may not read what the same
+  // BLOCK writes, and the storage BLOCK writes On and Brightness.
+  const hue = control("Hue");
+  const links = [];
+  for (const item of service?.characteristics ?? []) {
+    links.push(
+      ...(await probe.listLinks({ aId: id, sId: service.sId, cId: item.cId })),
+    );
+  }
+  const listed = (await probe.listAccessories()).find((item) => item.id === id);
+  const ok =
+    accessory?.virtual === true &&
+    Boolean(on && brightness && hue) &&
+    links.length === 0 &&
+    accessory.roomId === Number(roomRef.split("/").at(-1));
+  row(
+    "V accessory create",
+    "accessory.create{name,roomId,services:[Lightbulb+Brightness,Hue]}",
+    "virtual Lightbulb with On, Brightness and Hue, no links, in the probe room",
+    `accessory/${id}; name ${accessory?.name === probeAccessoryName(prefix) ? "as sent" : "changed"}; virtual ${accessory?.virtual}; On ${Boolean(on)}; Brightness ${Boolean(brightness)}; Hue ${Boolean(hue)}; links ${links.length}`,
+    ok ? "match" : "mismatch",
+  );
+  row(
+    "V accessory.list virtual",
+    "accessory.list{expand}",
+    "virtual flag as accessory.get has it",
+    `list has virtual: ${listed ? Object.hasOwn(listed, "virtual") : "not listed"}; get virtual: ${accessory?.virtual}`,
+    listed && listed.virtual === accessory?.virtual ? "match" : "mismatch",
+    listed ? { list_fields: Object.keys(listed).sort() } : undefined,
+  );
+  if (!ok) {
+    abort("the virtual accessory is not as requested");
+    return;
+  }
+  const valueKind = (item) => Object.keys(item.control.value ?? {})[0];
+  ctx.virtual = {
+    serviceRef: `${hub.homeRef}/accessory/${id}/service/${service.sId}`,
+    on: { ids: { aId: id, sId: service.sId, cId: on.cId } },
+    brightness: {
+      ids: { aId: id, sId: service.sId, cId: brightness.cId },
+      kind: valueKind(brightness),
+    },
+    hue: { ids: { aId: id, sId: service.sId, cId: hue.cId } },
+  };
+  ctx.virtual.initial = await virtualState(probe, ctx.virtual);
+  hub.anchors.add(ctx.virtual.serviceRef);
+  report.targets.virtual_accessory = {
+    ref: `accessory/${id}`,
+    initial: ctx.virtual.initial,
+    brightness_kind: ctx.virtual.brightness.kind,
+  };
+}
+
+// Cleanup of the virtual accessory. A probe scenario that is still there may
+// act on it, so then the accessory is left for the sweep, which deletes
+// scenarios first.
+async function deleteVirtualAccessory(ctx, id) {
+  const pending = ctx.cleanup.filter((entry) => entry.scenario && !entry.done);
+  if (pending.length > 0) {
+    return {
+      verified: false,
+      status: "left_for_sweep",
+      observed: `left for the sweep: ${pending.length} probe scenario(s) not removed`,
+    };
+  }
+  let failure;
+  try {
+    await ctx.probe.deleteVirtualAccessory(id);
+  } catch (error) {
+    failure = error;
+  }
+  const gone = (await ctx.probe.getAccessoryOrNull(id)) === null;
+  return {
+    verified: gone,
+    status: gone ? "deleted" : "left",
+    observed: `${failure ? `delete error ${failure.code ?? failure.message}` : "accessory.delete acknowledged"}; verified ${gone}`,
+  };
+}
+
+async function virtualState(probe, virtual) {
+  const [on, brightness] = await Promise.all([
+    probe.getCharacteristic(virtual.on.ids),
+    probe.getCharacteristic(virtual.brightness.ids),
+  ]);
+  return {
+    on: on.control.value?.boolValue,
+    brightness: brightness.control.value?.[virtual.brightness.kind],
+  };
+}
+
+async function setVirtual(probe, virtual, state) {
+  await probe.setVirtualValue(virtual.on.ids, { boolValue: state.on });
+  await probe.setVirtualValue(virtual.brightness.ids, {
+    [virtual.brightness.kind]: state.brightness,
+  });
+  const seen = await watchVirtual(probe, virtual, (current) =>
+    isDeepStrictEqual(current, state),
+  );
+  if (!seen.reached) {
+    throw new Error(
+      `virtual accessory did not reach ${JSON.stringify(state)}: ${JSON.stringify(seen.state)}`,
+    );
+  }
+  return seen.state;
+}
+
+// Polls the virtual accessory until done(state) or WATCH_MS. The first state
+// that differs from `from` is kept with its time.
+async function watchVirtual(probe, virtual, done, from) {
+  const started = Date.now();
+  let state;
+  let firstChange;
+  for (;;) {
+    state = await virtualState(probe, virtual);
+    if (from && !firstChange && !isDeepStrictEqual(state, from)) {
+      firstChange = { after_ms: Date.now() - started, state };
+    }
+    if (done?.(state)) return { reached: true, state, firstChange };
+    if (Date.now() - started >= WATCH_MS) {
+      return { reached: false, state, firstChange };
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+}
+
+function virtualChange(from, seen) {
+  const final = seen.state;
+  const first = seen.firstChange
+    ? ` (first change after ${seen.firstChange.after_ms} ms)`
+    : "";
+  return `On ${from.on}→${final.on}, Brightness ${from.brightness}→${final.brightness}${first}`;
+}
+
 // --- step 2: BLOCK storage conformance ---------------------------------------
 
 function setLamp(lamp, value) {
@@ -944,60 +1427,74 @@ function ifNode(mode, condition, then, otherwise = []) {
   };
 }
 
-function blockFamilies(targets, controlIndex) {
-  const { lamp, sensor } = targets;
+function setVirtualBrightness(virtual, value) {
+  return lampAction(virtual, {
+    type: "set",
+    cId: virtual.brightness.ids.cId,
+    hc: "Brightness",
+    value: String(value),
+  });
+}
+
+// Every family starts on the far-future one-date cron and acts only on the
+// run's virtual accessory (the owner's rule for this run).
+function blockFamilies(virtual) {
   const oneDate = () => cronCondition("NONE", ONE_DATE_CRON, 0);
-  const off = () => setLamp(lamp, false);
-  const families = [
-    {
-      id: "weekday_cron",
-      expected: `cron NONE "${WEEKDAY_CRON}" stored as sent`,
-      node: ifNode("EVERY", cronCondition("NONE", WEEKDAY_CRON, 0), [off()]),
-    },
+  const off = () => setLamp(virtual, false);
+  // Read-only condition (trigger=false) on Hue, which no family writes.
+  const heldHue = (timeCond) => ({
+    type: "condition",
+    mode: "AND",
+    conditions: [
+      { type: "cron", mode: "NONE", cron: ONE_DATE_CRON, offset: 0 },
+      {
+        type: "characteristic",
+        ...virtual.hue.ids,
+        hs: "Lightbulb",
+        hc: "Hue",
+        trigger: false,
+        cond: ">",
+        value: "180",
+        timeCond,
+        time: HOLD_MS,
+      },
+    ],
+  });
+  const step = (type, value) =>
+    lampAction(virtual, {
+      type,
+      cId: virtual.brightness.ids.cId,
+      hc: "Brightness",
+      value,
+    });
+  return [
     {
       id: "one_date_cron",
       expected: `cron NONE "${ONE_DATE_CRON}" stored as sent`,
       node: ifNode("EVERY", oneDate(), [off()]),
     },
     {
-      id: "sunset_offset",
-      expected: `cron SUNSET "${SUN_CRON}" offset ${SUNSET_OFFSET_MINUTES} stored as sent`,
-      node: ifNode(
-        "EVERY",
-        cronCondition("SUNSET", SUN_CRON, SUNSET_OFFSET_MINUTES),
-        [off()],
-      ),
-    },
-    {
       id: "toggle",
       expected: "toggle On without value stored as sent",
       node: ifNode("EVERY", oneDate(), [
-        lampAction(lamp, { type: "toggle", cId: lamp.on.ids.cId, hc: "On" }),
+        lampAction(virtual, {
+          type: "toggle",
+          cId: virtual.on.ids.cId,
+          hc: "On",
+        }),
       ]),
     },
     {
       id: "inc",
-      expected: 'inc Brightness value "10" stored as sent',
-      node: ifNode("EVERY", oneDate(), [
-        lampAction(lamp, {
-          type: "inc",
-          cId: lamp.brightness.ids.cId,
-          hc: "Brightness",
-          value: "10",
-        }),
-      ]),
+      expected: "inc Brightness value 10 (number, as published) stored as sent",
+      node: ifNode("EVERY", oneDate(), [step("inc", 10)]),
     },
     {
       id: "dec",
-      expected: 'dec Brightness value "10" stored as sent',
-      node: ifNode("EVERY", oneDate(), [
-        lampAction(lamp, {
-          type: "dec",
-          cId: lamp.brightness.ids.cId,
-          hc: "Brightness",
-          value: "10",
-        }),
-      ]),
+      expected:
+        'dec Brightness value "10" (string, still accepted) stored as the number 10',
+      node: ifNode("EVERY", oneDate(), [step("dec", "10")]),
+      stored: ifNode("EVERY", oneDate(), [step("dec", 10)]),
     },
     {
       id: "if_once",
@@ -1006,28 +1503,13 @@ function blockFamilies(targets, controlIndex) {
     },
     {
       id: "held_condition",
-      expected: `characteristic timeCond ">" time ${HOLD_MS} stored as sent`,
-      node: ifNode(
-        "EVERY",
-        {
-          type: "condition",
-          mode: "AND",
-          conditions: [
-            {
-              type: "characteristic",
-              ...pick(sensor.ids, ["aId", "sId", "cId"]),
-              hs: sensor.serviceType,
-              hc: sensor.type,
-              trigger: true,
-              cond: "=",
-              value: "true",
-              timeCond: ">",
-              time: HOLD_MS,
-            },
-          ],
-        },
-        [off()],
-      ),
+      expected: `characteristic trigger=false timeCond ">" time ${HOLD_MS} stored as sent`,
+      node: ifNode("EVERY", heldHue(">"), [setVirtualBrightness(virtual, 30)]),
+    },
+    {
+      id: "changed_back_within",
+      expected: `characteristic trigger=false timeCond "<" time ${HOLD_MS} stored as sent`,
+      node: ifNode("EVERY", heldHue("<"), [setVirtualBrightness(virtual, 30)]),
     },
     {
       id: "delay_continue_clear_delay",
@@ -1048,17 +1530,18 @@ function blockFamilies(targets, controlIndex) {
       ),
     },
   ];
-  if (controlIndex) {
-    families.push({
-      id: "scenario_fire",
-      expected: "scenario FIRE target stored as sent",
-      node: ifNode("EVERY", oneDate(), [
-        { type: "scenario", mode: "FIRE", index: controlIndex },
-      ]),
-    });
-  }
-  return families;
 }
+
+// Forms of the first run (research/protocol/2026-09-24-live-conformance.md,
+// all stored as sent) that this run's BLOCK rule does not allow.
+const RULE_EXCLUDED_FAMILIES = [
+  ["weekday_cron", "a weekday cron trigger is not a far-future one-date cron"],
+  ["sunset_offset", "a SUNSET cron trigger is not a far-future one-date cron"],
+  [
+    "scenario_fire",
+    "a scenario FIRE action targets a scenario, not the virtual accessory",
+  ],
+];
 
 async function createBlock(ctx, { label, data, sync = false }) {
   const name = `${ctx.prefix}-${label}`;
@@ -1076,6 +1559,7 @@ async function createBlock(ctx, { label, data, sync = false }) {
   const cleanupEntry = scenarioRef
     ? pushCleanup(ctx, {
         label: `BLOCK ${label}`,
+        scenario: true,
         changeRef: result.changeRef,
         verify: async () => !(await scenarioPresent(ctx.hub, scenarioRef)),
       })
@@ -1099,6 +1583,9 @@ async function createBlock(ctx, { label, data, sync = false }) {
   const stored = scenarioRef
     ? await readScenario(ctx.hub, scenarioRef)
     : undefined;
+  if (stored?.options_window_ref) {
+    ctx.hub.ownWindows.set(stored.options_window_ref, scenarioRef);
+  }
   return {
     ...result,
     name,
@@ -1127,51 +1614,41 @@ function storedFlagsDiff(block) {
 }
 
 async function stepBlockStorage(ctx) {
-  const { targets } = ctx;
+  const { virtual } = ctx;
+  if (!virtual) {
+    row(
+      "2 BLOCK storage",
+      "scenario.create{BLOCK}",
+      "the run's virtual accessory as the only target",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
+  const oneDate = () => cronCondition("NONE", ONE_DATE_CRON, 0);
   const control = await createBlock(ctx, {
     label: "block-control",
     data: {
       targets: [
         ifNode(
           "EVERY",
-          {
-            type: "condition",
-            mode: "AND",
-            conditions: [
-              {
-                type: "interval",
-                start: {
-                  type: "cron",
-                  mode: "NONE",
-                  cron: "0 0 22 ? * * *",
-                  offset: 0,
-                },
-                end: {
-                  type: "cron",
-                  mode: "NONE",
-                  cron: "0 0 6 ? * * *",
-                  offset: 0,
-                },
-                trigger: true,
-              },
-            ],
-          },
-          [setLamp(targets.lamp, true)],
-          [setLamp(targets.lamp, false)],
+          oneDate(),
+          [setLamp(virtual, true)],
+          [setLamp(virtual, false)],
         ),
       ],
     },
   });
-  blockRow("2 control daily interval", control, "stored as sent");
+  blockRow("2 control one-date", control, "stored as sent");
   ctx.control = control;
   if (abortReason) return;
-  const controlIndex = control.scenarioRef
-    ? decodeURIComponent(control.scenarioRef.split("/").pop())
-    : undefined;
+  for (const [id, why] of RULE_EXCLUDED_FAMILIES) {
+    row(`2 ${id}`, "-", "-", `not created: ${why}`, "skipped");
+  }
 
   // prepare never writes; it shows which families the product accepts.
   const accepted = [];
-  for (const family of blockFamilies(targets, controlIndex)) {
+  for (const family of blockFamilies(virtual)) {
     const prepared = await ctx.hub.prepare({
       operation: "block_create",
       target_ref: ctx.hub.homeRef,
@@ -1182,19 +1659,7 @@ async function stepBlockStorage(ctx) {
       sync: false,
       data: { targets: [family.node] },
     });
-    if (
-      prepared.status === "prepared" &&
-      ORPHANING_FAMILIES.has(family.id) &&
-      !process.argv.includes("--include-orphaning")
-    ) {
-      row(
-        `2 ${family.id}`,
-        "scenario.create{BLOCK}",
-        family.expected,
-        "not created: SprutHub stores this value as a number and the product then cannot delete the BLOCK (--include-orphaning to test a fix)",
-        "blocked",
-      );
-    } else if (prepared.status === "prepared") {
+    if (prepared.status === "prepared") {
       accepted.push(family);
     } else {
       row(
@@ -1278,10 +1743,12 @@ function oneDateStoredVerbatim() {
 
 function familyRow(family, block, index, readNode) {
   const sentNode = block.sent.targets[index];
+  // A family may name the documented hub form of what it sends.
+  const expectedNode = family.stored ?? sentNode;
   const diff =
     readNode === undefined
       ? [{ path: "targets", kind: "reordered_or_missing" }]
-      : structuralDiff(sentNode, readNode);
+      : structuralDiff(expectedNode, readNode);
   const hubAssigned = diff.filter(isHubAssigned);
   const other = diff.filter((entry) => !isHubAssigned(entry));
   const productApplied = block.applied?.status === "applied";
@@ -1290,7 +1757,7 @@ function familyRow(family, block, index, readNode) {
     "scenario.create{BLOCK}",
     family.expected,
     other.length === 0
-      ? `stored as sent (+${hubAssigned.length} hub-assigned blockId/state)`
+      ? `stored ${family.stored ? "in the documented form" : "as sent"} (+${hubAssigned.length} hub-assigned blockId/state)`
       : `${other.length} difference(s): ${other
           .slice(0, 3)
           .map((entry) => `${entry.kind} ${entry.path}`)
@@ -1399,7 +1866,7 @@ const SCENARIO_FIELDS = [
 ];
 
 async function stepPartialUpdates(ctx) {
-  const { hub, targets, prefix } = ctx;
+  const { hub, virtual, prefix } = ctx;
   if (!ctx.oneDateVerbatim) {
     row(
       "3 partial updates",
@@ -1413,7 +1880,7 @@ async function stepPartialUpdates(ctx) {
   const probeData = (cron) => ({
     targets: [
       ifNode("EVERY", cronCondition("NONE", cron, 0), [
-        setLamp(targets.lamp, false),
+        setLamp(virtual, false),
       ]),
     ],
   });
@@ -1429,6 +1896,31 @@ async function stepPartialUpdates(ctx) {
     throw new GuardError("probe BLOCK is not activatable");
   }
   let previous = await readScenario(hub, ref);
+  // The web client turns a scenario on and off through one option of this
+  // window; the product sends scenario.update{index,active}. Read-only here.
+  const windowRef = previous.options_window_ref;
+  const windowActive = async (step, expected) => {
+    const window = await readWindow(hub, windowRef);
+    const active = window.value("Active");
+    row(
+      step,
+      "window.get{windowKey}",
+      `option Active=${expected}`,
+      `Active=${JSON.stringify(active)}; options [${window.keys.join(", ")}]`,
+      active === expected ? "match" : "mismatch",
+    );
+  };
+  if (!windowRef) {
+    row(
+      "3 options window",
+      "scenario.get",
+      "optionsWindow present",
+      "no options_window_ref",
+      "mismatch",
+    );
+  } else {
+    await windowActive("3 window before turn on", false);
+  }
 
   const check = async (
     step,
@@ -1494,6 +1986,7 @@ async function stepPartialUpdates(ctx) {
     { active: true },
   );
   if (abortReason) return;
+  if (windowRef) await windowActive("3a window after turn on", true);
   const newName = `${prefix}-block-partial-renamed`;
   await check(
     "3b rename",
@@ -1533,6 +2026,7 @@ async function stepPartialUpdates(ctx) {
     ["active"],
     { active: false },
   );
+  if (windowRef) await windowActive("3e window after turn off", false);
 }
 
 // --- step 4: LOGIC source lifecycle ------------------------------------------
@@ -1555,12 +2049,24 @@ function trigger(source, value, variables, options, context) {
 }
 
 async function stepLogic(ctx) {
-  const { hub, targets, prefix } = ctx;
+  const { hub, virtual, prefix } = ctx;
+  if (!virtual) {
+    row(
+      "4 LOGIC",
+      "scenario.create{LOGIC}",
+      "the virtual Lightbulb as the anchor service",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
   const name = `${prefix}-logic`;
   const source = logicSource(name, "1.0");
+  // The anchor only lets the product map the new LOGIC type; the LOGIC is
+  // never assigned to it.
   const create = await prepareAndApply(hub, {
     operation: "logic_source_create",
-    target_ref: targets.lamp.serviceRef,
+    target_ref: virtual.serviceRef,
     name,
     description: PROBE_DESCRIPTION,
     active: false,
@@ -1584,6 +2090,7 @@ async function stepLogic(ctx) {
   const createdSource = `${source}\n\n${markerComment}`;
   const createEntry = pushCleanup(ctx, {
     label: "LOGIC",
+    scenario: true,
     changeRef: create.changeRef,
     verify: async () => !(await scenarioPresent(hub, ref)),
     fallback: async (result) => activateLogicForRestore(ctx, ref, result),
@@ -1721,6 +2228,423 @@ async function activateLogicForRestore(ctx, ref, result) {
   }
 }
 
+// --- step 6: manual run of a turned-off and a turned-on BLOCK ----------------
+
+// Does scenario.run execute a turned-off BLOCK? The product refuses that run
+// (scenario_inactive); this step sends it directly for this run's own BLOCKs,
+// whose only target is the virtual accessory, and watches that accessory.
+async function stepManualRun(ctx) {
+  const { hub, probe, virtual: v, prefix } = ctx;
+  if (!v) {
+    row(
+      "6 manual run",
+      "scenario.run{index}",
+      "the virtual accessory as the only target",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
+  const base = { on: true, brightness: v.initial.brightness };
+  const marker = v.initial.brightness === 42 ? 43 : 42;
+
+  // The brief asked for an action-only On=true BLOCK; prepare never writes.
+  const onOnly = await hub.prepare({
+    operation: "block_create",
+    target_ref: hub.homeRef,
+    name: `${prefix}-prepare-only-run-on`,
+    description: PROBE_DESCRIPTION,
+    active: false,
+    on_start: false,
+    sync: false,
+    data: { targets: [setLamp(v, true)] },
+  });
+  row(
+    "6a action-only On=true",
+    "prepare only",
+    "record whether the product accepts it",
+    onOnly.status === "prepared"
+      ? "prepared (not applied)"
+      : `product rejected: ${onOnly.error?.code}: ${onOnly.error?.message}`,
+    "observed",
+  );
+
+  // R1: the action-only form the product accepts, turned off. The product
+  // creates it only turned on, so it is created directly.
+  const r1Data = { targets: [setLamp(v, false)] };
+  const r1Product = await hub.prepare({
+    operation: "block_create",
+    target_ref: hub.homeRef,
+    name: `${prefix}-prepare-only-run-off`,
+    description: PROBE_DESCRIPTION,
+    active: false,
+    on_start: false,
+    sync: false,
+    data: r1Data,
+  });
+  const r1Ref = await probe.createTurnedOffBlock(
+    `${prefix}-run-action-only`,
+    r1Data,
+  );
+  pushCleanup(ctx, {
+    label: "BLOCK run-action-only (direct)",
+    scenario: true,
+    run: async () => {
+      const { failure, gone } = await probe.deleteDirectBlock(r1Ref);
+      return {
+        verified: gone,
+        status: gone ? "deleted" : "left",
+        observed: `${failure ? `delete error ${failure.code ?? failure.message}` : "scenario.delete acknowledged"}; verified ${gone}`,
+      };
+    },
+  });
+  const r1Stored = await readScenario(hub, r1Ref);
+  const r1Diff = structuralDiff(r1Data, r1Stored.data).filter(
+    (entry) => !isHubAssigned(entry),
+  );
+  row(
+    "6b action-only BLOCK, turned off",
+    "scenario.create{BLOCK} (direct)",
+    "product refuses it turned off; created directly, stored as sent",
+    `product: ${r1Product.status === "prepared" ? "prepared" : r1Product.error?.code}; direct: active ${r1Stored.active}, data differences ${r1Diff.length}`,
+    r1Stored.active === false && r1Diff.length === 0 ? "match" : "mismatch",
+    r1Product.error ? { product_error: r1Product.error.message } : undefined,
+  );
+  const r1 = { scenarioRef: r1Ref };
+  const refused = await hub.prepare({
+    operation: "scenario_run",
+    target_ref: r1.scenarioRef,
+  });
+  row(
+    "6c product run, turned off",
+    "prepare scenario_run",
+    "refused with scenario_inactive, nothing sent",
+    refused.status === "prepared"
+      ? "prepared"
+      : `${refused.error?.code}: ${refused.error?.message}`,
+    refused.error?.code === "scenario_inactive" ? "match" : "mismatch",
+  );
+  await directRun(ctx, "6d direct run, action-only, turned off", r1, base);
+
+  // R2: the same action plus an if on the far-future cron, so that it may be
+  // turned on. The if's Brightness shows whether a run enters that branch.
+  const r2 = await createBlock(ctx, {
+    label: "run-with-trigger",
+    data: {
+      targets: [
+        setLamp(v, false),
+        ifNode("EVERY", cronCondition("NONE", ONE_DATE_CRON, 0), [
+          setVirtualBrightness(v, marker),
+        ]),
+      ],
+    },
+  });
+  blockRow("6e BLOCK with far-future if create", r2, "stored as sent");
+  if (!r2.scenarioRef || abortReason) return;
+  if (!hub.created.get(r2.scenarioRef)?.activatable) {
+    throw new GuardError("the run BLOCK is not activatable");
+  }
+  await directRun(ctx, "6f direct run, far-future if, turned off", r2, base);
+
+  await setVirtual(probe, v, base);
+  const on = await prepareAndApply(hub, {
+    operation: "scenario_active",
+    target_ref: r2.scenarioRef,
+    value: true,
+  });
+  if (on.applied) {
+    pushCleanup(ctx, {
+      label: "6 turn on",
+      parent: r2.cleanupEntry,
+      changeRef: on.changeRef,
+      restoreOptional: true,
+    });
+  }
+  const afterOn = await watchVirtual(probe, v, undefined, base);
+  row(
+    "6g turn on",
+    "scenario.update{index,active:true}",
+    "applied; record whether turning on writes",
+    `${on.applied?.status ?? describe(on)}; ${virtualChange(base, afterOn)}`,
+    on.applied?.status === "applied" ? "observed" : "rejected",
+  );
+  if (on.applied?.status !== "applied") return;
+
+  await setVirtual(probe, v, base);
+  const run = await prepareAndApply(hub, {
+    operation: "scenario_run",
+    target_ref: r2.scenarioRef,
+  });
+  const afterRun = await watchVirtual(probe, v, undefined, base);
+  const observations = run.applied?.target_observations;
+  row(
+    "6h product run, turned on",
+    "scenario.run{index}",
+    "applied; record the effect",
+    `${run.applied?.status ?? describe(run)}; ${virtualChange(base, afterRun)}`,
+    run.applied?.status === "applied" ? "observed" : "rejected",
+    {
+      product_effect: run.applied?.effect ?? run.prepared?.effect ?? null,
+      product_observations: Array.isArray(observations)
+        ? observations.map((item) => ({
+            ref: relativeRef(item.characteristic_ref ?? item.ref ?? ""),
+            status: item.status ?? null,
+            value: item.observed_value ?? item.value ?? null,
+          }))
+        : (observations ?? null),
+    },
+  );
+
+  // The web client's path to turning it off: the window's Active option.
+  const windowRef = r2.stored.options_window_ref;
+  const offer = await hub.prepare({
+    operation: "window_option",
+    target_ref: windowRef,
+    option_key: "Active",
+    value: false,
+  });
+  row(
+    "6i product window_option Active",
+    "prepare only",
+    "record whether the product offers the web client's path",
+    offer.status === "prepared"
+      ? "prepared (not applied)"
+      : `product rejected: ${offer.error?.code}: ${offer.error?.message}`,
+    "observed",
+  );
+  const beforeOff = await readScenario(hub, r2.scenarioRef);
+  let windowAck = "acknowledged";
+  try {
+    await probe.setBlockActiveByWindow(r2.scenarioRef, false);
+  } catch (error) {
+    if (error instanceof GuardError) throw error;
+    windowAck = `${error.code ?? error.message}${error.hubError ? ` ${JSON.stringify(error.hubError)}` : ""}`;
+  }
+  const afterOff = await readScenario(hub, r2.scenarioRef);
+  const changed = SCENARIO_FIELDS.filter(
+    (field) => !isDeepStrictEqual(beforeOff[field], afterOff[field]),
+  );
+  row(
+    "6j window Active=false",
+    "window.update{windowKey,options:[Active]}",
+    "only active changes, to false",
+    `${windowAck}; active ${afterOff.active}; changed [${changed.join(", ")}]`,
+    afterOff.active === false && isDeepStrictEqual(changed, ["active"])
+      ? "match"
+      : "mismatch",
+    {
+      before: pick(beforeOff, SCENARIO_FIELDS),
+      after: pick(afterOff, SCENARIO_FIELDS),
+    },
+  );
+  if (afterOff.active !== false) {
+    const off = await prepareAndApply(hub, {
+      operation: "scenario_active",
+      target_ref: r2.scenarioRef,
+      value: false,
+    });
+    row(
+      "6j fallback turn off",
+      "scenario.update{index,active:false}",
+      "applied",
+      describe(off),
+      off.applied?.status === "applied" ? "match" : "mismatch",
+    );
+  }
+
+  // setVirtual throws unless the accessory reads back as requested.
+  const restored = await setVirtual(probe, v, v.initial);
+  row(
+    "6k virtual accessory back",
+    "characteristic.update",
+    JSON.stringify(v.initial),
+    JSON.stringify(restored),
+    isDeepStrictEqual(restored, v.initial) ? "match" : "mismatch",
+  );
+}
+
+// Sets the virtual accessory to `base`, sends scenario.run directly and
+// watches the accessory for WATCH_MS.
+async function directRun(ctx, step, block, base) {
+  const { hub, probe, virtual } = ctx;
+  await setVirtual(probe, virtual, base);
+  let ack = "acknowledged";
+  try {
+    await probe.runBlock(block.scenarioRef);
+  } catch (error) {
+    if (error instanceof GuardError) throw error;
+    ack = `${error.code ?? error.message}${error.hubError ? ` ${JSON.stringify(error.hubError)}` : ""}`;
+  }
+  const seen = await watchVirtual(probe, virtual, undefined, base);
+  const after = await readScenario(hub, block.scenarioRef);
+  row(
+    step,
+    "scenario.run{index}",
+    "record whether the hub runs it",
+    `${ack}; ${virtualChange(base, seen)}; active ${after.active}, execution_error ${after.execution_error}`,
+    "observed",
+  );
+}
+
+// --- step 7: history.list (read-only) ----------------------------------------
+
+// The product has no history read. Counts and field names only, no values.
+async function stepHistory(ctx) {
+  const { hub, probe, targets } = ctx;
+  const chosen = [];
+  const temperature = await firstCharacteristic(
+    hub,
+    "TemperatureSensor",
+    "CurrentTemperature",
+    "number",
+  );
+  if (temperature) chosen.push({ label: "temperature", ...temperature });
+  chosen.push({ label: "light On", ...targets.lamp.on });
+  const motion = await firstCharacteristic(
+    hub,
+    "MotionSensor",
+    "MotionDetected",
+    "boolean",
+  );
+  if (motion) chosen.push({ label: "motion", ...motion });
+  // Changed by this run a minute ago (step 6): a recorded history shows it.
+  if (ctx.virtual) {
+    chosen.push({
+      label: "virtual On",
+      ids: ctx.virtual.on.ids,
+      ref: `accessory/${ctx.virtual.on.ids.aId}/service/${ctx.virtual.on.ids.sId}/characteristic/${ctx.virtual.on.ids.cId}`,
+    });
+  }
+
+  const before = Date.now();
+  const after = before - DAY_MS;
+  const window = { afterTimestamp: after, beforeTimestamp: before };
+  const variants = (ids) => [
+    ["24h", { filter: { accessories: [ids] }, ...window, limit: 100 }],
+    [
+      "24h includeContexts",
+      {
+        filter: { accessories: [ids] },
+        ...window,
+        limit: 100,
+        includeContexts: true,
+      },
+    ],
+    [
+      "24h group HOUR",
+      { filter: { accessories: [ids] }, ...window, group: "HOUR" },
+    ],
+    ["24h filters[]", { filters: [ids], ...window, limit: 100 }],
+    [
+      "24h in seconds",
+      {
+        filter: { accessories: [ids] },
+        afterTimestamp: Math.floor(after / 1000),
+        beforeTimestamp: Math.floor(before / 1000),
+        limit: 100,
+      },
+    ],
+    ["latest 50", { filter: { accessories: [ids] }, limit: 50 }],
+    [
+      "accessory latest 50",
+      { filter: { accessories: [{ aId: ids.aId }] }, limit: 50 },
+    ],
+  ];
+  const all = [];
+  for (const { label, ids, ref } of chosen) {
+    const results = [];
+    for (const [name, request] of variants(pick(ids, ["aId", "sId", "cId"]))) {
+      results.push({ variant: name, ...(await historyShape(probe, request)) });
+    }
+    all.push(...results);
+    row(
+      `7 history ${label}`,
+      "history.list",
+      "entries or an explicit empty list",
+      results
+        .map((result) =>
+          result.error
+            ? `${result.variant}: ${result.error}`
+            : `${result.variant}: ${result.count}`,
+        )
+        .join("; "),
+      "observed",
+      { ref: relativeRef(ref), results },
+    );
+  }
+  const home = await historyShape(probe, { limit: 5 });
+  all.push(home);
+  row(
+    "7 history home",
+    "history.list{limit:5}",
+    "entries or an explicit empty list",
+    home.error ?? `${home.count} entr(ies); list fields [${home.list_fields}]`,
+    "observed",
+    home,
+  );
+  // Whether the hub checks the request at all: an unknown accessory and an
+  // unknown group value.
+  const controls = [];
+  for (const [variant, request] of [
+    ["unknown accessory", { filter: { accessories: [{ aId: 999_999 }] } }],
+    ["unknown group", { group: "NOT_A_GROUP", limit: 5 }],
+  ]) {
+    controls.push({ variant, ...(await historyShape(probe, request)) });
+  }
+  row(
+    "7 history controls",
+    "history.list",
+    "record how invalid requests are answered",
+    controls
+      .map(({ variant, error, count }) => `${variant}: ${error ?? count}`)
+      .join("; "),
+    "observed",
+    { controls },
+  );
+  report.history = {
+    requested_at: new Date(before).toISOString(),
+    non_empty: all.filter((result) => result.count > 0).length,
+    errors: all.filter((result) => result.error).length,
+  };
+}
+
+async function historyShape(probe, request) {
+  let message;
+  try {
+    message = await probe.historyList(request);
+  } catch (error) {
+    return { error: error.message };
+  }
+  if (message.error) {
+    return { error: `hub error ${message.error.code}` };
+  }
+  const list = message.result?.history?.list;
+  if (!isRecord(list)) {
+    return {
+      error: "no history.list object",
+      result_fields: Object.keys(message.result ?? {}),
+    };
+  }
+  const entries = Array.isArray(list.histories) ? list.histories : [];
+  return {
+    list_fields: Object.keys(list).sort(),
+    histories_present: Object.hasOwn(list, "histories"),
+    count: entries.length,
+    entry_fields: [...new Set(entries.flatMap(Object.keys))].sort(),
+    value_kinds: [
+      ...new Set(entries.flatMap((entry) => Object.keys(entry.value ?? {}))),
+    ].sort(),
+    with_contexts: entries.filter((entry) => entry.contexts?.length > 0).length,
+    context_types: [
+      ...new Set(
+        entries.flatMap((entry) =>
+          (entry.contexts ?? []).map(({ type }) => type),
+        ),
+      ),
+    ].sort(),
+  };
+}
+
 // --- cleanup -----------------------------------------------------------------
 
 function pushCleanup(ctx, entry) {
@@ -1731,6 +2655,18 @@ function pushCleanup(ctx, entry) {
 
 async function runRestore(hub, entry) {
   if (entry.done) return entry.outcome;
+  // An object created outside the product (the virtual accessory).
+  if (entry.run) {
+    const outcome = await entry.run();
+    entry.done = outcome.verified;
+    entry.outcome = outcome;
+    report.cleanup.push({
+      label: entry.label,
+      status: outcome.status,
+      verified: outcome.verified,
+    });
+    return outcome;
+  }
   let result = await hub.restore(entry.changeRef);
   if (result.status !== "restored" && entry.fallback) {
     const fallbackChange = await entry.fallback(result);
@@ -1783,7 +2719,7 @@ async function runCleanup(hub, cleanup) {
     const outcome = await runRestore(hub, entry);
     row(
       `5 cleanup ${entry.label}`,
-      "restore_native_change",
+      entry.run ? "direct delete" : "restore_native_change",
       "restored and verified",
       outcome.observed,
       outcome.verified ? "match" : "mismatch",
@@ -1953,7 +2889,13 @@ async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
     ref: relativeRef(entry.ref),
   }));
   if (entries.length === 0) {
-    row("5 sweep", "room.list, scenario.list", "nothing left", "none", "match");
+    row(
+      "5 sweep",
+      "scenario, accessory and room lists",
+      "nothing left",
+      "none",
+      "match",
+    );
   }
   for (const entry of entries) {
     const deleted = entry.outcome === "deleted";
@@ -1985,6 +2927,15 @@ async function readProbeAccessories(stateDirectory) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
+}
+
+async function recordProbeAccessory(stateDirectory, id) {
+  const ids = (await readProbeAccessories(stateDirectory)) ?? [];
+  await writeFile(
+    path.join(stateDirectory, PROBE_ACCESSORIES_FILE),
+    `${JSON.stringify({ accessory_ids: [...ids, id] })}\n`,
+    { mode: 0o600 },
+  );
 }
 
 // The hub cuts accessory names to 30 characters (2026-09-11), so the
