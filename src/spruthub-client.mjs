@@ -23,6 +23,9 @@ const VALUE_FIELDS = [
 ];
 
 const INCLUDE_READ_ERROR = Symbol("includeReadError");
+// A room above this many services returns its size and a paged
+// read_services call instead of listing every accessory and service.
+const ROOM_LISTING_SERVICE_LIMIT = 20;
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
     `LOG_LEVEL_${name.toUpperCase()}`,
@@ -1720,22 +1723,43 @@ export class SprutHubClient {
       "accessories",
     ]);
     accessories.forEach(validateAccessory);
-    return {
+    const inRoom = accessories.filter(({ roomId }) => roomId === room.id);
+    const serviceCount = inRoom.reduce(
+      (count, accessory) => count + (accessory.services ?? []).length,
+      0,
+    );
+    const identity = {
       kind: "room",
       ref: roomRef(parsed.serial, room.id),
       name: room.name,
-      accessories: accessories
-        .filter(({ roomId }) => roomId === room.id)
-        .map((accessory) => ({
-          ref: accessoryRef(parsed.serial, accessory.id),
-          name: accessory.name,
-          available: accessory.online,
-          services: (accessory.services ?? []).map((service) => ({
-            ref: serviceRef(parsed.serial, accessory.id, service.sId),
-            name: service.name,
-            type: service.type,
-          })),
+    };
+    if (serviceCount > ROOM_LISTING_SERVICE_LIMIT) {
+      return {
+        ...identity,
+        accessory_count: inRoom.length,
+        service_count: serviceCount,
+        next: {
+          tool: "read_services",
+          arguments: {
+            home_ref: homeRef(parsed.serial),
+            room_ref: identity.ref,
+            representation: "catalog",
+          },
+        },
+      };
+    }
+    return {
+      ...identity,
+      accessories: inRoom.map((accessory) => ({
+        ref: accessoryRef(parsed.serial, accessory.id),
+        name: accessory.name,
+        available: accessory.online,
+        services: (accessory.services ?? []).map((service) => ({
+          ref: serviceRef(parsed.serial, accessory.id, service.sId),
+          name: service.name,
+          type: service.type,
         })),
+      })),
     };
   }
 
@@ -4179,6 +4203,16 @@ function nextReadTowardOwner(entity, include, ownerContext) {
         include: [include],
       },
     };
+  }
+
+  if (
+    entity.kind === "room" &&
+    !Array.isArray(entity.accessories) &&
+    ["options", "relations", "physical_configuration", "diagnostics"].includes(
+      include,
+    )
+  ) {
+    return entity.next;
   }
 
   const containerRoute = ownerCandidatesFromContainer(entity, include);
