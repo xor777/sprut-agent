@@ -7,6 +7,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
 import { FAKE_HUB_HOST, ORDINARY_HUB_TIMEOUT_MS } from "./support/fake-hub.mjs";
+import {
+  loadHomeFixture,
+  startSimulatedHub,
+} from "./support/simulated-hub.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -74,42 +78,42 @@ const observedLog = [
 
 const expectedNewestFirst = [
   {
-    time: "2026-09-11T09:54:50.710Z",
+    time: "2026-09-11T12:54:50.710+03:00",
     native_time: 1789120490710,
     level: "debug",
     path: "Scenario.ScenarioLogic",
     message: "Сценарий 7: tick",
   },
   {
-    time: "2026-09-11T09:54:50.705Z",
+    time: "2026-09-11T12:54:50.705+03:00",
     native_time: 1789120490705,
     level: "warn",
     path: "Cloud.Connection",
     message: "[REDACTED]",
   },
   {
-    time: "2026-09-11T09:54:50.701Z",
+    time: "2026-09-11T12:54:50.701+03:00",
     native_time: 1789120490701,
     level: "error",
     path: "API.Account",
     message: "[REDACTED]",
   },
   {
-    time: "2026-09-11T09:54:50.700Z",
+    time: "2026-09-11T12:54:50.700+03:00",
     native_time: 1789120490700,
     level: "info",
     path: "Scenario.ScenarioBlock.Target.jBlock",
     message: "[REDACTED]",
   },
   {
-    time: "2026-09-11T09:54:50.692Z",
+    time: "2026-09-11T12:54:50.692+03:00",
     native_time: 1789120490692,
     level: "info",
     path: "Scenario.ScenarioBlock.Target.jBlock",
     message: "Сценарий 23: jTargetDelay_4 time=3000, mode=RESET, index=1",
   },
   {
-    time: "2026-09-11T09:54:50.687Z",
+    time: "2026-09-11T12:54:50.687+03:00",
     native_time: 1789120490687,
     level: "info",
     path: "Scenario.ScenarioBlock.Target.jBlock",
@@ -117,7 +121,7 @@ const expectedNewestFirst = [
       "Сценарий 23: jConditionCharacteristic_3 C[2.13.15 Lightbulb.On 'true'], cond='=', value='true'",
   },
   {
-    time: "2026-09-11T09:54:50.684Z",
+    time: "2026-09-11T12:54:50.684+03:00",
     native_time: 1789120490684,
     level: "info",
     path: "Scenario.ScenarioBlock.Target.jBlock",
@@ -125,7 +129,7 @@ const expectedNewestFirst = [
       "Сценарий 23: jConditionCharacteristic_3 (TRIGGER: SCENARIO[23] <- CHARACTERISTIC[Characteristic/2.13.15/] <- CLOUD[0]_1789120490)",
   },
   {
-    time: "2026-09-11T09:23:55.092Z",
+    time: "2026-09-11T12:23:55.092+03:00",
     native_time: 1789118635092,
     level: "error",
     path: "Notifiers.Notifier",
@@ -144,7 +148,44 @@ function listLog(log, { lastTime, count }) {
     .slice(-count);
 }
 
-async function startHub({ log = observedLog, respond } = {}) {
+// The clock group of the home settings window (window.get with the root key
+// "") in the form observed on 2026-09-16; the live window also holds
+// network and user settings, left out here.
+function settingsWindow(timeZone) {
+  return {
+    windowKey: "",
+    label: { text: "Настройки хаба" },
+    options: [
+      { key: "clock", inputType: "GROUP", parent: "datetime" },
+      {
+        key: "TimeZone",
+        type: "GenericString",
+        inputType: "LIST",
+        parent: "clock",
+        read: true,
+        write: true,
+        value: { stringValue: timeZone },
+      },
+      {
+        key: "Time",
+        type: "GenericString",
+        inputType: "STATUS",
+        parent: "clock",
+        read: true,
+        write: false,
+        value: { stringValue: "2026-09-11 - 12:55:00 (GMT+03:00)" },
+      },
+    ],
+  };
+}
+
+// settings is the home settings window, or null for a hub that refuses
+// window.get.
+async function startHub({
+  log = observedLog,
+  respond,
+  settings = settingsWindow("Europe/Moscow"),
+} = {}) {
   const requests = [];
   const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
@@ -161,6 +202,11 @@ async function startHub({ log = observedLog, respond } = {}) {
             log: { list: { log: listLog(log, request.params.log.list) } },
           },
         };
+      } else if (
+        request.params?.window?.get?.windowKey === "" &&
+        settings !== null
+      ) {
+        reply = { result: { window: { get: settings } } };
       } else {
         reply = { error: { code: -32601, message: "unexpected test request" } };
       }
@@ -201,37 +247,43 @@ async function readLog(client, args) {
   return client.callTool({ name: "read_hub_log", arguments: args });
 }
 
-function assertOnlyLogListRequests(hub) {
+const LOG_READ = { log: { list: { count: 500 } } };
+const ZONE_READ = { window: { get: { windowKey: "" } } };
+
+// Every read of the log is one log.list and one read of the home settings
+// window for its time zone, both on the selected home.
+function assertOnlyLogReads(hub, calls) {
   assert.deepEqual(
-    hub.requests.map(({ params }) => Object.keys(params)),
-    hub.requests.map(() => ["log"]),
+    hub.requests
+      .map(({ params }) => JSON.stringify(params))
+      .sort()
+      .join("\n"),
+    Array.from({ length: calls }, () => [LOG_READ, ZONE_READ])
+      .flat()
+      .map((params) => JSON.stringify(params))
+      .sort()
+      .join("\n"),
   );
-  for (const { params, serial } of hub.requests) {
-    assert.deepEqual(Object.keys(params.log), ["list"]);
-    assert.equal(serial, "home/A");
-  }
+  for (const { serial } of hub.requests) assert.equal(serial, "home/A");
 }
 
-test("read_hub_log returns the hub execution log newest first with ISO time, level names and redacted text", async (t) => {
+test("read_hub_log returns the hub execution log newest first with hub-local time, level names and redacted text", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
 
   const result = await readLog(client, { home_ref: homeRef });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.deepEqual(
-    hub.requests.map(({ params }) => params),
-    [{ log: { list: { count: 500 } } }],
-  );
-  assertOnlyLogListRequests(hub);
+  assertOnlyLogReads(hub, 1);
   const page = result.structuredContent;
   assert.equal(page.status, "ok");
   assert.equal(page.home_ref, homeRef);
   assert.equal(page.order, "newest_first");
   assert.equal(page.content_origin, "spruthub_native_log");
+  assert.equal(page.time_zone, "Europe/Moscow");
   assert.deepEqual(page.entries, expectedNewestFirst);
   assert.equal(page.buffer_entries, 8);
-  assert.equal(page.oldest_entry_at, "2026-09-11T09:23:55.092Z");
+  assert.equal(page.oldest_entry_at, "2026-09-11T12:23:55.092+03:00");
   assert.equal(page.page.returned, 8);
   assert.equal(page.page.matched_total, 8);
   assert.equal(page.page.truncated, false);
@@ -240,6 +292,79 @@ test("read_hub_log returns the hub execution log newest first with ISO time, lev
   const text = result.content[0].text;
   assert.equal(text.includes("must-not-leak"), false, text);
   assert(Buffer.byteLength(text) <= 16_000);
+});
+
+// Agents quoted UTC log times to the owner as local time («с 06:42» at 09:42
+// hub time). Each time carries the offset of the hub's zone at that
+// instant, so a clock change inside the buffer reads right.
+test("read_hub_log gives each time the hub zone's offset at that instant", async (t) => {
+  const log = [
+    {
+      time: Date.parse("2026-10-25T00:59:59.500Z"),
+      level: "LOG_LEVEL_INFO",
+      path: "Controllers.zigbee",
+      message: "before the clock change",
+    },
+    {
+      time: Date.parse("2026-10-25T01:00:00.500Z"),
+      level: "LOG_LEVEL_INFO",
+      path: "Controllers.zigbee",
+      message: "after the clock change",
+    },
+  ];
+  const hub = await startHub({
+    log,
+    settings: settingsWindow("Europe/Berlin"),
+  });
+  const client = await startClient(t, hub);
+
+  const result = await readLog(client, { home_ref: homeRef });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const page = result.structuredContent;
+  assert.equal(page.time_zone, "Europe/Berlin");
+  assert.deepEqual(
+    page.entries.map(({ time, message }) => [time, message]),
+    [
+      ["2026-10-25T02:00:00.500+01:00", "after the clock change"],
+      ["2026-10-25T02:59:59.500+02:00", "before the clock change"],
+    ],
+  );
+  assert.equal(page.oldest_entry_at, "2026-10-25T02:59:59.500+02:00");
+});
+
+// Without a zone the server can apply, times stay UTC and the page says so
+// instead of guessing an offset.
+test("read_hub_log keeps UTC and says so when the hub time zone cannot be read", async (t) => {
+  const withoutZone = settingsWindow("Europe/Moscow");
+  withoutZone.options = withoutZone.options.filter(
+    ({ key }) => key !== "TimeZone",
+  );
+  for (const settings of [
+    null,
+    withoutZone,
+    settingsWindow("Mars/Olympus_Mons"),
+  ]) {
+    const hub = await startHub({ settings });
+    const client = await startClient(t, hub);
+
+    const result = await readLog(client, { home_ref: homeRef });
+
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    const page = result.structuredContent;
+    assert.equal(page.time_zone, null);
+    assert.deepEqual(
+      page.entries.map(({ time }) => time),
+      expectedNewestFirst.map(({ native_time: time }) =>
+        new Date(time).toISOString(),
+      ),
+    );
+    assert.equal(page.oldest_entry_at, "2026-09-11T09:23:55.092Z");
+    assert.ok(
+      page.limitations.some((line) => /\bUTC\b/.test(line)),
+      JSON.stringify(page.limitations),
+    );
+  }
 });
 
 test("read_hub_log filters by level, text and the observed scenario formats without exposing redacted text", async (t) => {
@@ -302,11 +427,7 @@ test("read_hub_log filters by level, text and the observed scenario formats with
     assert.equal(hidden.structuredContent.page.matched_total, 0);
   }
 
-  assert.equal(hub.requests.length, 8);
-  assertOnlyLogListRequests(hub);
-  for (const { params } of hub.requests) {
-    assert.deepEqual(params, { log: { list: { count: 500 } } });
-  }
+  assertOnlyLogReads(hub, 8);
 });
 
 // About three hours of a quiet home: mostly Zigbee controller lines, one
@@ -355,12 +476,9 @@ test("read_hub_log reports what the hub still retains, so an older run reads as 
   assert.equal(page.buffer_entries, BUFFER_SIZE);
   // The run at index 10 is older than everything the hub kept.
   const oldestRetained = log.at(-BUFFER_SIZE).time;
-  assert.equal(page.oldest_entry_at, new Date(oldestRetained).toISOString());
+  assert.equal(Date.parse(page.oldest_entry_at), oldestRetained);
   assert(Date.parse(page.oldest_entry_at) > log[10].time);
-  assert.deepEqual(
-    hub.requests.map(({ params }) => params),
-    [{ log: { list: { count: 500 } } }],
-  );
+  assertOnlyLogReads(hub, 1);
 });
 
 test("read_hub_log returns the newest matches that fit max_bytes and says how many matched", async (t) => {
@@ -547,4 +665,53 @@ test("read_hub_log rejects another home, a foreign scenario and a secret filter 
   }
 
   assert.equal(hub.requests.length, 0);
+});
+
+// The eval apartment at noon hub time (UTC+3): its buffer runs from 09:42
+// to 11:57 on the hub clock, and the settings window's Time names the date.
+test("read_hub_log on the simulated home states times on the hub's own clock", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
+    hubTime: "12:00",
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["src/server.mjs"],
+    cwd: projectRoot,
+    env: {
+      PATH: process.env.PATH,
+      ...hub.connectionEnv(),
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "hub-log-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close();
+    await hub.close();
+  });
+  await client.connect(transport);
+
+  const result = await readLog(client, {
+    home_ref: "spruthub://hub/sim-apartment-01",
+    max_bytes: 32_768,
+  });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const page = result.structuredContent;
+  const hubDate = hub.state.windows[""].options
+    .find(({ key }) => key === "Time")
+    .value.stringValue.slice(0, 10);
+  assert.equal(page.time_zone, "Europe/Moscow");
+  assert.equal(page.oldest_entry_at, `${hubDate}T09:42:00.118+03:00`);
+  assert.equal(page.entries[0].time, `${hubDate}T11:57:00.811+03:00`);
+  for (const { time, native_time: nativeTime } of page.entries) {
+    assert.match(time, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+03:00$/);
+    assert.equal(Date.parse(time), nativeTime);
+  }
+  assert.deepEqual(
+    hub.requests
+      .filter(({ method }) => method !== "log.list")
+      .map(({ method, params }) => [method, params]),
+    [["window.get", { window: { get: { windowKey: "" } } }]],
+  );
 });
