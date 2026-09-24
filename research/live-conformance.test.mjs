@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -267,6 +267,105 @@ test("the sweep deletes only inert probe objects that the product owns", async (
   assert.equal(roomIds.includes(900), true);
 });
 
+// The live probe names its virtual accessory within the hub's 30-character
+// accessory name limit and records the created id in the state directory.
+const accessoryName = "zz-probe-20260924T121158Z";
+
+async function createVirtual(client, roomId) {
+  return client.createAccessory({
+    name: accessoryName,
+    roomId,
+    services: [
+      { name: accessoryName, type: "Lightbulb", optional: ["Brightness"] },
+    ],
+  });
+}
+
+async function recordAccessories(stateDirectory, ids) {
+  await writeFile(
+    path.join(stateDirectory, "probe-accessories.json"),
+    `${JSON.stringify({ accessory_ids: ids })}\n`,
+  );
+}
+
+test("the sweep deletes a recorded, unlinked virtual accessory before its room", async (t) => {
+  const ctx = await setup(t);
+  const { hub } = ctx;
+  const room = await createRoom(ctx, `${prefix}-vroom`);
+  const client = await productClient(t, hub);
+  const otherRoomId = hub.state.rooms[0].id;
+  const owned = await createVirtual(client, room.id);
+  // Same name, but the run has no record of creating it.
+  const foreign = await createVirtual(client, otherRoomId);
+  // Recorded, but linked to a real lamp: deleting it would change that lamp.
+  const linked = await createVirtual(client, otherRoomId);
+  const on = linked.services[0].characteristics.find(
+    ({ control }) => control.type === "On",
+  );
+  await client.addVirtualLink({
+    aId: linked.id,
+    sId: linked.services[0].sId,
+    cId: on.cId,
+    tAId: 35,
+    tSId: 13,
+    tCId: 14,
+  });
+
+  const writesBefore = hub.writes().length;
+  const entries = await conformance.sweepProbeObjects({
+    client,
+    prefix,
+    changes: await journal(client, ctx.stateDirectory),
+    accessoryIds: [owned.id, linked.id],
+  });
+
+  assert.deepEqual(
+    entries.sort((a, b) => a.ref.localeCompare(b.ref)),
+    [
+      {
+        kind: "accessory",
+        ref: `${ctx.homeRef}/accessory/${owned.id}`,
+        name: accessoryName,
+        outcome: "deleted",
+      },
+      {
+        kind: "accessory",
+        ref: `${ctx.homeRef}/accessory/${foreign.id}`,
+        name: accessoryName,
+        outcome: "left",
+        reason: "no_ownership_marker",
+      },
+      {
+        kind: "accessory",
+        ref: `${ctx.homeRef}/accessory/${linked.id}`,
+        name: accessoryName,
+        outcome: "left",
+        reason: "has_links",
+      },
+      {
+        kind: "room",
+        ref: room.ref,
+        name: `${prefix}-vroom`,
+        outcome: "deleted",
+      },
+    ].sort((a, b) => a.ref.localeCompare(b.ref)),
+  );
+  assert.deepEqual(sweepWrites(hub, writesBefore), [
+    {
+      method: "accessory.delete",
+      params: { accessory: { delete: { id: owned.id } } },
+    },
+    {
+      method: "room.delete",
+      params: { room: { delete: { id: room.id } } },
+    },
+  ]);
+  const ids = hub.state.accessories.map(({ id }) => id);
+  assert.equal(ids.includes(owned.id), false);
+  assert.equal(ids.includes(foreign.id), true);
+  assert.equal(ids.includes(linked.id), true);
+});
+
 test("without the run's journal a probe room is reported, not deleted", async (t) => {
   const ctx = await setup(t);
   const room = await createRoom(ctx, `${prefix}-room`);
@@ -295,6 +394,10 @@ test("--sweep-only removes what a run left and fails a prefix of another kind", 
   const ctx = await setup(t);
   const room = await createRoom(ctx, `${prefix}-room`);
   const block = await createBlock(ctx, `${prefix}-block`, false);
+  // The room can go only after the run's recorded accessory in it.
+  const client = await productClient(t, ctx.hub);
+  const accessory = await createVirtual(client, room.id);
+  await recordAccessories(ctx.stateDirectory, [accessory.id]);
   const env = {
     PATH: process.env.PATH,
     ...ctx.hub.connectionEnv(),
@@ -323,6 +426,11 @@ test("--sweep-only removes what a run left and fails a prefix of another kind", 
   );
   assert.match(swept.stdout, /room\/\d+ .*deleted/);
   assert.match(swept.stdout, /scenario\/\d+ .*deleted/);
+  assert.match(swept.stdout, /accessory\/\d+ .*deleted/);
+  assert.equal(
+    ctx.hub.state.accessories.some(({ id }) => id === accessory.id),
+    false,
+  );
   assert.equal(
     ctx.hub.state.rooms.some(
       ({ id }) => `${ctx.homeRef}/room/${id}` === room.ref,
