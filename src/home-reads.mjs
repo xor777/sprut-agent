@@ -259,7 +259,7 @@ export class HomeReads {
         client,
         serial,
         catalog,
-        candidates,
+        [...candidates, ...outletsNotNamedAsLights(catalog, selection)],
         deadline,
         selection.roomId,
       );
@@ -294,10 +294,26 @@ export class HomeReads {
       evaluateCandidate(candidate, values),
     );
     if (summary) return { ...base, ...roomSummary(serial, catalog, evaluated) };
-    return this.#firstPage(base, serial, catalog, evaluated, selection);
+    const outlets = outletsNotNamedAsLights(catalog, selection)
+      .map((candidate) => evaluateCandidate(candidate, values))
+      .filter((item) => matchesState(item, selection.state)).length;
+    return this.#firstPage(base, serial, catalog, evaluated, selection, {
+      ...(outlets > 0
+        ? {
+            outlets_not_named_as_lights: {
+              matches: outlets,
+              note: "Relays and sockets matching these filters whose names do not say light; some may drive lamps.",
+              next: {
+                tool: "find_devices",
+                arguments: { ...selection.args, kind: "outlet" },
+              },
+            },
+          }
+        : {}),
+    });
   }
 
-  #firstPage(base, serial, catalog, evaluated, selection) {
+  #firstPage(base, serial, catalog, evaluated, selection, hints) {
     const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
     const stateFilter = selection.state;
     const listed = [];
@@ -354,6 +370,7 @@ export class HomeReads {
       slots,
       roomMatches: countBy(slots, ({ room }) => room.ref),
       extras: {
+        ...hints,
         ...(stateFilter === "on" || stateFilter === "off"
           ? {
               not_evaluated: notEvaluated.slice(0, NOT_EVALUATED_LIMIT),
@@ -498,6 +515,27 @@ function selectCandidates(catalog, selection) {
     }
   }
   return candidates;
+}
+
+// With kind=light: the Switch and Outlet services that match the other
+// filters but are not classed as lights. A relay's name may not say what it
+// drives, so a light question points to them instead of leaving them on.
+function outletsNotNamedAsLights(catalog, selection) {
+  return selection.kind === "light"
+    ? selectCandidates(catalog, { ...selection, kind: "outlet" })
+    : [];
+}
+
+// Whether an evaluated service passes a state filter; unknown on/off does
+// not.
+function matchesState(item, state) {
+  if (state === "on" || state === "off") {
+    return (
+      item.onState?.applicable === true && item.onState.on === (state === "on")
+    );
+  }
+  if (state === "unavailable") return item.available === false;
+  return true;
 }
 
 function hasRoom(catalog, selection) {
@@ -1368,8 +1406,19 @@ export const DEVICE_KINDS = [
 const NO_ON_OFF_KINDS = new Set(["sensor", "cover", "button", "technical"]);
 
 // A relay or outlet drives whatever is wired to it, and owners name such
-// channels after their lamps. Its own name decides first; a generic channel
-// name ("Канал 1") takes the device's name unless it names another load.
+// channels after their lamps. Its own name decides first. A switch of an
+// air conditioner, breezer, purifier or thermostat is one of that device's
+// own functions and takes its kind (the owner's hub on 2026-09-24: 36 of
+// its 41 Switch and Outlet services). Otherwise a generic channel name
+// ("Канал 1") takes the device's name unless it names another load.
+const DEVICE_FUNCTION_TYPES = new Set([
+  "Thermostat",
+  "HeaterCooler",
+  "AirPurifier",
+  "Fan",
+  "Fanv2",
+  "HumidifierDehumidifier",
+]);
 const LIGHT_NAME =
   /свет|ламп|люстр|спот|лент|торшер|ночник|фонар|гирлянд|прожектор|софит|(?:^| )бра(?: |$)|(?:^| )led(?: |$)|light|lamp/;
 const OTHER_LOAD_NAME =
@@ -1379,10 +1428,14 @@ export function serviceKind(service, accessory) {
   const kind = KIND_BY_TYPE.get(service.type) ?? "other";
   if (service.type === "Switch" || service.type === "Outlet") {
     const own = normalizeName(service.name);
+    if (LIGHT_NAME.test(own)) return { kind: "light", basis: "name" };
+    const device = (accessory.services ?? []).find(({ type }) =>
+      DEVICE_FUNCTION_TYPES.has(type),
+    );
+    if (device) return { kind: KIND_BY_TYPE.get(device.type), basis: "device" };
     if (
-      LIGHT_NAME.test(own) ||
-      (!OTHER_LOAD_NAME.test(own) &&
-        LIGHT_NAME.test(normalizeName(accessory.name)))
+      !OTHER_LOAD_NAME.test(own) &&
+      LIGHT_NAME.test(normalizeName(accessory.name))
     ) {
       return { kind: "light", basis: "name" };
     }
