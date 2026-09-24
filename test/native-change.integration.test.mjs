@@ -10737,6 +10737,68 @@ test("hub code added to or changed in an existing BLOCK is refused with its poin
   );
 });
 
+test("stored rules this contract would not write stay as stored during an edit", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // A comparison and an action target that sprut-agent itself would not
+  // write: != on a boolean, and a status the lamp only reports.
+  const manual = blockData();
+  delete manual.vendorConfiguration;
+  manual.targets[0].if.conditions[0].cond = "!=";
+  manual.targets[0].then.push(
+    setAction({ cId: 17, hc: "StatusActive", value: "false" }),
+  );
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+  const stored = scenarioData(hub, "existing-block");
+
+  const edited = await readBlockConfiguration(client);
+  edited.targets[0].then[1].time = 120_000;
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Выключать свет через две минуты",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const preview = prepared.structuredContent.block_action_preview;
+  assert.deepEqual(
+    preview.actions.map(({ configuration_pointer }) => configuration_pointer),
+    [
+      "/targets/0/then/0/characteristics/0",
+      "/targets/0/then/1/targets/0/characteristics/0",
+    ],
+  );
+  assert.deepEqual(preview.unchecked_actions, [
+    {
+      configuration_pointer: "/targets/0/then/2/characteristics/0",
+      reason: "The selected characteristic must be readable and writable.",
+    },
+  ]);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const written = scenarioData(hub, "existing-block");
+  assert.equal(written.targets[0].then[1].time, 120_000);
+  assert.deepEqual(written.targets[0].if, stored.targets[0].if);
+  assert.deepEqual(written.targets[0].then[2], stored.targets[0].then[2]);
+
+  // The same target in an action the agent adds is refused.
+  const added = await readBlockConfiguration(client);
+  added.targets[0].else = [
+    setAction({ cId: 17, hc: "StatusActive", value: "true" }),
+  ];
+  const writesBefore = scenarioWriteCount(hub);
+  const refused = await prepareBlockUpdate(
+    client,
+    added,
+    "Включать статус лампы без движения",
+  );
+  assert.equal(refused.isError, true);
+  assert.equal(refused.structuredContent.error.code, "insufficient_rights");
+  assert.equal(scenarioWriteCount(hub), writesBefore);
+});
+
 test("an existing BLOCK without a trigger is edited and reported as started only by hand or another scenario", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
