@@ -945,6 +945,47 @@ test("SprutHub runtime target state does not block status or rollback", async (t
   );
 });
 
+test("a rule turned off in the SprutHub interface stays owned and is still rolled back", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await preview(client);
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === applied.structuredContent.scenario_index,
+  );
+  assert.equal(scenario.active, true);
+  scenario.active = false;
+
+  const status = await client.callTool({
+    name: "get_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(status.isError, undefined, status.content[0]?.text);
+  assert.equal(status.structuredContent.status, "applied");
+  assert.equal(status.structuredContent.owned, true);
+
+  const rollback = await client.callTool({
+    name: "rollback_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(rollback.isError, undefined, rollback.content[0]?.text);
+  assert.equal(rollback.structuredContent.status, "rolled_back");
+  assert.deepEqual(
+    hub.requests
+      .filter(({ scenario: request }) => request?.delete)
+      .map(({ scenario: request }) => request.delete),
+    [{ index: scenario.index }],
+  );
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === scenario.index),
+    false,
+  );
+});
+
 test("status restores a legacy auto-off journal after SprutHub assigns block IDs", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
