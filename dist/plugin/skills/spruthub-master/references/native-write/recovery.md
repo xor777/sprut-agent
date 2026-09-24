@@ -32,7 +32,14 @@
 `hub_effect=not_applied`, apply оставляет change в `not_applied`, restore — в
 прежнем `applied`, а `write_intent.rejection` сохраняет причину. Сверять
 такой отказ не нужно; `uncertain` остаётся только для timeout, разрыва
-соединения и нераспознанного ответа после отправки. `verification.fresh=false` означает отсутствие нового
+соединения и нераспознанного ответа после отправки. Исключение —
+многошаговый `virtual_light_group`: если хаб уже выполнил создание accessory
+или часть шагов restore, отказ следующего шага даёт `hub_effect=partial`,
+`change` с записанным состоянием (как у следующего get:
+`uncertain`, `verification.result=owned_partial_group_observed`) и `next`:
+после apply — `restore_native_change`, который удаляет созданное, после
+restore — `get_native_change`. После такого отказа повторный apply
+продолжает недостающие шаги, а повторный restore — удаление. `verification.fresh=false` означает отсутствие нового
 readback: прошлый outcome и последнее наблюдение могут быть показаны, но не
 считаются текущей проверкой. Restore ещё не применённого `block_create`,
 `block_data_update`, `block_action_pause`, `logic_source_create` или

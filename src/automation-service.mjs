@@ -2240,7 +2240,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           change.progress.creation.sent = false;
-          throw await this.#finishRefusedWrite(change, "not_applied", error);
+          throw await this.#finishRefusedGroupStep(change, "apply", error);
         }
         return this.#recordUnownedVirtualLightCandidates(change);
       }
@@ -2386,7 +2386,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           link.sent = false;
-          throw await this.#finishRefusedWrite(change, "not_applied", error);
+          throw await this.#finishRefusedGroupStep(change, "apply", error);
         }
       }
       const after = await this.client.listLinks(source);
@@ -2452,7 +2452,7 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           setting.sent = false;
-          throw await this.#finishRefusedWrite(change, "not_applied", error);
+          throw await this.#finishRefusedGroupStep(change, "apply", error);
         }
       }
       const after = await this.client.getAccessory(change.created_accessory_id);
@@ -2512,6 +2512,14 @@ export class AutomationService {
         verification: failedVerification(error),
       });
     }
+    return this.#recordVirtualLightGroupState(change, current);
+  }
+
+  // Records what an observed group means for this change: restored when its
+  // accessory is gone after a restore, applied when it matches the applied
+  // configuration, uncertain while it holds only part of this change, and a
+  // conflict for anything else.
+  async #recordVirtualLightGroupState(change, current) {
     if (current.absent) {
       if (change.write_intent?.direction === "restore") {
         const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change, {
@@ -2683,12 +2691,11 @@ export class AutomationService {
           removal.uncertain_retry_sent = undefined;
           removal.physical_links_before = undefined;
           removal.physical_links_after = undefined;
-          throw await this.#finishRefusedWrite(
+          throw await this.#finishRefusedGroupStep(
             change,
-            "applied",
+            "restore",
             error,
-            undefined,
-            { observed_snapshot: current },
+            current,
           );
         }
       }
@@ -2755,12 +2762,11 @@ export class AutomationService {
       } catch (error) {
         if (!isUncertainWriteError(error)) {
           setting.sent = false;
-          throw await this.#finishRefusedWrite(
+          throw await this.#finishRefusedGroupStep(
             change,
-            "applied",
+            "restore",
             error,
-            undefined,
-            { observed_snapshot: current },
+            current,
           );
         }
       }
@@ -2801,12 +2807,13 @@ export class AutomationService {
       change.native_acknowledged = virtualLightAllWritesAcknowledged(change);
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        throw await this.#finishRefusedWrite(
+        // The hub did not delete it, so a later restore sends the delete again.
+        change.progress.deletion = undefined;
+        throw await this.#finishRefusedGroupStep(
           change,
-          "applied",
+          "restore",
           error,
-          undefined,
-          { observed_snapshot: current },
+          current,
         );
       }
     }
@@ -3875,6 +3882,55 @@ export class AutomationService {
         rejection,
       };
     }
+    return error;
+  }
+
+  // A virtual light group is written step by step. A refused step before any
+  // other took effect is an ordinary refusal: nothing was created on apply,
+  // and on restore the applied group is still complete. Once the hub has
+  // acknowledged earlier steps, the home holds part of this change, so it is
+  // recorded as get_native_change observes that group, and the error says
+  // the effect is partial: restore removes a partly created group, and after
+  // a refused restore get shows what is left.
+  async #finishRefusedGroupStep(change, direction, error, current) {
+    if (!virtualLightGroupPartlyWritten(change, direction)) {
+      return this.#finishRefusedWrite(
+        change,
+        direction === "apply" ? "not_applied" : "applied",
+        error,
+        undefined,
+        current ? { observed_snapshot: current } : {},
+      );
+    }
+    const rejection = writeRejection(error);
+    if (rejection) change.write_intent = { ...change.write_intent, rejection };
+    let recorded;
+    try {
+      recorded = await this.#recordVirtualLightGroupState(
+        change,
+        await this.#observeVirtualLightGroup(change),
+      );
+    } catch (readError) {
+      recorded = await this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(readError),
+      });
+    }
+    const changeRef = `spruthub-change://native/${change.id}`;
+    error.details = {
+      ...error.details,
+      change_ref: changeRef,
+      hub_effect: "partial",
+      ...(rejection ? { rejection } : {}),
+      change: recorded,
+      next:
+        direction === "apply"
+          ? {
+              tool: "restore_native_change",
+              arguments: { change_ref: changeRef },
+            }
+          : nativeChangeNext(changeRef),
+    };
     return error;
   }
 
@@ -8132,6 +8188,21 @@ function matchesVirtualLightCandidate(
   } catch {
     return false;
   }
+}
+
+// Whether the home holds part of this group change: its accessory exists
+// after apply created it; on restore, the applied group is incomplete once a
+// cleanup step completed, or when it was never completely applied.
+function virtualLightGroupPartlyWritten(change, direction) {
+  if (change.created_accessory_id === undefined) return false;
+  if (direction === "apply") return true;
+  const cleanup = change.progress.cleanup;
+  return (
+    change.applied_snapshot === undefined ||
+    [...(cleanup?.links ?? []), ...(cleanup?.settings ?? [])].some(
+      ({ completed }) => completed === true,
+    )
+  );
 }
 
 function virtualLightAllWritesAcknowledged(change) {
