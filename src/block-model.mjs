@@ -117,6 +117,17 @@ export const CHARACTERISTIC_HOLD = {
   },
 };
 
+// SprutHub stores an inc/dec step sent as a numeric string as a number
+// (live conformance on 3.0.0 rev 20131, 2026-09-24); set values stay
+// strings. Steps are published, validated and compared in the stored form.
+export function storedRelativeStep(value) {
+  return typeof value === "string" &&
+    value.trim() !== "" &&
+    Number.isFinite(Number(value))
+    ? Number(value)
+    : value;
+}
+
 // inc/dec step limits read from the characteristic returned by get_entity.
 const RELATIVE_STEP = {
   exclusive_minimum: 0,
@@ -195,20 +206,18 @@ const BLOCK_NODE_CONSTRAINTS = {
   },
   inc: {
     native_ids: ["cId"],
-    fields: { hc: "characteristic_type_from_get_entity", value: "string" },
+    fields: { hc: "characteristic_type_from_get_entity", value: "number" },
     characteristic_kind: ["intValue", "longValue", "doubleValue"],
     value_meaning: "positive_step_in_characteristic_unit",
     step: RELATIVE_STEP,
-    value_encoding: NATIVE_SCALAR_AS_STRING,
     editor_optional: ["blockId"],
   },
   dec: {
     native_ids: ["cId"],
-    fields: { hc: "characteristic_type_from_get_entity", value: "string" },
+    fields: { hc: "characteristic_type_from_get_entity", value: "number" },
     characteristic_kind: ["intValue", "longValue", "doubleValue"],
     value_meaning: "positive_step_in_characteristic_unit",
     step: RELATIVE_STEP,
-    value_encoding: NATIVE_SCALAR_AS_STRING,
     editor_optional: ["blockId"],
   },
   scenario: {

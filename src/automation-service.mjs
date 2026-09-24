@@ -11,6 +11,7 @@ import {
   isBlockTrigger,
   publishedBlockNodes,
   SERVICE_ACTION_KINDS,
+  storedRelativeStep,
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
@@ -5835,7 +5836,7 @@ function blockContract() {
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
-      "toggle (boolean), inc and dec (numeric without listed values, value is a positive step in the characteristic's unit, at most its max minus min and a multiple of its minStep) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
+      "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0, with a step sent as a numeric string stored as a number; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow the official editor schema; a hub has not been observed running them. ONCE follows the SprutHub Wiki; what CONTINUE keeps, timeCond ">" and milliseconds as the hold unit are assumptions.',
       "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
@@ -6234,8 +6235,8 @@ function validateRelativeAction(action, contract) {
       `${operation} cannot step a characteristic with listed values; use set with one of them`,
     );
   }
-  const step = parseBlockValue(action.value, kind);
-  if (!(step > 0)) {
+  const step = storedRelativeStep(action.value);
+  if (typeof step !== "number" || !(step > 0)) {
     throw invalidBlock(path, `${operation} step must be a positive number`);
   }
   if (contract.min !== undefined && contract.max !== undefined) {
@@ -6807,10 +6808,15 @@ function validateBlockNode(node, kind, path, context) {
       // Other types are named by the child check after this node.
       if (!SERVICE_ACTION_KINDS.includes(action.type)) return;
       const actionPath = `${path}.characteristics[${index}]`;
+      // A stored inc/dec step is a number; see storedRelativeStep.
+      const valueKnown =
+        action.type === "toggle" ||
+        typeof action.value === "string" ||
+        (action.type !== "set" && typeof action.value === "number");
       if (
         !stableNativeId(action.cId) ||
         typeof action.hc !== "string" ||
-        (action.type !== "toggle" && typeof action.value !== "string")
+        !valueKnown
       ) {
         throw invalidBlock(actionPath, `${action.type} action is incomplete`);
       }
@@ -11450,6 +11456,10 @@ function normalizedKnownBlockNode(node, kind) {
       (kind === "if" && key === "state")
     )
       continue;
+    if ((kind === "inc" || kind === "dec") && key === "value") {
+      normalized[key] = storedRelativeStep(value);
+      continue;
+    }
     const rule = BLOCK_CHILD_FIELDS[kind]?.[key];
     if (!rule) {
       normalized[key] = structuredClone(value);
