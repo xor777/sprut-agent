@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
@@ -781,18 +783,31 @@ test("read_hub_log rejects another home, a foreign scenario and a secret filter 
 
 // The eval apartment at noon hub time (UTC+3): its buffer runs from 09:42
 // to 11:57 on the hub clock, and the settings window's Time names the date.
-test("read_hub_log on the simulated home states times on the hub's own clock", async (t) => {
+const simulatedHomeRef = "spruthub://hub/sim-apartment-01";
+
+// The eval apartment at noon hub time behind a server. With shiftedClock
+// the server runs with test/support/shifted-clock.mjs, and shiftClock
+// moves its clock 5 minutes forward.
+async function startSimulated(t, { shiftedClock = false } = {}) {
   const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
     hubTime: "12:00",
   });
+  const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-hub-log-"));
+  const clockModule = pathToFileURL(
+    path.join(projectRoot, "test/support/shifted-clock.mjs"),
+  ).href;
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/server.mjs"],
+    args: [
+      ...(shiftedClock ? ["--import", clockModule] : []),
+      "src/server.mjs",
+    ],
     cwd: projectRoot,
     env: {
       PATH: process.env.PATH,
       ...hub.connectionEnv(),
       SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
     },
     stderr: "pipe",
   });
@@ -800,11 +815,45 @@ test("read_hub_log on the simulated home states times on the hub's own clock", a
   t.after(async () => {
     await client.close();
     await hub.close();
+    await rm(stateDirectory, { recursive: true, force: true });
   });
   await client.connect(transport);
+  const shiftClock = async () => {
+    const shifted = new Promise((resolve) => {
+      const onData = (chunk) => {
+        if (!String(chunk).includes("clock shifted")) return;
+        transport.stderr.off("data", onData);
+        resolve();
+      };
+      transport.stderr.on("data", onData);
+    });
+    process.kill(transport.pid, "SIGUSR2");
+    await shifted;
+  };
+  // The zone the owner sets in the SprutHub app.
+  const setHubZone = (zone) => {
+    hub.state.windows[""].options.find(
+      ({ key }) => key === "TimeZone",
+    ).value.stringValue = zone;
+  };
+  const zoneReads = () =>
+    hub.requests.filter(
+      ({ method, params }) =>
+        method === "window.get" && params.window.get.windowKey === "",
+    ).length;
+  const logZone = async () => {
+    const result = await readLog(client, { home_ref: simulatedHomeRef });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return result.structuredContent.time_zone;
+  };
+  return { hub, client, shiftClock, setHubZone, zoneReads, logZone };
+}
+
+test("read_hub_log on the simulated home states times on the hub's own clock", async (t) => {
+  const { hub, client } = await startSimulated(t);
 
   const result = await readLog(client, {
-    home_ref: "spruthub://hub/sim-apartment-01",
+    home_ref: simulatedHomeRef,
     max_bytes: 32_768,
   });
 
@@ -826,4 +875,48 @@ test("read_hub_log on the simulated home states times on the hub's own clock", a
       .map(({ method, params }) => [method, params]),
     [["window.get", { window: { get: { windowKey: "" } } }]],
   );
+});
+
+// The kept zone serves reads for 5 minutes and until a write of this
+// process; a zone the owner changes in the SprutHub app shows up after
+// either.
+test("read_hub_log reads the hub time zone again after a write of this process", async (t) => {
+  const { client, setHubZone, zoneReads, logZone } = await startSimulated(t);
+
+  assert.equal(await logZone(), "Europe/Moscow");
+  setHubZone("Europe/Berlin");
+  assert.equal(await logZone(), "Europe/Moscow");
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "service_name",
+      target_ref: `${simulatedHomeRef}/accessory/17/service/13`,
+      value: "Лента над диваном",
+      reason: "Переименовать ленту",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+
+  assert.equal(await logZone(), "Europe/Berlin");
+  assert.equal(zoneReads(), 2);
+});
+
+test("read_hub_log reads the hub time zone again once the kept one is 5 minutes old", async (t) => {
+  const { shiftClock, setHubZone, zoneReads, logZone } = await startSimulated(
+    t,
+    { shiftedClock: true },
+  );
+
+  assert.equal(await logZone(), "Europe/Moscow");
+  setHubZone("Europe/Berlin");
+  assert.equal(await logZone(), "Europe/Moscow");
+  await shiftClock();
+
+  assert.equal(await logZone(), "Europe/Berlin");
+  assert.equal(zoneReads(), 2);
 });
