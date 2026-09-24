@@ -39,11 +39,21 @@ const RAW_REFS = [
   /spruthub(?:-[a-z]+)?:\/\//i,
   /\b[asc]Id\b/,
   /\b(?:scenario|accessory|room|service|characteristic)\s*[:#/=]?\s*\d/i,
+  // In Russian: a number sign after any form of the word («в сценарии №5»),
+  // a bare number after the singular itself («аксессуар 33»); after
+  // another form a bare number is a count («в сценарии 2 ветки»).
+  /(?<!\p{L})(?:аксессуар|сценари|комнат|сервис|характеристик|устройств)\p{L}*\s*[№#]\s*\d/iu,
+  /(?<!\p{L})(?:аксессуар|сценарий)\s+\d/iu,
   /\b[a-z]+_refs?\b/i,
   /\/configuration\//i,
   /\b(?:Bridge|Controller):\w/,
-  /\bid\s*[:=#]?\s*\d/i,
-  /(?<![\w&])#\d/,
+  // A Zigbee address («Zigbee ID 0x00158d…») is the owner's to read.
+  /\bid\s*[:=#]?\s*(?!0x)\d/i,
+  // A number sign not after a word: «(#5)»; «Вариант #1» numbers an option.
+  /(?<![\p{L}\p{N}&]\s*)#\d/u,
+  // aId.sId.cId (32.13.14) where it cannot be a date: the middle part is
+  // no month, or the first no day. A version such as 3.0.0 is neither.
+  /(?<![\d.,])(?:[1-9]\d{0,4}\.(?:1[3-9]|[2-9]\d|[1-9]\d{2})|(?:3[2-9]|[4-9]\d|[1-9]\d{2,4})\.[1-9]\d{1,2})\.[1-9]\d{1,2}(?!\d|[.,]\d)/,
 ];
 
 // The bedroom's 21.4 °C as a number: 21,4 / 21.4, or 21 with a unit; not
