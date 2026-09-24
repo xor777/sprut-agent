@@ -15,6 +15,8 @@ import {
 // The owner's home will at least double. A household question must cost
 // the agent the same at every size: the MCP answer and the number of native
 // requests may not grow with the devices that the question is not about.
+// Reads of named devices, scenarios and their relations must not pull the
+// whole home from the hub either: their native reply bytes stay flat too.
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -22,6 +24,16 @@ const projectRoot = path.resolve(
 const SIZES = [80, 160, 320];
 const home = "spruthub://hub/sim-scaled-01";
 const livingRoom = `${home}/room/3`;
+// "Вечерний свет в гостиной" and the floor lamp's On, which two BLOCKs use.
+const eveningScenario = `${home}/scenario/14`;
+const floorLampOn = `${home}/accessory/16/service/13/characteristic/14`;
+const FLAT_TRAFFIC = new Set([
+  "scenario_summary_cold",
+  "relations_cold",
+  "bedroom_temperature",
+  "living_room_lights",
+  "scenario_summary_warm",
+]);
 
 function listed(body) {
   return body.rooms.flatMap((room) =>
@@ -63,13 +75,26 @@ async function measure(t, accessoryCount) {
     const before = hub.requests.length;
     const result = await client.callTool({ name, arguments: args });
     assert.equal(result.isError, undefined, result.content[0]?.text);
+    const native = hub.requests.slice(before);
     questions[question] = {
       bytes: Buffer.byteLength(result.content[0].text),
-      requests: hub.requests.length - before,
+      requests: native.length,
+      replyBytes: native.reduce(
+        (sum, { responseBytes }) => sum + responseBytes,
+        0,
+      ),
     };
     return result.structuredContent;
   };
 
+  // A fresh MCP process has no catalog yet.
+  const scenario = await ask("scenario_summary_cold", "get_entity", {
+    entity_ref: eveningScenario,
+  });
+  const relations = await ask("relations_cold", "get_entity", {
+    entity_ref: floorLampOn,
+    include: ["relations"],
+  });
   const overview = await ask("overview", "home_overview", {});
   const on = await ask("whats_on", "find_devices", { state: "on" });
   const temperature = await ask("bedroom_temperature", "find_devices", {
@@ -79,11 +104,14 @@ async function measure(t, accessoryCount) {
     room_ref: livingRoom,
     kind: "light",
   });
+  await ask("scenario_summary_warm", "get_entity", {
+    entity_ref: eveningScenario,
+  });
   return {
     accessories: hub.state.accessories.length,
     services: hub.state.accessories.flatMap(({ services }) => services).length,
     questions,
-    answers: { overview, on, temperature, lights },
+    answers: { overview, on, temperature, lights, scenario, relations },
   };
 }
 
@@ -101,7 +129,27 @@ test("household reads cost the same at 1x, 2x and 4x the owner's home", async (t
         run.services <= run.accessories * 3.6,
       `${run.services} services for ${run.accessories} accessories`,
     );
-    const { overview, on, temperature, lights } = run.answers;
+    const { overview, on, temperature, lights, scenario, relations } =
+      run.answers;
+    assert.equal(scenario.entity.name, "Вечерний свет в гостиной");
+    assert.equal(
+      JSON.stringify(scenario.entity.summary),
+      JSON.stringify(runs[0].answers.scenario.entity.summary),
+    );
+    assert.match(JSON.stringify(scenario.entity.summary), /Торшер/);
+    assert.deepEqual(
+      relations.entity.relations.scenario_roles.map(
+        ({ scenario_ref: ref }) => ref,
+      ),
+      runs[0].answers.relations.entity.relations.scenario_roles.map(
+        ({ scenario_ref: ref }) => ref,
+      ),
+    );
+    assert(relations.entity.relations.scenario_roles.length >= 2);
+    assert.equal(
+      relations.entity.relations.unchecked.some(({ area }) => area === "names"),
+      false,
+    );
     assert.equal(overview.rooms.length, 13);
     assert.equal(overview.problems_total, 2);
     assert.deepEqual(
@@ -130,9 +178,12 @@ test("household reads cost the same at 1x, 2x and 4x the owner's home", async (t
   for (const question of Object.keys(runs[0].questions)) {
     const values = runs.map(({ questions }) => questions[question]);
     t.diagnostic(
-      `${question}: ${values.map(({ bytes, requests }) => `${bytes}B/${requests}req`).join(" -> ")}`,
+      `${question}: ${values.map(({ bytes, requests, replyBytes }) => `${bytes}B/${requests}req/${replyBytes}B native`).join(" -> ")}`,
     );
-    for (const measure of ["bytes", "requests"]) {
+    const measures = FLAT_TRAFFIC.has(question)
+      ? ["bytes", "requests", "replyBytes"]
+      : ["bytes", "requests"];
+    for (const measure of measures) {
       const series = values.map((value) => value[measure]);
       assert(
         Math.max(...series) <= Math.min(...series) * 1.1,
