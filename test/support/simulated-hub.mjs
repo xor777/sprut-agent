@@ -1991,13 +1991,14 @@ function seedLog(log, now) {
   const localMidnight =
     Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) -
     offsetMs;
+  const byDay = [];
   const placed = (log.entries ?? []).map(
     ({ day, time: wallClock, minutesAgo, offsetMs: extra, ...entry }) => {
       if (typeof minutesAgo === "number") {
         return { time: now - minutesAgo * 60_000 + (extra ?? 0), ...entry };
       }
       const [hours, minutes, seconds] = wallClock.split(":").map(Number);
-      return {
+      const placedEntry = {
         time:
           localMidnight +
           day * 86_400_000 +
@@ -2005,8 +2006,22 @@ function seedLog(log, now) {
           Math.round(seconds * 1_000),
         ...entry,
       };
+      byDay.push(placedEntry);
+      return placedEntry;
     },
   );
+  // Wall-clock entries describe the last completed run (a night scenario
+  // from 23:00 to 06:00). Early in the day that run is not over yet, or is
+  // still inside the recent window, so the whole group moves back a day
+  // until its latest entry is old enough. Without this the seeded log
+  // depended on the hour the run started.
+  const minAgeMs = (log.dayEntriesAtLeastMinutesAgo ?? 0) * 60_000;
+  while (
+    byDay.length > 0 &&
+    Math.max(...byDay.map(({ time }) => time)) > now - minAgeMs
+  ) {
+    for (const entry of byDay) entry.time -= 86_400_000;
+  }
   for (const group of log.recurring ?? []) {
     for (let repeat = 0; repeat < group.times; repeat += 1) {
       const start =

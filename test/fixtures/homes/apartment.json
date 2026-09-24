@@ -879,8 +879,9 @@
     ]
   },
   "log": {
-    "note": "Execution log seeded relative to the run start in hub local time (utcOffsetMinutes). day places an entry on a calendar day offset at a wall clock time; minutesAgo counts back from the start; recurring repeats its entries every everyMinutes. The hub keeps a ring buffer of capacity entries (128 on a live hub), so the older night-scenario runs are seeded but evicted. Characteristic trigger, condition, delay and Notifier lines follow the O20260911 forms; CRON, interval, service and controller lines are synthetic.",
+    "note": "Execution log seeded relative to the run start in hub local time (utcOffsetMinutes). day places an entry on a calendar day offset at a wall clock time; minutesAgo counts back from the start; recurring repeats its entries every everyMinutes. The hub keeps a ring buffer of capacity entries (128 on a live hub), so the older night-scenario runs are seeded but evicted. dayEntriesAtLeastMinutesAgo moves the day entries back a day until the latest is at least that old, so the night run stays older than the recent window at any hour. Characteristic trigger, condition, delay and Notifier lines follow the O20260911 forms; CRON, interval, service and controller lines are synthetic.",
     "utcOffsetMinutes": 180,
+    "dayEntriesAtLeastMinutesAgo": 180,
     "capacity": 128,
     "entries": [
       {
