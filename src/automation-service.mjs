@@ -9,13 +9,13 @@ import {
   blockSubgraphHasTrigger,
   CHARACTERISTIC_HOLD,
   isBlockTrigger,
+  normalizeBlockRequest,
   publishedBlockNodes,
   SERVICE_ACTION_KINDS,
   storedRelativeStep,
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
-  wrapDirectCharacteristicIfPredicates,
 } from "./block-model.mjs";
 import {
   inspectNativeOption,
@@ -571,7 +571,7 @@ export class AutomationService {
     }
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
     const data = structuredClone(input.data);
-    wrapDirectCharacteristicIfPredicates(data);
+    normalizeBlockRequest(data);
     const validation = await validateBlockData(data, this.client, {
       allowUnknownFrom: null,
       allowActionOnly: true,
@@ -666,7 +666,7 @@ export class AutomationService {
       Date.now(),
     );
     const data = prepared.data;
-    wrapDirectCharacteristicIfPredicates(data);
+    normalizeBlockRequest(data);
     const validation = await validateBlockData(data, this.client, {
       allowUnknownFrom: baseline.data,
       allowedPauses: pauseChanges,
@@ -5832,7 +5832,7 @@ function blockContract() {
       "A conditional BLOCK requires at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
       "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
       "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
-      "time_trigger days_at_time and sun follow what the official web client writes: day names in field 5 and a SUNRISE/SUNSET offset in seconds (negative is before). A hub has not been observed saving or firing them, so check read_hub_log after the first expected moment.",
+      "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, but firing is not observed, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",

@@ -265,6 +265,10 @@ const SUN_OFFSET = {
   negative: "before",
 };
 
+// The periods the web client offers for "every N".
+const EVERY_N_HOURS = [1, 2, 3, 4, 6, 8, 12];
+const EVERY_N_MINUTES_OR_SECONDS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+
 export const TIME_TRIGGER = {
   node: "cron",
   position: "condition.conditions",
@@ -272,7 +276,30 @@ export const TIME_TRIGGER = {
   clock: "selected_hub_local_wall_clock",
   forms: {
     days_at_time: { mode: "NONE", cron: "0 MM HH ? * DAYS *", offset: 0 },
-    one_date: { mode: "NONE", cron: "0 MM HH D M ? YYYY", offset: 0 },
+    every_n_hours: {
+      mode: "NONE",
+      cron: "0 0 0/N ? * DAYS *",
+      offset: 0,
+      N: EVERY_N_HOURS,
+    },
+    every_n_minutes: {
+      mode: "NONE",
+      cron: "0 0/N * ? * DAYS *",
+      offset: 0,
+      N: EVERY_N_MINUTES_OR_SECONDS,
+    },
+    every_n_seconds: {
+      mode: "NONE",
+      cron: "0/N * * ? * DAYS *",
+      offset: 0,
+      N: EVERY_N_MINUTES_OR_SECONDS,
+    },
+    one_date: {
+      mode: "NONE",
+      cron: "0 MM HH D M ? YYYY",
+      offset: 0,
+      official_editor: "never_writes_this_form",
+    },
     sun: {
       mode: ["SUNRISE", "SUNSET"],
       cron: "0 0 0 ? * DAYS *",
@@ -285,9 +312,14 @@ export const TIME_TRIGGER = {
     D: "day_of_month_1_to_31",
     M: "month_1_to_12",
     YYYY: "year_2000_to_2099",
-    DAYS: `* for every day, or comma-separated names from ${CRON_DAY_NAMES.join(",")}`,
+    N: "one_of_the_form_N_list",
+    DAYS: `* for every day, or comma-separated names from ${CRON_DAY_NAMES.join(",")}; all seven names are sent as *`,
   },
-  evidence: "official_editor_schema_only",
+  evidence: {
+    forms: "official_web_client_code",
+    one_date: "official_editor_schema_only",
+    hub: "days_at_time, one_date and sun stored as sent on SprutHub 3.0.0; firing not observed",
+  },
 };
 
 const CRON_MINUTE = "([0-5]?\\d)";
@@ -299,6 +331,24 @@ const ONE_DATE_CRON = new RegExp(
   `^0 ${CRON_MINUTE} ${CRON_HOUR} (0?[1-9]|[12]\\d|3[01]) (0?[1-9]|1[0-2]) \\? (20\\d\\d)$`,
 );
 const SUN_CRON = /^0 0 0 \? \* (\S+) \*$/;
+const EVERY_N_FORMS = [
+  "every_n_hours",
+  "every_n_minutes",
+  "every_n_seconds",
+].map((name) => ({
+  form: TIME_TRIGGER.forms[name],
+  pattern: cronTemplatePattern(TIME_TRIGGER.forms[name].cron),
+}));
+
+// The form template as a pattern that captures N and then DAYS.
+function cronTemplatePattern(template) {
+  const parts = { N: "(\\d+)", DAYS: "(\\S+)" };
+  const source = template
+    .split(/([A-Z]+)/)
+    .map((piece) => parts[piece] ?? piece.replace(/[?*/]/g, "\\$&"))
+    .join("");
+  return new RegExp(`^${source}$`);
+}
 
 // Returns why a standalone cron is outside TIME_TRIGGER, or null.
 export function timeTriggerProblem(node) {
@@ -309,9 +359,19 @@ export function timeTriggerProblem(node) {
     if (node.offset !== 0) return "time trigger at a clock time needs offset 0";
     const weekly = DAYS_AT_TIME_CRON.exec(node.cron);
     if (weekly && cronDaysValid(weekly[3])) return null;
+    for (const { form, pattern } of EVERY_N_FORMS) {
+      const every = pattern.exec(node.cron);
+      if (
+        every &&
+        form.N.map(String).includes(every[1]) &&
+        cronDaysValid(every[2])
+      ) {
+        return null;
+      }
+    }
     const date = ONE_DATE_CRON.exec(node.cron);
     if (date && calendarDateValid(date[3], date[4], date[5])) return null;
-    return `time trigger cron must be ${forms.days_at_time.cron} or ${forms.one_date.cron} in the selected hub's local wall clock; ${days}`;
+    return `time trigger cron must be ${forms.days_at_time.cron}; ${forms.every_n_hours.cron} with N from ${forms.every_n_hours.N.join(",")}; ${forms.every_n_minutes.cron} or ${forms.every_n_seconds.cron} with N from ${forms.every_n_minutes.N.join(",")}; or ${forms.one_date.cron}, in the selected hub's local wall clock; ${days}`;
   }
   if (node.mode === "SUNRISE" || node.mode === "SUNSET") {
     const sun = SUN_CRON.exec(node.cron);
@@ -384,7 +444,27 @@ function publishedBlockChildren() {
   return children;
 }
 
-export function wrapDirectCharacteristicIfPredicates(data) {
+// Brings requested BLOCK data to the form the official editor writes before
+// it is validated, previewed and sent.
+export function normalizeBlockRequest(data) {
+  wrapDirectCharacteristicIfPredicates(data);
+  visitKnownBlockNodes(data, (node, kind) => {
+    if (kind !== "cron" || typeof node.cron !== "string") return;
+    // The web client writes every day as *, never as all seven names.
+    const fields = node.cron.split(" ");
+    const days = fields[5]?.split(",") ?? [];
+    if (
+      fields.length === 7 &&
+      days.length === CRON_DAY_NAMES.length &&
+      CRON_DAY_NAMES.every((day) => days.includes(day))
+    ) {
+      fields[5] = "*";
+      node.cron = fields.join(" ");
+    }
+  });
+}
+
+function wrapDirectCharacteristicIfPredicates(data) {
   visitKnownBlockNodes(data, (node, kind) => {
     if (kind !== "if") return;
     const predicate = node.if;
