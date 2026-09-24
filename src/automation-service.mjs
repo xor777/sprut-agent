@@ -7554,6 +7554,25 @@ const NATIVE_VALUE_KINDS = {
         value: nativeScalarValue(value),
       }),
   },
+  scenario_active: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    async inspect(service, input) {
+      const target = parseScenarioRef(input.target_ref, service.hubSerial);
+      return {
+        fields: { target },
+        ...(await readScenarioActive(service.client, target)),
+      };
+    },
+    read: (service, change) =>
+      readScenarioActive(service.client, change.target),
+    // Only the flag is sent, so data, metadata and other flags of any
+    // scenario type stay as they are.
+    write: (service, change, value) =>
+      service.client.updateScenario(change.target.index, {
+        active: value.value,
+      }),
+  },
 };
 
 function nativeValueKind(kind) {
@@ -7961,6 +7980,26 @@ async function readLogicActive(client, target) {
   const logic = await client.getLogic(target);
   if (!logic) throw logicNotFound();
   return { value: logicActiveValue(logic), contract: logicActiveContract() };
+}
+
+async function readScenarioActive(client, target) {
+  const scenario = await client.getScenario(target.index);
+  if (!scenario) throw scenarioNotFound();
+  if (typeof scenario.active !== "boolean") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned a scenario without an explicit active state.",
+      "get_entity",
+    );
+  }
+  return {
+    value: { value: scenario.active, kind: "boolValue" },
+    contract: {
+      type: "ScenarioActive",
+      kind: "boolValue",
+      confirmation: "separate_scenario_get_readback",
+    },
+  };
 }
 
 function isNativeValueChange(change) {
@@ -9524,7 +9563,7 @@ function publicNativeChange(
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
-      "An option or logic-active write with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+      "An option, logic-active, or scenario-active write with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
       ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets
         ? [

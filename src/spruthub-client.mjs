@@ -1323,6 +1323,7 @@ export class SprutHubClient {
     const update = { index };
     if (Object.hasOwn(fields, "name")) update.name = fields.name;
     if (Object.hasOwn(fields, "desc")) update.desc = fields.desc;
+    if (Object.hasOwn(fields, "active")) update.active = fields.active;
     if (Object.hasOwn(fields, "data")) update.data = fields.data;
     const response = await this.#request(
       { scenario: { update } },

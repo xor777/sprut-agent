@@ -77,6 +77,7 @@
 - [`logic_source_create`, `logic_source_update`](native-write/logic-source.md)
 - [`block_create`, `block_data_update`](native-write/block-create-update.md)
 - [`scenario_run`](native-write/scenario-run.md)
+- [`scenario_active`](native-write/scenario-active.md)
 - [`block_action_pause`](native-write/block-action-pause.md)
 - [совместимый boolean source → target путь](native-write/boolean-automation.md)
 
