@@ -628,19 +628,13 @@ function publishedBlockChildren() {
 
 // Brings requested BLOCK data to the form the official editor writes before
 // it is validated, previewed and sent.
+// Nothing the hub drops on store is added here: a from without value and a
+// PUSH without to are sent as they are. SprutHub 3.0.0 stores the web
+// client's value "" and to null as absent (live-conformance-4), and
+// canonicalBlock reads both forms alike.
 export function normalizeBlockRequest(data) {
   wrapDirectCharacteristicIfPredicates(data);
   visitKnownBlockNodes(data, (node, kind) => {
-    // The web client writes to null for every PUSH it creates.
-    if (kind === "notify" && node.mode === "PUSH" && node.to === undefined) {
-      node.to = null;
-      return;
-    }
-    // The web client writes value "" on a from action.
-    if (kind === "from" && node.value === undefined) {
-      node.value = "";
-      return;
-    }
     if (kind === "inc" || kind === "dec") {
       // Sent in the form the hub stores (relativeStepNumber).
       const step = relativeStepNumber(node.value);
@@ -671,7 +665,9 @@ export function normalizeBlockRequest(data) {
 // else, a changed value, mode, delay, branch or field, stays a difference,
 // so a manual edit is still detected. An inc/dec step is compared as it is:
 // normalizeBlockRequest sends it as a number, and SprutHub 3.0.0 stored a
-// step sent as the string "10" as the number 10.
+// step sent as the string "10" as the number 10. An empty string is a value
+// like any other (timeCond "" is stored as sent); only a from action's
+// value "" is folded, as below.
 export function canonicalBlock(data) {
   return canonicalNode(data, "root");
 }
@@ -694,6 +690,10 @@ function canonicalNode(node, kind) {
   if (!Object.hasOwn(BLOCK_ALLOWED_KEYS, kind)) return structuredClone(fields);
   const canonical = {};
   for (const [key, value] of Object.entries(fields)) {
+    // SprutHub 3.0.0 drops a null field when it stores a node: an if's
+    // else (live-conformance-3), a notify's to (live-conformance-4). Null
+    // and absent mean the same.
+    if (value === null) continue;
     const rule = BLOCK_CHILD_FIELDS[kind]?.[key];
     if (rule?.shape === "array" && Array.isArray(value)) {
       canonical[key] = value.map(canonicalBlockNode);
@@ -723,10 +723,21 @@ function canonicalNode(node, kind) {
       canonical.else = [];
     }
   }
-  if (kind === "notify" && !Object.hasOwn(canonical, "to")) {
-    // Client code: a new notify has no to, and a mode change writes to
-    // null; both mean no recipients were chosen.
-    canonical.to = null;
+  if (kind === "notify" && Array.isArray(canonical.to)) {
+    // The web client writes clients null for every recipient of a service;
+    // SprutHub 3.0.0 stores the entry without clients (live-conformance-4).
+    canonical.to = canonical.to.map((entry) =>
+      isRecord(entry)
+        ? Object.fromEntries(
+            Object.entries(entry).filter(([, value]) => value !== null),
+          )
+        : entry,
+    );
+  }
+  if (kind === "from" && canonical.value === "") {
+    // The web client writes value "" on a from action; SprutHub 3.0.0
+    // stores the action without value (live-conformance-4).
+    delete canonical.value;
   }
   if (
     kind === "condition" &&
