@@ -727,7 +727,7 @@ test("an edit that deletes a request or notification the agent cannot write back
     JSON.stringify(stored);
 
   const edited = await prepareUpdate(client, index, (data) => {
-    data.targets[0].then = [data.targets[0].then[0]];
+    data.targets[0].then.splice(1);
   });
   assert.equal(edited.status, "prepared", JSON.stringify(edited));
   const warning = edited.limitations.find((text) =>

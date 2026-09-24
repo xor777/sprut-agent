@@ -4674,6 +4674,8 @@ function isSensitiveContainerKey(key) {
 function redactSensitiveText(text, role = "data") {
   const containsCredential =
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
+    // A URL with a user name and password, as in a BLOCK request.
+    /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i.test(text) ||
     containsSensitiveAssignment(text, role);
   return containsCredential ? "[REDACTED]" : text;
 }
