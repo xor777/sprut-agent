@@ -609,10 +609,9 @@ export const CASES = {
     ],
   },
   // A UI-made button rule (OR trigger, code action, no else key): only the
-  // trigger's press value may change.
+  // trigger's press value may change. Its description («Одно нажатие…»)
+  // goes stale, but the request does not ask to rewrite it.
   "edit-button-scenario": {
-    expectedFail:
-      "block_data_update refuses a UI-made BLOCK with a code action and no else (invalid_block_data); diff-scoped BLOCK update validation is in progress",
     prompt:
       "Поменяй в сценарии кнопки у кровати, чтобы ночник переключался двойным нажатием",
     graders: [

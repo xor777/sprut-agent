@@ -2169,10 +2169,6 @@ test("weekday-schedule grades the cron by day and waits for weekday triggers", a
 });
 
 test("edit-button-scenario accepts only the press value change of the UI-made rule", async (t) => {
-  assert.match(
-    CASES["edit-button-scenario"].expectedFail,
-    /invalid_block_data/,
-  );
   const stored = async (session) =>
     JSON.parse(
       session.hub.state.scenarios.find(({ index }) => index === "12").data,
