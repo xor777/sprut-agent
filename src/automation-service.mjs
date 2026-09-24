@@ -3137,8 +3137,8 @@ export class AutomationService {
     if (listed.length > VIRTUAL_CANDIDATE_LIMIT) {
       throw new SprutHubError(
         "too_many_matching_accessories",
-        `More than ${VIRTUAL_CANDIDATE_LIMIT} accessories in this room match the virtual light by name or services, and SprutHub tells which are virtual only one accessory at a time. Nothing was written; rename or remove some of them first.`,
-        "list_rooms",
+        `More than ${VIRTUAL_CANDIDATE_LIMIT} accessories in this room match the virtual light by name or services, and SprutHub tells which are virtual only one accessory at a time. Nothing was written; find them with find_devices and the room_ref, then rename or remove some of them first.`,
+        "find_devices",
       );
     }
     const virtual = [];
