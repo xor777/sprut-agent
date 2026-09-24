@@ -882,3 +882,48 @@ test("the simulator switches a BLOCK only through the Active option of its optio
   await send({ scenario: { update: { index: "9", active: false } } });
   assert.equal((await scenario("9")).active, true);
 });
+
+// Owner's hub, 3.0.0, 2026-09-24: accessory.list had no virtual field while
+// accessory.get of the created virtual accessory had virtual=true, and a
+// 42-character room name was kept as its first 30 characters.
+test("the simulator lists accessories without virtual and keeps 30 characters of a room name", async (t) => {
+  const { send } = await rawSession(t);
+  const created = (
+    await send({
+      accessory: {
+        create: {
+          name: "Виртуальная лампа",
+          roomId: 3,
+          services: [{ type: "Lightbulb" }],
+        },
+      },
+    })
+  ).result.accessory.create;
+  const listed = (
+    await send({
+      accessory: { list: { expand: "services,characteristics" } },
+    })
+  ).result.accessory.list.accessories;
+  assert.ok(listed.some(({ id }) => id === created.id));
+  assert.deepEqual(
+    listed.filter((accessory) => Object.hasOwn(accessory, "virtual")),
+    [],
+  );
+  assert.equal(
+    (await send({ accessory: { get: { id: created.id } } })).result.accessory
+      .get.virtual,
+    true,
+  );
+
+  const roomName = async (id) =>
+    (await send({ room: { get: { id } } })).result.room.get.name;
+  const long = "zz-sprut-agent-probe-20260924T132528Z-room";
+  assert.equal(long.length, 42);
+  const room = (await send({ room: { create: { name: long } } })).result.room
+    .create;
+  assert.equal(await roomName(room.id), "zz-sprut-agent-probe-20260924T");
+  await send({
+    room: { update: { id: 7, name: "Кабинет с видом на сад и старую яблоню" } },
+  });
+  assert.equal(await roomName(7), "Кабинет с видом на сад и стару");
+});
