@@ -1269,6 +1269,16 @@ function withRuntimeBlockFields(data) {
       normalized.blockId = nextBlockId++;
       if (kind === "if") normalized.state = false;
     }
+    // SprutHub 3.0.0 (live conformance, 2026-09-24) stores an inc or dec
+    // step sent as "10" as the number 10; set values stay strings.
+    if (
+      (kind === "inc" || kind === "dec") &&
+      typeof normalized.value === "string" &&
+      normalized.value.trim() !== "" &&
+      Number.isFinite(Number(normalized.value))
+    ) {
+      normalized.value = Number(normalized.value);
+    }
     for (const key of childFields[kind] ?? []) {
       normalized[key] = Array.isArray(value[key])
         ? value[key].map((child) => visit(child, child?.type))
@@ -9517,7 +9527,8 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
   const edited = structuredClone(
     read.structuredContent.entity.configuration.value,
   );
-  edited.targets[1].then[0].characteristics[0].value = "20";
+  // The read configuration carries the steps as the numbers SprutHub stored.
+  edited.targets[1].then[0].characteristics[0].value = 20;
   const preparedUpdate = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -9540,7 +9551,7 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
   assert.equal(updated.structuredContent.configuration_matches, true);
   assert.equal(
     scenarioData(hub, createdIndex).targets[1].then[0].characteristics[0].value,
-    "20",
+    20,
   );
 
   const restoredUpdate = await client.callTool({
@@ -9566,6 +9577,77 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
   assert.equal(
     hub.state.scenarios.some(({ index }) => index === "all-off"),
     true,
+  );
+});
+
+test("a step that SprutHub stores as a number keeps the created BLOCK owned and restorable", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installButton(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await firstClient.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+  assert.equal(publishedBlockNode(contract, "inc").fields.value, "number");
+  assert.equal(publishedBlockNode(contract, "dec").fields.value, "number");
+
+  // A step sent as the contract publishes it and one sent as a string by an
+  // older client are both stored as numbers by the hub.
+  const data = {
+    targets: [
+      everyIf({
+        when: conditionGroup(buttonPress(1)),
+        thenActions: [
+          lampAction({ type: "inc", cId: 16, hc: "Brightness", value: 10 }),
+        ],
+      }),
+      everyIf({
+        when: conditionGroup(buttonPress(2)),
+        thenActions: [
+          lampAction({ type: "dec", cId: 16, hc: "Brightness", value: "10" }),
+        ],
+      }),
+    ],
+  };
+  const prepared = await prepareBlockCreate(firstClient, {
+    name: "Яркость кнопкой",
+    data,
+    reason: "Двойное нажатие прибавляет яркость на 10, долгое убавляет",
+  });
+  const created = await firstClient.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.configuration_matches, true);
+  const createdIndex = created.structuredContent.scenario_index;
+  const stored = scenarioData(hub, createdIndex);
+  assert.deepEqual(
+    [
+      stored.targets[0].then[0].characteristics[0].value,
+      stored.targets[1].then[0].characteristics[0].value,
+    ],
+    [10, 10],
+  );
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const observed = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(observed.structuredContent.status, "applied");
+  assert.equal(observed.structuredContent.configuration_matches, true);
+  const removed = await secondClient.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === createdIndex),
+    false,
   );
 });
 
