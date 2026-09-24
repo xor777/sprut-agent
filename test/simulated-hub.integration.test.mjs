@@ -214,8 +214,21 @@ test("the house fixture keeps the apartment and serves a double-scale home to th
     if (!page.next) break;
     page = await call(client, page.next.tool, page.next.arguments);
   }
+  const offDevices = hub.state.accessories.filter(
+    ({ online, services: list }) =>
+      online &&
+      list.some(({ characteristics }) =>
+        characteristics.some(
+          ({ control }) =>
+            (control.type === "On" && control.value.boolValue === false) ||
+            (control.type === "Active" && control.value.intValue === 0) ||
+            (control.type === "TargetHeatingCoolingState" &&
+              control.value.intValue === 0),
+        ),
+      ),
+  );
   assert.ok(pages > 1);
-  assert.ok(seen.size >= 100);
+  assert.equal(seen.size, offDevices.length);
   const inspected = await call(client, "home_overview", { home_ref: houseRef });
   assert.equal(inspected.rooms.length, hub.state.rooms.length);
   assertEveryRequestSupported(hub);

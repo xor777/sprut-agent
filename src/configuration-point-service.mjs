@@ -290,7 +290,7 @@ export class ConfigurationPointService {
     } catch {
       throw new SprutHubError(
         "invalid_entity_ref",
-        "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
+        "Use a home-qualified reference returned by home_overview, find_devices, or get_entity.",
         "home_overview",
       );
     }

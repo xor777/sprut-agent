@@ -60,8 +60,8 @@ const LOGIC_MARKER = /\/\* \[sprut-agent:native:[0-9a-f]{24}\] \*\//;
 
 const READ_TOOLS = new Set([
   "home_overview",
+  "find_devices",
   "get_entity",
-  "read_services",
   "get_native_change_contract",
   "get_scenario_sdk",
   "get_native_change",
@@ -113,18 +113,20 @@ class GuardedHub {
     return this.#call(tool, args);
   }
 
-  // Every room and scenario of the home for the safety snapshot. The MCP
-  // overview gives counts and name matches only, so these two lists are
+  // Every room, scenario and accessory of the home for the safety snapshot.
+  // The MCP reads answer questions, not full listings, so these lists are
   // read with the product client, as the sweep does.
   async lists() {
     this.#listClient ??= await new SprutHubConnection({
       env: serverEnvironment(report.state_directory),
     }).getClient();
-    const [rooms, scenarios] = await Promise.all([
+    const [rooms, scenarios, accessories] = await Promise.all([
       this.#listClient.listRooms(),
       this.#listClient.listScenarios(),
+      this.#listClient.listAccessories(),
     ]);
     return {
+      accessories,
       rooms: rooms.rooms,
       scenarios: scenarios.map((scenario) => ({
         ref: `${this.homeRef}/scenario/${encodeURIComponent(scenario.index)}`,
@@ -793,7 +795,7 @@ async function guardedStep(ctx, id, step) {
 
 async function discoverTargets(hub) {
   const lamps = [];
-  for (const service of await catalogServices(hub, ["Lightbulb"])) {
+  for (const service of await catalogServices(hub, "light", ["Lightbulb"])) {
     const entity = await hub.read("get_entity", {
       entity_ref: service.ref,
       max_bytes: 32_768,
@@ -811,9 +813,10 @@ async function discoverTargets(hub) {
   return { lamp };
 }
 
-// The first readable characteristic of this type in the home, or undefined.
+// The first readable sensor characteristic of this type in the home, or
+// undefined.
 async function firstCharacteristic(hub, serviceType, type, valueType) {
-  for (const service of await catalogServices(hub, [serviceType])) {
+  for (const service of await catalogServices(hub, "sensor", [serviceType])) {
     const entity = await hub.read("get_entity", {
       entity_ref: service.ref,
       max_bytes: 32_768,
@@ -848,18 +851,26 @@ function nativeIds(ref) {
   };
 }
 
-async function catalogServices(hub, serviceTypes) {
+// Services of one household kind and native types, names only.
+async function catalogServices(hub, kind, serviceTypes) {
   let args = {
     home_ref: hub.homeRef,
-    representation: "catalog",
+    kind,
+    values: false,
+    limit: 100,
     max_bytes: 32_768,
-    ...(serviceTypes ? { service_types: serviceTypes } : {}),
   };
   const services = [];
   for (;;) {
-    const page = await hub.read("read_services", args);
-    expectOk(page, "read_services");
-    services.push(...page.services);
+    const page = await hub.read("find_devices", args);
+    expectOk(page, "find_devices");
+    for (const room of page.rooms) {
+      for (const device of room.devices) {
+        services.push(
+          ...device.services.filter(({ type }) => serviceTypes.includes(type)),
+        );
+      }
+    }
     if (!page.next) return services;
     args = page.next.arguments;
   }
@@ -910,18 +921,22 @@ async function homeSnapshot(hub, targets) {
   scenarios.sort(byRef);
   const accessories = new Map();
   const services = [];
-  for (const service of await catalogServices(hub)) {
-    services.push({
-      ref: service.ref,
-      name_sha256: sha256(service.name),
-      type: service.type,
-      room_ref: service.room?.ref ?? null,
+  for (const accessory of lists.accessories) {
+    const accessoryRef = `${hub.homeRef}/accessory/${accessory.id}`;
+    const roomRef = `${hub.homeRef}/room/${accessory.roomId}`;
+    accessories.set(accessoryRef, {
+      ref: accessoryRef,
+      name_sha256: sha256(accessory.name),
+      room_ref: roomRef,
     });
-    accessories.set(service.accessory.ref, {
-      ref: service.accessory.ref,
-      name_sha256: sha256(service.accessory.name),
-      room_ref: service.room?.ref ?? null,
-    });
+    for (const service of accessory.services ?? []) {
+      services.push({
+        ref: `${accessoryRef}/service/${service.sId}`,
+        name_sha256: sha256(service.name),
+        type: service.type,
+        room_ref: roomRef,
+      });
+    }
   }
   const anchor = await hub.read("get_entity", {
     entity_ref: targets.lamp.serviceRef,
@@ -2905,7 +2920,7 @@ async function finalChecks(hub) {
     report.snapshot.diff = diff;
     row(
       "5 final snapshot",
-      "room.list, scenario.list, get_entity, read_services",
+      "room.list, scenario.list, accessory.list, get_entity",
       "equal to the initial snapshot",
       diff.length === 0
         ? `equal (sha256 ${report.snapshot.after_sha256.slice(0, 12)})`

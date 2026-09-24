@@ -23,9 +23,44 @@ const VALUE_FIELDS = [
 ];
 
 const INCLUDE_READ_ERROR = Symbol("includeReadError");
-// A room above this many services returns its size and a paged
-// read_services call instead of listing every accessory and service.
+// A room above this many services returns its size and a find_devices call
+// instead of listing every accessory and service.
 const ROOM_LISTING_SERVICE_LIMIT = 20;
+// How long a home catalog serves names without a new whole-home read, so
+// edits made in the SprutHub app show up; writes of this client drop it at
+// once.
+const HOME_CATALOG_TTL_MS = 5 * 60_000;
+// Native methods that only read. Any other method may change the home, so
+// sending one drops the cached home catalogs.
+const READ_ONLY_METHODS = new Set([
+  "hub.list",
+  "server.ping",
+  "room.list",
+  "room.get",
+  "accessory.list",
+  "accessory.get",
+  "service.types",
+  "characteristic.get",
+  "characteristic.getOptions",
+  "link.list",
+  "logic.types",
+  "logic.list",
+  "logic.get",
+  "logic.getOptions",
+  "scenario.list",
+  "scenario.get",
+  "scenario.sdk",
+  "scenario.subscribe",
+  "scenario.unsubscribe",
+  "log.list",
+  "log.subscribe",
+  "log.unsubscribe",
+  "window.get",
+  "extension.list",
+  "extension.get",
+  "extensionChild.list",
+  "extensionChild.get",
+]);
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
     `LOG_LEVEL_${name.toUpperCase()}`,
@@ -78,12 +113,14 @@ export class SprutHubClient {
   #connectPromise;
   #configuredSerial;
   #connectingSocket;
+  #homeCatalogs = new Map();
   #nextRequestId = 1;
   #observation;
   #observationClient;
   #pending = new Map();
   #socket;
   #startingObservationClient;
+  #writeGeneration = 0;
 
   constructor({
     url,
@@ -149,6 +186,111 @@ export class SprutHubClient {
                   options,
                 },
       freshness: freshness(observedAt),
+    };
+  }
+
+  // The selected home's serial, or the error that tells the agent to choose
+  // one.
+  selectedSerial() {
+    if (this.serial !== null) return this.serial;
+    if (this.#availableHomeCount === 0) throw noHomesAvailable();
+    throw homeSelectionRequired();
+  }
+
+  // Counts the writes this client has sent; a catalog read before a write is
+  // not stored after it.
+  get writeGeneration() {
+    return this.#writeGeneration;
+  }
+
+  // A home's rooms and accessories as last read whole: names, rooms, types
+  // and refs for find_devices and BLOCK summaries. It is never the source of
+  // current values. A write of this client drops it, and it expires after
+  // HOME_CATALOG_TTL_MS.
+  cachedHomeCatalog(serial) {
+    const catalog = this.#homeCatalogs.get(serial);
+    if (
+      !catalog ||
+      catalog.generation !== this.#writeGeneration ||
+      Date.now() - catalog.builtAt >= HOME_CATALOG_TTL_MS
+    ) {
+      return null;
+    }
+    return catalog;
+  }
+
+  async homeCatalog(serial, deadline, { refresh = false } = {}) {
+    const cached = refresh ? null : this.cachedHomeCatalog(serial);
+    if (cached) return { catalog: cached, fresh: false };
+    const generation = this.#writeGeneration;
+    const [rooms, accessories] = await Promise.all([
+      this.nativeRooms(serial, deadline),
+      this.nativeAccessories(serial, deadline),
+    ]);
+    const catalog = this.rememberHomeCatalog(serial, {
+      rooms: rooms.rooms,
+      accessories: accessories.accessories,
+      observedAt: latestObservedAt([rooms.observedAt, accessories.observedAt]),
+      generation,
+    });
+    return {
+      catalog,
+      fresh: true,
+      valuesObservedAt: accessories.observedAt,
+    };
+  }
+
+  rememberHomeCatalog(serial, { rooms, accessories, observedAt, generation }) {
+    const catalog = {
+      serial,
+      generation,
+      builtAt: Date.now(),
+      observedAt,
+      rooms,
+      accessories,
+      byId: new Map(accessories.map((item) => [item.id, item])),
+      identities: new Map(
+        accessories.map((item) => [item.id, accessoryIdentity(item)]),
+      ),
+    };
+    if (generation === this.#writeGeneration) {
+      this.#homeCatalogs.set(serial, catalog);
+    }
+    return catalog;
+  }
+
+  // One accessory with its services and values; null when the hub says it
+  // is not there (a live -32603 or get:null).
+  async nativeAccessory(serial, id, deadline) {
+    let response;
+    try {
+      response = await this.#request({ accessory: { get: { id } } }, deadline, {
+        serial,
+      });
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      return { accessory: null, observedAt: new Date().toISOString() };
+    }
+    const container = response.result?.accessory;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible accessory response.",
+      );
+    }
+    if (container.get === null) {
+      return { accessory: null, observedAt: response.responseReceivedAt };
+    }
+    validateAccessory(container.get);
+    if (container.get.id !== id) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a different accessory than requested.",
+      );
+    }
+    return {
+      accessory: container.get,
+      observedAt: response.responseReceivedAt,
     };
   }
 
@@ -545,76 +687,6 @@ export class SprutHubClient {
     };
   }
 
-  async readServices(input) {
-    const selection = normalizeServiceSelection(input);
-    const deadline = Date.now() + this.timeoutMs;
-    if (this.serial === null || selection.serial !== this.serial) {
-      await this.#requireHome(selection.serial, deadline);
-    }
-
-    const snapshots = selection.room
-      ? [await this.#readServiceRoom(selection.room, deadline)]
-      : await this.#readServiceHome(selection.serial, deadline);
-    const allServices = snapshots
-      .flatMap(({ room, accessories, observedAt }) =>
-        accessories.flatMap((accessory) =>
-          (accessory.services ?? []).map((service) => {
-            const identity = normalizeServiceIdentity(
-              selection.serial,
-              room,
-              accessory,
-              service,
-              observedAt,
-            );
-            return selection.representation === "catalog"
-              ? { ...identity, readings_status: "not_requested" }
-              : {
-                  ...identity,
-                  readings: normalizeReadableCharacteristics(
-                    selection.serial,
-                    accessory,
-                    service,
-                  ),
-                };
-          }),
-        ),
-      )
-      .sort(compareServiceRefs);
-    const observedServiceTypes = [
-      ...new Set(allServices.map(({ type }) => type)),
-    ];
-    const services = selection.serviceTypes
-      ? allServices.filter(({ type }) => selection.serviceTypes.includes(type))
-      : allServices;
-    const observedAt = latestObservedAt(
-      snapshots.map(({ observedAt: value }) => value),
-    );
-    const base = {
-      status: "ok",
-      representation: selection.representation,
-      scope: {
-        home_ref: selection.homeRef,
-        ...(selection.room
-          ? {
-              room: {
-                ref: roomRef(selection.serial, selection.room.roomId),
-                name: snapshots[0].room.name,
-              },
-            }
-          : {}),
-      },
-      scope_status: allServices.length === 0 ? "empty" : "non_empty",
-      match_status: selection.serviceTypes
-        ? services.length === 0
-          ? "no_matches"
-          : "matched"
-        : "not_filtered",
-      observed_service_types: observedServiceTypes,
-      freshness: freshness(observedAt),
-    };
-    return paginateServices(base, services, selection);
-  }
-
   async readHubLog({ homeRef: selectedHomeRef, count }) {
     const serial = parseHomeRef(selectedHomeRef);
     if (this.serial === null) {
@@ -674,112 +746,6 @@ export class SprutHubClient {
         time_unit: "unix_ms",
       },
       freshness: freshness(response.responseReceivedAt),
-    };
-  }
-
-  async #readServiceHome(serial, deadline) {
-    const [roomsResponse, accessoriesResponse] = await Promise.all([
-      this.#request({ room: { list: {} } }, deadline, { serial }),
-      // A narrower native expand has not been observed on the target hub. The
-      // catalog representation is therefore a safe MCP projection of this
-      // confirmed response rather than a guessed transport contract.
-      this.#request(
-        {
-          accessory: {
-            list: { expand: "services,characteristics" },
-          },
-        },
-        deadline,
-        { serial },
-      ),
-    ]);
-    const rooms = extractNativeList(roomsResponse, ["room", "list", "rooms"]);
-    rooms.forEach((room) => {
-      validateRoom(room);
-    });
-    const accessories = extractNativeList(accessoriesResponse, [
-      "accessory",
-      "list",
-      "accessories",
-    ]);
-    accessories.forEach(validateAccessory);
-    const observedAt = latestObservedAt([
-      roomsResponse.responseReceivedAt,
-      accessoriesResponse.responseReceivedAt,
-    ]);
-    if (accessories.length === 0) {
-      return [
-        {
-          room: null,
-          accessories: [],
-          observedAt,
-        },
-      ];
-    }
-    const roomsById = new Map(rooms.map((room) => [room.id, room]));
-    return accessories.map((accessory) => ({
-      room: roomsById.get(accessory.roomId) ?? null,
-      accessories: [accessory],
-      observedAt,
-    }));
-  }
-
-  async #readServiceRoom(parsedRoom, deadline) {
-    const roomResponse = await this.#request(
-      { room: { get: { id: parsedRoom.roomId } } },
-      deadline,
-      { serial: parsedRoom.serial },
-    );
-    const roomContainer = roomResponse.result?.room;
-    if (!roomContainer || !Object.hasOwn(roomContainer, "get")) {
-      throw new SprutHubError(
-        "incompatible_response",
-        "SprutHub returned an incompatible room response.",
-      );
-    }
-    if (roomContainer.get === null) {
-      throw new SprutHubError(
-        "room_not_found",
-        "The selected SprutHub room was not found.",
-        "home_overview",
-      );
-    }
-    validateRoom(roomContainer.get, parsedRoom.roomId);
-    const snapshot = await this.#readServiceRoomForKnownRoom(
-      parsedRoom.serial,
-      roomContainer.get,
-      deadline,
-    );
-    snapshot.observedAt = latestObservedAt([
-      roomResponse.responseReceivedAt,
-      snapshot.observedAt,
-    ]);
-    return snapshot;
-  }
-
-  async #readServiceRoomForKnownRoom(serial, room, deadline) {
-    const accessoriesResponse = await this.#request(
-      {
-        accessory: {
-          list: {
-            roomId: room.id,
-            expand: "services,characteristics",
-          },
-        },
-      },
-      deadline,
-      { serial },
-    );
-    const accessories = extractNativeList(accessoriesResponse, [
-      "accessory",
-      "list",
-      "accessories",
-    ]);
-    accessories.forEach(validateAccessory);
-    return {
-      room,
-      accessories: accessories.filter(({ roomId }) => roomId === room.id),
-      observedAt: accessoriesResponse.responseReceivedAt,
     };
   }
 
@@ -1729,11 +1695,10 @@ export class SprutHubClient {
         accessory_count: inRoom.length,
         service_count: serviceCount,
         next: {
-          tool: "read_services",
+          tool: "find_devices",
           arguments: {
             home_ref: homeRef(parsed.serial),
             room_ref: identity.ref,
-            representation: "catalog",
           },
         },
       };
@@ -2615,6 +2580,21 @@ export class SprutHubClient {
   }
 
   async #request(params, deadline, { serial = this.serial } = {}) {
+    const writes = !READ_ONLY_METHODS.has(nativeMethod(params));
+    if (writes) this.#forgetHomeCatalogs();
+    try {
+      return await this.#send(params, deadline, serial);
+    } finally {
+      if (writes) this.#forgetHomeCatalogs();
+    }
+  }
+
+  #forgetHomeCatalogs() {
+    this.#writeGeneration += 1;
+    this.#homeCatalogs.clear();
+  }
+
+  async #send(params, deadline, serial) {
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -3303,11 +3283,16 @@ export function accessoryRef(serial, accessoryId) {
   return `${homeRef(serial)}/accessory/${accessoryId}`;
 }
 
-function serviceRef(serial, accessoryId, serviceId) {
+export function serviceRef(serial, accessoryId, serviceId) {
   return `${accessoryRef(serial, accessoryId)}/service/${serviceId}`;
 }
 
-function characteristicRef(serial, accessoryId, serviceId, characteristicId) {
+export function characteristicRef(
+  serial,
+  accessoryId,
+  serviceId,
+  characteristicId,
+) {
   return `${serviceRef(serial, accessoryId, serviceId)}/characteristic/${characteristicId}`;
 }
 
@@ -3343,195 +3328,6 @@ function parseHomeRef(ref) {
   const parsed = parseEntityRef(ref);
   if (parsed.kind !== "home") throw invalidEntityRef();
   return parsed.serial;
-}
-
-function normalizeServiceSelection({
-  homeRef: selectedHomeRef,
-  roomRef: selectedRoomRef,
-  serviceTypes,
-  representation,
-  maxBytes,
-  cursor,
-}) {
-  const serial = parseHomeRef(selectedHomeRef);
-  let room = null;
-  if (selectedRoomRef !== undefined) {
-    try {
-      room = parseEntityRef(selectedRoomRef);
-    } catch {
-      throw invalidServiceScope();
-    }
-    if (room.kind !== "room" || room.serial !== serial) {
-      throw invalidServiceScope();
-    }
-  }
-  const normalizedServiceTypes = serviceTypes
-    ? [...new Set(serviceTypes)]
-    : null;
-  const selectedRepresentation = representation ?? "readings";
-  const cursorScope = JSON.stringify({
-    home_ref: selectedHomeRef,
-    room_ref: selectedRoomRef ?? null,
-    service_types: normalizedServiceTypes,
-    ...(selectedRepresentation === "catalog"
-      ? { representation: selectedRepresentation }
-      : {}),
-  });
-  const selection = {
-    homeRef: selectedHomeRef,
-    roomRef: selectedRoomRef ?? null,
-    serial,
-    room,
-    serviceTypes: normalizedServiceTypes,
-    representation: selectedRepresentation,
-    representationArgument: representation,
-    maxBytes,
-    cursorScope,
-  };
-  return {
-    ...selection,
-    afterRef: decodeServiceCursor(cursor, cursorScope, selection),
-  };
-}
-
-function decodeServiceCursor(cursor, expectedScope, selection) {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(
-      Buffer.from(cursor, "base64url").toString("utf8"),
-    );
-    if (
-      parsed?.v !== 2 ||
-      typeof parsed.after_ref !== "string" ||
-      parsed.after_ref.length === 0 ||
-      parsed.scope !== expectedScope
-    ) {
-      throw new Error("invalid cursor");
-    }
-    return parsed.after_ref;
-  } catch {
-    throw invalidServiceCursor(selection);
-  }
-}
-
-function encodeServiceCursor(afterRef, scope) {
-  return Buffer.from(
-    JSON.stringify({ v: 2, after_ref: afterRef, scope }),
-  ).toString("base64url");
-}
-
-function paginateServices(base, services, selection) {
-  const start =
-    selection.afterRef === null
-      ? 0
-      : services.findIndex(({ ref }) => ref === selection.afterRef) + 1;
-  if (start === 0 && selection.afterRef !== null) {
-    throw new SprutHubError(
-      "stale_cursor",
-      "The selected service set changed before this cursor could be read.",
-      "restart_read_services",
-      { next: serviceReadNext(selection, null) },
-    );
-  }
-  let end = start;
-  while (end < services.length) {
-    const candidate = servicePageResult(
-      base,
-      services.slice(start, end + 1),
-      services.length,
-      end + 1,
-      selection,
-    );
-    if (serializedResultBytes(candidate) > selection.maxBytes) break;
-    end += 1;
-  }
-
-  let selected = services.slice(start, end);
-  if (selected.length === 0 && start < services.length) {
-    selected = [oversizedServiceSummary(services[start])];
-    end = start + 1;
-  }
-  const result = servicePageResult(
-    base,
-    selected,
-    services.length,
-    end,
-    selection,
-  );
-  if (serializedResultBytes(result) > selection.maxBytes) {
-    throw new SprutHubError(
-      "result_too_large",
-      "The selected service cannot be represented inside max_bytes without truncation.",
-      "narrow_read_services_scope",
-      {
-        service_ref: services[start]?.ref,
-        required_bytes: serializedResultBytes(result),
-      },
-    );
-  }
-  return result;
-}
-
-function servicePageResult(base, selected, total, end, selection) {
-  const nextCursor =
-    end < total
-      ? encodeServiceCursor(selected.at(-1).ref, selection.cursorScope)
-      : null;
-  return {
-    ...base,
-    services: selected,
-    page: {
-      max_bytes: selection.maxBytes,
-      serialized_bytes: 0,
-      returned_services: selected.length,
-      remaining_services: total - end,
-      snapshot: false,
-      next_cursor: nextCursor,
-    },
-    next: nextCursor ? serviceReadNext(selection, nextCursor) : null,
-  };
-}
-
-function serviceReadNext(selection, cursor) {
-  return {
-    tool: "read_services",
-    arguments: {
-      home_ref: selection.homeRef,
-      ...(selection.roomRef ? { room_ref: selection.roomRef } : {}),
-      ...(selection.serviceTypes
-        ? { service_types: selection.serviceTypes }
-        : {}),
-      ...(selection.representationArgument
-        ? { representation: selection.representationArgument }
-        : {}),
-      max_bytes: selection.maxBytes,
-      ...(cursor ? { cursor } : {}),
-    },
-  };
-}
-
-function serializedResultBytes(result) {
-  let previous = -1;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const bytes = Buffer.byteLength(JSON.stringify(result));
-    if (bytes === previous) return bytes;
-    result.page.serialized_bytes = bytes;
-    previous = bytes;
-  }
-  return Buffer.byteLength(JSON.stringify(result));
-}
-
-function oversizedServiceSummary(service) {
-  const { readings: _readings, ...summary } = service;
-  return {
-    ...summary,
-    readings_status: "not_included",
-    reason: "service_exceeds_page_limit",
-    next: {
-      tool: "get_entity",
-      arguments: { entity_ref: service.ref },
-    },
-  };
 }
 
 export function parseEntityRef(ref) {
@@ -3631,25 +3427,8 @@ function parseEntityId(value) {
 function invalidEntityRef(action = "home_overview") {
   return new SprutHubError(
     "invalid_entity_ref",
-    "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
+    "Use a home-qualified reference returned by home_overview, find_devices, or get_entity.",
     action,
-  );
-}
-
-function invalidServiceScope() {
-  return new SprutHubError(
-    "invalid_service_scope",
-    "room_ref must identify a room in the selected home_ref.",
-    "home_overview",
-  );
-}
-
-function invalidServiceCursor(selection) {
-  return new SprutHubError(
-    "invalid_cursor",
-    "Use the cursor returned by read_services for the same scope and filters.",
-    "restart_read_services",
-    { next: serviceReadNext(selection, null) },
   );
 }
 
@@ -5218,76 +4997,7 @@ function isStableId(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function normalizeServiceIdentity(
-  serial,
-  room,
-  accessory,
-  service,
-  observedAt,
-) {
-  return {
-    ref: serviceRef(serial, accessory.id, service.sId),
-    name: redactSensitiveText(service.name),
-    type: redactSensitiveText(service.type),
-    room: room
-      ? {
-          ref: roomRef(serial, room.id),
-          name: redactSensitiveText(room.name),
-        }
-      : {
-          ref: roomRef(serial, accessory.roomId),
-          name: null,
-          metadata_status: "missing",
-        },
-    accessory: {
-      ref: accessoryRef(serial, accessory.id),
-      name: redactSensitiveText(accessory.name),
-      available: accessory.online,
-    },
-    observed_at: observedAt,
-  };
-}
-
-function compareServiceRefs(left, right) {
-  if (left.ref < right.ref) return -1;
-  if (left.ref > right.ref) return 1;
-  return 0;
-}
-
-function normalizeReadableCharacteristics(serial, accessory, service) {
-  return (service.characteristics ?? [])
-    .filter(({ control }) => control.read === true)
-    .map((characteristic) => {
-      const control = characteristic.control;
-      if (isSensitiveNativeNode(control)) return redactedNode();
-      const value = extractTypedValue(control.value);
-      const reading = {
-        ref: characteristicRef(
-          serial,
-          accessory.id,
-          service.sId,
-          characteristic.cId,
-        ),
-        name: redactSensitiveText(control.name),
-        type: redactSensitiveText(control.type ?? control.key),
-        value: value.found ? sanitizeNativeData(value.value) : null,
-        ...(control.validValues
-          ? { enum: matchEnumValue(control.validValues, value) }
-          : {}),
-        unit:
-          typeof control.unit === "string"
-            ? redactSensitiveText(control.unit)
-            : null,
-      };
-      return {
-        ...reading,
-        value_status: value.found ? "known" : "unknown",
-        measured_at: null,
-      };
-    });
-}
-
-function extractTypedValue(value) {
+export function extractTypedValue(value) {
   if (!value) return { found: false, field: null, value: null };
   for (const field of VALUE_FIELDS) {
     if (Object.hasOwn(value, field)) {
@@ -5295,6 +5005,32 @@ function extractTypedValue(value) {
     }
   }
   return { found: false, field: null, value: null };
+}
+
+function nativeMethod(params) {
+  const [domain] = Object.keys(params ?? {});
+  const [operation] = Object.keys(params?.[domain] ?? {});
+  return `${domain}.${operation}`;
+}
+
+// What a home catalog knows of an accessory: its room, name and services'
+// names, types, visibility and characteristic types. A fresh read with
+// another identity means the catalog is stale.
+export function accessoryIdentity(accessory) {
+  return JSON.stringify([
+    accessory.roomId,
+    accessory.name,
+    (accessory.services ?? []).map((service) => [
+      service.sId,
+      service.name,
+      service.type,
+      service.visible !== false,
+      (service.characteristics ?? []).map(({ cId, control }) => [
+        cId,
+        control?.type ?? control?.key,
+      ]),
+    ]),
+  ]);
 }
 
 function nativeCharacteristicKey({ aId, sId, cId } = {}) {
@@ -5315,7 +5051,7 @@ function normalizeEventValue(typed) {
   };
 }
 
-function matchEnumValue(validValues, currentValue) {
+export function matchEnumValue(validValues, currentValue) {
   if (!currentValue.found) return null;
   const match = validValues.find((validValue) => {
     const candidate = extractTypedValue(validValue.value);

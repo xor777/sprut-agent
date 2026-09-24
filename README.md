@@ -206,7 +206,7 @@ SPRUTHUB_PASSWORD=пароль
 ```
 
 Один пакет на Node.js, сервер запускается одним процессом. Агент начинает с
-обзора дома `home_overview`, находит устройства через `read_services` и
+обзора дома `home_overview`, находит устройства через `find_devices` и
 раскрывает детали выбранной сущности через `get_entity`. Изменение проходит через `get_native_change_contract`,
 `prepare_native_change` и `apply_native_change`; история и возврат доступны
 через `list_native_changes` и `restore_native_change`. Ответы содержат

@@ -282,7 +282,8 @@ test("a room word finds both bedrooms' sensors with battery inline and technical
   );
 
   const technical = await call("find_devices", {
-    query: "климата в спальне",
+    room_ref: `${home}/room/5`,
+    query: "климат",
     include_technical: true,
   });
   assert.deepEqual(
@@ -481,7 +482,11 @@ test("the session catalog is reused, dropped by this process's writes and refres
     "room.list",
   ]);
   const floorLamp = hub.state.accessories.find(({ id }) => id === 16);
-  floorLamp.services[0].characteristics[1].control.value = { intValue: 30 };
+  floorLamp.services
+    .find(({ type }) => type === "Lightbulb")
+    .characteristics.find(
+      ({ control }) => control.type === "Brightness",
+    ).control.value = { intValue: 30 };
 
   const warm = await call("find_devices", { query: "торшер" });
   assert.deepEqual(methods(warm.native), ["accessory.get"]);

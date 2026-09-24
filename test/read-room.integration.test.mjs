@@ -1607,16 +1607,15 @@ test("repeated MCP reads return the latest hub values without losing false, zero
       "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
     ),
     {
-      ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
-      name: "Качество воздуха",
       type: "AirQuality",
       value: null,
       value_status: "unknown",
-      unit: null,
-      measured_at: null,
+      ref: "spruthub://hub/test-hub/accessory/101/service/1/characteristic/3",
     },
   );
-  assert.equal(secondRoom.freshness.measurementAt, null);
+  assert.match(secondRoom.observed_at, /^\d{4}-\d{2}-\d{2}T/);
+  // The first read takes names and values in two whole reads; the second
+  // reads only the room's two devices.
   assert.equal(hub.requests.length, 4);
 });
 

@@ -5506,8 +5506,8 @@ function parseCharacteristicRef(ref, configuredSerial, allowLegacy = false) {
   if (!match) {
     throw new SprutHubError(
       "invalid_characteristic_ref",
-      "Use a characteristic reference returned by read_services or get_entity.",
-      "read_services",
+      "Use a characteristic reference returned by find_devices or get_entity.",
+      "find_devices",
     );
   }
   return {
@@ -11809,7 +11809,7 @@ function selectCharacteristic(selection, ref, value, requireWrite, serial) {
     throw new SprutHubError(
       "characteristic_not_found",
       "The selected characteristic was not found in the selected room.",
-      "read_services",
+      "find_devices",
     );
   }
   if (accessory.online !== true) {
