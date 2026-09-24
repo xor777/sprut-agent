@@ -3161,7 +3161,7 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.equal(
     contract.structuredContent.contract.scope,
-    "any_active_scenario",
+    "one_active_BLOCK_or_user_LOGIC_scenario",
   );
 
   const prepared = await firstClient.callTool({
@@ -3969,28 +3969,6 @@ const runnableScenarioCases = [
     effect: { predicted: false, reasons: ["targets_unknown"] },
     verification: "command_acknowledged_effect_not_predicted",
   },
-  {
-    key: "global",
-    title: "GLOBAL",
-    install(hub) {
-      const scenario = {
-        index: "global-helpers",
-        name: "Общие функции",
-        desc: "",
-        active: true,
-        onStart: true,
-        sync: false,
-        type: "GLOBAL",
-        data: 'log.info("helpers ready");',
-      };
-      hub.state.scenarios.push(scenario);
-      return scenario;
-    },
-    targetsKnown: false,
-    targets: [],
-    effect: { predicted: false, reasons: ["targets_unknown"] },
-    verification: "command_acknowledged_effect_not_predicted",
-  },
 ];
 
 function installRunnableScenario(hub, key) {
@@ -4026,7 +4004,7 @@ async function prepareScenarioRun(client, targetRef, name) {
   return prepared.structuredContent;
 }
 
-test("an active scenario of any type is run once by its prepared intent", async (t) => {
+test("an active BLOCK or user LOGIC scenario is run once by its prepared intent", async (t) => {
   for (const scenarioCase of runnableScenarioCases) {
     await t.test(scenarioCase.title, async (subtest) => {
       const { hub, stateDirectory } = await setup(subtest);
@@ -4079,6 +4057,158 @@ test("an active scenario of any type is run once by its prepared intent", async 
       assert.deepEqual(scenarioRuns(hub), [scenario.index]);
       assert.deepEqual(hubConfigurationWrites(hub), []);
       assert.deepEqual(scenario, configuration);
+    });
+  }
+});
+
+// A manual run of GLOBAL code or of a built-in scenario has not been observed
+// on a hub; a GLOBAL run may register its timers and subscriptions again.
+const unverifiedRunScenarios = [
+  {
+    title: "GLOBAL",
+    scenario: {
+      index: "global-helpers",
+      name: "Общие функции",
+      desc: "",
+      active: true,
+      onStart: true,
+      sync: false,
+      type: "GLOBAL",
+      data: 'Cron.schedule("0 0 * * * ?", () => log.info("hourly"));',
+    },
+  },
+  {
+    title: "turned-off GLOBAL",
+    scenario: {
+      index: "global-off",
+      name: "Выключенные функции",
+      desc: "",
+      active: false,
+      onStart: true,
+      sync: false,
+      type: "GLOBAL",
+      data: 'log.info("helpers ready");',
+    },
+  },
+  {
+    title: "built-in LOGIC",
+    scenario: {
+      index: "builtin-logic",
+      predefined: true,
+      name: "Встроенная логика",
+      desc: "",
+      active: true,
+      onStart: false,
+      sync: false,
+      type: "LOGIC",
+      data: firstLogicSource,
+    },
+  },
+];
+
+test("a GLOBAL or built-in scenario is not run until its manual run is verified on a hub", async (t) => {
+  for (const unverified of unverifiedRunScenarios) {
+    await t.test(unverified.title, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const scenario = structuredClone(unverified.scenario);
+      hub.state.scenarios.push(scenario);
+      const configuration = structuredClone(scenario);
+      const targetRef = scenarioRefFor(scenario);
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      for (const [name, reason] of [
+        ["get_native_change_contract", undefined],
+        ["prepare_native_change", `Запусти «${scenario.name}»`],
+      ]) {
+        const refused = await client.callTool({
+          name,
+          arguments: {
+            operation: "scenario_run",
+            target_ref: targetRef,
+            ...(reason ? { reason } : {}),
+          },
+        });
+        assert.equal(refused.isError, true, name);
+        assert.equal(
+          refused.structuredContent.error.code,
+          "scenario_run_unverified_type",
+          refused.content[0]?.text,
+        );
+      }
+      const history = await client.callTool({
+        name: "list_native_changes",
+        arguments: { home_ref: homeRef, entity_ref: targetRef },
+      });
+      assert.deepEqual(history.structuredContent.changes, []);
+      assert.deepEqual(scenarioRuns(hub), []);
+      assert.deepEqual(hubConfigurationWrites(hub), []);
+      assert.deepEqual(scenario, configuration);
+    });
+  }
+});
+
+test("a GLOBAL or built-in run prepared by an earlier version is not sent", async (t) => {
+  for (const [title, rewrite] of [
+    [
+      "GLOBAL",
+      (scenario) => {
+        scenario.type = "GLOBAL";
+      },
+    ],
+    [
+      "built-in",
+      (scenario) => {
+        scenario.predefined = true;
+      },
+    ],
+  ]) {
+    await t.test(title, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const logic = installRunnableScenario(hub, "logic");
+      const firstClient = await startClient(subtest, hub, stateDirectory);
+      const prepared = await prepareScenarioRun(
+        firstClient,
+        scenarioRefFor(logic),
+        logic.name,
+      );
+      await firstClient.close();
+
+      // Earlier versions prepared these runs; the journal kept the scenario
+      // exactly as the hub still returns it.
+      rewrite(logic);
+      const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
+      const journal = JSON.parse(await readFile(journalFile, "utf8"));
+      const changeId = prepared.change_ref.slice(
+        "spruthub-change://native/".length,
+      );
+      rewrite(journal.changes[changeId].baseline_snapshot);
+      await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+
+      const client = await startClient(subtest, hub, stateDirectory);
+      const refused = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref: prepared.change_ref },
+      });
+      assert.equal(refused.isError, true);
+      assert.equal(
+        refused.structuredContent.error.code,
+        "scenario_run_unverified_type",
+        refused.content[0]?.text,
+      );
+      const saved = await callChangeTool(
+        client,
+        "get_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(saved.status, "not_applied");
+      assert.equal(saved.command_delivery.status, "not_sent");
+      const repeated = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(repeated.status, "not_applied");
+      assert.deepEqual(scenarioRuns(hub), []);
     });
   }
 });
@@ -4140,14 +4270,14 @@ test("a turned-off scenario is not run and the agent is pointed to scenario_acti
   assert.equal(inactive.active, false);
 });
 
-test("apply rechecks the exact scenario of any type and never resends a lost run", async (t) => {
+test("apply rechecks the exact scenario and never resends a lost run", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const logic = installRunnableScenario(hub, "logic");
-  const global = installRunnableScenario(hub, "global");
+  const conditional = installRunnableScenario(hub, "conditional");
   const scene = installRunnableScenario(hub, "scene");
   const firstClient = await startClient(t, hub, stateDirectory);
   const runs = [];
-  for (const scenario of [logic, global, scene]) {
+  for (const scenario of [logic, conditional, scene]) {
     runs.push(
       await prepareScenarioRun(
         firstClient,
@@ -4158,7 +4288,7 @@ test("apply rechecks the exact scenario of any type and never resends a lost run
   }
 
   logic.data = secondLogicSource;
-  global.active = false;
+  conditional.active = false;
   hub.state.scenarios = hub.state.scenarios.filter(
     ({ index }) => index !== scene.index,
   );
