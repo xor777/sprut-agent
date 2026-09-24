@@ -11678,11 +11678,46 @@ test("an update names the stored node it removes, not the sibling it edits", asy
     return data;
   };
 
+  // «Не включай свет, а кондиционеру ставь ещё и режим»: the lamp action
+  // goes, the climate action stays and gains a mode, so its actions no
+  // longer name it.
+  installClimateFixture(hub);
+  const lightThenClimate = {
+    targets: [
+      everyIf({
+        when: conditionGroup(characteristicCondition()),
+        thenActions: [
+          setAction(),
+          setAction({
+            sId: 14,
+            hs: "HeaterCooler",
+            cId: 30,
+            hc: "TargetTemperature",
+            value: "22",
+          }),
+        ],
+      }),
+    ],
+  };
+  const dropLightAddMode = (data) => {
+    data.targets[0].then.splice(0, 1);
+    data.targets[0].then[0].characteristics.push({
+      type: "set",
+      cId: 31,
+      hc: "TargetHeatingCoolingState",
+      value: "2",
+    });
+    return data;
+  };
+
   assert.deepEqual(
     {
       action_as_read: await removal(lightThenBrightness, dropOnSetBrightness),
       action_without_block_ids: await removal(lightThenBrightness, (data) =>
         dropOnSetBrightness(withoutBlockIds(data)),
+      ),
+      grown_action_without_block_ids: await removal(lightThenClimate, (data) =>
+        dropLightAddMode(withoutBlockIds(data)),
       ),
       if_as_read: await removal(codeThenLight, dropCodeEditLight),
     },
@@ -11692,6 +11727,10 @@ test("an update names the stored node it removes, not the sibling it edits", asy
         deletion_warnings: [],
       },
       action_without_block_ids: {
+        removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
+        deletion_warnings: [],
+      },
+      grown_action_without_block_ids: {
         removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
         deletion_warnings: [],
       },
