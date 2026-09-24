@@ -292,12 +292,16 @@ async function startHub(initialState = hubState) {
             result: {
               accessory: {
                 list: {
-                  accessories: state.accessories?.filter(
-                    (accessory) =>
-                      state.ignoreRoomFilter ||
-                      roomId === undefined ||
-                      accessory.roomId === roomId,
-                  ),
+                  // null stays in the reply: an omitted list is an empty one.
+                  accessories:
+                    state.accessories === null
+                      ? null
+                      : state.accessories?.filter(
+                          (accessory) =>
+                            state.ignoreRoomFilter ||
+                            roomId === undefined ||
+                            accessory.roomId === roomId,
+                        ),
                 },
               },
             },

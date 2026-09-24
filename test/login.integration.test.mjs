@@ -59,6 +59,8 @@ async function startHub(
     nullFirstAuth = false,
     nullFirstRoomList = false,
     sendForeignFrames = false,
+    // proto3 JSON, as the hub sends it, leaves an empty repeated field out.
+    omitEmptyHomeList = false,
   } = {},
 ) {
   const availableHomes = homes ?? [home("home/A", "Основной дом")];
@@ -163,7 +165,12 @@ async function startHub(
       if (params.hub?.list) {
         assert.equal("serial" in request, false);
         reply(socket, request.id, {
-          hub: { list: { hubs: availableHomes } },
+          hub: {
+            list:
+              omitEmptyHomeList && availableHomes.length === 0
+                ? {}
+                : { hubs: availableHomes },
+          },
         });
         return;
       }
@@ -699,21 +706,27 @@ test("an empty file pin is treated as no selection for a single home", async (t)
   assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
 });
 
-test("an account without homes returns a terminal catalog outcome", async (t) => {
-  const hub = await startHub(t, { homes: [] });
-  const client = await startClient(t, hub, await withSessionPath(t));
+for (const omitEmptyHomeList of [false, true]) {
+  test(`an account without homes returns a terminal catalog outcome (${omitEmptyHomeList ? "hubs omitted" : "hubs: []"})`, async (t) => {
+    const hub = await startHub(t, { homes: [], omitEmptyHomeList });
+    const client = await startClient(t, hub, await withSessionPath(t));
 
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
-  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.deepEqual(catalog.structuredContent.selection, {
-    required: false,
-    reason: "no_available_homes",
+    const catalog = await client.callTool({
+      name: "list_homes",
+      arguments: {},
+    });
+    assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+    assert.deepEqual(catalog.structuredContent.homes, []);
+    assert.deepEqual(catalog.structuredContent.selection, {
+      required: false,
+      reason: "no_available_homes",
+    });
+    const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
+    assert.equal(rooms.isError, true);
+    assert.equal(rooms.structuredContent.error.code, "no_homes_available");
+    assert.equal(rooms.structuredContent.error.action, "check_home_access");
   });
-  const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
-  assert.equal(rooms.isError, true);
-  assert.equal(rooms.structuredContent.error.code, "no_homes_available");
-  assert.equal(rooms.structuredContent.error.action, "check_home_access");
-});
+}
 
 test("a complete MCP environment points home selection back to that environment", async (t) => {
   const hub = await startHub(t, {
