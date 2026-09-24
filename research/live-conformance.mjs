@@ -9,7 +9,11 @@
 // created in this run. By the owner's
 // rules a BLOCK may act only on that virtual accessory and start only on a
 // one-date cron in FAR_FUTURE_YEAR or later or on one daily time; it is
-// created turned off with onStart=false. A run BLOCK may be turned on; a run
+// created turned off with onStart=false. A run BLOCK may be turned on unless
+// it holds a form that is inert only while off (stayOffForms: notify, http
+// to PROBE_HTTP_URL only, an every-N cron beside the far-future date, a
+// scenario target on another BLOCK of this run); such a BLOCK is never
+// turned on or run. A from action reads only the virtual accessory. A run
 // LOGIC, whose source is an info object and an empty trigger, runs nothing,
 // so it may be on and may be assigned, only to the virtual accessory; its
 // stored source is read back as that inert form before it is assigned or
@@ -52,6 +56,11 @@ const ONE_DATE_CRON = `0 0 12 1 1 ? ${FAR_FUTURE_YEAR}`;
 const ONE_DATE_CRON_UPDATED = `0 0 13 1 1 ? ${FAR_FUTURE_YEAR}`;
 const HOLD_MS = 60_000;
 const DELAY_MS = 60_000;
+// The only request a probe BLOCK may hold: the discard port of the hub's
+// own loopback. The BLOCK stays off, so it is never sent.
+const PROBE_HTTP_URL = "http://127.0.0.1:9/";
+// A branch repeat period for the stored form; the BLOCK never runs.
+const REPEAT_MS = 60_000;
 const PROBE_DESCRIPTION = "sprut-agent live conformance probe; safe to delete";
 // How long a run or a turn-on is watched for a write to the virtual accessory.
 const WATCH_MS = 6_000;
@@ -204,14 +213,21 @@ export class GuardedHub {
       ...input,
     });
     if (typeof result.change_ref === "string") {
+      const stayOff =
+        input.operation === "block_create" &&
+        stayOffForms(input.data).length > 0;
       this.changes.set(result.change_ref, {
         operation: input.operation,
         target_ref: input.target_ref,
         value: input.value,
         // Product-created BLOCKs passed probeBlockViolation and act only on
-        // the virtual accessory, so they may be turned on.
+        // the virtual accessory, so they may be turned on, unless they hold
+        // a form that is inert only while off.
         activatable:
-          input.operation === "block_create" && input.on_start === false,
+          input.operation === "block_create" &&
+          input.on_start === false &&
+          !stayOff,
+        stayOff,
         // The product's path to a BLOCK's Active window option is only
         // prepared, to learn whether it is offered; a virtual light group is
         // only prepared, to see its duplicate check.
@@ -314,7 +330,11 @@ export class GuardedHub {
       this.created.set(
         result.scenario_ref,
         change.operation === "block_create"
-          ? { kind: "block", activatable: change.activatable === true }
+          ? {
+              kind: "block",
+              activatable: change.activatable === true,
+              stayOff: change.stayOff === true,
+            }
           : {
               kind: "logic",
               // A user LOGIC's native type is its scenario index (SprutHub
@@ -416,8 +436,16 @@ export class GuardedHub {
       }
     }
     if (["block_create", "block_data_update"].includes(op)) {
-      const violation = probeBlockViolation(input.data, this.virtualAIds);
+      const violation = probeBlockViolation(
+        input.data,
+        this.virtualAIds,
+        (index) => this.ownsBlockIndex(index),
+      );
       if (violation) refuse(violation);
+    }
+    // An update could turn a BLOCK that may be on into one that must stay off.
+    if (op === "block_data_update" && stayOffForms(input.data).length > 0) {
+      refuse(`${stayOffForms(input.data).join(", ")} only in a new BLOCK`);
     }
     if (op === "logic_source_create") {
       if (!this.#isVirtualService(target)) {
@@ -479,6 +507,18 @@ export class GuardedHub {
     if (op === "scenario_run" && owned?.kind !== "block") {
       refuse("BLOCK not created by this run");
     }
+    if (op === "scenario_run" && owned?.stayOff) {
+      refuse("this BLOCK stays off for the whole run");
+    }
+  }
+
+  // Whether a scenario index names a BLOCK of this run.
+  ownsBlockIndex(index) {
+    return (
+      typeof index === "string" &&
+      this.created.get(`${this.homeRef}/scenario/${encodeURIComponent(index)}`)
+        ?.kind === "block"
+    );
   }
 
   #checkWindowOption(input, owned, refuse) {
@@ -733,7 +773,13 @@ export class ProbeClient {
   // its own cleanup fails; it is not a product change and has no journal.
   async createTurnedOffBlock(name, data) {
     this.#writable("scenario.create");
-    const violation = probeBlockViolation(data, this.#hub.virtualAIds);
+    const violation =
+      probeBlockViolation(data, this.#hub.virtualAIds, (index) =>
+        this.#hub.ownsBlockIndex(index),
+      ) ??
+      (stayOffForms(data).length > 0
+        ? `${stayOffForms(data).join(", ")} only through the product`
+        : null);
     if (!name.startsWith(this.#hub.prefix) || violation) {
       throw new GuardError(`refused direct BLOCK: ${violation ?? "name"}`);
     }
@@ -770,8 +816,11 @@ export class ProbeClient {
 
   runBlock(scenarioRef) {
     this.#writable("scenario.run");
-    if (this.#hub.created.get(scenarioRef)?.kind !== "block") {
-      throw new GuardError(`${relativeRef(scenarioRef)} is not a probe BLOCK`);
+    const owned = this.#hub.created.get(scenarioRef);
+    if (owned?.kind !== "block" || owned.stayOff) {
+      throw new GuardError(
+        `${relativeRef(scenarioRef)} is not a probe BLOCK that may run`,
+      );
     }
     return this.#client.runScenario(scenarioIndex(scenarioRef));
   }
@@ -912,8 +961,11 @@ function scenarioIndex(scenarioRef) {
 // run no code and no other scenario. A characteristic may only be read
 // (trigger=false), and only on the virtual accessory. Such a BLOCK may be
 // turned on. Returns the first violation or null.
-function probeBlockViolation(data, virtualAIds) {
+// ownsBlock(index) tells whether a scenario index is a BLOCK of this run: a
+// scenario target may only reach those.
+function probeBlockViolation(data, virtualAIds, ownsBlock = () => false) {
   let violation = null;
+  const guardedEveryN = everyNBesideFarFutureDate(data);
   walkNodes(data, (node) => {
     if (violation) return;
     if (
@@ -921,19 +973,76 @@ function probeBlockViolation(data, virtualAIds) {
       !virtualAIds.has(node.aId)
     ) {
       violation = `${node.type} on accessory ${node.aId} is not the run's virtual accessory`;
+    } else if (node.type === "from" && !virtualAIds.has(node.from_aId)) {
+      violation = `from reads accessory ${node.from_aId}, not the run's virtual accessory`;
     } else if (node.type === "characteristic" && node.trigger !== false) {
       violation = "a characteristic trigger is not a time trigger";
     } else if (
       node.type === "cron" &&
       !isFarFutureOneDate(node) &&
-      !isDailyTime(node)
+      !isDailyTime(node) &&
+      !guardedEveryN.has(node)
     ) {
-      violation = `cron ${node.mode} ${node.cron} is neither a far-future one-date cron nor one daily time`;
-    } else if (["interval", "code", "scenario"].includes(node.type)) {
+      violation = `cron ${node.mode} ${node.cron} is neither a far-future one-date cron, one daily time nor every N beside a far-future date`;
+    } else if (node.type === "scenario" && !ownsBlock(node.index)) {
+      violation = `scenario target ${node.index} is not a BLOCK of this run`;
+    } else if (node.type === "http" && node.url !== PROBE_HTTP_URL) {
+      violation = `an http request may go only to ${PROBE_HTTP_URL}`;
+    } else if (["interval", "code"].includes(node.type)) {
       violation = `${node.type} nodes are not allowed`;
     }
   });
   return violation;
+}
+
+// Forms that are inert only while their BLOCK is off: a notification the
+// owner would get, a request, a time that repeats all day, a target that
+// switches or runs another BLOCK. A BLOCK with one stays off for the whole
+// run: the guard neither turns it on nor runs it.
+export function stayOffForms(data) {
+  const forms = new Set();
+  walkNodes(data, (node) => {
+    if (node.type === "notify") forms.add("notify");
+    if (node.type === "http") forms.add("http");
+    if (node.type === "scenario") forms.add("scenario target");
+    if (node.type === "cron" && isEveryN(node)) forms.add("every-N cron");
+  });
+  return [...forms];
+}
+
+function isEveryN(node) {
+  return (
+    node.mode === "NONE" &&
+    node.offset === 0 &&
+    /^(?:0\/\d+ \* \*|0 0\/\d+ \*|0 0 0\/\d+) \? \* \S+ \*$/.test(
+      node.cron ?? "",
+    )
+  );
+}
+
+// Every-N crons that share an AND group with a far-future one-date cron:
+// such a group is never true before that date.
+function everyNBesideFarFutureDate(data) {
+  const guarded = new Set();
+  walkNodes(data, (node) => {
+    if (
+      node.type !== "condition" ||
+      node.mode !== "AND" ||
+      !Array.isArray(node.conditions) ||
+      !node.conditions.some(
+        (condition) =>
+          condition?.type === "cron" && isFarFutureOneDate(condition),
+      )
+    ) {
+      return;
+    }
+    for (const condition of node.conditions) {
+      if (condition?.type === "cron" && isEveryN(condition)) {
+        guarded.add(condition);
+      }
+    }
+  });
+  return guarded;
 }
 
 function isDailyTime(node) {
@@ -2342,7 +2451,13 @@ const RULE_EXCLUDED_FAMILIES = [
   ],
 ];
 
-async function createBlock(ctx, { label, data, sync = false }) {
+// leaveOnConflict: a hub that stores a form other than sent makes the create
+// a conflict, and restore cannot delete the BLOCK; a form under test is then
+// left, off and marked, to the final sweep instead of stopping the run.
+async function createBlock(
+  ctx,
+  { label, data, sync = false, leaveOnConflict = false },
+) {
   const name = `${ctx.prefix}-${label}`;
   const result = await prepareAndApply(ctx.hub, {
     operation: "block_create",
@@ -2366,6 +2481,18 @@ async function createBlock(ctx, { label, data, sync = false }) {
   // A clean refusal (status error, nothing created) lets other checks go on;
   // the per-step house check still catches an untracked probe object.
   if (
+    leaveOnConflict &&
+    scenarioRef &&
+    cleanupEntry &&
+    result.applied?.status === "conflict"
+  ) {
+    leaveForSweep(
+      ctx,
+      cleanupEntry,
+      scenarioRef,
+      "the hub stored the form differently, so restore cannot delete it",
+    );
+  } else if (
     result.applied &&
     result.applied.status !== "applied" &&
     (scenarioRef ||
@@ -2440,6 +2567,8 @@ async function stepBlockStorage(ctx) {
   });
   blockRow("2 control one-date", control, "stored as sent");
   ctx.control = control;
+  if (abortReason) return;
+  await storeEditorForms(ctx);
   if (abortReason) return;
   for (const [id, why] of RULE_EXCLUDED_FAMILIES) {
     row(`2 ${id}`, "-", "-", `not created: ${why}`, "skipped");
@@ -2533,6 +2662,151 @@ async function stepBlockStorage(ctx) {
   ctx.oneDateVerbatim = oneDateStoredVerbatim();
 }
 
+// Node forms taken from the web client's code (web-client-action-map D6,
+// D10, D13, D15, D16, D17), one product-created BLOCK per form, created off
+// and kept off for the whole run by the guard (stayOffForms). The far-future
+// date is their trigger, the only device they touch is the run's virtual
+// accessory, a scenario target reaches only a BLOCK of this run, the
+// notification is never sent and the request would go to the hub's own
+// discard port. Each row records the form the hub stores, raw, in its
+// details; a form stored differently is left, off and marked, to the sweep.
+async function storeEditorForms(ctx) {
+  const { virtual, hub } = ctx;
+  const farDate = () => cronCondition("NONE", ONE_DATE_CRON, 0);
+  const off = () => setLamp(virtual, false);
+  const notificationService = (await hub.lists()).extensions.find(
+    ({ bundle_type: bundleType }) => bundleType === "NOTIFICATION",
+  );
+  const text = "sprut-agent probe: never sent";
+  const target = await createBlock(ctx, {
+    label: "block-mode-target",
+    data: { targets: [ifNode("EVERY", farDate(), [off()])] },
+  });
+  blockRow("2 mode target", target, "stored as sent");
+  if (abortReason || !target.scenarioRef) return;
+  const targetIndex = scenarioIndex(target.scenarioRef);
+  const families = [
+    {
+      id: "every_n_cron",
+      expected:
+        'cron NONE "0 0/15 * ? * * *" beside the far-future date stored as sent',
+      node: ifNode(
+        "EVERY",
+        {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            { type: "cron", mode: "NONE", cron: ONE_DATE_CRON, offset: 0 },
+            { type: "cron", mode: "NONE", cron: "0 0/15 * ? * * *", offset: 0 },
+          ],
+        },
+        [off()],
+      ),
+    },
+    {
+      id: "branch_repeat",
+      expected: `if then_delay ${REPEAT_MS} and else_delay ${REPEAT_MS} stored as sent`,
+      node: {
+        ...ifNode("EVERY", farDate(), [off()], [off()]),
+        then_delay: REPEAT_MS,
+        else_delay: REPEAT_MS,
+      },
+    },
+    {
+      id: "from",
+      expected:
+        'from with value "" (Brightness from Hue of the virtual accessory) stored as sent',
+      node: ifNode("EVERY", farDate(), [
+        lampAction(virtual, {
+          type: "from",
+          cId: virtual.brightness.ids.cId,
+          hc: "Brightness",
+          value: "",
+          from_aId: virtual.hue.ids.aId,
+          from_sId: virtual.hue.ids.sId,
+          from_cId: virtual.hue.ids.cId,
+          from_hs: "Lightbulb",
+          from_hc: "Hue",
+        }),
+      ]),
+    },
+    {
+      id: "notify",
+      expected: `notify MESSAGE without to, PUSH with to null${notificationService ? " and PUSH to one service" : ""} stored as sent`,
+      node: ifNode("EVERY", farDate(), [
+        { type: "notify", text, mode: "MESSAGE" },
+        { type: "notify", text, mode: "PUSH", to: null },
+        ...(notificationService
+          ? [
+              {
+                type: "notify",
+                text,
+                mode: "PUSH",
+                to: [{ index: notificationService.index, clients: null }],
+              },
+            ]
+          : []),
+      ]),
+    },
+    {
+      id: "http",
+      expected: `http GET ${PROBE_HTTP_URL} stored as sent`,
+      node: ifNode("EVERY", farDate(), [
+        { type: "http", method: "GET", url: PROBE_HTTP_URL },
+      ]),
+    },
+    {
+      id: "scenario_modes",
+      expected:
+        "scenario targets ACTIVATE, DEACTIVATE, ACTIVATE_AND_FIRE and RESET of a run BLOCK stored as sent",
+      node: ifNode(
+        "EVERY",
+        farDate(),
+        ["ACTIVATE", "DEACTIVATE", "ACTIVATE_AND_FIRE", "RESET"].map(
+          (mode) => ({ type: "scenario", index: targetIndex, mode }),
+        ),
+      ),
+    },
+  ];
+  for (const family of families) {
+    if (abortReason) return;
+    const block = await createBlock(ctx, {
+      label: `block-${family.id}`,
+      data: { targets: [family.node] },
+      leaveOnConflict: true,
+    });
+    if (!block.scenarioRef) {
+      row(
+        `2 ${family.id}`,
+        "scenario.create{BLOCK}",
+        family.expected,
+        describe(block),
+        "rejected",
+      );
+      continue;
+    }
+    // The raw stored node: the product's read redacts and reshapes nothing
+    // here, but the architect needs exactly what the hub keeps.
+    const stored = await ctx.probe.storedBlockData(block.scenarioRef);
+    familyRow(family, block, 0, stored.data?.targets?.[0], {
+      stored: stored.data?.targets?.[0],
+      active: stored.active,
+    });
+    // The target cannot be deleted while a BLOCK left to the sweep names it.
+    if (
+      family.id === "scenario_modes" &&
+      block.cleanupEntry?.outcome?.status === "left_for_sweep"
+    ) {
+      leaveForSweep(
+        ctx,
+        target.cleanupEntry,
+        target.scenarioRef,
+        "a BLOCK left to the sweep switches it",
+      );
+    }
+  }
+}
+
 // Step 3 turns a BLOCK on only after the hub kept the far-future cron as sent.
 function oneDateStoredVerbatim() {
   return rows.some(
@@ -2540,7 +2814,9 @@ function oneDateStoredVerbatim() {
   );
 }
 
-function familyRow(family, block, index, readNode) {
+// evidence: what to keep in the row's details whatever the verdict, such as
+// the raw stored node of a form under test.
+function familyRow(family, block, index, readNode, evidence) {
   const sentNode = block.sent.targets[index];
   // A family may name the documented hub form of what it sends.
   const expectedNode = family.stored ?? sentNode;
@@ -2566,7 +2842,12 @@ function familyRow(family, block, index, readNode) {
       : productApplied
         ? "mismatch"
         : "hub-normalized",
-    other.length > 0 ? { differences: other, sent: sentNode } : undefined,
+    other.length > 0 || evidence
+      ? {
+          ...(other.length > 0 ? { differences: other, sent: sentNode } : {}),
+          ...evidence,
+        }
+      : undefined,
   );
 }
 
