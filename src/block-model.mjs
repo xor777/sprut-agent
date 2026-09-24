@@ -336,7 +336,7 @@ export const TIME_TRIGGER = {
   evidence: {
     forms: "official_web_client_code",
     one_date: "official_editor_schema_only",
-    hub: "days_at_time, one_date and sun stored as sent on SprutHub 3.0.0; firing not observed",
+    hub: "days_at_time, one_date and sun stored as sent on SprutHub 3.0.0; a days_at_time for every day fired at its minute of the hub clock (live-conformance-3); firing of one_date and sun not observed",
   },
 };
 
@@ -532,13 +532,16 @@ function canonicalNode(node, kind) {
   }
   if (kind === "if") {
     // state is runtime, not configuration: live reads carry it on stored
-    // ifs, SprutHub 3.0.0 did not add it at create, and the web client sets
-    // it to null when it switches to ONCE.
+    // ifs, SprutHub 3.0.0 did not add it at create but added state: true
+    // when a time trigger fired and changes it during runs (no nextRun
+    // appeared; live-conformance-3), and the web client sets it to null
+    // when it switches to ONCE.
     delete canonical.state;
     // Client code (research/protocol/2026-09-24-web-client-evidence.md): the
     // web client creates an if without mode, then_delay and else_delay and
     // with else null, and shows it as EVERY without a repeat period or an
-    // else branch. Which form the hub keeps is not observed.
+    // else branch. SprutHub 3.0.0 stored such an if with mode EVERY and both
+    // delays 0, and without else (live-conformance-3).
     if (!Object.hasOwn(canonical, "mode")) canonical.mode = "EVERY";
     for (const key of ["then_delay", "else_delay"]) {
       if (!Object.hasOwn(canonical, key)) canonical[key] = 0;

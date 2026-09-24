@@ -5742,7 +5742,7 @@ function scenarioNotFound() {
 function inactiveScenarioRun(targetRef) {
   return new SprutHubError(
     "scenario_inactive",
-    "This scenario is turned off. A manual run of a turned-off scenario has not been observed on SprutHub, so it is not sent. scenario_active turns it on and also re-arms its triggers; do that only if the owner wants it on, then prepare scenario_run again.",
+    "This scenario is turned off, so the run is not sent: SprutHub acknowledges a manual run of a turned-off BLOCK but runs none of its actions. scenario_active turns it on and also re-arms its triggers; do that only if the owner wants it on, then prepare scenario_run again.",
     "get_native_change_contract",
     {
       next: {
@@ -5961,13 +5961,13 @@ function blockContract() {
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
       "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
-      "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, but firing is not observed, so check read_hub_log after the first expected moment.",
+      "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, and a days_at_time for every day fired at its minute of the hub clock; firing of the other forms is not observed, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice, unless the edit keeps both as stored.",
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0; a hub has not been observed running them, including whether a step clamps at the characteristic's range. A step is a number or a plain decimal string such as \"10\", and is sent as a number, the form the hub stores.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
-      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6016,8 +6016,10 @@ function scenarioRunContract() {
       live_hub_version: "3.0.0b (20131)",
       live_run:
         "active action-only BLOCK with two Lightbulb On=false targets, including an explicit repeat run",
+      turned_off_run:
+        "a turned-off BLOCK: SprutHub acknowledged scenario.run and ran none of its actions; turned on, the same BLOCK ran (2026-09-24)",
       not_observed: [
-        "a run of a turned-off scenario",
+        "a run of a turned-off LOGIC",
         "whether a run evaluates or bypasses BLOCK conditions and triggers",
         "delays and LOGIC",
         "GLOBAL, built-in, and other scenario types, which are refused",
@@ -6025,7 +6027,7 @@ function scenarioRunContract() {
     },
     limitations: [
       "GLOBAL, built-in (predefined), and other non-BLOCK, non-LOGIC scenarios are refused with scenario_run_unverified_type until a manual run is verified on a hub: a GLOBAL run may register its timers and subscriptions again. Ask the owner to run such a scenario in the SprutHub app.",
-      "A turned-off scenario is refused because its manual run has not been observed; scenario_active turns it on and also re-arms its triggers.",
+      "A turned-off scenario is refused: SprutHub acknowledges a run of a turned-off BLOCK but runs none of its actions. scenario_active turns it on and also re-arms its triggers.",
       "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write. start_native_observation for this scenario, active during the run, shows what it did; the hub log kept no scenario lines without such a subscription.",
       "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
       "SprutHub exposes no native compare-and-set; a race remains after the pre-run scenario check.",

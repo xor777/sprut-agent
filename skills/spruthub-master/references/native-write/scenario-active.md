@@ -10,8 +10,11 @@
   хабе. `block_data_update` флаги не меняет, `active` меняется только здесь:
   `window_option` с ref окна сценария и `option_key=Active` отказывает с
   `scenario_owner_required` и `next` сюда.
-- SprutHub 3.0.0 принимает `scenario.update {index, active}` с ACK, но флаг
-  не меняет, поэтому этот путь не используется. Change, записанный, когда
+- На SprutHub 3.0.0 запись `Active` через окно включает и выключает BLOCK и
+  LOGIC, и `scenario.get` сразу совпадает с окном; у GLOBAL и встроенных
+  сценариев окно с тем же `Active` только прочитано. `scenario.update
+  {index, active}` хаб принимает с ACK, но флаг не меняет, поэтому этот путь
+  не используется. Change, записанный, когда
   операция ещё отправляла `scenario.update`, сверяется тем же чтением, а
   повторный apply пишет уже через окно.
 - Если у сценария нет окна настроек или в окне нет опции `Active`, prepare

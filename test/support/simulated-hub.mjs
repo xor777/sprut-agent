@@ -75,15 +75,15 @@ export const METHOD_EVIDENCE = {
   "room.get": [OBSERVED, "2026-09-09-room-reading"],
   "room.create": [
     OBSERVED,
-    "2026-09-24-live-conformance-2: applied, a 42-character name kept as its first 30",
+    "2026-09-24-live-conformance-2: applied; 2026-09-24-live-conformance-3: the first 32 characters kept, Cyrillic and Latin alike, emoji dropped, the answer carrying the kept name",
   ],
   "room.delete": [
     OBSERVED,
     "2026-09-24-live-conformance-2: an empty created room deleted, its absence read back",
   ],
   "room.update": [
-    SCHEMA_ONLY,
-    "RoomUpdateRequest in 51547-Room.proto; the web client sends {id, name} and {id, visible} (2026-09-24-web-client-evidence); sent live only with names whose first 30 characters equalled the current one, which stayed (2026-09-24-live-conformance-2)",
+    OBSERVED,
+    "{id, name}: a rename and its restore read back (2026-09-24-live-conformance-3, step 1b); {id, visible} is sent by the web client (2026-09-24-web-client-evidence) and was not sent live",
   ],
   "accessory.list": [
     OBSERVED,
@@ -140,7 +140,7 @@ export const METHOD_EVIDENCE = {
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
     OBSERVED,
-    "live scenario_run (b95e8a3); the simulator runs only top-level literal set actions",
+    "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); the simulator runs only top-level literal set actions",
   ],
   "scenario.sdk": [OBSERVED, "2026-09-09-automations"],
   "scenario.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
@@ -161,8 +161,8 @@ export const METHOD_EVIDENCE = {
   ],
   // The product switches a scenario only with this write.
   "window.update {Active}": [
-    SCHEMA_ONLY,
-    "the web client switches a scenario with the Active option of its options window (2026-09-24-web-client-evidence, 4); the option was read on live windows of a BLOCK (2026-09-24-live-conformance-2) and of a LOGIC, a GLOBAL and a predefined scenario (2026-09-24-live-conformance-3-read-only); its write was not read back live for any type",
+    OBSERVED,
+    "a BLOCK and a LOGIC switched on and off, scenario.get and the window agreeing on the first read (2026-09-24-live-conformance-3); a GLOBAL's and a predefined scenario's window read only, same keys (2026-09-24-live-conformance-3-read-only)",
   ],
   // No entry, so a run reports them as unsupported: window.update {OnStart},
   // {Sync} and {Remove} of a scenario window, and {Name} or {Desc} of a
@@ -2221,6 +2221,12 @@ function runScenario(state, scenario) {
   };
   if (scenario.type !== "BLOCK") {
     run.skipped.push({ type: scenario.type });
+    return run;
+  }
+  // SprutHub 3.0.0 acknowledged a run of a turned-off BLOCK and ran none of
+  // its actions (live-conformance-3).
+  if (scenario.active !== true) {
+    run.skipped.push({ type: scenario.type, active: false });
     return run;
   }
   for (const target of JSON.parse(scenario.data).targets) {
