@@ -16306,6 +16306,93 @@ test("a created room is reused after restart and removed only after its accessor
   );
 });
 
+test("a created room renamed by a later change points to that change and is removed after it is restored", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const roomChange = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Лаборатория",
+      reason: "Создать комнату для паяльной станции",
+    },
+  });
+  const created = await callChangeTool(
+    client,
+    "apply_native_change",
+    roomChange.structuredContent.change_ref,
+  );
+  assert.equal(created.status, "applied");
+  const room = hub.state.rooms.find(
+    ({ id }) => `${homeRef}/room/${id}` === created.room.ref,
+  );
+  const rename = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_name",
+      target_ref: created.room.ref,
+      value: "Мастерская",
+      reason: "Переименовать новую комнату",
+    },
+  });
+  assert.equal(
+    (
+      await callChangeTool(
+        client,
+        "apply_native_change",
+        rename.structuredContent.change_ref,
+      )
+    ).status,
+    "applied",
+  );
+
+  for (const tool of ["restore_native_change", "get_native_change"]) {
+    const blocked = await callChangeTool(
+      client,
+      tool,
+      roomChange.structuredContent.change_ref,
+    );
+    assert.equal(blocked.status, "conflict", tool);
+    assert.equal(blocked.conflict_reason, "later_owned_change", tool);
+    assert.equal(
+      blocked.restore_first_change_ref,
+      rename.structuredContent.change_ref,
+      tool,
+    );
+  }
+
+  // A name the owner typed is still a manual change, not the agent's rename.
+  room.name = "Кладовка";
+  const manual = await callChangeTool(
+    client,
+    "restore_native_change",
+    roomChange.structuredContent.change_ref,
+  );
+  assert.equal(manual.conflict_reason, "manual_change");
+  assert.equal(manual.restore_first_change_ref, undefined);
+  assert.equal(
+    hub.requests.filter(({ room: request }) => request?.delete).length,
+    0,
+  );
+
+  room.name = "Мастерская";
+  const renameRestored = await callChangeTool(
+    client,
+    "restore_native_change",
+    rename.structuredContent.change_ref,
+  );
+  assert.equal(renameRestored.status, "restored");
+  const roomRestored = await callChangeTool(
+    client,
+    "restore_native_change",
+    roomChange.structuredContent.change_ref,
+  );
+  assert.equal(roomRestored.status, "restored");
+  assert.equal(roomRestored.restore_first_change_ref, undefined);
+  assert.equal(hub.state.rooms.includes(room), false);
+});
+
 test("static room discovery does not relax target-dependent reads or preparation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
