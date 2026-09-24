@@ -4749,20 +4749,18 @@ export class AutomationService {
       }
     }
     if (change.kind === "logic_source_create") {
-      if (typeof change.native_logic_type !== "string") {
+      const assignments = await this.#createdLogicAssignments(change);
+      if (assignments === null) {
         return this.#finishNative(change, "applied", undefined, {
           conflict_reason: undefined,
           ...applied.fields,
         });
       }
-      const assignments = await this.client.findLogicAssignments(
-        change.native_logic_type,
-      );
       if (assignments.length > 0) {
         return this.#finishNative(change, "conflict", undefined, {
           conflict_reason: "logic_assignments_present",
-          logic_assignments: assignments.map(({ aId, sId, active }) => ({
-            ref: `${change.home_ref}/accessory/${aId}/service/${sId}/logic/${encodeURIComponent(change.native_logic_type)}`,
+          logic_assignments: assignments.map(({ aId, sId, type, active }) => ({
+            ref: `${change.home_ref}/accessory/${aId}/service/${sId}/logic/${encodeURIComponent(type)}`,
             active,
           })),
           ...applied.fields,
@@ -4810,6 +4808,34 @@ export class AutomationService {
       return this.#reconcileScenarioRestore(change, false);
     }
     return this.#reconcileScenarioRestore(change, true);
+  }
+
+  // Assignments that stop the delete of a created LOGIC, or null while
+  // several new types leave its own unknown. SprutHub 3.0.0 did not list the
+  // type of a turned-off LOGIC on its anchor service (owner hub, 2026-09-24).
+  // A type the catalog does not offer cannot be picked for an assignment, so
+  // only the anchor is checked then, and there any assignment of a type
+  // outside the catalog read at prepare may be this LOGIC.
+  async #createdLogicAssignments(change) {
+    if (typeof change.native_logic_type === "string") {
+      return this.client.findLogicAssignments(change.native_logic_type);
+    }
+    if (change.logic_mapping_status !== "missing") return null;
+    const catalog = new Set(change.baseline_logic_types);
+    const logics = await this.client.listLogics(change.target);
+    if (logics.some((logic) => typeof logic?.type !== "string")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a logic assignment without its type.",
+      );
+    }
+    return logics
+      .filter(({ type }) => !catalog.has(type))
+      .map(({ type, active }) => ({
+        ...change.target,
+        type,
+        active: active === true,
+      }));
   }
 
   async #reconcileScenarioRestore(change, acknowledged) {
@@ -10237,7 +10263,7 @@ function logicSourceContract(mode) {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario after its native type is mapped, every current assignment of that type is absent, and no BLOCK runs it with a scenario target",
+        "delete only the owned unchanged scenario while no BLOCK runs it with a scenario target and no assignment of it is found: of its mapped native type across the home, or, when SprutHub does not list a new type on the selected service, of any type outside the catalog read at prepare on that service; several new types block deletion until one is mapped",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
@@ -10570,7 +10596,8 @@ function scenarioRestoreSupported(change) {
   }
   if (
     change.kind === "logic_source_create" &&
-    typeof change.native_logic_type !== "string"
+    typeof change.native_logic_type !== "string" &&
+    change.logic_mapping_status !== "missing"
   ) {
     return false;
   }
@@ -11078,7 +11105,7 @@ function publicNativeChange(
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "Deletion requires a mapped native logic type and scans its current assignments and the scenario targets of BLOCKs, but SprutHub exposes no compare-and-set after that check.",
+        "Deletion scans the current assignments of the mapped native logic type across the home and the scenario targets of BLOCKs. When SprutHub does not list the new type on the selected service (seen for a turned-off LOGIC), it cannot be picked for an assignment, so only that service is checked, and any assignment there of a type outside the catalog read at prepare blocks deletion. Several new types block deletion until one is mapped. SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
           : change.owned_target_absent_observed === true
