@@ -21722,6 +21722,52 @@ test("window_option refuses the Active option of a scenario's options window and
   assert.equal(applied.status, "applied");
 });
 
+// get_entity on a BLOCK routes its options to options_window_ref; that read
+// must not offer the scenario flag as a window_option.
+test("a scenario's options window read offers its Active option through scenario_active", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  hub.state.window.options.push({
+    key: "Active",
+    name: "Активен",
+    type: "GenericBoolean",
+    inputType: "CHECKBOX",
+    read: true,
+    write: true,
+    disabled: false,
+    value: { boolValue: false },
+  });
+  const client = await startClient(t, hub, stateDirectory);
+  const activeOption = async (entityRef) => {
+    const read = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: entityRef },
+    });
+    assert.equal(read.isError, undefined, read.content[0]?.text);
+    return read.structuredContent.entity.options.find(
+      ({ key }) => key === "Active",
+    );
+  };
+
+  const scenarioWindowActive = await activeOption(scenarioWindowRef);
+  assert.equal(scenarioWindowActive.configured_value, true);
+  assert.deepEqual(scenarioWindowActive.native_change, {
+    native_write: true,
+    supported: false,
+    reason: "scenario_owner_required",
+    next: {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "scenario_active",
+        target_ref: scenarioRefFor(scenario),
+      },
+    },
+  });
+  const deviceActive = await activeOption(deviceWindowRef);
+  assert.equal(deviceActive.native_change.supported, true);
+  assert.equal(deviceActive.native_change.operation, "window_option");
+});
+
 // Before a change exists there is nothing for get_native_change to read.
 test("a scenario whose flag and Active option disagree is refused at contract and prepare with a read of the scenario next", async (t) => {
   const { hub, stateDirectory } = await setup(t);
