@@ -1181,9 +1181,9 @@ test("the simulator lists accessories without virtual, reads it on each accessor
 });
 
 // The BLOCK forms written from the web client's code (action map D6, D10,
-// D13, D15, D16, D17) are not yet seen stored by a hub. A run whose write
-// carries one reports it as schema_only, so a pass that rests on it shows.
-test("the simulator reports BLOCK writes of forms not seen on a hub as schema_only", async (t) => {
+// D13, D15, D16, D17) were seen stored by a hub in live-conformance-4. A run
+// whose write carries one names that evidence for the form.
+test("the simulator reports BLOCK writes of the web client's forms with their live storage evidence", async (t) => {
   const { hub, send } = await rawSession(t);
   const lamp = (characteristics) => ({
     type: "service",
@@ -1256,14 +1256,18 @@ test("the simulator reports BLOCK writes of forms not seen on a hub as schema_on
     index ??= created.result.scenario.create.index;
     await send({ scenario: { update: { index, data } } });
   }
-  const levels = Object.fromEntries(
-    hub.touchedMethods().map(({ method, level }) => [method, level]),
+  const evidence = Object.fromEntries(
+    hub
+      .touchedMethods()
+      .map(({ method, level, source }) => [method, { level, source }]),
   );
-  assert.equal(levels["scenario.create"], "observed");
-  assert.equal(levels["scenario.update"], "observed");
+  assert.equal(evidence["scenario.create"].level, "observed");
+  assert.equal(evidence["scenario.update"].level, "observed");
   for (const form of Object.keys(forms).filter((key) => key !== "observed")) {
     for (const method of ["scenario.create", "scenario.update"]) {
-      assert.equal(levels[`${method} {${form}}`], "schema_only", form);
+      const { level, source } = evidence[`${method} {${form}}`];
+      assert.equal(level, "observed", form);
+      assert.match(source, /^2026-09-25-live-conformance-4: /, form);
     }
   }
 });

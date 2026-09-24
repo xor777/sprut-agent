@@ -185,29 +185,41 @@ export const METHOD_EVIDENCE = {
 };
 
 // BLOCK forms taken from the official web client's code
-// (2026-09-24-web-client-action-map, the row named) that no hub has been
-// seen storing. The simulator stores them like any BLOCK; a create or update
-// that carries one is keyed by the first of them, so a run that rests on it
-// reports schema_only. A form confirmed live moves to OBSERVED with its
-// source.
-const UNCONFIRMED_BLOCK_FORMS = [
-  ["notify", "D16", (node) => node.type === "notify"],
-  ["http", "D17", (node) => node.type === "http"],
-  ["from", "D10", (node) => node.type === "from"],
+// (2026-09-24-web-client-action-map D16, D17, D10, D15, D13, D6), each with
+// what a hub has been seen storing. A create or update that carries one is
+// keyed by the first of them, so a run names the evidence its pass rests
+// on. Storage is observed for all of them; their run on a hub is not.
+const LIVE_4 = "2026-09-25-live-conformance-4";
+const EDITOR_BLOCK_FORMS = [
+  [
+    "notify",
+    `${LIVE_4}: MESSAGE and PUSH stored, to null and clients null dropped; sending not observed`,
+    (node) => node.type === "notify",
+  ],
+  [
+    "http",
+    `${LIVE_4}: a GET request stored as sent; sending not observed`,
+    (node) => node.type === "http",
+  ],
+  [
+    "from",
+    `${LIVE_4}: stored with value "" dropped; the copy not observed`,
+    (node) => node.type === "from",
+  ],
   [
     "scenario mode",
-    "D15, any mode but FIRE",
+    `${LIVE_4}: ACTIVATE, DEACTIVATE, ACTIVATE_AND_FIRE and RESET stored as sent; not run`,
     (node) => node.type === "scenario" && node.mode !== "FIRE",
   ],
   [
     "branch repeat",
-    "D13, then_delay or else_delay above 0",
+    `${LIVE_4}: then_delay and else_delay 60000 stored as sent; repeat not observed`,
     (node) =>
       node.type === "if" && (node.then_delay > 0 || node.else_delay > 0),
   ],
   [
     "every N cron",
-    "D6, 0/N in a cron field",
+    `${LIVE_4}: 0 0/15 * ? * * * stored as sent; firing not observed`,
     (node) =>
       node.type === "cron" &&
       typeof node.cron === "string" &&
@@ -215,16 +227,13 @@ const UNCONFIRMED_BLOCK_FORMS = [
   ],
 ];
 for (const method of ["scenario.create", "scenario.update"]) {
-  for (const [form, row] of UNCONFIRMED_BLOCK_FORMS) {
-    METHOD_EVIDENCE[`${method} {${form}}`] = [
-      SCHEMA_ONLY,
-      `web client code, 2026-09-24-web-client-action-map ${row}; not seen stored by a hub`,
-    ];
+  for (const [form, source] of EDITOR_BLOCK_FORMS) {
+    METHOD_EVIDENCE[`${method} {${form}}`] = [OBSERVED, source];
   }
 }
 
-// The first form of UNCONFIRMED_BLOCK_FORMS in a BLOCK write, or null.
-function unconfirmedBlockForm(input) {
+// The first form of EDITOR_BLOCK_FORMS in a BLOCK write, or null.
+function editorBlockForm(input) {
   if (!isRecord(input) || typeof input.data !== "string") return null;
   let data;
   try {
@@ -243,8 +252,7 @@ function unconfirmedBlockForm(input) {
   };
   visit(data);
   return (
-    UNCONFIRMED_BLOCK_FORMS.find(([, , matches]) => nodes.some(matches))?.[0] ??
-    null
+    EDITOR_BLOCK_FORMS.find(([, , matches]) => nodes.some(matches))?.[0] ?? null
   );
 }
 
@@ -260,7 +268,7 @@ function evidenceKey(state, method, params) {
     }
   }
   if (method === "scenario.create" || method === "scenario.update") {
-    const form = unconfirmedBlockForm(params?.scenario?.[method.split(".")[1]]);
+    const form = editorBlockForm(params?.scenario?.[method.split(".")[1]]);
     if (form !== null) return `${method} {${form}}`;
   }
   if (method === "window.update") {
