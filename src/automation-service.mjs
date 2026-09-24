@@ -3791,7 +3791,7 @@ export class AutomationService {
       scenario === null ? null : runnableScenarioSnapshot(scenario);
     if (
       current === null ||
-      !snapshotsEqual(current, change.baseline_snapshot)
+      !runSnapshotsEqual(current, change.baseline_snapshot)
     ) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "scenario_changed",
@@ -3866,7 +3866,7 @@ export class AutomationService {
       const scenario = await this.client.getScenario(change.target.index);
       configurationMatches =
         scenario !== null &&
-        snapshotsEqual(
+        runSnapshotsEqual(
           runnableScenarioSnapshot(scenario),
           change.baseline_snapshot,
         );
@@ -9042,7 +9042,8 @@ function scenarioSnapshot(scenario) {
 }
 
 // BLOCK data is parsed so hub projections do not look like edits. Other types
-// are compared exactly as returned; their code is not interpreted here.
+// keep only a fingerprint of their source: a run needs equality alone, and
+// LOGIC code often holds tokens that must not reach the local journal.
 function runnableScenarioSnapshot(scenario) {
   if (isRecord(scenario) && scenario.type === "BLOCK") {
     return scenarioSnapshot(scenario);
@@ -9068,7 +9069,37 @@ function runnableScenarioSnapshot(scenario) {
     onStart: scenario.onStart ?? null,
     sync: scenario.sync ?? null,
     type: scenario.type,
-    data: scenario.data ?? null,
+    data_sha256: scenarioSourceFingerprint(scenario.data),
+  };
+}
+
+function scenarioSourceFingerprint(data) {
+  if (data === undefined || data === null) return null;
+  return sourceFingerprint(
+    typeof data === "string" ? data : JSON.stringify(data),
+  );
+}
+
+// scenario_run compares the whole snapshot: a scenario turned off after
+// preparation must not be run. Runs prepared by earlier versions saved the
+// source of other types itself, so it is fingerprinted before comparing.
+function runSnapshotsEqual(current, saved) {
+  return isDeepStrictEqual(
+    comparableRunSnapshot(current),
+    comparableRunSnapshot(saved),
+  );
+}
+
+function comparableRunSnapshot(snapshot) {
+  if (snapshot.type === "BLOCK") {
+    return comparableNativeScenarioConfiguration(snapshot);
+  }
+  const { data, data_sha256: fingerprint, ...configuration } = snapshot;
+  return {
+    ...configuration,
+    data_sha256: Object.hasOwn(snapshot, "data")
+      ? scenarioSourceFingerprint(data)
+      : fingerprint,
   };
 }
 
@@ -9733,8 +9764,6 @@ function scenarioRepeatApplyLimitation() {
   return "This change was already applied, so apply will not be sent again. Prepare a new authorized change from the current hub configuration.";
 }
 
-// scenario_run compares the whole snapshot: a scenario turned off after
-// preparation must not be run.
 function snapshotsEqual(left, right) {
   return isDeepStrictEqual(
     comparableNativeScenarioConfiguration(left),
