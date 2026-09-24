@@ -808,9 +808,10 @@ test("different auto-off behavior is not treated as the requested rule", async (
   }
 });
 
-test("an existing rule that also turns the light off later is reported and not duplicated", async (t) => {
-  const { hub, stateDirectory } = await setup(t);
-  hub.state.scenarios.push({
+// An office rule that turns the lamp on when motion is detected and off
+// 120 s later: it does what the preview asks for and more.
+function officeMotionRuleWithAutoOff(runtime = {}) {
+  return {
     index: "motion-light",
     name: "Свет в офисе по движению",
     desc: "Настроено вручную",
@@ -819,6 +820,7 @@ test("an existing rule that also turns the light off later is reported and not d
     active: true,
     onStart: false,
     sync: false,
+    ...runtime,
     data: JSON.stringify({
       targets: [
         {
@@ -878,27 +880,34 @@ test("an existing rule that also turns the light off later is reported and not d
         },
       ],
     }),
-  });
+  };
+}
+
+const officeRuleRef =
+  "spruthub://hub/automation-test-hub/scenario/motion-light";
+const officeAutoOffDifference = {
+  field: "auto_off",
+  existing: [
+    {
+      after_seconds: 120,
+      timer_mode: "RESET",
+      target_value: false,
+      timer_index: 1,
+    },
+  ],
+  requested: [],
+};
+
+test("an existing rule that also turns the light off later is reported and not duplicated", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push(officeMotionRuleWithAutoOff());
   const scenariosBefore = structuredClone(hub.state.scenarios);
   const client = await startClient(t, hub, stateDirectory);
   const existingRule = {
-    ref: "spruthub://hub/automation-test-hub/scenario/motion-light",
+    ref: officeRuleRef,
     name: "Свет в офисе по движению",
     relation: "superset",
-    differences: [
-      {
-        field: "auto_off",
-        existing: [
-          {
-            after_seconds: 120,
-            timer_mode: "RESET",
-            target_value: false,
-            timer_index: 1,
-          },
-        ],
-        requested: [],
-      },
-    ],
+    differences: [officeAutoOffDifference],
   };
 
   const prepared = await preview(client);
@@ -942,6 +951,78 @@ test("an existing rule that also turns the light off later is reported and not d
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.delete),
     false,
   );
+  assert.deepEqual(hub.state.scenarios, scenariosBefore);
+});
+
+test("a turned-off broader rule is reported and does not block the requested rule", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push(officeMotionRuleWithAutoOff({ active: false }));
+  const turnedOff = structuredClone(hub.state.scenarios.at(-1));
+  const scenarioCount = hub.state.scenarios.length;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await preview(client);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  // It does not run, so a new rule duplicates nothing; the agent learns that
+  // the broader rule exists but is off.
+  assert.deepEqual(prepared.structuredContent.existing_rules, [
+    {
+      ref: officeRuleRef,
+      name: "Свет в офисе по движению",
+      relation: "inactive_superset",
+      differences: [
+        officeAutoOffDifference,
+        { field: "active", existing: false, requested: true },
+      ],
+    },
+  ]);
+
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.created, true);
+  assert.equal(applied.structuredContent.owned, true);
+  assert.equal(hub.state.scenarios.length, scenarioCount + 1);
+  assert.deepEqual(
+    hub.state.scenarios.find(({ index }) => index === "motion-light"),
+    turnedOff,
+  );
+});
+
+test("a broader rule that also runs on start still blocks a duplicate", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios.push(officeMotionRuleWithAutoOff({ onStart: true }));
+  const scenariosBefore = structuredClone(hub.state.scenarios);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await preview(client);
+  assert.deepEqual(
+    prepared.structuredContent.existing_rules.map(
+      ({ relation, differences }) => ({ relation, differences }),
+    ),
+    [
+      {
+        relation: "superset",
+        differences: [
+          officeAutoOffDifference,
+          { field: "on_start", existing: true, requested: false },
+        ],
+      },
+    ],
+  );
+  const applied = await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "conflict");
+  assert.equal(
+    applied.structuredContent.conflict_reason,
+    "existing_rule_superset",
+  );
+  assert.equal(applied.structuredContent.created, false);
   assert.deepEqual(hub.state.scenarios, scenariosBefore);
 });
 
