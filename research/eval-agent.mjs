@@ -302,12 +302,17 @@ export async function runCase({
 }
 
 // The simulated hub of a case: its fixture, patched by the case (for example
-// a light that must start on), with the case's faults.
+// a light that must start on), with the case's faults. Its clock starts at
+// noon hub time on the machine's date, so the seeded log (last night's run
+// gone, about 2.5 hours kept) and the facts a case states about it hold at
+// any hour of the run.
+const CASE_HUB_TIME = "12:00";
+
 export async function startCaseHub(definition, fixtureName, options = {}) {
   const fixture = structuredClone(await loadHomeFixture(fixtureName));
   return startSimulatedHub(
     definition.patch ? definition.patch(fixture) : fixture,
-    { faults: definition.faults, ...options },
+    { faults: definition.faults, hubTime: CASE_HUB_TIME, ...options },
   );
 }
 

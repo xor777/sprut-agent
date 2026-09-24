@@ -969,6 +969,10 @@ async function loadFixtureFile(file) {
 //   value writes without changing anything;
 // - lampLogic [{aId, sId}]: an active LightbulbControl logic is assigned to
 //   the service (see applyLampLogic).
+// hubTime ("12:00" or "12:00:00") starts the hub clock at that hub-local
+// wall clock on the machine's hub-local date; the clock then runs at the
+// machine's pace. It places the seeded log, the settings window's time and
+// the log lines of later runs. Without it the hub clock is the machine's.
 export async function startSimulatedHub(
   fixture,
   {
@@ -977,9 +981,10 @@ export async function startSimulatedHub(
     token = SIMULATED_HUB_TOKEN,
     cid = SIMULATED_HUB_CID,
     faults = {},
+    hubTime,
   } = {},
 ) {
-  const state = buildState(withFixtureFaults(fixture, faults));
+  const state = buildState(withFixtureFaults(fixture, faults), hubTime);
   const initialState = structuredClone(state);
   state.faults = {
     delayedReadback: structuredClone(faults.delayedReadback ?? []),
@@ -1765,9 +1770,13 @@ const HANDLERS = {
     null,
 };
 
-function buildState(fixture) {
-  const startedAt = Date.now();
+function buildState(fixture, hubTime) {
   const utcOffsetMinutes = fixture.log?.utcOffsetMinutes ?? 180;
+  const machineNow = Date.now();
+  const startedAt =
+    hubTime === undefined
+      ? machineNow
+      : atHubTime(hubTime, utcOffsetMinutes, machineNow);
   const hub = {
     serial: fixture.hub.serial,
     name: fixture.hub.name,
@@ -1811,6 +1820,7 @@ function buildState(fixture) {
     runs: [],
     log: seedLog(fixture.log, startedAt),
     logCapacity: fixture.log?.capacity ?? DEFAULT_LOG_CAPACITY,
+    clockOffsetMs: startedAt - machineNow,
     nextScenarioIndex: 1,
     nextWindow: 1,
     nextSubscription: 1,
@@ -2037,6 +2047,33 @@ function homeSettingsWindow(hub) {
   };
 }
 
+// The instant a hub-local wall clock ("12:00" or "12:00:00") falls on the
+// hub-local date of now.
+function atHubTime(wallClock, utcOffsetMinutes, now) {
+  const match = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(wallClock);
+  if (!match) throw new Error(`hubTime ${wallClock} is not HH:MM[:SS]`);
+  const [hours, minutes, seconds] = match
+    .slice(1)
+    .map((part) => Number(part ?? 0));
+  const offsetMs = utcOffsetMinutes * 60_000;
+  const localDate = new Date(now + offsetMs);
+  return (
+    Date.UTC(
+      localDate.getUTCFullYear(),
+      localDate.getUTCMonth(),
+      localDate.getUTCDate(),
+      hours,
+      minutes,
+      seconds,
+    ) - offsetMs
+  );
+}
+
+// The hub's clock: the machine's, moved by the start's hubTime.
+function hubNow(state) {
+  return Date.now() + state.clockOffsetMs;
+}
+
 // Wall clock of the hub settings window: "2026-09-24 - 21:40:12 (GMT+03:00)".
 function hubClock(now, utcOffsetMinutes) {
   const local = new Date(now + utcOffsetMinutes * 60_000).toISOString();
@@ -2061,14 +2098,13 @@ function seedLog(log, now) {
   const localMidnight =
     Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) -
     offsetMs;
-  const byDay = [];
   const placed = (log.entries ?? []).map(
     ({ day, time: wallClock, minutesAgo, offsetMs: extra, ...entry }) => {
       if (typeof minutesAgo === "number") {
         return { time: now - minutesAgo * 60_000 + (extra ?? 0), ...entry };
       }
       const [hours, minutes, seconds] = wallClock.split(":").map(Number);
-      const placedEntry = {
+      return {
         time:
           localMidnight +
           day * 86_400_000 +
@@ -2076,22 +2112,8 @@ function seedLog(log, now) {
           Math.round(seconds * 1_000),
         ...entry,
       };
-      byDay.push(placedEntry);
-      return placedEntry;
     },
   );
-  // Wall-clock entries describe the last completed run (a night scenario
-  // from 23:00 to 06:00). Early in the day that run is not over yet, or is
-  // still inside the recent window, so the whole group moves back a day
-  // until its latest entry is old enough. Without this the seeded log
-  // depended on the hour the run started.
-  const minAgeMs = (log.dayEntriesAtLeastMinutesAgo ?? 0) * 60_000;
-  while (
-    byDay.length > 0 &&
-    Math.max(...byDay.map(({ time }) => time)) > now - minAgeMs
-  ) {
-    for (const entry of byDay) entry.time -= 86_400_000;
-  }
   for (const group of log.recurring ?? []) {
     for (let repeat = 0; repeat < group.times; repeat += 1) {
       const start =
@@ -2110,7 +2132,7 @@ function seedLog(log, now) {
 }
 
 function appendLog(state, entry) {
-  const time = Math.max(Date.now(), (state.log.at(-1)?.time ?? 0) + 1);
+  const time = Math.max(hubNow(state), (state.log.at(-1)?.time ?? 0) + 1);
   state.log.push({ time, ...entry });
   if (state.log.length > state.logCapacity) {
     state.log.splice(0, state.log.length - state.logCapacity);

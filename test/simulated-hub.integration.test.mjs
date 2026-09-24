@@ -23,8 +23,11 @@ const projectRoot = path.resolve(
 );
 const homeRef = "spruthub://hub/sim-apartment-01";
 
-async function setup(t, fixture = "apartment") {
-  const hub = await startSimulatedHub(await loadHomeFixture(fixture));
+async function setup(t, fixture = "apartment", hubOptions = {}) {
+  const hub = await startSimulatedHub(
+    await loadHomeFixture(fixture),
+    hubOptions,
+  );
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-simulated-hub-"),
   );
@@ -520,7 +523,9 @@ test("only allowlisted reads are reads, and link settings show in the home diff"
 });
 
 test("the shipped hub log, room rename and service hide work on the simulated home", async (t) => {
-  const { hub, client } = await setup(t);
+  // At noon last night's run (23:00 to 06:00) is out of the buffer; on the
+  // machine clock at night it would still be in it.
+  const { hub, client } = await setup(t, "apartment", { hubTime: "12:00" });
 
   // One read covers the whole 128-entry ring buffer; the newest matches that
   // fit max_bytes are shown, the rest is counted, never paged.
@@ -537,8 +542,11 @@ test("the shipped hub log, room rename and service hide work on the simulated ho
   assert.equal(logPage.buffer_entries, 128);
   assert.equal(logPage.page.matched_total, 128);
   assert.equal(logPage.next, undefined);
-  // About two and a half hours are kept: yesterday's night run was evicted.
-  assert.ok(Date.now() - Date.parse(logPage.oldest_entry_at) < 3 * 3.6e6);
+  // About two and a half hours are kept: last night's run was evicted.
+  assert.ok(
+    Date.parse(logPage.entries[0].time) - Date.parse(logPage.oldest_entry_at) <
+      3 * 3.6e6,
+  );
   assert.ok(
     !logPage.entries.some(({ message }) => message.startsWith("Сценарий 5:")),
   );
