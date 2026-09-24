@@ -771,6 +771,10 @@ export class AutomationService {
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) throw scenarioNotFound();
     const snapshot = runnableScenarioSnapshot(scenario);
+    // Turning it on would not make it runnable, so this is checked first.
+    if (!isVerifiedRunType(snapshot)) {
+      throw unverifiedScenarioRunType(snapshot);
+    }
     if (!snapshot.active) throw inactiveScenarioRun(targetRef);
     return { target, snapshot };
   }
@@ -3774,6 +3778,14 @@ export class AutomationService {
       });
     }
     if (change.status !== "prepared") return publicStoredNativeChange(change);
+    // Earlier versions prepared runs of any type.
+    if (!isVerifiedRunType(change.baseline_snapshot)) {
+      const error = unverifiedScenarioRunType(change.baseline_snapshot);
+      await this.#finishNative(change, "not_applied", undefined, {
+        last_verification: failedVerification(error),
+      });
+      throw error;
+    }
     const scenario = await this.client.getScenario(change.target.index);
     const current =
       scenario === null ? null : runnableScenarioSnapshot(scenario);
@@ -5439,6 +5451,25 @@ function inactiveScenarioRun(targetRef) {
   );
 }
 
+// A manual run was observed for an action-only BLOCK; user LOGIC is run on
+// the owner's decision. A GLOBAL run may execute its code again and register
+// its cron jobs and subscriptions a second time, and built-in scenarios were
+// never run, so other types wait for a live check.
+function isVerifiedRunType(snapshot) {
+  return (
+    ["BLOCK", "LOGIC"].includes(snapshot.type) && snapshot.predefined !== true
+  );
+}
+
+function unverifiedScenarioRunType(snapshot) {
+  const kind =
+    snapshot.predefined === true ? "built-in" : String(snapshot.type);
+  return new SprutHubError(
+    "scenario_run_unverified_type",
+    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. scenario_active can turn this scenario on or off; to run it now, ask the owner to run it in the SprutHub app.`,
+  );
+}
+
 function unsupportedScenarioType() {
   return new SprutHubError(
     "unsupported_scenario_type",
@@ -5644,14 +5675,19 @@ function scenarioRunContract() {
   return {
     version: "2026-09-24",
     write: "scenario.run({index})",
-    scope: "any_active_scenario",
+    scope: "one_active_BLOCK_or_user_LOGIC_scenario",
     required_configuration: { active: true },
+    refused_until_live_check: {
+      error: "scenario_run_unverified_type",
+      types: "every type other than BLOCK and LOGIC, including GLOBAL",
+      predefined: true,
+    },
     preparation: "read_without_execution",
     effect: {
       targets:
         "literal service/set actions of a BLOCK that resolve to writable characteristics",
       targets_known:
-        "false for LOGIC, GLOBAL and other types, and for BLOCK code, toggle/inc/dec actions, scenario targets, non-literal values, unresolved bindings, or uninterpreted nodes and fields",
+        "false for LOGIC, and for BLOCK code anywhere, toggle/inc/dec actions, scenario targets, non-literal values, unresolved bindings, or uninterpreted nodes and fields",
       predicted:
         "true only for a BLOCK with known targets and no conditions, delays, or repeated targets; otherwise effect.reasons names what the hub decides during the run",
     },
@@ -5675,10 +5711,12 @@ function scenarioRunContract() {
       not_observed: [
         "a run of a turned-off scenario",
         "whether a run evaluates or bypasses BLOCK conditions and triggers",
-        "delays, LOGIC, GLOBAL, and other scenario types",
+        "delays and LOGIC",
+        "GLOBAL, built-in, and other scenario types, which are refused",
       ],
     },
     limitations: [
+      "GLOBAL, built-in (predefined), and other non-BLOCK, non-LOGIC scenarios are refused with scenario_run_unverified_type until a manual run is verified on a hub: a GLOBAL run may register its timers and subscriptions again. Ask the owner to run such a scenario in the SprutHub app.",
       "A turned-off scenario is refused because its manual run has not been observed; scenario_active turns it on and also re-arms its triggers.",
       "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write, and read_hub_log with the scenario_ref shows what it did.",
       "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
@@ -10243,7 +10281,7 @@ function publicNativeChange(
         ...(plan.targets_known
           ? []
           : [
-              "Characteristics changed by code, other scenario types, or uninterpreted BLOCK parts are not listed as targets.",
+              "Characteristics changed by LOGIC or BLOCK code, or by uninterpreted BLOCK parts, are not listed as targets.",
             ]),
         "An acknowledged run means SprutHub accepted scenario.run; target values are observed separately and do not prove physical delivery or causality.",
         "The target actions are not atomic, and a race remains after the pre-run scenario comparison.",
