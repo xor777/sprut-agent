@@ -2062,14 +2062,25 @@ function nativeText(value) {
 
 // Grader-side evaluation of the home's active BLOCK rules for one
 // characteristic change: preset values are applied silently, then change is
-// applied and every active BLOCK whose condition tree has a trigger on that
-// characteristic runs once. Supported: if with condition groups (AND/OR),
-// characteristic leaves (=, ==, !=, <>, >, <, >=, <=), then/else branches,
-// nested if and service/set actions. Delays are skipped (a RESET delay is a
-// timer the grader does not run) and actions do not trigger further rules.
-// Any other node (interval, cron, code, unknown refs) is reported as
-// unsupported rather than guessed. It is not a model of the hub's scheduler.
-export function evaluateRulesOnChange(state, { preset = [], change }) {
+// applied and every active BLOCK with a trigger leaf on that characteristic
+// fires once. A fired BLOCK runs all its top-level steps in order, as the
+// editor lays them out (not observed on a hub): service/set actions, ifs
+// with condition groups (AND/OR) of characteristic leaves (=, ==, !=, <>,
+// >, <, >=, <=), then/else branches, nested ifs, RESET delays and
+// clear_delay. An if without mode is EVERY; ONCE runs a branch only when
+// the condition differs from its value before the change. A RESET delay
+// runs its steps when it ends inside windowMs after the change, so a
+// switch-off after 0 or 120 ms leaves the light off; a longer one is only
+// listed in skipped. Actions do not trigger further rules. Anything else
+// (a hold on a leaf, a repeating branch, another delay mode, interval,
+// cron, code, toggle, unknown refs) is reported as unsupported rather than
+// guessed. It is not a model of the hub's scheduler.
+export const RULE_WINDOW_MS = 10_000;
+
+export function evaluateRulesOnChange(
+  state,
+  { preset = [], change, windowMs = RULE_WINDOW_MS },
+) {
   const home = { accessories: structuredClone(state.accessories) };
   const set = ({ aId, sId, cId, value }) => {
     const characteristic = findCharacteristic(home, { aId, sId, cId });
@@ -2083,14 +2094,40 @@ export function evaluateRulesOnChange(state, { preset = [], change }) {
   };
   for (const value of preset) set(value);
   const before = characteristicValues(home);
+  const previous = structuredClone(home);
   set(change);
   const result = { fired: [], writes: [], skipped: [], unsupported: [] };
   for (const scenario of state.scenarios) {
     if (scenario.type !== "BLOCK" || scenario.active !== true) continue;
-    for (const target of JSON.parse(scenario.data).targets ?? []) {
-      if (target.type !== "if" || !hasTrigger(target.if, change)) continue;
-      result.fired.push(scenario.index);
-      runRuleIf(home, target, result, scenario.index);
+    const data = JSON.parse(scenario.data);
+    if (!blockNodes(scenario.data).some((node) => isTrigger(node, change))) {
+      continue;
+    }
+    result.fired.push(scenario.index);
+    const run = {
+      home,
+      previous,
+      result,
+      index: scenario.index,
+      now: 0,
+      timers: [],
+    };
+    runRuleActions(run, data.targets);
+    // Timers that end inside the window run in the order they end.
+    for (;;) {
+      run.timers.sort((left, right) => left.at - right.at);
+      const timer = run.timers.shift();
+      if (!timer) break;
+      if (timer.at >= windowMs) {
+        result.skipped.push({
+          index: scenario.index,
+          node: "delay",
+          time: timer.time,
+        });
+        continue;
+      }
+      run.now = timer.at;
+      runRuleActions(run, timer.targets);
     }
   }
   const after = characteristicValues(home);
@@ -2170,39 +2207,43 @@ function characteristicValues(home) {
   return values;
 }
 
-function hasTrigger(node, target) {
-  if (!isRecord(node)) return false;
-  if (node.type === "characteristic") {
-    return (
-      node.trigger === true &&
-      node.aId === target.aId &&
-      node.sId === target.sId &&
-      node.cId === target.cId
-    );
-  }
-  return (node.conditions ?? []).some((child) => hasTrigger(child, target));
+function isTrigger(node, target) {
+  return (
+    node.type === "characteristic" &&
+    node.trigger === true &&
+    node.aId === target.aId &&
+    node.sId === target.sId &&
+    node.cId === target.cId
+  );
 }
 
-function evaluateRuleCondition(home, node, result, index) {
+// true, false, or null with the reason in unsupported (when given).
+function evaluateRuleCondition(home, node, unsupported, index) {
   if (node?.type === "condition") {
     const values = (node.conditions ?? []).map((child) =>
-      evaluateRuleCondition(home, child, result, index),
+      evaluateRuleCondition(home, child, unsupported, index),
     );
     if (values.includes(null)) return null;
     if (node.mode === "OR") return values.some(Boolean);
     if (node.mode === "AND") return values.every(Boolean);
   }
-  if (node?.type === "characteristic") {
+  // A hold ("has not changed for", "changed back within") needs time the
+  // grader does not run.
+  const held =
+    node?.type === "characteristic" &&
+    ((node.timeCond ?? "") !== "" || (node.time ?? 0) !== 0);
+  if (node?.type === "characteristic" && !held) {
     const characteristic = findCharacteristic(home, node);
     const verdict = characteristic
       ? compareNative(nativeText(characteristic.control.value), node)
       : null;
     if (verdict !== null) return verdict;
   }
-  result.unsupported.push({
+  unsupported?.push({
     index,
     node: node?.type ?? null,
     ...(node?.cond ? { cond: node.cond } : {}),
+    ...(held ? { hold: `${node.timeCond ?? ""} ${node.time ?? 0}` } : {}),
   });
   return null;
 }
@@ -2225,18 +2266,69 @@ function compareNative(actual, { cond, value }) {
   return null;
 }
 
-function runRuleIf(home, node, result, index) {
-  const verdict = evaluateRuleCondition(home, node.if, result, index);
+function runRuleIf(run, node) {
+  const { result, index } = run;
+  const mode = node.mode ?? "EVERY";
+  const repeats = ["then_delay", "else_delay"].filter(
+    (key) => (node[key] ?? 0) !== 0,
+  );
+  if ((mode !== "EVERY" && mode !== "ONCE") || repeats.length > 0) {
+    result.unsupported.push({
+      index,
+      node: "if",
+      ...(repeats.length > 0 ? { repeats } : { mode }),
+    });
+    return;
+  }
+  const verdict = evaluateRuleCondition(
+    run.home,
+    node.if,
+    result.unsupported,
+    index,
+  );
   if (verdict === null) return;
-  runRuleActions(home, verdict ? node.then : node.else, result, index);
+  if (mode === "ONCE") {
+    // The value before the change stands in for the stored if state, which
+    // is known only for the change itself, not later inside a delay.
+    const earlier =
+      run.now === 0
+        ? evaluateRuleCondition(run.previous, node.if, null, index)
+        : null;
+    if (earlier === null) {
+      result.unsupported.push({ index, node: "if", mode });
+      return;
+    }
+    if (earlier === verdict) return;
+  }
+  runRuleActions(run, verdict ? node.then : node.else);
 }
 
-function runRuleActions(home, nodes, result, index) {
+function runRuleActions(run, nodes) {
+  const { home, result, index } = run;
   for (const node of nodes ?? []) {
     if (node.type === "if") {
-      runRuleIf(home, node, result, index);
+      runRuleIf(run, node);
     } else if (node.type === "delay") {
-      result.skipped.push({ index, node: "delay", time: node.time });
+      if (
+        node.mode !== "RESET" ||
+        !Number.isFinite(node.time) ||
+        node.time < 0
+      ) {
+        result.unsupported.push({ index, node: "delay", mode: node.mode });
+        continue;
+      }
+      // A RESET delay started again replaces its running timer.
+      run.timers = run.timers.filter((timer) => timer.delay !== node.index);
+      run.timers.push({
+        delay: node.index,
+        at: run.now + node.time,
+        time: node.time,
+        targets: node.targets,
+      });
+    } else if (node.type === "clear_delay") {
+      run.timers = run.timers.filter(
+        (timer) => node.index !== 0 && timer.delay !== node.index,
+      );
     } else if (node.type === "service") {
       for (const action of node.characteristics ?? []) {
         const characteristic = findCharacteristic(home, {
@@ -2260,6 +2352,7 @@ function runRuleActions(home, nodes, result, index) {
             cId: action.cId,
           }),
           value: String(action.value),
+          at: run.now,
         });
       }
     } else {

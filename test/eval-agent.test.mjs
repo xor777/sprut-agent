@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import {
   collectEvidence,
+  failureClass,
   integrityGraders,
   main,
   parseClaudeStream,
@@ -875,7 +876,6 @@ test("motion-light-new runs the rule: branches, conditions, refs and side effect
   // What the evaluator does not model fails as unsupported, never as a
   // pass: a hold on the motion condition, a CONTINUE delay and a branch
   // that repeats.
-  const { failureClass } = await import("../research/eval-agent.mjs");
   for (const [label, data] of [
     ["hold", motionRule(35, { condition: { timeCond: ">", time: 60_000 } })],
     [

@@ -396,11 +396,12 @@ function stayedInBounds({ toolCalls, allowedRoots, forbiddenRoots }) {
 }
 
 // The first failed grader family names why a run failed; agent means the
-// household graders.
-function failureClass(graders) {
-  const failed = new Set(
-    graders.filter(({ pass }) => !pass).map(({ name }) => name),
-  );
+// household graders. grader_unsupported: the only failed graders could not
+// evaluate what the agent built (they return unsupported: true), so the
+// run neither passes nor counts against the agent.
+export function failureClass(graders) {
+  const failedGraders = graders.filter(({ pass }) => !pass);
+  const failed = new Set(failedGraders.map(({ name }) => name));
   if (failed.size === 0) return null;
   if (failed.has("run_completed")) return "harness";
   if (
@@ -410,6 +411,9 @@ function failureClass(graders) {
     return "isolation";
   }
   if (failed.has("no_simulator_gap")) return "simulator_gap";
+  if (failedGraders.every(({ unsupported }) => unsupported === true)) {
+    return "grader_unsupported";
+  }
   return "agent";
 }
 

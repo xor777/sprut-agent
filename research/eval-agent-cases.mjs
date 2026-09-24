@@ -895,8 +895,10 @@ function answerMatches(name, pattern) {
   };
 }
 
-// Motion on must turn the bathroom light on and change nothing else; motion
-// off must not turn it on. Every active BLOCK rule of the home takes part.
+// Motion on must leave the bathroom light on, motion off must not turn it
+// on, and neither may change anything else. Every active BLOCK rule of the
+// home takes part. A rule the evaluator cannot run fails as unsupported:
+// the grader does not know, so the run is not blamed on the agent.
 function motionVerdict(state) {
   const light = (value) => ({ ...BATHROOM_LIGHT, value });
   const motion = (value) => ({ ...BATHROOM_MOTION, value });
@@ -910,21 +912,26 @@ function motionVerdict(state) {
   });
   const unsupported = [...start.unsupported, ...stop.unsupported];
   if (unsupported.length > 0) {
-    return result(
-      false,
-      `rule not evaluable: ${JSON.stringify(unsupported.slice(0, 3))}`,
-    );
+    return {
+      pass: false,
+      unsupported: true,
+      detail: `rule not evaluable: ${JSON.stringify(unsupported.slice(0, 3))}`,
+    };
   }
   const lightKey = "35.13.14";
-  const others = start.changed.filter(({ key }) => key !== lightKey);
+  const others = [
+    ...new Set(
+      [...start.changed, ...stop.changed]
+        .filter(({ key }) => key !== lightKey)
+        .map(({ key }) => key),
+    ),
+  ];
   const onWithMotion = start.after[lightKey] === true;
   const offWithoutMotion = stop.after[lightKey] === false;
   return result(
     onWithMotion && others.length === 0 && offWithoutMotion,
     `motion_on_light=${start.after[lightKey]} motion_off_light=${stop.after[lightKey]}${
-      others.length > 0
-        ? ` also_changed=${others.map(({ key }) => key).join(",")}`
-        : ""
+      others.length > 0 ? ` also_changed=${others.join(",")}` : ""
     }`,
   );
 }
