@@ -925,10 +925,11 @@ function assembleTimeTriggerFromContract(
   }
   let offset = form.offset;
   if (typeof form.offset === "object") {
-    if (form.offset.unit !== "minutes") {
-      throw new Error(`time trigger ${formName} offset is not in minutes`);
+    const perMinute = { seconds: 60, minutes: 1 }[form.offset.unit];
+    if (perMinute === undefined) {
+      throw new Error(`time trigger ${formName} offset has no known unit`);
     }
-    offset = offsetMinutes;
+    offset = offsetMinutes * perMinute;
   }
   return {
     type: "cron",
@@ -9058,7 +9059,8 @@ test("weekday, one-date and sunset time triggers are created, read back and remo
         offset: 0,
       },
       { type: "cron", mode: "NONE", cron: "0 0 9 25 9 ? 2026", offset: 0 },
-      { type: "cron", mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 30 },
+      // The web client stores the sun offset in seconds.
+      { type: "cron", mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 1800 },
     ],
   );
   const data = {
@@ -9119,7 +9121,8 @@ test("an existing BLOCK with a sunrise trigger is updated, read back and restore
           type: "cron",
           mode: "SUNRISE",
           cron: "0 0 0 ? * * *",
-          offset: -10,
+          // The web client's default for "before": one hour, in seconds.
+          offset: -3600,
         }),
         thenActions: [setAction({ value: "false" })],
       }),
@@ -9136,7 +9139,7 @@ test("an existing BLOCK with a sunrise trigger is updated, read back and restore
     read.structuredContent.entity.configuration.value,
   );
   edited.targets[0].if.conditions[0].cron = "0 0 0 ? * SAT,SUN *";
-  edited.targets[0].if.conditions[0].offset = 20;
+  edited.targets[0].if.conditions[0].offset = 20 * 60;
   const prepared = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -9159,7 +9162,7 @@ test("an existing BLOCK with a sunrise trigger is updated, read back and restore
     blockId: 3,
     mode: "SUNRISE",
     cron: "0 0 0 ? * SAT,SUN *",
-    offset: 20,
+    offset: 1200,
   });
 
   const restored = await client.callTool({
@@ -9193,7 +9196,7 @@ test("time triggers outside the published forms are refused with a repairable re
     ],
     [
       "sunset far offset",
-      { mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 721 },
+      { mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 43_201 },
     ],
     ["unknown mode", { mode: "NOON", cron: "0 0 12 ? * * *", offset: 0 }],
   ];
