@@ -2685,8 +2685,10 @@ function runRuleActions(run, nodes) {
   }
 }
 
+// SprutHub 3.0.0 (owner hub, 2026-09-24, live-conformance-3): a user LOGIC's
+// native type is the string of its scenario index.
 function logicTypeForScenario(index) {
-  return `UserLogic_${index}`;
+  return String(index);
 }
 
 function logicSourceDescription(source) {
@@ -2698,12 +2700,17 @@ function logicSourceServices(source) {
   return [...list.matchAll(/HS\.(\w+)/g)].map(([, type]) => type);
 }
 
+// A user LOGIC's type is listed on the services of its sourceServices only
+// while the LOGIC is on, with the scenario's current name and description
+// (owner hub, 2026-09-24, live-conformance-3; listing on every service of
+// sourceServices is assumed from the one anchor observed).
 function availableLogicTypes(state, service) {
   const builtIn = state.logicCatalog[service.type] ?? [];
   const user = state.scenarios
     .filter(
       (scenario) =>
         scenario.type === "LOGIC" &&
+        scenario.active === true &&
         logicSourceServices(scenario.data).includes(service.type),
     )
     .map((scenario) => ({

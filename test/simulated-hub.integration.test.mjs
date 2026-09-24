@@ -167,7 +167,7 @@ test("public read tools see the simulated apartment as a native home", async (t)
   });
   assert.deepEqual(
     logic.entity.assigned_logics.map(({ type, active }) => [type, active]),
-    [["UserLogic_9", true]],
+    [["9", true]],
   );
 
   assertEveryRequestSupported(hub);

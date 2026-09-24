@@ -653,12 +653,11 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
     sync: false,
     source,
   });
-  // The product maps a LOGIC's type only when the read right after its
-  // create shows it on, so the probe creates it on; it runs nothing.
+  // Created on, it runs nothing; its type is its scenario index.
   const created = await guardApply(g.guard, logicInput(true, inertLogic(name)));
   const logicRef = created.applied.scenario_ref;
   const type = created.applied.native_logic_type;
-  assert.equal(typeof type, "string");
+  assert.equal(type, logicRef.split("/").at(-1));
   const assign = (serviceRef, logicType) => ({
     operation: "logic_assignment",
     target_ref: `${serviceRef}/logic/${encodeURIComponent(logicType)}`,
@@ -705,22 +704,15 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
   );
   assert.deepEqual(sweepWrites(g.hub, before), []);
 
-  // Off and unassigned: it may be assigned, and then it stays off.
-  const assignment = await guardApply(
-    g.guard,
-    assign(virtual.serviceRef, type),
+  // Off, its type is not listed on the anchor (SprutHub 3.0.0), so the
+  // product's logic_assignment cannot name it as a run LOGIC's.
+  await assert.rejects(
+    g.guard.prepare(assign(virtual.serviceRef, type)),
+    conformance.GuardError,
   );
-  await assert.rejects(g.guard.prepare(active(true)), conformance.GuardError);
-  assert.equal(
-    (await g.guard.restore(assignment.changeRef)).status,
-    "restored",
-  );
-  assert.equal(
-    g.hub.state.logics.some((item) => item.type === type),
-    false,
-  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
 
-  // Unassigned again: it may be turned on.
+  // Unassigned: it may be turned on.
   await guardApply(g.guard, active(true));
   assert.equal(logic.active, true);
 });

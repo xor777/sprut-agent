@@ -1024,7 +1024,7 @@
       }
     ]
   },
-  "logics": [{ "aId": 23, "sId": 13, "type": "UserLogic_9", "active": true }],
+  "logics": [{ "aId": 23, "sId": 13, "type": "9", "active": true }],
   "scenarios": [
     {
       "index": "3",
