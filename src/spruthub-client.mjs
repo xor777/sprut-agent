@@ -18,15 +18,13 @@ const VALUE_FIELDS = [
 ];
 
 const INCLUDE_READ_ERROR = Symbol("includeReadError");
-const LOG_LEVELS = new Set([
-  "LOG_LEVEL_OFF",
-  "LOG_LEVEL_ERROR",
-  "LOG_LEVEL_WARN",
-  "LOG_LEVEL_INFO",
-  "LOG_LEVEL_DEBUG",
-  "LOG_LEVEL_TRACE",
-  "LOG_LEVEL_ALL",
-]);
+const LOG_LEVEL_NAMES = new Map(
+  ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
+    `LOG_LEVEL_${name.toUpperCase()}`,
+    name,
+  ]),
+);
+const LOG_LEVELS = new Set(LOG_LEVEL_NAMES.keys());
 const SCENARIO_LOG_PREFIX_BY_PATH = new Map([
   ["Scenario.ScenarioBlock.Target.jBlock", ": "],
   ["Notifiers.Notifier", " - "],
@@ -222,7 +220,7 @@ export class SprutHubClient {
       ],
       unsupported_in_this_slice: [
         "pairing and controller actions",
-        "historical events, logs, and unbounded monitoring",
+        "history of characteristic values and events, and unbounded monitoring",
         "dashboards",
         "backups",
       ],
@@ -618,6 +616,89 @@ export class SprutHubClient {
       freshness: freshness(observedAt),
     };
     return paginateServices(base, services, selection);
+  }
+
+  async readHubLog({ homeRef: selectedHomeRef, count, lastTime = null }) {
+    const serial = parseHomeRef(selectedHomeRef);
+    if (this.serial === null) {
+      if (this.#availableHomeCount === 0) throw noHomesAvailable();
+      throw homeSelectionRequired();
+    }
+    if (serial !== this.serial) {
+      throw new SprutHubError(
+        "wrong_home",
+        "The hub log is read only from the configured SprutHub home. Use its home_ref from list_homes.",
+        "list_homes",
+        { next: { tool: "list_homes", arguments: {} } },
+      );
+    }
+    let response;
+    try {
+      response = await this.#request(
+        {
+          log: {
+            list: { ...(lastTime === null ? {} : { lastTime }), count },
+          },
+        },
+        Date.now() + this.timeoutMs,
+        { serial },
+      );
+    } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        ["unsupported", "request_rejected"].includes(error.code)
+      ) {
+        throw new SprutHubError(
+          "hub_log_unavailable",
+          "SprutHub did not provide its execution log for this request; this is not an empty log.",
+          undefined,
+          {
+            capability_status:
+              error.code === "unsupported" ? "unsupported" : "unknown",
+            native_error_code:
+              error.protocolErrorCode ??
+              (error.code === "unsupported" ? -32601 : null),
+          },
+        );
+      }
+      throw error;
+    }
+    const list = response.result?.log?.list;
+    // Protobuf JSON omits an empty repeated field, so a list object without
+    // log is an empty answer; any other form is not a readable log.
+    const nativeEntries =
+      isPlainObject(list) && list.log === undefined ? [] : list?.log;
+    if (!isPlainObject(list) || !Array.isArray(nativeEntries)) {
+      throw incompatibleHubLog();
+    }
+    const entries = nativeEntries
+      .map(normalizeHubLogEntry)
+      .sort((a, b) => b.native_time - a.native_time);
+    if (
+      lastTime !== null &&
+      entries.some(({ native_time: time }) => time > lastTime)
+    ) {
+      throw new SprutHubError(
+        "unsupported_log_paging",
+        "SprutHub returned entries newer than the continuation boundary, so older log pages cannot be read reliably. Read the first page again without before.",
+        "restart_read_hub_log",
+        { capability_status: "unknown" },
+      );
+    }
+    return {
+      status: "ok",
+      home_ref: homeRef(serial),
+      entries,
+      native: {
+        operation: "log.list",
+        requested_count: count,
+        last_time: lastTime,
+        returned_count: nativeEntries.length,
+        time_unit: "unix_ms",
+        retention: "unknown",
+      },
+      freshness: freshness(response.responseReceivedAt),
+    };
   }
 
   async #readServiceHome(serial, deadline) {
@@ -2830,9 +2911,44 @@ function nativeLogTimestamp(time) {
   return Number.isNaN(date.valueOf()) ? null : date.toISOString();
 }
 
+// A missing level, path or message stays null (protobuf JSON may omit a
+// default); a present value of another form is not a readable log entry.
+function normalizeHubLogEntry(log) {
+  if (!isPlainObject(log)) throw incompatibleHubLog();
+  const time = nativeLogTimestamp(log.time);
+  const level = log.level === undefined ? null : LOG_LEVEL_NAMES.get(log.level);
+  if (
+    time === null ||
+    level === undefined ||
+    ![log.path, log.message].every(
+      (value) => value === undefined || typeof value === "string",
+    )
+  ) {
+    throw incompatibleHubLog();
+  }
+  return {
+    time,
+    native_time: log.time,
+    level,
+    path: log.path ?? null,
+    message: log.message ?? null,
+  };
+}
+
+function incompatibleHubLog() {
+  return new SprutHubError(
+    "incompatible_response",
+    "SprutHub returned an incompatible execution log.",
+  );
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 // Only these observed path/prefix pairs identify one scenario index; the
 // separator keeps "Сценарий 230" out of scenario 23.
-function isScenarioLogMessage(path, message, scenarioIndex) {
+export function isScenarioLogMessage(path, message, scenarioIndex) {
   const separator = SCENARIO_LOG_PREFIX_BY_PATH.get(path);
   return (
     separator !== undefined &&

@@ -353,24 +353,44 @@ for (const lastTimeSemantics of ["before_exclusive", "before_inclusive"]) {
     while (args) {
       pages += 1;
       assert(pages <= 60, "paging did not terminate");
+      const alreadySeen = [...seen];
       const result = await readLog(client, args);
       assert.equal(result.isError, undefined, result.content[0]?.text);
       assert(Buffer.byteLength(result.content[0].text) <= 2_048);
-      seen.push(...result.structuredContent.entries.map((e) => e.message));
+      const { lastTime, count } = hub.requests.at(-1).params.log.list;
+      if (pages === 1) {
+        assert.deepEqual(hub.requests.at(-1).params.log.list, { count: 5 });
+      } else {
+        // A continuation asks for the entries at or before the oldest one
+        // already returned and refetches that boundary so it can drop it.
+        const boundary = alreadySeen.filter(
+          ({ time }) => time === lastTime || time === lastTime - 1,
+        );
+        assert.equal(
+          Math.min(...alreadySeen.map(({ time }) => time)),
+          lastTime - 1,
+        );
+        assert.equal(count, 5 + boundary.length);
+      }
+      seen.push(
+        ...result.structuredContent.entries.map((entry) => ({
+          time: entry.native_time,
+          message: entry.message,
+        })),
+      );
       args = result.structuredContent.next?.arguments;
       if (result.structuredContent.next) {
         assert.equal(result.structuredContent.next.tool, "read_hub_log");
       }
     }
 
-    assert.deepEqual(seen, expected);
+    assert.deepEqual(
+      seen.map(({ message }) => message),
+      expected,
+    );
     assert(pages > 2, `expected several pages, got ${pages}`);
+    assert.equal(hub.requests.length, pages);
     assertOnlyLogListRequests(hub);
-    assert.equal(hub.requests[0].params.log.list.lastTime, undefined);
-    for (const request of hub.requests.slice(1)) {
-      assert.equal(request.params.log.list.count, 5);
-      assert(Number.isSafeInteger(request.params.log.list.lastTime));
-    }
   });
 }
 
