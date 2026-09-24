@@ -5,6 +5,7 @@ import {
   BLOCK_ALLOWED_KEYS,
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
+  blockDataHasTrigger,
   blockScenarioRuns,
   blockSubgraphHasTrigger,
   CHARACTERISTIC_HOLD,
@@ -668,13 +669,13 @@ export class AutomationService {
     );
     const data = prepared.data;
     normalizeBlockRequest(data);
+    // Runtime flags belong to the owner here: this operation never writes
+    // them, so a BLOCK without a trigger keeps whatever it had.
     const validation = await validateBlockData(data, this.client, {
-      allowUnknownFrom: baseline.data,
+      editedFrom: baseline.data,
       allowedPauses: pauseChanges,
-      allowActionOnly: true,
       scenarioIndex: target.index,
     });
-    requireActionOnlyRuntime(baseline, validation);
     const requested = {
       ...structuredClone(baseline),
       data: prepared.data,
@@ -4214,15 +4215,18 @@ export class AutomationService {
 
     if (isBlockChange(change) && blockUpdateWritesData(change)) {
       const pauseChanges = await this.#knownBlockPauses(change.target_ref);
+      const stored =
+        change.kind === "block_create"
+          ? null
+          : scenarioSnapshot(current.scenario).data;
       await validateBlockData(change.requested_snapshot.data, this.client, {
-        allowUnknownFrom:
-          change.kind === "block_create"
-            ? null
-            : scenarioSnapshot(current.scenario).data,
+        ...(change.kind === "block_data_update"
+          ? { editedFrom: stored }
+          : { allowUnknownFrom: stored }),
         allowedPauses: [...pauseChanges, change],
         allowedPauseIntentId:
           change.kind === "block_action_pause" ? change.id : undefined,
-        allowActionOnly: change.kind !== "block_action_pause",
+        allowActionOnly: change.kind === "block_create",
         scenarioIndex:
           change.kind === "block_data_update" ? change.target.index : undefined,
       });
@@ -4711,13 +4715,15 @@ export class AutomationService {
           pauseChanges,
           Date.now(),
         );
+        // Restore writes the stored original back, so what it keeps from that
+        // original passes as stored, like the nodes an edit keeps; bindings,
+        // pause controllers and scenario runs are still checked.
         await validateBlockData(prepared.data, this.client, {
-          allowUnknownFrom: scenarioSnapshot(current.scenario).data,
+          editedFrom: change.baseline_snapshot.data,
           allowedPauses: pauseChanges,
-          allowActionOnly: true,
           scenarioIndex: change.target.index,
         });
-        // Validation reads current bindings and can outlast a short pause. Rebuild
+        // Validation reads current records and can outlast a short pause. Rebuild
         // from the immutable baseline immediately afterwards so that such a pause
         // is not revived by the restore write.
         prepared = prepareBlockWriteSource(
@@ -5890,16 +5896,19 @@ function blockContract() {
     },
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
-      "A conditional BLOCK requires at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
+      "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
+      "block_data_update checks only what the edit adds or changes. A subtree equal to a stored one under the same parent fields and node types, apart from blockId, if.state and the stored form of an inc/dec step, is written as stored wherever it sits in its array; each stored subtree matches once. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions.",
+      "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
+      "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
       "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
       "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, but firing is not observed, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
-      "The same characteristic cannot be both a condition and an action in this slice.",
+      "The same characteristic cannot be both a condition and an action in this slice, unless the edit keeps both as stored.",
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0, with a step sent as a numeric string stored as a number; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
-      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6003,10 +6012,20 @@ function blockActionPauseContract() {
   };
 }
 
+// Checks BLOCK data before it is prepared, applied or restored. For
+// block_data_update, editedFrom is the stored data the request edits:
+// subtrees the edit keeps from it (keptBlockSubtrees) are written as stored
+// without checks of their own shape, rights or values, so a BLOCK made in the
+// SprutHub interface stays editable around nodes this contract cannot write.
+// Pause controllers, scenario runs, delay references, bindings and the
+// trigger count are checked over the whole data. Failing rules of the data
+// itself and of its scenario runs are reported together; the device checks
+// that follow stop at the first failure.
 async function validateBlockData(
   data,
   client,
   {
+    editedFrom,
     allowUnknownFrom,
     allowedPauses = [],
     allowedPauseIntentId,
@@ -6017,65 +6036,107 @@ async function validateBlockData(
   if (
     !isRecord(data) ||
     !Array.isArray(data.targets) ||
-    data.targets.length === 0 ||
-    !blockNodeArray(data.targets)
-  ) {
-    throw invalidBlock("root", "targets must be a non-empty array");
-  }
-  const unknown = collectUnknownBlockFields(data);
-  if (allowUnknownFrom === null) {
-    if (unknown.length > 0) {
-      throw invalidBlock(unknown[0].path, "unsupported field");
-    }
-  } else if (
-    !isDeepStrictEqual(unknown, collectUnknownBlockFields(allowUnknownFrom))
+    data.targets.length === 0
   ) {
     throw invalidBlock(
-      "root",
-      "unknown configuration fields must be preserved unchanged",
+      "root.targets",
+      "targets must be a non-empty array of nodes",
     );
   }
-
+  const edit =
+    editedFrom === undefined ? null : keptBlockSubtrees(data, editedFrom);
+  const kept = (value) => edit?.kept.has(value) === true;
   const context = {
+    kept,
+    problems: [],
     conditions: [],
     actions: [],
-    delayIndexes: new Set(),
-    intervals: 0,
+    delays: [],
+    intervals: [],
     triggers: 0,
     scenarioRuns: [],
     clearDelays: [],
+    uncheckedActions: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
       allowedIntentId: allowedPauseIntentId,
     }),
     allowedPauseCodeNodes: new WeakSet(),
   };
+  const report = (path, message) => {
+    context.problems.push({ path, message });
+  };
+  if (edit === null) reportUnknownFieldChanges(data, allowUnknownFrom, report);
   visitKnownBlockNodes(
     data,
     (node, kind, path) => {
-      validateBlockNode(node, kind, path, context);
       if (isBlockTrigger(node, kind, path)) context.triggers += 1;
+      validateBlockNode(node, kind, path, context);
+      if (edit !== null && !kept(node)) {
+        reportUnknownNodeFields(
+          node,
+          kind,
+          path,
+          edit.counterparts.get(node),
+          report,
+        );
+      }
     },
-    (path, message) => {
-      throw invalidBlock(path, message);
+    (path, message, value, parent) => {
+      // A node outside this contract that the edit keeps is written as stored.
+      if (!kept(value) && !kept(parent)) report(path, message);
     },
   );
-  if (
-    context.triggers === 0 &&
-    !(allowActionOnly && isLiteralActionOnlyBlock(data))
-  ) {
-    throw invalidBlock(
-      "targets",
-      "at least one trigger is required: trigger=true or a time_trigger cron",
+
+  for (const delay of context.delays) {
+    if (
+      !delay.kept &&
+      delay.index > 0 &&
+      context.delays.some(
+        (other) => other !== delay && other.index === delay.index,
+      )
+    ) {
+      report(
+        `${delay.path}.index`,
+        `delay index ${delay.index} is also used by another delay of this BLOCK`,
+      );
+    }
+  }
+  const delayIndexes = new Set(context.delays.map(({ index }) => index));
+  const storedDelayIndexes =
+    edit === null ? new Set() : blockDelayIndexes(editedFrom);
+  for (const clear of context.clearDelays) {
+    if (clear.index === CLEAR_ALL_DELAYS || delayIndexes.has(clear.index)) {
+      continue;
+    }
+    // A kept clear_delay whose delay was already missing stays as stored.
+    if (clear.kept && !storedDelayIndexes.has(clear.index)) continue;
+    report(
+      `${clear.path}.index`,
+      `clear_delay index ${clear.index} has no delay with that index in this BLOCK`,
     );
   }
-  for (const clear of context.clearDelays) {
-    if (
-      clear.index !== CLEAR_ALL_DELAYS &&
-      !context.delayIndexes.has(clear.index)
-    ) {
-      throw invalidBlock(
-        clear.path,
-        `clear_delay index ${clear.index} has no delay with that index in this BLOCK`,
+  if (context.intervals.length > 1) {
+    for (const interval of context.intervals) {
+      if (!interval.kept) {
+        report(interval.path, "only one daily interval is supported");
+      }
+    }
+  }
+  if (context.triggers === 0) {
+    if (edit !== null) {
+      // A BLOCK without a trigger runs only when started manually or by
+      // another scenario; an edit may keep that, not turn a triggered
+      // BLOCK into one.
+      if (blockDataHasTrigger(editedFrom)) {
+        report(
+          "root.targets",
+          "this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron",
+        );
+      }
+    } else if (!(allowActionOnly && isLiteralActionOnlyBlock(data))) {
+      report(
+        "root.targets",
+        "at least one trigger is required: trigger=true or a time_trigger cron",
       );
     }
   }
@@ -6084,93 +6145,65 @@ async function validateBlockData(
   for (const run of context.scenarioRuns) {
     // A BLOCK that fires itself would rerun its own targets without end.
     if (run.index === scenarioIndex) {
-      throw invalidBlock(run.path, "a BLOCK cannot run itself");
+      report(run.path, "a BLOCK cannot run itself");
+      continue;
     }
     if (!scenarios.has(run.index)) {
       scenarios.set(run.index, await client.getScenario(run.index));
     }
     const record = scenarios.get(run.index);
+    // Also for a kept target: an index could name another scenario by now.
     if (!record) {
-      throw invalidBlock(
-        run.path,
-        `scenario ${run.index} does not exist in this home`,
-      );
+      report(run.path, `scenario ${run.index} does not exist in this home`);
+      continue;
     }
     run.scenario = {
       name: record.name,
       type: record.type,
       ...(typeof record.active === "boolean" ? { active: record.active } : {}),
     };
-  }
-  if (scenarioIndex !== undefined) {
-    for (const run of context.scenarioRuns) {
-      await refuseScenarioRunLoop(run, scenarioIndex, scenarios, client);
+    if (scenarioIndex !== undefined) {
+      const loop = await scenarioRunLoop(run, scenarioIndex, scenarios, client);
+      if (loop) report(run.path, loop);
     }
   }
+  if (context.problems.length > 0) {
+    throw invalidBlockProblems(context.problems);
+  }
 
+  // Every reference, kept or not, must still name the service and
+  // characteristic types it names, so that a write never binds a BLOCK to
+  // another device. Rights, values and comparisons are this contract's rules
+  // for what the agent writes; a kept node that breaks them stays as stored.
   const accessories = new Map();
   for (const reference of [...context.conditions, ...context.actions]) {
     if (!accessories.has(reference.aId)) {
       accessories.set(reference.aId, await client.getAccessory(reference.aId));
     }
     const accessory = accessories.get(reference.aId);
-    const service = accessory.services?.find(
-      ({ sId }) => sId === reference.sId,
-    );
-    const characteristic = service?.characteristics?.find(
-      ({ cId }) => cId === reference.cId,
-    );
-    if (
-      !service ||
-      !characteristic?.control ||
-      service.type !== reference.hs ||
-      characteristic.control.type !== reference.hc
-    ) {
-      throw invalidBlock(
-        reference.path,
-        "native binding or type does not match",
-      );
-    }
-    const contract = characteristicContract(characteristic.control, {
-      requireWrite: reference.role === "action",
-    });
-    if (reference.role === "action") {
-      reference.contract_kind = contract.kind;
-      reference.observation_available = accessory.online;
-      reference.observed_value = observableBlockValue(
-        characteristic.control.value,
-      );
-    }
-    if (RELATIVE_ACTIONS.includes(reference.operation)) {
-      validateRelativeAction(reference, contract);
-      continue;
-    }
-    const value = parseBlockValue(reference.value, contract.kind);
-    if (reference.role === "action") reference.parsed_value = value;
-    if (reference.role === "condition") {
-      reference.parsed_value = value;
-      reference.contract_kind = contract.kind;
-      if (Object.hasOwn(contract, "valid_values")) {
-        reference.valid_values = contract.valid_values;
+    const control = boundBlockControl(reference, accessory);
+    try {
+      checkBlockReference(reference, accessory, control);
+    } catch (error) {
+      if (!reference.kept || !(error instanceof SprutHubError)) throw error;
+      reference.unchecked = true;
+      if (reference.role === "action") {
+        context.uncheckedActions.push({
+          configuration_pointer: blockPathToPointer(reference.path),
+          reason: error.message,
+        });
       }
-    }
-    validateCharacteristicValue(value, contract);
-    if (
-      reference.role === "condition" &&
-      !allowedConditions(contract.kind).includes(reference.cond)
-    ) {
-      throw invalidBlock(
-        reference.path,
-        "comparison is not supported for this value kind",
-      );
     }
   }
 
-  const actionRefs = new Set(
-    context.actions.map(({ aId, sId, cId }) => `${aId}/${sId}/${cId}`),
-  );
-  const feedback = context.conditions.find(({ aId, sId, cId }) =>
-    actionRefs.has(`${aId}/${sId}/${cId}`),
+  const feedback = context.conditions.find((condition) =>
+    context.actions.some(
+      (action) =>
+        !(condition.kept && action.kept) &&
+        action.aId === condition.aId &&
+        action.sId === condition.sId &&
+        action.cId === condition.cId,
+    ),
   );
   if (feedback) {
     throw invalidBlock(
@@ -6178,7 +6211,10 @@ async function validateBlockData(
       "a condition cannot write the same characteristic in this slice",
     );
   }
+  context.conditions = context.conditions.filter(({ unchecked }) => !unchecked);
+  context.actions = context.actions.filter(({ unchecked }) => !unchecked);
   if (
+    edit === null &&
     context.triggers === 0 &&
     context.actions.some(
       (action) =>
@@ -6189,11 +6225,208 @@ async function validateBlockData(
     )
   ) {
     throw invalidBlock(
-      "targets",
+      "root.targets",
       "action-only BLOCK supports only literal Lightbulb On=false actions",
     );
   }
   return context;
+}
+
+// Finds what an edit keeps from stored BLOCK data. A requested subtree is
+// kept when a stored subtree reached through the same parent fields and node
+// types has the same content apart from hub projections (blockId, if.state,
+// the stored form of an inc/dec step). It may sit at another position of its
+// array, and each stored subtree is kept at most once. Other requested nodes
+// pair, in order, with the remaining stored nodes of the same type in the
+// same array, so that their children are compared in turn; a node without a
+// pair is new, and so is everything below it.
+function keptBlockSubtrees(data, stored) {
+  const kept = new WeakSet();
+  const counterparts = new WeakMap();
+  const keep = (value) => {
+    if (value === null || typeof value !== "object") return;
+    kept.add(value);
+    for (const child of Object.values(value)) keep(child);
+  };
+  const pair = (node, storedNode, kind) => {
+    counterparts.set(node, storedNode);
+    for (const [key, rule] of Object.entries(BLOCK_CHILD_FIELDS[kind] ?? {})) {
+      if (rule.shape !== "array") {
+        pairChildren([node[key]], [storedNode[key]]);
+      } else if (Array.isArray(node[key]) && Array.isArray(storedNode[key])) {
+        pairChildren(node[key], storedNode[key]);
+      }
+    }
+  };
+  const pairChildren = (children, storedChildren) => {
+    const candidates = storedChildren.map((child) => ({
+      child,
+      comparable: stableJson(normalizedBlockChild(child)),
+      used: false,
+    }));
+    const edited = [];
+    for (const child of children) {
+      const comparable = stableJson(normalizedBlockChild(child));
+      const same = candidates.find(
+        (candidate) => !candidate.used && candidate.comparable === comparable,
+      );
+      if (same) {
+        same.used = true;
+        keep(child);
+      } else {
+        edited.push(child);
+      }
+    }
+    let next = 0;
+    for (const child of edited) {
+      if (!isRecord(child) || !Object.hasOwn(BLOCK_ALLOWED_KEYS, child.type)) {
+        continue;
+      }
+      const index = candidates.findIndex(
+        (candidate, position) =>
+          position >= next &&
+          !candidate.used &&
+          isRecord(candidate.child) &&
+          candidate.child.type === child.type,
+      );
+      if (index === -1) continue;
+      candidates[index].used = true;
+      next = index + 1;
+      pair(child, candidates[index].child, child.type);
+    }
+  };
+  if (isRecord(data) && isRecord(stored)) pair(data, stored, "root");
+  return { kept, counterparts };
+}
+
+function blockDelayIndexes(data) {
+  const indexes = new Set();
+  visitKnownBlockNodes(data, (node, kind) => {
+    if (kind === "delay" && Number.isSafeInteger(node.index)) {
+      indexes.add(node.index);
+    }
+  });
+  return indexes;
+}
+
+// Unknown fields of new data are refused; those of stored data must stay at
+// the same path with the same value.
+function reportUnknownFieldChanges(data, storedData, report) {
+  const requested = collectUnknownBlockFields(data);
+  if (storedData === null || storedData === undefined) {
+    for (const { path } of requested) report(path, "unsupported field");
+    return;
+  }
+  const stored = new Map(
+    collectUnknownBlockFields(storedData).map(({ path, value }) => [
+      path,
+      value,
+    ]),
+  );
+  for (const { path, value } of requested) {
+    if (!stored.has(path)) report(path, "unsupported field");
+    else if (!isDeepStrictEqual(stored.get(path), value)) {
+      report(path, "unknown field must be kept as stored");
+    }
+  }
+  const requestedPaths = new Set(requested.map(({ path }) => path));
+  for (const path of stored.keys()) {
+    if (!requestedPaths.has(path)) {
+      report(path, "unknown field of the stored BLOCK must be kept");
+    }
+  }
+}
+
+// Unknown fields of an edited node must be those of the stored node it was
+// edited from, with the same values; a new node has none.
+function reportUnknownNodeFields(node, kind, path, counterpart, report) {
+  const allowed = BLOCK_ALLOWED_KEYS[kind];
+  if (!allowed) return;
+  for (const [key, value] of Object.entries(node)) {
+    if (allowed.has(key)) continue;
+    if (!isRecord(counterpart) || !Object.hasOwn(counterpart, key)) {
+      report(`${path}.${key}`, "unsupported field");
+    } else if (!isDeepStrictEqual(value, counterpart[key])) {
+      report(`${path}.${key}`, "unknown field must be kept as stored");
+    }
+  }
+  if (!isRecord(counterpart)) return;
+  for (const key of Object.keys(counterpart)) {
+    if (!allowed.has(key) && !Object.hasOwn(node, key)) {
+      report(`${path}.${key}`, "unknown field of the stored node must be kept");
+    }
+  }
+}
+
+// The characteristic one condition or action names, with the service and
+// characteristic types it names.
+function boundBlockControl(reference, accessory) {
+  const { aId, sId, cId } = reference;
+  const service = accessory?.services?.find(
+    (candidate) => candidate.sId === sId,
+  );
+  const control = service?.characteristics?.find(
+    (candidate) => candidate.cId === cId,
+  )?.control;
+  if (!control) {
+    throw invalidBlock(
+      reference.path,
+      `no characteristic ${aId}/${sId}/${cId} in this home`,
+    );
+  }
+  if (service.type !== reference.hs) {
+    throw invalidBlock(
+      `${reference.servicePath ?? reference.path}.hs`,
+      `hs must be ${service.type}, the type of service ${aId}/${sId}`,
+    );
+  }
+  if (control.type !== reference.hc) {
+    throw invalidBlock(
+      `${reference.path}.hc`,
+      `hc must be ${control.type}, the type of characteristic ${aId}/${sId}/${cId}`,
+    );
+  }
+  return control;
+}
+
+// Checks rights, value and comparison of one condition or action and keeps
+// what the preview shows.
+function checkBlockReference(reference, accessory, control) {
+  const contract = characteristicContract(control, {
+    requireWrite: reference.role === "action",
+  });
+  if (reference.role === "action") {
+    reference.contract_kind = contract.kind;
+    reference.observation_available = accessory.online;
+    reference.observed_value = observableBlockValue(control.value);
+  }
+  if (RELATIVE_ACTIONS.includes(reference.operation)) {
+    validateRelativeAction(reference, contract);
+    return;
+  }
+  const value = parseBlockValue(
+    reference.value,
+    contract.kind,
+    `${reference.path}.value`,
+  );
+  if (reference.role === "action") reference.parsed_value = value;
+  if (reference.role === "condition") {
+    reference.parsed_value = value;
+    reference.contract_kind = contract.kind;
+    if (Object.hasOwn(contract, "valid_values")) {
+      reference.valid_values = contract.valid_values;
+    }
+  }
+  validateCharacteristicValue(value, contract);
+  if (
+    reference.role === "condition" &&
+    !allowedConditions(contract.kind).includes(reference.cond)
+  ) {
+    throw invalidBlock(
+      `${reference.path}.cond`,
+      `comparison ${reference.cond} is not supported for ${contract.kind}; use ${allowedConditions(contract.kind).join(" ")}`,
+    );
+  }
 }
 
 // Scenario targets of other BLOCKs that run this scenario. Deleting it would
@@ -6237,44 +6470,38 @@ const SCENARIO_RUN_CHAIN_LIMIT = 8;
 
 // Follows the FIRE targets of BLOCK scenarios from one run of the BLOCK being
 // written. A chain back to it would make the BLOCKs run each other without
-// end. Scenarios run from LOGIC code are not followed.
-async function refuseScenarioRunLoop(run, scenarioIndex, records, client) {
+// end. Scenarios run from LOGIC code are not followed. Returns why the run is
+// refused, or null.
+async function scenarioRunLoop(run, scenarioIndex, records, client) {
   const explored = new Set();
   const walk = async (chain) => {
     const index = chain[chain.length - 1];
     if (index === scenarioIndex) {
-      throw invalidBlock(
-        run.path,
-        `scenario ${run.index} runs this BLOCK again (${[scenarioIndex, ...chain].join(" -> ")}); remove a scenario target from that chain`,
-      );
+      return `scenario ${run.index} runs this BLOCK again (${[scenarioIndex, ...chain].join(" -> ")}); remove a scenario target from that chain`;
     }
-    if (explored.has(index)) return;
+    if (explored.has(index)) return null;
     explored.add(index);
     if (chain.length > SCENARIO_RUN_CHAIN_LIMIT) {
-      throw invalidBlock(
-        run.path,
-        `scenario targets from ${run.index} run more than ${SCENARIO_RUN_CHAIN_LIMIT} scenarios in a row (${chain.join(" -> ")}); a run back to this BLOCK cannot be ruled out`,
-      );
+      return `scenario targets from ${run.index} run more than ${SCENARIO_RUN_CHAIN_LIMIT} scenarios in a row (${chain.join(" -> ")}); a run back to this BLOCK cannot be ruled out`;
     }
     if (!records.has(index)) {
       records.set(index, await client.getScenario(index));
     }
     const record = records.get(index);
-    if (record?.type !== "BLOCK") return;
+    if (record?.type !== "BLOCK") return null;
     let data;
     try {
       data = JSON.parse(record.data);
     } catch {
-      throw invalidBlock(
-        run.path,
-        `scenario ${index} in the chain from ${run.index} has unreadable BLOCK data; a run back to this BLOCK cannot be ruled out`,
-      );
+      return `scenario ${index} in the chain from ${run.index} has unreadable BLOCK data; a run back to this BLOCK cannot be ruled out`;
     }
     for (const next of blockScenarioRuns(data)) {
-      await walk([...chain, next.index]);
+      const loop = await walk([...chain, next.index]);
+      if (loop) return loop;
     }
+    return null;
   };
-  await walk([run.index]);
+  return walk([run.index]);
 }
 
 // The hub computes these values at run time from the characteristic.
@@ -6391,6 +6618,18 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
               ...run.scenario,
             },
           })),
+        }
+      : {}),
+    // Kept actions whose rights or value this contract would refuse.
+    ...(validation.uncheckedActions.length > 0
+      ? { unchecked_actions: structuredClone(validation.uncheckedActions) }
+      : {}),
+    ...(validation.triggers === 0
+      ? {
+          triggers: {
+            status: "none",
+            note: "runs only when started manually or by another scenario",
+          },
         }
       : {}),
   };
@@ -6668,7 +6907,7 @@ function resolvedRunTarget(action, accessory, homeRef) {
   let expected;
   try {
     const contract = characteristicContract(control, { requireWrite: true });
-    const value = parseBlockValue(action.value, contract.kind);
+    const value = parseBlockValue(action.value, contract.kind, "root");
     validateCharacteristicValue(value, contract);
     expected = { value, kind: contract.kind };
   } catch (error) {
@@ -6730,47 +6969,61 @@ function isLiteralActionOnlyBlock(data) {
   );
 }
 
+// Reports each rule one node breaks, one problem per rule. A node the edit
+// keeps is written as stored: its problems are not reported, but what it adds
+// to the checks over the whole BLOCK is still collected.
 function validateBlockNode(node, kind, path, context) {
+  const kept = context.kept(node);
+  let valid = true;
+  const report = (at, message) => {
+    valid = false;
+    if (!kept) context.problems.push({ path: at, message });
+  };
+  const field = (key) => `${path}.${key}`;
   if (kind === "root") return;
   if (kind === "if") {
     const pauseId = pauseControllerId(node);
     if (pauseId !== null) {
       const parsed = parsePauseCode(node.if?.conditions?.[0]?.code);
       const owner = context.pauseOwnership.get(pauseId);
+      // Checked also when the edit keeps the controller.
       if (
         owner?.state !== "owned" ||
         owner.node !== node ||
         owner.change.pause_expires_at_ms !== parsed?.deadline
       ) {
-        throw invalidBlock(path, "unowned or changed action-pause controller");
+        context.problems.push({
+          path,
+          message: "unowned or changed action-pause controller",
+        });
+        return;
       }
       context.allowedPauseCodeNodes.add(node.if.conditions[0]);
       return;
     }
-    if (
-      // An if without mode is EVERY, as the web client creates it.
-      (Object.hasOwn(node, "mode") && !["EVERY", "ONCE"].includes(node.mode)) ||
-      node.then_delay !== 0 ||
-      node.else_delay !== 0 ||
-      !blockNode(node.if) ||
-      !blockNodeArray(node.then) ||
-      !blockNodeArray(node.else)
-    ) {
-      throw invalidBlock(
-        path,
-        "if needs mode EVERY or ONCE (omitted means EVERY), a condition and zero-delay branches",
+    // An if without mode is EVERY, as the web client creates it.
+    if (Object.hasOwn(node, "mode") && !["EVERY", "ONCE"].includes(node.mode)) {
+      report(
+        field("mode"),
+        "if mode must be EVERY or ONCE; omitted means EVERY",
       );
+    }
+    for (const key of ["then_delay", "else_delay"]) {
+      if (Object.hasOwn(node, key) && node[key] !== 0) {
+        report(
+          field(key),
+          `${key} must be 0 or omitted; a repeat period is not supported`,
+        );
+      }
     }
     return;
   }
   if (kind === "condition") {
-    if (
-      !["AND", "OR"].includes(node.mode) ||
-      !Array.isArray(node.conditions) ||
-      node.conditions.length === 0 ||
-      !blockNodeArray(node.conditions)
-    ) {
-      throw invalidBlock(path, "AND/OR condition must not be empty");
+    if (!["AND", "OR"].includes(node.mode)) {
+      report(field("mode"), "condition mode must be AND or OR");
+    }
+    if (Array.isArray(node.conditions) && node.conditions.length === 0) {
+      report(field("conditions"), "conditions must not be empty");
     }
     return;
   }
@@ -6784,7 +7037,7 @@ function validateBlockNode(node, kind, path, context) {
         (key) => !["type", "blockId", "code"].includes(key),
       )
     ) {
-      throw invalidBlock(
+      report(
         path,
         "node type code is not supported by this contract; only sprut-agent's own action pause uses it",
       );
@@ -6792,17 +7045,18 @@ function validateBlockNode(node, kind, path, context) {
     return;
   }
   if (kind === "characteristic") {
-    if (
-      !stableNativeId(node.aId) ||
-      !stableNativeId(node.sId) ||
-      !stableNativeId(node.cId) ||
-      typeof node.hs !== "string" ||
-      typeof node.hc !== "string" ||
-      typeof node.trigger !== "boolean" ||
-      typeof node.cond !== "string" ||
-      typeof node.value !== "string"
-    ) {
-      throw invalidBlock(path, "characteristic condition is incomplete");
+    for (const key of ["aId", "sId", "cId"]) {
+      if (!stableNativeId(node[key])) {
+        report(field(key), `${key} must be a native id, an integer from 0`);
+      }
+    }
+    for (const key of ["hs", "hc", "cond", "value"]) {
+      if (typeof node[key] !== "string") {
+        report(field(key), `${key} must be a string`);
+      }
+    }
+    if (typeof node.trigger !== "boolean") {
+      report(field("trigger"), "trigger must be true or false");
     }
     const { none, ...holds } = CHARACTERISTIC_HOLD;
     const held = Object.values(holds).some(
@@ -6815,8 +7069,8 @@ function validateBlockNode(node, kind, path, context) {
       !(node.timeCond === none.timeCond && node.time === none.time) &&
       !held
     ) {
-      throw invalidBlock(
-        path,
+      report(
+        field("timeCond"),
         `characteristic hold needs timeCond "" with time 0, or timeCond ${Object.values(
           holds,
         )
@@ -6824,8 +7078,10 @@ function validateBlockNode(node, kind, path, context) {
           .join(" or ")} with a positive time in milliseconds`,
       );
     }
+    if (!valid) return;
     context.conditions.push({
       role: "condition",
+      kept,
       path,
       aId: node.aId,
       sId: node.sId,
@@ -6839,62 +7095,81 @@ function validateBlockNode(node, kind, path, context) {
     return;
   }
   if (kind === "interval") {
+    if (typeof node.trigger !== "boolean") {
+      report(field("trigger"), "trigger must be true or false");
+    }
+    context.intervals.push({ path, kept });
+    const start = parseDailyCron(node.start, field("start"), report);
+    const end = parseDailyCron(node.end, field("end"), report);
     if (
-      typeof node.trigger !== "boolean" ||
-      !isRecord(node.start) ||
-      !isRecord(node.end)
+      start &&
+      end &&
+      start.hour === end.hour &&
+      start.minute === end.minute
     ) {
-      throw invalidBlock(path, "daily interval condition is incomplete");
-    }
-    context.intervals += 1;
-    if (context.intervals > 1) {
-      throw invalidBlock(path, "only one daily interval is supported");
-    }
-    const start = parseDailyCron(node.start, `${path}.start`);
-    const end = parseDailyCron(node.end, `${path}.end`);
-    if (start.hour === end.hour && start.minute === end.minute) {
-      throw invalidBlock(path, "daily interval start and end must differ");
+      report(path, "daily interval start and end must differ");
     }
     return;
   }
   if (kind === "cron") {
-    // Interval boundaries were checked above as daily crons.
+    // Interval boundaries are checked with their interval.
     if (!isBlockTrigger(node, kind, path)) return;
     const problem = timeTriggerProblem(node);
-    if (problem) throw invalidBlock(path, problem);
+    if (problem) report(path, problem);
     return;
   }
   if (kind === "service") {
-    if (
-      !stableNativeId(node.aId) ||
-      !stableNativeId(node.sId) ||
-      typeof node.hs !== "string" ||
-      !Array.isArray(node.characteristics) ||
-      node.characteristics.length === 0 ||
-      !blockNodeArray(node.characteristics)
-    ) {
-      throw invalidBlock(path, "service action is incomplete");
+    for (const key of ["aId", "sId"]) {
+      if (!stableNativeId(node[key])) {
+        report(field(key), `${key} must be a native id, an integer from 0`);
+      }
     }
+    if (typeof node.hs !== "string") report(field("hs"), "hs must be a string");
+    if (
+      Array.isArray(node.characteristics) &&
+      node.characteristics.length === 0
+    ) {
+      report(field("characteristics"), "characteristics must not be empty");
+    }
+    if (!Array.isArray(node.characteristics)) return;
+    const serviceValid = valid;
     node.characteristics.forEach((action, index) => {
       // Other types are named by the child check after this node.
-      if (!SERVICE_ACTION_KINDS.includes(action.type)) return;
-      const actionPath = `${path}.characteristics[${index}]`;
-      // A stored inc/dec step is a number; see storedRelativeStep.
-      const valueKnown =
-        action.type === "toggle" ||
-        typeof action.value === "string" ||
-        (action.type !== "set" && typeof action.value === "number");
-      if (
-        !stableNativeId(action.cId) ||
-        typeof action.hc !== "string" ||
-        !valueKnown
-      ) {
-        throw invalidBlock(actionPath, `${action.type} action is incomplete`);
+      if (!isRecord(action) || !SERVICE_ACTION_KINDS.includes(action.type)) {
+        return;
       }
+      const actionPath = `${field("characteristics")}[${index}]`;
+      const actionKept = context.kept(action);
+      let actionValid = true;
+      const reportAction = (key, message) => {
+        actionValid = false;
+        if (!actionKept) {
+          context.problems.push({ path: `${actionPath}.${key}`, message });
+        }
+      };
+      if (!stableNativeId(action.cId)) {
+        reportAction("cId", "cId must be a native id, an integer from 0");
+      }
+      if (typeof action.hc !== "string") {
+        reportAction("hc", "hc must be a string");
+      }
+      // A stored inc/dec step is a number; see storedRelativeStep.
+      if (action.type === "set" && typeof action.value !== "string") {
+        reportAction("value", "set value must be a native scalar string");
+      }
+      if (
+        ["inc", "dec"].includes(action.type) &&
+        !["string", "number"].includes(typeof action.value)
+      ) {
+        reportAction("value", `${action.type} value must be a positive step`);
+      }
+      if (!serviceValid || !actionValid) return;
       context.actions.push({
         role: "action",
+        kept: actionKept,
         operation: action.type,
         path: actionPath,
+        servicePath: path,
         aId: node.aId,
         sId: node.sId,
         cId: action.cId,
@@ -6907,79 +7182,79 @@ function validateBlockNode(node, kind, path, context) {
   }
   if (SERVICE_ACTION_KINDS.includes(kind)) return;
   if (kind === "scenario") {
-    if (
-      typeof node.index !== "string" ||
-      node.index.length === 0 ||
-      node.mode !== "FIRE"
-    ) {
-      throw invalidBlock(
-        path,
-        "scenario target needs mode FIRE and the index of an existing scenario",
+    if (typeof node.index !== "string" || node.index.length === 0) {
+      report(
+        field("index"),
+        "scenario index must be the index of an existing scenario, the last segment of its scenario_ref",
       );
     }
-    context.scenarioRuns.push({ path, index: node.index });
+    if (node.mode !== "FIRE") {
+      report(field("mode"), "scenario mode must be FIRE");
+    }
+    if (valid) context.scenarioRuns.push({ path, index: node.index });
     return;
   }
   if (kind === "delay") {
     if (!["RESET", "CONTINUE"].includes(node.mode)) {
-      throw invalidBlock(path, "delay mode must be RESET or CONTINUE");
+      report(field("mode"), "delay mode must be RESET or CONTINUE");
     }
-    if (
-      !Number.isSafeInteger(node.index) ||
-      node.index <= 0 ||
-      context.delayIndexes.has(node.index) ||
-      !Number.isSafeInteger(node.time) ||
-      node.time <= 0 ||
-      !blockNodeArray(node.targets)
-    ) {
-      throw invalidBlock(
-        path,
-        "delay index must be a positive unique integer; time must be a positive integer",
+    if (!Number.isSafeInteger(node.index) || node.index <= 0) {
+      report(field("index"), "delay index must be a positive integer");
+    }
+    if (!Number.isSafeInteger(node.time) || node.time <= 0) {
+      report(
+        field("time"),
+        "delay time must be a positive integer in milliseconds",
       );
     }
-    context.delayIndexes.add(node.index);
+    if (Number.isSafeInteger(node.index)) {
+      context.delays.push({ path, index: node.index, kept });
+    }
     return;
   }
   if (kind === "clear_delay") {
     if (!Number.isSafeInteger(node.index)) {
-      throw invalidBlock(path, "clear_delay needs the index of a delay");
+      report(
+        field("index"),
+        "clear_delay index must be an integer: the index of a delay of this BLOCK, or 0 for all its delays",
+      );
+      return;
     }
     // The delay may come later in the tree; checked after the walk.
-    context.clearDelays.push({ path, index: node.index });
+    context.clearDelays.push({ path, index: node.index, kept });
     return;
   }
-  throw invalidBlock(path, `node type ${kind ?? "missing"} is not supported`);
+  report(path, `node type ${kind ?? "missing"} is not supported`);
 }
 
-function parseDailyCron(node, path) {
-  if (
-    !isRecord(node) ||
-    node.type !== "cron" ||
-    node.mode !== "NONE" ||
-    node.offset !== 0 ||
-    typeof node.cron !== "string"
-  ) {
-    throw invalidBlock(
-      path,
-      "daily cron requires mode NONE, offset 0, and a cron string",
-    );
-  }
-  const match = /^0 ([0-5]?\d) ([01]?\d|2[0-3]) \? \* \* \*$/.exec(node.cron);
+// Returns the time of a daily interval boundary, or null after reporting
+// what is wrong with it. A missing or foreign boundary is named by the child
+// check.
+function parseDailyCron(node, path, report) {
+  if (!isRecord(node) || node.type !== "cron") return null;
+  let valid = true;
+  const fail = (at, message) => {
+    valid = false;
+    report(at, message);
+  };
+  if (node.mode !== "NONE")
+    fail(`${path}.mode`, "daily cron mode must be NONE");
+  if (node.offset !== 0) fail(`${path}.offset`, "daily cron offset must be 0");
+  const match =
+    typeof node.cron === "string"
+      ? /^0 ([0-5]?\d) ([01]?\d|2[0-3]) \? \* \* \*$/.exec(node.cron)
+      : null;
   if (!match) {
-    throw invalidBlock(
-      path,
+    fail(
+      `${path}.cron`,
       "daily cron must match 0 MM HH ? * * * with MM 0-59 and HH 0-23 in the selected hub's local wall clock",
     );
   }
-  return { minute: Number(match[1]), hour: Number(match[2]) };
+  return valid ? { minute: Number(match[1]), hour: Number(match[2]) } : null;
 }
 
 function blockNode(value) {
   return isRecord(value) && typeof value.type === "string";
-}
-
-function blockNodeArray(value) {
-  return Array.isArray(value) && value.every(blockNode);
 }
 
 function collectUnknownBlockFields(data) {
@@ -7360,10 +7635,25 @@ function invalidActionPointer(pointer) {
 }
 
 function invalidBlock(path, message) {
+  return invalidBlockProblems([{ path, message }]);
+}
+
+// Names every failing rule with its RFC 6901 pointer into the BLOCK data.
+function invalidBlockProblems(found) {
+  const problems = found.map(({ path, message }) => ({
+    pointer: blockPathToPointer(path),
+    message,
+  }));
+  const [only] = problems;
   return new SprutHubError(
     "invalid_block_data",
-    `Unsupported BLOCK data at ${path}: ${message}.`,
+    problems.length === 1
+      ? `Unsupported BLOCK data at ${only.pointer}: ${only.message}.`
+      : `Unsupported BLOCK data: ${problems.length} problems. ${problems
+          .map(({ pointer, message }) => `At ${pointer}: ${message}.`)
+          .join(" ")}`,
     "get_native_change_contract",
+    { problems },
   );
 }
 
@@ -7375,7 +7665,7 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function parseBlockValue(value, kind) {
+function parseBlockValue(value, kind, path) {
   if (kind === "boolValue") {
     if (value === "true") return true;
     if (value === "false") return false;
@@ -7387,7 +7677,7 @@ function parseBlockValue(value, kind) {
   } else if (kind === "stringValue") {
     return value;
   }
-  throw invalidBlock("value", `value does not match ${kind}`);
+  throw invalidBlock(path, `value does not match ${kind}`);
 }
 
 function allowedConditions(kind) {
@@ -10278,6 +10568,12 @@ function publicBlockActionPreview(change, fresh) {
     ...(preview.scenario_runs
       ? { scenario_runs: structuredClone(preview.scenario_runs) }
       : {}),
+    ...(preview.unchecked_actions
+      ? { unchecked_actions: structuredClone(preview.unchecked_actions) }
+      : {}),
+    ...(preview.triggers
+      ? { triggers: structuredClone(preview.triggers) }
+      : {}),
   };
 }
 
@@ -11550,19 +11846,29 @@ function normalizedKnownBlockNode(node, kind) {
     }
     if (rule.shape === "array") {
       normalized[key] = Array.isArray(value)
-        ? value.map((child) => normalizedBlockChild(child, rule))
+        ? value.map(normalizedBlockChild)
         : structuredClone(value);
       continue;
     }
-    normalized[key] = normalizedBlockChild(value, rule);
+    normalized[key] = normalizedBlockChild(value);
   }
   return normalized;
 }
 
-function normalizedBlockChild(child, rule) {
-  return isRecord(child) && rule.kinds.has(child.type)
-    ? normalizedKnownBlockNode(child, child.type)
-    : structuredClone(child);
+// The hub numbers every node it stores in a BLOCK child field again after a
+// write, also nodes outside this contract such as code in then
+// (research/protocol/2026-09-09-automations.md), so a node kept as stored
+// may come back with another blockId. Only that blockId is dropped from such
+// a node; its other fields and anything below it are compared as stored.
+function normalizedBlockChild(child) {
+  if (!isRecord(child) || typeof child.type !== "string") {
+    return structuredClone(child);
+  }
+  if (Object.hasOwn(BLOCK_ALLOWED_KEYS, child.type)) {
+    return normalizedKnownBlockNode(child, child.type);
+  }
+  const { blockId: _blockId, ...fields } = child;
+  return structuredClone(fields);
 }
 
 function sameRuleBody(scenario, change) {

@@ -1288,6 +1288,8 @@ function withRuntimeBlockFields(data) {
       normalized.value = Number(normalized.value);
     }
     for (const key of childFields[kind] ?? []) {
+      // The hub does not add a child field the data leaves out, such as else.
+      if (!Object.hasOwn(value, key)) continue;
       normalized[key] = Array.isArray(value[key])
         ? value[key].map((child) => visit(child, child?.type))
         : visit(value[key], value[key]?.type);
@@ -9849,7 +9851,7 @@ test("relative actions and scenario runs outside the contract are refused before
     [
       "no step",
       lampAction({ type: "inc", cId: 16, hc: "Brightness" }),
-      /inc action is incomplete/,
+      /characteristics\/0\/value: inc value must be a positive step/,
     ],
     [
       "copy another value",
@@ -11352,9 +11354,10 @@ test("block_data_update wraps a single characteristic if predicate into a condit
     rejectedUnknown.structuredContent.error.code,
     "invalid_block_data",
   );
+  // The code replaced the only trigger, so that rule fails as well.
   assert.equal(
     rejectedUnknown.structuredContent.error.message,
-    "Unsupported BLOCK data at /targets/0/if: node type code is not supported by this contract; allowed here: condition, characteristic.",
+    "Unsupported BLOCK data: 2 problems. At /targets/0/if: node type code is not supported by this contract; allowed here: condition, characteristic. At /targets: this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron.",
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,

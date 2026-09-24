@@ -14,7 +14,9 @@ export const BLOCK_CHILD_FIELDS = {
     },
     // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
     then: { shape: "array", kinds: new Set(TARGET_KINDS) },
-    else: { shape: "array", kinds: new Set(TARGET_KINDS) },
+    // The web client creates an if with else null and stores some without
+    // else; both mean no else branch.
+    else: { shape: "array", kinds: new Set(TARGET_KINDS), optional: true },
   },
   condition: {
     conditions: {
@@ -145,9 +147,10 @@ const BLOCK_NODE_CONSTRAINTS = {
   },
   if: {
     // The web client creates an if without mode and shows it as EVERY; ONCE
-    // was stored as sent on SprutHub 3.0.0, its run is not observed.
+    // was stored as sent on SprutHub 3.0.0, its run is not observed. It may
+    // also leave out then_delay and else_delay.
     fields: { mode: ["EVERY", "ONCE"] },
-    when_omitted: { mode: "EVERY" },
+    when_omitted: { mode: "EVERY", then_delay: 0, else_delay: 0 },
     modes: {
       EVERY: "run_the_chosen_branch_on_every_check",
       ONCE: "run_a_branch_only_when_the_condition_result_changes",
@@ -450,6 +453,7 @@ function publishedBlockChildren() {
         shape: rule.shape,
         types,
         ...(minItems === undefined ? {} : { min_items: minItems }),
+        ...(rule.optional ? { omitted_or_null: "no_branch" } : {}),
       };
     }
   }
@@ -490,6 +494,8 @@ function wrapDirectCharacteristicIfPredicates(data) {
   });
 }
 
+// invalidChild gets the path, the reason, the invalid value and the node
+// that holds it.
 export function visitKnownBlockNodes(data, visitor, invalidChild) {
   const visit = (node, kind, path) => {
     if (!isRecord(node)) return;
@@ -497,27 +503,37 @@ export function visitKnownBlockNodes(data, visitor, invalidChild) {
     for (const [key, rule] of Object.entries(BLOCK_CHILD_FIELDS[kind] ?? {})) {
       const value = node[key];
       const childPath = `${path}.${key}`;
+      if (rule.optional && (value === undefined || value === null)) continue;
       if (rule.shape === "array") {
         if (!Array.isArray(value)) {
-          invalidChild?.(childPath, "child field must be an array", value);
+          invalidChild?.(
+            childPath,
+            rule.optional
+              ? `${key} must be an array of nodes, null or omitted`
+              : `${key} must be an array of nodes`,
+            value,
+            node,
+          );
           continue;
         }
         value.forEach((child, index) => {
-          visitBlockChild(
-            child,
-            `${childPath}[${index}]`,
-            rule,
+          visitBlockChild(child, `${childPath}[${index}]`, rule, {
             visit,
             invalidChild,
-          );
+            parent: node,
+          });
         });
         continue;
       }
       if (Array.isArray(value) || !isRecord(value)) {
-        invalidChild?.(childPath, "child field must be one object", value);
+        invalidChild?.(childPath, `${key} must be one node`, value, node);
         continue;
       }
-      visitBlockChild(value, childPath, rule, visit, invalidChild);
+      visitBlockChild(value, childPath, rule, {
+        visit,
+        invalidChild,
+        parent: node,
+      });
     }
   };
   visit(data, "root", "root");
@@ -534,8 +550,12 @@ export function isBlockTrigger(node, kind, path) {
 }
 
 export function blockSubgraphHasTrigger(node) {
+  return blockDataHasTrigger({ targets: [node] });
+}
+
+export function blockDataHasTrigger(data) {
   let found = false;
-  visitKnownBlockNodes({ targets: [node] }, (candidate, kind, path) => {
+  visitKnownBlockNodes(data, (candidate, kind, path) => {
     if (isBlockTrigger(candidate, kind, path)) found = true;
   });
   return found;
@@ -592,9 +612,9 @@ function publishedChildTypes(rule) {
   return [...rule.kinds].filter((type) => type !== "code");
 }
 
-function visitBlockChild(child, path, rule, visit, invalidChild) {
+function visitBlockChild(child, path, rule, { visit, invalidChild, parent }) {
   if (!isRecord(child) || !rule.kinds.has(child.type)) {
-    invalidChild?.(path, unsupportedChildMessage(child, rule), child);
+    invalidChild?.(path, unsupportedChildMessage(child, rule), child, parent);
     return;
   }
   visit(child, child.type, path);
