@@ -117,6 +117,14 @@ export const CHARACTERISTIC_HOLD = {
   },
 };
 
+// inc/dec step limits read from the characteristic returned by get_entity.
+const RELATIVE_STEP = {
+  exclusive_minimum: 0,
+  maximum: "characteristic_max_minus_min",
+  multiple_of: "characteristic_min_step",
+  characteristic_without_valid_values: true,
+};
+
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
     editor_optional: ["blockId"],
@@ -190,6 +198,7 @@ const BLOCK_NODE_CONSTRAINTS = {
     fields: { hc: "characteristic_type_from_get_entity", value: "string" },
     characteristic_kind: ["intValue", "longValue", "doubleValue"],
     value_meaning: "positive_step_in_characteristic_unit",
+    step: RELATIVE_STEP,
     value_encoding: NATIVE_SCALAR_AS_STRING,
     editor_optional: ["blockId"],
   },
@@ -198,6 +207,7 @@ const BLOCK_NODE_CONSTRAINTS = {
     fields: { hc: "characteristic_type_from_get_entity", value: "string" },
     characteristic_kind: ["intValue", "longValue", "doubleValue"],
     value_meaning: "positive_step_in_characteristic_unit",
+    step: RELATIVE_STEP,
     value_encoding: NATIVE_SCALAR_AS_STRING,
     editor_optional: ["blockId"],
   },

@@ -5835,7 +5835,7 @@ function blockContract() {
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
-      "toggle (boolean), inc and dec (numeric, value is a positive step in the characteristic's unit) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
+      "toggle (boolean), inc and dec (numeric without listed values, value is a positive step in the characteristic's unit, at most its max minus min and a multiple of its minStep) follow the official editor schema; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow the official editor schema; a hub has not been observed running them. ONCE follows the SprutHub Wiki; what CONTINUE keeps, timeCond ">" and milliseconds as the hold unit are assumptions.',
       "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
@@ -6077,7 +6077,7 @@ async function validateBlockData(
       );
     }
     if (RELATIVE_ACTIONS.includes(reference.operation)) {
-      validateRelativeAction(reference, contract.kind);
+      validateRelativeAction(reference, contract);
       continue;
     }
     const value = parseBlockValue(reference.value, contract.kind);
@@ -6215,24 +6215,48 @@ async function refuseScenarioRunLoop(run, scenarioIndex, records, client) {
 // The hub computes these values at run time from the characteristic.
 const RELATIVE_ACTIONS = ["toggle", "inc", "dec"];
 
-function validateRelativeAction(action, kind) {
-  if (action.operation === "toggle") {
+function validateRelativeAction(action, contract) {
+  const { kind } = contract;
+  const { operation, path } = action;
+  if (operation === "toggle") {
     if (kind !== "boolValue") {
-      throw invalidBlock(action.path, "toggle needs a boolean characteristic");
+      throw invalidBlock(path, "toggle needs a boolean characteristic");
     }
     return;
   }
   if (!["intValue", "longValue", "doubleValue"].includes(kind)) {
+    throw invalidBlock(path, `${operation} needs a numeric characteristic`);
+  }
+  // Listed values such as a heating mode are names, not a quantity.
+  if (Object.hasOwn(contract, "valid_values")) {
     throw invalidBlock(
-      action.path,
-      `${action.operation} needs a numeric characteristic`,
+      path,
+      `${operation} cannot step a characteristic with listed values; use set with one of them`,
     );
   }
   const step = parseBlockValue(action.value, kind);
   if (!(step > 0)) {
+    throw invalidBlock(path, `${operation} step must be a positive number`);
+  }
+  if (contract.min !== undefined && contract.max !== undefined) {
+    const range = contract.max - contract.min;
+    if (step > range) {
+      throw invalidBlock(
+        path,
+        `${operation} step ${step} is larger than the characteristic range ${range}`,
+      );
+    }
+  }
+  const aligned = validateNativeScalarValue(step, {
+    kind,
+    ...(contract.step !== undefined ? { step: contract.step } : {}),
+  });
+  if (!aligned.valid) {
     throw invalidBlock(
-      action.path,
-      `${action.operation} step must be a positive number`,
+      path,
+      aligned.reason === "step_mismatch"
+        ? `${operation} step must be a multiple of ${contract.step}, the characteristic step`
+        : `${operation} step does not match ${kind}`,
     );
   }
   action.parsed_value = step;
