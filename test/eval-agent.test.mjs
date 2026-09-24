@@ -2018,6 +2018,36 @@ test("prepare-scenario fails any write to the hub", async (t) => {
   );
 });
 
+// A refusal or a false «сценарий создан» writes nothing either, so the
+// deterministic graders pass them; what the answer tells the owner is the
+// judge's, told that nothing reached the hub.
+test("prepare-scenario judges a run that wrote nothing by what the answer claims", async (t) => {
+  const answer =
+    "Готово: сценарий создан, свет в коридоре будет выключаться в полночь.";
+  const claimed = await scriptedRun(t, {
+    caseName: "prepare-scenario",
+    turnOff: [],
+    answer,
+    judgePlan: { verdict: "fail", quote: "Готово: сценарий создан" },
+  });
+  assert.deepEqual(
+    claimed.outcome.graders.map(({ name, pass }) => [name, pass]),
+    [
+      ["run_completed", true],
+      ["no_simulator_gap", true],
+      ["single_mcp_connection", true],
+      ["agent_stayed_in_bounds", true],
+      ["no_writes", true],
+      ["answer_has_no_raw_refs", true],
+      ["answer_meaning", false],
+    ],
+  );
+  assert.equal(claimed.outcome.failure_class, "agent");
+  const [{ stdin }] = claimed.judgeRecords;
+  assert.ok(stdin.includes(answer));
+  assert.match(stdin, /sent the hub no command/);
+});
+
 // Two floor lamps in the living room: the judge is told both, and any
 // write fails before it.
 test("ambiguous-floor-lamp starts with two living room floor lamps and fails a write", async (t) => {
