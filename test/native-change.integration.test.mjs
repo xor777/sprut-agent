@@ -20701,6 +20701,71 @@ test("a created LOGIC the owner deleted lends the change no logic ref or readine
   assert.deepEqual(scenarioDeletes(hub), []);
 });
 
+// The anchor service only lists the LOGIC's type for assignment. Removed
+// with its accessory, or alone, it leaves the LOGIC undeletable unless
+// restore does without it: the type is the scenario index, and the
+// whole-home scan finds its assignments without the anchor.
+test("a created LOGIC whose anchor service was removed reads unready and is still deleted by restore", async (t) => {
+  for (const [label, removeAnchor] of [
+    [
+      "accessory removed",
+      (hub) => {
+        hub.state.accessories = hub.state.accessories.filter(
+          ({ id }) => id !== 34,
+        );
+      },
+    ],
+    [
+      "service removed",
+      (hub) => {
+        hub.state.accessories.find(({ id }) => id === 34).services = [];
+      },
+    ],
+  ]) {
+    await t.test(label, async (subtest) => {
+      const { hub, client, changeRef, created } = await createOwnedLogic(
+        subtest,
+        { active: true },
+      );
+      assertIdentityMapping(created, { ready: true, reason: undefined });
+      removeAnchor(hub);
+
+      const read = await callChangeTool(client, "get_native_change", changeRef);
+      assert.equal(read.status, "applied");
+      assertIdentityMapping(read, {
+        ready: false,
+        reason: "logic_target_service_not_found",
+      });
+      assert.equal(read.restore_supported, true);
+
+      hub.state.logics.push(ownAssignmentElsewhere(true));
+      assertAssignedLogicRestoreBlocked(
+        await client.callTool({
+          name: "restore_native_change",
+          arguments: { change_ref: changeRef },
+        }),
+        {
+          tool: "restore_native_change",
+          type: "created-1",
+          scenarioIndex: "created-1",
+          hub,
+        },
+      );
+      hub.state.logics.length = 0;
+      const restored = await callChangeTool(
+        client,
+        "restore_native_change",
+        changeRef,
+      );
+      assert.equal(restored.status, "restored");
+      assert.equal(
+        hub.state.scenarios.some(({ index }) => index === "created-1"),
+        false,
+      );
+    });
+  }
+});
+
 // Before a created scenario is deleted, restore scans the home: logic.list
 // on every service for a LOGIC's assignments (about 250 services now, twice
 // that later) and every BLOCK for a scenario target, one read after another.
