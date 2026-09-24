@@ -954,6 +954,39 @@ test("a scenario sets a value from another characteristic", async (t) => {
   ]);
 });
 
+// A source the hub cannot copy from is refused with its own reason, so that
+// the agent can tell the owner what to pick instead.
+test("a from action names why its source cannot be copied", async (t) => {
+  const brightnessOf = (fixture, aId) =>
+    fixture.accessories
+      .find(({ id }) => id === aId)
+      .services[0].characteristics.find(({ type }) => type === "Brightness");
+  const { client } = await setup(t, (fixture) => {
+    // «Люстра» cannot be read; «Торшер» reports no value; «Светодиодная
+    // лента» lists values of another kind than its own.
+    brightnessOf(fixture, 15).control = { read: false };
+    brightnessOf(fixture, 16).control = { value: {} };
+    brightnessOf(fixture, 17).control = {
+      validValues: [
+        { key: "WARM", name: "Тёплый", value: { stringValue: "w" } },
+      ],
+    };
+  });
+  const reasons = [];
+  for (const aId of [15, 16, 17]) {
+    const refused = await prepareCreate(client, {
+      targets: [whenLeak([nightLight(fromCorridor({ from_aId: aId }))])],
+    });
+    assert.deepEqual(problemsOf(refused), [
+      "/targets/0/then/0/characteristics/0/from_cId",
+    ]);
+    reasons.push(refused.problems[0].message);
+  }
+  assert.match(reasons[0], /must be readable/);
+  assert.match(reasons[1], /no supported current value/);
+  assert.match(reasons[2], /incompatible native valid values/);
+});
+
 // SprutHub 3.0.0 drops a from action's value "", a notify's to null and the
 // clients null of a recipient entry (live-conformance-4). What the agent
 // creates in the web client's form must still read back as its own and be
