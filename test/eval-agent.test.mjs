@@ -446,6 +446,91 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
     4,
   );
   assert.ok(lines.some((line) => line.includes("2/2")));
+
+  // Hub-side cost: native requests and the bytes the hub sent back, per run
+  // and as medians, with the house/apartment ratio.
+  const hubCost = async (entry) => {
+    const runs = [];
+    for (const dir of entry.run_dirs) {
+      const saved = JSON.parse(
+        await readFile(path.join(dir, "result.json"), "utf8"),
+      );
+      const requests = JSON.parse(
+        await readFile(path.join(dir, "hub-requests.json"), "utf8"),
+      );
+      assert.equal(saved.metrics.hub_requests, requests.length);
+      assert.equal(
+        saved.metrics.hub_response_bytes,
+        requests.reduce((total, { responseBytes }) => total + responseBytes, 0),
+      );
+      assert.ok(
+        lines.some((line) =>
+          line.includes(
+            `hub=${saved.metrics.hub_requests}/${saved.metrics.hub_response_bytes}B`,
+          ),
+        ),
+      );
+      runs.push(saved.metrics);
+    }
+    return runs;
+  };
+  for (const entry of summary.cases) {
+    const runs = await hubCost(entry);
+    const middle = (key) => (runs[0][key] + runs[1][key]) / 2;
+    assert.equal(entry.median_hub_requests, middle("hub_requests"));
+    assert.equal(entry.median_hub_response_bytes, middle("hub_response_bytes"));
+  }
+  assert.ok(
+    byFixture.house.median_hub_response_bytes >
+      byFixture.apartment.median_hub_response_bytes,
+  );
+  assert.equal(
+    scale.hub_response_bytes_ratio,
+    Math.round(
+      (byFixture.house.median_hub_response_bytes /
+        byFixture.apartment.median_hub_response_bytes) *
+        100,
+    ) / 100,
+  );
+  assert.equal(
+    scale.hub_requests_ratio,
+    Math.round(
+      (byFixture.house.median_hub_requests /
+        byFixture.apartment.median_hub_requests) *
+        100,
+    ) / 100,
+  );
+  assert.ok(
+    lines.some((line) =>
+      /^SCALE turn-off-room .* hub_requests=[\d.]+ hub_bytes=[\d.]+/.test(line),
+    ),
+  );
+});
+
+test("the simulator records the size of each reply it sends", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("house"));
+  t.after(() => hub.close());
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  const received = [];
+  // The full catalogue the client reads, a small reply and an error.
+  for (const [id, params] of [
+    [1, { accessory: { list: { expand: "services,characteristics" } } }],
+    [2, { room: { get: { id: 3 } } }],
+    [3, { scenario: { get: { index: "999" } } }],
+  ]) {
+    socket.send(
+      JSON.stringify({ id, token: hub.token, serial: hub.serial, params }),
+    );
+    const [data] = await once(socket, "message");
+    received.push(Buffer.byteLength(data));
+  }
+  assert.deepEqual(
+    hub.requests.map(({ responseBytes }) => responseBytes),
+    received,
+  );
+  assert.ok(received[0] > 100_000);
 });
 
 test("a scripted agent that also turns off the kitchen light fails the room boundary", async (t) => {
