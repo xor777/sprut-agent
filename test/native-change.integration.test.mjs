@@ -1600,6 +1600,28 @@ async function startHub(port = 0) {
         );
         if (roomIndex >= 0) state.rooms.splice(roomIndex, 1);
         result = { room: { delete: {} } };
+      } else if (params.room?.update) {
+        // RoomUpdateRequest {id, name, visible}: only present fields change.
+        const update = params.room.update;
+        const room = state.rooms.find(({ id }) => id === update.id);
+        if (room && Object.hasOwn(update, "name")) room.name = update.name;
+        if (room && Object.hasOwn(update, "visible")) {
+          room.visible = update.visible;
+        }
+        result = { room: { update: {} } };
+      } else if (params.service?.update) {
+        // ServiceUpdateRequest {aId, sId, order, grid, name, visible}.
+        const update = params.service.update;
+        const service = state.accessories
+          .find(({ id }) => id === update.aId)
+          ?.services.find(({ sId }) => sId === update.sId);
+        if (service && Object.hasOwn(update, "name")) {
+          service.name = update.name;
+        }
+        if (service && Object.hasOwn(update, "visible")) {
+          service.visible = update.visible;
+        }
+        result = { service: { update: {} } };
       } else if (params.characteristic?.get) {
         const selected = state.accessories
           .find(({ id }) => id === params.characteristic.get.aId)
@@ -16541,4 +16563,463 @@ test("a scenario ref of another home is rejected before any scenario request", a
     false,
   );
   assert.equal(hub.state.scenarios[0].active, true);
+});
+
+const twoChannelSwitch = {
+  id: 40,
+  roomId: 1,
+  name: "Выключатель у дивана",
+  online: true,
+  services: [
+    {
+      aId: 40,
+      sId: 10,
+      name: "Канал 1",
+      type: "Switch",
+      visible: true,
+      characteristics: [
+        {
+          aId: 40,
+          sId: 10,
+          cId: 20,
+          control: {
+            name: "Включено",
+            type: "On",
+            read: true,
+            write: true,
+            value: { boolValue: false },
+          },
+        },
+      ],
+    },
+    {
+      aId: 40,
+      sId: 11,
+      name: "Канал 2",
+      type: "Switch",
+      visible: true,
+      characteristics: [
+        {
+          aId: 40,
+          sId: 11,
+          cId: 21,
+          control: {
+            name: "Включено",
+            type: "On",
+            read: true,
+            write: true,
+            value: { boolValue: true },
+          },
+        },
+      ],
+    },
+    {
+      aId: 40,
+      sId: 12,
+      name: "Температура устройства",
+      type: "TemperatureSensor",
+      visible: true,
+      characteristics: [
+        {
+          aId: 40,
+          sId: 12,
+          cId: 22,
+          control: {
+            name: "Текущая температура",
+            type: "CurrentTemperature",
+            read: true,
+            write: false,
+            value: { doubleValue: 41.5 },
+          },
+        },
+      ],
+    },
+  ],
+};
+
+function installTwoChannelSwitch(hub) {
+  const accessory = structuredClone(twoChannelSwitch);
+  hub.state.accessories.push(accessory);
+  return accessory;
+}
+
+// Each case names the household request, the entity the fake hub keeps, and
+// the exact native update expected for one value.
+const roomServiceSettingCases = [
+  {
+    operation: "room_name",
+    targetRef: `${homeRef}/room/1`,
+    foreignRef: "spruthub://hub/other-home/room/1",
+    kind: "stringValue",
+    field: "name",
+    baseline: "Зал",
+    input: "  Гостиная ",
+    requested: "Гостиная",
+    changedBeforeApply: "Кухня",
+    changedAfterApply: "Кухня",
+    install(hub) {
+      const room = hub.state.rooms.find(({ id }) => id === 1);
+      room.name = "Зал";
+      return room;
+    },
+    locate: (room) => room,
+    update: (name) => ({ room: { update: { id: 1, name } } }),
+  },
+  {
+    operation: "service_name",
+    targetRef: `${homeRef}/accessory/40/service/11`,
+    foreignRef: "spruthub://hub/other-home/accessory/40/service/11",
+    kind: "stringValue",
+    field: "name",
+    baseline: "Канал 2",
+    input: " Подсветка ",
+    requested: "Подсветка",
+    changedBeforeApply: "Свет у дивана",
+    changedAfterApply: "Свет у дивана",
+    install: installTwoChannelSwitch,
+    locate: (accessory) => accessory.services.find(({ sId }) => sId === 11),
+    update: (name) => ({ service: { update: { aId: 40, sId: 11, name } } }),
+  },
+  {
+    operation: "service_visible",
+    targetRef: `${homeRef}/accessory/40/service/12`,
+    foreignRef: "spruthub://hub/other-home/accessory/40/service/12",
+    kind: "boolValue",
+    field: "visible",
+    baseline: true,
+    input: false,
+    requested: false,
+    changedBeforeApply: false,
+    changedAfterApply: true,
+    install: installTwoChannelSwitch,
+    locate: (accessory) => accessory.services.find(({ sId }) => sId === 12),
+    update: (visible) => ({
+      service: { update: { aId: 40, sId: 12, visible } },
+    }),
+  },
+];
+
+function roomServiceUpdates(hub) {
+  return hub.requests.filter(
+    (params) => params.room?.update || params.service?.update,
+  );
+}
+
+function withSetting(settingCase, entity, value) {
+  const expected = structuredClone(entity);
+  settingCase.locate(expected)[settingCase.field] = value;
+  return expected;
+}
+
+async function prepareRoomServiceSetting(client, settingCase, value) {
+  return client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: settingCase.operation,
+      target_ref: settingCase.targetRef,
+      value,
+      reason: "Хозяин попросил навести порядок в названиях и плитках",
+    },
+  });
+}
+
+async function preparedRoomServiceSetting(client, settingCase, value) {
+  const prepared = await prepareRoomServiceSetting(client, settingCase, value);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  return prepared.structuredContent;
+}
+
+test("a room or service is renamed or hidden with one native update and restored after restart", async (t) => {
+  for (const settingCase of roomServiceSettingCases) {
+    await t.test(settingCase.operation, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const entity = settingCase.install(hub);
+      const before = structuredClone(entity);
+      const firstClient = await startClient(subtest, hub, stateDirectory);
+
+      const contract = await firstClient.callTool({
+        name: "get_native_change_contract",
+        arguments: {
+          operation: settingCase.operation,
+          target_ref: settingCase.targetRef,
+        },
+      });
+      assert.equal(contract.isError, undefined, contract.content[0]?.text);
+      assert.equal(contract.structuredContent.contract.kind, settingCase.kind);
+      assert.equal(contract.structuredContent.restore_supported, true);
+
+      const prepared = await preparedRoomServiceSetting(
+        firstClient,
+        settingCase,
+        settingCase.input,
+      );
+      assert.equal(prepared.status, "prepared");
+      assert.equal(prepared.operation, settingCase.operation);
+      assert.deepEqual(prepared.diff, {
+        value: {
+          from: settingCase.baseline,
+          to: settingCase.requested,
+          kind: settingCase.kind,
+        },
+      });
+      assert.equal(prepared.warnings, undefined);
+      assert.deepEqual(roomServiceUpdates(hub), []);
+
+      const applied = await callChangeTool(
+        firstClient,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(applied.status, "applied");
+      assert.equal(applied.native_acknowledged, true);
+      assert.deepEqual(applied.observed_value, {
+        value: settingCase.requested,
+        kind: settingCase.kind,
+      });
+      assert.deepEqual(roomServiceUpdates(hub), [
+        settingCase.update(settingCase.requested),
+      ]);
+      assert.deepEqual(
+        entity,
+        withSetting(settingCase, before, settingCase.requested),
+      );
+
+      const history = await firstClient.callTool({
+        name: "list_native_changes",
+        arguments: { home_ref: homeRef, entity_ref: settingCase.targetRef },
+      });
+      assert.deepEqual(
+        history.structuredContent.changes.map(
+          ({ change_ref, operation, recorded_status }) => ({
+            change_ref,
+            operation,
+            recorded_status,
+          }),
+        ),
+        [
+          {
+            change_ref: prepared.change_ref,
+            operation: settingCase.operation,
+            recorded_status: "applied",
+          },
+        ],
+      );
+
+      await firstClient.close();
+      const secondClient = await startClient(subtest, hub, stateDirectory);
+      const restored = await callChangeTool(
+        secondClient,
+        "restore_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(restored.status, "restored");
+      assert.deepEqual(roomServiceUpdates(hub), [
+        settingCase.update(settingCase.requested),
+        settingCase.update(settingCase.baseline),
+      ]);
+      assert.deepEqual(entity, before);
+    });
+  }
+});
+
+test("a room or service setting changed by hand is neither overwritten on apply nor reclaimed on restore", async (t) => {
+  for (const settingCase of roomServiceSettingCases) {
+    await t.test(settingCase.operation, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const target = settingCase.locate(settingCase.install(hub));
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      const stale = await preparedRoomServiceSetting(
+        client,
+        settingCase,
+        settingCase.input,
+      );
+      target[settingCase.field] = settingCase.changedBeforeApply;
+      const refused = await callChangeTool(
+        client,
+        "apply_native_change",
+        stale.change_ref,
+      );
+      assert.equal(refused.status, "conflict");
+      assert.equal(refused.conflict_reason, "baseline_changed");
+      assert.deepEqual(roomServiceUpdates(hub), []);
+
+      target[settingCase.field] = settingCase.baseline;
+      const prepared = await preparedRoomServiceSetting(
+        client,
+        settingCase,
+        settingCase.input,
+      );
+      const applied = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(applied.status, "applied");
+      target[settingCase.field] = settingCase.changedAfterApply;
+      const observed = await callChangeTool(
+        client,
+        "get_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(observed.status, "conflict");
+      assert.equal(observed.manual_change_observed, true);
+
+      target[settingCase.field] = settingCase.requested;
+      const restored = await callChangeTool(
+        client,
+        "restore_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(restored.status, "conflict");
+      assert.equal(restored.conflict_reason, "manual_change");
+      assert.deepEqual(roomServiceUpdates(hub), [
+        settingCase.update(settingCase.requested),
+      ]);
+      assert.equal(target[settingCase.field], settingCase.requested);
+    });
+  }
+});
+
+test("a room or service that already has the requested setting creates no change or write", async (t) => {
+  for (const settingCase of roomServiceSettingCases) {
+    await t.test(settingCase.operation, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      settingCase.install(hub);
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      const prepared = await preparedRoomServiceSetting(
+        client,
+        settingCase,
+        settingCase.baseline,
+      );
+      assert.deepEqual(prepared, {
+        status: "already_desired",
+        operation: settingCase.operation,
+        target_ref: settingCase.targetRef,
+        observed_value: {
+          value: settingCase.baseline,
+          kind: settingCase.kind,
+        },
+        native_write_sent: false,
+        owned_change_created: false,
+      });
+      const history = await client.callTool({
+        name: "list_native_changes",
+        arguments: { home_ref: homeRef, entity_ref: settingCase.targetRef },
+      });
+      assert.deepEqual(history.structuredContent.changes, []);
+      assert.deepEqual(roomServiceUpdates(hub), []);
+    });
+  }
+});
+
+test("a room or service ref of another home is rejected before any room or service request", async (t) => {
+  for (const settingCase of roomServiceSettingCases) {
+    await t.test(settingCase.operation, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const entity = settingCase.install(hub);
+      const before = structuredClone(entity);
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      const contract = await client.callTool({
+        name: "get_native_change_contract",
+        arguments: {
+          operation: settingCase.operation,
+          target_ref: settingCase.foreignRef,
+        },
+      });
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: settingCase.operation,
+          target_ref: settingCase.foreignRef,
+          value: settingCase.input,
+          reason: "Не трогать комнаты и сервисы другого дома",
+        },
+      });
+      for (const refused of [contract, prepared]) {
+        assert.equal(refused.isError, true);
+        assert.equal(
+          refused.structuredContent?.error?.code,
+          "unsupported_home_write",
+          refused.content[0]?.text,
+        );
+      }
+      assert.equal(
+        hub.requests.some(
+          (params) => params.room || params.accessory || params.service,
+        ),
+        false,
+      );
+      assert.deepEqual(entity, before);
+    });
+  }
+});
+
+test("a blank room name is refused and a name already used by another room is flagged", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const [roomName] = roomServiceSettingCases;
+  roomName.install(hub);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const blank = await prepareRoomServiceSetting(client, roomName, "   ");
+  assert.equal(blank.isError, true);
+  assert.equal(
+    blank.structuredContent?.error?.code,
+    "name_required",
+    blank.content[0]?.text,
+  );
+
+  const workshop = hub.state.rooms.find(({ id }) => id === 2);
+  const prepared = await preparedRoomServiceSetting(
+    client,
+    roomName,
+    workshop.name,
+  );
+  assert.equal(prepared.status, "prepared");
+  assert.equal(prepared.diff.value.to, workshop.name);
+  assert.deepEqual(
+    prepared.warnings.map(({ code, room_refs }) => ({ code, room_refs })),
+    [{ code: "room_name_in_use", room_refs: [workshopRoomRef] }],
+  );
+  assert.deepEqual(roomServiceUpdates(hub), []);
+});
+
+test("a service whose visibility the hub does not report is not hidden on a guess", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const serviceVisible = roomServiceSettingCases.find(
+    ({ operation }) => operation === "service_visible",
+  );
+  const target = serviceVisible.locate(serviceVisible.install(hub));
+  delete target.visible;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: {
+      operation: "service_visible",
+      target_ref: serviceVisible.targetRef,
+    },
+  });
+  const prepared = await prepareRoomServiceSetting(
+    client,
+    serviceVisible,
+    false,
+  );
+  for (const refused of [contract, prepared]) {
+    assert.equal(refused.isError, true);
+    assert.equal(
+      refused.structuredContent?.error?.code,
+      "service_visibility_unknown",
+      refused.content[0]?.text,
+    );
+  }
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: serviceVisible.targetRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  assert.deepEqual(roomServiceUpdates(hub), []);
+  assert.equal(Object.hasOwn(target, "visible"), false);
 });
