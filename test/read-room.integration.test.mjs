@@ -467,6 +467,7 @@ test("MCP discovers every room before reading the selected stable reference", as
       "get_native_observation",
       "stop_native_observation",
       "read_services",
+      "read_hub_log",
     ],
   );
   for (const tool of tools.tools.filter(({ name }) =>
