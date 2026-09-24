@@ -20560,6 +20560,55 @@ test("a listed type named unlike its LOGIC leaves the LOGIC unmapped and undelet
   assert.equal(restored.status, "restored");
 });
 
+// Indices may be reused, as room ids are (live-conformance-2). A LOGIC the
+// owner makes at the index of the deleted created one has that index as its
+// type, but it is not this change's LOGIC: it has no ownership marker.
+test("another LOGIC at the created LOGIC's index does not lend the change its type", async (t) => {
+  const { hub, client, changeRef, created } = await createOwnedLogic(t, {
+    active: true,
+  });
+  assertIdentityMapping(created, { ready: true, reason: undefined });
+  const index = hub.state.scenarios.findIndex(
+    (scenario) => scenario.index === "created-1",
+  );
+  hub.state.scenarios[index] = {
+    index: "created-1",
+    name: "Новый LOGIC владельца",
+    desc: "Set the initial brightness once",
+    active: true,
+    onStart: false,
+    sync: false,
+    type: "LOGIC",
+    data: firstLogicSource,
+    predefined: false,
+  };
+  hub.state.logics.push({ ...ownAssignmentElsewhere(true), name: "Чужой" });
+
+  const read = await callChangeTool(client, "get_native_change", changeRef);
+  assert.equal(read.status, "conflict");
+  assert.equal(read.native_logic_type, undefined);
+  assert.equal(read.logic_ref, undefined);
+  assert.equal(read.logic_assignment_ready, false);
+  assert.equal(read.logic_mapping_reason, "logic_scenario_not_owned");
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: `${serviceRef}/logic/created-1`,
+    },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+
+  const restore = await callChangeTool(
+    client,
+    "restore_native_change",
+    changeRef,
+  );
+  assert.equal(restore.status, "conflict");
+  assert.deepEqual(scenarioDeletes(hub), []);
+  assert.equal(hub.state.scenarios[index].name, "Новый LOGIC владельца");
+});
+
 // Earlier versions mapped the one new type seen by a later get and saved it.
 // The fixture is such a record, captured from that code: its own type was
 // unlisted and the type of a LOGIC created afterwards was taken instead.
