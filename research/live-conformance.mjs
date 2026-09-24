@@ -3080,10 +3080,11 @@ function trigger(source, value, variables, options, context) {
 }
 
 // A user LOGIC's native type is its scenario index, listed on its anchor only
-// while it is on (2026-09-24). A LOGIC created off (restore, then on to see
-// its type, renamed, off, assigned while off, restore again), then a LOGIC
-// created on, assigned while on, turned off to learn whether logic.list still
-// shows that assignment, turned on again, unassigned and deleted.
+// while it is on (2026-09-24). A LOGIC created off (turned on to see its
+// type, renamed, turned off, then deleted by restore while off), then a
+// LOGIC created on, assigned while on and turned off: the assignment is still
+// listed and blocks the delete, it is removed while the LOGIC is off, and
+// restore deletes the LOGIC while it is off.
 async function stepLogic(ctx) {
   const { virtual } = ctx;
   if (!virtual) {
@@ -3255,8 +3256,7 @@ async function turnedOffLogic(ctx, anchor) {
     }
   }
 
-  // Read before the first restore, which would delete the LOGIC if the
-  // product allowed it while off.
+  // Whether the LOGIC can be turned on here, and 4m run at all.
   const view = await probe.activeView(ref);
   const hasActive = Boolean(view?.option);
   row(
@@ -3274,33 +3274,41 @@ async function turnedOffLogic(ctx, anchor) {
     { active_option: view?.option ?? null },
   );
 
-  const first = await logicCreateRestore(
-    ctx,
-    "4e restore create",
-    createEntry,
-    ref,
-    "refused with logic_off_assignments_unverified; LOGIC kept",
-    refusedWhileOff,
-  );
-  if (first.deleted) return { hasActive };
-  if (!hasActive) {
-    leaveForSweep(
-      ctx,
-      createEntry,
+  if (hasActive) {
+    await turnedOnAndOff(ctx, {
       ref,
-      "a turned-off LOGIC without an Active option; its type is not seen",
-    );
-    row(
-      "4g LOGIC turn on",
-      "-",
-      "-",
-      "not run: no Active option; the LOGIC is left to the sweep",
-      "skipped",
-    );
-    return { hasActive };
+      anchor,
+      typesBefore,
+      name,
+      markerComment,
+      createEntry,
+      changeRef: create.changeRef,
+    });
+    if (abortReason) return { hasActive };
+  } else {
+    row("4g LOGIC turn on", "-", "-", "not run: no Active option", "skipped");
   }
 
-  // On while unassigned: its source runs nothing.
+  // Off and unassigned: the product's scan finds no assignment, and restore
+  // deletes the LOGIC while it is off.
+  await logicCreateRestore(
+    ctx,
+    "4l restore create while off",
+    createEntry,
+    ref,
+    "LOGIC deleted while off",
+    deletedLogic,
+  );
+  return { hasActive };
+}
+
+// On while unassigned (its source runs nothing): its type on the anchor, a
+// rename, and off again.
+async function turnedOnAndOff(
+  ctx,
+  { ref, anchor, typesBefore, name, markerComment, createEntry, changeRef },
+) {
+  const { hub, probe } = ctx;
   const on = await prepareAndApply(hub, {
     operation: "scenario_active",
     target_ref: ref,
@@ -3323,12 +3331,7 @@ async function turnedOffLogic(ctx, anchor) {
   );
   await activeAgreement(ctx, "4g agreement", ref, true);
   if (on.applied?.status === "applied") {
-    await logicTypeWhileOn(ctx, "4h", {
-      ref,
-      anchor,
-      typesBefore,
-      changeRef: create.changeRef,
-    });
+    await logicTypeWhileOn(ctx, "4h", { ref, anchor, typesBefore, changeRef });
     await renameLogic(ctx, {
       ref,
       anchor,
@@ -3337,59 +3340,32 @@ async function turnedOffLogic(ctx, anchor) {
       markerComment,
       createEntry,
     });
-    if (abortReason) return { hasActive };
+    if (abortReason) return;
   }
-  if (onEntry) {
-    const offOutcome = await runRestore(hub, onEntry);
-    row(
-      "4j LOGIC turn off",
-      "restore scenario_active",
-      "restored; active=false",
-      offOutcome.observed,
-      offOutcome.verified ? "match" : "mismatch",
-    );
-    await activeAgreement(ctx, "4j agreement", ref, false);
-    if (!offOutcome.verified) {
-      abort("the probe LOGIC was not turned off");
-      return { hasActive };
-    }
-  }
-
-  await assignmentWhileOff(ctx, { ref, anchor, createEntry });
-  if (abortReason) return { hasActive };
-
-  const second = await logicCreateRestore(
-    ctx,
-    "4l retry restore create",
-    createEntry,
-    ref,
-    "refused again while off; LOGIC kept",
-    refusedWhileOff,
+  if (!onEntry) return;
+  const offOutcome = await runRestore(hub, onEntry);
+  row(
+    "4j LOGIC turn off",
+    "restore scenario_active",
+    "restored; active=false",
+    offOutcome.observed,
+    offOutcome.verified ? "match" : "mismatch",
   );
-  if (!second.deleted) {
-    leaveForSweep(
-      ctx,
-      createEntry,
-      ref,
-      "restore does not delete a turned-off LOGIC (logic_off_assignments_unverified)",
-    );
-  }
-  return { hasActive };
+  await activeAgreement(ctx, "4j agreement", ref, false);
+  if (!offOutcome.verified) abort("the probe LOGIC was not turned off");
 }
 
-// The product's restore of a turned-off created LOGIC: refused, LOGIC kept.
-function refusedWhileOff(outcome, present) {
-  return (
-    present &&
-    outcome.result?.error?.code === "logic_off_assignments_unverified"
-  );
+// The product's restore of a created LOGIC deleted it.
+function deletedLogic(outcome, present) {
+  return outcome.verified && !present;
 }
 
 // A LOGIC created on, as an agent may create it: the product maps its type
-// (its scenario index) and may assign it at once. 4n assigns it while on,
-// turns it off and records what logic.list and logic.get show and what the
-// product's restore of the create answers then. It is turned on again, its
-// assignment removed and the LOGIC deleted.
+// (its scenario index) and may assign it at once. 4n assigns it while on and
+// turns it off: logic.list and logic.get still show the assignment, and the
+// product's restore of the create answers logic_assignments_present. The
+// assignment is then removed while the LOGIC is off, and restore deletes the
+// LOGIC while it is off.
 async function createdOnLogic(ctx, anchor) {
   const { hub, probe, virtual, prefix } = ctx;
   const name = `${prefix}-logic-on`;
@@ -3445,22 +3421,22 @@ async function createdOnLogic(ctx, anchor) {
   });
   const assignment = await assignWhileOn(ctx, { ref, anchor, createEntry });
   if (abortReason) return;
-  // Cleanup restores it before the assignment and the create: the
-  // assignment's removal is read back, and the create deleted, only while
-  // the LOGIC is on.
+  // If the run stops before the assignment is removed, cleanup restores this
+  // turn-off first: the LOGIC is turned on (the guard reads its inert source
+  // back), the assignment removed and the LOGIC deleted.
   const off = await prepareAndApply(hub, {
     operation: "scenario_active",
     target_ref: ref,
     value: false,
   });
-  const offEntry = off.applied
-    ? pushCleanup(ctx, {
-        label: "4m turn off",
-        parent: createEntry,
-        changeRef: off.changeRef,
-        verify: async () => (await probe.activeView(ref))?.active === true,
-      })
-    : undefined;
+  if (off.applied) {
+    pushCleanup(ctx, {
+      label: "4m turn off",
+      parent: createEntry,
+      changeRef: off.changeRef,
+      verify: async () => (await probe.activeView(ref))?.active === true,
+    });
+  }
   row(
     "4m turn off",
     "window.update{windowKey,options:[Active=false]}",
@@ -3473,84 +3449,38 @@ async function createdOnLogic(ctx, anchor) {
     abort("a LOGIC created on did not turn off");
     return;
   }
-  const seen = assignment ? await visibleWhileOff(ctx, { ref, anchor }) : null;
-  // The product scans the home with logic.list before it refuses a
-  // turned-off LOGIC: an assignment it shows blocks the delete.
-  const shown = seen?.list === true;
-  const whileOff = await logicCreateRestore(
+  if (assignment) {
+    await visibleWhileOff(ctx, { ref, anchor });
+    // The product's scan lists the assignment made while the LOGIC was on:
+    // it blocks the delete while the LOGIC is off.
+    const blocked = await logicCreateRestore(
+      ctx,
+      "4m restore create while assigned",
+      createEntry,
+      ref,
+      "conflict logic_assignments_present; LOGIC kept",
+      assignedWhileOff,
+    );
+    if (blocked.deleted) return;
+    const removed = await runRestore(hub, assignment);
+    const stillOff = (await probe.activeView(ref))?.active === false;
+    row(
+      "4n remove assignment while off",
+      "logic.delete{aId,sId,type}",
+      "assignment removed; logic.list no longer shows it; LOGIC still off",
+      `${removed.observed}; LOGIC ${stillOff ? "off" : "not off"}`,
+      removed.verified && stillOff ? "match" : "mismatch",
+    );
+    if (!removed.verified) return;
+  }
+  await logicCreateRestore(
     ctx,
     "4m restore create while off",
     createEntry,
     ref,
-    shown
-      ? "conflict logic_assignments_present; LOGIC kept"
-      : "refused with logic_off_assignments_unverified; LOGIC kept",
-    shown ? assignedWhileOff : refusedWhileOff,
+    "LOGIC deleted while off",
+    deletedLogic,
   );
-  if (whileOff.deleted) return;
-  if (!offEntry) {
-    leaveForSweep(
-      ctx,
-      createEntry,
-      ref,
-      "it could not be turned on again for the product's delete",
-    );
-    return;
-  }
-  // The product's next step, with the owner's consent: turn it on. The
-  // run's LOGIC runs nothing and is assigned only to the virtual accessory.
-  const on = await runRestore(hub, offEntry);
-  row(
-    "4m turn on",
-    "restore scenario_active",
-    "restored; active=true",
-    on.observed,
-    on.verified ? "match" : "mismatch",
-  );
-  await activeAgreement(ctx, "4m on agreement", ref, true);
-  if (assignment) {
-    const removed = await runRestore(hub, assignment);
-    row(
-      "4n remove assignment",
-      "logic.delete{aId,sId,type}",
-      "assignment removed; logic.list no longer shows it",
-      removed.observed,
-      removed.verified ? "match" : "mismatch",
-    );
-  }
-  const deleted = await logicCreateRestore(
-    ctx,
-    "4m restore create",
-    createEntry,
-    ref,
-    "LOGIC deleted",
-    (outcome) => outcome.verified,
-  );
-  if (deleted.deleted) return;
-  // Not deleted and maybe on: off again, it is left to the sweep.
-  const offAgain = await prepareAndApply(hub, {
-    operation: "scenario_active",
-    target_ref: ref,
-    value: false,
-  });
-  if (offAgain.applied) {
-    pushCleanup(ctx, {
-      label: "4m turn off again",
-      parent: createEntry,
-      changeRef: offAgain.changeRef,
-      restoreOptional: true,
-    });
-  }
-  if ((await probe.activeView(ref))?.active === false) {
-    leaveForSweep(
-      ctx,
-      createEntry,
-      ref,
-      "restore did not delete a LOGIC created on, turned on again",
-    );
-  } else {
-    abort("a LOGIC created on is neither off nor deleted");
-  }
 }
 
 // The product's restore of a turned-off created LOGIC whose assignment
@@ -3563,12 +3493,12 @@ function assignedWhileOff(outcome, present) {
   );
 }
 
-// 4n: whether an assignment stays visible after its LOGIC is turned off
-// decides whether the product may delete a turned-off LOGIC
-// (logic_off_assignments_unverified). SprutHub refuses to assign a
-// turned-off LOGIC (live-conformance-3), so the run's LOGIC is assigned
-// while it is on, through the product, to the run's virtual accessory (its
-// anchor); it runs nothing. Returns the assignment's cleanup entry.
+// 4n: restore deletes a turned-off LOGIC because an assignment made while
+// it was on stays listed once it is off (live-conformance-3); this checks
+// that again. SprutHub refuses to assign a turned-off LOGIC, so the run's
+// LOGIC is assigned while it is on, through the product, to the run's
+// virtual accessory (its anchor); it runs nothing. Returns the assignment's
+// cleanup entry.
 async function assignWhileOn(ctx, { ref, anchor, createEntry }) {
   const { hub, probe, virtual } = ctx;
   const type = scenarioIndex(ref);
@@ -3607,17 +3537,18 @@ async function assignWhileOn(ctx, { ref, anchor, createEntry }) {
   return entry;
 }
 
+// The product deletes a turned-off LOGIC after a scan with logic.list, so
+// the assignment must still be listed.
 async function visibleWhileOff(ctx, { ref, anchor }) {
   const seen = await ctx.probe.logicAssignmentSeen(ref, anchor);
   row(
     "4n visible while off",
     "logic.list{aId,sId}, logic.get{aId,sId,type}",
-    "record whether logic.list and logic.get still show the assignment",
+    "logic.list and logic.get still show the assignment",
     `logic.list ${seenText(seen.list, seen.list_error)}; logic.get ${seenText(seen.get, seen.get_error)}`,
-    "observed",
+    seen.list === true && seen.get === true ? "match" : "mismatch",
     { seen },
   );
-  return seen;
 }
 
 function seenText(value, error) {
@@ -3782,72 +3713,6 @@ async function renameLogic(
     back.verified ? "match" : "mismatch",
   );
   if (!back.verified) abort("the LOGIC rename was not restored");
-}
-
-// Assigns the turned-off LOGIC to the run's virtual accessory, reads
-// logic.list and removes the assignment.
-async function assignmentWhileOff(ctx, { ref, anchor, createEntry }) {
-  const { hub, probe, virtual } = ctx;
-  const step = "4k assignment while off";
-  const expected = "listed on the virtual accessory while the LOGIC is off";
-  const type = hub.created.get(ref)?.type;
-  if (!type) {
-    row(
-      step,
-      "logic.create",
-      expected,
-      "not run: the product has no type for it",
-      "skipped",
-    );
-    return;
-  }
-  const listed = (await probe.listLogicTypes(anchor)).some(
-    (entry) => entry.type === type,
-  );
-  if (!listed) {
-    row(
-      step,
-      "logic.create",
-      expected,
-      `not run: the anchor does not list ${type} while the LOGIC is off`,
-      "skipped",
-    );
-    return;
-  }
-  const assign = await prepareAndApply(hub, {
-    operation: "logic_assignment",
-    target_ref: `${virtual.serviceRef}/logic/${encodeURIComponent(type)}`,
-  });
-  if (!assign.applied) {
-    row(step, "logic.create", expected, describe(assign), "rejected");
-    return;
-  }
-  const entry = pushCleanup(ctx, {
-    label: "LOGIC assignment",
-    parent: createEntry,
-    changeRef: assign.changeRef,
-    verify: async () =>
-      !(await probe.listLogics(anchor)).some((item) => item.type === type),
-  });
-  const found = (await probe.listLogics(anchor)).find(
-    (item) => item.type === type,
-  );
-  row(
-    step,
-    "logic.create{aId,sId,type}, logic.list",
-    expected,
-    `${assign.applied.status}; logic.list ${found ? `lists it, active ${found.active}` : "does not list it"}`,
-    found ? "match" : "mismatch",
-  );
-  const removed = await runRestore(hub, entry);
-  row(
-    "4k restore assignment",
-    "logic.delete{aId,sId,type}",
-    "assignment absent",
-    removed.observed,
-    removed.verified ? "match" : "mismatch",
-  );
-  if (!removed.verified) abort("the LOGIC assignment was not removed");
 }
 
 // A run object that its restore cannot remove and that cannot act (off,
