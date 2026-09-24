@@ -232,7 +232,8 @@ test("a BLOCK summary names what the scenario does without its JSON", async (t) 
   assert.equal(leak.entity.summary.targets_known, false);
   assert.doesNotMatch(JSON.stringify(leak.entity.summary), /Hub\.getAccessory/);
 
-  // Ten lights are named from one accessory catalog read, not one read each.
+  // Without a session catalog the ten lights are read one by one instead of
+  // the whole home; once the overview has read the home, none is read.
   const before = hub.requests.length;
   const allOff = await read(client, { entity_ref: `${homeRef}/scenario/11` });
   assert.deepEqual(
@@ -255,7 +256,24 @@ test("a BLOCK summary names what the scenario does without its JSON", async (t) 
       .slice(before)
       .map(({ method }) => method)
       .filter((method) => method.startsWith("accessory.")),
-    ["accessory.list"],
+    Array(10).fill("accessory.get"),
+  );
+  const overview = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  const warm = hub.requests.length;
+  const named = await read(client, { entity_ref: `${homeRef}/scenario/11` });
+  assert.deepEqual(named.entity.summary.steps, allOff.entity.summary.steps);
+  assert.deepEqual(
+    hub.requests
+      .slice(warm)
+      .map(({ method }) => method)
+      .filter(
+        (method) => method.startsWith("accessory.") || method === "room.list",
+      ),
+    [],
   );
 
   const withConfiguration = await read(client, {

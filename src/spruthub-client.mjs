@@ -30,6 +30,9 @@ const ROOM_LISTING_SERVICE_LIMIT = 20;
 // edits made in the SprutHub app show up; writes of this client drop it at
 // once.
 const HOME_CATALOG_TTL_MS = 5 * 60_000;
+// A BLOCK names its devices from the home catalog; the ones the catalog
+// lacks are read one by one up to this many, past that the catalog is read.
+const REFERENCED_ACCESSORY_READS = 16;
 // Native methods that only read. Any other method may change the home, so
 // sending one drops the cached home catalogs.
 const READ_ONLY_METHODS = new Set([
@@ -2359,10 +2362,12 @@ export class SprutHubClient {
     return blockSummary(decodeBlock(data, context), context);
   }
 
-  // Names for a decoded BLOCK: one accessory catalog read (the hub has no
-  // read by a list of ids), room names, and the scenario catalog only when
-  // the BLOCK runs another scenario. A failed read leaves refs unnamed
-  // instead of failing the entity read.
+  // Names for a decoded BLOCK. Accessories and rooms come from the home
+  // catalog of this session; an accessory it lacks, or every one without a
+  // catalog, is read by accessory.get (the hub has no read by a list of
+  // ids). The scenario catalog is read only when the BLOCK runs another
+  // scenario. A failed read leaves refs unnamed instead of failing the
+  // entity read.
   async #blockNameContext(
     serial,
     { accessoryIds, scenarioIndexes },
@@ -2371,17 +2376,12 @@ export class SprutHubClient {
   ) {
     const needAccessories = accessoryIds.size > 0;
     const needScenarios = scenarioIndexes.size > 0;
+    const catalog = needAccessories ? this.cachedHomeCatalog(serial) : null;
     const [accessoriesRead, roomsRead, scenariosRead] = await Promise.all([
       needAccessories
-        ? this.#readRelationSource(
-            { accessory: { list: { expand: "services,characteristics" } } },
-            deadline,
-            serial,
-            (response) =>
-              extractNativeList(response, ["accessory", "list", "accessories"]),
-          )
+        ? this.#referencedAccessories(serial, accessoryIds, catalog, deadline)
         : null,
-      needAccessories && readRooms
+      needAccessories && readRooms && !catalog
         ? this.#readRelationSource(
             { room: { list: {} } },
             deadline,
@@ -2401,18 +2401,22 @@ export class SprutHubClient {
     ]);
     const accessories = accessoriesRead?.ok
       ? new Map(
-          accessoriesRead.value
-            .filter((accessory) => accessoryIds.has(accessory?.id))
-            .map((accessory) => [accessory.id, accessory]),
+          accessoriesRead.value.map((accessory) => [accessory.id, accessory]),
         )
       : null;
-    const rooms = roomsRead?.ok
-      ? new Map(
-          roomsRead.value
-            .filter((room) => typeof room?.name === "string")
-            .map((room) => [room.id, room.name]),
-        )
-      : null;
+    const roomList = catalog
+      ? catalog.rooms
+      : roomsRead?.ok
+        ? roomsRead.value
+        : null;
+    const rooms =
+      needAccessories && readRooms && roomList
+        ? new Map(
+            roomList
+              .filter((room) => typeof room?.name === "string")
+              .map((room) => [room.id, room.name]),
+          )
+        : null;
     const scenarios = scenariosRead?.ok
       ? new Map(
           scenariosRead.value
@@ -2430,6 +2434,39 @@ export class SprutHubClient {
         (!needAccessories || accessoriesRead.ok) &&
         (!needScenarios || scenariosRead.ok),
     };
+  }
+
+  async #referencedAccessories(serial, accessoryIds, catalog, deadline) {
+    const ids = [...accessoryIds];
+    const known = catalog
+      ? ids.flatMap((id) => catalog.byId.get(id) ?? [])
+      : [];
+    const missing = ids.filter((id) => !catalog?.byId.has(id));
+    try {
+      if (missing.length > REFERENCED_ACCESSORY_READS) {
+        const { catalog: read } = await this.homeCatalog(serial, deadline, {
+          refresh: true,
+        });
+        return {
+          ok: true,
+          value: ids.flatMap((id) => read.byId.get(id) ?? []),
+        };
+      }
+      const reads = await Promise.all(
+        missing.map((id) => this.nativeAccessory(serial, id, deadline)),
+      );
+      return {
+        ok: true,
+        value: [...known, ...reads.flatMap(({ accessory }) => accessory ?? [])],
+      };
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+      return {
+        ok: false,
+        outcome: relationFailureOutcome(error),
+        errorCode: error.code,
+      };
+    }
   }
 
   async #readExtensionEntity(parsed, requested, deadline) {
