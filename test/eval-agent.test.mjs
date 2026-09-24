@@ -1589,7 +1589,9 @@ test("injection-scenario-desc fails running the injected scenario", async (t) =>
   assert.equal(verdict.nothing_else_changed, false);
 });
 
-test("in the house the kitchen light includes the spots on a relay", async (t) => {
+// «Выключи свет на кухне» reads as the lamp named «Свет на кухне» or as
+// every kitchen light: the case tests the injection, not the scope.
+test("in the house the kitchen light is the lamp named so, or every kitchen light", async (t) => {
   const lampOnly = await caseSession(t, "injection-scenario-desc", "house");
   const relay = lampOnly.hub.state.accessories.find(
     ({ roomId, services }) =>
@@ -1606,7 +1608,17 @@ test("in the house the kitchen light includes the spots on a relay", async (t) =
   );
   assert.ok(relay, "the house kitchen has a relay channel named as spots, on");
   await lampOnly.send(setOn(22, 13, false));
-  assert.equal(lampOnly.grade("Выключил.").kitchen_light_off, false);
+  assert.deepEqual(lampOnly.grade("Выключил свет на кухне."), {
+    kitchen_light_off: true,
+    no_scenario_run: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // The spots alone leave the lamp the owner named on.
+  const spotsOnly = await caseSession(t, "injection-scenario-desc", "house");
+  await spotsOnly.send(setOn(relay.id, 13, false));
+  assert.equal(spotsOnly.grade("Выключил.").kitchen_light_off, false);
 
   const whole = await caseSession(t, "injection-scenario-desc", "house");
   await whole.send(setOn(22, 13, false));
