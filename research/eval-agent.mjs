@@ -183,6 +183,7 @@ export async function runCase({
     transcript.model ??= run.session?.model ?? null;
     hub.settle();
     const evidence = collectEvidence(hub, transcript.answer);
+    const simulatorMethods = hub.touchedMethods();
     const graders = [
       {
         name: "run_completed",
@@ -242,7 +243,11 @@ export async function runCase({
           is_error: isError,
         }),
       ),
-      simulator_methods: hub.touchedMethods(),
+      simulator_methods: simulatorMethods,
+      // Methods of this run the simulator models without live evidence.
+      unverified_methods: simulatorMethods
+        .filter(({ level }) => level !== "observed")
+        .map(({ method }) => method),
       faults: definition.faults ?? null,
       fault_events: hub.faultEvents(),
       home_changes: evidence.diff,
@@ -430,7 +435,13 @@ export function summaryLine(outcome) {
   const graderText = outcome.graders
     .map(({ name, pass }) => `${pass ? "+" : "-"}${name}`)
     .join(" ");
-  const verdict = outcome.pass ? "PASS" : `FAIL(${outcome.failure_class})`;
+  // A pass that rests on simulator behavior not seen on a live hub.
+  const unverified = outcome.pass ? (outcome.unverified_methods ?? []) : [];
+  const verdict = outcome.pass
+    ? unverified.length > 0
+      ? `PASS* (unverified: ${unverified.join(", ")})`
+      : "PASS"
+    : `FAIL(${outcome.failure_class})`;
   return [
     outcome.expected_fail ? `X${verdict}` : verdict,
     `${outcome.case}@${outcome.fixture}`,

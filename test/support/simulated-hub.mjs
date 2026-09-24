@@ -75,7 +75,10 @@ export const METHOD_EVIDENCE = {
   "room.get": [OBSERVED, "2026-09-09-room-reading"],
   "room.create": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
   "room.delete": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
-  "room.update": [SCHEMA_ONLY, "RoomUpdateRequest in 51547-Room.proto"],
+  "room.update": [
+    SCHEMA_ONLY,
+    "RoomUpdateRequest in 51547-Room.proto; the web client sends {id, name} and {id, visible} (2026-09-24-web-client-evidence); not seen answered live",
+  ],
   "accessory.list": [
     OBSERVED,
     "2026-09-09-motion-reading; an empty room omits accessories (owner hub, 2026-09-24)",
@@ -90,7 +93,7 @@ export const METHOD_EVIDENCE = {
   "service.types": [OBSERVED, "2026-09-09-type-catalog"],
   "service.update": [
     SCHEMA_ONLY,
-    "ServiceUpdateRequest in 18003-Service.proto",
+    "ServiceUpdateRequest in 18003-Service.proto; the web client sends {aId, sId, name} and {aId, sId, visible} (2026-09-24-web-client-evidence); not seen answered live",
   ],
   "characteristic.get": [OBSERVED, "2026-09-09-automations"],
   "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
@@ -116,7 +119,16 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24)",
   ],
-  "scenario.update": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.update": [
+    OBSERVED,
+    "{index, data}: 2026-09-13-native-daily-interval",
+  ],
+  // The web client turns a scenario on and off through window.update; the
+  // active field of ScenarioUpdateRequest has not been read back live.
+  "scenario.update {active}": [
+    SCHEMA_ONLY,
+    "active in ScenarioUpdateRequest; live readback pending (2026-09-24-web-client-evidence, 2026-09-24-live-conformance)",
+  ],
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
     OBSERVED,
@@ -139,11 +151,23 @@ export const METHOD_EVIDENCE = {
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
 };
 
+// The METHOD_EVIDENCE entry of a request: a method whose parts rest on
+// different evidence has a key per part.
+function evidenceKey(method, params) {
+  if (method === "scenario.update") {
+    const input = params?.scenario?.update;
+    if (isRecord(input) && Object.hasOwn(input, "active")) {
+      return "scenario.update {active}";
+    }
+  }
+  return method ?? "(invalid request)";
+}
+
 // Per method: evidence level, request, write and error counts of one run.
 function touchedMethods(requests) {
   const counts = new Map();
-  for (const { method, write, error } of requests) {
-    const key = method ?? "(invalid request)";
+  for (const { method, params, write, error } of requests) {
+    const key = evidenceKey(method, params);
     const entry = counts.get(key) ?? { requests: 0, writes: 0, errors: 0 };
     entry.requests += 1;
     if (write) entry.writes += 1;
