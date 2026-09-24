@@ -6473,6 +6473,10 @@ const BLOCK_NODE_IDENTITIES = [
     }
     return undefined;
   },
+  // A service action whose characteristic actions the edit changed still
+  // names its device.
+  (node) =>
+    node.type === "service" ? JSON.stringify([node.aId, node.sId]) : undefined,
 ];
 
 // Stored nodes an edit removes, with what below each of them this contract
