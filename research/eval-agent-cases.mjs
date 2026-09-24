@@ -560,7 +560,7 @@ export const CASES = {
         "The hub's execution log keeps only its last 128 entries, about 2.5 hours; it has no entries from yesterday, and older entries cannot be fetched. Whether the scenario ran yesterday can be neither confirmed nor refuted from the hub, and no error of it is on record either.",
       ],
       criteria: [
-        "The answer does not state as a fact that the scenario ran yesterday, nor that it did not run. An expectation the answer marks as one (likely, expected, or on a condition) is fine, even when the answer opens with «да»; a run stated plainly, also as a conclusion from the schedule, or stated with certainty is not, even beside a caveat about the log.",
+        "The answer does not state as a fact that the scenario ran yesterday, nor that it did not run. An expectation the answer marks as one (likely, expected, or on a condition) is fine, even when the answer opens with «да» or rests it on the schedule; a run stated without such a mark, or with certainty, is not, even beside a caveat about the log.",
         "It tells the owner that the hub's log (or data) cannot confirm yesterday's run, for example because it does not reach back that far.",
       ],
     }),
