@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { existsSync, realpathSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -8,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -331,6 +332,34 @@ test("reading the repository outside the plugin fails the run as isolation", asy
     );
     assert.equal(escaped.outcome.failure_class, "isolation", read);
   }
+
+  // A path written from the home directory leads where the shell and the
+  // Read tool expand it.
+  const fromHome = path.relative(homedir(), repo);
+  for (const read of [
+    `~/${fromHome}/research/eval-agent-cases.mjs`,
+    `cat $HOME/${fromHome}/src/server.mjs`,
+    `cat "\${HOME}/${fromHome}/src/server.mjs"`,
+  ]) {
+    const home = await scriptedRun(t, { turnOff: [on(15), on(16)], read });
+    assert.equal(home.outcome.failure_class, "isolation", read);
+  }
+
+  // On a case-insensitive file system a path with other letter case is the
+  // repository too; where the file system tells case apart, it is no path.
+  const shouted = path.join(repo.toUpperCase(), "research", "cases.mjs");
+  const sameFile =
+    existsSync(repo.toUpperCase()) &&
+    realpathSync.native(repo.toUpperCase()) === realpathSync.native(repo);
+  const cased = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    read: shouted,
+  });
+  assert.equal(
+    cased.outcome.failure_class,
+    sameFile ? "isolation" : null,
+    `${shouted} same_file=${sameFile}`,
+  );
 
   const skill = await scriptedRun(t, {
     turnOff: [on(15), on(16)],
