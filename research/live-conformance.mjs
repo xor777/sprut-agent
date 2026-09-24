@@ -21,7 +21,7 @@
 // Hub names are stored only as SHA-256; credentials never pass through here.
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -368,14 +368,17 @@ class ProbeClient {
 
   // The product creates an action-only BLOCK only turned on; this is the
   // turned-off form an owner can have. Same rule as every probe BLOCK.
+  // A marker of the sweep's form in desc lets the sweep delete this BLOCK if
+  // its own cleanup fails; it is not a product change and has no journal.
   async createTurnedOffBlock(name, data) {
     const violation = probeBlockViolation(data, this.#hub.virtualAIds);
     if (!name.startsWith(this.#hub.prefix) || violation) {
       throw new GuardError(`refused direct BLOCK: ${violation ?? "name"}`);
     }
+    const marker = `sprut-agent:native:${randomBytes(12).toString("hex")}`;
     const created = await this.#client.createScenario({
       name,
-      desc: PROBE_DESCRIPTION,
+      desc: `${PROBE_DESCRIPTION}\n\n[${marker}]`,
       active: false,
       onStart: false,
       sync: false,
@@ -389,6 +392,21 @@ class ProbeClient {
       direct: true,
     });
     return ref;
+  }
+
+  // The stored BLOCK data exactly as scenario.get returns it.
+  async storedBlockData(scenarioRef) {
+    if (!this.#hub.created.get(scenarioRef)?.direct) {
+      throw new GuardError(`${relativeRef(scenarioRef)} was not made directly`);
+    }
+    const scenario = await this.#client.getScenario(scenarioIndex(scenarioRef));
+    return {
+      active: scenario?.active,
+      data:
+        typeof scenario?.data === "string"
+          ? JSON.parse(scenario.data)
+          : scenario?.data,
+    };
   }
 
   async deleteDirectBlock(scenarioRef) {
@@ -643,13 +661,25 @@ async function main() {
       row("1-6", "-", "-", "--read-only: no write sent", "skipped");
       await guardedStep(ctx, "7", stepHistory);
     } else {
-      await guardedStep(ctx, "1", stepRoom);
-      await guardedStep(ctx, "V", stepVirtualAccessory);
-      await guardedStep(ctx, "2", stepBlockStorage);
-      await guardedStep(ctx, "3", stepPartialUpdates);
-      await guardedStep(ctx, "4", stepLogic);
-      await guardedStep(ctx, "6", stepManualRun);
-      await guardedStep(ctx, "7", stepHistory);
+      // --only 2i,7 runs just those steps; a step that needs an earlier one
+      // reports itself blocked.
+      const only = optionValue("--only")?.split(",");
+      for (const [id, step] of [
+        ["1", stepRoom],
+        ["V", stepVirtualAccessory],
+        ["2", stepBlockStorage],
+        ["2i", stepIfForms],
+        ["3", stepPartialUpdates],
+        ["4", stepLogic],
+        ["6", stepManualRun],
+        ["7", stepHistory],
+      ]) {
+        if (only && !only.includes(id)) {
+          row(id, "-", "-", "not selected by --only", "skipped");
+        } else {
+          await guardedStep(ctx, id, step);
+        }
+      }
     }
   } catch (error) {
     abort(`script error: ${error.message}`);
@@ -1867,6 +1897,73 @@ function structuralDiff(sent, read, pointer = "", nodeType = undefined) {
     : [{ path: pointer, kind: "changed", sent, read, node_type: nodeType }];
 }
 
+// --- step 2i: if node as the web client creates it --------------------------
+
+// The web client creates an if without mode and delays and with else null
+// (research/protocol/2026-09-24-web-client-evidence.md, section 3). Both
+// forms are created directly, turned off, with no action, because the
+// product may refuse or reshape the first; the stored if is reported as
+// scenario.get returns it.
+async function stepIfForms(ctx) {
+  const { probe, prefix } = ctx;
+  const condition = () => ({
+    type: "condition",
+    mode: "OR",
+    conditions: [
+      { type: "cron", mode: "NONE", cron: ONE_DATE_CRON, offset: 0 },
+    ],
+  });
+  const forms = [
+    {
+      id: "web_client",
+      sent: {
+        type: "if",
+        if: condition(),
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
+        then: [],
+        else: null,
+      },
+    },
+    {
+      id: "explicit",
+      sent: {
+        type: "if",
+        mode: "EVERY",
+        if: condition(),
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK grammar requires this field name.
+        then: [],
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    },
+  ];
+  const stored = {};
+  for (const form of forms) {
+    const ref = await probe.createTurnedOffBlock(`${prefix}-if-${form.id}`, {
+      targets: [form.sent],
+    });
+    pushDirectBlockCleanup(ctx, ref, `if-${form.id}`);
+    const read = await probe.storedBlockData(ref);
+    const node = read.data?.targets?.[0];
+    const fields = Object.fromEntries(
+      ["mode", "then_delay", "else_delay", "else", "state", "then"].map(
+        (key) => [key, node && Object.hasOwn(node, key) ? node[key] : "absent"],
+      ),
+    );
+    stored[form.id] = { active: read.active, if_node: node };
+    row(
+      `2i if ${form.id}`,
+      "scenario.create{BLOCK} (direct), scenario.get",
+      `stored ${JSON.stringify(form.sent, (key, value) => (key === "if" ? "…" : value))}`,
+      JSON.stringify(fields),
+      read.active === false && node?.type === "if" ? "observed" : "mismatch",
+      { stored_if: node },
+    );
+  }
+  report.if_forms = stored;
+}
+
 // --- step 3: partial updates on a probe BLOCK -------------------------------
 
 const SCENARIO_FIELDS = [
@@ -2302,18 +2399,7 @@ async function stepManualRun(ctx) {
     `${prefix}-run-action-only`,
     r1Data,
   );
-  pushCleanup(ctx, {
-    label: "BLOCK run-action-only (direct)",
-    scenario: true,
-    run: async () => {
-      const { failure, gone } = await probe.deleteDirectBlock(r1Ref);
-      return {
-        verified: gone,
-        status: gone ? "deleted" : "left",
-        observed: `${failure ? `delete error ${failure.code ?? failure.message}` : "scenario.delete acknowledged"}; verified ${gone}`,
-      };
-    },
-  });
+  pushDirectBlockCleanup(ctx, r1Ref, "run-action-only");
   const r1Stored = await readScenario(hub, r1Ref);
   const r1Diff = structuralDiff(r1Data, r1Stored.data).filter(
     (entry) => !isHubAssigned(entry),
@@ -2477,6 +2563,21 @@ async function stepManualRun(ctx) {
     JSON.stringify(restored),
     isDeepStrictEqual(restored, v.initial) ? "match" : "mismatch",
   );
+}
+
+function pushDirectBlockCleanup(ctx, scenarioRef, label) {
+  pushCleanup(ctx, {
+    label: `BLOCK ${label} (direct)`,
+    scenario: true,
+    run: async () => {
+      const { failure, gone } = await ctx.probe.deleteDirectBlock(scenarioRef);
+      return {
+        verified: gone,
+        status: gone ? "deleted" : "left",
+        observed: `${failure ? `delete error ${failure.code ?? failure.message}` : "scenario.delete acknowledged"}; verified ${gone}`,
+      };
+    },
+  });
 }
 
 // Sets the virtual accessory to `base`, sends scenario.run directly and
