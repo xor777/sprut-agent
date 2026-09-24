@@ -1005,7 +1005,9 @@ export class AutomationService {
       const changes = await this.store.list();
       const results = [];
       for (const item of items) {
-        results.push(await this.#sendDeviceCommand(item, changes, reason));
+        results.push(
+          await this.#sendDeviceCommand(item, changes, homeRef, reason),
+        );
       }
       return deviceCommandsResult(homeRef, results);
     });
@@ -1063,7 +1065,7 @@ export class AutomationService {
     );
   }
 
-  async #sendDeviceCommand({ command, draft, name }, changes, reason) {
+  async #sendDeviceCommand({ command, draft, name }, changes, homeRef, reason) {
     const item = {
       target_ref: command.target_ref,
       name,
@@ -1071,11 +1073,15 @@ export class AutomationService {
       requested: draft.requested.value,
     };
     let change;
+    let earlierContext = {};
     try {
       // A failure here still yields this item's result, so the results of
       // commands already sent in this call are never lost.
-      const earlier = await this.#unresolvedEarlierCommand(changes, draft);
-      if (earlier) {
+      const earlier =
+        command.resend_unconfirmed === true
+          ? null
+          : await this.#uncertainEarlierCommand(changes, draft);
+      if (earlier?.held) {
         return {
           ...item,
           status: "uncertain",
@@ -1084,7 +1090,18 @@ export class AutomationService {
           change_ref: earlier.result.change_ref,
           restore_supported: earlier.result.restore_supported === true,
           reason: "earlier_command_unresolved",
-          next: nativeChangeNext(earlier.result.change_ref),
+          next: resendDeviceCommandNext(homeRef, command, reason),
+        };
+      }
+      if (earlier) {
+        earlierContext = {
+          earlier_command: {
+            change_ref: earlier.result.change_ref,
+            status: earlier.result.status,
+            ...(earlier.result.conflict_reason
+              ? { conflict_reason: earlier.result.conflict_reason }
+              : {}),
+          },
         };
       }
       if (nativeValueAlreadyDesired(draft)) {
@@ -1108,17 +1125,25 @@ export class AutomationService {
       return {
         ...item,
         ...deviceCommandOutcome(await this.#applyValueChange(change)),
+        ...earlierContext,
       };
     } catch (error) {
-      return { ...item, ...deviceCommandFailure(change, error) };
+      return {
+        ...item,
+        ...deviceCommandFailure(change, error),
+        ...earlierContext,
+      };
     }
   }
 
   // A repeated command is a new intent, but it must not blindly resend a
   // value whose earlier send to the same characteristic is still unknown:
   // that earlier change is reconciled by readback first, as get_native_change
-  // does, and only a still-uncertain send of the same value holds this one.
-  async #unresolvedEarlierCommand(changes, draft) {
+  // does. Only a send the hub never acknowledged may still be on its way, so
+  // only that one holds a new send of the same value until the agent asks to
+  // resend it. An acknowledged send the device did not carry out is a device
+  // problem: the new request is sent and the earlier change is reported.
+  async #uncertainEarlierCommand(changes, draft) {
     const earlier = latestSentValueCommand(
       changes,
       configuredHomeRef(this.hubSerial),
@@ -1137,7 +1162,11 @@ export class AutomationService {
         ? earlier.baseline_value
         : earlier.requested_value;
     if (!valuesEqual(sentValue, draft.requested)) return null;
-    return { current: pending.current, result: pending.result };
+    return {
+      held: earlier.native_acknowledged !== true,
+      current: pending.current,
+      result: pending.result,
+    };
   }
 
   async #applyValueChange(change) {
@@ -8242,6 +8271,23 @@ function latestSentValueCommand(changes, homeRef, target) {
 
 function nativeChangeNext(changeRef) {
   return { tool: "get_native_change", arguments: { change_ref: changeRef } };
+}
+
+function resendDeviceCommandNext(homeRef, command, reason) {
+  return {
+    tool: "send_device_commands",
+    arguments: {
+      home_ref: homeRef,
+      commands: [
+        {
+          target_ref: command.target_ref,
+          value: command.value,
+          resend_unconfirmed: true,
+        },
+      ],
+      reason,
+    },
+  };
 }
 
 const DEVICE_COMMAND_STATUSES = {

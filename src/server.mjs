@@ -279,7 +279,7 @@ server.registerTool(
   {
     title: "Send direct commands to SprutHub devices",
     description:
-      "Writes to the hub. One-shot device commands (on/off, brightness, position, setpoint) for one or many devices in one call; take characteristic refs from read_services readings. All commands are checked against the live contract first: if any is invalid, nothing is sent and each invalid item is listed. They then run in order, and each item reports applied, already_desired, uncertain, conflict, rejected or not_sent with its change_ref for get_native_change. uncertain is not proof that nothing happened; a repeat does not resend a value whose earlier send is still uncertain. Commands are not undoable physical actions; items with restore_supported=true can be restored via restore_native_change. For configuration changes use prepare_native_change.",
+      "Writes to the hub. One-shot device commands (on/off, brightness, position, setpoint) for one or many devices in one call; take characteristic refs from read_services readings. All commands are checked against the live contract first: if any is invalid, nothing is sent and each invalid item is listed. They then run in order, and each item reports applied, already_desired, uncertain, conflict, rejected or not_sent with its change_ref for get_native_change. uncertain is not proof that nothing happened; a repeat holds a value whose earlier send got no answer, and that item's next resends it. Commands are not undoable physical actions; items with restore_supported=true can be restored via restore_native_change. For configuration changes use prepare_native_change.",
     inputSchema: {
       home_ref: z.string().min(1).describe("Exact home_ref from list_homes."),
       commands: z
@@ -292,6 +292,12 @@ server.registerTool(
             value: z
               .union([z.boolean(), z.number(), z.string()])
               .describe("New value in the characteristic's native type."),
+            resend_unconfirmed: z
+              .boolean()
+              .optional()
+              .describe(
+                "Send even though an earlier send of this value got no answer; set it only as an item's next offers.",
+              ),
           }),
         )
         .min(1)
