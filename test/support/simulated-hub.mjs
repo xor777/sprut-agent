@@ -1664,6 +1664,7 @@ function buildState(fixture) {
             ? hubClock(startedAt, utcOffsetMinutes)
             : fixture.hub.clock,
       }),
+      ...bridgeWindows(fixture.extensions ?? []),
     },
     extensions: structuredClone(fixture.extensions ?? []),
     logicCatalog: structuredClone(fixture.logicTypes ?? {}),
@@ -1997,6 +1998,38 @@ function syncScenarioWindow(state, scenario) {
       }),
     ],
   };
+}
+
+// A bridge's options window with the one option read on the owner's hub:
+// AutoAddNewAccessory was false on all four bridges (live-conformance-2).
+// Its other options are not modelled.
+function bridgeWindows(extensions) {
+  return Object.fromEntries(
+    extensions
+      .filter(({ bundleType, optionsWindow }) => {
+        return bundleType === "BRIDGE" && optionsWindow;
+      })
+      .map(({ name, optionsWindow }) => [
+        optionsWindow,
+        {
+          windowKey: optionsWindow,
+          label: { text: name },
+          options: [
+            {
+              key: "AutoAddNewAccessory",
+              name: "Добавлять новые аксессуары",
+              type: "GenericBoolean",
+              inputType: "CHECKBOX",
+              parent: "",
+              read: true,
+              write: true,
+              disabled: false,
+              value: { boolValue: false },
+            },
+          ],
+        },
+      ]),
+  );
 }
 
 const SCENARIO_WINDOW_PREFIX = "scenario-options-";
