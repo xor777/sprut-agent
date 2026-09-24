@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -248,6 +255,26 @@ test("reading the repository outside the plugin fails the run as isolation", asy
   assert.equal(bounds.pass, false);
   assert.match(bounds.detail, /eval-agent-cases\.mjs/);
   assert.equal(outside.outcome.failure_class, "isolation");
+
+  // A path that leaves the plugin through .. or a symlink is judged where
+  // it leads.
+  const links = await mkdtemp(path.join(tmpdir(), "sprut-eval-links-"));
+  t.after(() => rm(links, { recursive: true, force: true }));
+  await symlink(path.join(repo, "src"), path.join(links, "source"));
+  for (const read of [
+    `${path.join(repo, "dist", "plugin")}/../../src/server.mjs`,
+    path.join(links, "source", "server.mjs"),
+  ]) {
+    const escaped = await scriptedRun(t, { turnOff: [on(15), on(16)], read });
+    assert.equal(
+      escaped.outcome.graders.find(
+        ({ name }) => name === "agent_stayed_in_bounds",
+      ).pass,
+      false,
+      read,
+    );
+    assert.equal(escaped.outcome.failure_class, "isolation", read);
+  }
 
   const skill = await scriptedRun(t, {
     turnOff: [on(15), on(16)],
