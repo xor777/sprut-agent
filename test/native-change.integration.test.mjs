@@ -734,7 +734,16 @@ function assembleIntervalFromContract(contract, { start, end, trigger }) {
 
 function assembleCharacteristicFromContract(
   contract,
-  { ref, service, characteristic, trigger, cond, value, holdSeconds },
+  {
+    ref,
+    service,
+    characteristic,
+    trigger,
+    cond,
+    value,
+    holdSeconds,
+    hold = "held_for",
+  },
 ) {
   const form = publishedBlockNode(contract, "characteristic");
   const hs = requiredFieldName(form, "hs");
@@ -750,22 +759,22 @@ function assembleCharacteristicFromContract(
     [triggerField]: trigger,
     [condField]: cond,
     [valueField]: publishedScalarString(form, value),
-    ...publishedHold(form, holdSeconds),
+    ...publishedHold(form, holdSeconds, hold),
   };
 }
 
-function publishedHold(form, holdSeconds) {
+function publishedHold(form, holdSeconds, hold) {
   if (holdSeconds === undefined) {
     if (form.hold?.none === undefined) {
       throw new Error("BLOCK characteristic does not publish hold.none");
     }
     return structuredClone(form.hold.none);
   }
-  const heldFor = form.hold?.held_for;
-  if (heldFor?.time?.unit !== "milliseconds") {
-    throw new Error("BLOCK characteristic does not publish a hold in ms");
+  const published = form.hold?.[hold];
+  if (published?.time?.unit !== "milliseconds") {
+    throw new Error(`BLOCK characteristic does not publish hold ${hold} in ms`);
   }
-  return { timeCond: heldFor.timeCond, time: holdSeconds * 1000 };
+  return { timeCond: published.timeCond, time: holdSeconds * 1000 };
 }
 
 function publishedMode(form, mode) {
@@ -10444,6 +10453,65 @@ test("a window held open, a one-time branch and a continued timer are created, r
   );
 });
 
+test("a condition that changed back within a time is created and read back", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+  const [motionService, motion] = await Promise.all(
+    [`${homeRef}/accessory/32/service/13`, motionCharacteristicRef].map(
+      (entity_ref) =>
+        client.callTool({ name: "get_entity", arguments: { entity_ref } }),
+    ),
+  );
+  // The web client's third hold, "changed back within": timeCond "<".
+  const briefMotion = assembleCharacteristicFromContract(contract, {
+    ref: motionCharacteristicRef,
+    service: motionService,
+    characteristic: motion,
+    trigger: true,
+    cond: "=",
+    value: true,
+    holdSeconds: 10,
+    hold: "changed_back_within",
+  });
+  assert.deepEqual(
+    { timeCond: briefMotion.timeCond, time: briefMotion.time },
+    { timeCond: "<", time: 10_000 },
+  );
+  const data = {
+    targets: [
+      everyIf({
+        when: conditionGroup(briefMotion),
+        thenActions: [setAction()],
+      }),
+    ],
+  };
+  const prepared = await prepareBlockCreate(client, {
+    name: "Короткое движение",
+    data,
+    reason: "Включать свет, если движение пропало в течение 10 секунд",
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.deepEqual(
+    scenarioData(hub, created.structuredContent.scenario_index),
+    withRuntimeBlockFields(data),
+  );
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+});
+
 test("an existing BLOCK with ONCE, a hold, CONTINUE and clear_delay is updated, read back and restored", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -10510,9 +10578,9 @@ test("holds, branch modes, delay modes and delay clearing outside the contract a
       /no delay with that index/,
     ],
     [
-      "held shorter than",
+      "unknown hold comparison",
       (data) => {
-        data.targets[0].if.conditions[0].timeCond = "<";
+        data.targets[0].if.conditions[0].timeCond = "<=";
       },
       /hold/,
     ],
