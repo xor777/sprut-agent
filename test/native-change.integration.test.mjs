@@ -21642,6 +21642,86 @@ test("scenario_active refuses a scenario without an Active option in its options
   assert.deepEqual(scenarioUpdates(hub), []);
 });
 
+// window_option confirms only the window, so on its own it could report a
+// scenario switched while scenario.get still shows the old flag.
+test("window_option refuses the Active option of a scenario's options window and points to scenario_active", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenarios = scenarioActiveCases.map((scenarioCase) =>
+    scenarioCase.install(hub),
+  );
+  // A device option keyed Active is not a scenario flag.
+  hub.state.window.options.push({
+    key: "Active",
+    name: "Активен",
+    type: "GenericBoolean",
+    inputType: "CHECKBOX",
+    read: true,
+    write: true,
+    disabled: false,
+    value: { boolValue: false },
+  });
+  const client = await startClient(t, hub, stateDirectory);
+
+  for (const scenario of scenarios) {
+    const windowRef = `${homeRef}/window/${encodeURIComponent(scenario.optionsWindow)}`;
+    const refusals = [
+      await client.callTool({
+        name: "get_native_change_contract",
+        arguments: {
+          operation: "window_option",
+          target_ref: windowRef,
+          option_key: "Active",
+        },
+      }),
+      await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "window_option",
+          target_ref: windowRef,
+          option_key: "Active",
+          value: false,
+          reason: "Выключить сценарий через его окно",
+        },
+      }),
+    ];
+    for (const refused of refusals) {
+      assert.equal(refused.isError, true, refused.content[0]?.text);
+      assert.equal(
+        refused.structuredContent.error.code,
+        "scenario_owner_required",
+        refused.content[0]?.text,
+      );
+      assert.deepEqual(refused.structuredContent.next, {
+        tool: "get_native_change_contract",
+        arguments: {
+          operation: "scenario_active",
+          target_ref: scenarioRefFor(scenario),
+        },
+      });
+    }
+    assert.equal(scenario.active, true);
+  }
+  assert.deepEqual(windowUpdates(hub), []);
+
+  const device = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "window_option",
+      target_ref: deviceWindowRef,
+      option_key: "Active",
+      value: true,
+      reason: "Включить опцию устройства с ключом Active",
+    },
+  });
+  assert.equal(device.isError, undefined, device.content[0]?.text);
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    device.structuredContent.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+});
+
 test("an Active option that SprutHub does not carry to the scenario flag is not reported as applied", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const scenario = scenarioActiveCases[0].install(hub);
