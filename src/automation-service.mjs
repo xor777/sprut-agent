@@ -676,8 +676,8 @@ export class AutomationService {
       pauseChanges,
       Date.now(),
     );
-    const data = prepared.data;
-    normalizeBlockRequest(data);
+    normalizeBlockRequest(prepared.data);
+    const data = withKeptSubtreesAsStored(prepared.data, baseline.data);
     // Runtime flags belong to the owner here: this operation never writes
     // them, so a BLOCK without a trigger keeps whatever it had.
     const validation = await validateBlockData(data, this.client, {
@@ -687,7 +687,7 @@ export class AutomationService {
     });
     const requested = {
       ...structuredClone(baseline),
-      data: prepared.data,
+      data,
     };
     const id = this.store.newId();
     const now = new Date().toISOString();
@@ -5956,10 +5956,10 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written as stored wherever it sits in its array; each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a condition group of one condition with mode OR as AND, and an inc/dec step as a number; any other difference is an edit. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a condition group of one condition with mode OR as AND, and an inc/dec step as a number; any other difference is an edit. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
-      "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
+      "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
       "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
       "time_trigger days_at_time, every_n_hours, every_n_minutes, every_n_seconds and sun follow what the official web client writes: day names in field 5 with all seven sent as *, every N as 0/N with the editor's N list, and a SUNRISE/SUNSET offset in seconds (negative is before). one_date is only in the editor schema; the web client never writes it. SprutHub 3.0.0 stored days_at_time, one_date and sun as sent, but firing is not observed, so check read_hub_log after the first expected moment.",
       "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
@@ -6301,9 +6301,11 @@ async function validateBlockData(
 // position, so that their children are compared in turn; a node without a
 // pair is new, and so is everything below it. A stored node that is neither
 // kept nor paired is removed by the edit with everything below it; removed
-// holds its path in the stored data.
+// holds its path in the stored data; keptAs maps the top node of each kept
+// subtree to the stored node it matches.
 function keptBlockSubtrees(data, stored) {
   const kept = new WeakSet();
+  const keptAs = new Map();
   const counterparts = new WeakMap();
   const removed = [];
   const keep = (value) => {
@@ -6342,6 +6344,7 @@ function keptBlockSubtrees(data, stored) {
       if (same) {
         same.used = true;
         keep(child);
+        keptAs.set(child, same.child);
       } else {
         edited.push(child);
       }
@@ -6390,7 +6393,25 @@ function keptBlockSubtrees(data, stored) {
     }
   };
   if (isRecord(data) && isRecord(stored)) pair(data, stored, "root", "root");
-  return { kept, counterparts, removed };
+  return { kept, keptAs, counterparts, removed };
+}
+
+// The data an edit writes: each subtree it keeps is replaced by the stored
+// subtree it matches, so that what the canonical form reads alike (blockId,
+// if.state, if defaults written out or left out, the mode of a one-condition
+// group) stays as the hub holds it. The hub may read those fields
+// differently than the canonical form assumes.
+function withKeptSubtreesAsStored(data, stored) {
+  const { keptAs } = keptBlockSubtrees(data, stored);
+  const rebuild = (value) => {
+    if (keptAs.has(value)) return structuredClone(keptAs.get(value));
+    if (Array.isArray(value)) return value.map(rebuild);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, rebuild(child)]),
+    );
+  };
+  return rebuild(data);
 }
 
 // What names an edited node's stored original besides its position, first

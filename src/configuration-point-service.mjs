@@ -341,15 +341,8 @@ function extractCapturedEntity(entity, entityRef) {
           active: entity.active === true,
           on_start: entity.on_start === true,
           sync: entity.sync === true,
-          configuration:
-            configuration.format === "json" &&
-            configuration.value &&
-            typeof configuration.value === "object"
-              ? {
-                  format: "json",
-                  value: canonicalBlock(configuration.value),
-                }
-              : configuration,
+          // As read; comparableSettings brings it to the compared form.
+          configuration,
         },
       },
       not_captured: [],
@@ -515,8 +508,9 @@ function diffCaptured(previous, current) {
   return foldIncompleteOptions(previous, current, changes, not_compared);
 }
 
-// A scenario configuration is compared in canonicalBlock form on both sides:
-// points saved before captures took that form keep the data as it was read.
+// A scenario configuration is compared in canonicalBlock form on both sides.
+// A point holds the data as read; points saved by 0.1.44 hold that form
+// already, earlier ones the data without blockIds, and both still compare.
 function comparableSettings(captured) {
   const configuration = captured.settings?.configuration;
   if (

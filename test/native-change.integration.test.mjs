@@ -11949,6 +11949,9 @@ test("block_data_update wraps a single characteristic if predicate into a condit
   assert.equal(value.targets[1].if.mode, "OR");
   assert.equal(value.targets[1].if.conditions[0].type, "characteristic");
 
+  // The same data again keeps every stored node, so the hub gets them back
+  // as it stores them.
+  const storedBeforeRepeat = scenarioData(hub, "existing-block");
   const repeated = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -11959,7 +11962,8 @@ test("block_data_update wraps a single characteristic if predicate into a condit
     },
   });
   assert.equal(repeated.isError, undefined, repeated.content[0]?.text);
-  assert.deepEqual(repeated.structuredContent.diff.data.to, expected);
+  assert.equal(repeated.structuredContent.diff.data.changed, false);
+  assert.deepEqual(repeated.structuredContent.diff.data.to, storedBeforeRepeat);
   const repeatedApply = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: repeated.structuredContent.change_ref },
@@ -11970,13 +11974,17 @@ test("block_data_update wraps a single characteristic if predicate into a condit
       hub.requests.filter(({ scenario }) => scenario?.update).at(-1).scenario
         .update.data,
     ),
-    expected,
+    storedBeforeRepeat,
   );
 
+  // A new one-condition OR group (the value changes) is written as sent.
   const orGroup = {
     targets: [
       everyIf({
-        when: conditionGroup(characteristicCondition(), "OR"),
+        when: conditionGroup(
+          { ...characteristicCondition(), value: "false" },
+          "OR",
+        ),
         thenActions: [setAction()],
         elseActions: [setAction({ value: "false" })],
       }),
@@ -11992,7 +12000,10 @@ test("block_data_update wraps a single characteristic if predicate into a condit
     },
   });
   assert.equal(preparedOr.isError, undefined, preparedOr.content[0]?.text);
-  assert.deepEqual(preparedOr.structuredContent.diff.data.to, orGroup);
+  assert.deepEqual(
+    preparedOr.structuredContent.diff.data.to.targets[0].if,
+    orGroup.targets[0].if,
+  );
   const appliedOr = await client.callTool({
     name: "apply_native_change",
     arguments: { change_ref: preparedOr.structuredContent.change_ref },
