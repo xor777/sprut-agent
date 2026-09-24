@@ -1429,6 +1429,7 @@ async function startHub(port = 0) {
       closeAfterScenarioRun: false,
       closeAfterCharacteristicUpdate: false,
       dropNextCharacteristicUpdate: false,
+      rejectNextCharacteristicUpdate: false,
       closeAfterCharacteristicSetOptions: false,
       dropNextCharacteristicSetOptions: false,
       closeAfterWindowUpdate: false,
@@ -1700,6 +1701,16 @@ async function startHub(port = 0) {
         }
         result = { window: { update: {} } };
       } else if (params.characteristic?.update) {
+        if (state.behavior.rejectNextCharacteristicUpdate) {
+          state.behavior.rejectNextCharacteristicUpdate = false;
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: { code: 400, message: "characteristic update rejected" },
+            }),
+          );
+          return;
+        }
         const selected = state.accessories
           .find(({ id }) => id === params.characteristic.update.aId)
           ?.services.find(({ sId }) => sId === params.characteristic.update.sId)
@@ -6396,6 +6407,519 @@ test("a lost characteristic response is reconciled without another command", asy
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     1,
   );
+});
+
+function installLivingRoomLights(hub) {
+  hub.state.rooms.push({ id: 3, order: 3, name: "Гостиная", visible: true });
+  for (const [id, name] of [
+    [40, "Люстра"],
+    [41, "Торшер"],
+    [42, "Бра"],
+  ]) {
+    hub.state.accessories.push({
+      id,
+      roomId: 3,
+      name,
+      online: true,
+      services: [
+        {
+          aId: id,
+          sId: 13,
+          name: "Свет",
+          type: "Lightbulb",
+          characteristics: [
+            {
+              aId: id,
+              sId: 13,
+              cId: 15,
+              control: {
+                name: "Включена",
+                type: "On",
+                read: true,
+                write: true,
+                value: { boolValue: true },
+              },
+            },
+            {
+              aId: id,
+              sId: 13,
+              cId: 16,
+              control: {
+                name: "Яркость",
+                type: "Brightness",
+                read: true,
+                write: true,
+                minValue: 0,
+                maxValue: 100,
+                minStep: 1,
+                value: { intValue: 70 },
+              },
+            },
+          ],
+        },
+      ],
+    });
+  }
+  const lamp = (id) => ({
+    on: `${homeRef}/accessory/${id}/service/13/characteristic/15`,
+    brightness: `${homeRef}/accessory/${id}/service/13/characteristic/16`,
+  });
+  return { chandelier: lamp(40), floor: lamp(41), sconce: lamp(42) };
+}
+
+function livingRoomOff(lights) {
+  return [lights.floor, lights.chandelier, lights.sconce].map(({ on }) => ({
+    target_ref: on,
+    value: false,
+  }));
+}
+
+async function sendDeviceCommands(
+  client,
+  commands,
+  reason = "Выключить весь свет в гостиной",
+) {
+  return client.callTool({
+    name: "send_device_commands",
+    arguments: { home_ref: homeRef, commands, reason },
+  });
+}
+
+function deviceCommandUpdates(hub, ref) {
+  const updates = hub.requests
+    .filter(({ characteristic }) => characteristic?.update)
+    .map(({ characteristic }) => characteristic.update);
+  if (ref === undefined) return updates;
+  const [, aId, sId, cId] =
+    /\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/
+      .exec(ref)
+      .map(Number);
+  return updates.filter(
+    (update) => update.aId === aId && update.sId === sId && update.cId === cId,
+  );
+}
+
+function offUpdate(aId) {
+  return { aId, sId: 13, cId: 15, control: { value: { boolValue: false } } };
+}
+
+function commandOutcome({
+  target_ref,
+  name,
+  type,
+  requested,
+  status,
+  sent,
+  observed_value,
+  restore_supported,
+}) {
+  return {
+    target_ref,
+    name,
+    type,
+    requested,
+    status,
+    sent,
+    observed_value,
+    restore_supported,
+  };
+}
+
+test("device commands turn off several lamps in one call and journal each command", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(client, livingRoomOff(lights));
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  assert.equal(sent.structuredContent.status, "ok");
+  assert.deepEqual(sent.structuredContent.summary, {
+    total: 3,
+    applied: 3,
+    already_desired: 0,
+    uncertain: 0,
+    conflict: 0,
+    rejected: 0,
+    not_sent: 0,
+  });
+  const { results } = sent.structuredContent;
+  assert.deepEqual(
+    results.map(commandOutcome),
+    [
+      ["Торшер", lights.floor.on],
+      ["Люстра", lights.chandelier.on],
+      ["Бра", lights.sconce.on],
+    ].map(([name, ref]) => ({
+      target_ref: ref,
+      name: `${name} / Свет`,
+      type: "On",
+      requested: false,
+      status: "applied",
+      sent: true,
+      observed_value: false,
+      restore_supported: false,
+    })),
+  );
+  for (const { change_ref: changeRef } of results) {
+    assert.match(changeRef, /^spruthub-change:\/\/native\/[a-f0-9]{24}$/);
+  }
+  assert.equal(new Set(results.map(({ change_ref }) => change_ref)).size, 3);
+
+  assert.deepEqual(deviceCommandUpdates(hub), [
+    offUpdate(41),
+    offUpdate(40),
+    offUpdate(42),
+  ]);
+  for (const { on, brightness } of Object.values(lights)) {
+    assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: false });
+    assert.deepEqual(currentCharacteristicValue(hub, brightness), {
+      intValue: 70,
+    });
+  }
+
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, limit: 50 },
+  });
+  assert.equal(history.isError, undefined, history.content[0]?.text);
+  assert.deepEqual(
+    history.structuredContent.changes
+      .map(({ change_ref, operation, recorded_status }) => ({
+        change_ref,
+        operation,
+        recorded_status,
+      }))
+      .sort((left, right) => left.change_ref.localeCompare(right.change_ref)),
+    results
+      .map(({ change_ref }) => ({
+        change_ref,
+        operation: "characteristic_value",
+        recorded_status: "applied",
+      }))
+      .sort((left, right) => left.change_ref.localeCompare(right.change_ref)),
+  );
+  const detail = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: results[0].change_ref },
+  });
+  assert.equal(detail.isError, undefined, detail.content[0]?.text);
+  assert.equal(detail.structuredContent.status, "applied");
+  assert.equal(detail.structuredContent.target_ref, lights.floor.on);
+  assert.equal(
+    detail.structuredContent.reason,
+    "Выключить весь свет в гостиной",
+  );
+});
+
+test("device commands skip an already chosen setting and still deliver an equal lamp command", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const lights = installLivingRoomLights(hub);
+  const [temperature] = climateSettings;
+  currentCharacteristicValue(hub, lights.floor.on).boolValue = false;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(
+    client,
+    [
+      { target_ref: temperature.ref, value: temperature.baseline },
+      { target_ref: lights.floor.on, value: false },
+      { target_ref: lights.chandelier.on, value: false },
+    ],
+    "Выключить свет, в гостиной оставить 21 градус",
+  );
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  assert.equal(sent.structuredContent.status, "ok");
+  const [setpoint, floor, chandelier] = sent.structuredContent.results;
+  assert.deepEqual(
+    { ...commandOutcome(setpoint), change_ref: setpoint.change_ref },
+    {
+      target_ref: temperature.ref,
+      name: "Лампа / Климат офиса",
+      type: "TargetTemperature",
+      requested: temperature.baseline,
+      status: "already_desired",
+      sent: false,
+      observed_value: temperature.baseline,
+      restore_supported: false,
+      change_ref: null,
+    },
+  );
+  // A lamp command of unknown semantics is delivered even when the hub
+  // already shows the requested value, to resynchronize the actuator.
+  assert.equal(floor.status, "applied");
+  assert.equal(floor.sent, true);
+  assert.equal(chandelier.status, "applied");
+  assert.deepEqual(deviceCommandUpdates(hub), [offUpdate(41), offUpdate(40)]);
+  assert.deepEqual(sent.structuredContent.summary, {
+    total: 3,
+    applied: 2,
+    already_desired: 1,
+    uncertain: 0,
+    conflict: 0,
+    rejected: 0,
+    not_sent: 0,
+  });
+});
+
+test("a setpoint sent as a device command stays restorable", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const [temperature] = climateSettings;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(
+    client,
+    [{ target_ref: temperature.ref, value: temperature.requested }],
+    "Сделать теплее",
+  );
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  const [setpoint] = sent.structuredContent.results;
+  assert.equal(setpoint.status, "applied");
+  assert.equal(setpoint.restore_supported, true);
+  assert.deepEqual(currentCharacteristicValue(hub, temperature.ref), {
+    doubleValue: temperature.requested,
+  });
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: setpoint.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(currentCharacteristicValue(hub, temperature.ref), {
+    doubleValue: temperature.baseline,
+  });
+});
+
+test("one invalid device command rejects the whole call before any write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const readOnlyRef = `${homeRef}/accessory/34/service/13/characteristic/17`;
+  const client = await startClient(t, hub, stateDirectory);
+
+  const rejected = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+    { target_ref: lights.chandelier.brightness, value: 101 },
+    { target_ref: readOnlyRef, value: false },
+    { target_ref: lights.sconce.on, value: "off" },
+  ]);
+  assert.equal(rejected.isError, true);
+  assert.equal(
+    rejected.structuredContent.error.code,
+    "invalid_device_commands",
+  );
+  const invalid = rejected.structuredContent.invalid_commands;
+  assert.deepEqual(
+    invalid.map(({ index, target_ref, code }) => ({ index, target_ref, code })),
+    [
+      {
+        index: 1,
+        target_ref: lights.chandelier.brightness,
+        code: "invalid_native_value",
+      },
+      { index: 2, target_ref: readOnlyRef, code: "insufficient_rights" },
+      {
+        index: 3,
+        target_ref: lights.sconce.on,
+        code: "invalid_native_value",
+      },
+    ],
+  );
+  assert.deepEqual(invalid[0].contract, {
+    type: "Brightness",
+    kind: "intValue",
+    min: 0,
+    max: 100,
+    step: 1,
+  });
+  assert.deepEqual(invalid[2].contract, { type: "On", kind: "boolValue" });
+  for (const item of invalid) {
+    assert.equal(typeof item.message, "string");
+  }
+
+  assert.deepEqual(deviceCommandUpdates(hub), []);
+  for (const { on } of Object.values(lights)) {
+    assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: true });
+  }
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+});
+
+test("duplicate or foreign-home device commands are rejected before any hub request", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  const requestsBefore = hub.requests.length;
+
+  const duplicate = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+    { target_ref: lights.chandelier.on, value: false },
+    { target_ref: lights.floor.on, value: true },
+  ]);
+  assert.equal(duplicate.isError, true);
+  assert.equal(
+    duplicate.structuredContent.error.code,
+    "invalid_device_commands",
+  );
+  assert.deepEqual(
+    duplicate.structuredContent.invalid_commands.map(
+      ({ index, target_ref, code }) => ({ index, target_ref, code }),
+    ),
+    [{ index: 2, target_ref: lights.floor.on, code: "duplicate_target" }],
+  );
+
+  const foreignRef =
+    "spruthub://hub/other-home/accessory/41/service/13/characteristic/15";
+  const foreign = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+    { target_ref: foreignRef, value: false },
+  ]);
+  assert.equal(foreign.isError, true);
+  assert.deepEqual(
+    foreign.structuredContent.invalid_commands.map(
+      ({ index, target_ref, code }) => ({ index, target_ref, code }),
+    ),
+    [{ index: 1, target_ref: foreignRef, code: "unsupported_home_write" }],
+  );
+
+  assert.equal(hub.requests.length, requestsBefore);
+});
+
+test("a lost device command response is not resent by a repeated call until its outcome is known", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+
+  const first = await sendDeviceCommands(firstClient, livingRoomOff(lights));
+  assert.equal(first.isError, undefined, first.content[0]?.text);
+  assert.equal(first.structuredContent.status, "incomplete");
+  assert.deepEqual(
+    first.structuredContent.results.map(({ status, sent }) => ({
+      status,
+      sent,
+    })),
+    [
+      { status: "uncertain", sent: true },
+      { status: "applied", sent: true },
+      { status: "applied", sent: true },
+    ],
+  );
+  const lost = first.structuredContent.results[0];
+  assert.equal(lost.observed_value, true);
+  assert.deepEqual(lost.next, {
+    tool: "get_native_change",
+    arguments: { change_ref: lost.change_ref },
+  });
+  assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 1);
+  await firstClient.close();
+
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await sendDeviceCommands(
+    secondClient,
+    livingRoomOff(lights),
+  );
+  assert.equal(repeated.isError, undefined, repeated.content[0]?.text);
+  const [floor, chandelier, sconce] = repeated.structuredContent.results;
+  assert.deepEqual(
+    {
+      status: floor.status,
+      sent: floor.sent,
+      change_ref: floor.change_ref,
+      reason: floor.reason,
+      observed_value: floor.observed_value,
+      next: floor.next,
+    },
+    {
+      status: "uncertain",
+      sent: false,
+      change_ref: lost.change_ref,
+      reason: "earlier_command_unresolved",
+      observed_value: true,
+      next: lost.next,
+    },
+  );
+  assert.equal(chandelier.status, "applied");
+  assert.equal(sconce.status, "applied");
+  assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 1);
+  assert.equal(deviceCommandUpdates(hub).length, 5);
+
+  // The lamp reports the requested value late: the earlier command is
+  // reconciled by readback and the new request is sent as a new intent.
+  currentCharacteristicValue(hub, lights.floor.on).boolValue = false;
+  const afterReport = await sendDeviceCommands(secondClient, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  assert.equal(afterReport.isError, undefined, afterReport.content[0]?.text);
+  const [resent] = afterReport.structuredContent.results;
+  assert.equal(resent.status, "applied");
+  assert.equal(resent.sent, true);
+  assert.notEqual(resent.change_ref, lost.change_ref);
+  const earlier = await secondClient.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: lost.change_ref },
+  });
+  assert.equal(earlier.structuredContent.status, "applied");
+  assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 2);
+});
+
+test("a different command to a lamp with an uncertain earlier command is sent", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+  const first = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  assert.equal(first.structuredContent.results[0].status, "uncertain");
+
+  const turnedOn = await sendDeviceCommands(
+    client,
+    [{ target_ref: lights.floor.on, value: true }],
+    "Всё-таки включить торшер",
+  );
+  assert.equal(turnedOn.isError, undefined, turnedOn.content[0]?.text);
+  const [floor] = turnedOn.structuredContent.results;
+  assert.equal(floor.status, "applied");
+  assert.equal(floor.sent, true);
+  assert.deepEqual(deviceCommandUpdates(hub, lights.floor.on), [
+    offUpdate(41),
+    { aId: 41, sId: 13, cId: 15, control: { value: { boolValue: true } } },
+  ]);
+});
+
+test("a rejected device command does not stop the remaining commands", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.rejectNextCharacteristicUpdate = true;
+
+  const sent = await sendDeviceCommands(client, livingRoomOff(lights));
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  assert.equal(sent.structuredContent.status, "incomplete");
+  const [floor, chandelier, sconce] = sent.structuredContent.results;
+  assert.equal(floor.status, "rejected");
+  assert.equal(floor.sent, true);
+  assert.equal(floor.error.code, "request_rejected");
+  assert.equal(chandelier.status, "applied");
+  assert.equal(sconce.status, "applied");
+  assert.deepEqual(currentCharacteristicValue(hub, lights.floor.on), {
+    boolValue: true,
+  });
+  assert.deepEqual(currentCharacteristicValue(hub, lights.sconce.on), {
+    boolValue: false,
+  });
+  assert.equal(sent.structuredContent.summary.rejected, 1);
+
+  const detail = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: floor.change_ref },
+  });
+  assert.equal(detail.structuredContent.status, "not_applied");
 });
 
 test("apply revalidates the current characteristic contract and BLOCK bindings", async (t) => {
