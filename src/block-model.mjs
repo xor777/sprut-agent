@@ -1,4 +1,11 @@
-const TARGET_KINDS = ["if", "service", "delay", "clear_delay", "scenario"];
+const TARGET_KINDS = [
+  "if",
+  "service",
+  "delay",
+  "clear_delay",
+  "scenario",
+  "notify",
+];
 
 // Service actions that the preview and relations interpret.
 export const SERVICE_ACTION_KINDS = ["set", "toggle", "inc", "dec"];
@@ -81,6 +88,7 @@ export const BLOCK_ALLOWED_KEYS = {
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
   clear_delay: new Set(["type", "blockId", "index"]),
   scenario: new Set(["type", "blockId", "index", "mode"]),
+  notify: new Set(["type", "blockId", "text", "mode", "to"]),
 };
 
 const BLOCK_CREATE_NODE_KINDS = [
@@ -98,6 +106,7 @@ const BLOCK_CREATE_NODE_KINDS = [
   "delay",
   "clear_delay",
   "scenario",
+  "notify",
 ];
 
 const NATIVE_SCALAR_AS_STRING = {
@@ -171,6 +180,31 @@ const SCENARIO_RUN_MODES = new Set(["FIRE", "ACTIVATE_AND_FIRE"]);
 export function scenarioTargetRuns(mode) {
   return SCENARIO_RUN_MODES.has(mode);
 }
+
+// Notify modes with the web client's labels. Where the hub shows a MESSAGE
+// is not known from the client.
+export const NOTIFY_MODES = {
+  MESSAGE: "system_notification_editor_label_Системное",
+  PUSH: "send_through_notification_services_editor_label_Отправить",
+};
+
+// Recipients of a PUSH, as the web client writes them: null for every
+// notification service, or one entry per service by the index of its
+// NOTIFICATION extension, with clients null for all its recipients or the
+// ids of its children. The client writes neither an empty list nor empty
+// clients; it sets them to null.
+export const NOTIFY_RECIPIENTS = {
+  all_services: null,
+  listed_services: [
+    {
+      index:
+        "index of a notification service: an extension with bundle_type NOTIFICATION (home_overview list=extensions)",
+      clients:
+        "null for all its recipients, or ids of its children (get_entity include children)",
+    },
+  ],
+  with_mode_MESSAGE: "null_or_omitted",
+};
 
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
@@ -288,6 +322,18 @@ const BLOCK_NODE_CONSTRAINTS = {
       CONTINUE:
         "new_timer_each_entry_starts_another_delay_expected_from_editor_label",
     },
+    editor_optional: ["blockId"],
+  },
+  // The web client's Notify: text, mode and to. Its new node is
+  // {text:"", mode:"MESSAGE"} without to, and a mode change sets to null.
+  notify: {
+    fields: {
+      text: "the_message_itself_owner_data_not_empty",
+      mode: Object.keys(NOTIFY_MODES),
+      to: NOTIFY_RECIPIENTS,
+    },
+    modes: NOTIFY_MODES,
+    when_omitted: { to: null },
     editor_optional: ["blockId"],
   },
   // The web client offers index 0 as "All delays"; stored as sent on
@@ -506,6 +552,11 @@ function publishedBlockChildren() {
 export function normalizeBlockRequest(data) {
   wrapDirectCharacteristicIfPredicates(data);
   visitKnownBlockNodes(data, (node, kind) => {
+    // The web client writes to null for every PUSH it creates.
+    if (kind === "notify" && node.mode === "PUSH" && node.to === undefined) {
+      node.to = null;
+      return;
+    }
     if (kind === "inc" || kind === "dec") {
       // Sent in the form the hub stores (relativeStepNumber).
       const step = relativeStepNumber(node.value);
@@ -587,6 +638,11 @@ function canonicalNode(node, kind) {
     if (canonical.else === undefined || canonical.else === null) {
       canonical.else = [];
     }
+  }
+  if (kind === "notify" && !Object.hasOwn(canonical, "to")) {
+    // Client code: a new notify has no to, and a mode change writes to
+    // null; both mean no recipients were chosen.
+    canonical.to = null;
   }
   if (
     kind === "condition" &&

@@ -465,11 +465,7 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
         value: undefined,
         unit: undefined,
       },
-      {
-        type: "unrecognized",
-        pointer: `${pointer}/then/1`,
-        native_type: "notify",
-      },
+      { type: "notify", mode: "MESSAGE", text: "Проверка" },
       {
         type: "run_scenario",
         mode: "FIRE",
@@ -482,7 +478,6 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
   );
   assert.deepEqual(summary.unrecognized, [
     { pointer: `${pointer}/if/conditions/4`, native_type: "cron" },
-    { pointer: `${pointer}/then/1`, native_type: "notify" },
   ]);
   assertReadOnly(hub, baseline);
 });

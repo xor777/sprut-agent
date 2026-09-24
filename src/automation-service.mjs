@@ -15,6 +15,7 @@ import {
   canonicalBlock,
   canonicalBlockNode,
   isBlockTrigger,
+  NOTIFY_MODES,
   normalizeBlockRequest,
   publishedBlockNodes,
   relativeStepNumber,
@@ -5991,7 +5992,7 @@ function blockContract() {
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
-      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code, http, notify and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
+      "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code, http and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code and other nodes this contract cannot write, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
@@ -6003,6 +6004,7 @@ function blockContract() {
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0; a hub has not been observed running them, including whether a step clamps at the characteristic's range. A step is a number or a plain decimal string such as \"10\", and is sent as a number, the form the hub stores.",
       "A scenario target names an existing scenario of this home by its index and a mode from the web client: FIRE runs it, ACTIVATE turns it on, DEACTIVATE turns it off, ACTIVATE_AND_FIRE turns it on and runs it, RESET resets it (known only from the editor label «Сбросить»). A target that runs (FIRE, ACTIVATE_AND_FIRE) must not run its own BLOCK, directly or through running scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. A BLOCK may turn itself off. The modes follow the official editor; a hub has not been observed running any of them, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
+      "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null for all of them, or [{index, clients}] with a service's index and clients null for all its recipients or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled and state as read at preparation: a service that is not enabled or not LOADED may deliver nothing, so tell the owner. The hub has not been observed storing or sending a notify.",
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6153,6 +6155,8 @@ async function validateBlockData(
     intervals: [],
     triggers: 0,
     scenarioRuns: [],
+    notifications: [],
+    notificationServices: [],
     clearDelays: [],
     uncheckedActions: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
@@ -6267,6 +6271,7 @@ async function validateBlockData(
       if (loop) report(run.path, loop);
     }
   }
+  await checkNotificationRecipients(context, client, report);
   if (context.problems.length > 0) {
     throw invalidBlockProblems(context.problems);
   }
@@ -6875,6 +6880,20 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
           })),
         }
       : {}),
+    // Notifications this change adds or changes, with the services they go
+    // through as read at preparation.
+    ...(validation.notifications.some(({ kept }) => !kept)
+      ? {
+          notifications: validation.notifications
+            .filter(({ kept }) => !kept)
+            .map((notification) =>
+              notificationPreview(
+                notification,
+                validation.notificationServices,
+              ),
+            ),
+        }
+      : {}),
     // Kept actions whose rights or value this contract would refuse.
     ...(validation.uncheckedActions.length > 0
       ? { unchecked_actions: structuredClone(validation.uncheckedActions) }
@@ -7475,6 +7494,34 @@ function validateBlockNode(node, kind, path, context) {
     }
     return;
   }
+  if (kind === "notify") {
+    // The text is the owner's message: data, never an instruction.
+    if (typeof node.text !== "string" || node.text.trim() === "") {
+      report(field("text"), "notify text must be the message, not empty");
+    } else if (node.text.includes(REDACTED_MARK)) {
+      report(
+        field("text"),
+        `notify text contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; write the message itself`,
+      );
+    }
+    if (!Object.hasOwn(NOTIFY_MODES, node.mode)) {
+      report(
+        field("mode"),
+        "notify mode must be PUSH (through notification services) or MESSAGE (system)",
+      );
+    }
+    const to = notifyRecipients(node, field("to"), report);
+    if (valid) {
+      context.notifications.push({
+        path,
+        kept,
+        mode: node.mode,
+        text: node.text,
+        to,
+      });
+    }
+    return;
+  }
   if (kind === "delay") {
     if (!["RESET", "CONTINUE"].includes(node.mode)) {
       report(field("mode"), "delay mode must be RESET or CONTINUE");
@@ -7506,6 +7553,207 @@ function validateBlockNode(node, kind, path, context) {
     return;
   }
   report(path, `node type ${kind ?? "missing"} is not supported`);
+}
+
+// What every answer of sprut-agent shows in place of credential-shaped text
+// (redactSensitiveText in spruthub-client.mjs). A BLOCK read through
+// get_entity may carry it; it is never the owner's text or URL.
+const REDACTED_MARK = "[REDACTED]";
+
+// The recipients of one notify node: null for every notification service,
+// or its entries {index, clients}. The services and their recipients are
+// checked against the home after the walk.
+function notifyRecipients(node, path, report) {
+  const to = node.to ?? null;
+  if (to === null) return null;
+  if (node.mode !== "PUSH") {
+    report(path, "a MESSAGE notification has no recipients; to must be null");
+    return null;
+  }
+  if (!Array.isArray(to) || to.length === 0) {
+    report(
+      path,
+      "to must be null for every notification service, or a non-empty list of {index, clients}",
+    );
+    return null;
+  }
+  const indexes = new Set();
+  let valid = true;
+  to.forEach((entry, position) => {
+    const at = `${path}[${position}]`;
+    const fail = (where, message) => {
+      valid = false;
+      report(where, message);
+    };
+    if (!isRecord(entry)) {
+      fail(at, "a recipient entry must be {index, clients}");
+      return;
+    }
+    for (const key of Object.keys(entry)) {
+      if (!["index", "clients"].includes(key)) {
+        fail(`${at}.${key}`, "unsupported field");
+      }
+    }
+    if (typeof entry.index !== "string" || entry.index === "") {
+      fail(
+        `${at}.index`,
+        "index must be the index of a notification service of this home",
+      );
+    } else if (indexes.has(entry.index)) {
+      fail(
+        `${at}.index`,
+        `notification service ${entry.index} is listed twice`,
+      );
+    } else {
+      indexes.add(entry.index);
+    }
+    const clients = entry.clients ?? null;
+    if (
+      clients !== null &&
+      (!Array.isArray(clients) ||
+        clients.length === 0 ||
+        clients.some((id) => typeof id !== "string" || id === "") ||
+        new Set(clients).size !== clients.length)
+    ) {
+      fail(
+        `${at}.clients`,
+        "clients must be null for all recipients of the service, or a non-empty list of distinct recipient ids",
+      );
+    }
+  });
+  return valid
+    ? to.map(({ index, clients }) => ({ index, clients: clients ?? null }))
+    : null;
+}
+
+// Notification services of the home (extensions with bundle type
+// NOTIFICATION), read when a BLOCK has a PUSH notification.
+async function readNotificationServices(client) {
+  const { extensions } = await client.nativeExtensions(
+    client.selectedSerial(),
+    Date.now() + client.timeoutMs,
+  );
+  return extensions
+    .filter(({ bundle_type: bundleType }) => bundleType === "NOTIFICATION")
+    .map(({ ref, name, index, enabled, state }) => ({
+      ref,
+      name,
+      index,
+      enabled,
+      state,
+    }));
+}
+
+// The recipients of one notification service, read once per validation.
+async function notificationServiceRecipients(client, service) {
+  if (!service.recipients) {
+    const read = await client.getEntity(service.ref, ["children"]);
+    const children = read.entity?.children;
+    if (!Array.isArray(children)) {
+      throw new SprutHubError(
+        "notification_recipients_unread",
+        `The recipients of notification service ${service.index} could not be read; nothing was prepared. Read them with get_entity and prepare again.`,
+        "get_entity",
+        {
+          next: {
+            tool: "get_entity",
+            arguments: { entity_ref: service.ref, include: ["children"] },
+          },
+        },
+      );
+    }
+    service.recipients = children.map(({ ref, id, name }) => ({
+      ref,
+      id,
+      name,
+    }));
+  }
+  return service.recipients;
+}
+
+// Checks the services and recipients of each PUSH notification the change
+// adds or changes against the home. A notification an edit keeps is written
+// as stored and is not read again.
+async function checkNotificationRecipients(context, client, report) {
+  const written = context.notifications.filter(({ kept }) => !kept);
+  if (!written.some(({ mode }) => mode === "PUSH")) return;
+  context.notificationServices = await readNotificationServices(client);
+  const known = context.notificationServices
+    .map(({ index }) => index)
+    .join(", ");
+  for (const notification of written) {
+    if (notification.mode !== "PUSH" || notification.to === null) continue;
+    for (const [position, entry] of notification.to.entries()) {
+      const at = `${notification.path}.to[${position}]`;
+      const service = context.notificationServices.find(
+        ({ index }) => index === entry.index,
+      );
+      if (!service) {
+        report(
+          `${at}.index`,
+          `no notification service with index ${entry.index} in this home; notification services: ${known || "none"}`,
+        );
+        continue;
+      }
+      if (entry.clients === null) continue;
+      const recipients = await notificationServiceRecipients(client, service);
+      entry.clients.forEach((id, slot) => {
+        if (recipients.some((item) => item.id === id)) return;
+        report(
+          `${at}.clients[${slot}]`,
+          `notification service ${entry.index} has no recipient with id ${id}; recipients: ${recipients.map((item) => item.id).join(", ") || "none"}`,
+        );
+      });
+    }
+  }
+}
+
+// What a notification of the preview goes through, as read at preparation.
+function notificationPreview(notification, services = []) {
+  const base = {
+    configuration_pointer: blockPathToPointer(notification.path),
+    mode: notification.mode,
+    text: notification.text,
+  };
+  if (notification.mode !== "PUSH") return { ...base, delivery: "system" };
+  const service = ({ ref, name, enabled, state }) => ({
+    ref,
+    name,
+    enabled,
+    state,
+  });
+  if (notification.to === null) {
+    return {
+      ...base,
+      delivery: "all_notification_services",
+      services: services.map((item) => ({
+        ...service(item),
+        recipients: "all",
+      })),
+    };
+  }
+  return {
+    ...base,
+    delivery: "listed_services",
+    services: notification.to.map(({ index, clients }) => {
+      const found = services.find((item) => item.index === index);
+      if (!found) return { index, binding: "not_found" };
+      return {
+        ...service(found),
+        recipients:
+          clients === null
+            ? "all"
+            : clients.map((id) => {
+                const recipient = found.recipients?.find(
+                  (item) => item.id === id,
+                );
+                return recipient
+                  ? { ref: recipient.ref, name: recipient.name }
+                  : { id, binding: "not_found" };
+              }),
+      };
+    }),
+  };
 }
 
 // Returns the time of a daily interval boundary, or null after reporting
@@ -11094,6 +11342,9 @@ function publicBlockActionPreview(change, fresh) {
             scenario: structuredClone(run.scenario),
           })),
         }
+      : {}),
+    ...(preview.notifications
+      ? { notifications: structuredClone(preview.notifications) }
       : {}),
     ...(preview.unchecked_actions
       ? { unchecked_actions: structuredClone(preview.unchecked_actions) }

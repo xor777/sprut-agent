@@ -10878,7 +10878,7 @@ test("hub code added to or changed in an existing BLOCK is refused with its poin
   );
   const stored = await readBlockConfiguration(client);
   const allowed =
-    "node type code is not supported by this contract; allowed here: if, service, delay, clear_delay, scenario";
+    "node type code is not supported by this contract; allowed here: if, service, delay, clear_delay, scenario, notify";
 
   const added = structuredClone(stored);
   added.targets[0].then.push({ type: "code", code: "log.info('extra');" });
@@ -12346,17 +12346,6 @@ test("an existing BLOCK keeps nodes outside the contract as stored and refuses t
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const cases = [
-    {
-      type: "notify",
-      add: (data) => {
-        data.targets[0].then.push({
-          type: "notify",
-          text: "Свет включён",
-          mode: "PUSH",
-        });
-        return `/targets/0/then/${data.targets[0].then.length - 1}`;
-      },
-    },
     {
       type: "http",
       add: (data) => {

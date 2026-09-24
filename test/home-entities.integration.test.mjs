@@ -1308,7 +1308,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     data: JSON.stringify({
       blockId: 0,
       targets: [
-        { type: "notify", blockId: 90, message: "unsupported sibling" },
+        { type: "code", blockId: 90, code: "log.info('unsupported sibling')" },
         {
           type: "if",
           blockId: 1,
@@ -1603,7 +1603,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
         outcome: "unrecognized",
         scenario_ref: blockRef,
         pointer: "/configuration/value/targets/0",
-        native_type: "notify",
+        native_type: "code",
       },
     ],
   );

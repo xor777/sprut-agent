@@ -144,7 +144,28 @@ function decodeStep(node, pointer, chain, delay, state) {
   if (node.type === "scenario") {
     return [decodeScenarioRun(node, state)];
   }
+  if (node.type === "notify") return [decodeNotify(node)];
   return [unrecognized(state, pointer, node)];
+}
+
+// A notification names no device. Its text is the owner's message: data.
+function decodeNotify(node) {
+  const mode = typeof node.mode === "string" ? node.mode : null;
+  return {
+    type: "notify",
+    mode,
+    text: textOrNull(node.text),
+    ...(mode === "PUSH"
+      ? {
+          to: Array.isArray(node.to)
+            ? node.to.map((entry) => ({
+                service_index: textOrNull(entry?.index),
+                clients: Array.isArray(entry?.clients) ? entry.clients : "all",
+              }))
+            : "all",
+        }
+      : {}),
+  };
 }
 
 function decodeIf(node, pointer, chain, delay, state) {
