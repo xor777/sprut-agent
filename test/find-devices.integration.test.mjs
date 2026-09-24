@@ -674,6 +674,27 @@ test("everyday phrases with prepositions find the room's devices", async (t) => 
   );
 });
 
+test("query words match at the start of a word, not inside one", async (t) => {
+  const { call } = await setup(t, await loadHomeFixture("apartment"));
+
+  // "не" stays in the query (a name filter cannot negate) and occurs inside
+  // "кухне"; it must not find the lamp named «Свет на кухне».
+  const negated = await call("find_devices", { query: "свет не на кухне" });
+  assert.deepEqual(listed(negated.body), []);
+
+  // Word forms still match at word starts.
+  const kitchen = await call("find_devices", { query: "свет на кухне" });
+  assert.deepEqual(
+    listed(kitchen.body).map(({ device }) => device.name),
+    ["Свет на кухне"],
+  );
+  const nursery = await call("find_devices", { query: "свет в детской" });
+  assert.deepEqual(
+    listed(nursery.body).map(({ room, device }) => [room.name, device.name]),
+    [["Детская спальня", "Свет в детской"]],
+  );
+});
+
 test("without filters find_devices sums services, on and unavailable per room", async (t) => {
   const { hub, call, home } = await setup(
     t,
