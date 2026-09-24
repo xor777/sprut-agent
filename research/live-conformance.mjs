@@ -1957,4 +1957,5 @@ function printTable() {
   }
 }
 
-process.exitCode = await main();
+// Imported by its offline test without touching a hub.
+if (import.meta.main) process.exitCode = await main();
