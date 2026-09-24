@@ -91,7 +91,7 @@ export const METHOD_EVIDENCE = {
   ],
   "accessory.get": [
     OBSERVED,
-    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2)",
+    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2); virtual=false, present, on a physical accessory (2026-09-24-live-conformance-3-read-only)",
   ],
   "accessory.create": [OBSERVED, "2026-09-11-virtual-light-group"],
   "accessory.update": [OBSERVED, "2026-09-11-device-placement"],
@@ -116,7 +116,10 @@ export const METHOD_EVIDENCE = {
   "logic.update": [OBSERVED, "2026-09-10-native-logic"],
   "logic.setOptions": [OBSERVED, "2026-09-10-native-logic"],
   "logic.delete": [OBSERVED, "2026-09-10-native-logic"],
-  "scenario.list": [OBSERVED, "2026-09-09-automations"],
+  "scenario.list": [
+    OBSERVED,
+    "2026-09-09-automations; optionsWindow on every BLOCK, LOGIC, predefined LOGIC and GLOBAL (2026-09-24-live-conformance-3-read-only)",
+  ],
   "scenario.get": [
     OBSERVED,
     "2026-09-09-automations; active seen in an owner-hub read on 2026-09-24",
@@ -150,7 +153,7 @@ export const METHOD_EVIDENCE = {
   "log.unsubscribe": [SCHEMA_ONLY],
   "window.get": [
     OBSERVED,
-    "2026-09-10-window-setting; a BLOCK options window with Name, Active, OnStart, Sync and Desc (2026-09-24-live-conformance-2)",
+    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove: a BLOCK's, Active showing its flag (2026-09-24-live-conformance-2), and a LOGIC's, a GLOBAL's and a predefined one's, keys and input types only (2026-09-24-live-conformance-3-read-only); OnStart and Sync showing the scenario's flags is assumed",
   ],
   "window.update": [
     OBSERVED,
@@ -159,17 +162,24 @@ export const METHOD_EVIDENCE = {
   // The product switches a scenario only with this write.
   "window.update {Active}": [
     SCHEMA_ONLY,
-    "the web client switches a scenario with the Active option of its options window (2026-09-24-web-client-evidence, 4); the option was read on a live BLOCK window, its write not read back live (2026-09-24-live-conformance-2)",
+    "the web client switches a scenario with the Active option of its options window (2026-09-24-web-client-evidence, 4); the option was read on live windows of a BLOCK (2026-09-24-live-conformance-2) and of a LOGIC, a GLOBAL and a predefined scenario (2026-09-24-live-conformance-3-read-only); its write was not read back live for any type",
   ],
+  // No entry, so a run reports them as unsupported: window.update {OnStart},
+  // {Sync} and {Remove} of a scenario window, and {Name} or {Desc} of a
+  // scenario other than a BLOCK. The web client edits a scenario's flags
+  // through its window (2026-09-24-web-client-evidence, 4), but none of these
+  // writes was sent to a live hub, and the simulator refuses them.
   "extension.list": [OBSERVED, "2026-09-16-extension-child-read"],
   "extension.get": [OBSERVED, "2026-09-16-extension-child-read"],
   "extensionChild.list": [OBSERVED, "2026-09-17-extension-child-empty-list"],
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
 };
 
-// The METHOD_EVIDENCE entry of a request: a method whose parts rest on
-// different evidence has a key per part.
-function evidenceKey(method, params) {
+// The METHOD_EVIDENCE entry of a request, taken when it arrives: a method
+// whose parts rest on different evidence has a key per part. A write to a
+// scenario's options window that the simulator refuses as unmodelled is
+// keyed by that option, with no entry, so a run reports it as unsupported.
+function evidenceKey(state, method, params) {
   if (method === "scenario.update") {
     const input = params?.scenario?.update;
     if (isRecord(input) && Object.hasOwn(input, "active")) {
@@ -178,12 +188,14 @@ function evidenceKey(method, params) {
   }
   if (method === "window.update") {
     const input = params?.window?.update;
-    if (
-      isScenarioWindowKey(input?.windowKey) &&
-      Array.isArray(input.options) &&
-      input.options.some((option) => option?.key === "Active")
-    ) {
-      return "window.update {Active}";
+    const scenario = scenarioOfWindow(state, input?.windowKey);
+    if (scenario && Array.isArray(input.options)) {
+      const keys = input.options.map((option) => option?.key);
+      const unmodelled = keys.find((key) =>
+        unmodelledScenarioWrite(scenario, key),
+      );
+      if (unmodelled !== undefined) return `window.update {${unmodelled}}`;
+      if (keys.includes("Active")) return "window.update {Active}";
     }
   }
   return method ?? "(invalid request)";
@@ -192,8 +204,7 @@ function evidenceKey(method, params) {
 // Per method: evidence level, request, write and error counts of one run.
 function touchedMethods(requests) {
   const counts = new Map();
-  for (const { method, params, write, error } of requests) {
-    const key = evidenceKey(method, params);
+  for (const { evidence: key, write, error } of requests) {
     const entry = counts.get(key) ?? { requests: 0, writes: 0, errors: 0 };
     entry.requests += 1;
     if (write) entry.writes += 1;
@@ -1037,6 +1048,7 @@ function handleMessage(
     connection,
     write: isWriteMethod(method),
     params: structuredClone(message?.params ?? null),
+    evidence: evidenceKey(state, method, message?.params),
   };
   requests.push(entry);
   const fail = (error) => {
@@ -1498,7 +1510,6 @@ const HANDLERS = {
     };
     if (scenario.type === "BLOCK") {
       scenario.data = normalizeBlockData(input.data);
-      scenario.optionsWindow = scenarioWindowKey(state);
       scenario.rooms = blockRooms(state, scenario.data);
     } else if (scenario.type === "LOGIC") {
       if (typeof input.data !== "string") {
@@ -1509,14 +1520,14 @@ const HANDLERS = {
     } else {
       throw invalidParams(`Scenario type ${input.type} is not supported`);
     }
+    addScenarioWindow(state, scenario);
     state.scenarios.push(scenario);
-    syncScenarioWindow(state, scenario);
     return scenario;
   },
   "scenario.update": (state, input) => {
     const scenario = requireScenario(state, input.index);
     // The owner's hub acknowledged active here and kept the flag, for a BLOCK
-    // and a LOGIC (2026-09-24); a BLOCK is switched through its options
+    // and a LOGIC (2026-09-24); a scenario is switched through its options
     // window. onStart and sync were not sent live.
     for (const key of ["onStart", "sync"]) {
       if (typeof input[key] === "boolean") scenario[key] = input[key];
@@ -1591,22 +1602,20 @@ const HANDLERS = {
     if (!window) return null;
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
-    // Active shows the scenario's flag, as it did on the owner's hub.
+    // The scenario-backed options show the scenario's fields; Active showed
+    // the flag on the owner's hub (live-conformance-2).
     const view = structuredClone(window);
-    const active = view.options.find(({ key }) => key === "Active");
-    if (active) active.value = { boolValue: scenario.active };
+    for (const option of view.options) {
+      const field = SCENARIO_WINDOW_FIELDS[option.key];
+      if (field) option.value = { [field.kind]: scenario[field.name] };
+    }
     return view;
   },
   "window.update": (state, { windowKey, options }) => {
     const window = state.windows[windowKey];
     if (!window) throw notFound(`Window ${windowKey}`);
     const scenario = scenarioOfWindow(state, windowKey);
-    const active = Array.isArray(options)
-      ? options.find((option) => option?.key === "Active")
-      : undefined;
-    if (scenario && active && typeof active.value?.boolValue !== "boolean") {
-      throw invalidParams("Active must be a boolValue");
-    }
+    if (scenario) checkScenarioWindowUpdate(scenario, options);
     applyOptions(window.options, options);
     // Only the options this update carries reach the scenario. That Active
     // switches it is the web client's path, not read back on a live hub.
@@ -1712,7 +1721,6 @@ function buildState(fixture) {
     };
     if (input.type === "BLOCK") {
       scenario.data = normalizeBlockData(JSON.stringify(input.data));
-      scenario.optionsWindow = scenarioWindowKey(state);
       scenario.rooms = blockRooms(state, scenario.data);
     } else {
       scenario.data = Array.isArray(input.data)
@@ -1721,8 +1729,8 @@ function buildState(fixture) {
       scenario.desc =
         input.desc ?? logicSourceDescription(scenario.data) ?? scenario.desc;
     }
+    addScenarioWindow(state, scenario);
     state.scenarios.push(scenario);
-    syncScenarioWindow(state, scenario);
   }
   state.nextScenarioIndex =
     Math.max(0, ...state.scenarios.map(({ index }) => Number(index) || 0)) + 1;
@@ -1815,6 +1823,9 @@ function buildAccessory(state, input) {
     roomId: input.roomId,
     name: input.name,
     online: input.online !== false,
+    // accessory.get of a physical accessory read virtual: false, present
+    // rather than omitted (owner hub, 3.0.0, live-conformance-3-read-only).
+    virtual: false,
     ...(input.extensionKey
       ? {
           extensionKey: input.extensionKey,
@@ -1980,15 +1991,22 @@ function appendLog(state, entry) {
   }
 }
 
-// A BLOCK options window read on the owner's hub (3.0.0, 2026-09-24) had
-// Name (TEXT), Active, OnStart, Sync (CHECKBOX), Desc (TEXT_MULTILINE) and a
-// Remove button. The simulator keeps Name, Active and Desc in that order;
-// the labels and the GenericBoolean type of Active are its own, as the live
-// read recorded only keys and input types. Whether a LOGIC or GLOBAL has
-// such a window was not read, so they have none.
-function syncScenarioWindow(state, scenario) {
-  if (scenario.type !== "BLOCK") return;
-  const option = (key, name, type, inputType, value) => ({
+// Every scenario has an options window. On the owner's hub (3.0.0,
+// 2026-09-24) scenario.list carried optionsWindow for every BLOCK, LOGIC,
+// predefined LOGIC and GLOBAL, and the windows of a BLOCK
+// (live-conformance-2) and of a LOGIC, a GLOBAL and a predefined scenario
+// (live-conformance-3-read-only) had the same options: main, primary, footer
+// (GROUP), Name (TEXT), Active, OnStart, Sync (CHECKBOX), Desc
+// (TEXT_MULTILINE) and Remove (BUTTON_DANGER). Active was GenericBoolean,
+// read, write, not disabled. The runs recorded no values and only keys and
+// input types of the other options, so their order, labels, types and access
+// here are the simulator's own. The window stores no values of the
+// scenario-backed options: window.get shows the scenario's fields in them.
+function addScenarioWindow(state, scenario) {
+  scenario.optionsWindow = scenarioWindowKey(state);
+  // The groups and the Remove button: no value, type or access recorded.
+  const control = (key, name, inputType) => ({ key, name, inputType });
+  const option = (key, name, type, inputType) => ({
     key,
     name,
     type,
@@ -1996,24 +2014,60 @@ function syncScenarioWindow(state, scenario) {
     read: true,
     write: true,
     disabled: false,
-    value,
   });
   state.windows[scenario.optionsWindow] = {
     windowKey: scenario.optionsWindow,
     label: { text: "Настройки сценария" },
     options: [
-      option("Name", "Имя", "GenericString", "TEXT", {
-        stringValue: scenario.name,
-      }),
-      // window.get shows the scenario's flag here.
-      option("Active", "Активен", "GenericBoolean", "CHECKBOX", {
-        boolValue: scenario.active,
-      }),
-      option("Desc", "Описание", "GenericString", "TEXT_MULTILINE", {
-        stringValue: scenario.desc,
-      }),
+      control("main", "Основное", "GROUP"),
+      control("primary", "Сценарий", "GROUP"),
+      option("Name", "Имя", "GenericString", "TEXT"),
+      option("Active", "Активен", "GenericBoolean", "CHECKBOX"),
+      option("OnStart", "Запускать при старте", "GenericBoolean", "CHECKBOX"),
+      option("Sync", "Синхронно", "GenericBoolean", "CHECKBOX"),
+      option("Desc", "Описание", "GenericString", "TEXT_MULTILINE"),
+      control("footer", "", "GROUP"),
+      control("Remove", "Удалить", "BUTTON_DANGER"),
     ],
   };
+}
+
+// The scenario field each scenario-backed option of the window shows.
+const SCENARIO_WINDOW_FIELDS = {
+  Name: { name: "name", kind: "stringValue" },
+  Active: { name: "active", kind: "boolValue" },
+  OnStart: { name: "onStart", kind: "boolValue" },
+  Sync: { name: "sync", kind: "boolValue" },
+  Desc: { name: "desc", kind: "stringValue" },
+};
+
+// Writes to a scenario's options window that the simulator applies: Name
+// and Desc of a BLOCK (observed, live-conformance-2) and Active of any
+// scenario (the web client's path, schema_only). A write of OnStart, Sync or
+// Remove, or of Name or Desc of another type, was never sent to a live hub;
+// rather than invent its effect the simulator refuses the whole update as
+// unsupported (-32601) before anything is stored.
+function unmodelledScenarioWrite(scenario, key) {
+  if (key === "OnStart" || key === "Sync" || key === "Remove") return true;
+  return (key === "Name" || key === "Desc") && scenario.type !== "BLOCK";
+}
+
+function checkScenarioWindowUpdate(scenario, options) {
+  if (!Array.isArray(options)) throw invalidParams("options must be an array");
+  for (const option of options) {
+    if (unmodelledScenarioWrite(scenario, option?.key)) {
+      throw new SimulatorError(
+        -32601,
+        `unsupported by simulator: window.update {${option.key}} of a ${scenario.type} scenario`,
+      );
+    }
+    if (
+      option?.key === "Active" &&
+      typeof option.value?.boolValue !== "boolean"
+    ) {
+      throw invalidParams("Active must be a boolValue");
+    }
+  }
 }
 
 // A bridge's options window with the one option read on the owner's hub:
@@ -2054,14 +2108,8 @@ function scenarioWindowKey(state) {
   return `${SCENARIO_WINDOW_PREFIX}${state.nextWindow++}`;
 }
 
-function isScenarioWindowKey(windowKey) {
-  return (
-    typeof windowKey === "string" &&
-    windowKey.startsWith(SCENARIO_WINDOW_PREFIX)
-  );
-}
-
 function scenarioOfWindow(state, windowKey) {
+  if (typeof windowKey !== "string") return undefined;
   return state.scenarios.find(
     (candidate) => candidate.optionsWindow === windowKey,
   );

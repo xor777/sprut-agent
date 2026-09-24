@@ -669,28 +669,9 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
     value,
   });
 
-  // Whether a LOGIC has an options window with Active is not observed; the
-  // simulated LOGIC gets one here so that it can be switched.
   const logic = g.hub.state.scenarios.find(
     ({ index }) => index === logicRef.split("/").at(-1),
   );
-  logic.optionsWindow = "scenario-options-probe-logic";
-  g.hub.state.windows[logic.optionsWindow] = {
-    windowKey: logic.optionsWindow,
-    label: { text: "Настройки сценария" },
-    options: [
-      {
-        key: "Active",
-        name: "Активен",
-        type: "GenericBoolean",
-        inputType: "CHECKBOX",
-        read: true,
-        write: true,
-        disabled: false,
-        value: { boolValue: true },
-      },
-    ],
-  };
 
   // While it may be on, it is not assigned.
   const whileOn = g.hub.writes().length;

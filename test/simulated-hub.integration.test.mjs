@@ -651,9 +651,9 @@ test("log.list returns the newest entries by count, pages forward from lastTime 
 
 // A raw native session for fault tests: replies are matched by id, and a
 // reply that never comes resolves to null after waitMs.
-async function rawSession(t, options) {
+async function rawSession(t, options, fixture) {
   const hub = await startSimulatedHub(
-    await loadHomeFixture("apartment"),
+    fixture ?? (await loadHomeFixture("apartment")),
     options,
   );
   t.after(() => hub.close());
@@ -881,15 +881,172 @@ test("the simulator switches a BLOCK only through the Active option of its optio
   // The motion rule next to it keeps its own flag.
   assert.equal((await scenario("3")).active, true);
 
-  // A LOGIC ignores the flag too; its options window was not read live.
+  // A LOGIC ignores the flag too.
   await send({ scenario: { update: { index: "9", active: false } } });
   assert.equal((await scenario("9")).active, true);
 });
 
+// Owner's hub, 3.0.0, 2026-09-24: scenario.list carried optionsWindow for
+// every BLOCK, LOGIC, predefined LOGIC and GLOBAL, and their options windows
+// had the same keys and input types, with a writable GenericBoolean Active
+// (live-conformance-2 and live-conformance-3-read-only). Writes of the other
+// flags and of Remove were never sent live.
+test("the simulator gives every scenario type the live options window and refuses its unobserved writes", async (t) => {
+  const fixture = await loadHomeFixture("apartment");
+  fixture.scenarios.push(
+    {
+      index: "20",
+      name: "Переменные дома",
+      type: "GLOBAL",
+      active: true,
+      onStart: true,
+      data: "let away = false;",
+    },
+    {
+      index: "21",
+      name: "Встроенная логика",
+      type: "LOGIC",
+      predefined: true,
+      active: false,
+      sync: true,
+      data: "info = {};",
+    },
+  );
+  const { hub, send } = await rawSession(t, {}, fixture);
+  const scenario = async (index) =>
+    (await send({ scenario: { get: { index } } })).result.scenario.get;
+  const windowOf = async (index) =>
+    (
+      await send({
+        window: { get: { windowKey: (await scenario(index)).optionsWindow } },
+      })
+    ).result.window.get.options;
+  const update = async (index, options) =>
+    send({
+      window: {
+        update: { windowKey: (await scenario(index)).optionsWindow, options },
+      },
+    });
+
+  const listed = (await send({ scenario: { list: {} } })).result.scenario.list
+    .scenarios;
+  assert.deepEqual(
+    listed.filter(({ optionsWindow }) => typeof optionsWindow !== "string"),
+    [],
+  );
+  assert.equal(
+    new Set(listed.map(({ optionsWindow }) => optionsWindow)).size,
+    listed.length,
+  );
+
+  const kinds = { 5: "BLOCK", 9: "LOGIC", 20: "GLOBAL", 21: "predefined" };
+  for (const [index, kind] of Object.entries(kinds)) {
+    const options = await windowOf(index);
+    assert.deepEqual(
+      options.map(({ key, inputType }) => [key, inputType]).sort(),
+      [
+        ["Active", "CHECKBOX"],
+        ["Desc", "TEXT_MULTILINE"],
+        ["Name", "TEXT"],
+        ["OnStart", "CHECKBOX"],
+        ["Remove", "BUTTON_DANGER"],
+        ["Sync", "CHECKBOX"],
+        ["footer", "GROUP"],
+        ["main", "GROUP"],
+        ["primary", "GROUP"],
+      ],
+      kind,
+    );
+    const active = options.find(({ key }) => key === "Active");
+    assert.deepEqual(
+      [active.type, active.read, active.write, active.disabled],
+      ["GenericBoolean", true, true, false],
+      kind,
+    );
+    // The flags show the scenario's own.
+    const stored = await scenario(index);
+    assert.deepEqual(
+      Object.fromEntries(
+        options
+          .filter(({ key }) => ["Active", "OnStart", "Sync"].includes(key))
+          .map(({ key, value }) => [key, value.boolValue]),
+      ),
+      { Active: stored.active, OnStart: stored.onStart, Sync: stored.sync },
+      kind,
+    );
+  }
+  assert.deepEqual(
+    [await scenario("20"), await scenario("21")].map(
+      ({ active, onStart, sync }) => [active, onStart, sync],
+    ),
+    [
+      [true, true, false],
+      [false, false, true],
+    ],
+  );
+
+  // Active switches a LOGIC and a GLOBAL as it does a BLOCK.
+  const before = hub.snapshot();
+  await update("9", [{ key: "Active", value: { boolValue: false } }]);
+  await update("20", [{ key: "Active", value: { boolValue: false } }]);
+  assert.deepEqual(
+    [(await scenario("9")).active, (await scenario("20")).active],
+    [false, false],
+  );
+  assert.equal(
+    (await windowOf("9")).find(({ key }) => key === "Active").value.boolValue,
+    false,
+  );
+
+  // Unobserved writes are refused whole, before anything is stored.
+  for (const [index, options] of [
+    ["5", [{ key: "OnStart", value: { boolValue: true } }]],
+    ["20", [{ key: "Sync", value: { boolValue: true } }]],
+    ["9", [{ key: "Remove", value: { boolValue: true } }]],
+    ["9", [{ key: "Name", value: { stringValue: "Протечка" } }]],
+    ["21", [{ key: "Desc", value: { stringValue: "Своё описание" } }]],
+    [
+      "21",
+      [
+        { key: "Active", value: { boolValue: true } },
+        { key: "OnStart", value: { boolValue: true } },
+      ],
+    ],
+  ]) {
+    const refused = await update(index, options);
+    assert.equal(refused.error?.code, -32601, JSON.stringify(options));
+  }
+  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), [
+    { key: "scenario/20/active", before: true, after: false },
+    { key: "scenario/9/active", before: true, after: false },
+  ]);
+  assert.deepEqual(
+    (await windowOf("21"))
+      .filter(({ key }) => ["Active", "OnStart", "Desc"].includes(key))
+      .map(({ key, value }) => [key, value]),
+    [
+      ["Active", { boolValue: false }],
+      ["OnStart", { boolValue: false }],
+      ["Desc", { stringValue: "" }],
+    ],
+  );
+  // A run reports the refused writes as unsupported, not as observed.
+  const levels = Object.fromEntries(
+    hub
+      .touchedMethods()
+      .map(({ method, level, errors }) => [method, [level, errors]]),
+  );
+  assert.deepEqual(levels["window.update {Active}"], ["schema_only", 0]);
+  assert.deepEqual(levels["window.update {OnStart}"], ["unsupported", 2]);
+  for (const key of ["Sync", "Remove", "Name", "Desc"]) {
+    assert.deepEqual(levels[`window.update {${key}}`], ["unsupported", 1]);
+  }
+});
+
 // Owner's hub, 3.0.0, 2026-09-24: accessory.list had no virtual field while
-// accessory.get of the created virtual accessory had virtual=true, and a
+// accessory.get had it, true on the created virtual accessory, and a
 // 42-character room name was kept as its first 30 characters.
-test("the simulator lists accessories without virtual and keeps 30 characters of a room name", async (t) => {
+test("the simulator lists accessories without virtual, reads it on each accessory and keeps 30 characters of a room name", async (t) => {
   const { send } = await rawSession(t);
   const created = (
     await send({
@@ -916,6 +1073,14 @@ test("the simulator lists accessories without virtual and keeps 30 characters of
     (await send({ accessory: { get: { id: created.id } } })).result.accessory
       .get.virtual,
     true,
+  );
+  // A physical accessory reads virtual: false rather than omitting it
+  // (live-conformance-3-read-only).
+  const lamp = (await send({ accessory: { get: { id: 16 } } })).result.accessory
+    .get;
+  assert.deepEqual(
+    [Object.hasOwn(lamp, "virtual"), lamp.virtual],
+    [true, false],
   );
 
   const roomName = async (id) =>
