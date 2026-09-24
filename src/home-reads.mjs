@@ -941,9 +941,53 @@ function isExtensionProblem({ state, enabled }) {
 
 // Russian names are matched by word stems: the query "в спальне" finds
 // "Спальня" and "Детская спальня", "гостиной" finds "Гостиная". Every query
-// word of two or more letters must occur in the name; one-letter words are
-// prepositions. Longer endings are tried first; a stem keeps at least three
+// word must occur in the name, except one-letter words and the function
+// words below: prepositions, conjunctions, particles and "весь/все", which
+// name no device ("все розетки на кухне" asks for the kitchen outlets). "не"
+// stays: a name filter cannot negate, and dropping it would answer the
+// opposite. Longer endings are tried first; a stem keeps at least three
 // letters.
+const IGNORED_WORDS = new Set([
+  "во",
+  "на",
+  "по",
+  "из",
+  "изо",
+  "от",
+  "ото",
+  "до",
+  "за",
+  "со",
+  "ко",
+  "об",
+  "обо",
+  "над",
+  "надо",
+  "под",
+  "подо",
+  "при",
+  "про",
+  "для",
+  "без",
+  "через",
+  "возле",
+  "около",
+  "между",
+  "или",
+  "либо",
+  "но",
+  "ли",
+  "же",
+  "бы",
+  "весь",
+  "вся",
+  "все",
+  "всю",
+  "всех",
+  "всем",
+  "всеми",
+]);
+
 const ENDINGS = [
   "ями",
   "ами",
@@ -997,7 +1041,7 @@ export function normalizeName(text) {
 export function queryStems(query) {
   return normalizeName(query)
     .split(" ")
-    .filter((word) => word.length > 1)
+    .filter((word) => word.length > 1 && !IGNORED_WORDS.has(word))
     .map((word) => {
       if (word.length < 4 || !/[а-я]$/.test(word)) return word;
       const ending = ENDINGS.find(
