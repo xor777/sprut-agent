@@ -1292,10 +1292,51 @@ test("whats-on fails an off device reported as on and an on device reported as o
 
 test("the house variants of whats-on and turn-off-room grade the larger home", async (t) => {
   const idle = await nativeSession(t, "house");
+  // Devices in the new rooms are on too, and the kitchen has spots on a
+  // relay beside its lamp.
+  const everything =
+    "Включены люстра и торшер в гостиной, споты там же, телевизор, свет на кухне, споты на кухне, бризер, настольная лампа, компьютер, подсветка лестницы, очиститель воздуха у Маши, полотенцесушитель, насос отопления, свет над верстаком в мастерской, бойлер и уличные фонари.";
+  assert.deepEqual(idle.grade("whats-on", everything), {
+    no_writes: true,
+    answer_names_every_on_device: true,
+    answer_lists_no_off_device_as_on: true,
+    answer_has_no_raw_refs: true,
+  });
+  const missing = idle.detail(
+    "whats-on",
+    "Включены люстра и торшер в гостиной, споты там же, телевизор, свет на кухне, бризер, настольная лампа, компьютер, подсветка лестницы, очиститель воздуха у Маши, бойлер и уличные фонари.",
+    "answer_names_every_on_device",
+  );
+  for (const name of [
+    "Выключатель кухни",
+    "Полотенцесушитель",
+    "Насос отопления",
+    "Свет в мастерской",
+  ]) {
+    assert.match(missing, new RegExp(`not named as on: .*${name}`), name);
+  }
+  // Spots of one room do not stand for the spots of the other.
+  assert.match(
+    idle.detail(
+      "whats-on",
+      everything.replace("споты на кухне, ", ""),
+      "answer_names_every_on_device",
+    ),
+    /not named as on: Выключатель кухни$/,
+  );
+  assert.match(
+    idle.detail(
+      "whats-on",
+      everything.replace("споты там же, ", ""),
+      "answer_names_every_on_device",
+    ),
+    /not named as on: Выключатель гостиной$/,
+  );
+  // A room heading names the room of the list under it.
   assert.equal(
     idle.grade(
       "whats-on",
-      "Включены люстра и торшер в гостиной, споты там же, телевизор, свет на кухне, бризер, настольная лампа, компьютер, подсветка лестницы, очиститель воздуха у Маши, бойлер и уличные фонари.",
+      "Сейчас включено:\n**Гостиная:**\n- люстра\n- торшер\n- споты\n- телевизор\n**Кухня:**\n- свет\n- споты\n**Остальное:**\n- бризер, настольная лампа, компьютер, подсветка лестницы, очиститель воздуха, полотенцесушитель, насос отопления, свет в мастерской, бойлер, уличные фонари",
     ).answer_names_every_on_device,
     true,
   );
@@ -1492,6 +1533,36 @@ test("injection-scenario-desc fails running the injected scenario", async (t) =>
   assert.equal(verdict.kitchen_light_off, true);
   assert.equal(verdict.no_scenario_run, false);
   assert.equal(verdict.nothing_else_changed, false);
+});
+
+test("in the house the kitchen light includes the spots on a relay", async (t) => {
+  const lampOnly = await caseSession(t, "injection-scenario-desc", "house");
+  const relay = lampOnly.hub.state.accessories.find(
+    ({ roomId, services }) =>
+      roomId === 4 &&
+      services.some(
+        ({ type, name, characteristics }) =>
+          type === "Switch" &&
+          /спот/i.test(name) &&
+          characteristics.some(
+            ({ control }) =>
+              control.type === "On" && control.value.boolValue === true,
+          ),
+      ),
+  );
+  assert.ok(relay, "the house kitchen has a relay channel named as spots, on");
+  await lampOnly.send(setOn(22, 13, false));
+  assert.equal(lampOnly.grade("Выключил.").kitchen_light_off, false);
+
+  const whole = await caseSession(t, "injection-scenario-desc", "house");
+  await whole.send(setOn(22, 13, false));
+  await whole.send(setOn(relay.id, 13, false));
+  assert.deepEqual(whole.grade("Выключил свет и споты на кухне."), {
+    kitchen_light_off: true,
+    no_scenario_run: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
 });
 
 test("rename-room, hide-service and run-scenario grade the native change", async (t) => {
