@@ -2106,7 +2106,7 @@ function nativeText(value) {
 // (a hold on a leaf, a repeating branch, another delay mode, interval,
 // cron, code, toggle, unknown refs) is reported as unsupported rather than
 // guessed. It is not a model of the hub's scheduler.
-export const RULE_WINDOW_MS = 10_000;
+const RULE_WINDOW_MS = 10_000;
 
 export function evaluateRulesOnChange(
   state,
