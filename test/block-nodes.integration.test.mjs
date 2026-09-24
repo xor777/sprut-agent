@@ -962,8 +962,8 @@ test("a from action names why its source cannot be copied", async (t) => {
       .find(({ id }) => id === aId)
       .services[0].characteristics.find(({ type }) => type === "Brightness");
   const { client } = await setup(t, (fixture) => {
-    // «Люстра» cannot be read; «Торшер» reports no value; «Светодиодная
-    // лента» lists values of another kind than its own.
+    // «Люстра» cannot be read; «Торшер» reports a value of no known kind;
+    // «Светодиодная лента» lists values of another kind than its own.
     brightnessOf(fixture, 15).control = { read: false };
     brightnessOf(fixture, 16).control = { value: {} };
     brightnessOf(fixture, 17).control = {
@@ -983,7 +983,7 @@ test("a from action names why its source cannot be copied", async (t) => {
     reasons.push(refused.problems[0].message);
   }
   assert.match(reasons[0], /must be readable/);
-  assert.match(reasons[1], /no supported current value/);
+  assert.match(reasons[1], /value kind is ambiguous or unsupported/);
   assert.match(reasons[2], /incompatible native valid values/);
 });
 
