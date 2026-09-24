@@ -59,6 +59,98 @@ export function isWriteMethod(method) {
   return !READ_METHODS.has(method);
 }
 
+// How much of each simulated method rests on evidence about a live hub:
+// observed (live traffic or a live experiment under research/protocol/ or a
+// dated commit), schema_only (declared in the public protobuf or sent by the
+// official UI code, never seen answered live) or guess (the simulator's own
+// assumption). A run reports the methods it touched with these levels, so a
+// pass that depends on schema_only or guessed behavior is visible.
+const OBSERVED = "observed";
+const SCHEMA_ONLY = "schema_only";
+export const METHOD_EVIDENCE = {
+  "hub.list": [OBSERVED, "2026-09-09-home-entities"],
+  "server.ping": [SCHEMA_ONLY],
+  "room.list": [OBSERVED, "2026-09-09-room-reading"],
+  "room.get": [OBSERVED, "2026-09-09-room-reading"],
+  "room.create": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
+  "room.delete": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
+  "room.update": [SCHEMA_ONLY, "RoomUpdateRequest in 51547-Room.proto"],
+  "accessory.list": [OBSERVED, "2026-09-09-motion-reading"],
+  "accessory.get": [
+    OBSERVED,
+    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24",
+  ],
+  "accessory.create": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "accessory.update": [OBSERVED, "2026-09-11-device-placement"],
+  "accessory.delete": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "service.types": [OBSERVED, "2026-09-09-type-catalog"],
+  "service.update": [
+    SCHEMA_ONLY,
+    "ServiceUpdateRequest in 18003-Service.proto",
+  ],
+  "characteristic.get": [OBSERVED, "2026-09-09-automations"],
+  "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
+  "characteristic.setOptions": [SCHEMA_ONLY],
+  "characteristic.update": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "link.list": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "link.remove": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "logic.types": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.list": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.get": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.getOptions": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.create": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.update": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.setOptions": [OBSERVED, "2026-09-10-native-logic"],
+  "logic.delete": [OBSERVED, "2026-09-10-native-logic"],
+  "scenario.list": [OBSERVED, "2026-09-09-automations"],
+  "scenario.get": [
+    OBSERVED,
+    "2026-09-09-automations; active seen in an owner-hub read on 2026-09-24",
+  ],
+  "scenario.create": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.update": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.run": [
+    OBSERVED,
+    "live scenario_run (b95e8a3); the simulator runs only top-level literal set actions",
+  ],
+  "scenario.sdk": [OBSERVED, "2026-09-09-automations"],
+  "scenario.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
+  "scenario.unsubscribe": [SCHEMA_ONLY],
+  "log.list": [
+    OBSERVED,
+    "owner-hub read on 2026-09-24: newest by count, lastTime pages forward, 128-entry ring buffer; reply order is assumed",
+  ],
+  "log.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
+  "log.unsubscribe": [SCHEMA_ONLY],
+  "window.get": [OBSERVED, "2026-09-10-window-setting"],
+  "window.update": [OBSERVED, "2026-09-10-window-setting"],
+  "extension.list": [OBSERVED, "2026-09-16-extension-child-read"],
+  "extension.get": [OBSERVED, "2026-09-16-extension-child-read"],
+  "extensionChild.list": [OBSERVED, "2026-09-17-extension-child-empty-list"],
+  "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
+};
+
+// Per method: evidence level, request, write and error counts of one run.
+function touchedMethods(requests) {
+  const counts = new Map();
+  for (const { method, write, error } of requests) {
+    const key = method ?? "(invalid request)";
+    const entry = counts.get(key) ?? { requests: 0, writes: 0, errors: 0 };
+    entry.requests += 1;
+    if (write) entry.writes += 1;
+    if (error) entry.errors += 1;
+    counts.set(key, entry);
+  }
+  return [...counts]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([method, entry]) => {
+      const [level, source] = METHOD_EVIDENCE[method] ?? ["unsupported"];
+      return { method, level, ...(source ? { source } : {}), ...entry };
+    });
+}
+
 const VALUE_FIELDS = [
   "boolValue",
   "intValue",
@@ -555,6 +647,7 @@ export async function startSimulatedHub(
       );
       refusals.set(method, queue);
     },
+    touchedMethods: () => touchedMethods(requests),
     connectionEnv: () => ({
       SPRUTHUB_URL: url,
       SPRUTHUB_TOKEN: token,
@@ -663,6 +756,23 @@ const HANDLERS = {
     state.rooms.splice(at, 1);
     return {};
   },
+  // RoomUpdateRequest {id, name, visible}: only the sent fields change.
+  "room.update": (state, input) => {
+    const room = requireRoom(state, input.id);
+    if (Object.hasOwn(input, "name")) {
+      if (typeof input.name !== "string" || input.name.trim().length === 0) {
+        throw invalidParams("Room name must be a non-empty string");
+      }
+      room.name = input.name;
+    }
+    if (Object.hasOwn(input, "visible")) {
+      if (typeof input.visible !== "boolean") {
+        throw invalidParams("Room visible must be a boolean");
+      }
+      room.visible = input.visible;
+    }
+    return {};
+  },
 
   "accessory.list": (state, { roomId, expand }) => ({
     accessories: state.accessories
@@ -709,6 +819,7 @@ const HANDLERS = {
           sId: 1,
           name: serviceInput.name ?? name,
           type: serviceInput.type,
+          visible: true,
           characteristics: types.map((type, index) =>
             buildCharacteristic(id, 1, {
               cId: index + 1,
@@ -756,6 +867,24 @@ const HANDLERS = {
   },
 
   "service.types": () => ({ types: SERVICE_TYPES }),
+  // ServiceUpdateRequest {aId, sId, order, grid, name, visible}: only the
+  // sent name and visible change; order and grid are not modelled.
+  "service.update": (state, input) => {
+    const service = requireService(state, input.aId, input.sId);
+    if (Object.hasOwn(input, "name")) {
+      if (typeof input.name !== "string" || input.name.trim().length === 0) {
+        throw invalidParams("Service name must be a non-empty string");
+      }
+      service.name = input.name;
+    }
+    if (Object.hasOwn(input, "visible")) {
+      if (typeof input.visible !== "boolean") {
+        throw invalidParams("Service visible must be a boolean");
+      }
+      service.visible = input.visible;
+    }
+    return {};
+  },
 
   "characteristic.get": (state, input) => findCharacteristic(state, input),
   "characteristic.getOptions": (state, input) => {
@@ -1025,6 +1154,12 @@ const HANDLERS = {
   },
   "scenario.run": (state, { index }) => {
     const scenario = requireScenario(state, index);
+    // The manual-run log line is the simulator's guess at its form.
+    appendLog(state, {
+      level: "LOG_LEVEL_INFO",
+      path: "Scenario.ScenarioBlock.Target.jBlock",
+      message: `Сценарий ${index}: (TRIGGER: SCENARIO[${index}] <- MANUAL)`,
+    });
     state.runs.push(runScenario(state, scenario));
     return {};
   },
@@ -1034,6 +1169,21 @@ const HANDLERS = {
     return { uuid: subscriptionUuid(state, "scenario") };
   },
   "scenario.unsubscribe": () => ({}),
+  // Observed on the owner's hub (read-only, firmware 3.0.0, 2026-09-24):
+  // time is Unix epoch milliseconds, {count} returns the newest count
+  // entries, {lastTime, count} returns entries newer than lastTime (forward,
+  // not older), and the hub keeps only a ring buffer (state.logCapacity, 128
+  // there). Assumed here: the reply is in console order (oldest first), the
+  // forward page starts right after lastTime, and an empty page omits the
+  // repeated field as protobuf JSON does.
+  "log.list": (state, { lastTime, count }) => {
+    const limit = Number.isInteger(count) && count > 0 ? count : 100;
+    const page =
+      typeof lastTime === "number"
+        ? state.log.filter(({ time }) => time > lastTime).slice(0, limit)
+        : state.log.slice(-limit);
+    return page.length === 0 ? {} : { log: page };
+  },
   "log.subscribe": (state) => ({ uuid: subscriptionUuid(state, "log") }),
   "log.unsubscribe": () => ({}),
 
@@ -1082,6 +1232,8 @@ const HANDLERS = {
 };
 
 function buildState(fixture) {
+  const startedAt = Date.now();
+  const utcOffsetMinutes = fixture.log?.utcOffsetMinutes ?? 180;
   const hub = {
     serial: fixture.hub.serial,
     name: fixture.hub.name,
@@ -1106,7 +1258,15 @@ function buildState(fixture) {
     })),
     accessories: [],
     characteristicOptions: {},
-    windows: { "": homeSettingsWindow(fixture.hub) },
+    windows: {
+      "": homeSettingsWindow({
+        ...fixture.hub,
+        clock:
+          fixture.hub.clock === "now"
+            ? hubClock(startedAt, utcOffsetMinutes)
+            : fixture.hub.clock,
+      }),
+    },
     extensions: structuredClone(fixture.extensions ?? []),
     logicCatalog: structuredClone(fixture.logicTypes ?? {}),
     logics: [],
@@ -1114,6 +1274,8 @@ function buildState(fixture) {
     scenarios: [],
     links: new Map(),
     runs: [],
+    log: seedLog(fixture.log, startedAt),
+    logCapacity: fixture.log?.capacity ?? DEFAULT_LOG_CAPACITY,
     nextScenarioIndex: 1,
     nextWindow: 1,
     nextSubscription: 1,
@@ -1197,6 +1359,8 @@ function buildAccessory(state, input) {
       sId: service.sId,
       name: service.name,
       type: service.type,
+      // A live accessory.get reports service visible (owner hub, 2026-09-24).
+      visible: service.visible !== false,
       characteristics: service.characteristics.map((characteristic) => {
         const built = buildCharacteristic(
           input.id,
@@ -1334,6 +1498,71 @@ function homeSettingsWindow(hub) {
       status("Sunset", "Закат", hub.sunset ?? "18:41"),
     ],
   };
+}
+
+// Wall clock of the hub settings window: "2026-09-24 - 21:40:12 (GMT+03:00)".
+function hubClock(now, utcOffsetMinutes) {
+  const local = new Date(now + utcOffsetMinutes * 60_000).toISOString();
+  const sign = utcOffsetMinutes < 0 ? "-" : "+";
+  const offset = Math.abs(utcOffsetMinutes);
+  const zone = `${String(Math.floor(offset / 60)).padStart(2, "0")}:${String(offset % 60).padStart(2, "0")}`;
+  return `${local.slice(0, 10)} - ${local.slice(11, 19)} (GMT${sign}${zone})`;
+}
+
+const DEFAULT_LOG_CAPACITY = 128;
+
+// Native log entries {time, level, path, message}, oldest first, cut to the
+// ring buffer. A fixture entry is placed at day (calendar offset from the
+// start's hub-local date) and time (hub-local wall clock), or minutesAgo
+// (+ offsetMs) before the start; a recurring group repeats its entries
+// (4 ms apart, shifted by offsetMs) every everyMinutes from firstMinutesAgo. Entries after the
+// start are dropped.
+function seedLog(log, now) {
+  if (!log) return [];
+  const offsetMs = (log.utcOffsetMinutes ?? 0) * 60_000;
+  const local = new Date(now + offsetMs);
+  const localMidnight =
+    Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) -
+    offsetMs;
+  const placed = (log.entries ?? []).map(
+    ({ day, time: wallClock, minutesAgo, offsetMs: extra, ...entry }) => {
+      if (typeof minutesAgo === "number") {
+        return { time: now - minutesAgo * 60_000 + (extra ?? 0), ...entry };
+      }
+      const [hours, minutes, seconds] = wallClock.split(":").map(Number);
+      return {
+        time:
+          localMidnight +
+          day * 86_400_000 +
+          (hours * 3_600 + minutes * 60) * 1_000 +
+          Math.round(seconds * 1_000),
+        ...entry,
+      };
+    },
+  );
+  for (const group of log.recurring ?? []) {
+    for (let repeat = 0; repeat < group.times; repeat += 1) {
+      const start =
+        now -
+        (group.firstMinutesAgo - repeat * group.everyMinutes) * 60_000 +
+        (group.offsetMs ?? 0);
+      group.entries.forEach((entry, index) => {
+        placed.push({ time: start + index * 4, ...entry });
+      });
+    }
+  }
+  return placed
+    .filter(({ time }) => time <= now)
+    .sort((left, right) => left.time - right.time)
+    .slice(-(log.capacity ?? DEFAULT_LOG_CAPACITY));
+}
+
+function appendLog(state, entry) {
+  const time = Math.max(Date.now(), (state.log.at(-1)?.time ?? 0) + 1);
+  state.log.push({ time, ...entry });
+  if (state.log.length > state.logCapacity) {
+    state.log.splice(0, state.log.length - state.logCapacity);
+  }
 }
 
 function syncScenarioWindow(state, scenario) {

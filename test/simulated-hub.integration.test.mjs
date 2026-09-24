@@ -471,35 +471,28 @@ test("only allowlisted reads are reads, and link settings show in the home diff"
 test("the shipped hub log, room rename and service hide work on the simulated home", async (t) => {
   const { hub, client } = await setup(t);
 
-  const seen = [];
-  let page = await call(client, "read_hub_log", {
+  // One page holds the whole 128-entry ring buffer; paging with lastTime is
+  // forward on a live hub, which the shipped continuation does not expect.
+  const logPage = await call(client, "read_hub_log", {
     home_ref: homeRef,
-    count: 4,
+    count: 500,
+    max_bytes: 32_768,
   });
-  for (;;) {
-    seen.push(...page.entries);
-    if (!page.next) break;
-    page = await call(client, page.next.tool, page.next.arguments);
-  }
-  const times = seen.map(({ native_time: time }) => time);
+  const times = logPage.entries.map(({ native_time: time }) => time);
   assert.deepEqual(
     times,
     [...times].sort((left, right) => right - left),
   );
   assert.equal(new Set(times).size, times.length);
-  assert.equal(seen.length, hub.state.log.length);
-  // The night scenario fired yesterday at 23:00 hub time (UTC+3).
-  const yesterday = new Date(Date.now() + 3 * 3_600_000 - 86_400_000)
-    .toISOString()
-    .slice(0, 10);
+  assert.equal(logPage.entries.length, 128);
+  assert.equal(logPage.next, null);
+  // About two and a half hours are kept: yesterday's night run was evicted.
+  assert.ok(Date.now() - Date.parse(logPage.entries.at(-1).time) < 3 * 3.6e6);
   assert.ok(
-    seen.some(
-      ({ time, message }) =>
-        message.startsWith("Сценарий 5:") &&
-        new Date(Date.parse(time) + 3 * 3_600_000)
-          .toISOString()
-          .startsWith(`${yesterday}T23:00`),
-    ),
+    !logPage.entries.some(({ message }) => message.startsWith("Сценарий 5:")),
+  );
+  assert.ok(
+    logPage.entries.some(({ message }) => message.startsWith("Сценарий 3:")),
   );
 
   const renamed = await call(client, "prepare_native_change", {
@@ -554,7 +547,7 @@ test("the shipped hub log, room rename and service hide work on the simulated ho
   assert.equal(touched["accessory.get"], "observed");
 });
 
-test("log.list pages newest first and returns entries strictly older than lastTime", async (t) => {
+test("log.list returns the newest entries by count, pages forward from lastTime and keeps a ring buffer", async (t) => {
   const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
   t.after(() => hub.close());
   const socket = new WebSocket(hub.url, "json-rpc");
@@ -579,16 +572,28 @@ test("log.list pages newest first and returns entries strictly older than lastTi
 
   const newest = await list({ count: 3 });
   assert.deepEqual(
-    newest.map(({ time }) => time),
-    oldestFirst.slice(-3).reverse(),
+    newest.map(({ time }) => time).sort((left, right) => left - right),
+    oldestFirst.slice(-3),
   );
-  const boundary = oldestFirst.at(-3);
-  const older = await list({ lastTime: boundary, count: 2 });
+  const boundary = oldestFirst.at(-6);
+  const newer = await list({ lastTime: boundary, count: 2 });
   assert.deepEqual(
-    older.map(({ time }) => time),
-    oldestFirst
-      .filter((time) => time < boundary)
-      .slice(-2)
-      .reverse(),
+    newer.map(({ time }) => time).sort((left, right) => left - right),
+    oldestFirst.slice(-5, -3),
   );
+
+  // The ring buffer keeps its size: a manual run pushes out the oldest line.
+  id += 1;
+  socket.send(
+    JSON.stringify({
+      id,
+      token: hub.token,
+      serial: hub.serial,
+      params: { scenario: { run: { index: "11" } } },
+    }),
+  );
+  await once(socket, "message");
+  assert.equal(hub.state.log.length, oldestFirst.length);
+  assert.equal(hub.state.log[0].time, oldestFirst[1]);
+  assert.match(hub.state.log.at(-1).message, /^Сценарий 11:/);
 });

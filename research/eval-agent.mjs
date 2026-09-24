@@ -171,6 +171,7 @@ export async function runCase({
           is_error: isError,
         }),
       ),
+      simulator_methods: hub.touchedMethods(),
       home_changes: evidence.diff,
       hub_writes: hub.requests
         .filter(({ write }) => write)

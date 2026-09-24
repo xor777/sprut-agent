@@ -8,7 +8,7 @@
     "version": "3.0.0",
     "revision": "20131",
     "timeZone": "Europe/Moscow",
-    "clock": "2026-09-24 - 21:40:12 (GMT+03:00)"
+    "clock": "now"
   },
   "extensions": [
     {
@@ -845,6 +845,152 @@
       {
         "type": "MotionDetectedFromCurrentMotionLevel",
         "name": "Наличие движения исходя из уровня движения"
+      }
+    ]
+  },
+  "log": {
+    "note": "Execution log seeded relative to the run start in hub local time (utcOffsetMinutes). day places an entry on a calendar day offset at a wall clock time; minutesAgo counts back from the start; recurring repeats its entries every everyMinutes. The hub keeps a ring buffer of capacity entries (128 on a live hub), so the older night-scenario runs are seeded but evicted. Characteristic trigger, condition, delay and Notifier lines follow the O20260911 forms; CRON, interval, service and controller lines are synthetic.",
+    "utcOffsetMinutes": 180,
+    "capacity": 128,
+    "entries": [
+      {
+        "day": -1,
+        "time": "06:00:00.187",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 (TRIGGER: SCENARIO[5] <- CRON[0 0 6 ? * * *])"
+      },
+      {
+        "day": -1,
+        "time": "06:00:00.191",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 I[23:00-06:00], value='false'"
+      },
+      {
+        "day": -1,
+        "time": "06:00:00.195",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jTargetService_6 S[14.13 Lightbulb] On='false'"
+      },
+      {
+        "day": -1,
+        "time": "23:00:00.214",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 (TRIGGER: SCENARIO[5] <- CRON[0 0 23 ? * * *])"
+      },
+      {
+        "day": -1,
+        "time": "23:00:00.218",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 I[23:00-06:00], value='true'"
+      },
+      {
+        "day": -1,
+        "time": "23:00:00.222",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jTargetService_4 S[15.13 Lightbulb] On='false'"
+      },
+      {
+        "day": -1,
+        "time": "23:00:00.226",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jTargetService_5 S[14.13 Lightbulb] On='true', Brightness='15'"
+      },
+      {
+        "day": 0,
+        "time": "06:00:00.187",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 (TRIGGER: SCENARIO[5] <- CRON[0 0 6 ? * * *])"
+      },
+      {
+        "day": 0,
+        "time": "06:00:00.191",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jConditionInterval_2 I[23:00-06:00], value='false'"
+      },
+      {
+        "day": 0,
+        "time": "06:00:00.195",
+        "level": "LOG_LEVEL_INFO",
+        "path": "Scenario.ScenarioBlock.Target.jBlock",
+        "message": "Сценарий 5: jTargetService_6 S[14.13 Lightbulb] On='false'"
+      },
+      {
+        "minutesAgo": 41,
+        "level": "LOG_LEVEL_ERROR",
+        "path": "Controller.zigbee",
+        "message": "Датчик протечки в ванной (0x00158d0004a1b237): устройство не отвечает"
+      },
+      {
+        "minutesAgo": 41,
+        "offsetMs": 14,
+        "level": "LOG_LEVEL_ERROR",
+        "path": "Notifiers.Notifier",
+        "message": "Сценарий 9 - Accessory 37 is offline"
+      }
+    ],
+    "recurring": [
+      {
+        "firstMinutesAgo": 149,
+        "offsetMs": 118,
+        "everyMinutes": 11,
+        "times": 14,
+        "entries": [
+          {
+            "level": "LOG_LEVEL_INFO",
+            "path": "Scenario.ScenarioBlock.Target.jBlock",
+            "message": "Сценарий 3: jConditionCharacteristic_3 (TRIGGER: SCENARIO[3] <- CHARACTERISTIC[Characteristic/13.13.14/])"
+          },
+          {
+            "level": "LOG_LEVEL_INFO",
+            "path": "Scenario.ScenarioBlock.Target.jBlock",
+            "message": "Сценарий 3: jConditionCharacteristic_3 C[13.13.14 MotionSensor.MotionDetected 'true'], cond='=', value='true'"
+          },
+          {
+            "level": "LOG_LEVEL_INFO",
+            "path": "Scenario.ScenarioBlock.Target.jBlock",
+            "message": "Сценарий 3: jTargetService_4 S[14.13 Lightbulb] On='true'"
+          },
+          {
+            "level": "LOG_LEVEL_INFO",
+            "path": "Scenario.ScenarioBlock.Target.jBlock",
+            "message": "Сценарий 3: jTargetDelay_5 time=120000, mode=RESET, index=1"
+          }
+        ]
+      },
+      {
+        "firstMinutesAgo": 148,
+        "offsetMs": 530,
+        "everyMinutes": 5,
+        "times": 30,
+        "entries": [
+          {
+            "level": "LOG_LEVEL_INFO",
+            "path": "Controller.zigbee",
+            "message": "Датчик климата в спальне: CurrentTemperature=21.4"
+          }
+        ]
+      },
+      {
+        "firstMinutesAgo": 147,
+        "offsetMs": 811,
+        "everyMinutes": 3,
+        "times": 49,
+        "entries": [
+          {
+            "level": "LOG_LEVEL_DEBUG",
+            "path": "Controller.zigbee",
+            "message": "Датчик движения в коридоре: LQI=112"
+          }
+        ]
       }
     ]
   },
