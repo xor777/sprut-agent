@@ -180,22 +180,48 @@ function settingsWindow(timeZone) {
 }
 
 // settings is the home settings window, null for a hub that refuses
-// window.get, or "no_reply" for one that never answers it.
+// window.get, or "no_reply" for one that never answers it; settingsDelayMs
+// delays its answer. respond may return a promise of the log reply.
 async function startHub({
   log = observedLog,
   respond,
   settings = settingsWindow("Europe/Moscow"),
+  settingsDelayMs = 0,
 } = {}) {
   const requests = [];
+  let settingsAnswered;
+  const hub = {
+    requests,
+    settingsAnswered: new Promise((resolve) => {
+      settingsAnswered = resolve;
+    }),
+  };
   const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
+  hub.connections = 0;
   server.on("connection", (socket) => {
-    socket.on("message", (data) => {
+    hub.connections += 1;
+    const send = (id, reply) => {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify({ id, ...reply }));
+      }
+    };
+    socket.on("message", async (data) => {
       const request = JSON.parse(data.toString());
       requests.push(request);
       let reply;
       if (request.params?.log?.list && respond) {
-        reply = respond(request.params.log.list);
+        reply = await respond(request.params.log.list);
+      } else if (
+        request.params?.window?.get?.windowKey === "" &&
+        settingsDelayMs > 0 &&
+        settings !== "no_reply"
+      ) {
+        setTimeout(() => {
+          send(request.id, { result: { window: { get: settings } } });
+          settingsAnswered();
+        }, settingsDelayMs);
+        return;
       } else if (request.params?.log?.list) {
         reply = {
           result: {
@@ -215,12 +241,15 @@ async function startHub({
       } else {
         reply = { error: { code: -32601, message: "unexpected test request" } };
       }
-      socket.send(JSON.stringify({ id: request.id, ...reply }));
+      send(request.id, reply);
     });
   });
   const address = server.address();
   assert(address && typeof address === "object");
-  return { requests, server, url: `ws://127.0.0.1:${address.port}` };
+  return Object.assign(hub, {
+    server,
+    url: `ws://127.0.0.1:${address.port}`,
+  });
 }
 
 async function startClient(t, hub) {
@@ -396,6 +425,58 @@ test("read_hub_log returns the log in UTC without waiting out a hub that does no
     page.limitations.some((line) => /\bUTC\b/.test(line)),
     JSON.stringify(page.limitations),
   );
+});
+
+// A hub that gives its settings window later than a read waits for it, as
+// through a slow cloud relay: the read stops waiting, but the window read
+// keeps its connection and the other requests on it, and its late answer
+// serves the next reads.
+test("read_hub_log stops waiting for a slow hub time zone without closing the requests beside it", async (t) => {
+  const log = { result: { log: { list: { log: observedLog } } } };
+  let logReads = 0;
+  const hub = await startHub({
+    settingsDelayMs: 3_000,
+    // The second log read is still on the connection when the first read
+    // stops waiting for the zone: the hub answers it after the window.
+    respond: async () => {
+      logReads += 1;
+      if (logReads === 2) await hub.settingsAnswered;
+      return log;
+    },
+  });
+  const client = await startClient(t, hub);
+
+  const began = Date.now();
+  const first = readLog(client, { home_ref: homeRef });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const second = readLog(client, { home_ref: homeRef });
+  const firstResult = await first;
+  const firstElapsed = Date.now() - began;
+  const secondResult = await second;
+  const later = await readLog(client, { home_ref: homeRef });
+
+  const outcome = (result) =>
+    result.isError
+      ? result.structuredContent?.error?.code
+      : result.structuredContent.time_zone;
+  assert.deepEqual([firstResult, secondResult, later].map(outcome), [
+    null,
+    "Europe/Moscow",
+    "Europe/Moscow",
+  ]);
+  assert(firstElapsed < 3_000, `${firstElapsed} ms`);
+  assert.ok(
+    firstResult.structuredContent.limitations.some((line) =>
+      /\bUTC\b/.test(line),
+    ),
+    JSON.stringify(firstResult.structuredContent.limitations),
+  );
+  assert.equal(
+    later.structuredContent.entries[0].time,
+    expectedNewestFirst[0].time,
+  );
+  assertOnlyLogReads(hub, 3);
+  assert.equal(hub.connections, 1);
 });
 
 test("read_hub_log filters by level, text and the observed scenario formats without exposing redacted text", async (t) => {

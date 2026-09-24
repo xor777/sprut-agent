@@ -18,15 +18,19 @@ const characteristicRef = `${homeRef}/accessory/34/service/13/characteristic/15`
 const scenarioRef = `${homeRef}/scenario/23`;
 
 // timeZone is the TimeZone of the home settings window (window.get with the
-// root key ""), or null for a hub that refuses window.get.
+// root key ""), or null for a hub that refuses window.get. timeZoneDelayMs
+// delays that answer; until it is sent, accessory.get on the same connection
+// is answered only after it.
 async function startHub({
   subscribeDelayMs = 0,
   logSubscribeErrorAt = null,
   timeZone = null,
+  timeZoneDelayMs = 0,
 } = {}) {
   const requests = [];
   const connections = [];
   let logSubscribeCount = 0;
+  let zoneRead = null;
   const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
@@ -169,6 +173,21 @@ async function startHub({
       };
       if (request.params?.scenario?.subscribe && subscribeDelayMs > 0) {
         setTimeout(respond, subscribeDelayMs);
+      } else if (request.params?.window?.get && timeZoneDelayMs > 0) {
+        zoneRead = {
+          connectionId,
+          answered: new Promise((resolve) => {
+            setTimeout(() => {
+              respond();
+              resolve();
+            }, timeZoneDelayMs);
+          }),
+        };
+      } else if (
+        request.params?.accessory?.get &&
+        zoneRead?.connectionId === connectionId
+      ) {
+        zoneRead.answered.then(respond);
       } else {
         respond();
       }
@@ -531,6 +550,44 @@ test("native observation gives its times on the hub's clock with its UTC offset"
     unknown.limitations.some((line) => /\bUTC\b/.test(line)),
     JSON.stringify(unknown.limitations),
   );
+});
+
+// A hub slow to give its settings window, as through a cloud relay: the
+// start stops waiting for the zone and keeps UTC, while the zone read keeps
+// the main connection and the reads on it; its late answer serves the next
+// observation.
+test("an observation start stops waiting for a slow hub time zone without closing the reads beside it", async (t) => {
+  const hub = await startHub({
+    timeZone: "Europe/Moscow",
+    timeZoneDelayMs: 3_000,
+  });
+  const client = await startClient(t, hub);
+  const zoneReads = () =>
+    hub.requests.filter(({ params }) => params.window?.get).length;
+
+  const began = Date.now();
+  const starting = startObservation(client);
+  await waitFor(() => zoneReads() === 1);
+  const read = client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef },
+  });
+  const first = await starting;
+  const elapsed = Date.now() - began;
+  const readResult = await read;
+  assert.equal(readResult.isError, undefined, readResult.content[0]?.text);
+  assert.equal(first.time_zone, null);
+  assert(elapsed < 3_000, `${elapsed} ms`);
+  assert(
+    first.limitations.some((line) => /\bUTC\b/.test(line)),
+    JSON.stringify(first.limitations),
+  );
+  const completed = await getObservation(client, first.observation_ref, 3);
+  assert.equal(completed.status, "completed");
+
+  const second = await startObservation(client);
+  assert.equal(second.time_zone, "Europe/Moscow");
+  assert.equal(zoneReads(), 1);
 });
 
 test("ordinary reads stay available without changing an active observation home", async (t) => {
