@@ -2872,6 +2872,90 @@ test("native secrets are redacted from structured and text output", async (t) =>
   assert.match(visible, /\[REDACTED\]/);
 });
 
+test("BLOCK summaries and relations keep a sensitive characteristic redacted", async (t) => {
+  const hub = await startHub();
+  const state = hub.states.get("home/A");
+  const secretRef =
+    "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/16";
+  const block = {
+    index: "secret-block",
+    name: "Пароль по движению",
+    type: "BLOCK",
+    predefined: false,
+    active: true,
+    data: JSON.stringify({
+      targets: [
+        {
+          type: "if",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: 32,
+                sId: 13,
+                cId: 16,
+                cond: "=",
+                value: "condition-secret-must-not-leak",
+                trigger: true,
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: native SprutHub BLOCK key.
+          then: [
+            {
+              type: "service",
+              aId: 32,
+              sId: 13,
+              characteristics: [
+                {
+                  type: "set",
+                  cId: 16,
+                  value: "set-secret-must-not-leak",
+                },
+                { type: "set", cId: 15, value: "true" },
+              ],
+            },
+          ],
+          else: [],
+        },
+      ],
+    }),
+  };
+  state.scenarios.push(block);
+  state.scenarioAssociations.set(32, [block]);
+  const client = await startClient(t, hub);
+  const redacted = { redacted: true, reason: "sensitive_native_data" };
+
+  const scenario = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: "spruthub://hub/home%2FA/scenario/secret-block" },
+  });
+  assert.equal(scenario.isError, undefined, scenario.content[0]?.text);
+  const [rule] = scenario.structuredContent.entity.summary.steps;
+  assert.deepEqual(rule.condition.all, [redacted]);
+  assert.deepEqual(rule.then[0], redacted);
+  assert.equal(rule.then[1].characteristic_type, "MotionDetected");
+
+  const relations = await client.callTool({
+    name: "get_entity",
+    arguments: {
+      entity_ref: "spruthub://hub/home%2FA/accessory/32",
+      include: ["relations"],
+    },
+  });
+  assert.equal(relations.isError, undefined, relations.content[0]?.text);
+  const roles = relations.structuredContent.entity.relations.scenario_roles;
+  assert.deepEqual(roles.slice(0, 2), [redacted, redacted]);
+  assert.equal(roles[2].characteristic, "Обнаружено движение");
+  assert.deepEqual(roles[2].same_device_actions, [redacted]);
+  const visible = JSON.stringify({ scenario, relations });
+  assert.doesNotMatch(visible, /must-not-leak/);
+  // Like its own detail read, the sensitive characteristic keeps its ref.
+  assert.equal(visible.includes(secretRef), false);
+});
+
 test("pairing PIN codes stay redacted while ordinary window settings remain readable", async (t) => {
   const hub = await startHub();
   const pairingSecret = "pairing-code-secret-must-not-leak";
