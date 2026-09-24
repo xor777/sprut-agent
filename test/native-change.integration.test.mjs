@@ -18828,30 +18828,96 @@ test("a room name longer than SprutHub keeps or with emoji is refused before any
   assert.equal(hub.state.rooms.find(({ id }) => id === 2).name, renamedTo);
 });
 
-test("a room_create an earlier version prepared with a name SprutHub would not keep is refused at apply", async (t) => {
-  for (const [name, code] of [
-    ["Комната для гостей на мансарде у окна", "name_too_long"],
-    ["Гостевая 🙂", "name_characters_unsupported"],
+// Only 🙂 (outside the BMP) was seen dropped. Emoji inside the BMP, and the
+// variation selector that makes a symbol an emoji, are refused as well: the
+// hub may drop them the same way, and the owner would get another name.
+test("a room name with an emoji inside the Basic Multilingual Plane is refused before any write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  for (const [name, unsupported] of [
+    ["Детская ❤", ["❤"]],
+    ["Детская ❤\uFE0F", ["❤", "\uFE0F"]],
+    ["Кухня ⭐", ["⭐"]],
+    ["Терраса ☀️", ["☀", "\uFE0F"]],
+    ["Готово ✅", ["✅"]],
   ]) {
-    await t.test(code, async (subtest) => {
+    for (const [operation, field] of [
+      ["room_create", "name"],
+      ["room_name", "value"],
+    ]) {
+      const refused = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation,
+          target_ref: operation === "room_create" ? homeRef : workshopRoomRef,
+          reason: "Назвать комнату с символом",
+          [field]: name,
+        },
+      });
+      assert.equal(refused.isError, true, `${operation} ${name}`);
+      assert.equal(
+        refused.structuredContent.error.code,
+        "name_characters_unsupported",
+        refused.content[0]?.text,
+      );
+      assert.deepEqual(
+        refused.structuredContent.unsupported_characters,
+        unsupported,
+        `${operation} ${name}`,
+      );
+    }
+  }
+  assert.equal(
+    hub.requests.some(({ room }) => room?.create || room?.update),
+    false,
+  );
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+});
+
+test("a room_create or room_name an earlier version prepared with a name SprutHub would not keep is refused at apply", async (t) => {
+  for (const [operation, name, code] of [
+    ["room_create", "Комната для гостей на мансарде у окна", "name_too_long"],
+    ["room_create", "Гостевая 🙂", "name_characters_unsupported"],
+    ["room_name", "Комната для гостей на мансарде у окна", "name_too_long"],
+    ["room_name", "Гостевая 🙂", "name_characters_unsupported"],
+    ["room_name", "Гостевая ❤️", "name_characters_unsupported"],
+  ]) {
+    await t.test(`${operation} ${code} ${name}`, async (subtest) => {
       const { hub, stateDirectory } = await setup(subtest);
       const firstClient = await startClient(subtest, hub, stateDirectory);
       const prepared = await firstClient.callTool({
         name: "prepare_native_change",
-        arguments: {
-          operation: "room_create",
-          target_ref: homeRef,
-          name: "Гостевая",
-          reason: "Создать гостевую комнату",
-        },
+        arguments:
+          operation === "room_create"
+            ? {
+                operation,
+                target_ref: homeRef,
+                name: "Гостевая",
+                reason: "Создать гостевую комнату",
+              }
+            : {
+                operation,
+                target_ref: workshopRoomRef,
+                value: "Гостевая",
+                reason: "Назвать мастерскую гостевой",
+              },
       });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
       await firstClient.close();
       const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
       const journal = JSON.parse(await readFile(journalFile, "utf8"));
       const id = prepared.structuredContent.change_ref.slice(
         "spruthub-change://native/".length,
       );
-      journal.changes[id].requested_name = name;
+      if (operation === "room_create") {
+        journal.changes[id].requested_name = name;
+      } else {
+        journal.changes[id].requested_value.value = name;
+      }
       await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
       const client = await startClient(subtest, hub, stateDirectory);
 
@@ -18862,8 +18928,12 @@ test("a room_create an earlier version prepared with a name SprutHub would not k
       assert.equal(refused.isError, true, refused.content[0]?.text);
       assert.equal(refused.structuredContent.error.code, code);
       assert.equal(
-        hub.requests.some(({ room }) => room?.create),
+        hub.requests.some(({ room }) => room?.create || room?.update),
         false,
+      );
+      assert.equal(
+        hub.state.rooms.find(({ id }) => id === 2).name,
+        "Мастерская",
       );
       const recorded = await callChangeTool(
         client,
