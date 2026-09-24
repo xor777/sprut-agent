@@ -1300,7 +1300,16 @@ async function homeSnapshot(hub, targets) {
         ["configuration"],
         "/configuration",
       );
-      entry.configuration_sha256 = sha256(stableJson(configuration));
+      // An active BLOCK's if.state is runtime state the hub flips on its own
+      // (owner's scenario/31 on 2026-09-24); the product's canonical form
+      // drops it, so the snapshot compares that form.
+      entry.configuration_sha256 = sha256(
+        stableJson(
+          configuration?.format === "json" && configuration.value
+            ? { ...configuration, value: canonicalBlock(configuration.value) }
+            : configuration,
+        ),
+      );
     } catch (error) {
       entry.configuration_error = error.code ?? "read_failed";
     }
@@ -1430,7 +1439,15 @@ async function readScenario(hub, ref) {
     type: entity.type,
     window_name: option("Name"),
     window_desc: option("Desc"),
-    configuration_sha256: sha256(stableJson(configuration.value)),
+    // Canonical form: an active BLOCK's if.state is runtime state that the
+    // hub flips on its own; data keeps the stored bytes.
+    configuration_sha256: sha256(
+      stableJson(
+        configuration.format === "json" && configuration.value
+          ? canonicalBlock(configuration.value)
+          : configuration.value,
+      ),
+    ),
     data: configuration.value,
     execution_error: entity.execution_error,
     options_window_ref: entity.options_window_ref,
@@ -1443,10 +1460,17 @@ async function readWindow(hub, windowRef) {
     entity_ref: windowRef,
     max_bytes: 32_768,
   });
-  if (result.status !== "ok" || !result.entity) {
+  if (result.status !== "ok") {
     throw new ProbeFailure("read options window", result);
   }
-  const options = result.entity.options ?? [];
+  // A large window (the owner's home settings) comes back as an overview;
+  // its options are then read by pointer.
+  const options = result.entity
+    ? (result.entity.options ?? [])
+    : await readEntityValue(hub, windowRef, undefined, "/options");
+  if (!Array.isArray(options)) {
+    throw new ProbeFailure("read options window", result);
+  }
   return {
     keys: options.map(({ key, input_type }) => `${key}:${input_type}`),
     value: (key) =>
@@ -3672,8 +3696,10 @@ async function stepManualRun(ctx) {
     );
     return;
   }
-  const base = { on: true, brightness: v.initial.brightness };
-  const marker = v.initial.brightness === 42 ? 43 : 42;
+  // SprutHub keeps a lamp at brightness 0 off, so the lamp turned on needs
+  // a brightness above 0 (step 6 on 2026-09-24 stayed off at 0).
+  const base = { on: true, brightness: v.initial.brightness || 30 };
+  const marker = base.brightness === 42 ? 43 : 42;
 
   // The brief asked for an action-only On=true BLOCK; prepare never writes.
   const onOnly = await hub.prepare({
@@ -3869,14 +3895,20 @@ async function stepManualRun(ctx) {
     );
   }
 
-  // setVirtual throws unless the accessory reads back as requested.
-  const restored = await setVirtual(probe, v, v.initial);
+  // Only On goes back: SprutHub kept brightness 30 when 0 was written to
+  // the lamp turned off (2026-09-24); the accessory is deleted afterwards.
+  await probe.setVirtualValue(v.on.ids, { boolValue: v.initial.on });
+  const restored = await watchVirtual(
+    probe,
+    v,
+    (current) => current.on === v.initial.on,
+  );
   row(
     "6k virtual accessory back",
-    "characteristic.update",
-    JSON.stringify(v.initial),
-    JSON.stringify(restored),
-    isDeepStrictEqual(restored, v.initial) ? "match" : "mismatch",
+    "characteristic.update{On}",
+    `On ${v.initial.on}`,
+    JSON.stringify(restored.state),
+    restored.reached ? "match" : "mismatch",
   );
 }
 
@@ -3960,7 +3992,12 @@ async function stepTimeTrigger(ctx) {
     `hub ${clock.text}${clock.zone ? ` ${clock.zone}` : ""}; hub UTC ${Math.round((clock.utc - clock.readAt) / 1000)} s from this machine; trigger ${hhmm} hub time in ${Math.round((fireAt - Date.now()) / 1000)} s`,
     "observed",
   );
-  const base = { on: false, brightness: v.initial.brightness };
+  // Brightness stays as it is: SprutHub kept 30 when 0 was written to the
+  // lamp turned off (2026-09-24).
+  const base = {
+    on: false,
+    brightness: (await virtualState(probe, v)).brightness,
+  };
   await setVirtual(probe, v, base);
   const block = await createBlock(ctx, {
     label: "fire",
@@ -4092,7 +4129,7 @@ async function stepTimeTrigger(ctx) {
       abort("the fired BLOCK is neither off nor deleted");
     }
   }
-  await setVirtual(probe, v, v.initial);
+  await setVirtual(probe, v, { ...base, on: v.initial.on });
 }
 
 // The home settings window's Time status, e.g.
