@@ -330,6 +330,120 @@ test("a refused restore of every native write lifecycle keeps the change applied
   }
 });
 
+function linksInUse(state) {
+  return Object.fromEntries(
+    [...state.links].filter(([, links]) => links.length > 0).sort(),
+  );
+}
+
+// A virtual light group is written step by step: create the accessory, add
+// each link, enable link processing; restore removes the links, disables
+// processing and deletes the accessory. A refusal of a later step leaves the
+// steps the hub already acknowledged in the home, so the change is partial:
+// neither "nothing changed" on apply nor "still applied" on restore.
+const partialGroupRefusals = [
+  { name: "a link on apply", direction: "apply", method: "link.addVirtual" },
+  {
+    name: "link processing on apply",
+    direction: "apply",
+    method: "characteristic.update",
+  },
+  {
+    name: "disabling link processing on restore",
+    direction: "restore",
+    method: "characteristic.update",
+  },
+  {
+    name: "the accessory delete on restore",
+    direction: "restore",
+    method: "accessory.delete",
+  },
+];
+
+test("a refused later step of a virtual light group reports the partial group it leaves", async (t) => {
+  const groupInput = lifecycles.find(
+    ({ name }) => name === "virtual light group",
+  ).input;
+  for (const refusal of partialGroupRefusals) {
+    await t.test(refusal.name, async (t) => {
+      const { hub, stateDirectory } = await setup(t);
+      const client = await startClient(t, hub, stateDirectory);
+      const prepared = await call(client, "prepare_native_change", {
+        ...groupInput,
+        reason: "Проверить отказ хаба посреди изменения",
+      });
+      const changeRef = prepared.change_ref;
+      if (refusal.direction === "restore") {
+        const applied = await call(client, "apply_native_change", {
+          change_ref: changeRef,
+        });
+        assert.equal(applied.status, "applied");
+      }
+      const accessoryIds = new Set(hub.state.accessories.map(({ id }) => id));
+      hub.refuseNext(refusal.method);
+      const rejection = unsupported(refusal.method);
+
+      const refused = await client.callTool({
+        name: `${refusal.direction}_native_change`,
+        arguments: { change_ref: changeRef },
+      });
+
+      assert.equal(refused.isError, true, JSON.stringify(refused));
+      const error = refused.structuredContent;
+      assert.equal(error.error.code, rejection.code);
+      assert.equal(error.change_ref, changeRef);
+      assert.equal(error.hub_effect, "partial");
+      assert.deepEqual(error.rejection, rejection);
+      // The group accessory this change created is still in the home.
+      const group = hub.state.accessories.find(
+        (accessory) =>
+          accessory.virtual === true &&
+          (refusal.direction === "restore" || !accessoryIds.has(accessory.id)),
+      );
+      assert.ok(group, "the created group accessory is still present");
+      assert.equal(
+        error.change?.virtual_accessory_ref,
+        `${homeRef}/accessory/${group.id}`,
+      );
+      assert.deepEqual(
+        error.next,
+        refusal.direction === "apply"
+          ? {
+              tool: "restore_native_change",
+              arguments: { change_ref: changeRef },
+            }
+          : { tool: "get_native_change", arguments: { change_ref: changeRef } },
+      );
+
+      // The error and a later read describe the same recorded state.
+      const detail = await call(client, "get_native_change", {
+        change_ref: changeRef,
+      });
+      assert.equal(detail.status, "uncertain");
+      assert.equal(detail.verification.result, "owned_partial_group_observed");
+      assert.equal(error.change.status, detail.status);
+      assert.equal(
+        error.change.verification.result,
+        detail.verification.result,
+      );
+      assert.equal(detail.write_intent.direction, refusal.direction);
+      assert.deepEqual(detail.write_intent.rejection, rejection);
+      assert.equal(detail.restore_supported, true);
+
+      // Restoring the partial change puts the home back as it was prepared.
+      const restored = await call(client, "restore_native_change", {
+        change_ref: changeRef,
+      });
+      assert.equal(restored.status, "restored", JSON.stringify(restored));
+      assert.deepEqual(
+        diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+        [],
+      );
+      assert.deepEqual(linksInUse(hub.state), linksInUse(hub.initialState));
+    });
+  }
+});
+
 test("a hub refusal keeps its reason while the connection token stays out of output and journal", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
