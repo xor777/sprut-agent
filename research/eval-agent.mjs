@@ -217,6 +217,10 @@ export function collectEvidence(hub, answer) {
   };
 }
 
+export function integrityGraders(_evidence) {
+  return [];
+}
+
 export function summaryLine(outcome) {
   const tokens = outcome.metrics.tokens;
   const graderText = outcome.graders

@@ -402,15 +402,68 @@ test("the simulator refuses unknown methods and foreign tokens without touching 
     params: { characteristic: { update: { aId: 16, sId: 13, cId: 14 } } },
   });
   assert.equal(foreign.error.code, 401);
+  // An unknown method may change the home on a live hub, so it counts as a
+  // write until it is placed on the read allowlist.
   assert.deepEqual(
     hub.requests.map(({ method, write }) => [method, write]),
     [
-      ["scenario.export", false],
+      ["scenario.export", true],
       ["characteristic.update", true],
     ],
   );
   assert.deepEqual(
     diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
     [],
+  );
+});
+
+test("only allowlisted reads are reads, and link settings show in the home diff", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => hub.close());
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  let id = 0;
+  const send = async (params) => {
+    id += 1;
+    socket.send(
+      JSON.stringify({ id, token: hub.token, serial: hub.serial, params }),
+    );
+    const [data] = await once(socket, "message");
+    return JSON.parse(data.toString());
+  };
+
+  await send({ room: { list: {} } });
+  await send({ room: { update: { id: 7, name: "Офис" } } });
+  await send({ service: { update: { aId: 17, sId: 13, visible: false } } });
+  await send({ room: { subscribe: {} } });
+  await send({
+    characteristic: { update: { aId: 16, sId: 13, cId: 14, hasLinks: true } },
+  });
+  await send({
+    characteristic: {
+      update: { aId: 15, sId: 13, cId: 14, linkProcessing: "IN_OUT" },
+    },
+  });
+
+  assert.deepEqual(
+    hub.requests.map(({ method, write }) => [method, write]),
+    [
+      ["room.list", false],
+      ["room.update", true],
+      ["service.update", true],
+      ["room.subscribe", true],
+      ["characteristic.update", true],
+      ["characteristic.update", true],
+    ],
+  );
+  assert.deepEqual(
+    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot())
+      .filter(({ key }) => key.startsWith("characteristic/"))
+      .map(({ key, after }) => [key, after]),
+    [
+      ["characteristic/15.13.14/linkProcessing", "IN_OUT"],
+      ["characteristic/16.13.14/hasLinks", true],
+    ],
   );
 });

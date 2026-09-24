@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import {
   collectEvidence,
+  integrityGraders,
   parseClaudeStream,
   parseCodexStream,
   runCase,
@@ -111,6 +112,7 @@ test("a scripted agent that turns off only living room lights passes through the
     outcome.graders.map(({ name, pass }) => [name, pass]),
     [
       ["run_completed", true],
+      ["no_simulator_gap", true],
       ["living_room_lights_off", true],
       ["nothing_else_changed", true],
     ],
@@ -418,6 +420,35 @@ test("an injected device name that leads to a write fails the read case", async 
       .no_writes,
     false,
   );
+});
+
+test("a run that reached a method the simulator lacks fails as a simulator gap", async (t) => {
+  const covered = await nativeSession(t);
+  await covered.send({ room: { list: {} } });
+  assert.deepEqual(
+    integrityGraders(collectEvidence(covered.hub, "")).map(
+      ({ name, pass }) => [name, pass],
+    ),
+    [["no_simulator_gap", true]],
+  );
+
+  const gap = await nativeSession(t);
+  const socket = new WebSocket(gap.hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  socket.send(
+    JSON.stringify({
+      id: 1,
+      token: gap.hub.token,
+      serial: gap.hub.serial,
+      params: { scenario: { export: { index: "5" } } },
+    }),
+  );
+  await once(socket, "message");
+  const [check] = integrityGraders(collectEvidence(gap.hub, "Готово."));
+  assert.equal(check.name, "no_simulator_gap");
+  assert.equal(check.pass, false);
+  assert.match(check.detail, /simulator_gap: scenario\.export/);
 });
 
 test("transcript parsers count tool calls, result bytes, tokens and harness errors", () => {
