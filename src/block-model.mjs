@@ -106,15 +106,16 @@ const NATIVE_SCALAR_AS_STRING = {
   string: "literal",
 };
 
-// The editor schema gives characteristic.timeCond (string) and time
-// (integer) without values. ">" and milliseconds, the unit of the observed
-// delay.time, are assumptions that still need a live check.
+// The official web client writes timeCond "" (applies at once), ">" ("has
+// not changed for") or "<" ("changed back within"), with time in
+// milliseconds (research/protocol/2026-09-24-web-client-evidence.md).
+// SprutHub 3.0.0 stored ">" with 60000 as sent; how the hub evaluates "<"
+// is known only from the client's label.
+const HOLD_TIME = { type: "integer", minimum: 1, unit: "milliseconds" };
 export const CHARACTERISTIC_HOLD = {
   none: { timeCond: "", time: 0 },
-  held_for: {
-    timeCond: ">",
-    time: { type: "integer", minimum: 1, unit: "milliseconds" },
-  },
+  held_for: { timeCond: ">", time: HOLD_TIME },
+  changed_back_within: { timeCond: "<", time: HOLD_TIME },
 };
 
 // SprutHub stores an inc/dec step sent as a numeric string as a number

@@ -5838,7 +5838,7 @@ function blockContract() {
       "The same characteristic cannot be both a condition and an action in this slice.",
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0, with a step sent as a numeric string stored as a number; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
-      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow the official editor schema; a hub has not been observed running them. ONCE follows the SprutHub Wiki; what CONTINUE keeps, timeCond ">" and milliseconds as the hold unit are assumptions.',
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. What CONTINUE does on a repeated entry is an assumption.',
       "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6739,18 +6739,24 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       throw invalidBlock(path, "characteristic condition is incomplete");
     }
-    const { none, held_for: heldFor } = CHARACTERISTIC_HOLD;
+    const { none, ...holds } = CHARACTERISTIC_HOLD;
+    const held = Object.values(holds).some(
+      (hold) =>
+        node.timeCond === hold.timeCond &&
+        Number.isSafeInteger(node.time) &&
+        node.time >= hold.time.minimum,
+    );
     if (
       !(node.timeCond === none.timeCond && node.time === none.time) &&
-      !(
-        node.timeCond === heldFor.timeCond &&
-        Number.isSafeInteger(node.time) &&
-        node.time >= heldFor.time.minimum
-      )
+      !held
     ) {
       throw invalidBlock(
         path,
-        `characteristic hold needs timeCond "" with time 0, or timeCond "${heldFor.timeCond}" with a positive time in ${heldFor.time.unit}`,
+        `characteristic hold needs timeCond "" with time 0, or timeCond ${Object.values(
+          holds,
+        )
+          .map(({ timeCond }) => `"${timeCond}"`)
+          .join(" or ")} with a positive time in milliseconds`,
       );
     }
     context.conditions.push({
