@@ -10,7 +10,8 @@
 // are only read. Everything created is restored (deleted) in reverse order and
 // the final home snapshot must equal the initial one. A final sweep then
 // deletes, through the product client, every inert object of this run that
-// the product owns but its restore left behind, and fails the run for it.
+// the product owns but its restore left behind, and the run's own unlinked
+// virtual accessory, and fails the run for it.
 // `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep.
 //
 // Output: a JSON report in a new temporary directory and a console table.
@@ -18,7 +19,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1938,6 +1939,7 @@ async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
         client,
         prefix,
         changes: await readJournal(client, stateDirectory),
+        accessoryIds: await readProbeAccessories(stateDirectory),
       });
     } finally {
       await client.close();
@@ -1968,6 +1970,29 @@ async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
   return entries;
 }
 
+// The run's proof that it created a virtual accessory: its id, written to the
+// state directory right after the hub acknowledged the create.
+const PROBE_ACCESSORIES_FILE = "probe-accessories.json";
+
+async function readProbeAccessories(stateDirectory) {
+  if (!stateDirectory) return null;
+  try {
+    const record = JSON.parse(
+      await readFile(path.join(stateDirectory, PROBE_ACCESSORIES_FILE), "utf8"),
+    );
+    return Array.isArray(record.accessory_ids) ? record.accessory_ids : null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+// The hub cuts accessory names to 30 characters (2026-09-11), so the
+// accessory carries the run stamp without the long prefix.
+function probeAccessoryName(prefix) {
+  return `zz-probe-${prefix.slice("zz-sprut-agent-probe-".length)}`;
+}
+
 async function readJournal(client, stateDirectory) {
   if (!stateDirectory) return null;
   const store = new AutomationStore({
@@ -1986,11 +2011,19 @@ async function readJournal(client, stateDirectory) {
 // Deletes, directly through the product client, every room and scenario of
 // the run (name starts with prefix) that the product provably created and
 // that cannot act: a scenario with the product's marker and active=false, a
-// room from the run's room_create with no accessories. Everything else with
-// the prefix is left and reported. `changes` is the run's change journal, or
-// null when it is not available. The product's restore is not used: the
-// sweep exists for objects that restore could not remove.
-export async function sweepProbeObjects({ client, prefix, changes }) {
+// room from the run's room_create with no accessories. It also deletes the
+// run's virtual accessory (probeAccessoryName) when its id is in
+// `accessoryIds` and none of its characteristics has a link. Everything else
+// with those names is left and reported. `changes` is the run's change
+// journal and `accessoryIds` the run's accessory record; either is null when
+// it is not available. The product's restore is not used: the sweep exists
+// for objects that restore could not remove.
+export async function sweepProbeObjects({
+  client,
+  prefix,
+  changes,
+  accessoryIds = null,
+}) {
   const entries = [];
   const homeRef = `spruthub://hub/${encodeURIComponent(client.serial)}`;
   for (const summary of await client.listScenarios()) {
@@ -2000,6 +2033,19 @@ export async function sweepProbeObjects({ client, prefix, changes }) {
       ref: `${homeRef}/scenario/${encodeURIComponent(summary.index)}`,
       name: summary.name,
       ...(await settle(() => sweepScenario(client, summary.index))),
+    });
+  }
+  // After the scenarios that act on it and before the room that holds it.
+  const accessoryName = probeAccessoryName(prefix);
+  for (const accessory of await client.listAccessories()) {
+    if (accessory.name !== accessoryName) continue;
+    entries.push({
+      kind: "accessory",
+      ref: `${homeRef}/accessory/${accessory.id}`,
+      name: accessory.name,
+      ...(await settle(() =>
+        sweepAccessory(client, accessory.id, accessoryIds),
+      )),
     });
   }
   for (const room of (await client.listRooms()).rooms) {
@@ -2030,6 +2076,26 @@ async function sweepScenario(client, index) {
   return deleteAndVerify(
     () => client.deleteScenario(index),
     () => client.getScenario(index),
+  );
+}
+
+// accessory.list on SprutHub 3.0.0 has no `virtual` field; accessory.get
+// has it. A link would tie the accessory to a real device.
+async function sweepAccessory(client, id, accessoryIds) {
+  if (accessoryIds === null) return left("record_unavailable");
+  if (!accessoryIds.includes(id)) return left("no_ownership_marker");
+  const accessory = await client.getAccessoryOrNull(id);
+  if (accessory === null) return { outcome: "gone" };
+  if (accessory.virtual !== true) return left("not_virtual");
+  for (const service of accessory.services ?? []) {
+    for (const { cId } of service.characteristics ?? []) {
+      const links = await client.listLinks({ aId: id, sId: service.sId, cId });
+      if (links.length > 0) return left("has_links");
+    }
+  }
+  return deleteAndVerify(
+    () => client.deleteAccessory(id),
+    () => client.getAccessoryOrNull(id),
   );
 }
 
