@@ -6,7 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { scaledHome } from "./fixtures/homes/scaled.mjs";
+import { litHome, scaledHome } from "./fixtures/homes/scaled.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -43,11 +43,7 @@ function listed(body) {
   );
 }
 
-async function measure(t, accessoryCount) {
-  const fixture = scaledHome(
-    await loadHomeFixture("apartment"),
-    accessoryCount,
-  );
+async function connect(t, fixture) {
   const hub = await startSimulatedHub(fixture);
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-scale-"));
   const client = new Client({ name: "scale-test", version: "1.0.0" });
@@ -70,6 +66,14 @@ async function measure(t, accessoryCount) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
+  return { hub, client };
+}
+
+async function measure(t, accessoryCount) {
+  const { hub, client } = await connect(
+    t,
+    scaledHome(await loadHomeFixture("apartment"), accessoryCount),
+  );
   const questions = {};
   const ask = async (question, name, args) => {
     const before = hub.requests.length;
@@ -191,4 +195,76 @@ test("household reads cost the same at 1x, 2x and 4x the owner's home", async (t
       );
     }
   }
+});
+
+// «Какой свет горит?» at the owner's lights: 11 lamps on, most with color,
+// 7 unavailable and 3 relays on at 80 accessories, twice that at 160. The
+// answer is one page with what the agent acts on: each lamp's On ref and
+// brightness, and why a state is unknown. Every value is one parameter away.
+test("what lights are on fits one page at the owner's lamp count and at twice it", async (t) => {
+  const apartment = await loadHomeFixture("apartment");
+  const sizes = [];
+  for (const [accessories, share] of [
+    [80, 1],
+    [160, 2],
+  ]) {
+    const { hub, client } = await connect(t, litHome(apartment, accessories));
+    const result = await client.callTool({
+      name: "find_devices",
+      arguments: { kind: "light", state: "on" },
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    const body = result.structuredContent;
+    sizes.push(`${accessories}: ${Buffer.byteLength(result.content[0].text)}B`);
+
+    // Independent of the product: the lamps the simulator holds as on, with
+    // their On ref and brightness.
+    const lampsOn = hub.state.accessories.flatMap((accessory) =>
+      accessory.online === false
+        ? []
+        : accessory.services.flatMap(({ sId, type, characteristics }) => {
+            const control = (name) =>
+              characteristics.find((item) => item.control.type === name);
+            const on = control("On");
+            if (type !== "Lightbulb" || on.control.value.boolValue !== true) {
+              return [];
+            }
+            const ref = `${home}/accessory/${accessory.id}/service/${sId}`;
+            return [
+              {
+                ref,
+                on_ref: `${ref}/characteristic/${on.cId}`,
+                brightness: control("Brightness")?.control.value.intValue,
+              },
+            ];
+          }),
+    );
+    assert.equal(lampsOn.length, 11 * share);
+    assert.equal(body.next, null);
+    const byRef = (left, right) => left.ref.localeCompare(right.ref);
+    assert.deepEqual(
+      listed(body)
+        .map(({ service }) => ({
+          ref: service.ref,
+          on_ref: service.values.find(({ type }) => type === "On")?.ref,
+          brightness: service.values.find(({ type }) => type === "Brightness")
+            ?.value,
+        }))
+        .sort(byRef),
+      lampsOn.sort(byRef),
+    );
+    assert.equal(body.not_evaluated_total, 7 * share);
+    assert(body.not_evaluated.every(({ reason }) => reason === "unavailable"));
+    assert.equal(body.switches.total, 3 * share);
+    assert(body.switches.entries.every(({ on_ref: ref }) => ref));
+
+    const full = await client.callTool(body.all_values);
+    assert.equal(full.isError, undefined, full.content[0]?.text);
+    assert(
+      listed(full.structuredContent).some(({ service }) =>
+        service.values.some(({ type }) => type === "Hue"),
+      ),
+    );
+  }
+  t.diagnostic(`find_devices {kind: light, state: on}: ${sizes.join(", ")}`);
 });

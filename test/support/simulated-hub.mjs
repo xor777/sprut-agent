@@ -307,6 +307,20 @@ const CHARACTERISTIC_TYPES = {
     minStep: 1,
     write: true,
   },
+  // A color lamp's mode on the owner's hub (get_entity, 2026-09-24):
+  // read-only, 0..2.
+  C_ColorMode: {
+    name: "Режим",
+    format: "int",
+    minValue: 0,
+    maxValue: 2,
+    minStep: 1,
+    validValues: enumValues([
+      ["UNKNOWN", 0, "Неизвестно"],
+      ["HUE", 1, "Цвет"],
+      ["TEMPERATURE", 2, "Температура"],
+    ]),
+  },
   OutletInUse: { name: "Используется", format: "bool" },
   MotionDetected: { name: "Обнаружено движение", format: "bool" },
   CurrentAmbientLightLevel: {

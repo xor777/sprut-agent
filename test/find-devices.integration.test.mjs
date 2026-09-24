@@ -129,6 +129,35 @@ test("find_devices state=on lists every service that is on, air purifiers includ
     roomOrder.filter((ref) => on.some(({ room }) => room.ref === ref)),
   );
   assert(on.every(({ service }) => service.on === true));
+  // Each service shows what the agent acts on: its on/off value and a
+  // lamp's brightness; every value is one call away.
+  assert.deepEqual(
+    on
+      .filter(({ service }) =>
+        service.values.some(
+          ({ type }) => type !== "Brightness" && type !== service.on_basis,
+        ),
+      )
+      .map(({ service }) => service.ref),
+    [],
+  );
+  assert(
+    on.every(({ service }) =>
+      service.values.some(({ type, ref }) => type === service.on_basis && ref),
+    ),
+  );
+  assert.equal(body.values_shown, "on_off_and_brightness");
+  const all = await call(body.all_values.tool, body.all_values.arguments);
+  assert.deepEqual(
+    listed(all.body).map(({ service }) => service.ref),
+    on.map(({ service }) => service.ref),
+  );
+  assert.equal(Object.hasOwn(all.body, "values_shown"), false);
+  assert(
+    listed(all.body).some(({ service }) =>
+      service.values.some(({ type }) => type === "OutletInUse"),
+    ),
+  );
   const byDevice = (name) =>
     on
       .filter(({ device }) => device.name === name)
