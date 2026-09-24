@@ -7332,10 +7332,26 @@ test("a different command to a lamp with an uncertain earlier command is sent", 
   const [floor] = turnedOn.structuredContent.results;
   assert.equal(floor.status, "applied");
   assert.equal(floor.sent, true);
+
+  // The uncertain "off" is no longer the latest send to this lamp, so a new
+  // "off" is decided by the applied "on", not held by the older send.
+  const turnedOff = await sendDeviceCommands(
+    client,
+    [{ target_ref: lights.floor.on, value: false }],
+    "Теперь выключить торшер",
+  );
+  assert.equal(turnedOff.isError, undefined, turnedOff.content[0]?.text);
+  const [offAgain] = turnedOff.structuredContent.results;
+  assert.equal(offAgain.status, "applied");
+  assert.equal(offAgain.sent, true);
   assert.deepEqual(deviceCommandUpdates(hub, lights.floor.on), [
     offUpdate(41),
     { aId: 41, sId: 13, cId: 15, control: { value: { boolValue: true } } },
+    offUpdate(41),
   ]);
+  assert.deepEqual(currentCharacteristicValue(hub, lights.floor.on), {
+    boolValue: false,
+  });
 });
 
 test("a rejected device command does not stop the remaining commands", async (t) => {
