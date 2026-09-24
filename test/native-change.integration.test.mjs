@@ -2264,6 +2264,7 @@ async function startHub(port = 0) {
         [params.scenario?.update, "afterUpdate"],
         [params.scenario?.run, "afterRun"],
         [params.scenario?.delete, "afterDelete"],
+        [params.characteristic?.update, "afterCharacteristicUpdate"],
       ]) {
         if (matches && state.behavior[callbackName]) {
           const callback = state.behavior[callbackName];
@@ -7286,7 +7287,20 @@ test("a lost device command response is not resent by a repeated call until its 
       change_ref: lost.change_ref,
       reason: "earlier_command_unresolved",
       observed_value: true,
-      next: lost.next,
+      next: {
+        tool: "send_device_commands",
+        arguments: {
+          home_ref: homeRef,
+          commands: [
+            {
+              target_ref: lights.floor.on,
+              value: false,
+              resend_unconfirmed: true,
+            },
+          ],
+          reason: "Выключить весь свет в гостиной",
+        },
+      },
     },
   );
   assert.equal(chandelier.status, "applied");
@@ -7311,6 +7325,92 @@ test("a lost device command response is not resent by a repeated call until its 
   });
   assert.equal(earlier.structuredContent.status, "applied");
   assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 2);
+});
+
+test("following the resend offered for a held device command sends it exactly once", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.behavior.dropNextCharacteristicUpdate = true;
+  const lost = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  assert.equal(lost.structuredContent.results[0].status, "uncertain");
+  assert.equal(lost.structuredContent.results[0].sent, true);
+
+  const held = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  const [heldFloor] = held.structuredContent.results;
+  assert.equal(heldFloor.reason, "earlier_command_unresolved");
+  assert.equal(heldFloor.sent, false);
+  assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 1);
+
+  const resent = await client.callTool({
+    name: heldFloor.next.tool,
+    arguments: heldFloor.next.arguments,
+  });
+  assert.equal(resent.isError, undefined, resent.content[0]?.text);
+  assert.deepEqual(deviceCommandUpdates(hub), [offUpdate(41), offUpdate(41)]);
+  const [floor] = resent.structuredContent.results;
+  assert.equal(floor.status, "applied");
+  assert.equal(floor.sent, true);
+  assert.notEqual(floor.change_ref, heldFloor.change_ref);
+  assert.deepEqual(currentCharacteristicValue(hub, lights.floor.on), {
+    boolValue: false,
+  });
+});
+
+test("an acknowledged command the lamp did not carry out does not hold the next request", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const lights = installLivingRoomLights(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  // The hub acknowledges the command, but the unpowered lamp keeps reporting
+  // that it is on.
+  const lampStaysOn = () => {
+    currentCharacteristicValue(hub, lights.floor.on).boolValue = true;
+  };
+  hub.state.behavior.afterCharacteristicUpdate = lampStaysOn;
+  const first = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  const [ignored] = first.structuredContent.results;
+  assert.equal(ignored.status, "uncertain");
+  assert.equal(ignored.sent, true);
+  assert.equal(ignored.conflict_reason, "ack_without_requested_result");
+
+  hub.state.behavior.afterCharacteristicUpdate = lampStaysOn;
+  const repeated = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  assert.equal(repeated.isError, undefined, repeated.content[0]?.text);
+  const [again] = repeated.structuredContent.results;
+  assert.equal(again.sent, true);
+  assert.equal(again.status, "uncertain");
+  assert.equal(again.conflict_reason, "ack_without_requested_result");
+  assert.notEqual(again.change_ref, ignored.change_ref);
+  assert.deepEqual(again.earlier_command, {
+    change_ref: ignored.change_ref,
+    status: "uncertain",
+    conflict_reason: "ack_without_requested_result",
+  });
+  assert.equal(deviceCommandUpdates(hub, lights.floor.on).length, 2);
+
+  // Power is back: the next request turns the lamp off.
+  const powered = await sendDeviceCommands(client, [
+    { target_ref: lights.floor.on, value: false },
+  ]);
+  const [floor] = powered.structuredContent.results;
+  assert.equal(floor.status, "applied");
+  assert.equal(floor.sent, true);
+  assert.deepEqual(deviceCommandUpdates(hub, lights.floor.on), [
+    offUpdate(41),
+    offUpdate(41),
+    offUpdate(41),
+  ]);
+  assert.deepEqual(currentCharacteristicValue(hub, lights.floor.on), {
+    boolValue: false,
+  });
 });
 
 test("a different command to a lamp with an uncertain earlier command is sent", async (t) => {
