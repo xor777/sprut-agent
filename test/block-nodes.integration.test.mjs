@@ -389,7 +389,11 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
       ],
     },
   ]);
-  assert.deepEqual(storedData(hub, index), data);
+  // The hub keeps a PUSH to every service without to.
+  const { to: _all, ...storedEverywhere } = everywhere;
+  assert.deepEqual(storedData(hub, index), {
+    targets: [whenLeak([storedEverywhere, browser])],
+  });
 
   const summary = (
     await call(client, "get_entity", { entity_ref: scenarioRef(index) })
@@ -548,12 +552,13 @@ test("a scenario makes an HTTP request without repeating its query or key", asyn
   assert.equal(JSON.stringify(refused).includes("password1"), false);
 });
 
-test("a scenario sets a value from another characteristic", async (t) => {
-  const { hub, client } = await setup(t);
-  const corridorBrightness = `${homeRef}/accessory/14/service/13/characteristic/15`;
-  const nightLightBrightness = `${homeRef}/accessory/26/service/13/characteristic/15`;
-  // «Ночник — такой же яркости, как свет в коридоре, когда тот меняется.»
-  const fromCorridor = (fields = {}) => ({
+// «Ночник — такой же яркости, как свет в коридоре, когда тот меняется»,
+// with the from action as the web client writes it (value "").
+const corridorBrightness = `${homeRef}/accessory/14/service/13/characteristic/15`;
+const nightLightBrightness = `${homeRef}/accessory/26/service/13/characteristic/15`;
+
+function fromCorridor(fields = {}) {
+  return {
     type: "from",
     cId: 15,
     hc: "Brightness",
@@ -564,42 +569,59 @@ test("a scenario sets a value from another characteristic", async (t) => {
     from_hs: "Lightbulb",
     from_hc: "Brightness",
     ...fields,
-  });
-  const nightLight = (action) => ({
+  };
+}
+
+// The from action as SprutHub 3.0.0 stores it: without the empty value
+// (research/protocol/2026-09-25-live-conformance-4.md).
+function storedFromCorridor() {
+  const { value: _empty, ...stored } = fromCorridor();
+  return stored;
+}
+
+function nightLight(action) {
+  return {
     type: "service",
     aId: 26,
     sId: 13,
     hs: "Lightbulb",
     characteristics: [action],
-  });
-  const corridorChanges = {
-    type: "condition",
-    mode: "AND",
-    conditions: [
-      {
-        type: "characteristic",
-        aId: 14,
-        sId: 13,
-        cId: 15,
-        hs: "Lightbulb",
-        hc: "Brightness",
-        trigger: true,
-        cond: ">",
-        value: "0",
-        timeCond: "",
-        time: 0,
-      },
-    ],
   };
-  const rule = (then) => ({
+}
+
+function whenCorridorChanges(then) {
+  return {
     type: "if",
     mode: "EVERY",
-    if: corridorChanges,
+    if: {
+      type: "condition",
+      mode: "AND",
+      conditions: [
+        {
+          type: "characteristic",
+          aId: 14,
+          sId: 13,
+          cId: 15,
+          hs: "Lightbulb",
+          hc: "Brightness",
+          trigger: true,
+          cond: ">",
+          value: "0",
+          timeCond: "",
+          time: 0,
+        },
+      ],
+    },
     then,
     else: [],
     then_delay: 0,
     else_delay: 0,
-  });
+  };
+}
+
+test("a scenario sets a value from another characteristic", async (t) => {
+  const { hub, client } = await setup(t);
+  const rule = whenCorridorChanges;
   const data = { targets: [rule([nightLight(fromCorridor())])] };
   const { prepared, index } = await createBlock(client, data, "Ночник");
   assert.deepEqual(prepared.block_action_preview.actions, [
@@ -628,7 +650,9 @@ test("a scenario sets a value from another characteristic", async (t) => {
       },
     },
   ]);
-  assert.deepEqual(storedData(hub, index), data);
+  assert.deepEqual(storedData(hub, index), {
+    targets: [rule([nightLight(storedFromCorridor())])],
+  });
 
   const summary = (
     await call(client, "get_entity", { entity_ref: scenarioRef(index) })
@@ -699,6 +723,91 @@ test("a scenario sets a value from another characteristic", async (t) => {
     ["/targets/0/then/0/characteristics/0/value"],
     ["/targets/0/then/0/characteristics/0/from_cId"],
   ]);
+});
+
+// SprutHub 3.0.0 drops a from action's value "", a notify's to null and the
+// clients null of a recipient entry (live-conformance-4). What the agent
+// creates in the web client's form must still read back as its own and be
+// deleted by restore.
+test("a BLOCK with from and notify reads back as applied and restore deletes it on a hub that drops their empty fields", async (t) => {
+  const { hub, client } = await setup(t, withNotificationServices);
+  const leakText = "Протечка в ванной!";
+  const closeText = "Протечка: закрой воду";
+  const data = {
+    targets: [
+      whenCorridorChanges([nightLight(fromCorridor())]),
+      whenLeak([
+        { type: "notify", text: leakText, mode: "PUSH", to: null },
+        {
+          type: "notify",
+          text: closeText,
+          mode: "PUSH",
+          to: [{ index: "web", clients: null }],
+        },
+      ]),
+    ],
+  };
+  const { prepared, index } = await createBlock(client, data);
+  assert.deepEqual(storedData(hub, index), {
+    targets: [
+      whenCorridorChanges([nightLight(storedFromCorridor())]),
+      whenLeak([
+        { type: "notify", text: leakText, mode: "PUSH" },
+        {
+          type: "notify",
+          text: closeText,
+          mode: "PUSH",
+          to: [{ index: "web" }],
+        },
+      ]),
+    ],
+  });
+  const change = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(change.status, "applied", JSON.stringify(change));
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.equal(
+    hub.state.scenarios.some((item) => item.index === index),
+    false,
+  );
+});
+
+// «Ночник — как свет в коридоре», made by the owner in the SprutHub
+// interface: the hub keeps the from action without value. An unrelated edit
+// keeps it as stored, applies, and its restore brings the original back.
+test("an owner's BLOCK with a stored from action takes an unrelated edit and its restore", async (t) => {
+  const { hub, client } = await setup(t);
+  const { index } = await createBlock(client, {
+    targets: [whenLeak([fanOn()])],
+  });
+  hub.state.scenarios.find((item) => item.index === index).data =
+    JSON.stringify({
+      targets: [whenCorridorChanges([nightLight(storedFromCorridor())])],
+    });
+  const original = storedData(hub, index);
+
+  const edited = await prepareUpdate(client, index, (read) => {
+    read.targets.push(whenLeak([fanOn()]));
+  });
+  assert.equal(edited.status, "prepared", JSON.stringify(edited));
+  const applied = await call(client, "apply_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(storedData(hub, index), {
+    targets: [...original.targets, whenLeak([fanOn()])],
+  });
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.deepEqual(storedData(hub, index), original);
 });
 
 // The owner made these in the SprutHub interface: a request to a router with

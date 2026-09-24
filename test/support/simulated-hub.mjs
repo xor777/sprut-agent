@@ -2314,6 +2314,16 @@ function normalizeBlockData(data) {
     ) {
       normalized.value = Number(normalized.value);
     }
+    // The hub drops a from action's value "", a notify's to null and the
+    // clients null of a recipient entry (owner hub, 3.0.0,
+    // 2026-09-25-live-conformance-4).
+    if (kind === "from" && normalized.value === "") delete normalized.value;
+    if (kind === "notify" && normalized.to === null) delete normalized.to;
+    if (kind === "notify" && Array.isArray(normalized.to)) {
+      for (const entry of normalized.to) {
+        if (isRecord(entry) && entry.clients === null) delete entry.clients;
+      }
+    }
     for (const key of BLOCK_CHILDREN[kind] ?? []) {
       if (Array.isArray(node[key])) {
         normalized[key] = node[key].map((child) => visit(child, child?.type));
