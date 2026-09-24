@@ -24,6 +24,7 @@ const ACTION_OPS = {
   toggle: "toggle",
   inc: "increase",
   dec: "decrease",
+  from: "set_from",
 };
 const ACTION_KINDS = new Set(SERVICE_ACTION_KINDS);
 
@@ -39,6 +40,7 @@ export function blockBindings(data) {
     }
     if (!isRecord(value)) return;
     if (Number.isSafeInteger(value.aId)) accessoryIds.add(value.aId);
+    if (Number.isSafeInteger(value.from_aId)) accessoryIds.add(value.from_aId);
     if (value.type === "scenario" && typeof value.index === "string") {
       scenarioIndexes.add(value.index);
     }
@@ -397,6 +399,28 @@ function decodeService(node, pointer, chain, delay, state) {
       return;
     }
     const op = ACTION_OPS[action.type];
+    if (action.type === "from") {
+      const source = decodeFromSource(
+        action,
+        actionPointer,
+        chain,
+        delay,
+        state,
+      );
+      actions.push({ op, ...targetNames(target), source, ref: target.ref });
+      records.push({
+        ref: target.ref,
+        accessoryId: node.aId,
+        characteristic: target.control?.name ?? null,
+        role: "action",
+        pointer: actionPointer,
+        chain,
+        op,
+        ...(typeof source.ref === "string" ? { source_ref: source.ref } : {}),
+        ...(delay ? { delay } : {}),
+      });
+      return;
+    }
     const value =
       action.type === "toggle"
         ? {}
@@ -443,6 +467,37 @@ function decodeService(node, pointer, chain, delay, state) {
     state.records.push(record);
   }
   return actions;
+}
+
+// The characteristic a from action copies. It is read by the rule, so it
+// gets a relation of its own (role source), apart from the actions on the
+// target device.
+function decodeFromSource(action, pointer, chain, delay, state) {
+  const source = describeTarget(
+    state.context,
+    action.from_aId,
+    action.from_sId,
+    action.from_cId,
+    { nativeType: action.from_hc },
+  );
+  if (!source.ref) return { binding: "invalid_reference" };
+  if (source.sensitive) {
+    state.records.push(
+      sensitiveRecord(source, action.from_aId, pointer, "source"),
+    );
+    return REDACTED;
+  }
+  state.records.push({
+    ref: source.ref,
+    accessoryId: action.from_aId,
+    characteristic: source.control?.name ?? null,
+    role: "source",
+    pointer,
+    chain,
+    op: ACTION_OPS.from,
+    ...(delay ? { delay } : {}),
+  });
+  return { ...targetNames(source), ref: source.ref };
 }
 
 function decodeScenarioRun(node, state) {

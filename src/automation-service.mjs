@@ -6008,6 +6008,7 @@ function blockContract() {
       "A scenario target names an existing scenario of this home by its index and a mode from the web client: FIRE runs it, ACTIVATE turns it on, DEACTIVATE turns it off, ACTIVATE_AND_FIRE turns it on and runs it, RESET resets it (known only from the editor label «Сбросить»). A target that runs (FIRE, ACTIVATE_AND_FIRE) must not run its own BLOCK, directly or through running scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. A BLOCK may turn itself off. The modes follow the official editor; a hub has not been observed running any of them, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null for all of them, or [{index, clients}] with a service's index and clients null for all its recipients or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled and state as read at preparation: a service that is not enabled or not LOADED may deliver nothing, so tell the owner. The hub has not been observed storing or sending a notify.",
+      'from («Установить из» in the web client) sets the target to the current value of another characteristic when the action runs: {type:"from", cId, hc, value:"", from_aId, from_sId, from_cId, from_hs, from_hc} with the source\'s ids and its service and characteristic types from get_entity. The source must be readable, hold the same kind of value (yes/no, number or text) and not be the target itself; a target with listed values (a mode) takes them only from a characteristic of its own type. A value outside the target\'s range is not checked in advance, and what the hub does with it is not observed. block_action_preview shows the source with its value at preparation, and the source device\'s relations name the rule with role source. The hub has not been observed storing or running a from action.',
       "http makes a request with a method from the web client's list to an absolute http or https URL, with no body or headers, as the web client writes it. Any such URL is accepted: what the BLOCK calls, such as a device on the home network or a webhook, is the owner's request. A URL with a user name or password is refused, since answers would repeat it. block_action_preview.http_requests and the summary show method, scheme, host and path of each request, not the query or fragment; answers show a URL whose query carries a credential-shaped parameter such as api_key as [REDACTED], and an edit that sends [REDACTED] back for a node with the same blockId keeps the stored URL. The hub has not been observed storing or sending a request; a scenario_run of a BLOCK with a request has no known targets.",
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
@@ -6286,14 +6287,28 @@ async function validateBlockData(
   // another device. Rights, values and comparisons are this contract's rules
   // for what the agent writes; a kept node that breaks them stays as stored.
   const accessories = new Map();
+  // Sources are read by accessory.get or found missing without an error.
+  const sourceAccessories = new Map();
   for (const reference of [...context.conditions, ...context.actions]) {
     if (!accessories.has(reference.aId)) {
       accessories.set(reference.aId, await client.getAccessory(reference.aId));
     }
     const accessory = accessories.get(reference.aId);
     const control = boundBlockControl(reference, accessory);
+    let source;
+    if (reference.source) {
+      const { aId } = reference.source;
+      if (!sourceAccessories.has(aId)) {
+        sourceAccessories.set(aId, await client.getAccessoryOrNull(aId));
+      }
+      const sourceAccessory = sourceAccessories.get(aId);
+      source = {
+        accessory: sourceAccessory,
+        control: boundSourceControl(reference, sourceAccessory),
+      };
+    }
     try {
-      checkBlockReference(reference, accessory, control);
+      checkBlockReference(reference, accessory, control, source);
     } catch (error) {
       if (!reference.kept || !(error instanceof SprutHubError)) throw error;
       reference.unchecked = true;
@@ -6698,7 +6713,7 @@ function boundBlockControl(reference, accessory) {
 
 // Checks rights, value and comparison of one condition or action and keeps
 // what the preview shows.
-function checkBlockReference(reference, accessory, control) {
+function checkBlockReference(reference, accessory, control, source) {
   const contract = characteristicContract(control, {
     requireWrite: reference.role === "action",
   });
@@ -6706,6 +6721,10 @@ function checkBlockReference(reference, accessory, control) {
     reference.contract_kind = contract.kind;
     reference.observation_available = accessory.online;
     reference.observed_value = observableBlockValue(control.value);
+  }
+  if (reference.operation === "from") {
+    validateFromAction(reference, contract, source.accessory, source.control);
+    return;
   }
   if (RELATIVE_ACTIONS.includes(reference.operation)) {
     validateRelativeAction(reference, contract);
@@ -6870,6 +6889,16 @@ function observableBlockValue(value) {
   return validation.valid ? validation.value : null;
 }
 
+// A characteristic's value as read at preparation, when its accessory was
+// online and the value was readable.
+function previewObservation({ observation_available, observed_value }) {
+  const available = observation_available === true && observed_value !== null;
+  return {
+    status: available ? "available" : "unavailable",
+    ...(observed_value ?? {}),
+  };
+}
+
 function blockActionPreview(validation, data, homeRef, capturedAt) {
   return {
     snapshot: {
@@ -6877,27 +6906,39 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
       captured_at: capturedAt,
     },
     actions: validation.actions.map((action) => {
-      const relative = RELATIVE_ACTIONS.includes(action.operation);
-      const command = relative
-        ? {
-            operation: action.operation,
-            ...(action.operation === "toggle"
-              ? {}
-              : { step: action.parsed_value }),
-            kind: action.contract_kind,
-            execution: "write_if_action_runs",
-          }
-        : {
-            value: action.parsed_value,
-            kind: action.contract_kind,
-            execution: "write_if_action_runs",
-          };
-      const observationAvailable =
-        action.observation_available === true && action.observed_value !== null;
-      const observation = {
-        status: observationAvailable ? "available" : "unavailable",
-        ...(action.observed_value ?? {}),
-      };
+      // The hub derives a relative or copied value at run time.
+      const relative =
+        RELATIVE_ACTIONS.includes(action.operation) ||
+        action.operation === "from";
+      const command =
+        action.operation === "from"
+          ? {
+              operation: "from",
+              source: {
+                characteristic_ref: `${homeRef}/accessory/${action.source.aId}/service/${action.source.sId}/characteristic/${action.source.cId}`,
+                service_type: action.source.hs,
+                characteristic_type: action.source.hc,
+                observation: previewObservation(action.source),
+              },
+              kind: action.contract_kind,
+              execution: "write_if_action_runs",
+            }
+          : relative
+            ? {
+                operation: action.operation,
+                ...(action.operation === "toggle"
+                  ? {}
+                  : { step: action.parsed_value }),
+                kind: action.contract_kind,
+                execution: "write_if_action_runs",
+              }
+            : {
+                value: action.parsed_value,
+                kind: action.contract_kind,
+                execution: "write_if_action_runs",
+              };
+      const observation = previewObservation(action);
+      const observationAvailable = observation.status === "available";
       const branch = actionBranchPreview(action, data, validation, homeRef);
       return {
         configuration_pointer: blockPathToPointer(action.path),
@@ -7521,6 +7562,19 @@ function validateBlockNode(node, kind, path, context) {
           `${action.type} value must be a positive step: a number or a plain decimal string such as "10" or "2.5"`,
         );
       }
+      const source =
+        action.type === "from" ? fromSource(action, reportAction) : undefined;
+      if (
+        source &&
+        source.aId === node.aId &&
+        source.sId === node.sId &&
+        source.cId === action.cId
+      ) {
+        reportAction(
+          "from_cId",
+          "the source is the characteristic this action sets; name another one",
+        );
+      }
       if (!serviceValid || !actionValid) return;
       context.actions.push({
         role: "action",
@@ -7534,6 +7588,7 @@ function validateBlockNode(node, kind, path, context) {
         hs: node.hs,
         hc: action.hc,
         value: action.value,
+        ...(source ? { source } : {}),
       });
     });
     return;
@@ -7642,6 +7697,108 @@ function validateBlockNode(node, kind, path, context) {
 // (redactSensitiveText in spruthub-client.mjs). A BLOCK read through
 // get_entity may carry it; it is never the owner's text or URL.
 const REDACTED_MARK = "[REDACTED]";
+
+// The characteristic a from action copies, as the web client writes it: the
+// source's ids and types in from_* fields and value "", since the value
+// comes from the source when the action runs.
+function fromSource(action, reportAction) {
+  if (action.value !== "") {
+    reportAction(
+      "value",
+      'from value must be "": the value comes from the source characteristic',
+    );
+  }
+  for (const key of ["from_aId", "from_sId", "from_cId"]) {
+    if (!stableNativeId(action[key])) {
+      reportAction(
+        key,
+        `${key} must be a native id of the source characteristic, an integer from 0`,
+      );
+    }
+  }
+  for (const key of ["from_hs", "from_hc"]) {
+    if (typeof action[key] !== "string") {
+      reportAction(key, `${key} must be the source's native type`);
+    }
+  }
+  return {
+    aId: action.from_aId,
+    sId: action.from_sId,
+    cId: action.from_cId,
+    hs: action.from_hs,
+    hc: action.from_hc,
+  };
+}
+
+// The source characteristic of a from action, with the service and
+// characteristic types it names, checked like every other reference.
+function boundSourceControl(reference, accessory) {
+  const { aId, sId, cId, hs, hc } = reference.source;
+  const service = accessory?.services?.find(
+    (candidate) => candidate.sId === sId,
+  );
+  const control = service?.characteristics?.find(
+    (candidate) => candidate.cId === cId,
+  )?.control;
+  if (!control) {
+    throw invalidBlock(
+      `${reference.path}.from_cId`,
+      `no source characteristic ${aId}/${sId}/${cId} in this home`,
+    );
+  }
+  if (service.type !== hs) {
+    throw invalidBlock(
+      `${reference.path}.from_hs`,
+      `from_hs must be ${service.type}, the type of service ${aId}/${sId}`,
+    );
+  }
+  if (control.type !== hc) {
+    throw invalidBlock(
+      `${reference.path}.from_hc`,
+      `from_hc must be ${control.type}, the type of characteristic ${aId}/${sId}/${cId}`,
+    );
+  }
+  return control;
+}
+
+const VALUE_CLASSES = {
+  boolValue: "a yes/no value",
+  intValue: "a number",
+  longValue: "a number",
+  doubleValue: "a number",
+  stringValue: "text",
+};
+
+// The hub copies the source's current value when the action runs. It must
+// be readable and hold the same kind of value; a target with listed values
+// (a mode) takes them only from a characteristic of its own type.
+function validateFromAction(action, contract, sourceAccessory, sourceControl) {
+  const at = `${action.path}.from_cId`;
+  let source;
+  try {
+    source = characteristicContract(sourceControl, { requireWrite: false });
+  } catch (error) {
+    if (!(error instanceof SprutHubError)) throw error;
+    throw invalidBlock(at, "the source characteristic must be readable");
+  }
+  if (VALUE_CLASSES[source.kind] !== VALUE_CLASSES[contract.kind]) {
+    throw invalidBlock(
+      at,
+      `the source holds ${VALUE_CLASSES[source.kind] ?? source.kind} and ${action.hc} takes ${VALUE_CLASSES[contract.kind] ?? contract.kind}; name a source of the same kind`,
+    );
+  }
+  if (
+    Object.hasOwn(contract, "valid_values") &&
+    source.type !== contract.type
+  ) {
+    throw invalidBlock(
+      at,
+      `${action.hc} takes listed values; the source must be a ${contract.type} characteristic`,
+    );
+  }
+  action.source.observation_available = sourceAccessory.online;
+  action.source.observed_value = observableBlockValue(sourceControl.value);
+}
 
 // Why a request URL cannot be written, or null. See HTTP_URL in
 // block-model.mjs for what is accepted and why.

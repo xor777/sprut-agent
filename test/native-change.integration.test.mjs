@@ -10031,7 +10031,7 @@ test("relative actions and scenario runs outside the contract are refused before
       /characteristics\/0\/value: inc value must be a positive step/,
     ]),
     [
-      "copy another value",
+      "copy another value without the source's types",
       lampAction({
         type: "from",
         cId: 16,
@@ -10040,7 +10040,7 @@ test("relative actions and scenario runs outside the contract are refused before
         from_sId: 13,
         from_cId: 15,
       }),
-      /node type from\b/,
+      /characteristics\/0\/from_hs: from_hs must be the source's native type/,
     ],
     [
       "missing scenario",

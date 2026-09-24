@@ -9,7 +9,7 @@ const TARGET_KINDS = [
 ];
 
 // Service actions that the preview and relations interpret.
-export const SERVICE_ACTION_KINDS = ["set", "toggle", "inc", "dec"];
+export const SERVICE_ACTION_KINDS = ["set", "toggle", "inc", "dec", "from"];
 
 export const BLOCK_CHILD_FIELDS = {
   root: {
@@ -86,6 +86,18 @@ export const BLOCK_ALLOWED_KEYS = {
   toggle: new Set(["type", "blockId", "cId", "hc"]),
   inc: new Set(["type", "blockId", "cId", "hc", "value"]),
   dec: new Set(["type", "blockId", "cId", "hc", "value"]),
+  from: new Set([
+    "type",
+    "blockId",
+    "cId",
+    "hc",
+    "value",
+    "from_aId",
+    "from_sId",
+    "from_cId",
+    "from_hs",
+    "from_hc",
+  ]),
   delay: new Set(["type", "blockId", "index", "mode", "time", "targets"]),
   clear_delay: new Set(["type", "blockId", "index"]),
   scenario: new Set(["type", "blockId", "index", "mode"]),
@@ -105,6 +117,7 @@ const BLOCK_CREATE_NODE_KINDS = [
   "toggle",
   "inc",
   "dec",
+  "from",
   "delay",
   "clear_delay",
   "scenario",
@@ -341,6 +354,25 @@ const BLOCK_NODE_CONSTRAINTS = {
     characteristic_kind: ["intValue", "longValue", "doubleValue"],
     value_meaning: "positive_step_in_characteristic_unit",
     step: RELATIVE_STEP,
+    editor_optional: ["blockId"],
+  },
+  // The web client's «Установить из»: value "" and the source's ids and
+  // types; the source is chosen among readable characteristics.
+  from: {
+    native_ids: ["cId", "from_aId", "from_sId", "from_cId"],
+    fields: {
+      hc: "characteristic_type_from_get_entity",
+      from_hs: "source_service_type_from_get_entity",
+      from_hc: "source_characteristic_type_from_get_entity",
+      value: "",
+    },
+    source: {
+      read: true,
+      value: "same_kind_as_the_target: yes/no, number or text",
+      target_with_listed_values: "source_of_the_same_characteristic_type",
+      not: "the_target_itself",
+    },
+    when_omitted: { value: "" },
     editor_optional: ["blockId"],
   },
   scenario: {
@@ -604,6 +636,11 @@ export function normalizeBlockRequest(data) {
       node.to = null;
       return;
     }
+    // The web client writes value "" on a from action.
+    if (kind === "from" && node.value === undefined) {
+      node.value = "";
+      return;
+    }
     if (kind === "inc" || kind === "dec") {
       // Sent in the form the hub stores (relativeStepNumber).
       const step = relativeStepNumber(node.value);
@@ -830,6 +867,17 @@ export function blockAffectedRefs(data, homeRef) {
       refs.push(...bindingRefs(homeRef, node.aId, node.sId));
       for (const action of node.characteristics ?? []) {
         refs.push(...bindingRefs(homeRef, node.aId, node.sId, action?.cId));
+        // The device a from action copies is part of the rule too.
+        if (action?.type === "from") {
+          refs.push(
+            ...bindingRefs(
+              homeRef,
+              action.from_aId,
+              action.from_sId,
+              action.from_cId,
+            ),
+          );
+        }
       }
     }
   });
