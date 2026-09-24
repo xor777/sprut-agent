@@ -7139,6 +7139,74 @@ test("a setpoint sent as a device command stays restorable", async (t) => {
   });
 });
 
+test("each device command is decided by the value read right before its write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const lights = installLivingRoomLights(hub);
+  const [temperature] = climateSettings;
+  currentCharacteristicValue(hub, lights.sconce.on).boolValue = false;
+  // Right after the floor lamp is switched off, a link switches the
+  // chandelier off, a motion scenario switches the sconce on and someone
+  // sets the requested temperature on the thermostat.
+  hub.state.behavior.afterCharacteristicUpdate = () => {
+    currentCharacteristicValue(hub, lights.chandelier.on).boolValue = false;
+    currentCharacteristicValue(hub, lights.sconce.on).boolValue = true;
+    currentCharacteristicValue(hub, temperature.ref).doubleValue =
+      temperature.requested;
+  };
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(
+    client,
+    [
+      ...livingRoomOff(lights),
+      { target_ref: temperature.ref, value: temperature.requested },
+    ],
+    "Выключить свет и поставить 23 градуса",
+  );
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  const [floor, chandelier, sconce, setpoint] = sent.structuredContent.results;
+  assert.deepEqual(
+    [floor, chandelier, sconce].map(
+      ({ status, sent, previous_value, observed_value }) => ({
+        status,
+        sent,
+        previous_value,
+        observed_value,
+      }),
+    ),
+    [
+      // The chandelier is already off, but a lamp command is still sent.
+      { status: "applied", sent: true, previous_value: true },
+      { status: "applied", sent: true, previous_value: false },
+      { status: "applied", sent: true, previous_value: true },
+    ].map((expected) => ({ ...expected, observed_value: false })),
+  );
+  assert.deepEqual(
+    {
+      status: setpoint.status,
+      sent: setpoint.sent,
+      observed_value: setpoint.observed_value,
+      change_ref: setpoint.change_ref,
+    },
+    {
+      status: "already_desired",
+      sent: false,
+      observed_value: temperature.requested,
+      change_ref: null,
+    },
+  );
+  assert.equal(sent.structuredContent.status, "ok");
+  assert.deepEqual(deviceCommandUpdates(hub), [
+    offUpdate(41),
+    offUpdate(40),
+    offUpdate(42),
+  ]);
+  for (const { on } of Object.values(lights)) {
+    assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: false });
+  }
+});
+
 test("one invalid device command rejects the whole call before any write", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const lights = installLivingRoomLights(hub);
