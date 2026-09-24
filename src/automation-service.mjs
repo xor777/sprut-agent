@@ -40,10 +40,12 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
 ]);
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
-// SprutHub 3.0.0 kept only the first 30 characters of a longer room name on
-// room.create and room.update (owner hub, 2026-09-24). UTF-16 code units
-// are counted, which is never fewer than the characters a hub may count.
+// SprutHub 3.0.0 kept only the first 30 characters of a longer ASCII room
+// name on room.create and room.update (owner hub, 2026-09-24). Whether it
+// counts characters or bytes of a Cyrillic name is not checked; UTF-16 code
+// units are counted here.
 const ROOM_NAME_MAX_LENGTH = 30;
+const ROOM_NAME_LIMIT_NOTE = `SprutHub cut a longer room name to ${ROOM_NAME_MAX_LENGTH} (checked on ASCII names; not checked for Cyrillic), so a name longer than ${ROOM_NAME_MAX_LENGTH} characters is refused before any write.`;
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -5816,7 +5818,7 @@ function roomCreateContract() {
       live_create: "SprutHub 3.0.0 rev 20131, 2026-09-24",
     },
     limitations: [
-      `SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name, so a longer name is refused before any write.`,
+      ROOM_NAME_LIMIT_NOTE,
       "A lost create response cannot establish ownership from a matching name alone and is never retried blindly.",
       "Room deletion is not attempted when creation ownership, unchanged configuration, or emptiness is unconfirmed.",
     ],
@@ -9769,7 +9771,7 @@ function roomNameWithinLimit(name) {
   if (name.length <= ROOM_NAME_MAX_LENGTH) return name;
   throw new SprutHubError(
     "name_too_long",
-    `SprutHub keeps at most ${ROOM_NAME_MAX_LENGTH} characters of a room name, and this name has ${name.length}. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    `This name has ${name.length} characters. ${ROOM_NAME_LIMIT_NOTE} Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
     "prepare_native_change",
     { max_length: ROOM_NAME_MAX_LENGTH, name_length: name.length },
   );
@@ -11035,7 +11037,7 @@ function publicNativeChange(
         "A matching room observed after a lost create response is a usable candidate but is not owned by this change.",
         "Deletion is allowed only for a confirmed created room whose configuration is unchanged and which contains no accessories.",
         "A later applied room_name change of this room is named by restore_first_change_ref; restoring it first brings back the created name.",
-        `SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name; a longer name is refused before any write.`,
+        ROOM_NAME_LIMIT_NOTE,
       ],
     };
   }
