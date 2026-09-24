@@ -103,6 +103,11 @@ export async function main(
 
   const outcomes = [];
   for (const name of caseNames) {
+    const harnesses = CASES[name].harnesses;
+    if (harnesses && !harnesses.includes(values.harness)) {
+      write(`SKIP ${name}: needs ${harnesses.join(" or ")}\n`);
+      continue;
+    }
     for (const fixture of fixtures) {
       for (let attempt = 1; attempt <= repeat; attempt += 1) {
         const outcome = await runCase({
@@ -144,12 +149,14 @@ export async function runCase({
   timeoutMs,
 }) {
   const fixtureName = fixture ?? definition.fixture ?? "apartment";
+  if (definition.harnesses && !definition.harnesses.includes(harness)) {
+    throw new Error(`${caseName} needs ${definition.harnesses.join(" or ")}`);
+  }
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-eval-run-"));
   // Credentials of this run only: nothing in the repository or an earlier
   // run lets another client pass as the MCP server.
   const runId = randomUUID();
-  const hub = await startSimulatedHub(await loadHomeFixture(fixtureName), {
-    faults: definition.faults,
+  const hub = await startCaseHub(definition, fixtureName, {
     token: `eval-token-${runId}`,
     cid: `eval-mcp-${runId}`,
   });
@@ -157,6 +164,7 @@ export async function runCase({
   try {
     const run = await HARNESSES[harness]({
       prompt: definition.prompt,
+      followUps: definition.followUps ?? [],
       model,
       plugin,
       hub,
@@ -193,6 +201,7 @@ export async function runCase({
       case: caseName,
       fixture: fixtureName,
       prompt: definition.prompt,
+      follow_ups: definition.followUps ?? [],
       harness,
       harness_version: harnessVersion,
       harness_session: run.session ?? transcript.session ?? null,
@@ -259,6 +268,16 @@ export async function runCase({
     await hub.close();
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+// The simulated hub of a case: its fixture, patched by the case (for example
+// a light that must start on), with the case's faults.
+export async function startCaseHub(definition, fixtureName, options = {}) {
+  const fixture = structuredClone(await loadHomeFixture(fixtureName));
+  return startSimulatedHub(
+    definition.patch ? definition.patch(fixture) : fixture,
+    { faults: definition.faults, ...options },
+  );
 }
 
 // The graders' view of one run: requests the simulator received, the home
@@ -571,7 +590,15 @@ function isolatedEnvironment(overrides) {
   return { ...env, ...overrides };
 }
 
-async function runClaude({ prompt, model, plugin, hub, scratch, timeoutMs }) {
+async function runClaude({
+  prompt,
+  followUps = [],
+  model,
+  plugin,
+  hub,
+  scratch,
+  timeoutMs,
+}) {
   const workspace = path.join(scratch, "workspace");
   const configHome = path.join(scratch, "config");
   const stateDir = path.join(scratch, "state");
@@ -618,19 +645,96 @@ async function runClaude({ prompt, model, plugin, hub, scratch, timeoutMs }) {
     "--allowedTools",
     `mcp__${MCP_SERVER_NAME}`,
     "Skill",
-    "--no-session-persistence",
   ];
-  return runProcess({
-    command: process.env.SPRUT_EVAL_CLAUDE_BIN ?? "claude",
-    args,
-    stdin: prompt,
-    cwd: workspace,
-    env: isolatedEnvironment({ XDG_CONFIG_HOME: configHome }),
-    timeoutMs,
-  });
+  const command = process.env.SPRUT_EVAL_CLAUDE_BIN ?? "claude";
+  const env = isolatedEnvironment({ XDG_CONFIG_HOME: configHome });
+  if (followUps.length === 0) {
+    return runProcess({
+      command,
+      args: [...args, "--no-session-persistence"],
+      stdin: prompt,
+      cwd: workspace,
+      env,
+      timeoutMs,
+    });
+  }
+  // Follow-up turns resume one session by id; the session transcript Claude
+  // Code keeps is removed afterwards.
+  const sessionId = randomUUID();
+  const started = Date.now();
+  const combined = {
+    exitCode: 0,
+    timedOut: false,
+    stdout: "",
+    stderr: "",
+    wallMs: 0,
+  };
+  try {
+    for (const [index, text] of [prompt, ...followUps].entries()) {
+      const turn = await runProcess({
+        command,
+        args: [
+          ...args,
+          ...(index === 0
+            ? ["--session-id", sessionId]
+            : ["--resume", sessionId]),
+        ],
+        stdin: text,
+        cwd: workspace,
+        env,
+        timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - started)),
+      });
+      combined.stdout += turn.stdout;
+      combined.stderr += turn.stderr;
+      combined.exitCode = turn.exitCode;
+      combined.timedOut = turn.timedOut;
+      if (turn.exitCode !== 0 || turn.timedOut) break;
+    }
+  } finally {
+    combined.wallMs = Date.now() - started;
+    await removeClaudeSession(sessionId);
+  }
+  return combined;
 }
 
-async function runCodex({ prompt, model, plugin, hub, scratch, timeoutMs }) {
+// Deletes only the files named by this run's session id.
+async function removeClaudeSession(sessionId) {
+  const projects = path.join(
+    process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude"),
+    "projects",
+  );
+  for (const project of await readdir(projects).catch(() => [])) {
+    const directory = path.join(projects, project);
+    const transcript = path.join(directory, `${sessionId}.jsonl`);
+    const exists = await stat(transcript).then(
+      () => true,
+      () => false,
+    );
+    if (!exists) continue;
+    await rm(transcript, { force: true });
+    await rm(path.join(directory, sessionId), {
+      recursive: true,
+      force: true,
+    });
+    // The project directory of the scratch workspace held only this run.
+    if ((await readdir(directory)).length === 0) {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+}
+
+async function runCodex({
+  prompt,
+  followUps = [],
+  model,
+  plugin,
+  hub,
+  scratch,
+  timeoutMs,
+}) {
+  if (followUps.length > 0) {
+    throw new Error("The codex harness does not run follow-up turns");
+  }
   const codex = process.env.SPRUT_EVAL_CODEX_BIN ?? "codex";
   const workspace = path.join(scratch, "workspace");
   const home = path.join(scratch, "home");
@@ -916,18 +1020,29 @@ export function parseClaudeStream(text) {
       } else {
         answer = typeof event.result === "string" ? event.result : answer;
       }
-      costUsd = event.total_cost_usd ?? costUsd;
-      turns = event.num_turns ?? turns;
+      if (typeof event.total_cost_usd === "number") {
+        costUsd = (costUsd ?? 0) + event.total_cost_usd;
+      }
+      if (typeof event.num_turns === "number") {
+        turns = (turns ?? 0) + event.num_turns;
+      }
       if (event.usage) {
         const input = event.usage.input_tokens ?? 0;
         const cacheRead = event.usage.cache_read_input_tokens ?? 0;
         const cacheCreation = event.usage.cache_creation_input_tokens ?? 0;
+        const previous = usage ?? {
+          input: 0,
+          cache_read: 0,
+          cache_creation: 0,
+          total_input: 0,
+          output: 0,
+        };
         usage = {
-          input,
-          cache_read: cacheRead,
-          cache_creation: cacheCreation,
-          total_input: input + cacheRead + cacheCreation,
-          output: event.usage.output_tokens ?? 0,
+          input: previous.input + input,
+          cache_read: previous.cache_read + cacheRead,
+          cache_creation: previous.cache_creation + cacheCreation,
+          total_input: previous.total_input + input + cacheRead + cacheCreation,
+          output: previous.output + (event.usage.output_tokens ?? 0),
         };
       }
     }
