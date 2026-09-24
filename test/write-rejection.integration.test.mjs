@@ -444,6 +444,49 @@ test("a refused later step of a virtual light group reports the partial group it
   }
 });
 
+test("a device command the hub refuses reports the hub reason in its item", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.refuseNext("characteristic.update", {
+    code: -32603,
+    message: "Internal error: device is not responding",
+  });
+  const rejection = {
+    code: "request_rejected",
+    protocol_code: -32603,
+    hub_message: "Internal error: device is not responding",
+  };
+
+  const sent = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: [
+      {
+        target_ref: `${homeRef}/accessory/16/service/13/characteristic/15`,
+        value: 30,
+      },
+    ],
+    reason: "Приглушить торшер",
+  });
+
+  const [item] = sent.results;
+  assert.equal(item.status, "rejected", JSON.stringify(item));
+  assert.equal(item.sent, true);
+  assert.equal(item.error.code, "request_rejected");
+  assert.deepEqual(item.rejection, rejection);
+  const detail = await call(client, "get_native_change", {
+    change_ref: item.change_ref,
+  });
+  assertRecordedRejection(detail, {
+    status: "not_applied",
+    direction: "apply",
+    rejection,
+  });
+  assert.deepEqual(
+    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+    [],
+  );
+});
+
 test("a hub refusal keeps its reason while the connection token stays out of output and journal", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
