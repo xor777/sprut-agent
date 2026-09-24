@@ -120,15 +120,18 @@ export const CHARACTERISTIC_HOLD = {
   changed_back_within: { timeCond: "<", time: HOLD_TIME },
 };
 
-// SprutHub stores an inc/dec step sent as a numeric string as a number
-// (live conformance on 3.0.0 rev 20131, 2026-09-24); set values stay
-// strings. Steps are published, validated and compared in the stored form.
-export function storedRelativeStep(value) {
-  return typeof value === "string" &&
-    value.trim() !== "" &&
-    Number.isFinite(Number(value))
+// SprutHub stores an inc/dec step sent as "10" as the number 10 (live
+// conformance on 3.0.0 rev 20131, 2026-09-24); set values stay strings. A
+// step is a finite number or a plain decimal string; how the hub reads other
+// spellings such as "0xA", "1e1" or " 10 " is not observed. Returns the
+// step as a number, or null.
+const PLAIN_DECIMAL = /^-?\d+(?:\.\d+)?$/;
+
+export function relativeStepNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  return typeof value === "string" && PLAIN_DECIMAL.test(value)
     ? Number(value)
-    : value;
+    : null;
 }
 
 // inc/dec step limits read from the characteristic returned by get_entity.
@@ -465,6 +468,12 @@ function publishedBlockChildren() {
 export function normalizeBlockRequest(data) {
   wrapDirectCharacteristicIfPredicates(data);
   visitKnownBlockNodes(data, (node, kind) => {
+    if (kind === "inc" || kind === "dec") {
+      // Sent in the form the hub stores (relativeStepNumber).
+      const step = relativeStepNumber(node.value);
+      if (step !== null) node.value = step;
+      return;
+    }
     if (kind !== "cron" || typeof node.cron !== "string") return;
     // The web client writes every day as *, never as all seven names.
     const fields = node.cron.split(" ");
@@ -478,6 +487,69 @@ export function normalizeBlockRequest(data) {
       node.cron = fields.join(" ");
     }
   });
+}
+
+// The one form in which BLOCK data is compared: a request with its readback,
+// an applied or baseline snapshot with the current data, a kept subtree with
+// the stored one, a requested rule with an existing one, a configuration
+// point with the current scenario. Both sides of every comparison take this
+// form; it is never sent to the hub. It folds only what the hub or the
+// official web client write differently for the same meaning. Anything
+// else, a changed value, mode, delay, branch or field, stays a difference,
+// so a manual edit is still detected.
+export function canonicalBlock(data) {
+  return canonicalNode(data, "root");
+}
+
+// A node of BLOCK data as canonicalBlock gives it, by its own type.
+export function canonicalBlockNode(node) {
+  if (!isRecord(node) || typeof node.type !== "string") {
+    return structuredClone(node);
+  }
+  return canonicalNode(node, node.type);
+}
+
+function canonicalNode(node, kind) {
+  if (!isRecord(node)) return structuredClone(node);
+  // Live-observed: the hub numbers every node it stores in a BLOCK child
+  // field again after a write, also nodes outside this contract such as code
+  // (research/protocol/2026-09-09-automations.md). Only that blockId is
+  // dropped from a node outside the contract; the rest of it stays exact.
+  const { blockId: _blockId, ...fields } = node;
+  if (!Object.hasOwn(BLOCK_ALLOWED_KEYS, kind)) return structuredClone(fields);
+  const canonical = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const rule = BLOCK_CHILD_FIELDS[kind]?.[key];
+    if (rule?.shape === "array" && Array.isArray(value)) {
+      canonical[key] = value.map(canonicalBlockNode);
+    } else if (rule?.shape === "single") {
+      canonical[key] = canonicalBlockNode(value);
+    } else {
+      canonical[key] = structuredClone(value);
+    }
+  }
+  if (kind === "if") {
+    // state is runtime, not configuration: live reads carry it on stored
+    // ifs, SprutHub 3.0.0 did not add it at create, and the web client sets
+    // it to null when it switches to ONCE.
+    delete canonical.state;
+    // Client code (research/protocol/2026-09-24-web-client-evidence.md): the
+    // web client creates an if without mode, then_delay and else_delay and
+    // with else null, and shows it as EVERY without a repeat period or an
+    // else branch. Which form the hub keeps is not observed.
+    if (!Object.hasOwn(canonical, "mode")) canonical.mode = "EVERY";
+    for (const key of ["then_delay", "else_delay"]) {
+      if (!Object.hasOwn(canonical, key)) canonical[key] = 0;
+    }
+    if (canonical.else === undefined || canonical.else === null) {
+      canonical.else = [];
+    }
+  }
+  if ((kind === "inc" || kind === "dec") && Object.hasOwn(canonical, "value")) {
+    // Live-observed: a step sent as "10" is stored as 10 (relativeStepNumber).
+    canonical.value = relativeStepNumber(canonical.value) ?? canonical.value;
+  }
+  return canonical;
 }
 
 function wrapDirectCharacteristicIfPredicates(data) {

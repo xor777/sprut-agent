@@ -9627,7 +9627,11 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
     reason:
       "Нажатие переключает свет, двойное прибавляет яркость на 10, долгое убавляет; без движения запустить «Всё выключить»",
   });
-  assert.deepEqual(prepared.structuredContent.diff.configuration.to.data, data);
+  // The diff shows what is sent: each step as the number the hub stores.
+  const sent = structuredClone(data);
+  sent.targets[1].then[0].characteristics[0].value = 10;
+  sent.targets[2].then[0].characteristics[0].value = 10;
+  assert.deepEqual(prepared.structuredContent.diff.configuration.to.data, sent);
   const preview = prepared.structuredContent.block_action_preview.actions;
   assert.deepEqual(
     preview.map(

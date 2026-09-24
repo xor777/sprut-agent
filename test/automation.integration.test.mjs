@@ -1121,7 +1121,12 @@ test("the same rule made in the SprutHub interface is reused or reported, never 
     [
       "turned on, without else",
       interfaceOfficeMotionRule(),
-      { differences: [], status: "already_present" },
+      {
+        differences: [],
+        status: "already_present",
+        // Reused: the result carries the reason of this change.
+        reason: previewArguments.reason,
+      },
     ],
     [
       "turned off, without else",

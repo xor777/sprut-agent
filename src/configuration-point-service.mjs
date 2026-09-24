@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { comparableScenarioConfigurationData } from "./automation-service.mjs";
+import { canonicalBlock } from "./block-model.mjs";
 import {
   CONFIGURATION_POINT_FORMAT_VERSION,
   ConfigurationPointStore,
@@ -347,9 +347,7 @@ function extractCapturedEntity(entity, entityRef) {
             typeof configuration.value === "object"
               ? {
                   format: "json",
-                  value: comparableScenarioConfigurationData(
-                    configuration.value,
-                  ),
+                  value: canonicalBlock(configuration.value),
                 }
               : configuration,
         },
@@ -511,10 +509,30 @@ function diffCaptured(previous, current) {
     return diffCharacteristicSettings(previous.settings, current.settings);
   }
   const { changes, not_compared } = diffSettings(
-    previous.settings,
-    current.settings,
+    comparableSettings(previous),
+    comparableSettings(current),
   );
   return foldIncompleteOptions(previous, current, changes, not_compared);
+}
+
+// A scenario configuration is compared in canonicalBlock form on both sides:
+// points saved before captures took that form keep the data as it was read.
+function comparableSettings(captured) {
+  const configuration = captured.settings?.configuration;
+  if (
+    captured.kind !== "scenario" ||
+    configuration?.format !== "json" ||
+    !isPlainObject(configuration.value)
+  ) {
+    return captured.settings;
+  }
+  return {
+    ...captured.settings,
+    configuration: {
+      ...configuration,
+      value: canonicalBlock(configuration.value),
+    },
+  };
 }
 
 function diffCharacteristicSettings(previous, current) {
