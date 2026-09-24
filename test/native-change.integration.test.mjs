@@ -20350,6 +20350,74 @@ test("a type that appears after the create is not taken as the unlisted created 
   assert.deepEqual(hub.state.logics, [ownAssignment]);
 });
 
+// When the read right after the create fails, the created LOGIC is adopted by
+// a later read. That read is not the create's, so the type it shows (here
+// another LOGIC's) is not taken either.
+test("a created LOGIC adopted after a failed read after its create gets no later type", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Выключенный LOGIC",
+      description: "Создан выключенным, тип не виден",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC и потом отменить его",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const changeRef = prepared.structuredContent.change_ref;
+  hub.state.behavior.afterCreate = () => {
+    hub.state.logicTypes = hub.state.logicTypes.filter(
+      ({ type }) => type === smoothLogicType,
+    );
+    hub.state.behavior.failNextScenarioGet = true;
+  };
+  const created = await callChangeTool(
+    client,
+    "apply_native_change",
+    changeRef,
+  );
+  assert.equal(created.status, "uncertain");
+  const ownAssignment = {
+    aId: 32,
+    sId: 13,
+    type: "GeneratedLogicType1",
+    name: "Выключенный LOGIC",
+    active: false,
+  };
+  hub.state.logics.push(ownAssignment);
+  hub.state.logicTypes.push({
+    type: "OtherLogicType",
+    name: "Другой LOGIC",
+    desc: "Создан владельцем позже",
+  });
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const read = await callChangeTool(
+    restartedClient,
+    "get_native_change",
+    changeRef,
+  );
+  assert.equal(read.status, "applied");
+  assert.equal(read.logic_mapping_status, "missing");
+  assertNoLogicTypeOffered(read);
+
+  assertUnlistedLogicRefused(
+    await restartedClient.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    }),
+  );
+  await assertUnlistedLogicKept(hub, restartedClient, changeRef);
+  assert.deepEqual(hub.state.logics, [ownAssignment]);
+});
+
 // Earlier versions mapped the one new type seen by a later get and saved it.
 // The fixture is such a record, captured from that code: its own type was
 // unlisted and the type of a LOGIC created afterwards was taken instead.
