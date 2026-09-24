@@ -45,6 +45,8 @@ const RAW_REFS = [
   /(?<!\p{L})(?:аксессуар|сценари|комнат|сервис|характеристик|устройств)\p{L}*\s*[№#]\s*\d/iu,
   /(?<!\p{L})(?:аксессуар|сценарий)\s+\d/iu,
   /\b[a-z]+_refs?\b/i,
+  // A tool or native field name: list_native_changes, execution_error.
+  /\b[a-z]+(?:_[a-z]+)+\b/,
   /\/configuration\//i,
   /\b(?:Bridge|Controller):\w/,
   // A Zigbee address («Zigbee ID 0x00158d…») is the owner's to read.
