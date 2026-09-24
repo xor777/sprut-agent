@@ -20325,15 +20325,41 @@ test("a turned-on LOGIC whose type its anchor does not list keeps its index as t
 
 // Whether logic.list shows the assignments of a turned-off LOGIC is not
 // known, so an empty scan does not show that no device uses it. Deleting it
-// could leave such a device with an assignment to a LOGIC that is gone.
-test("restore does not delete a turned-off LOGIC and deletes it once it is on and unassigned", async (t) => {
+// could leave such a device with an assignment to a LOGIC that is gone. An
+// assignment the scan does show blocks the delete while the LOGIC is off, as
+// it does while it is on: turning it on would make it run there. Turned on
+// with the owner's consent, a LOGIC whose assignments the next restore finds
+// stays on until its scenario_active change is restored.
+test("restore of a turned-off LOGIC names its visible assignments, refuses while none are visible, and deletes it once it is on and unassigned", async (t) => {
   const { hub, client, stateDirectory, changeRef, created } =
     await createOwnedLogic(t, { active: false });
   assert.equal(created.status, "applied");
   assertIdentityMapping(created, { ready: false, reason: "logic_turned_off" });
+  const logic = hub.state.scenarios.find(({ index }) => index === "created-1");
   const assignment = ownAssignmentElsewhere();
   hub.state.logics.push(assignment);
 
+  assertAssignedLogicRestoreBlocked(
+    await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    }),
+    {
+      tool: "restore_native_change",
+      type: "created-1",
+      scenarioIndex: "created-1",
+      hub,
+      active: false,
+    },
+  );
+  assertCreatedLogicKept(hub);
+  assert.equal(logic.active, false);
+  assert.deepEqual(scenarioWindowActiveUpdates(hub), []);
+
+  // With no assignment visible, the refusal says what turning it on means
+  // and does not hand the agent a plain next step to turn it on.
+  hub.state.logics.length = 0;
+  const listsBefore = logicListReads(hub);
   const refused = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: changeRef },
@@ -20344,19 +20370,18 @@ test("restore does not delete a turned-off LOGIC and deletes it once it is on an
     "logic_off_assignments_unverified",
     refused.content[0]?.text,
   );
+  assert.ok(logicListReads(hub) > listsBefore, "the home was scanned first");
   assert.equal(
     refused.structuredContent.scenario_ref,
     `${homeRef}/scenario/created-1`,
   );
-  assert.deepEqual(refused.structuredContent.next, {
-    tool: "get_native_change_contract",
-    arguments: {
-      operation: "scenario_active",
-      target_ref: `${homeRef}/scenario/created-1`,
-    },
-  });
+  assert.equal(refused.structuredContent.next, undefined);
+  assert.match(
+    refused.structuredContent.error.message,
+    /owner must agree/,
+    "turning it on is offered only with the owner's consent",
+  );
   assertCreatedLogicKept(hub);
-  assert.deepEqual(hub.state.logics, [assignment]);
   const restartedClient = await startClient(t, hub, stateDirectory);
   const stored = await callChangeTool(
     restartedClient,
@@ -20366,7 +20391,8 @@ test("restore does not delete a turned-off LOGIC and deletes it once it is on an
   assert.equal(stored.status, "applied");
   assertIdentityMapping(stored, { ready: false, reason: "logic_turned_off" });
 
-  const logic = hub.state.scenarios.find(({ index }) => index === "created-1");
+  // The owner agreed. Turned on, its assignment is found: it stays on, and
+  // restoring the scenario_active change turns it off again.
   addScenarioOptionsWindow(hub, logic);
   const turnOn = await prepareScenarioActive(
     restartedClient,
@@ -20389,9 +20415,8 @@ test("restore does not delete a turned-off LOGIC and deletes it once it is on an
     changeRef,
   );
   assertIdentityMapping(on, { ready: true, reason: undefined });
-
-  // On, its own assignment on another service blocks the delete.
   assignment.active = true;
+  hub.state.logics.push(assignment);
   assertAssignedLogicRestoreBlocked(
     await restartedClient.callTool({
       name: "restore_native_change",
@@ -20404,7 +20429,31 @@ test("restore does not delete a turned-off LOGIC and deletes it once it is on an
       hub,
     },
   );
+  assert.equal(logic.active, true);
+  assert.equal(
+    (
+      await callChangeTool(
+        restartedClient,
+        "restore_native_change",
+        turnOn.change_ref,
+      )
+    ).status,
+    "restored",
+  );
+  assert.equal(logic.active, false);
+
+  // Unassigned and on, it is deleted.
   hub.state.logics.length = 0;
+  const turnOnAgain = await prepareScenarioActive(
+    restartedClient,
+    `${homeRef}/scenario/created-1`,
+    true,
+  );
+  await callChangeTool(
+    restartedClient,
+    "apply_native_change",
+    turnOnAgain.change_ref,
+  );
   const restored = await callChangeTool(
     restartedClient,
     "restore_native_change",
@@ -20416,6 +20465,10 @@ test("restore does not delete a turned-off LOGIC and deletes it once it is on an
     false,
   );
 });
+
+function logicListReads(hub) {
+  return hub.requests.filter(({ logic }) => logic?.list).length;
+}
 
 // The owner (or another process) can create or turn on a LOGIC on the same
 // service while this create is in flight. Its type is its own index, not
@@ -21502,7 +21555,7 @@ function assertDoesNotAskToPrepareNewLogic(result, tool) {
 
 function assertAssignedLogicRestoreBlocked(
   result,
-  { tool, type, scenarioIndex, hub },
+  { tool, type, scenarioIndex, hub, active = true },
 ) {
   assert.equal(result.isError, undefined, result.content[0]?.text);
   assert.equal(result.structuredContent.status, "conflict", tool);
@@ -21515,7 +21568,7 @@ function assertAssignedLogicRestoreBlocked(
   assert.deepEqual(result.structuredContent.logic_assignments, [
     {
       ref: `${homeRef}/accessory/32/service/13/logic/${encodeURIComponent(type)}`,
-      active: true,
+      active,
     },
   ]);
   assertDoesNotAskToPrepareNewLogic(result, tool);
