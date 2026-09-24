@@ -11353,8 +11353,8 @@ test("an update that grows a web client's one-condition OR group warns that any 
     ],
   });
   const atNight = workModeEquals(workModeNight.value, false);
-  const preview = async (edit) => {
-    hub.state.scenarios[0].data = JSON.stringify(stored);
+  const preview = async (edit, storedData = stored) => {
+    hub.state.scenarios[0].data = JSON.stringify(storedData);
     const data = edit(await readBlockConfiguration(client));
     const prepared = await prepareBlockUpdate(
       client,
@@ -11370,6 +11370,7 @@ test("an update that grows a web client's one-condition OR group warns that any 
     );
     return {
       warnings: (shown.warnings ?? []).map(({ message: _, ...rest }) => rest),
+      removed_nodes: shown.removed_nodes,
       written_mode: diff.data.to.targets.at(-1).if.mode,
     };
   };
@@ -11385,6 +11386,44 @@ test("an update that grows a web client's one-condition OR group warns that any 
       when: conditionGroup(workModeEquals(workModeDay.value)),
       thenActions: [setAction({ value: "false" })],
     });
+  const dayOrNight = () => ({
+    type: "condition",
+    mode: "OR",
+    conditions: [
+      workModeEquals(workModeDay.value),
+      workModeEquals(workModeNight.value),
+    ],
+  });
+  // «Днём или ночью выключай свет» before the motion rule.
+  const twoRules = withRuntimeBlockFields({
+    targets: [
+      everyIf({
+        when: dayOrNight(),
+        thenActions: [setAction({ value: "false" })],
+      }),
+      {
+        ...motionLightIf(...IF_DEFAULT_KEYS),
+        if: conditionGroup(characteristicCondition(), "OR"),
+      },
+    ],
+  });
+  // The same conditions as two groups of one if: «(день или ночь) и
+  // движение».
+  const nestedGroups = withRuntimeBlockFields({
+    targets: [
+      {
+        ...motionLightIf(...IF_DEFAULT_KEYS),
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            dayOrNight(),
+            conditionGroup(characteristicCondition(), "OR"),
+          ],
+        },
+      },
+    ],
+  });
 
   const outcomes = {
     grown_or: await preview((data) => {
@@ -11425,34 +11464,94 @@ test("an update that grows a web client's one-condition OR group warns that any 
       );
       return data;
     }),
+    // Nor when the stored rule is edited beside it: the stored group
+    // becomes «no motion», and the new group is new.
+    new_or_rule_beside_edited_group: await preview((data) => {
+      data.targets[0].if.conditions[0].value = "false";
+      data.targets.push(
+        everyIf({
+          when: {
+            type: "condition",
+            mode: "OR",
+            conditions: [characteristicCondition(), atNight],
+          },
+          thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
+        }),
+      );
+      return data;
+    }),
+    // Without blockIds a rule is paired with the stored rule whose
+    // conditions it shares, not with the one at its position: the deleted
+    // day-or-night rule is the one removed, and the motion rule grew.
+    grown_or_after_deleting_the_rule_before_it_without_block_ids: await preview(
+      (data) => {
+        const edited = withoutBlockIds(data);
+        edited.targets.splice(0, 1);
+        edited.targets[0].if.conditions.push(atNight);
+        return edited;
+      },
+      twoRules,
+    ),
+    grown_or_in_reordered_rules_without_block_ids: await preview((data) => {
+      const edited = withoutBlockIds(data);
+      edited.targets.reverse();
+      edited.targets[0].if.conditions.push(atNight);
+      edited.targets[1].then[0].characteristics[0].value = "true";
+      return edited;
+    }, twoRules),
+    // The same for condition groups inside one if.
+    grown_nested_or_after_deleting_the_group_before_it_without_block_ids:
+      await preview((data) => {
+        const edited = withoutBlockIds(data);
+        edited.targets[0].if.conditions.splice(0, 1);
+        edited.targets[0].if.conditions[0].conditions.push(atNight);
+        return edited;
+      }, nestedGroups),
   };
 
+  const grownAt = (pointer) => [
+    { code: "or_group_grown", pointer, mode: "OR", conditions: 2 },
+  ];
   assert.deepEqual(outcomes, {
     grown_or: {
-      warnings: [
-        {
-          code: "or_group_grown",
-          pointer: "/targets/0/if",
-          mode: "OR",
-          conditions: 2,
-        },
-      ],
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [],
       written_mode: "OR",
     },
-    grown_and: { warnings: [], written_mode: "AND" },
-    action_added: { warnings: [], written_mode: "OR" },
+    grown_and: { warnings: [], removed_nodes: [], written_mode: "AND" },
+    action_added: { warnings: [], removed_nodes: [], written_mode: "OR" },
     grown_or_after_new_rule_without_block_ids: {
-      warnings: [
-        {
-          code: "or_group_grown",
-          pointer: "/targets/1/if",
-          mode: "OR",
-          conditions: 2,
-        },
-      ],
+      warnings: grownAt("/targets/1/if"),
+      removed_nodes: [],
       written_mode: "OR",
     },
-    new_or_rule_beside_kept_group: { warnings: [], written_mode: "OR" },
+    new_or_rule_beside_kept_group: {
+      warnings: [],
+      removed_nodes: [],
+      written_mode: "OR",
+    },
+    new_or_rule_beside_edited_group: {
+      warnings: [],
+      removed_nodes: [],
+      written_mode: "OR",
+    },
+    grown_or_after_deleting_the_rule_before_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [{ pointer: "/targets/0", type: "if" }],
+      written_mode: "OR",
+    },
+    grown_or_in_reordered_rules_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [],
+      written_mode: "OR",
+    },
+    grown_nested_or_after_deleting_the_group_before_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if/conditions/0"),
+      removed_nodes: [
+        { pointer: "/targets/0/if/conditions/0", type: "condition" },
+      ],
+      written_mode: "AND",
+    },
   });
 });
 
