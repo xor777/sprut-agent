@@ -17473,6 +17473,246 @@ test("a scenario ref of another home is rejected before any scenario request", a
   assert.equal(hub.state.scenarios[0].active, true);
 });
 
+async function turnScenarioOffWithChange(client, targetRef) {
+  const prepared = await prepareScenarioActive(client, targetRef, false);
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+}
+
+const scenarioTurnOffCases = [
+  {
+    name: "with a scenario_active change",
+    turnOff: turnScenarioOffWithChange,
+  },
+  {
+    name: "by hand in the SprutHub interface",
+    turnOff: async (_client, _targetRef, scenario) => {
+      scenario.active = false;
+    },
+  },
+];
+
+test("a BLOCK data update stays owned after its scenario is turned off and restores only its data", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const update = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: targetRef,
+      data: blockData({ delay: 45_000 }),
+      reason: "Сократить задержку ночника",
+    },
+  });
+  assert.equal(update.isError, undefined, update.content[0]?.text);
+  const updateRef = update.structuredContent.change_ref;
+  const applied = await callChangeTool(
+    firstClient,
+    "apply_native_change",
+    updateRef,
+  );
+  assert.equal(applied.status, "applied");
+
+  await turnScenarioOffWithChange(firstClient, targetRef);
+  assert.equal(scenario.active, false);
+  const observed = await callChangeTool(
+    firstClient,
+    "get_native_change",
+    updateRef,
+  );
+  assert.equal(observed.status, "applied");
+  assert.equal(observed.configuration_matches, true);
+
+  const writesBeforeRestore = scenarioUpdates(hub).length;
+  const appliedData = scenario.data;
+  scenario.data = JSON.stringify({
+    ...JSON.parse(appliedData),
+    manual: "keep",
+  });
+  const refused = await callChangeTool(
+    firstClient,
+    "restore_native_change",
+    updateRef,
+  );
+  assert.equal(refused.status, "conflict");
+  assert.equal(refused.conflict_reason, "manual_change");
+  assert.equal(scenarioUpdates(hub).length, writesBeforeRestore);
+  scenario.data = appliedData;
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const restored = await callChangeTool(
+    secondClient,
+    "restore_native_change",
+    updateRef,
+  );
+  assert.equal(restored.status, "restored");
+  assert.equal(restored.configuration_matches, true);
+  const restoreWrites = scenarioUpdates(hub).slice(writesBeforeRestore);
+  assert.equal(restoreWrites.length, 1);
+  assert.deepEqual(Object.keys(restoreWrites[0]).sort(), ["data", "index"]);
+  assert.equal(JSON.parse(scenario.data).targets[0].then[1].time, 60_000);
+  assert.equal(scenario.active, false);
+});
+
+test("a created BLOCK that was turned off is still deleted by its restore", async (t) => {
+  for (const turnOffCase of scenarioTurnOffCases) {
+    await t.test(turnOffCase.name, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const client = await startClient(subtest, hub, stateDirectory);
+      const data = blockData();
+      delete data.vendorConfiguration;
+      const prepared = await prepareBlockCreate(client, {
+        name: "Ночник в коридоре",
+        data,
+        reason: "Включать ночник в коридоре по движению",
+      });
+      const createRef = prepared.structuredContent.change_ref;
+      const created = await callChangeTool(
+        client,
+        "apply_native_change",
+        createRef,
+      );
+      assert.equal(created.status, "applied");
+      const scenario = hub.state.scenarios.find(
+        ({ index }) => index === created.scenario_index,
+      );
+      assert.equal(scenario.active, true);
+
+      await turnOffCase.turnOff(client, created.scenario_ref, scenario);
+      assert.equal(scenario.active, false);
+      const observed = await callChangeTool(
+        client,
+        "get_native_change",
+        createRef,
+      );
+      assert.equal(observed.status, "applied");
+
+      const restored = await callChangeTool(
+        client,
+        "restore_native_change",
+        createRef,
+      );
+      assert.equal(restored.status, "restored");
+      assert.deepEqual(
+        scenarioDeletes(hub).map(({ scenario: request }) => request.delete),
+        [{ index: created.scenario_index }],
+      );
+      assert.equal(
+        hub.state.scenarios.some(
+          ({ index }) => index === created.scenario_index,
+        ),
+        false,
+      );
+    });
+  }
+});
+
+test("a LOGIC source change stays restorable after its scenario is turned off", async (t) => {
+  await t.test("a created source is deleted", async (subtest) => {
+    const { hub, stateDirectory } = await setup(subtest);
+    const client = await startClient(subtest, hub, stateDirectory);
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "logic_source_create",
+        target_ref: serviceRef,
+        name: "Ночная яркость",
+        description: "Приглушать свет ночью",
+        active: true,
+        on_start: false,
+        sync: false,
+        source: firstLogicSource,
+        reason: "Приглушать свет ночью",
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    const createRef = prepared.structuredContent.change_ref;
+    const created = await callChangeTool(
+      client,
+      "apply_native_change",
+      createRef,
+    );
+    assert.equal(created.status, "applied");
+    const scenario = hub.state.scenarios.find(
+      ({ index }) => index === created.scenario_index,
+    );
+
+    await turnScenarioOffWithChange(client, created.scenario_ref);
+    assert.equal(scenario.active, false);
+    const observed = await callChangeTool(
+      client,
+      "get_native_change",
+      createRef,
+    );
+    assert.equal(observed.status, "applied");
+
+    const restored = await callChangeTool(
+      client,
+      "restore_native_change",
+      createRef,
+    );
+    assert.equal(restored.status, "restored");
+    assert.deepEqual(
+      scenarioDeletes(hub).map(({ scenario: request }) => request.delete),
+      [{ index: created.scenario_index }],
+    );
+  });
+
+  await t.test("an updated source is put back", async (subtest) => {
+    const { hub, stateDirectory } = await setup(subtest);
+    const scenario = logicScenarioFixture("evening-logic");
+    hub.state.scenarios.push(scenario);
+    const targetRef = scenarioRefFor(scenario);
+    const client = await startClient(subtest, hub, stateDirectory);
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "logic_source_update",
+        target_ref: targetRef,
+        source: secondLogicSource,
+        reason: "Поменять вечернюю яркость",
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    const updateRef = prepared.structuredContent.change_ref;
+    const applied = await callChangeTool(
+      client,
+      "apply_native_change",
+      updateRef,
+    );
+    assert.equal(applied.status, "applied");
+
+    await turnScenarioOffWithChange(client, targetRef);
+    assert.equal(scenario.active, false);
+    const observed = await callChangeTool(
+      client,
+      "get_native_change",
+      updateRef,
+    );
+    assert.equal(observed.status, "applied");
+
+    const restored = await callChangeTool(
+      client,
+      "restore_native_change",
+      updateRef,
+    );
+    assert.equal(restored.status, "restored");
+    assert.equal(scenario.data, firstLogicSource);
+    assert.equal(scenario.active, false);
+    assert.deepEqual(Object.keys(scenarioUpdates(hub).at(-1)).sort(), [
+      "data",
+      "index",
+    ]);
+  });
+});
+
 const twoChannelSwitch = {
   id: 40,
   roomId: 1,
