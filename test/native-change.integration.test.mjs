@@ -19948,14 +19948,15 @@ test("an exact owned LOGIC source remains applied when the hub normalizes a crea
       description: "Сохранить подтверждённый source",
       active: true,
       on_start: false,
-      sync: false,
+      sync: true,
       source: firstLogicSource,
       reason: "Не смешивать source ownership с native-нормализацией",
     },
   });
+  // The normalized flag is sync, not active: a LOGIC read turned off right
+  // after its create gets no type, and restore would refuse to delete it.
   hub.state.behavior.afterCreate = () => {
-    hub.state.scenarios.find(({ index }) => index === "created-1").active =
-      false;
+    hub.state.scenarios.find(({ index }) => index === "created-1").sync = false;
   };
 
   const created = await client.callTool({
@@ -19968,9 +19969,9 @@ test("an exact owned LOGIC source remains applied when the hub normalizes a crea
     created.structuredContent.diff.editable_flags.exact_match,
     false,
   );
-  assert.equal(created.structuredContent.diff.editable_flags.to.active, true);
+  assert.equal(created.structuredContent.diff.editable_flags.to.sync, true);
   assert.equal(
-    created.structuredContent.diff.editable_flags.observed.active,
+    created.structuredContent.diff.editable_flags.observed.sync,
     false,
   );
 
@@ -19982,7 +19983,7 @@ test("an exact owned LOGIC source remains applied when the hub normalizes a crea
   assert.equal(persisted.structuredContent.status, "applied");
   assert.equal(persisted.structuredContent.diff.source.exact_match, true);
   assert.equal(
-    persisted.structuredContent.diff.editable_flags.observed.active,
+    persisted.structuredContent.diff.editable_flags.observed.sync,
     false,
   );
 
@@ -20007,7 +20008,7 @@ test("an acknowledged LOGIC source delete that leaves the source stays uncertain
       target_ref: serviceRef,
       name: "Неудалённый LOGIC",
       description: "Сохранить наблюдаемый результат неудачного удаления",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
@@ -20109,13 +20110,15 @@ test("an owned LOGIC source remains editable while its type mapping is missing",
       target_ref: serviceRef,
       name: "Исправляемый LOGIC",
       description: "Сохранить владение отдельно от назначения",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
       reason: "Исправить source, если его тип пока не появился",
     },
   });
+  // A turned-on LOGIC whose type the anchor does not list, e.g. an anchor
+  // outside its sourceServices.
   hub.state.behavior.afterCreate = () => {
     hub.state.logicTypes = hub.state.logicTypes.filter(
       ({ type }) => type === smoothLogicType,
@@ -20223,6 +20226,7 @@ async function createLogicWithUnlistedType(t) {
   );
   assert.equal(created.status, "applied");
   assert.equal(created.logic_mapping_status, "missing");
+  assert.equal(created.logic_mapping_reason, "logic_created_inactive");
   return {
     hub,
     client,
@@ -20347,6 +20351,82 @@ test("a type that appears after the create is not taken as the unlisted created 
     }),
   );
   await assertUnlistedLogicKept(hub, client, changeRef);
+  assert.deepEqual(hub.state.logics, [ownAssignment]);
+});
+
+// The owner (or another process) can create or turn on a LOGIC on the same
+// service while this create is in flight. The LOGIC created here reads turned
+// off, and a turned-off LOGIC's type was not listed, so the one new type seen
+// right after the create is the other LOGIC's.
+test("a type that appears during the create is not taken as the created LOGIC's while it reads turned off", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Выключенный LOGIC",
+      description: "Создан выключенным, тип не виден",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC и потом отменить его",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const changeRef = prepared.structuredContent.change_ref;
+  hub.state.behavior.afterCreate = () => {
+    hub.state.logicTypes = hub.state.logicTypes.filter(
+      ({ type }) => type === smoothLogicType,
+    );
+    hub.state.logicTypes.push({
+      type: "OtherLogicType",
+      name: "Другой LOGIC",
+      desc: "Включён владельцем во время create",
+    });
+  };
+  const created = await callChangeTool(
+    client,
+    "apply_native_change",
+    changeRef,
+  );
+  assert.equal(created.status, "applied");
+  assert.equal(created.logic_mapping_status, "missing");
+  assert.equal(created.logic_mapping_reason, "logic_created_inactive");
+  assertNoLogicTypeOffered(created);
+  const ownAssignment = {
+    aId: 32,
+    sId: 13,
+    type: "GeneratedLogicType1",
+    name: "Выключенный LOGIC",
+    active: false,
+  };
+  hub.state.logics.push(ownAssignment);
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const otherLogicHistory = await restartedClient.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: `${serviceRef}/logic/OtherLogicType`,
+    },
+  });
+  assert.equal(
+    otherLogicHistory.isError,
+    undefined,
+    otherLogicHistory.content[0]?.text,
+  );
+  assert.deepEqual(otherLogicHistory.structuredContent.changes, []);
+
+  assertUnlistedLogicRefused(
+    await restartedClient.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    }),
+  );
+  await assertUnlistedLogicKept(hub, restartedClient, changeRef);
   assert.deepEqual(hub.state.logics, [ownAssignment]);
 });
 
@@ -20501,7 +20581,7 @@ test("an ambiguous LOGIC type mapping survives restart and is not narrowed by a 
       target_ref: serviceRef,
       name: "Неоднозначный LOGIC",
       description: "Не терять подтверждённый source",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
@@ -20564,7 +20644,7 @@ test("an ambiguous LOGIC type mapping survives restart and is not narrowed by a 
   assert.deepEqual(scenarioDeletes(hub), []);
 
   // Its own type is assigned on accessory 32 and leaves the anchor (turned
-  // off), so the one new type left there is the other LOGIC's.
+  // off later), so the one new type left there is the other LOGIC's.
   const ownAssignment = {
     aId: 32,
     sId: 13,
@@ -20618,7 +20698,7 @@ test("LOGIC restoration rejects malformed present services without deleting its 
       target_ref: serviceRef,
       name: "Защищённый LOGIC",
       description: "Не удалять source при сломанном каталоге",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
@@ -20888,7 +20968,7 @@ test("LOGIC restoration preserves a manual source edit and an assigned created t
       target_ref: serviceRef,
       name: "Новый LOGIC",
       description: "Проверить чужое назначение",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
@@ -20937,7 +21017,7 @@ test("LOGIC restore blocked by assignments does not ask to prepare a new LOGIC",
       target_ref: serviceRef,
       name: "LOGIC с чужим назначением",
       description: "Проверить причину blocked restore",
-      active: false,
+      active: true,
       on_start: false,
       sync: false,
       source: firstLogicSource,
