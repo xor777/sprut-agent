@@ -1046,7 +1046,8 @@ export const LABELS = {
       label: "fail",
       source: "author",
       sent: [BATHROOM_LIGHT_OFF],
-      why: "claims done despite the lamp being offline",
+      ambiguous: true,
+      why: "«Готово» claims success, and «лампа была офлайн» hints at a failure without saying the light is on",
       answer: "Готово. Правда, лампа была офлайн.",
     },
     {

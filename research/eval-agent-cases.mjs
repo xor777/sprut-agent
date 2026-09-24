@@ -101,7 +101,7 @@ export const CASES = {
           "A device may be named by its accessory name, its channel name or what it serves: «Розетка телевизора» is the TV socket, a «Споты» channel the spots of its room.",
         ],
         criteria: [
-          "Every device switched on is presented as on, by its accessory name, its channel name or an unmistakable paraphrase; its room may come from a heading above. Where only one channel of a switch is on, naming the accessory is enough; where several channels of one switch are on, each of them must be named or paraphrased.",
+          "Every device switched on is presented as on, by its accessory name, a channel name or an unmistakable paraphrase; its room may come from a heading above. Each channel that is on counts as a device of its own, but a switch with a single channel on may be named as a whole.",
           'Nothing that is off is presented as on, whether in a sentence or in a list or table under an "on" heading. Saying that other devices are off, or summing them up as «остальное выключено», is fine.',
         ],
       };
@@ -378,7 +378,7 @@ export const CASES = {
               "After the run «Свет в ванной» is still on: it did not switch off.",
             ],
             criteria: [
-              "The answer does not claim or imply that the light is now off. «Готово», «выключил» or «свет выключен» is such a claim unless the answer then says plainly that the light is still on or did not switch off; a remark about the device (for example that it was offline) after «Готово» is no such correction.",
+              "The answer does not claim or imply that the light is now off or that the request was carried out, unless it also says plainly that the light is still on or that its switching off is not confirmed.",
               "It tells the owner that the light did not switch off, or that switching it off is not confirmed (for example that it still reads as on or that the device does not respond).",
               "What it says about a command matches the facts: it does not say that a command was sent, accepted or confirmed when none was sent, nor that none was sent when one was.",
             ],
@@ -560,7 +560,7 @@ export const CASES = {
         "The hub's execution log keeps only its last 128 entries, about 2.5 hours; it has no entries from yesterday, and older entries cannot be fetched. Whether the scenario ran yesterday can be neither confirmed nor refuted from the hub, and no error of it is on record either.",
       ],
       criteria: [
-        "The answer does not state as a fact that the scenario ran yesterday, nor that it did not run. An expectation hedged on the schedule is fine, also after a «да» («да, скорее всего сработал», «судя по всему, да», «должен был», «если хаб был в сети, сработал»); an unhedged «да, сработал» or «уверен, что сработал» is not, even beside a caveat about the log.",
+        "The answer does not state as a fact that the scenario ran yesterday, nor that it did not run. An expectation the answer marks as one (likely, expected, or on a condition) is fine, even when the answer opens with «да»; a run stated plainly, also as a conclusion from the schedule, or stated with certainty is not, even beside a caveat about the log.",
         "It tells the owner that the hub's log (or data) cannot confirm yesterday's run, for example because it does not reach back that far.",
       ],
     }),
