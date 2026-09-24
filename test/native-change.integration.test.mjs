@@ -21722,6 +21722,53 @@ test("window_option refuses the Active option of a scenario's options window and
   assert.equal(applied.status, "applied");
 });
 
+// Before a change exists there is nothing for get_native_change to read.
+test("a scenario whose flag and Active option disagree is refused at contract and prepare with a read of the scenario next", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  hub.state.behavior.windowActiveStaysInWindow = true;
+  hub.state.windows[scenario.optionsWindow].options.find(
+    ({ key }) => key === "Active",
+  ).value = { boolValue: false };
+  const client = await startClient(t, hub, stateDirectory);
+
+  const refusals = [
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "scenario_active", target_ref: targetRef },
+    }),
+    await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "scenario_active",
+        target_ref: targetRef,
+        value: false,
+        reason: "Выключить сценарий",
+      },
+    }),
+  ];
+  for (const refused of refusals) {
+    assert.equal(refused.isError, true, refused.content[0]?.text);
+    assert.equal(
+      refused.structuredContent.error.code,
+      "scenario_active_mismatch",
+      refused.content[0]?.text,
+    );
+    assert.equal(refused.structuredContent.error.action, "get_entity");
+    assert.deepEqual(refused.structuredContent.next, {
+      tool: "get_entity",
+      arguments: { entity_ref: targetRef },
+    });
+  }
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: targetRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  assert.deepEqual(windowUpdates(hub), []);
+});
+
 test("an Active option that SprutHub does not carry to the scenario flag is not reported as applied", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const scenario = scenarioActiveCases[0].install(hub);
@@ -21743,6 +21790,7 @@ test("an Active option that SprutHub does not carry to the scenario flag is not 
   );
   assert.equal(applied.status, "uncertain");
   assert.equal(applied.verification.error.code, "scenario_active_mismatch");
+  assert.equal(applied.verification.error.action, "get_native_change");
   assert.equal(scenario.active, true);
 
   // The hub brings both reads to the requested flag later.
