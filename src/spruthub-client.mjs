@@ -1220,6 +1220,43 @@ export class SprutHubClient {
     return room;
   }
 
+  // RoomUpdateRequest also carries visible; only the name is sent here.
+  async renameRoom(id, name) {
+    const response = await this.#request(
+      { room: { update: { id, name } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.room;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the room update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  // Sends only the named fields, never order or grid.
+  async updateService({ aId, sId }, fields) {
+    const update = { aId, sId };
+    if (Object.hasOwn(fields, "name")) update.name = fields.name;
+    if (Object.hasOwn(fields, "visible")) update.visible = fields.visible;
+    const response = await this.#request(
+      { service: { update } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.service;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the service update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async deleteRoom(id) {
     const response = await this.#request(
       { room: { delete: { id } } },

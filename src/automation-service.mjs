@@ -7573,6 +7573,40 @@ const NATIVE_VALUE_KINDS = {
         active: value.value,
       }),
   },
+  room_name: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    inspect: inspectRoomName,
+    prepare: prepareRoomName,
+    read: (service, change) => readRoomName(service.client, change.target),
+    write: (service, change, value) =>
+      service.client.renameRoom(change.target.id, value.value),
+  },
+  service_name: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    inspect: (service, input) =>
+      inspectService(service, input, readServiceName),
+    prepare: async (service, input) =>
+      nativeNameDraft(
+        await inspectService(service, input, readServiceName),
+        input.value,
+        "service_name",
+      ),
+    read: (service, change) => readServiceName(service.client, change.target),
+    write: (service, change, value) =>
+      service.client.updateService(change.target, { name: value.value }),
+  },
+  service_visible: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    inspect: (service, input) =>
+      inspectService(service, input, readServiceVisible),
+    read: (service, change) =>
+      readServiceVisible(service.client, change.target),
+    write: (service, change, value) =>
+      service.client.updateService(change.target, { visible: value.value }),
+  },
 };
 
 function nativeValueKind(kind) {
@@ -7998,6 +8032,117 @@ async function readScenarioActive(client, target) {
       type: "ScenarioActive",
       kind: "boolValue",
       confirmation: "separate_scenario_get_readback",
+    },
+  };
+}
+
+function nativeNameDraft(state, value, operation) {
+  const name = requiredNativeName(value, operation).trim();
+  return {
+    ...state,
+    requested: validateCharacteristicValue(name, state.contract),
+  };
+}
+
+function nativeNameContract(type, confirmation) {
+  return { type, kind: "stringValue", min_length: 1, confirmation };
+}
+
+async function inspectRoomName(service, input) {
+  const target = { id: parseRoomRef(input.target_ref, service.hubSerial) };
+  return {
+    fields: { target },
+    ...(await readRoomName(service.client, target)),
+  };
+}
+
+async function prepareRoomName(service, input) {
+  const draft = nativeNameDraft(
+    await inspectRoomName(service, input),
+    input.value,
+    "room_name",
+  );
+  if (valuesEqual(draft.value, draft.requested)) return draft;
+  // SprutHub's rule for two rooms with one name is unknown, so a namesake is
+  // reported for the user to decide instead of being refused or ignored.
+  const namesakes = (await service.client.listRooms()).rooms.filter(
+    ({ name }) => name === draft.requested.value,
+  );
+  if (namesakes.length === 0) return draft;
+  return {
+    ...draft,
+    extra: {
+      warnings: [
+        {
+          code: "room_name_in_use",
+          message: "Another room in this home already has this exact name.",
+          room_refs: namesakes.map(({ ref }) => ref),
+        },
+      ],
+    },
+  };
+}
+
+async function readRoomName(client, target) {
+  const room = await client.getRoom(target.id);
+  if (!room) {
+    throw new SprutHubError(
+      "room_not_found",
+      "The selected room was not found.",
+      "list_rooms",
+    );
+  }
+  return {
+    value: { value: room.name, kind: "stringValue" },
+    contract: nativeNameContract("RoomName", "separate_room_get_readback"),
+  };
+}
+
+async function inspectService(service, input, read) {
+  const target = parseServiceRef(input.target_ref, service.hubSerial);
+  return { fields: { target }, ...(await read(service.client, target)) };
+}
+
+async function readService(client, target) {
+  const accessory = await client.getAccessoryOrNull(target.aId);
+  const service = accessory?.services?.find(({ sId }) => sId === target.sId);
+  if (!service) {
+    throw new SprutHubError(
+      "service_not_found",
+      "The selected service was not found on its accessory.",
+      "get_entity",
+    );
+  }
+  return service;
+}
+
+async function readServiceName(client, target) {
+  const { name } = await readService(client, target);
+  return {
+    value: { value: name, kind: "stringValue" },
+    contract: nativeNameContract(
+      "ServiceName",
+      "separate_accessory_get_readback",
+    ),
+  };
+}
+
+async function readServiceVisible(client, target) {
+  const { visible } = await readService(client, target);
+  // An omitted flag is unknown, not hidden: a guessed baseline could write
+  // or restore a visibility the service never had.
+  if (typeof visible !== "boolean") {
+    throw new SprutHubError(
+      "service_visibility_unknown",
+      "SprutHub did not report whether this service is visible, so it cannot be hidden, shown or restored safely.",
+    );
+  }
+  return {
+    value: { value: visible, kind: "boolValue" },
+    contract: {
+      type: "ServiceVisible",
+      kind: "boolValue",
+      confirmation: "separate_accessory_get_readback",
     },
   };
 }
@@ -9514,6 +9659,7 @@ function publicNativeChange(
         kind: change.requested_value.kind,
       },
     },
+    ...(change.warnings ? { warnings: structuredClone(change.warnings) } : {}),
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
     ...(change.write_intent
@@ -9563,7 +9709,7 @@ function publicNativeChange(
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
-      "An option, logic-active, or scenario-active write with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+      "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
       ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets
         ? [

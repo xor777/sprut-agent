@@ -70,6 +70,7 @@
 
 - [`accessory_placement`](native-write/accessory-placement.md)
 - [`room_create`](native-write/room-create.md)
+- [`room_name`, `service_name`, `service_visible`](native-write/room-service-settings.md)
 - [`virtual_light_group`](native-write/virtual-light-group.md)
 - [`characteristic_value`](native-write/characteristic-value.md)
 - [`characteristic_option`, `logic_option`, `window_option`](native-write/options.md)

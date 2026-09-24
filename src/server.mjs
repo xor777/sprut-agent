@@ -296,6 +296,9 @@ server.registerTool(
         "block_action_pause",
         "scenario_run",
         "scenario_active",
+        "room_name",
+        "service_name",
+        "service_visible",
         "logic_source_create",
         "logic_source_update",
       ]),
@@ -325,7 +328,7 @@ server.registerTool(
   {
     title: "Prepare a native SprutHub change",
     description:
-      "Plans one native change and saves it with the current baseline and a diff; nothing is written to the hub yet. Operations: characteristic_value (device command or setpoint); characteristic_option, logic_option, window_option (typed setting by option_key, including a BLOCK's Name and Desc); logic_assignment, logic_active (assign a catalogued logic to a service, switch it on or off); scenario_active (turn an existing scenario of any type on or off without touching its data); logic_source_create, logic_source_update (LOGIC code); block_create, block_data_update (BLOCK scenario); block_action_pause (pause one BLOCK action, timed by the hub); scenario_run (run one supported scenario once); accessory_placement (rename or move); room_create; virtual_light_group (one light driving several). Check get_native_change_contract first for exact fields. Returns a change_ref for apply_native_change; already_desired means nothing to apply.",
+      "Plans one native change and saves it with the current baseline and a diff; nothing is written to the hub yet. Operations: characteristic_value (device command or setpoint); characteristic_option, logic_option, window_option (typed setting by option_key, including a BLOCK's Name and Desc); logic_assignment, logic_active (assign a catalogued logic to a service, switch it on or off); scenario_active (turn an existing scenario of any type on or off without touching its data); logic_source_create, logic_source_update (LOGIC code); block_create, block_data_update (BLOCK scenario); block_action_pause (pause one BLOCK action, timed by the hub); scenario_run (run one supported scenario once); accessory_placement (rename or move); room_create; room_name, service_name, service_visible (rename a room or service, hide or show a service); virtual_light_group (one light driving several). Check get_native_change_contract first for exact fields. Returns a change_ref for apply_native_change; already_desired means nothing to apply.",
     inputSchema: {
       operation: z.enum([
         "characteristic_value",
@@ -342,6 +345,9 @@ server.registerTool(
         "block_action_pause",
         "scenario_run",
         "scenario_active",
+        "room_name",
+        "service_name",
+        "service_visible",
         "logic_source_create",
         "logic_source_update",
       ]),
@@ -355,7 +361,7 @@ server.registerTool(
         .union([z.boolean(), z.number(), z.string()])
         .optional()
         .describe(
-          "New value for characteristic_value, logic_active, or an *_option operation.",
+          "New value for characteristic_value, logic_active, scenario_active, room_name, service_name, service_visible, or an *_option operation.",
         ),
       option_key: z
         .string()
