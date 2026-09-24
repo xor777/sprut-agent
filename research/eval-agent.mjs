@@ -575,11 +575,13 @@ export function parseClaudeStream(text) {
       }
     }
   }
+  // Init may still say "pending"; a completed MCP call proves the connection.
   if (
     setup &&
     !setup.mcp_servers.some(
       ({ name, status }) => name === MCP_SERVER_NAME && status === "connected",
-    )
+    ) &&
+    !toolCalls.some(({ mcp, isError }) => mcp && isError === false)
   ) {
     harnessError ??= `MCP server ${MCP_SERVER_NAME} was not connected`;
   }
