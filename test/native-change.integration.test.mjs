@@ -281,9 +281,9 @@ function installClimateFixture(hub) {
           : type === "TargetHeatingCoolingState"
             ? {
                 validValues: [
-                  { name: "Выключено", value: { intValue: 0 } },
-                  { name: "Нагрев", value: { intValue: 1 } },
-                  { name: "Охлаждение", value: { intValue: 2 } },
+                  { key: "OFF", name: "Выключено", value: { intValue: 0 } },
+                  { key: "HEAT", name: "Нагрев", value: { intValue: 1 } },
+                  { key: "COOL", name: "Охлаждение", value: { intValue: 2 } },
                 ],
               }
             : { minValue: 0, maxValue: 100, minStep: 10 }),

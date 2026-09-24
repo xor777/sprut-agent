@@ -978,6 +978,152 @@ export class AutomationService {
     });
   }
 
+  // Several characteristic_value changes in one call: every command is
+  // validated before any is recorded or sent, then each one goes through the
+  // same journal record and apply lifecycle as prepare → apply.
+  async sendDeviceCommands({ home_ref: homeRef, commands, reason }) {
+    parseConfiguredHomeRef(homeRef, this.hubSerial);
+    const targets = parseDeviceCommandTargets(commands, this.hubSerial);
+    return this.#exclusiveWrite(async () => {
+      const items = await this.#validateDeviceCommands(commands, targets);
+      const changes = await this.store.list();
+      const results = [];
+      for (const item of items) {
+        results.push(await this.#sendDeviceCommand(item, changes, reason));
+      }
+      return deviceCommandsResult(homeRef, results);
+    });
+  }
+
+  async #validateDeviceCommands(commands, targets) {
+    const items = [];
+    const invalid = [];
+    const accessories = new Map();
+    for (const [index, command] of commands.entries()) {
+      const input = {
+        operation: "characteristic_value",
+        target_ref: command.target_ref,
+        value: command.value,
+      };
+      let inspected;
+      try {
+        inspected = await inspectCharacteristicValue(this, input);
+        const draft = await characteristicValueDraft(this, input, inspected);
+        items.push({
+          command,
+          draft,
+          name: await this.#deviceCommandName(accessories, targets[index]),
+        });
+      } catch (error) {
+        if (!isDeviceCommandRejection(error)) throw error;
+        invalid.push(
+          invalidDeviceCommand(index, command, error, inspected?.contract),
+        );
+      }
+    }
+    if (invalid.length > 0) throw invalidDeviceCommands(invalid);
+    return items;
+  }
+
+  async #deviceCommandName(accessories, { aId, sId }) {
+    if (!accessories.has(aId)) {
+      accessories.set(
+        aId,
+        this.client.getAccessory(aId).catch((error) => {
+          // The name only labels the result; a transport failure still stops
+          // the call before any write, other read problems leave it unnamed.
+          if (!isDeviceCommandRejection(error)) throw error;
+          return null;
+        }),
+      );
+    }
+    const accessory = await accessories.get(aId);
+    if (typeof accessory?.name !== "string") return null;
+    const service = accessory.services?.find((entry) => entry.sId === sId);
+    return sanitizeNativeData(
+      typeof service?.name === "string"
+        ? `${accessory.name} / ${service.name}`
+        : accessory.name,
+    );
+  }
+
+  async #sendDeviceCommand({ command, draft, name }, changes, reason) {
+    const item = {
+      target_ref: command.target_ref,
+      name,
+      type: draft.contract.type,
+      requested: draft.requested.value,
+    };
+    let change;
+    try {
+      // A failure here still yields this item's result, so the results of
+      // commands already sent in this call are never lost.
+      const earlier = await this.#unresolvedEarlierCommand(changes, draft);
+      if (earlier) {
+        return {
+          ...item,
+          status: "uncertain",
+          sent: false,
+          ...(earlier.current ? { observed_value: earlier.current.value } : {}),
+          change_ref: earlier.result.change_ref,
+          restore_supported: earlier.result.restore_supported === true,
+          reason: "earlier_command_unresolved",
+          next: nativeChangeNext(earlier.result.change_ref),
+        };
+      }
+      if (nativeValueAlreadyDesired(draft)) {
+        return {
+          ...item,
+          status: "already_desired",
+          sent: false,
+          observed_value: draft.value.value,
+          change_ref: null,
+          restore_supported: false,
+        };
+      }
+      change = await this.#recordValueChange(
+        {
+          operation: "characteristic_value",
+          target_ref: command.target_ref,
+          reason,
+        },
+        draft,
+      );
+      return {
+        ...item,
+        ...deviceCommandOutcome(await this.#applyValueChange(change)),
+      };
+    } catch (error) {
+      return { ...item, ...deviceCommandFailure(change, error) };
+    }
+  }
+
+  // A repeated command is a new intent, but it must not blindly resend a
+  // value whose earlier send to the same characteristic is still unknown:
+  // that earlier change is reconciled by readback first, as get_native_change
+  // does, and only a still-uncertain send of the same value holds this one.
+  async #unresolvedEarlierCommand(changes, draft) {
+    const earlier = latestSentValueCommand(
+      changes,
+      configuredHomeRef(this.hubSerial),
+      draft.fields.target,
+    );
+    if (
+      !earlier ||
+      nativeValueLifecycle(earlier).phase !== "unresolved_intent"
+    ) {
+      return null;
+    }
+    const pending = await this.#reconcilePendingValueChange(earlier);
+    if (!pending || earlier.status !== "uncertain") return null;
+    const sentValue =
+      pending.direction === "restore"
+        ? earlier.baseline_value
+        : earlier.requested_value;
+    if (!valuesEqual(sentValue, draft.requested)) return null;
+    return { current: pending.current, result: pending.result };
+  }
+
   async #applyValueChange(change) {
     const lifecycle = nativeValueLifecycle(change);
     if (lifecycle.phase === "restore_completed") {
@@ -7779,6 +7925,183 @@ async function nativeValueDraft(service, kind, input) {
 
 function nativeValueAlreadyDesired(draft) {
   return !draft.alwaysSend && valuesEqual(draft.value, draft.requested);
+}
+
+// Errors that describe the hub connection rather than the command itself.
+const HUB_TRANSPORT_ERROR_CODES = new Set([
+  "authentication_delayed",
+  "authentication_failed",
+  "connection_closed",
+  "connection_failed",
+  "invalid_message",
+  "timeout",
+]);
+
+function isDeviceCommandRejection(error) {
+  return (
+    error instanceof SprutHubError && !HUB_TRANSPORT_ERROR_CODES.has(error.code)
+  );
+}
+
+function parseDeviceCommandTargets(commands, configuredSerial) {
+  const invalid = [];
+  const firstIndexByTarget = new Map();
+  const targets = commands.map((command, index) => {
+    let target;
+    try {
+      target = parseCharacteristicRef(command.target_ref, configuredSerial);
+    } catch (error) {
+      if (!isDeviceCommandRejection(error)) throw error;
+      invalid.push(invalidDeviceCommand(index, command, error));
+      return null;
+    }
+    const key = nativeTargetKey(target);
+    if (firstIndexByTarget.has(key)) {
+      invalid.push({
+        index,
+        target_ref: command.target_ref,
+        code: "duplicate_target",
+        message: `Command ${firstIndexByTarget.get(key)} already targets this characteristic; send one value per characteristic.`,
+      });
+    } else {
+      firstIndexByTarget.set(key, index);
+    }
+    return target;
+  });
+  if (invalid.length > 0) throw invalidDeviceCommands(invalid);
+  return targets;
+}
+
+function invalidDeviceCommand(index, command, error, contract) {
+  return {
+    index,
+    target_ref: command.target_ref,
+    code: error.code,
+    message: error.message,
+    ...(error.action ? { action: error.action } : {}),
+    ...(error.code === "invalid_native_value" && contract ? { contract } : {}),
+  };
+}
+
+function invalidDeviceCommands(invalid) {
+  return new SprutHubError(
+    "invalid_device_commands",
+    "No command was sent. Fix every command listed in invalid_commands and call send_device_commands again.",
+    "send_device_commands",
+    { invalid_commands: invalid },
+  );
+}
+
+function latestSentValueCommand(changes, homeRef, target) {
+  const key = nativeTargetKey(target);
+  let latest;
+  for (const change of changes) {
+    if (
+      change.kind !== "characteristic_value" ||
+      change.home_ref !== homeRef ||
+      change.native_write_sent !== true ||
+      !change.target ||
+      nativeTargetKey(change.target) !== key
+    ) {
+      continue;
+    }
+    if (
+      latest === undefined ||
+      (change.write_intent?.at ?? "") > (latest.write_intent?.at ?? "")
+    ) {
+      latest = change;
+    }
+  }
+  return latest;
+}
+
+function nativeChangeNext(changeRef) {
+  return { tool: "get_native_change", arguments: { change_ref: changeRef } };
+}
+
+const DEVICE_COMMAND_STATUSES = {
+  applied: "applied",
+  uncertain: "uncertain",
+  conflict: "conflict",
+  not_applied: "rejected",
+};
+
+function deviceCommandOutcome(result) {
+  const status = DEVICE_COMMAND_STATUSES[result.status] ?? "uncertain";
+  return {
+    status,
+    sent: result.native_write_sent === true,
+    ...(result.observed_value
+      ? { observed_value: result.observed_value.value }
+      : {}),
+    change_ref: result.change_ref,
+    restore_supported: result.restore_supported === true,
+    ...(result.conflict_reason
+      ? { conflict_reason: result.conflict_reason }
+      : {}),
+    ...(result.local_state ? { local_state: result.local_state } : {}),
+    ...(status === "applied"
+      ? {}
+      : { next: nativeChangeNext(result.change_ref) }),
+  };
+}
+
+function deviceCommandFailure(change, error) {
+  const code = error instanceof SprutHubError ? error.code : "internal_error";
+  let status = "uncertain";
+  if (
+    change === undefined ||
+    change.status === "prepared" ||
+    code === "state_storage_unavailable"
+  ) {
+    status = "not_sent";
+  } else if (change.status === "not_applied") {
+    status = error.requestSent === true ? "rejected" : "not_sent";
+  }
+  const changeRef = change ? `spruthub-change://native/${change.id}` : null;
+  return {
+    status,
+    sent: status === "rejected" || status === "uncertain",
+    change_ref: changeRef,
+    restore_supported: false,
+    error: {
+      code,
+      message:
+        error instanceof SprutHubError
+          ? error.message
+          : "The command failed inside sprut-agent.",
+      ...(error instanceof SprutHubError && error.action
+        ? { action: error.action }
+        : {}),
+    },
+    ...(status === "uncertain" ? { next: nativeChangeNext(changeRef) } : {}),
+  };
+}
+
+function deviceCommandsResult(homeRef, results) {
+  const summary = {
+    total: results.length,
+    applied: 0,
+    already_desired: 0,
+    uncertain: 0,
+    conflict: 0,
+    rejected: 0,
+    not_sent: 0,
+  };
+  for (const { status } of results) summary[status] += 1;
+  return {
+    status:
+      summary.applied + summary.already_desired === summary.total
+        ? "ok"
+        : "incomplete",
+    home_ref: homeRef,
+    summary,
+    results,
+    limitations: [
+      "observed_value is a readback after the command; it cannot prove the command caused it.",
+      "Commands are physical actions and are not undone; only items with restore_supported=true can be put back with restore_native_change.",
+    ],
+  };
 }
 
 function nativeScalarValue(typed) {
