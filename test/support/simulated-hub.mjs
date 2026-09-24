@@ -184,6 +184,70 @@ export const METHOD_EVIDENCE = {
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
 };
 
+// BLOCK forms taken from the official web client's code
+// (2026-09-24-web-client-action-map, the row named) that no hub has been
+// seen storing. The simulator stores them like any BLOCK; a create or update
+// that carries one is keyed by the first of them, so a run that rests on it
+// reports schema_only. A form confirmed live moves to OBSERVED with its
+// source.
+const UNCONFIRMED_BLOCK_FORMS = [
+  ["notify", "D16", (node) => node.type === "notify"],
+  ["http", "D17", (node) => node.type === "http"],
+  ["from", "D10", (node) => node.type === "from"],
+  [
+    "scenario mode",
+    "D15, any mode but FIRE",
+    (node) => node.type === "scenario" && node.mode !== "FIRE",
+  ],
+  [
+    "branch repeat",
+    "D13, then_delay or else_delay above 0",
+    (node) =>
+      node.type === "if" && (node.then_delay > 0 || node.else_delay > 0),
+  ],
+  [
+    "every N cron",
+    "D6, 0/N in a cron field",
+    (node) =>
+      node.type === "cron" &&
+      typeof node.cron === "string" &&
+      node.cron.split(" ").some((field) => /^0\/\d+$/.test(field)),
+  ],
+];
+for (const method of ["scenario.create", "scenario.update"]) {
+  for (const [form, row] of UNCONFIRMED_BLOCK_FORMS) {
+    METHOD_EVIDENCE[`${method} {${form}}`] = [
+      SCHEMA_ONLY,
+      `web client code, 2026-09-24-web-client-action-map ${row}; not seen stored by a hub`,
+    ];
+  }
+}
+
+// The first form of UNCONFIRMED_BLOCK_FORMS in a BLOCK write, or null.
+function unconfirmedBlockForm(input) {
+  if (!isRecord(input) || typeof input.data !== "string") return null;
+  let data;
+  try {
+    data = JSON.parse(input.data);
+  } catch {
+    return null;
+  }
+  const nodes = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+    } else if (isRecord(value)) {
+      nodes.push(value);
+      for (const child of Object.values(value)) visit(child);
+    }
+  };
+  visit(data);
+  return (
+    UNCONFIRMED_BLOCK_FORMS.find(([, , matches]) => nodes.some(matches))?.[0] ??
+    null
+  );
+}
+
 // The METHOD_EVIDENCE entry of a request, taken when it arrives: a method
 // whose parts rest on different evidence has a key per part. A write to a
 // scenario's options window that the simulator refuses as unmodelled is
@@ -194,6 +258,10 @@ function evidenceKey(state, method, params) {
     if (isRecord(input) && Object.hasOwn(input, "active")) {
       return "scenario.update {active}";
     }
+  }
+  if (method === "scenario.create" || method === "scenario.update") {
+    const form = unconfirmedBlockForm(params?.scenario?.[method.split(".")[1]]);
+    if (form !== null) return `${method} {${form}}`;
   }
   if (method === "window.update") {
     const input = params?.window?.update;
