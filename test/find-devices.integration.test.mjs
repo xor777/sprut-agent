@@ -463,7 +463,7 @@ test("a relay's generic channel beside its fan channel stays a relay", async (t)
   );
 });
 
-test("a light question in words lists the room's neutral relays beside the lamps", async (t) => {
+test("a light question in words lists the room's lamps whatever their names and its neutral relays beside them", async (t) => {
   const fixture = structuredClone(await loadHomeFixture("apartment"));
   // A relay channel with a neutral name that may drive a kitchen lamp.
   fixture.accessories.push({
@@ -481,6 +481,22 @@ test("a light question in words lists the room's neutral relays beside the lamps
       },
     ],
   });
+  // A kitchen lamp whose name says nothing of light.
+  fixture.accessories.push({
+    id: 43,
+    roomId: 4,
+    name: "Подвес над столом",
+    extensionKey: "Controller:zigbee",
+    deviceId: "00158d0004a1b243",
+    services: [
+      {
+        sId: 13,
+        type: "Lightbulb",
+        name: "Подвес",
+        characteristics: [{ cId: 14, type: "On", value: true }],
+      },
+    ],
+  });
   const { call, home } = await setup(t, fixture);
 
   const { body } = await call("find_devices", {
@@ -490,7 +506,10 @@ test("a light question in words lists the room's neutral relays beside the lamps
 
   assert.deepEqual(
     listed(body).map(({ device, service }) => [device.name, service.name]),
-    [["Свет на кухне", "Свет"]],
+    [
+      ["Свет на кухне", "Свет"],
+      ["Подвес над столом", "Подвес"],
+    ],
   );
   assert.deepEqual(body.switches.entries, [
     {
@@ -552,6 +571,129 @@ test("kind=light lists lamps and counts every relay that is on, with a call for 
   assert.deepEqual(
     (await allSwitches(call, all.body.switches)).sort(),
     relays.sort(),
+  );
+});
+
+// Independent of the product: refs of the simulator's services that pass
+// keep, which gets the service, its accessory and the words of the service,
+// device and room names.
+function servicesWhere(state, home, keep) {
+  return state.accessories.flatMap((accessory) => {
+    const room = state.rooms.find(({ id }) => id === accessory.roomId);
+    return accessory.services
+      .filter((service) =>
+        keep({
+          service,
+          accessory,
+          words: `${service.name} ${accessory.name} ${room?.name ?? ""}`
+            .toLowerCase()
+            .split(/[^\p{L}\p{N}]+/u),
+        }),
+      )
+      .map(({ sId }) => `${home}/accessory/${accessory.id}/service/${sId}`);
+  });
+}
+
+const named = (words, ...starts) =>
+  starts.every((start) => words.some((word) => word.startsWith(start)));
+const isLamp = ({ service }) => service.type === "Lightbulb";
+const isOn = ({ service }) =>
+  service.characteristics.some(
+    ({ control }) => control.type === "On" && control.value.boolValue === true,
+  );
+
+// Service refs of a find_devices answer: its page, or every page.
+async function allListed(call, body) {
+  const refs = listed(body).map(({ service }) => service.ref);
+  let next = body.next;
+  while (next) {
+    const page = await call(next.tool, next.arguments);
+    refs.push(...listed(page.body).map(({ service }) => service.ref));
+    next = page.body.next;
+  }
+  return refs;
+}
+
+test("a light word classifies the question: lamps are found by type, not by the light word in their names", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("house"));
+  const home = homeRefOf(hub);
+  const expected = (keep) => servicesWhere(hub.state, home, keep).sort();
+  const answer = async (args) =>
+    (await allListed(call, (await call("find_devices", args)).body)).sort();
+
+  // «Какой свет горит в гостиной»: the chandelier is a lamp that is on,
+  // though no word of its names starts with "свет".
+  const livingOn = await call("find_devices", {
+    query: "свет в гостиной",
+    state: "on",
+  });
+  assert.deepEqual(
+    (await allListed(call, livingOn.body)).sort(),
+    expected(
+      (item) =>
+        isOn(item) &&
+        ((isLamp(item) && named(item.words, "гостин")) ||
+          named(item.words, "свет", "гостин")),
+    ),
+  );
+  assert(listed(livingOn.body).some(({ device }) => device.name === "Люстра"));
+  assert.equal(Object.hasOwn(livingOn.body, "query_words"), false);
+  // The relays beside them are the room's other relays that are on.
+  const living = new Set(
+    listed(livingOn.body).map(({ service }) => service.ref),
+  );
+  assert.deepEqual(
+    (await allSwitches(call, livingOn.body.switches)).sort(),
+    expected(
+      (item) =>
+        isOn(item) &&
+        ["Switch", "Outlet"].includes(item.service.type) &&
+        named(item.words, "гостин"),
+    ).filter((ref) => !living.has(ref)),
+  );
+
+  assert.deepEqual(
+    await answer({ kind: "light", query: "свет в гостиной" }),
+    expected((item) => isLamp(item) && named(item.words, "гостин")),
+  );
+
+  // «Где горит свет»: every lamp that is on, and whatever else with "свет"
+  // in its names is on.
+  assert.deepEqual(
+    await answer({ query: "свет", state: "on" }),
+    expected(
+      (item) => isOn(item) && (isLamp(item) || named(item.words, "свет")),
+    ),
+  );
+
+  assert.deepEqual(
+    await answer({ query: "лампы в гостиной", state: "on" }),
+    expected(
+      (item) =>
+        isOn(item) &&
+        ((isLamp(item) && named(item.words, "гостин")) ||
+          named(item.words, "ламп", "гостин")),
+    ),
+  );
+
+  // A light word in a lamp's own name still finds it: the other word
+  // filters.
+  const stairs = await answer({ query: "подсветка лестницы" });
+  assert.deepEqual(
+    stairs,
+    expected(
+      (item) =>
+        (isLamp(item) && named(item.words, "лестниц")) ||
+        named(item.words, "подсветк", "лестниц"),
+    ),
+  );
+  const stairsLight = hub.state.accessories.find(
+    ({ name }) => name === "Подсветка лестницы",
+  );
+  assert(
+    stairs.includes(
+      `${home}/accessory/${stairsLight.id}/service/${stairsLight.services[0].sId}`,
+    ),
   );
 });
 
