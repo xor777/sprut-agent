@@ -21,7 +21,10 @@
   `logic_mapping_reason` — `logic_turned_off` (выключен: включи через
   [`scenario_active`](scenario-active.md), если владелец хочет назначить) или
   `logic_type_not_available_on_target` (включён, но этот сервис его не
-  показывает, например сервис не из `sourceServices`). Если запись этого type
+  показывает, например сервис не из `sourceServices`), или
+  `logic_target_service_not_found` (сервис или его аксессуар удалён; чтение
+  и restore работают без него: type — index, назначения ищутся по всему
+  дому). Если запись этого type
   названа не как сценарий, mapping нет (`logic_mapping_status=missing`,
   `logic_type_name_mismatch`): `logic_ref` не выдаётся, restore отвечает
   этой ошибкой и не удаляет; при совпадении имён mapping возвращается.

@@ -957,19 +957,27 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
-  async #readLogicTypeCatalog(target) {
-    const [accessory, types] = await Promise.all([
-      this.client.getAccessory(target.aId),
+  // With anchorMayBeGone, a removed anchor accessory or service reads as
+  // null instead of an error: a created LOGIC outlives its anchor, which
+  // only lists its type for assignment.
+  async #readLogicTypeCatalog(target, { anchorMayBeGone = false } = {}) {
+    const [accessory, types] = await Promise.allSettled([
+      anchorMayBeGone
+        ? this.client.getAccessoryOrNull(target.aId)
+        : this.client.getAccessory(target.aId),
       this.client.listLogicTypes(target),
     ]);
-    if (!accessory.services?.some(({ sId }) => sId === target.sId)) {
+    if (accessory.status === "rejected") throw accessory.reason;
+    if (!accessory.value?.services?.some(({ sId }) => sId === target.sId)) {
+      if (anchorMayBeGone) return null;
       throw new SprutHubError(
         "service_not_found",
         "The selected service was not found on its accessory.",
         "get_entity",
       );
     }
-    const entries = types.map((entry) => {
+    if (types.status === "rejected") throw types.reason;
+    const entries = types.value.map((entry) => {
       if (!isRecord(entry) || typeof entry.type !== "string") {
         throw new SprutHubError(
           "incompatible_response",
@@ -4920,9 +4928,13 @@ export class AutomationService {
     if (change.kind !== "logic_source_create") {
       return { scenario, logicTypes: [] };
     }
+    // A create not sent yet still needs its anchor; once sent, the LOGIC is
+    // read, adopted and restored without it (logicTypes null).
     const current = {
       scenario,
-      logicTypes: await this.#readLogicTypeCatalog(change.target),
+      logicTypes: await this.#readLogicTypeCatalog(change.target, {
+        anchorMayBeGone: change.native_write_sent === true,
+      }),
     };
     // Every read of a created LOGIC at its recorded index checks its type;
     // an adopting read records the index first (adoptRequestedLogicSource).
@@ -10405,8 +10417,9 @@ function createdLogicType(change) {
     : String(change.scenario_index);
 }
 
+// entries is null when the anchor service is gone.
 function logicTypeListed(entries, type) {
-  return entries.some((entry) => entry.type === type);
+  return entries?.some((entry) => entry.type === type) === true;
 }
 
 // The latest read's view of the type on the anchor: listed with the
@@ -10424,6 +10437,14 @@ function recordLogicTypeCheck(change, current) {
   }
   if (!logicSourceCarriesOwnershipMarker(change, current.scenario)) {
     change.logic_type_check = "not_owned";
+    return;
+  }
+  // The anchor is gone: nothing lists the type there. A name mismatch seen
+  // before stays, since it was the only check of the identity.
+  if (current.logicTypes === null) {
+    if (change.logic_type_check !== "name_mismatch") {
+      change.logic_type_check = "anchor_missing";
+    }
     return;
   }
   const entry = current.logicTypes.find((item) => item.type === type);
@@ -10460,9 +10481,11 @@ function createdLogicMapping(change) {
     assignmentReady,
     reason: assignmentReady
       ? undefined
-      : change.logic_type_check === "turned_off"
-        ? "logic_turned_off"
-        : "logic_type_not_available_on_target",
+      : change.logic_type_check === "anchor_missing"
+        ? "logic_target_service_not_found"
+        : change.logic_type_check === "turned_off"
+          ? "logic_turned_off"
+          : "logic_type_not_available_on_target",
   };
 }
 
@@ -10549,7 +10572,7 @@ function logicSourceContract(mode) {
         : ["source"],
     assignment: {
       mapping:
-        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker (logic_scenario_not_owned): another LOGIC at a reused index, or this one with the marker removed from its source, which nothing tells apart; with no scenario at the index, or once the LOGIC was seen gone, nothing is mapped either (logic_scenario_not_found)",
+        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; with that service or its accessory removed it is false (logic_target_service_not_found), and restore works without it; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker (logic_scenario_not_owned): another LOGIC at a reused index, or this one with the marker removed from its source, which nothing tells apart; with no scenario at the index, or once the LOGIC was seen gone, nothing is mapped either (logic_scenario_not_found)",
       separate_operation: "logic_assignment",
     },
     restore: {
