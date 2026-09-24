@@ -8399,6 +8399,45 @@ test("prepared BLOCK preview leaves unknown and nested condition domains undiscl
   );
 });
 
+test("prepared BLOCK preview does not map branches of a held condition to enum values", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installWindowSensor(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  // «Если окно открыто дольше 5 минут, выключи свет, иначе включи»: else
+  // also runs while the window is open but not yet for 5 minutes, so it is
+  // not only CLOSED.
+  const prepared = await prepareBlockCreate(client, {
+    name: "Окно открыто дольше 5 минут",
+    data: rootIfBlockData({
+      when: conditionGroup({
+        ...enumEquals({
+          aId: 70,
+          hs: "ContactSensor",
+          hc: "ContactSensorState",
+          value: 1,
+        }),
+        timeCond: ">",
+        time: 300_000,
+      }),
+      thenValue: "false",
+      elseValue: "true",
+    }),
+    reason: "Не выдавать else за «окно закрыто»",
+  });
+  assert.deepEqual(
+    [
+      previewAction(prepared, "/targets/0/then/0/characteristics/0", false)
+        .branch.coverage,
+      previewAction(prepared, "/targets/0/else/0/characteristics/0", true)
+        .branch.coverage,
+    ],
+    [
+      { status: "undisclosed", reason: "held_condition" },
+      { status: "undisclosed", reason: "held_condition" },
+    ],
+  );
+});
+
 test("daily interval contract lets a client repair cron before preparation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
