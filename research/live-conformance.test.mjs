@@ -668,34 +668,26 @@ async function runLogic(g, virtual) {
   };
 }
 
-test("the guard turns a probe LOGIC on only while unassigned and assigns it only to the run's virtual accessory while it is off", async (t) => {
+// Step 4n assigns the run's LOGIC while it is on: SprutHub refuses to
+// assign a turned-off LOGIC (live-conformance-3). The owner allows run
+// scenarios that act only on the run's virtual devices. The run's LOGIC runs
+// nothing, so it may be on while assigned, only to the run's virtual
+// accessory and only while its stored source is still the inert probe form.
+test("the guard assigns the run's inert LOGIC while on only to the run's virtual accessory and lets it be on while so assigned", async (t) => {
   const g = await guardSetup(t);
   const virtual = await runVirtual(g);
-  const { name, logicRef, index, type, scenario, active } = await runLogic(
-    g,
-    virtual,
-  );
+  const { name, index, type, scenario, active } = await runLogic(g, virtual);
   // Its type is its scenario index.
   assert.equal(type, index);
+  assert.equal(scenario.active, true);
   const assign = (serviceRef, logicType) => ({
     operation: "logic_assignment",
     target_ref: `${serviceRef}/logic/${encodeURIComponent(logicType)}`,
   });
-  const onVirtual = { aId: virtual.aId, sId: virtual.sId };
-
-  // While it may be on, it is not assigned, through the product or directly.
-  const whileOn = g.hub.writes().length;
-  await assert.rejects(
-    g.guard.prepare(assign(virtual.serviceRef, type)),
-    conformance.GuardError,
-  );
-  await assert.rejects(
-    g.probe.assignLogicWhileOff(logicRef, onVirtual),
-    conformance.GuardError,
-  );
-  assert.deepEqual(sweepWrites(g.hub, whileOn), []);
-  await guardApply(g.guard, active(false));
-  assert.equal(scenario.active, false);
+  const runAssignments = () =>
+    g.hub.state.logics
+      .filter(({ type: logicType }) => logicType === type)
+      .map(({ aId, sId }) => ({ aId, sId }));
   const before = g.hub.writes().length;
 
   // Only the run's LOGIC, only on the run's virtual accessory.
@@ -705,14 +697,6 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
   );
   await assert.rejects(
     g.guard.prepare(assign(virtual.serviceRef, "AdaptiveLighting")),
-    conformance.GuardError,
-  );
-  await assert.rejects(
-    g.probe.assignLogicWhileOff(logicRef, { aId: 15, sId: 13 }),
-    conformance.GuardError,
-  );
-  await assert.rejects(
-    g.probe.assignLogicWhileOff(`${g.homeRef}/scenario/9`, onVirtual),
     conformance.GuardError,
   );
   // A LOGIC created on must run nothing.
@@ -731,32 +715,45 @@ test("the guard turns a probe LOGIC on only while unassigned and assigns it only
   );
   assert.deepEqual(sweepWrites(g.hub, before), []);
 
-  // Off, its type is not listed on the anchor (SprutHub 3.0.0), so the
-  // product's logic_assignment cannot name it as a run LOGIC's.
+  // On, to the run's virtual accessory: assigned, and it may be turned off
+  // and on again, by a new change or by restoring the one that turned it off.
+  const assigned = await guardApply(g.guard, assign(virtual.serviceRef, type));
+  assert.deepEqual(runAssignments(), [{ aId: virtual.aId, sId: virtual.sId }]);
+  const turnOff = await guardApply(g.guard, active(false));
+  assert.equal(scenario.active, false);
+  assert.equal((await g.guard.restore(turnOff.changeRef)).status, "restored");
+  assert.equal(scenario.active, true);
+  await guardApply(g.guard, active(false));
+  await guardApply(g.guard, active(true));
+  assert.equal(scenario.active, true);
+
+  // Its stored source is read before: a LOGIC that no longer reads inert is
+  // not turned on while assigned, and not assigned.
+  const lastOff = await guardApply(g.guard, active(false));
+  const inert = scenario.data;
+  scenario.data = inert.replace(
+    "  // Intentionally empty.\n",
+    "  Hub.getAccessory(35).getService(13);\n",
+  );
+  assert.notEqual(scenario.data, inert);
+  const whileEdited = g.hub.writes().length;
+  await assert.rejects(g.guard.prepare(active(true)), conformance.GuardError);
+  await assert.rejects(
+    g.guard.restore(lastOff.changeRef),
+    conformance.GuardError,
+  );
+  assert.equal(scenario.active, false);
+  assert.equal((await g.guard.restore(assigned.changeRef)).status, "restored");
+  assert.deepEqual(runAssignments(), []);
+  scenario.active = true;
   await assert.rejects(
     g.guard.prepare(assign(virtual.serviceRef, type)),
     conformance.GuardError,
   );
-  assert.deepEqual(sweepWrites(g.hub, before), []);
-
-  // Directly, by its index, to the virtual accessory: the simulator refuses
-  // an unlisted type, and a refused assignment does not keep it off.
-  await assert.rejects(
-    g.probe.assignLogicWhileOff(logicRef, onVirtual),
-    (error) =>
-      !(error instanceof conformance.GuardError) &&
-      error.hubError !== undefined,
+  assert.deepEqual(
+    sweepWrites(g.hub, whileEdited).map(({ method }) => method),
+    ["logic.delete"],
   );
-  assert.deepEqual(sweepWrites(g.hub, before), [
-    {
-      method: "logic.create",
-      params: { logic: { create: { ...onVirtual, type } } },
-    },
-  ]);
-
-  // Unassigned: it may be turned on.
-  await guardApply(g.guard, active(true));
-  assert.equal(scenario.active, true);
 });
 
 // A product client whose hub accepts the assignment of a turned-off LOGIC,
