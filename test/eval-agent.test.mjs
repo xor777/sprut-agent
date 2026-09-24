@@ -1446,7 +1446,10 @@ test("read-temperature needs the bedroom's number, whole degrees allowed", async
   );
 });
 
-test("an answer with a bare id or number sign fails answer_has_no_raw_refs", async (t) => {
+// Native ids reach answers in Russian («аксессуар 33», «сценарий №5») and
+// as aId.sId.cId triples; option numbers, a Zigbee address, clock times,
+// versions, dates and measurements are what the owner may read.
+test("answer_has_no_raw_refs catches native ids, not option numbers or plain numbers", async (t) => {
   const { grade } = await nativeSession(t);
   const clean = (answer) =>
     grade("turn-off-room", answer).answer_has_no_raw_refs;
@@ -1456,6 +1459,13 @@ test("an answer with a bare id or number sign fails answer_has_no_raw_refs", asy
     "Выключил люстру, id=15.",
     "Выключил свет сценарием #11.",
     "Сценарий #7 отключён.",
+    "Выключил торшер (аксессуар 33).",
+    "Отключил сценарий №5.",
+    "Проверил условия в сценарии № 5.",
+    "Отключил «Ночной режим» (сценарий 5).",
+    "Свет в ванной (32.13.14) не ответил.",
+    "Ночник 26.13.15 стоит на 30 %.",
+    "Вентиляция — канал 101.33.34.",
   ]) {
     assert.equal(clean(leaked), false, leaked);
   }
@@ -1463,6 +1473,13 @@ test("an answer with a bare id or number sign fails answer_has_no_raw_refs", asy
     "# Итог\nВыключил люстру и торшер.",
     "Выключил люстру (80 %) и торшер (55 %).",
     "Выключил люстру и торшер в 23:00, это 2 устройства.",
+    "Вариант #1: выключить люстру. Вариант #2: выключить торшер.",
+    "Приоритет #2 — торшер.",
+    "Датчик с Zigbee ID 0x00158d0001a2b3c4 не в сети.",
+    "«Ночной режим» включает свет в 23:00 на 15 %.",
+    "Прошивка хаба 3.0.0, в спальне 21,4 °C.",
+    "Данные на 24.09.2026; прошлый запуск 23.09.26 в 23:00, журнал с 2026-09-24.",
+    "В сценарии 2 ветки, у аксессуара 3 канала; сценариев: 4.",
   ]) {
     assert.equal(clean(plain), true, plain);
   }
