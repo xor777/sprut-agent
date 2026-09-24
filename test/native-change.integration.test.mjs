@@ -11792,11 +11792,28 @@ test("an update names the stored node it removes, not the sibling it edits", asy
     return data;
   };
 
+  // «Не включай свет, а к яркости добавь режим»: the On action goes, the
+  // Brightness action of the same lamp stays and gains a mode.
+  const dropOnAddMode = (data) => {
+    data.targets[0].then.splice(0, 1);
+    data.targets[0].then[0].characteristics.push({
+      type: "set",
+      cId: 18,
+      hc: "TargetMode",
+      value: "away",
+    });
+    return data;
+  };
+
   assert.deepEqual(
     {
       action_as_read: await removal(lightThenBrightness, dropOnSetBrightness),
       action_without_block_ids: await removal(lightThenBrightness, (data) =>
         dropOnSetBrightness(withoutBlockIds(data)),
+      ),
+      grown_same_device_without_block_ids: await removal(
+        lightThenBrightness,
+        (data) => dropOnAddMode(withoutBlockIds(data)),
       ),
       grown_action_without_block_ids: await removal(lightThenClimate, (data) =>
         dropLightAddMode(withoutBlockIds(data)),
@@ -11809,6 +11826,10 @@ test("an update names the stored node it removes, not the sibling it edits", asy
         deletion_warnings: [],
       },
       action_without_block_ids: {
+        removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
+        deletion_warnings: [],
+      },
+      grown_same_device_without_block_ids: {
         removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
         deletion_warnings: [],
       },
