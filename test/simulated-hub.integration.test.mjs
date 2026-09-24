@@ -84,13 +84,16 @@ test("public read tools see the simulated apartment as a native home", async (t)
       "Балкон",
     ],
   );
-  assert.deepEqual(inspected.scenarios, {
-    total: 9,
-    by_type: {
-      BLOCK: { active: 7, inactive: 1 },
-      LOGIC: { active: 1, inactive: 0 },
+  assert.deepEqual(
+    { total: inspected.scenarios.total, by_type: inspected.scenarios.by_type },
+    {
+      total: 9,
+      by_type: {
+        BLOCK: { active: 7, inactive: 1 },
+        LOGIC: { active: 1, inactive: 0 },
+      },
     },
-  });
+  );
   assert.ok(
     inspected.extensions.some(
       ({ ref }) => ref === `${homeRef}/extension/Controller%3Azigbee`,

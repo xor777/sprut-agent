@@ -220,7 +220,9 @@ export class HomeReads {
       }
     }
 
-    let read = await client.homeCatalog(serial, deadline);
+    let read = await client.homeCatalog(serial, deadline, {
+      refresh: selection.refresh,
+    });
     let refreshed = read.fresh;
     let candidates = selectCandidates(read.catalog, selection);
     // A room or a name that a cached catalog does not know may be new: an
@@ -240,7 +242,13 @@ export class HomeReads {
     }
 
     const summary = !selection.filtered;
-    const needValues = summary || selection.state !== null || selection.values;
+    // A room is always read fresh: devices moved or added there in the
+    // SprutHub app are not in the catalog yet.
+    const needValues =
+      summary ||
+      selection.state !== null ||
+      selection.values ||
+      selection.roomId !== null;
     let values = null;
     let observedAt = catalog.observedAt;
     if (needValues && read.fresh) {
@@ -253,6 +261,7 @@ export class HomeReads {
         catalog,
         candidates,
         deadline,
+        selection.roomId,
       );
       if (fresh.stale && !refreshed) {
         read = await client.homeCatalog(serial, deadline, { refresh: true });
@@ -448,6 +457,8 @@ function findSelection(input, serial) {
     homeRef: home,
     roomId,
     roomRef: input.roomRef ?? null,
+    // Not part of args: once read, the catalog is fresh for next pages.
+    refresh: input.refresh === true,
     query,
     stems: query === null ? null : queryStems(query),
     kind: input.kind ?? null,
@@ -499,16 +510,28 @@ function deviceText(service, accessory, rooms) {
 }
 
 // Fresh values of the candidates' accessories with the fewest native
-// requests. A targeted read that disagrees with the catalog (an accessory
-// gone, renamed, moved or changed) marks the catalog stale.
-async function readValues(client, serial, catalog, candidates, deadline) {
+// requests; a selected room is read whole with accessory.list {roomId}, so
+// a device moved or added there shows. A targeted read that disagrees with
+// the catalog (an accessory gone, added, renamed, moved or changed) marks
+// the catalog stale.
+async function readValues(
+  client,
+  serial,
+  catalog,
+  candidates,
+  deadline,
+  roomId,
+) {
   const generation = client.writeGeneration;
   const accessoryIds = [...new Set(candidates.map((c) => c.accessory.id))];
-  const roomIds = [...new Set(candidates.map((c) => c.accessory.roomId))];
-  if (accessoryIds.length === 0) {
+  const roomIds =
+    roomId === null
+      ? [...new Set(candidates.map((c) => c.accessory.roomId))]
+      : [roomId];
+  if (roomId === null && accessoryIds.length === 0) {
     return { accessories: [], observedAt: catalog.observedAt, stale: false };
   }
-  if (accessoryIds.length <= TARGETED_ACCESSORY_READS) {
+  if (roomId === null && accessoryIds.length <= TARGETED_ACCESSORY_READS) {
     const reads = await Promise.all(
       accessoryIds.map((id) => client.nativeAccessory(serial, id, deadline)),
     );
@@ -850,7 +873,7 @@ function decodeCursor(cursor, selection) {
 function invalidCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
-    `Use the cursor returned by ${selection.tool} with the same arguments.`,
+    `Use the cursor returned by ${selection.tool} with the same filters.`,
     `restart_${selection.tool}`,
     { next: { tool: selection.tool, arguments: selection.args } },
   );

@@ -613,8 +613,8 @@ test("MCP discovers every room before reading the selected stable reference", as
   );
   assert.match(reading.observed_at, /^\d{4}-\d{2}-\d{2}T/);
 
-  // The overview left the home's names in the session catalog, so the room
-  // read asks the hub only for the values of its two devices.
+  // The overview left the home's names in the session catalog; the room
+  // read asks the hub for that room's devices only, in one request.
   assert.deepEqual(
     hub.requests.slice(0, overviewRequests).map(({ params }) => params),
     [
@@ -631,8 +631,14 @@ test("MCP discovers every room before reading the selected stable reference", as
       params,
     })),
     [
-      { serial: "test-hub", params: { accessory: { get: { id: 100 } } } },
-      { serial: "test-hub", params: { accessory: { get: { id: 101 } } } },
+      {
+        serial: "test-hub",
+        params: {
+          accessory: {
+            list: { roomId: 10, expand: "services,characteristics" },
+          },
+        },
+      },
     ],
   );
 });
@@ -1615,8 +1621,8 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   );
   assert.match(secondRoom.observed_at, /^\d{4}-\d{2}-\d{2}T/);
   // The first read takes names and values in two whole reads; the second
-  // reads only the room's two devices.
-  assert.equal(hub.requests.length, 4);
+  // reads only the room.
+  assert.equal(hub.requests.length, 3);
 });
 
 test("room catalog keeps duplicate and prefixed names for agent-side selection", async (t) => {
