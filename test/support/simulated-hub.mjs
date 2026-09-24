@@ -2219,6 +2219,12 @@ function nativeText(value) {
 // a repeating branch, another delay mode, interval, cron, code, toggle,
 // unknown refs) is reported as unsupported rather than guessed. It is not a
 // model of the hub's scheduler.
+//
+// A trigger inside a nested «Если» runs only its own part after the
+// conditions above it are checked (vendor wiki «Триггеры в сценариях»),
+// while a trigger of a top-level «Если» is read as running the whole
+// BLOCK. For a nested trigger both readings are run; where their values
+// differ, or its own part cannot be run, the BLOCK is unsupported.
 const RULE_WINDOW_MS = 10_000;
 
 export function evaluateRulesOnChange(
@@ -2248,32 +2254,38 @@ export function evaluateRulesOnChange(
       continue;
     }
     result.fired.push(scenario.index);
-    const run = {
-      home,
-      previous,
-      result,
-      index: scenario.index,
-      now: 0,
-      timers: [],
-      change,
-      windowMs,
-    };
-    runRuleActions(run, data.targets);
-    // Timers that end inside the window run in the order they end.
-    for (;;) {
-      run.timers.sort((left, right) => left.at - right.at);
-      const timer = run.timers.shift();
-      if (!timer) break;
-      if (timer.at >= windowMs) {
-        result.skipped.push({
+    const fire = (target, steps) =>
+      fireRule(
+        { home: target, previous, index: scenario.index, change, windowMs },
+        steps,
+      );
+    const paths = triggerPaths(data.targets, change);
+    if (paths.length > 0 && paths.every((path) => path.length > 1)) {
+      const whole = fire(structuredClone(home), (run) =>
+        runRuleActions(run, data.targets),
+      );
+      const own = fire(structuredClone(home), (run) =>
+        paths.forEach((path) => {
+          runOwnPart(run, path);
+        }),
+      );
+      if (
+        own.result.unsupported.length > 0 ||
+        JSON.stringify(characteristicValues(whole.home)) !==
+          JSON.stringify(characteristicValues(own.home))
+      ) {
+        result.unsupported.push({
           index: scenario.index,
-          node: "delay",
-          time: timer.time,
+          node: "nested trigger",
         });
         continue;
       }
-      run.now = timer.at;
-      runRuleActions(run, timer.targets);
+    }
+    const { result: fired } = fire(home, (run) =>
+      runRuleActions(run, data.targets),
+    );
+    for (const key of ["writes", "skipped", "unsupported"]) {
+      result[key].push(...fired[key]);
     }
   }
   const after = characteristicValues(home);
@@ -2283,6 +2295,93 @@ export function evaluateRulesOnChange(
     .map((key) => ({ key, before: before[key], after: after[key] }));
   result.after = after;
   return result;
+}
+
+// Runs steps of one fired BLOCK on home, then its timers that end inside
+// the window, in the order they end.
+function fireRule({ home, previous, index, change, windowMs }, steps) {
+  const result = { writes: [], skipped: [], unsupported: [] };
+  const run = {
+    home,
+    previous,
+    result,
+    index,
+    now: 0,
+    timers: [],
+    change,
+    windowMs,
+  };
+  steps(run);
+  for (;;) {
+    run.timers.sort((left, right) => left.at - right.at);
+    const timer = run.timers.shift();
+    if (!timer) break;
+    if (timer.at >= windowMs) {
+      result.skipped.push({ index, node: "delay", time: timer.time });
+      continue;
+    }
+    run.now = timer.at;
+    runRuleActions(run, timer.targets);
+  }
+  return { home, result };
+}
+
+// For every if whose condition holds a trigger leaf on change, the path to
+// it: the ifs above it, each with the branch that leads down ("then" or
+// "else"), or a delay on the way, and last the if itself. A path of one
+// step: a top-level if.
+function triggerPaths(steps, change, above = []) {
+  const paths = [];
+  for (const node of steps ?? []) {
+    if (node?.type === "if") {
+      if (conditionLeaves(node.if).some((leaf) => isTrigger(leaf, change))) {
+        paths.push([...above, { node, branch: null }]);
+      }
+      for (const branch of ["then", "else"]) {
+        paths.push(
+          ...triggerPaths(node[branch], change, [...above, { node, branch }]),
+        );
+      }
+    } else if (node?.type === "delay") {
+      paths.push(
+        ...triggerPaths(node.targets, change, [
+          ...above,
+          { node, branch: null },
+        ]),
+      );
+    }
+  }
+  return paths;
+}
+
+function conditionLeaves(node) {
+  if (!node || typeof node !== "object") return [];
+  if (node.type === "condition") {
+    return (node.conditions ?? []).flatMap(conditionLeaves);
+  }
+  return [node];
+}
+
+// A nested trigger's own part: each if above it must be an EVERY if whose
+// condition selects the branch that leads down, then the trigger's if
+// runs. A delay or another mode on the way cannot be run.
+function runOwnPart(run, path) {
+  for (const { node, branch } of path.slice(0, -1)) {
+    if (node.type !== "if" || (node.mode ?? "EVERY") !== "EVERY") {
+      run.result.unsupported.push({ index: run.index, node: "nested trigger" });
+      return;
+    }
+    const verdict = evaluateRuleCondition(
+      run.home,
+      node.if,
+      run.result.unsupported,
+      run.index,
+      { change: run.change, windowMs: run.windowMs },
+    );
+    if (verdict === null) return;
+    if (verdict !== (branch === "then")) return;
+  }
+  runRuleIf(run, path.at(-1).node);
 }
 
 // Refs of a BLOCK that do not resolve in the home, or whose hs/hc do not
