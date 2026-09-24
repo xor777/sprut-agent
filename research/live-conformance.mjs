@@ -80,7 +80,7 @@ const PREPARE_OPERATIONS = new Set([
   "scenario_run",
 ]);
 
-class GuardError extends Error {}
+export class GuardError extends Error {}
 
 class ProbeFailure extends Error {
   constructor(message, result) {
@@ -91,7 +91,7 @@ class ProbeFailure extends Error {
 }
 
 // The only path from this script to the MCP server.
-class GuardedHub {
+export class GuardedHub {
   #client;
   #listClient = null;
   constructor(client, prefix) {
@@ -317,7 +317,7 @@ class GuardedHub {
 // client: the run's virtual accessory (create, set, delete), a run of this
 // run's BLOCK, and the Active option of such a BLOCK's own options window.
 // history.list is the only raw read; the client has no method for it.
-class ProbeClient {
+export class ProbeClient {
   #client;
   #hub;
   #stateDirectory;
