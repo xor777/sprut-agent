@@ -10412,11 +10412,16 @@ function logicTypeListed(entries, type) {
 // The latest read's view of the type on the anchor: listed with the
 // scenario's name, not listed while the LOGIC is off or on, or listed with
 // another name. A scenario at the index without this change's ownership
-// marker is another one (indices may be reused, as room ids are): its type
-// is not this change's. A read without the scenario keeps the last check.
+// marker is another one, or this one with the marker removed from its
+// source; nothing shows which, so its type is not this change's. With no
+// scenario at the index the type names nothing.
 function recordLogicTypeCheck(change, current) {
   const type = createdLogicType(change);
-  if (type === undefined || current.scenario === null) return;
+  if (type === undefined) return;
+  if (current.scenario === null) {
+    change.logic_type_check = "absent";
+    return;
+  }
   if (!logicSourceCarriesOwnershipMarker(change, current.scenario)) {
     change.logic_type_check = "not_owned";
     return;
@@ -10433,7 +10438,13 @@ function recordLogicTypeCheck(change, current) {
 
 function createdLogicMapping(change) {
   const type = createdLogicType(change);
-  if (type === undefined) {
+  // Once the created LOGIC was seen gone, a scenario at its index later,
+  // even an exact copy with the marker, is another LOGIC.
+  if (
+    type === undefined ||
+    change.logic_type_check === "absent" ||
+    change.owned_target_absent_observed === true
+  ) {
     return { status: "missing", reason: "logic_scenario_not_found" };
   }
   if (change.logic_type_check === "name_mismatch") {
@@ -10477,7 +10488,7 @@ function createdLogicUnmappedRefusal(change) {
   const evidence =
     mapping.reason === "logic_type_name_mismatch"
       ? `SprutHub lists type ${createdLogicType(change)} on ${change.target_ref} under a name other than this LOGIC's`
-      : `the scenario at ${details.scenario_ref} does not carry this change's ownership marker`;
+      : `the scenario at ${details.scenario_ref} does not carry this change's ownership marker (it is another LOGIC at a reused index, or this one with the marker removed from its source)`;
   return new SprutHubError(
     mapping.reason,
     `${evidence}, so the type of the created LOGIC cannot be proven and its assignments cannot be checked. Restore will not delete it. The owner can delete it in the SprutHub app after checking that no device uses it.`,
@@ -10538,7 +10549,7 @@ function logicSourceContract(mode) {
         : ["source"],
     assignment: {
       mapping:
-        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker, which is another LOGIC (logic_scenario_not_owned)",
+        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker (logic_scenario_not_owned): another LOGIC at a reused index, or this one with the marker removed from its source, which nothing tells apart; with no scenario at the index, or once the LOGIC was seen gone, nothing is mapped either (logic_scenario_not_found)",
       separate_operation: "logic_assignment",
     },
     restore: {

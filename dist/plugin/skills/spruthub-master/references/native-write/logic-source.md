@@ -25,9 +25,13 @@
   названа не как сценарий, mapping нет (`logic_mapping_status=missing`,
   `logic_type_name_mismatch`): `logic_ref` не выдаётся, restore отвечает
   этой ошибкой и не удаляет; при совпадении имён mapping возвращается.
-  Сценарий по этому index без маркера владения в source — уже другой LOGIC
-  (index мог быть использован заново): mapping нет
-  (`logic_scenario_not_owned`), его type этому change не принадлежит.
+  Если у сценария по этому index нет маркера владения в source, mapping нет
+  (`logic_scenario_not_owned`): это другой LOGIC (index мог быть использован
+  заново) или этот же, из source которого убрали маркер, и различить их
+  нечем; после правки source change и так в conflict `manual_change`. Если
+  сценария по index нет или его отсутствие уже наблюдалось, mapping тоже нет
+  (`logic_scenario_not_found`): `logic_ref` и готовность к назначению не
+  выдаются, в том числе для точной копии, появившейся позже.
   Restore обходит назначения его type по дому и цели BLOCK и тогда, когда
   LOGIC выключен: найденное блокирует удаление так же, как у включённого
   (`logic_assignments_present` со списком сервисов). Удаляет restore
