@@ -1999,6 +1999,8 @@ export class AutomationService {
     if (roomCreationOutcomeUnknown(change)) {
       return this.#recordUnownedRoomCandidates(change);
     }
+    // A change prepared before the limit was known may carry a longer name.
+    roomNameWithinLimit(change.requested_name);
     const candidates = await this.#matchingRooms(change);
     if (candidates.length > 0) {
       return this.#finishNative(change, "conflict", undefined, {
