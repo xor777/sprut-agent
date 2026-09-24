@@ -4771,9 +4771,12 @@ export class AutomationService {
       }
     }
     if (change.kind === "logic_source_create") {
-      const refusal = createdLogicDeleteRefusal(change, current.scenario);
+      const refusal = createdLogicUnmappedRefusal(change);
       if (refusal) throw refusal;
-      const { type } = createdLogicMapping(change);
+      // Scanned while the LOGIC is off too: an assignment made while it was
+      // on and still listed blocks the delete, and turning the LOGIC on to
+      // delete it would make it run there.
+      const type = createdLogicType(change);
       const assignments = await this.client.findLogicAssignments(type);
       if (assignments.length > 0) {
         return this.#finishNative(change, "conflict", undefined, {
@@ -4801,9 +4804,11 @@ export class AutomationService {
       }
     }
     if (change.kind === "logic_source_create") {
+      const refusal = createdLogicOffRefusal(change, current.scenario);
+      if (refusal) throw refusal;
       // Saved with the restore intent: which type's assignments this delete
       // was checked against (logicDeleteAssignmentCheckUnproven).
-      change.logic_delete_checked_type = createdLogicMapping(change).type;
+      change.logic_delete_checked_type = createdLogicType(change);
     }
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
@@ -10443,41 +10448,44 @@ function createdLogicMapping(change) {
 // Once a live run shows the assignments, set this to true.
 const LOGIC_LIST_SHOWS_TURNED_OFF_ASSIGNMENTS = false;
 
-// Why restore must not delete this created LOGIC now, or undefined.
-function createdLogicDeleteRefusal(change, scenario) {
-  const scenarioRef = `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`;
-  const details = {
+function createdLogicRefusalDetails(change) {
+  return {
     change_ref: `spruthub-change://native/${change.id}`,
-    scenario_ref: scenarioRef,
+    scenario_ref: `${change.home_ref}/scenario/${encodeURIComponent(change.scenario_index)}`,
   };
+}
+
+// Why the assignments of this created LOGIC cannot be checked, or undefined.
+function createdLogicUnmappedRefusal(change) {
   const mapping = createdLogicMapping(change);
-  if (mapping.status !== "mapped") {
-    const evidence =
-      mapping.reason === "logic_type_name_mismatch"
-        ? `SprutHub lists type ${createdLogicType(change)} on ${change.target_ref} under a name other than this LOGIC's`
-        : `the scenario at ${scenarioRef} does not carry this change's ownership marker`;
-    return new SprutHubError(
-      mapping.reason,
-      `${evidence}, so the type of the created LOGIC cannot be proven and its assignments cannot be checked. Restore will not delete it. The owner can delete it in the SprutHub app after checking that no device uses it.`,
-      "get_native_change",
-      details,
-    );
+  if (mapping.status === "mapped") return undefined;
+  const details = createdLogicRefusalDetails(change);
+  const evidence =
+    mapping.reason === "logic_type_name_mismatch"
+      ? `SprutHub lists type ${createdLogicType(change)} on ${change.target_ref} under a name other than this LOGIC's`
+      : `the scenario at ${details.scenario_ref} does not carry this change's ownership marker`;
+  return new SprutHubError(
+    mapping.reason,
+    `${evidence}, so the type of the created LOGIC cannot be proven and its assignments cannot be checked. Restore will not delete it. The owner can delete it in the SprutHub app after checking that no device uses it.`,
+    "get_native_change",
+    details,
+  );
+}
+
+// Why restore must not delete this created LOGIC while it is off, after a
+// scan that found no assignment and no BLOCK running it, or undefined.
+// Turning it on is left to the owner: it then runs wherever it is assigned.
+function createdLogicOffRefusal(change, scenario) {
+  if (scenario.active === true || LOGIC_LIST_SHOWS_TURNED_OFF_ASSIGNMENTS) {
+    return undefined;
   }
-  if (scenario.active !== true && !LOGIC_LIST_SHOWS_TURNED_OFF_ASSIGNMENTS) {
-    return new SprutHubError(
-      "logic_off_assignments_unverified",
-      `${scenarioRef} is turned off, and whether SprutHub lists the device assignments of a turned-off LOGIC has not been observed, so finding none would not show that no device uses it. Restore will not delete it while it is off. To delete it here, turn it on with scenario_active (it then runs on any device it is assigned to) and restore again; or the owner can delete it in the SprutHub app.`,
-      "get_native_change_contract",
-      {
-        ...details,
-        next: {
-          tool: "get_native_change_contract",
-          arguments: { operation: "scenario_active", target_ref: scenarioRef },
-        },
-      },
-    );
-  }
-  return undefined;
+  const details = createdLogicRefusalDetails(change);
+  return new SprutHubError(
+    "logic_off_assignments_unverified",
+    `${details.scenario_ref} is turned off. No assignment of its type ${createdLogicType(change)} is visible across the home and no BLOCK runs it, but whether SprutHub lists the assignments of a turned-off LOGIC has not been observed, so that does not show that no device uses it. Restore will not delete it while it is off. Turning it on makes it run on any device that uses it, so the owner must agree first. If the owner agrees, turn it on with scenario_active and restore again; if that restore finds assignments, it deletes nothing and the LOGIC stays on, and restoring that scenario_active change turns it off again. Otherwise the owner can delete it in the SprutHub app.`,
+    undefined,
+    details,
+  );
 }
 
 // A restored create whose delete was not checked against the LOGIC's own
@@ -10523,7 +10531,7 @@ function logicSourceContract(mode) {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; a turned-off LOGIC is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed: turn it on with scenario_active and restore again, or the owner deletes it in the SprutHub app; an unmapped LOGIC (logic_type_name_mismatch) is refused the same way",
+        "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; the scan runs while it is off too, and what it finds blocks the delete (logic_assignments_present, scenario_targets_present); a turned-off LOGIC with none found is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed. Turning it on makes it run on any device that uses it, so only with the owner's agreement: turn it on with scenario_active and restore again; if that restore finds assignments, the LOGIC stays on and restoring that scenario_active change turns it off again. Otherwise the owner deletes it in the SprutHub app. An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted either",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
@@ -11374,7 +11382,7 @@ function publicNativeChange(
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "A created LOGIC's native type is its scenario index. Deletion scans the current assignments of that type across the home and the scenario targets of BLOCKs, and only while the LOGIC is on: whether SprutHub lists a turned-off LOGIC's assignments has not been observed, so restore refuses a turned-off LOGIC (logic_off_assignments_unverified). SprutHub exposes no compare-and-set after that check.",
+        "A created LOGIC's native type is its scenario index. Deletion scans the current assignments of that type across the home and the scenario targets of BLOCKs; what the scan finds blocks it, whether the LOGIC is on or off. A turned-off LOGIC is not deleted even when none is found (logic_off_assignments_unverified): whether SprutHub lists a turned-off LOGIC's assignments has not been observed. SprutHub exposes no compare-and-set after that check.",
         ...(logicDeleteAssignmentCheckUnproven(change)
           ? [
               "An earlier version deleted this LOGIC after checking the assignments of a type other than its own (its scenario index), so assignments of its own type may remain on devices (logic_assignments_may_remain).",
