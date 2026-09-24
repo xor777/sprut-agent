@@ -178,14 +178,15 @@ test("home_overview stays within 3 KB at the owner's scale and counts the whole 
   assert.equal(real.body.rooms.length, 13);
   assert(real.bytes <= 3_072, `home_overview returned ${real.bytes} bytes`);
 
-  const house = await setup(t, await loadHomeFixture("house"));
+  const houseFixture = await loadHomeFixture("house");
+  const house = await setup(t, houseFixture);
   const { body, bytes } = await overview(house.client);
-  assert.equal(body.rooms.length, 23);
+  assert.equal(body.rooms.length, houseFixture.rooms.length);
   assert.equal(
     body.rooms.reduce((sum, { device_count }) => sum + device_count, 0),
-    173,
+    houseFixture.accessories.length,
   );
-  assert.equal(body.scenarios.total, 50);
+  assert.equal(body.scenarios.total, houseFixture.scenarios.length);
   t.diagnostic(`owner scale ${real.bytes} bytes, house ${bytes} bytes`);
 });
 
