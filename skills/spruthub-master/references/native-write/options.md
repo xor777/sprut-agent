@@ -12,8 +12,8 @@
   `window.update`. Прямой window-ref не открывает TEXT/TEXT_MULTILINE Name/Desc
   и не обходит marker; если окно принадлежит BLOCK, отказ указывает на
   владельца-сценария, иначе это обычный unsupported TEXT. `Active` окна
-  сценария любого типа — его флаг включения: window_option отказывает с
-  `scenario_owner_required` и `next` на контракт
+  сценария любого типа — его флаг включения: чтение окна и window_option
+  отвечают `scenario_owner_required` с `next` на контракт
   [`scenario_active`](scenario-active.md), который проверяет и
   `scenario.get`. Ключ `Name`, `Desc` или `Active` сам по себе не делает окно
   сценарием: NUMBER/CHECKBOX/LIST с тем же ключом в окне устройства остаются

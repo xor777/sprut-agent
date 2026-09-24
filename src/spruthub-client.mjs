@@ -2573,12 +2573,44 @@ export class SprutHubClient {
       requested.has("diagnostics"),
       response.responseReceivedAt,
     );
+    await this.#offerScenarioActive(parsed, normalized, deadline);
     return {
       kind: "window",
       ...normalized.physical_configuration,
       ...(normalized.diagnostics
         ? { diagnostics: normalized.diagnostics }
         : { diagnostics_available: normalized.diagnostics_available }),
+    };
+  }
+
+  // Active in a scenario's options window is that scenario's on/off flag;
+  // window_option refuses it, and scenario_active also checks scenario.get.
+  async #offerScenarioActive(parsed, normalized, deadline) {
+    const option = normalized.physical_configuration.options.find(
+      ({ key, redacted }) => key === "Active" && redacted !== true,
+    );
+    if (!option) return;
+    const owners = extractScenarioCatalog(
+      await this.#request({ scenario: { list: {} } }, deadline, {
+        serial: parsed.serial,
+      }),
+    ).filter(({ optionsWindow }) => optionsWindow === parsed.windowKey);
+    if (owners.length === 0) return;
+    option.native_change = {
+      native_write: option.native_change.native_write,
+      supported: false,
+      reason: "scenario_owner_required",
+      ...(owners.length === 1
+        ? {
+            next: {
+              tool: "get_native_change_contract",
+              arguments: {
+                operation: "scenario_active",
+                target_ref: scenarioRef(parsed.serial, owners[0].index),
+              },
+            },
+          }
+        : {}),
     };
   }
 
