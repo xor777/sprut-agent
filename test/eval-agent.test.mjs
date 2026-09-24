@@ -431,7 +431,9 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
     ) / 100,
   );
   assert.equal(
-    lines.filter((line) => /^(PASS|FAIL) turn-off-room@/.test(line)).length,
+    lines.filter((line) =>
+      /^(?:PASS|FAIL\(agent\)) turn-off-room@(?:apartment|house) /.test(line),
+    ).length,
     4,
   );
   assert.ok(lines.some((line) => line.includes("2/2")));

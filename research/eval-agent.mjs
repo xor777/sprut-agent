@@ -8,6 +8,7 @@ import {
   cp,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -40,9 +41,16 @@ Options:
   --model <name>           Model passed to the CLI (default: sonnet for claude)
   --plugin-dir <path>      Plugin build to test (default: dist/plugin)
   --evidence-dir <path>    Where results are written (default: new temp dir)
-  --timeout <seconds>      Per-case limit (default: 600)`;
+  --timeout <seconds>      Per-case limit (default: 600)
+  --repeat <n>             Runs per case and fixture (default: 1)
+  --fixture <names>        Comma-separated homes, e.g. apartment,house
+                           (default: each case's own)
+  --include-pending        With all, also run cases marked pending`;
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  { write = (text) => process.stdout.write(text) } = {},
+) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -52,21 +60,34 @@ export async function main(argv = process.argv.slice(2)) {
       "plugin-dir": { type: "string" },
       "evidence-dir": { type: "string" },
       timeout: { type: "string", default: "600" },
+      repeat: { type: "string", default: "1" },
+      fixture: { type: "string" },
+      "include-pending": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
   const [selected] = positionals;
   if (values.help || positionals.length !== 1) {
-    process.stdout.write(`${USAGE}\n`);
+    write(`${USAGE}\n`);
     return values.help ? 0 : 2;
   }
-  const caseNames = selected === "all" ? Object.keys(CASES) : [selected];
+  const caseNames =
+    selected === "all"
+      ? Object.keys(CASES).filter(
+          (name) => values["include-pending"] || !CASES[name].pending,
+        )
+      : [selected];
   for (const name of caseNames) {
     if (!CASES[name]) throw new Error(`Unknown case ${name}\n${USAGE}`);
   }
   if (!HARNESSES[values.harness]) {
     throw new Error(`Unknown harness ${values.harness}`);
   }
+  const repeat = Number(values.repeat);
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    throw new Error("--repeat must be a positive integer");
+  }
+  const fixtures = values.fixture ? values.fixture.split(",") : [null];
   const pluginDir = path.resolve(
     values["plugin-dir"] ?? path.join(repo, "dist", "plugin"),
   );
@@ -78,44 +99,60 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const model =
     values.model ?? (values.harness === "claude" ? "sonnet" : undefined);
+  const harnessVersion = cliVersion(values.harness);
 
-  let failed = 0;
+  const outcomes = [];
   for (const name of caseNames) {
-    const outcome = await runCase({
-      caseName: name,
-      harness: values.harness,
-      model,
-      plugin,
-      evidenceRoot,
-      timeoutMs,
-    });
-    if (!outcome.pass) failed += 1;
-    process.stdout.write(`${summaryLine(outcome)}\n`);
+    for (const fixture of fixtures) {
+      for (let attempt = 1; attempt <= repeat; attempt += 1) {
+        const outcome = await runCase({
+          caseName: name,
+          fixture,
+          harness: values.harness,
+          harnessVersion,
+          model,
+          plugin,
+          evidenceRoot,
+          timeoutMs,
+        });
+        outcomes.push(outcome);
+        write(`${summaryLine(outcome)}\n`);
+      }
+    }
   }
-  return failed === 0 ? 0 : 1;
+  const summary = summarizeRuns(outcomes, {
+    harness: values.harness,
+    harnessVersion,
+    model,
+    plugin,
+  });
+  await writeJson(path.join(evidenceRoot, "summary.json"), summary);
+  for (const line of summaryTable(summary)) write(`${line}\n`);
+  write(`evidence: ${evidenceRoot}\n`);
+  return outcomes.every(({ pass }) => pass) ? 0 : 1;
 }
 
 export async function runCase({
   caseName,
   definition = CASES[caseName],
+  fixture = null,
   harness,
+  harnessVersion = null,
   model,
   plugin,
   evidenceRoot,
   timeoutMs,
 }) {
+  const fixtureName = fixture ?? definition.fixture ?? "apartment";
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-eval-run-"));
   // Credentials of this run only: nothing in the repository or an earlier
   // run lets another client pass as the MCP server.
   const runId = randomUUID();
-  const hub = await startSimulatedHub(
-    await loadHomeFixture(definition.fixture ?? "apartment"),
-    {
-      faults: definition.faults,
-      token: `eval-token-${runId}`,
-      cid: `eval-mcp-${runId}`,
-    },
-  );
+  const hub = await startSimulatedHub(await loadHomeFixture(fixtureName), {
+    faults: definition.faults,
+    token: `eval-token-${runId}`,
+    cid: `eval-mcp-${runId}`,
+  });
   const startedAt = new Date().toISOString();
   try {
     const run = await HARNESSES[harness]({
@@ -130,6 +167,7 @@ export async function runCase({
     if (typeof run.answer === "string" && run.answer.length > 0) {
       transcript.answer = run.answer;
     }
+    transcript.model ??= run.session?.model ?? null;
     hub.settle();
     const evidence = collectEvidence(hub, transcript.answer);
     const graders = [
@@ -153,8 +191,11 @@ export async function runCase({
     ];
     const outcome = {
       case: caseName,
+      fixture: fixtureName,
       prompt: definition.prompt,
       harness,
+      harness_version: harnessVersion,
+      harness_session: run.session ?? transcript.session ?? null,
       model: { requested: model ?? null, reported: transcript.model ?? null },
       plugin,
       started_at: startedAt,
@@ -198,7 +239,7 @@ export async function runCase({
     };
     const runDir = path.join(
       evidenceRoot,
-      `${startedAt.replaceAll(":", "-").replaceAll(".", "-")}-${caseName}-${harness}`,
+      `${startedAt.replaceAll(":", "-").replaceAll(".", "-")}-${caseName}-${fixtureName}-${harness}`,
     );
     await mkdir(runDir, { recursive: true });
     await writeJson(path.join(runDir, "result.json"), outcome);
@@ -348,23 +389,146 @@ function failureClass(graders) {
   return "agent";
 }
 
+// MCP calls and MCP result bytes are the cross-harness measure: the harness's
+// own tools (Read, Skill, shell) differ between Claude Code and Codex.
 export function summaryLine(outcome) {
   const tokens = outcome.metrics.tokens;
   const graderText = outcome.graders
     .map(({ name, pass }) => `${pass ? "+" : "-"}${name}`)
     .join(" ");
   return [
-    outcome.pass ? "PASS" : "FAIL",
-    outcome.case,
+    outcome.pass ? "PASS" : `FAIL(${outcome.failure_class})`,
+    `${outcome.case}@${outcome.fixture}`,
     `${outcome.harness}/${outcome.model.reported ?? outcome.model.requested ?? "default"}`,
-    `tools=${outcome.metrics.tool_calls}(mcp ${outcome.metrics.mcp_tool_calls})`,
-    `result_bytes=${outcome.metrics.tool_result_bytes}`,
+    `mcp=${outcome.metrics.mcp_tool_calls}/${outcome.metrics.mcp_tool_result_bytes}B`,
+    `tools=${outcome.metrics.tool_calls}`,
     `tokens_in=${tokens?.total_input ?? "?"} out=${tokens?.output ?? "?"}`,
     `${outcome.metrics.wall_seconds}s`,
-    `plugin=${outcome.plugin.git_sha?.slice(0, 12) ?? "?"}${outcome.plugin.dirty ? "+dirty" : ""}`,
+    `plugin=${outcome.plugin.server_sha256?.slice(0, 12) ?? "?"}`,
     graderText,
     outcome.run_dir ?? "",
   ].join(" ");
+}
+
+// Per case and fixture: passes, failure classes and medians; per case run on
+// both fixtures: the house/apartment ratio of the medians.
+export function summarizeRuns(
+  outcomes,
+  { harness, harnessVersion, model, plugin },
+) {
+  const groups = new Map();
+  for (const outcome of outcomes) {
+    const key = `${outcome.case}@${outcome.fixture}`;
+    groups.set(key, [...(groups.get(key) ?? []), outcome]);
+  }
+  const cases = [...groups.values()].map((runs) => {
+    const failureClasses = {};
+    for (const { failure_class: failure } of runs) {
+      if (failure) failureClasses[failure] = (failureClasses[failure] ?? 0) + 1;
+    }
+    return {
+      case: runs[0].case,
+      fixture: runs[0].fixture,
+      runs: runs.length,
+      passes: runs.filter(({ pass }) => pass).length,
+      failure_classes: failureClasses,
+      median_mcp_calls: median(
+        runs.map(({ metrics }) => metrics.mcp_tool_calls),
+      ),
+      median_mcp_result_bytes: median(
+        runs.map(({ metrics }) => metrics.mcp_tool_result_bytes),
+      ),
+      median_tokens: median(
+        runs.map(({ metrics }) =>
+          metrics.tokens
+            ? metrics.tokens.total_input + metrics.tokens.output
+            : null,
+        ),
+      ),
+      median_wall_seconds: median(
+        runs.map(({ metrics }) => metrics.wall_seconds),
+      ),
+      run_dirs: runs.map(({ run_dir: dir }) => dir ?? null),
+    };
+  });
+  const ratio = (large, small) =>
+    typeof large === "number" && typeof small === "number" && small > 0
+      ? Math.round((large / small) * 100) / 100
+      : null;
+  const scale = [];
+  for (const entry of cases.filter(({ fixture }) => fixture === "house")) {
+    const small = cases.find(
+      (candidate) =>
+        candidate.case === entry.case && candidate.fixture === "apartment",
+    );
+    if (!small) continue;
+    scale.push({
+      case: entry.case,
+      mcp_calls_ratio: ratio(entry.median_mcp_calls, small.median_mcp_calls),
+      mcp_result_bytes_ratio: ratio(
+        entry.median_mcp_result_bytes,
+        small.median_mcp_result_bytes,
+      ),
+      tokens_ratio: ratio(entry.median_tokens, small.median_tokens),
+    });
+  }
+  return {
+    harness,
+    harness_version: harnessVersion,
+    model: {
+      requested: model ?? null,
+      reported: [
+        ...new Set(outcomes.map((outcome) => outcome.model.reported)),
+      ].filter((value) => value !== null),
+    },
+    plugin,
+    cases,
+    scale,
+  };
+}
+
+function summaryTable(summary) {
+  return [
+    ...summary.cases.map(
+      (entry) =>
+        `SUMMARY ${entry.case}@${entry.fixture} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} tokens=${entry.median_tokens}${
+          Object.keys(entry.failure_classes).length > 0
+            ? ` failures=${JSON.stringify(entry.failure_classes)}`
+            : ""
+        }`,
+    ),
+    ...summary.scale.map(
+      (entry) =>
+        `SCALE ${entry.case} house/apartment mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio}`,
+    ),
+  ];
+}
+
+function median(values) {
+  const numbers = values
+    .filter((value) => typeof value === "number")
+    .sort((left, right) => left - right);
+  if (numbers.length === 0) return null;
+  const middle = Math.floor(numbers.length / 2);
+  return numbers.length % 2 === 1
+    ? numbers[middle]
+    : (numbers[middle - 1] + numbers[middle]) / 2;
+}
+
+function cliVersion(harness) {
+  const command =
+    harness === "claude"
+      ? (process.env.SPRUT_EVAL_CLAUDE_BIN ?? "claude")
+      : (process.env.SPRUT_EVAL_CODEX_BIN ?? "codex");
+  try {
+    return execFileSync(command, ["--version"], {
+      encoding: "utf8",
+      env: isolatedEnvironment({}),
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 // --- Harnesses -------------------------------------------------------------
@@ -552,9 +716,10 @@ async function runCodex({ prompt, model, plugin, hub, scratch, timeoutMs }) {
   const permissions = `{${Object.entries(readable)
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
     .join(", ")}}`;
+  // No --ephemeral: the rollout under CODEX_HOME/sessions names the model and
+  // settings Codex actually used; the scratch CODEX_HOME is deleted after.
   const args = [
     "exec",
-    "--ephemeral",
     "--skip-git-repo-check",
     "--strict-config",
     "--approve-for-me",
@@ -578,7 +743,43 @@ async function runCodex({ prompt, model, plugin, hub, scratch, timeoutMs }) {
     timeoutMs,
   });
   run.answer = await readFile(answerPath, "utf8").catch(() => null);
+  run.session = await readCodexSession(codexHome);
   return run;
+}
+
+// What a Codex rollout (session_meta, turn_context) says about the run.
+export async function readCodexSession(codexHome) {
+  const files = (
+    await readdir(path.join(codexHome, "sessions"), {
+      recursive: true,
+    }).catch(() => [])
+  ).filter((file) => /rollout-.*\.jsonl$/.test(file));
+  if (files.length === 0) return null;
+  const session = {};
+  for (const file of files.sort()) {
+    const text = await readFile(path.join(codexHome, "sessions", file), "utf8");
+    for (const event of jsonLines(text)) {
+      const payload = event.payload ?? {};
+      if (event.type === "session_meta") {
+        session.cli_version ??= payload.cli_version ?? null;
+        session.model_provider ??= payload.model_provider ?? null;
+      }
+      if (event.type === "turn_context") {
+        session.model ??= payload.model ?? null;
+        session.approval_policy ??= payload.approval_policy ?? null;
+        session.sandbox_policy ??= payload.sandbox_policy?.type ?? null;
+        session.permission_profile ??= payload.permission_profile?.type ?? null;
+      }
+    }
+  }
+  return {
+    cli_version: session.cli_version ?? null,
+    model: session.model ?? null,
+    model_provider: session.model_provider ?? null,
+    approval_policy: session.approval_policy ?? null,
+    sandbox_policy: session.sandbox_policy ?? null,
+    permission_profile: session.permission_profile ?? null,
+  };
 }
 
 function runProcess({ command, args, stdin, cwd, env, timeoutMs }) {
@@ -670,9 +871,15 @@ export function parseClaudeStream(text) {
   let model = null;
   let harnessError = null;
   let setup = null;
+  let session = null;
   for (const event of jsonLines(text)) {
     if (event.type === "system" && event.subtype === "init") {
       model = event.model ?? model;
+      session = {
+        cli_version: event.claude_code_version ?? null,
+        model: event.model ?? null,
+        permission_mode: event.permissionMode ?? null,
+      };
       setup = {
         mcp_servers: event.mcp_servers ?? [],
         tools: event.tools ?? [],
@@ -744,6 +951,7 @@ export function parseClaudeStream(text) {
     model,
     harnessError,
     setup,
+    session,
   };
 }
 
