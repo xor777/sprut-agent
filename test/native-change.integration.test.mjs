@@ -10157,7 +10157,7 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
   assert.equal(afterRestart.structuredContent.status, "applied");
   assert.equal(afterRestart.structuredContent.configuration_matches, true);
 
-  hub.state.scenarios[0].active = true;
+  hub.state.scenarios[0].onStart = true;
   const manualConflict = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -10172,7 +10172,7 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
     1,
   );
 
-  hub.state.scenarios[0].active = false;
+  hub.state.scenarios[0].onStart = false;
   const restored = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -10291,7 +10291,7 @@ test("BLOCK target class change stays applied when SprutHub projects rooms, icon
   assert.equal(afterRestart.structuredContent.status, "applied");
   assert.equal(afterRestart.structuredContent.configuration_matches, true);
 
-  hub.state.scenarios[0].active = true;
+  hub.state.scenarios[0].onStart = true;
   const manualConflict = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -10321,7 +10321,7 @@ test("BLOCK target class change stays applied when SprutHub projects rooms, icon
     "a previous conflict must not restore without proven ownership",
   );
 
-  hub.state.scenarios[0].active = false;
+  hub.state.scenarios[0].onStart = false;
   const restored = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },

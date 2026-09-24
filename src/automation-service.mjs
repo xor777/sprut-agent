@@ -5592,6 +5592,7 @@ function blockContract() {
       "The same characteristic cannot be both a condition and an action in this slice.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
+      "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
       "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage.",
     ],
@@ -8997,8 +8998,10 @@ function logicSnapshotMatches(scenario, expected) {
   return (
     scenario !== null &&
     isDeepStrictEqual(
-      logicEditableSnapshot(logicScenarioSnapshot(scenario)),
-      logicEditableSnapshot(expected),
+      withoutRuntimeActive(
+        logicEditableSnapshot(logicScenarioSnapshot(scenario)),
+      ),
+      withoutRuntimeActive(logicEditableSnapshot(expected)),
     )
   );
 }
@@ -9155,6 +9158,8 @@ function logicSourceContract(mode) {
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
         "delete only the owned unchanged scenario after its native type is mapped and every current assignment of that type is absent",
+      active:
+        "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
     limitations: [
       "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
@@ -9369,13 +9374,12 @@ function blockMatchesRequested(change, scenario) {
   const current = scenarioSnapshot(scenario);
   if (["block_data_update", "block_action_pause"].includes(change.kind)) {
     if (!change.requested_snapshot) return false;
-    return snapshotsEqual(current, change.requested_snapshot);
+    return blockConfigurationsEqual(current, change.requested_snapshot);
   }
   const expected = blockCreateRequest(change);
   return (
     current.name === expected.name &&
     current.desc === expected.desc &&
-    current.active === expected.active &&
     current.onStart === expected.onStart &&
     current.sync === expected.sync &&
     current.type === expected.type &&
@@ -9390,7 +9394,8 @@ function blockStillAtBaseline(change, scenario) {
   if (change.kind === "block_create") return scenario === null;
   const baseline = change.restore_snapshot ?? change.baseline_snapshot;
   return (
-    scenario !== null && snapshotsEqual(scenarioSnapshot(scenario), baseline)
+    scenario !== null &&
+    blockConfigurationsEqual(scenarioSnapshot(scenario), baseline)
   );
 }
 
@@ -9405,7 +9410,10 @@ function blockMatchesApplied(change, scenario) {
   return (
     scenario !== null &&
     change.applied_snapshot !== undefined &&
-    snapshotsEqual(scenarioSnapshot(scenario), change.applied_snapshot)
+    blockConfigurationsEqual(
+      scenarioSnapshot(scenario),
+      change.applied_snapshot,
+    )
   );
 }
 
@@ -9511,10 +9519,28 @@ function scenarioRepeatApplyLimitation() {
   return "This change was already applied, so apply will not be sent again. Prepare a new authorized change from the current hub configuration.";
 }
 
+// scenario_run compares the whole snapshot: a scenario turned off after
+// preparation must not be run.
 function snapshotsEqual(left, right) {
   return isDeepStrictEqual(
     comparableNativeScenarioConfiguration(left),
     comparableNativeScenarioConfiguration(right),
+  );
+}
+
+// active is a runtime flag owned by scenario_active and the SprutHub UI.
+// Turning a scenario off or on is not an edit of the configuration that a
+// BLOCK, LOGIC, or automation change owns, so their ownership checks leave it
+// out on both sides; journals saved with active in their snapshots still match.
+// onStart and sync stay compared: no public operation writes them.
+function withoutRuntimeActive({ active: _active, ...configuration }) {
+  return configuration;
+}
+
+function blockConfigurationsEqual(left, right) {
+  return snapshotsEqual(
+    withoutRuntimeActive(left),
+    withoutRuntimeActive(right),
   );
 }
 
@@ -10810,7 +10836,7 @@ function expectedScenario(change) {
 }
 
 function matchesExpected(scenario, change) {
-  const expected = expectedScenario(change);
+  const expected = withoutRuntimeActive(expectedScenario(change));
   const metadataMatches = Object.entries(expected).every(
     ([key, value]) => key === "data" || scenario[key] === value,
   );
