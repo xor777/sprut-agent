@@ -239,6 +239,90 @@ test("living-room lights include relays named as lights and leave the ventilatio
   assert.equal(ventilation.characteristics[0].control.value.boolValue, true);
 });
 
+test("kind=light points to relays and sockets not named as lights, not to device settings", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  // An air conditioner's own switch for one of its functions.
+  fixture.accessories
+    .find(({ id }) => id === 19)
+    .services.push({
+      sId: 20,
+      type: "Switch",
+      name: "Ионизатор",
+      characteristics: [{ cId: 21, type: "On", value: true }],
+    });
+  // A relay channel with a neutral name that may drive the kitchen lamp.
+  fixture.accessories.push({
+    id: 41,
+    roomId: 4,
+    name: "Реле 2",
+    extensionKey: "Controller:zigbee",
+    deviceId: "00158d0004a1b241",
+    services: [
+      {
+        sId: 13,
+        type: "Switch",
+        name: "Канал 1",
+        characteristics: [{ cId: 14, type: "On", value: true }],
+      },
+    ],
+  });
+  const { call, home } = await setup(t, fixture);
+  const kitchen = `${home}/room/4`;
+
+  const kitchenLights = await call("find_devices", {
+    room_ref: kitchen,
+    kind: "light",
+    state: "on",
+  });
+  assert.deepEqual(
+    listed(kitchenLights.body).map(({ device }) => device.name),
+    ["Свет на кухне"],
+  );
+  const hint = kitchenLights.body.outlets_not_named_as_lights;
+  assert.equal(hint.matches, 1);
+  assert.deepEqual(hint.next, {
+    tool: "find_devices",
+    arguments: {
+      home_ref: home,
+      room_ref: kitchen,
+      kind: "outlet",
+      state: "on",
+    },
+  });
+  const relays = await call(hint.next.tool, hint.next.arguments);
+  assert.deepEqual(
+    listed(relays.body).map(({ device, service }) => [
+      device.name,
+      service.name,
+    ]),
+    [["Реле 2", "Канал 1"]],
+  );
+
+  // In the whole home the TV and computer sockets and the relay are on;
+  // the air conditioner's ionizer is its own setting, not a relay.
+  const lights = await call("find_devices", { kind: "light", state: "on" });
+  assert.equal(lights.body.outlets_not_named_as_lights.matches, 3);
+  const outlets = await call("find_devices", { kind: "outlet" });
+  assert.equal(
+    listed(outlets.body).some(({ service }) => service.name === "Ионизатор"),
+    false,
+  );
+  const climate = await call("find_devices", {
+    kind: "climate",
+    query: "кондиционер",
+  });
+  assert.deepEqual(
+    listed(climate.body).map(({ service }) => [
+      service.name,
+      service.kind_basis ?? null,
+    ]),
+    [
+      ["Кондиционер", null],
+      ["Ионизатор", "device"],
+    ],
+  );
+});
+
 test("a room word finds both bedrooms' sensors with battery inline and technical services hidden", async (t) => {
   const { call, home } = await setup(t, await loadHomeFixture("apartment"));
 
