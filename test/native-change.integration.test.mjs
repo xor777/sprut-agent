@@ -19841,6 +19841,58 @@ test("a created BLOCK that was turned off is still deleted by its restore", asyn
   }
 });
 
+test("a created BLOCK that SprutHub stores turned off reports it and stays owned", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const data = blockData();
+  delete data.vendorConfiguration;
+  const prepared = await prepareBlockCreate(client, {
+    name: "Ночник в коридоре",
+    data,
+    reason: "Включать ночник в коридоре по движению",
+  });
+  hub.state.behavior.afterCreate = () => {
+    hub.state.scenarios.at(-1).active = false;
+  };
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  const reported = (result) => ({
+    requested: result.structuredContent.diff.configuration.to.active,
+    observed: result.structuredContent.diff.configuration.observed_at_create,
+    exact: result.structuredContent.diff.configuration.flags_exact_match,
+  });
+  const expected = {
+    requested: true,
+    observed: { active: false, onStart: false, sync: false },
+    exact: false,
+  };
+  assert.deepEqual(reported(created), expected);
+
+  const restarted = await startClient(t, hub, stateDirectory);
+  const read = await restarted.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(read.structuredContent.status, "applied");
+  assert.deepEqual(reported(read), expected);
+
+  const removed = await restarted.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(
+      ({ index }) => index === created.structuredContent.scenario_index,
+    ),
+    false,
+  );
+});
+
 test("a LOGIC source change stays restorable after its scenario is turned off", async (t) => {
   await t.test("a created source is deleted", async (subtest) => {
     const { hub, stateDirectory } = await setup(subtest);
