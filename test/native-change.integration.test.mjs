@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
@@ -10561,6 +10562,393 @@ test("an existing BLOCK whose if has no mode is updated as EVERY and keeps that 
   );
 });
 
+// Most BLOCKs made in the official web client on the owner's hub have this
+// shape: an OR condition, hub code in then, no else key at all
+// (live read-only probe on SprutHub 3.0.0, 2026-09-24).
+const hallCode = "log.info('hall light on');";
+
+function webClientCodeBlock() {
+  return {
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: conditionGroup(characteristicCondition(), "OR"),
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [{ type: "code", code: hallCode }],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  };
+}
+
+async function readBlockConfiguration(client) {
+  const read = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+  });
+  assert.equal(read.isError, undefined, read.content[0]?.text);
+  return structuredClone(read.structuredContent.entity.configuration.value);
+}
+
+async function prepareBlockUpdate(client, data, reason) {
+  return client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data,
+      reason,
+    },
+  });
+}
+
+test("an existing BLOCK with hub code and no else keeps its code while a condition changes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const manual = webClientCodeBlock();
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+  const storedCode = scenarioData(hub, "existing-block").targets[0].then[0];
+
+  const edited = await readBlockConfiguration(client);
+  edited.targets[0].if.conditions[0].value = "false";
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Включать свет в коридоре, когда движение прекратилось",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const stored = scenarioData(hub, "existing-block");
+  assert.equal(stored.targets[0].if.conditions[0].value, "false");
+  assert.deepEqual(stored.targets[0].then, [storedCode]);
+  assert.equal(Object.hasOwn(stored.targets[0], "else"), false);
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+});
+
+test("a condition added ahead of kept hub code is read back after the hub renumbers blocks", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const manual = webClientCodeBlock();
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+  const storedCode = scenarioData(hub, "existing-block").targets[0].then[0];
+
+  const edited = await readBlockConfiguration(client);
+  // «...и только пока лампа выключена».
+  edited.targets[0].if.conditions.push({
+    type: "characteristic",
+    aId: 34,
+    sId: 13,
+    cId: 15,
+    hs: "Lightbulb",
+    hc: "On",
+    trigger: false,
+    cond: "=",
+    value: "false",
+    timeCond: "",
+    time: 0,
+  });
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Не трогать коридор, когда лампа уже горит",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const stored = scenarioData(hub, "existing-block").targets[0].then[0];
+  assert.equal(stored.code, hallCode);
+  // The hub numbers every node again, so the kept code got a new blockId.
+  assert.notEqual(stored.blockId, storedCode.blockId);
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+});
+
+test("hub code added to or changed in an existing BLOCK is refused with its pointer", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(webClientCodeBlock()),
+  );
+  const stored = await readBlockConfiguration(client);
+  const allowed =
+    "node type code is not supported by this contract; allowed here: if, service, delay, clear_delay, scenario";
+
+  const added = structuredClone(stored);
+  added.targets[0].then.push({ type: "code", code: "log.info('extra');" });
+  const changed = structuredClone(stored);
+  changed.targets[0].then[0].code = "log.info('hall light off');";
+  const refusals = [];
+  for (const data of [added, changed]) {
+    const refused = await prepareBlockUpdate(
+      client,
+      data,
+      "Не писать новый код хаба",
+    );
+    assert.equal(refused.isError, true);
+    refusals.push({
+      code: refused.structuredContent.error.code,
+      message: refused.structuredContent.error.message,
+      problems: refused.structuredContent.problems,
+    });
+  }
+  assert.deepEqual(refusals, [
+    {
+      code: "invalid_block_data",
+      message: `Unsupported BLOCK data at /targets/0/then/1: ${allowed}.`,
+      problems: [{ pointer: "/targets/0/then/1", message: allowed }],
+    },
+    {
+      code: "invalid_block_data",
+      message: `Unsupported BLOCK data at /targets/0/then/0: ${allowed}.`,
+      problems: [{ pointer: "/targets/0/then/0", message: allowed }],
+    },
+  ]);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
+});
+
+test("an existing BLOCK without a trigger is edited and reported as started only by hand or another scenario", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // A scene made in the web client: nothing starts it by itself; it is run
+  // manually or by another scenario and then checks the time and a sensor.
+  const manual = {
+    targets: [
+      everyIf({
+        when: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            {
+              type: "interval",
+              start: dailyCron(22, 0),
+              end: dailyCron(6, 0),
+              trigger: false,
+            },
+            characteristicCondition({ trigger: false }),
+          ],
+        },
+        thenActions: [setAction({ cId: 16, hc: "Brightness", value: "20" })],
+        elseActions: [setAction({ value: "true" })],
+      }),
+    ],
+  };
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+
+  const edited = await readBlockConfiguration(client);
+  edited.targets[0].else[0].characteristics[0].value = "false";
+  const prepared = await prepareBlockUpdate(
+    client,
+    edited,
+    "Вне ночи сцена выключает свет, а не включает",
+  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent.block_action_preview.triggers, {
+    status: "none",
+    note: "runs only when started manually or by another scenario",
+  });
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const stored = scenarioData(hub, "existing-block");
+  assert.equal(stored.targets[0].else[0].characteristics[0].value, "false");
+  assert.deepEqual(
+    stored.targets[0].if,
+    withRuntimeBlockFields(manual).targets[0].if,
+  );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+});
+
+test("an edit that removes the last trigger is refused and a new BLOCK still needs one", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const untriggered = blockData();
+  untriggered.targets[0].if.conditions[0].trigger = false;
+  const update = await prepareBlockUpdate(
+    client,
+    untriggered,
+    "Движение больше не запускает сценарий",
+  );
+  delete untriggered.vendorConfiguration;
+  const create = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет без запуска",
+      description: "Ничто не запускает этот BLOCK",
+      active: true,
+      on_start: false,
+      sync: false,
+      data: untriggered,
+      reason: "Проверить, что новому BLOCK нужен запуск",
+    },
+  });
+
+  assert.deepEqual(
+    [update, create].map((refused) => ({
+      isError: refused.isError,
+      message: refused.structuredContent.error?.message,
+      problems: refused.structuredContent.problems,
+    })),
+    [
+      {
+        isError: true,
+        message:
+          "Unsupported BLOCK data at /targets: this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron.",
+        problems: [
+          {
+            pointer: "/targets",
+            message:
+              "this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron",
+          },
+        ],
+      },
+      {
+        isError: true,
+        message:
+          "Unsupported BLOCK data at /targets: at least one trigger is required: trigger=true or a time_trigger cron.",
+        problems: [
+          {
+            pointer: "/targets",
+            message:
+              "at least one trigger is required: trigger=true or a time_trigger cron",
+          },
+        ],
+      },
+    ],
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
+test("a BLOCK refusal lists every failing rule with its pointer", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const data = heldMotionLightData();
+  data.targets[0].mode = "SOMETIMES";
+  data.targets[0].then_delay = 1000;
+  data.targets[0].else[0].index = 0;
+  const refused = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Свет с ошибками",
+      description: "Несколько неподдержанных полей",
+      active: true,
+      on_start: false,
+      sync: false,
+      data,
+      reason: "Назвать каждое нарушенное правило",
+    },
+  });
+  assert.equal(refused.isError, true);
+  const problems = [
+    {
+      pointer: "/targets/0/mode",
+      message: "if mode must be EVERY or ONCE; omitted means EVERY",
+    },
+    {
+      pointer: "/targets/0/then_delay",
+      message:
+        "then_delay must be 0 or omitted; a repeat period is not supported",
+    },
+    {
+      pointer: "/targets/0/else/0/index",
+      message: "delay index must be a positive integer",
+    },
+    {
+      pointer: "/targets/0/then/1/index",
+      message: "clear_delay index 1 has no delay with that index in this BLOCK",
+    },
+  ];
+  assert.deepEqual(refused.structuredContent.problems, problems);
+  assert.equal(
+    refused.structuredContent.error.message,
+    `Unsupported BLOCK data: ${problems.length} problems. ${problems
+      .map(({ pointer, message }) => `At ${pointer}: ${message}.`)
+      .join(" ")}`,
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create),
+    false,
+  );
+});
+
+test("a new BLOCK may leave out else and branch delays as the web client does", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const data = {
+    targets: [
+      {
+        type: "if",
+        if: conditionGroup(characteristicCondition(), "OR"),
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [setAction()],
+        else: null,
+      },
+    ],
+  };
+  const prepared = await prepareBlockCreate(client, {
+    name: "Свет по движению",
+    data,
+    reason: "Включать свет по движению",
+  });
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.structuredContent.status, "applied");
+  assert.deepEqual(
+    scenarioData(hub, created.structuredContent.scenario_index),
+    withRuntimeBlockFields(data),
+  );
+});
+
 test("a clear_delay for all delays of the BLOCK is created and read back", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -10904,7 +11292,7 @@ test("block_data_update wraps a single characteristic if predicate into a condit
   );
   assert.equal(
     rejectedUnknown.structuredContent.error.message,
-    "Unsupported BLOCK data at root.targets[0].if: node type code is not supported by this contract; allowed here: condition, characteristic.",
+    "Unsupported BLOCK data at /targets/0/if: node type code is not supported by this contract; allowed here: condition, characteristic.",
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
@@ -10955,7 +11343,7 @@ test("BLOCK preparation rejects delay index zero before any scenario write", asy
       isError: true,
       code: "invalid_block_data",
       message:
-        "Unsupported BLOCK data at root.targets[0].then[1]: delay index must be a positive unique integer; time must be a positive integer.",
+        "Unsupported BLOCK data at /targets/0/then/1/index: delay index must be a positive integer.",
     })),
   );
   assert.equal(
@@ -11065,7 +11453,7 @@ test("BLOCK grammar rejects known nodes in unsupported child slots before send",
   );
 });
 
-test("an existing BLOCK with a node outside the contract names that node type and stays unsent", async (t) => {
+test("an existing BLOCK keeps nodes outside the contract as stored and refuses them when added", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const cases = [
@@ -11077,6 +11465,7 @@ test("an existing BLOCK with a node outside the contract names that node type an
           text: "Свет включён",
           mode: "PUSH",
         });
+        return `/targets/0/then/${data.targets[0].then.length - 1}`;
       },
     },
     {
@@ -11087,12 +11476,14 @@ test("an existing BLOCK with a node outside the contract names that node type an
           url: "http://example.invalid/hook",
           method: "GET",
         });
+        return `/targets/${data.targets.length - 1}`;
       },
     },
     {
       type: "code",
       add: (data) => {
         data.targets.push({ type: "code", code: "log.info('manual');" });
+        return `/targets/${data.targets.length - 1}`;
       },
     },
     {
@@ -11102,6 +11493,7 @@ test("an existing BLOCK with a node outside the contract names that node type an
           type: "code",
           code: "return global.guestMode !== true;",
         });
+        return `/targets/0/if/conditions/${data.targets[0].if.conditions.length - 1}`;
       },
     },
   ];
@@ -11110,48 +11502,69 @@ test("an existing BLOCK with a node outside the contract names that node type an
   for (const testCase of cases) {
     const manual = blockData();
     delete manual.vendorConfiguration;
-    testCase.add(manual);
-    hub.state.scenarios[0].data = JSON.stringify(
-      withRuntimeBlockFields(manual),
-    );
-    const read = await client.callTool({
-      name: "get_entity",
-      arguments: { entity_ref: scenarioRef, include: ["configuration"] },
-    });
-    assert.equal(read.isError, undefined, read.content[0]?.text);
-    const edited = structuredClone(
-      read.structuredContent.entity.configuration.value,
-    );
+    const pointer = testCase.add(manual);
+    const stored = withRuntimeBlockFields(manual);
+    hub.state.scenarios[0].data = JSON.stringify(stored);
+    const edited = await readBlockConfiguration(client);
     edited.targets[0].then[1].time = 120_000;
-    const prepared = await client.callTool({
-      name: "prepare_native_change",
-      arguments: {
-        operation: "block_data_update",
-        target_ref: scenarioRef,
-        data: edited,
-        reason: "Выключать свет через две минуты",
-      },
+    const prepared = await prepareBlockUpdate(
+      client,
+      edited,
+      "Выключать свет через две минуты",
+    );
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    const applied = await client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
     });
+    const written = scenarioData(hub, "existing-block");
+    const restored = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: prepared.structuredContent.change_ref },
+    });
+
+    const added = await readBlockConfiguration(client);
+    const addedPointer = testCase.add(added);
+    const writesBefore = scenarioWriteCount(hub);
+    const refused = await prepareBlockUpdate(
+      client,
+      added,
+      "Добавить ещё один такой же блок",
+    );
     results.push({
-      isError: prepared.isError,
-      code: prepared.structuredContent?.error?.code,
-      namesType: new RegExp(`node type ${testCase.type}\\b`).test(
-        prepared.structuredContent?.error?.message ?? "",
+      applied: applied.structuredContent.status,
+      delay: blockNodeAtPointer(written, "/targets/0/then/1").time,
+      kept: isDeepStrictEqual(
+        blockNodeAtPointer(written, pointer),
+        blockNodeAtPointer(stored, pointer),
       ),
+      restored: restored.structuredContent.status,
+      refusedCode: refused.structuredContent?.error?.code,
+      refusedAt: refused.structuredContent?.problems?.map(
+        (problem) => problem.pointer,
+      ),
+      namesType: new RegExp(
+        `^Unsupported BLOCK data at ${addedPointer}: node type ${testCase.type}\\b`,
+      ).test(refused.structuredContent?.error?.message ?? ""),
     });
+    assert.equal(scenarioWriteCount(hub), writesBefore);
   }
 
   assert.deepEqual(
     results,
-    cases.map(() => ({
-      isError: true,
-      code: "invalid_block_data",
-      namesType: true,
-    })),
-  );
-  assert.equal(
-    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
-    false,
+    cases.map((testCase) => {
+      const expected = blockData();
+      testCase.add(expected);
+      return {
+        applied: "applied",
+        delay: 120_000,
+        kept: true,
+        restored: "restored",
+        refusedCode: "invalid_block_data",
+        refusedAt: [testCase.add(expected)],
+        namesType: true,
+      };
+    }),
   );
 });
 
