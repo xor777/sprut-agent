@@ -627,6 +627,44 @@ test("pages come from one snapshot, stay within max_bytes and drill down by room
   assert.equal(garbage.error.code, "invalid_cursor");
 });
 
+test("a page that cannot fit max_bytes says so instead of passing silently", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  // Unavailable lamps with long names: even the most compact page of one
+  // service carries three of them in not_evaluated.
+  for (let n = 1; n <= 12; n += 1) {
+    fixture.accessories.push({
+      id: 300 + n,
+      roomId: 4,
+      name: `Потолочная лампа над обеденным столом у окна в дальнем углу кухни, группа ${n}`,
+      online: false,
+      extensionKey: "Controller:zigbee",
+      deviceId: `00158d0004a1b${300 + n}`,
+      services: [
+        {
+          sId: 13,
+          type: "Lightbulb",
+          name: "Свет",
+          characteristics: [{ cId: 14, type: "On", value: false }],
+        },
+      ],
+    });
+  }
+  const { call } = await setup(t, fixture);
+
+  const tight = await call("find_devices", {
+    state: "on",
+    limit: 1,
+    max_bytes: 2_048,
+  });
+  assert(tight.bytes > 2_048, `${tight.bytes} bytes`);
+  assert.equal(tight.body.max_bytes_exceeded, true);
+  assert.equal(tight.body.returned, 1);
+
+  const roomy = await call("find_devices", { state: "on", limit: 1 });
+  assert(roomy.bytes <= 16_000);
+  assert.equal(Object.hasOwn(roomy.body, "max_bytes_exceeded"), false);
+});
+
 test("the session catalog is reused, dropped by this process's writes and refreshed for unknown names", async (t) => {
   const { hub, call, home } = await setup(
     t,
