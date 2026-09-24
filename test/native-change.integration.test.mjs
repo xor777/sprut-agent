@@ -19874,6 +19874,10 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
   assert.equal(afterCleanup.structuredContent.status, "restored");
   assert.equal(afterCleanup.structuredContent.logic_mapping_status, undefined);
   assert.equal(afterCleanup.structuredContent.logic_mapping_reason, undefined);
+  assert.equal(
+    afterCleanup.structuredContent.logic_assignments_may_remain,
+    undefined,
+  );
 });
 
 test("a lost LOGIC create response is reconciled without creating a duplicate", async (t) => {
@@ -20512,8 +20516,7 @@ for (const tool of [
 // Earlier versions mapped the one new type seen by a later get and saved it.
 // The fixture is such a record, captured from that code: its own type was
 // unlisted and the type of a LOGIC created afterwards was taken instead.
-test("a LOGIC type an earlier version mapped after the create does not let restore delete the LOGIC", async (t) => {
-  const { hub, stateDirectory } = await setup(t);
+async function readLogicCreateMappedAfterApply() {
   const { change } = JSON.parse(
     await readFile(
       path.join(
@@ -20523,6 +20526,10 @@ test("a LOGIC type an earlier version mapped after the create does not let resto
       "utf8",
     ),
   );
+  return change;
+}
+
+async function writeNativeChangeJournal(hub, stateDirectory, change) {
   const fingerprint = createHash("sha256")
     .update(`${hub.url}\0${serial}`)
     .digest("hex");
@@ -20538,6 +20545,12 @@ test("a LOGIC type an earlier version mapped after the create does not let resto
       2,
     )}\n`,
   );
+}
+
+test("a LOGIC type an earlier version mapped after the create does not let restore delete the LOGIC", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const change = await readLogicCreateMappedAfterApply();
+  await writeNativeChangeJournal(hub, stateDirectory, change);
   hub.state.scenarios.push(structuredClone(change.applied_snapshot));
   hub.state.scenarioLogicTypes[change.scenario_index] = "GeneratedLogicType1";
   hub.state.logicTypes.push({
@@ -20568,6 +20581,59 @@ test("a LOGIC type an earlier version mapped after the create does not let resto
     }),
   );
   await assertUnlistedLogicKept(hub, client, changeRef);
+  assert.deepEqual(hub.state.logics, [ownAssignment]);
+});
+
+// The same record whose delete an earlier version sent after checking the
+// assignments of that later type: the journal says restoring, and the hub
+// already deleted the LOGIC while its own assignment stayed. The record is
+// settled as restored, but that check did not cover the LOGIC's own type.
+test("a LOGIC delete an earlier version sent after checking a later type is restored with its assignments not ruled out", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const change = await readLogicCreateMappedAfterApply();
+  const sentAt = "2026-09-24T15:31:00.000Z";
+  Object.assign(change, {
+    status: "restoring",
+    native_acknowledged: false,
+    write_intent: {
+      direction: "restore",
+      phase: "sending",
+      acknowledged: false,
+      at: sentAt,
+    },
+    updated_at: sentAt,
+  });
+  delete change.configuration_matches;
+  change.history.push({ status: "restoring", at: sentAt });
+  await writeNativeChangeJournal(hub, stateDirectory, change);
+  hub.state.logicTypes.push({
+    type: "OtherLogicType",
+    name: "Другой LOGIC",
+    desc: "Создан владельцем позже",
+  });
+  const ownAssignment = {
+    aId: 32,
+    sId: 13,
+    type: "GeneratedLogicType1",
+    name: change.applied_snapshot.name,
+    active: false,
+  };
+  hub.state.logics.push(ownAssignment);
+  const client = await startClient(t, hub, stateDirectory);
+  const changeRef = `spruthub-change://native/${change.id}`;
+
+  const settled = await callChangeTool(client, "get_native_change", changeRef);
+  assert.equal(settled.status, "restored");
+  assert.equal(settled.logic_assignments_may_remain, true);
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const stored = await callChangeTool(
+    restartedClient,
+    "get_native_change",
+    changeRef,
+  );
+  assert.equal(stored.status, "restored");
+  assert.equal(stored.logic_assignments_may_remain, true);
+  assert.deepEqual(scenarioDeletes(hub), []);
   assert.deepEqual(hub.state.logics, [ownAssignment]);
 });
 
