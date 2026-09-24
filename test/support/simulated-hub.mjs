@@ -2773,14 +2773,17 @@ function expandIncludes(expand, part) {
   );
 }
 
-// The owner's hub (3.0.0, 2026-09-24) kept the first 30 characters of a
-// 42-character ASCII room name on room.create, and a rename whose first 30
-// characters equalled the current name left it unchanged. How it counts
-// characters outside ASCII was not seen; this cuts UTF-16 units.
-const ROOM_NAME_LIMIT = 30;
+// The owner's hub (3.0.0, 2026-09-24, live-conformance-3) kept the first 32
+// characters of a room name on room.create, Cyrillic and Latin alike
+// (characters, not bytes), and dropped emoji. room.update is assumed to keep
+// a name the same way; which other characters it drops was not seen.
+const ROOM_NAME_LIMIT = 32;
 
 function storedRoomName(name) {
-  return name.slice(0, ROOM_NAME_LIMIT);
+  return [...name]
+    .filter((character) => character.codePointAt(0) <= 0xffff)
+    .slice(0, ROOM_NAME_LIMIT)
+    .join("");
 }
 
 function requireRoom(state, id) {

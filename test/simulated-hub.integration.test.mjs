@@ -1044,9 +1044,9 @@ test("the simulator gives every scenario type the live options window and refuse
 });
 
 // Owner's hub, 3.0.0, 2026-09-24: accessory.list had no virtual field while
-// accessory.get had it, true on the created virtual accessory, and a
-// 42-character room name was kept as its first 30 characters.
-test("the simulator lists accessories without virtual, reads it on each accessory and keeps 30 characters of a room name", async (t) => {
+// accessory.get had it, true on the created virtual accessory, and a room
+// name was kept as its first 32 characters, without emoji.
+test("the simulator lists accessories without virtual, reads it on each accessory and keeps 32 characters of a room name without emoji", async (t) => {
   const { send } = await rawSession(t);
   const created = (
     await send({
@@ -1089,9 +1089,15 @@ test("the simulator lists accessories without virtual, reads it on each accessor
   assert.equal(long.length, 42);
   const room = (await send({ room: { create: { name: long } } })).result.room
     .create;
-  assert.equal(await roomName(room.id), "zz-sprut-agent-probe-20260924T");
+  assert.equal(room.name, "zz-sprut-agent-probe-20260924T13");
+  assert.equal(await roomName(room.id), "zz-sprut-agent-probe-20260924T13");
+  const emoji = (await send({ room: { create: { name: "Детская🙂" } } })).result
+    .room.create;
+  assert.equal(await roomName(emoji.id), "Детская");
   await send({
-    room: { update: { id: 7, name: "Кабинет с видом на сад и старую яблоню" } },
+    room: {
+      update: { id: 7, name: "Кабинет с видом на старый яблоневый сад" },
+    },
   });
-  assert.equal(await roomName(7), "Кабинет с видом на сад и стару");
+  assert.equal(await roomName(7), "Кабинет с видом на старый яблоне");
 });
