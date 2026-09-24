@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -289,7 +290,7 @@ async function startClient(
   t,
   hub,
   sessionFile,
-  { timeoutMs = "1000", serial } = {},
+  { timeoutMs = String(ORDINARY_HUB_TIMEOUT_MS), serial } = {},
 ) {
   const connectionFile = path.join(path.dirname(sessionFile), "connection.env");
   await writeFile(
@@ -328,7 +329,7 @@ async function startInstalledProfileClient(t, configRoot, env = {}) {
     env: {
       PATH: process.env.PATH,
       XDG_CONFIG_HOME: configRoot,
-      SPRUTHUB_TIMEOUT_MS: "1000",
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
       ...env,
     },
     stderr: "pipe",

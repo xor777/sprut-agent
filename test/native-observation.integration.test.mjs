@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -175,7 +176,7 @@ async function startClient(t, hub, { serial = "home/A" } = {}) {
       SPRUTHUB_TOKEN: "observation-secret-must-not-leak",
       ...(serial === null ? {} : { SPRUTHUB_SERIAL: serial }),
       SPRUTHUB_CID: "native-observation-test",
-      SPRUTHUB_TIMEOUT_MS: "500",
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
     },
     stderr: "pipe",
   });
@@ -192,7 +193,7 @@ async function startClient(t, hub, { serial = "home/A" } = {}) {
   return client;
 }
 
-async function waitFor(predicate, timeoutMs = 1_000) {
+async function waitFor(predicate, timeoutMs = ORDINARY_HUB_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) assert.fail("timed out waiting for test event");

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -33,14 +34,20 @@ const observedMotionReading = JSON.parse(
   ),
 );
 
+// Fails a hung MCP call well before the SDK's 60 s default, but only after the
+// hub budget, so the product's own `timeout` result arrives first.
 class BoundedTestClient extends Client {
   callTool(params, resultSchema, options = {}) {
     return super.callTool(params, resultSchema, {
-      timeout: 1_500,
+      timeout: ORDINARY_HUB_TIMEOUT_MS + 5_000,
       ...options,
     });
   }
 }
+
+// Deliberate stalls below use this budget; the fake delays and the elapsed
+// time bounds in those tests are calibrated against it.
+const STALL_HUB_TIMEOUT = { SPRUTHUB_TIMEOUT_MS: "250" };
 
 const hubState = {
   rooms: [
@@ -350,7 +357,7 @@ async function startSilentHandshakeHub() {
     get openConnections() {
       return sockets.size;
     },
-    waitForNoConnections(timeoutMs = 500) {
+    waitForNoConnections(timeoutMs = ORDINARY_HUB_TIMEOUT_MS) {
       if (sockets.size === 0) return Promise.resolve();
       return new Promise((resolve, reject) => {
         const finish = () => {
@@ -396,7 +403,7 @@ async function startMcpClient(t, hub, environment = {}) {
       SPRUTHUB_TOKEN: "synthetic-test-token",
       SPRUTHUB_SERIAL: "test-hub",
       SPRUTHUB_CID: "sprut-agent-test",
-      SPRUTHUB_TIMEOUT_MS: "250",
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
       ...environment,
     },
     stderr: "pipe",
@@ -2012,7 +2019,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
 
   const silentHub = await startHub();
   silentHub.state.ignoreFirstConnection = true;
-  const silentClient = await startMcpClient(t, silentHub);
+  const silentClient = await startMcpClient(t, silentHub, STALL_HUB_TIMEOUT);
   const timeoutStartedAt = performance.now();
   const timeout = await readRoomServices(
     silentClient,
@@ -2097,7 +2104,11 @@ test("connection failures stay bounded and recover with a fresh reading in the s
 
 test("one tool deadline covers the WebSocket handshake and every room RPC", async (t) => {
   const handshakeHub = await startSilentHandshakeHub();
-  const handshakeClient = await startMcpClient(t, handshakeHub);
+  const handshakeClient = await startMcpClient(
+    t,
+    handshakeHub,
+    STALL_HUB_TIMEOUT,
+  );
   const handshakeStartedAt = performance.now();
   const handshakeTimeout = await readRoomServices(
     handshakeClient,
@@ -2120,7 +2131,7 @@ test("one tool deadline covers the WebSocket handshake and every room RPC", asyn
 
   const slowHub = await startHub();
   slowHub.state.responseDelays = [160, 160];
-  const slowClient = await startMcpClient(t, slowHub);
+  const slowClient = await startMcpClient(t, slowHub, STALL_HUB_TIMEOUT);
   const slowStartedAt = performance.now();
   const sequenceTimeout = await readRoomServices(
     slowClient,

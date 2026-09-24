@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -621,7 +622,11 @@ function respond(state, request, behavior) {
   };
 }
 
-async function startClient(t, hub) {
+async function startClient(
+  t,
+  hub,
+  { timeoutMs = ORDINARY_HUB_TIMEOUT_MS } = {},
+) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -632,7 +637,7 @@ async function startClient(t, hub) {
       SPRUTHUB_TOKEN: "opaque-4f9a8b7c",
       SPRUTHUB_SERIAL: homeSerial,
       SPRUTHUB_CID: "extension-child-test",
-      SPRUTHUB_TIMEOUT_MS: "500",
+      SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
     },
     stderr: "pipe",
   });
@@ -1228,9 +1233,16 @@ test("child catalogs paginate, distinguish empty from errors, and hide raw hub f
   );
 });
 
+// The next two tests leave child-list requests unanswered and expect
+// `timeout`. The MCP process keeps serving their ordinary calls in between, so
+// the budget is short but not tight.
+const STALLED_CHILD_LIST_TIMEOUT_MS = 1_000;
+
 test("empty notification children stay empty and keep provider status when the catalog cannot be read", async (t) => {
   const hub = await startHub();
-  const client = await startClient(t, hub);
+  const client = await startClient(t, hub, {
+    timeoutMs: STALLED_CHILD_LIST_TIMEOUT_MS,
+  });
 
   const omitted = await client.callTool({
     name: "get_entity",
@@ -1349,7 +1361,9 @@ test("empty notification children stay empty and keep provider status when the c
 
 test("a pointer into unread children keeps the include read failure", async (t) => {
   const hub = await startHub();
-  const client = await startClient(t, hub);
+  const client = await startClient(t, hub, {
+    timeoutMs: STALLED_CHILD_LIST_TIMEOUT_MS,
+  });
 
   hub.behavior.childListHangKey = telegramKey;
   const timedOut = await client.callTool({

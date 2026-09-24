@@ -5,6 +5,7 @@ import { WebSocketServer } from "ws";
 import { createSprutHubReader } from "../dist/plugin/dist/read.mjs";
 import { createSprutHubReader as createSourceSprutHubReader } from "../src/read-api.mjs";
 import { SprutHubError } from "../src/spruthub-client.mjs";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const homeRef = "spruthub://hub/home-1";
 const temperatureRef = `${homeRef}/accessory/10/service/20/characteristic/30`;
@@ -19,7 +20,7 @@ test("an external Node consumer reads fresh selected values and closes the insta
       SPRUTHUB_URL: hub.url,
       SPRUTHUB_SERIAL: "home-1",
       SPRUTHUB_CID: "external-reader-test",
-      SPRUTHUB_TIMEOUT_MS: "1000",
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
     },
   });
   const selection = {

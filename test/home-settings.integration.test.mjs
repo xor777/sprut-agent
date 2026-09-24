@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -555,7 +556,7 @@ async function startClient(t, hub) {
       SPRUTHUB_TOKEN: "home-settings-test-token",
       SPRUTHUB_SERIAL: selectedSerial,
       SPRUTHUB_CID: "home-settings-test",
-      SPRUTHUB_TIMEOUT_MS: "1000",
+      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
       SPRUT_AGENT_STATE_DIR: stateDirectory,
     },
     stderr: "pipe",
