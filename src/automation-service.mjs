@@ -4803,12 +4803,26 @@ export class AutomationService {
         });
       }
     }
-    if (change.kind === "logic_source_create") {
-      const refusal = createdLogicOffRefusal(change, current.scenario);
-      if (refusal) throw refusal;
-      // Saved with the restore intent: which type's assignments this delete
-      // was checked against (logicDeleteAssignmentCheckUnproven).
-      change.logic_delete_checked_type = createdLogicType(change);
+    if (["block_create", "logic_source_create"].includes(change.kind)) {
+      // The scans above read every service or BLOCK one after another. The
+      // delete goes by index, so the scenario is read again right before the
+      // intent is saved: anything changed since the first read, including
+      // another scenario at the index, stops it.
+      const fresh = await this.#observeScenarioChange(change);
+      if (!scenarioChangeObservation(change, fresh, "applied").matches) {
+        return this.#observeProvenScenarioChange(change, fresh);
+      }
+      if (change.kind === "logic_source_create") {
+        // Off at either read, the scan may have missed its assignments.
+        const refusal =
+          createdLogicUnmappedRefusal(change) ??
+          createdLogicOffRefusal(change, current.scenario) ??
+          createdLogicOffRefusal(change, fresh.scenario);
+        if (refusal) throw refusal;
+        // Saved with the restore intent: which type's assignments this
+        // delete was checked against (logicDeleteAssignmentCheckUnproven).
+        change.logic_delete_checked_type = createdLogicType(change);
+      }
     }
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
@@ -5971,7 +5985,7 @@ function blockContract() {
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
-      "Restore does not delete a created BLOCK or LOGIC that another BLOCK runs with a scenario target: the result is conflict scenario_targets_present naming those targets; change or remove them first, then restore again.",
+      "Restore does not delete a created BLOCK or LOGIC that another BLOCK runs with a scenario target: the result is conflict scenario_targets_present naming those targets; change or remove them first, then restore again. After this scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict).",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
       "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, held, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage. block_action_preview.scenario_runs names the scenario each scenario target runs.",
     ],
@@ -10531,7 +10545,7 @@ function logicSourceContract(mode) {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; the scan runs while it is off too, and what it finds blocks the delete (logic_assignments_present, scenario_targets_present); a turned-off LOGIC with none found is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed. Turning it on makes it run on any device that uses it, so only with the owner's agreement: turn it on with scenario_active and restore again; if that restore finds assignments, the LOGIC stays on and restoring that scenario_active change turns it off again. Otherwise the owner deletes it in the SprutHub app. An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted either",
+        "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; the scan runs while it is off too, and what it finds blocks the delete (logic_assignments_present, scenario_targets_present); after the scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict); a turned-off LOGIC with none found is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed. Turning it on makes it run on any device that uses it, so only with the owner's agreement: turn it on with scenario_active and restore again; if that restore finds assignments, the LOGIC stays on and restoring that scenario_active change turns it off again. Otherwise the owner deletes it in the SprutHub app. An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted either",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },

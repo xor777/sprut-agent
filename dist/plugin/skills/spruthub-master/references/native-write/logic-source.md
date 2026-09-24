@@ -80,8 +80,11 @@
   Так же удаление блокирует BLOCK, который запускает этот LOGIC целью
   `scenario`: conflict `scenario_targets_present` называет его в
   `referencing_scenario_targets` с указателем узла; сначала измени или убери
-  эту цель (`block_data_update`), затем повтори restore. После снятия дочерних source/options/active changes и назначений созданный
-  неизменённый LOGIC можно явно restore. Сохранённое отсутствие proven create
+  эту цель (`block_data_update`), затем повтори restore. После обхода
+  restore читает сценарий ещё раз: изменение с первого чтения, в том числе
+  другой сценарий под тем же index, останавливает удаление (conflict).
+  После снятия дочерних source/options/active changes и назначений
+  созданный неизменённый LOGIC можно явно restore. Сохранённое отсутствие proven create
   по записанному index через `get_native_change`, `apply_native_change` или
   `restore_native_change` прекращает delete этого change: точная копия под
   тем же index не удаляется, `restore_supported=false`. `get_entity` и

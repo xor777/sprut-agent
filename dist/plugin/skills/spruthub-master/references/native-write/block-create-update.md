@@ -260,7 +260,9 @@
   restore не удаляет: результат — conflict `scenario_targets_present` со
   списком `referencing_scenario_targets` (scenario ref, имя, указатель узла и
   `next` на `get_entity`). Сначала измени или убери эти цели, затем повтори
-  restore.
+  restore. После этого обхода restore читает сценарий ещё раз: изменение с
+  первого чтения, в том числе другой сценарий под тем же index, останавливает
+  удаление (conflict).
   Ручная правка имени, `onStart`/`sync` или data даёт conflict и
   сохраняется: повторный apply уже подтверждённого change не перезаписывает
   ручной откат, а `next` ведёт к новому prepare. Известный conflict не даёт
