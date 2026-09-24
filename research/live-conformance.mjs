@@ -113,20 +113,24 @@ class GuardedHub {
     return this.#call(tool, args);
   }
 
-  // Every room, scenario and accessory of the home for the safety snapshot.
+  // Every room, scenario, accessory and extension of the home for the safety
+  // snapshot.
   // The MCP reads answer questions, not full listings, so these lists are
   // read with the product client, as the sweep does.
   async lists() {
     this.#listClient ??= await new SprutHubConnection({
       env: serverEnvironment(report.state_directory),
     }).getClient();
-    const [rooms, scenarios, accessories] = await Promise.all([
+    const serial = decodeURIComponent(this.homeRef.split("/").at(-1));
+    const [rooms, scenarios, accessories, extensions] = await Promise.all([
       this.#listClient.listRooms(),
       this.#listClient.listScenarios(),
       this.#listClient.listAccessories(),
+      this.#listClient.nativeExtensions(serial, Date.now() + 10_000),
     ]);
     return {
       accessories,
+      extensions: extensions.extensions,
       rooms: rooms.rooms,
       scenarios: scenarios.map((scenario) => ({
         ref: `${this.homeRef}/scenario/${encodeURIComponent(scenario.index)}`,
@@ -943,7 +947,7 @@ async function homeSnapshot(hub, targets) {
     max_bytes: 32_768,
   });
   // A bridge that exported the probe accessory would change its child count.
-  const extensions = (inspect.entities.extensions ?? [])
+  const extensions = lists.extensions
     .map((extension, position) => ({
       ref: `${extension.ref}#${extension.index ?? position}`,
       bundle_type: extension.bundle_type ?? null,
