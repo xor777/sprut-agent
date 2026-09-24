@@ -8,10 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import {
-  defaultStateDirectory,
-  hubStateFingerprint,
-} from "./automation-store.mjs";
+import { hubStateFingerprint, stateDirectory } from "./automation-store.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 export const CONFIGURATION_POINT_FORMAT_VERSION = 1;
@@ -20,7 +17,7 @@ export class ConfigurationPointStore {
   #writes = Promise.resolve();
 
   constructor({ directory, hubUrl, hubSerial }) {
-    this.directory = directory ?? defaultStateDirectory();
+    this.directory = stateDirectory(directory);
     this.hubSerial = hubSerial;
     this.hubFingerprint = hubStateFingerprint(hubUrl, hubSerial);
     this.pointsDirectory = path.join(

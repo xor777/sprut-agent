@@ -7,7 +7,7 @@ export class AutomationStore {
   #writes = Promise.resolve();
 
   constructor({ directory, hubUrl, hubSerial }) {
-    this.directory = directory ?? defaultStateDirectory();
+    this.directory = stateDirectory(directory);
     this.hubFingerprint = hubStateFingerprint(hubUrl, hubSerial);
     this.file = path.join(
       this.directory,
@@ -73,7 +73,14 @@ export function hubStateFingerprint(hubUrl, hubSerial) {
   return createHash("sha256").update(`${hubUrl}\0${hubSerial}`).digest("hex");
 }
 
-export function defaultStateDirectory() {
+// MCP clients often pass an unfilled SPRUT_AGENT_STATE_DIR as an empty
+// string. A blank value counts as unset, so history stays in the per-user
+// directory instead of failing or following the process working directory.
+export function stateDirectory(configured) {
+  return isBlank(configured) ? defaultStateDirectory() : configured;
+}
+
+function defaultStateDirectory() {
   if (process.platform === "darwin") {
     return path.join(
       homedir(),
@@ -82,8 +89,14 @@ export function defaultStateDirectory() {
       "sprut-agent",
     );
   }
+  // The XDG rule treats an empty XDG_STATE_HOME as unset.
+  const stateHome = process.env.XDG_STATE_HOME;
   return path.join(
-    process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"),
+    isBlank(stateHome) ? path.join(homedir(), ".local", "state") : stateHome,
     "sprut-agent",
   );
+}
+
+function isBlank(value) {
+  return value === undefined || value === null || value.trim() === "";
 }
