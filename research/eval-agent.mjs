@@ -441,10 +441,9 @@ export function summaryLine(outcome) {
     .map(({ name, pass }) => `${pass ? "+" : "-"}${name}`)
     .join(" ");
   // A pass that rests on simulator behavior not seen on a live hub.
-  const unverified = outcome.pass ? (outcome.unverified_methods ?? []) : [];
   const verdict = outcome.pass
-    ? unverified.length > 0
-      ? `PASS* (unverified: ${unverified.join(", ")})`
+    ? isUnverifiedPass(outcome)
+      ? `PASS* (unverified: ${outcome.unverified_methods.join(", ")})`
       : "PASS"
     : `FAIL(${outcome.failure_class})`;
   return [
@@ -462,8 +461,11 @@ export function summaryLine(outcome) {
   ].join(" ");
 }
 
-// Per case and fixture: passes, failure classes and medians; per case run on
-// both fixtures: the house/apartment ratio of the medians.
+// Per case and fixture: verified passes, PASS* (a pass that rests on a
+// simulator method without live evidence) and failures counted apart, and
+// medians of passing and of failed runs apart: a failed run may stop early
+// or wander, so it says nothing about what the task costs. Per case run on
+// both fixtures: the house/apartment ratio of the passing runs' medians.
 export function summarizeRuns(
   outcomes,
   { harness, harnessVersion, model, plugin },
@@ -478,35 +480,19 @@ export function summarizeRuns(
     for (const { failure_class: failure } of runs) {
       if (failure) failureClasses[failure] = (failureClasses[failure] ?? 0) + 1;
     }
+    const passed = runs.filter(({ pass }) => pass);
+    const unverified = passed.filter(isUnverifiedPass).length;
     return {
       case: runs[0].case,
       fixture: runs[0].fixture,
       expected_fail: runs[0].expected_fail ?? null,
       runs: runs.length,
-      passes: runs.filter(({ pass }) => pass).length,
+      passes: passed.length - unverified,
+      unverified_passes: unverified,
+      failures: runs.length - passed.length,
       failure_classes: failureClasses,
-      median_mcp_calls: median(
-        runs.map(({ metrics }) => metrics.mcp_tool_calls),
-      ),
-      median_mcp_result_bytes: median(
-        runs.map(({ metrics }) => metrics.mcp_tool_result_bytes),
-      ),
-      median_hub_requests: median(
-        runs.map(({ metrics }) => metrics.hub_requests),
-      ),
-      median_hub_response_bytes: median(
-        runs.map(({ metrics }) => metrics.hub_response_bytes),
-      ),
-      median_tokens: median(
-        runs.map(({ metrics }) =>
-          metrics.tokens
-            ? metrics.tokens.total_input + metrics.tokens.output
-            : null,
-        ),
-      ),
-      median_wall_seconds: median(
-        runs.map(({ metrics }) => metrics.wall_seconds),
-      ),
+      passed: medians(passed),
+      failed: medians(runs.filter(({ pass }) => !pass)),
       run_dirs: runs.map(({ run_dir: dir }) => dir ?? null),
     };
   });
@@ -521,21 +507,23 @@ export function summarizeRuns(
         candidate.case === entry.case && candidate.fixture === "apartment",
     );
     if (!small) continue;
+    const [large, base] = [entry.passed ?? {}, small.passed ?? {}];
     scale.push({
       case: entry.case,
-      mcp_calls_ratio: ratio(entry.median_mcp_calls, small.median_mcp_calls),
+      basis: "passed runs",
+      mcp_calls_ratio: ratio(large.median_mcp_calls, base.median_mcp_calls),
       mcp_result_bytes_ratio: ratio(
-        entry.median_mcp_result_bytes,
-        small.median_mcp_result_bytes,
+        large.median_mcp_result_bytes,
+        base.median_mcp_result_bytes,
       ),
-      tokens_ratio: ratio(entry.median_tokens, small.median_tokens),
+      tokens_ratio: ratio(large.median_tokens, base.median_tokens),
       hub_requests_ratio: ratio(
-        entry.median_hub_requests,
-        small.median_hub_requests,
+        large.median_hub_requests,
+        base.median_hub_requests,
       ),
       hub_response_bytes_ratio: ratio(
-        entry.median_hub_response_bytes,
-        small.median_hub_response_bytes,
+        large.median_hub_response_bytes,
+        base.median_hub_response_bytes,
       ),
     });
   }
@@ -554,19 +542,44 @@ export function summarizeRuns(
   };
 }
 
+function isUnverifiedPass(outcome) {
+  return outcome.pass && (outcome.unverified_methods ?? []).length > 0;
+}
+
+// Medians of a set of runs; null for no runs.
+function medians(runs) {
+  if (runs.length === 0) return null;
+  const of = (read) => median(runs.map(({ metrics }) => read(metrics)));
+  return {
+    runs: runs.length,
+    median_mcp_calls: of((metrics) => metrics.mcp_tool_calls),
+    median_mcp_result_bytes: of((metrics) => metrics.mcp_tool_result_bytes),
+    median_hub_requests: of((metrics) => metrics.hub_requests),
+    median_hub_response_bytes: of((metrics) => metrics.hub_response_bytes),
+    median_tokens: of(({ tokens }) =>
+      tokens ? tokens.total_input + tokens.output : null,
+    ),
+    median_wall_seconds: of((metrics) => metrics.wall_seconds),
+  };
+}
+
 function summaryTable(summary) {
+  const cost = (entry) =>
+    entry
+      ? `mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} hub_requests=${entry.median_hub_requests} hub_bytes=${entry.median_hub_response_bytes} tokens=${entry.median_tokens}`
+      : "-";
   return [
     ...summary.cases.map(
       (entry) =>
-        `SUMMARY ${entry.case}@${entry.fixture}${entry.expected_fail ? " (expected to fail)" : ""} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} hub_requests=${entry.median_hub_requests} hub_bytes=${entry.median_hub_response_bytes} tokens=${entry.median_tokens}${
+        `SUMMARY ${entry.case}@${entry.fixture}${entry.expected_fail ? " (expected to fail)" : ""} PASS ${entry.passes} PASS* ${entry.unverified_passes} FAIL ${entry.failures} of ${entry.runs}${
           Object.keys(entry.failure_classes).length > 0
             ? ` failures=${JSON.stringify(entry.failure_classes)}`
             : ""
-        }`,
+        } passed: ${cost(entry.passed)} failed: ${cost(entry.failed)}`,
     ),
     ...summary.scale.map(
       (entry) =>
-        `SCALE ${entry.case} house/apartment mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio} hub_requests=${entry.hub_requests_ratio} hub_bytes=${entry.hub_response_bytes_ratio}`,
+        `SCALE ${entry.case} house/apartment (${entry.basis}) mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio} hub_requests=${entry.hub_requests_ratio} hub_bytes=${entry.hub_response_bytes_ratio}`,
     ),
   ];
 }

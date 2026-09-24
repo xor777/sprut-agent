@@ -568,7 +568,7 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
   );
   assert.ok(
     lines.some((line) =>
-      /^SUMMARY turn-off-room@apartment PASS 2 PASS\* 0 FAIL 0 of 2 passed: mcp_calls=6 .* failed: -$/.test(
+      /^SUMMARY turn-off-room@apartment PASS 2 PASS\* 0 FAIL 0 of 2 passed: mcp_calls=6 .* failed: -\n$/.test(
         line,
       ),
     ),
