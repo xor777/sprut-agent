@@ -1151,7 +1151,9 @@ test("an edit that deletes a request or notification the agent cannot write back
           url: "http://admin:secret@192.168.1.1/reboot",
         },
         { type: "notify", text: "", mode: "MESSAGE" },
+        // Answers hide a URL with a path, so the agent cannot write it again.
         { type: "http", method: "GET", url: "http://192.168.1.50/relay/0" },
+        { type: "http", method: "GET", url: "http://192.168.1.51" },
       ]),
     ],
   };
@@ -1170,11 +1172,12 @@ test("an edit that deletes a request or notification the agent cannot write back
       "This edit deletes stored nodes this contract cannot write",
     ),
   );
+  // The request to scheme and host only, which the agent sees whole and
+  // could add again, is not named.
   assert.match(
     warning ?? "",
-    /http at \/targets\/0\/then\/1, notify at \/targets\/0\/then\/2\./,
+    /: http at \/targets\/0\/then\/1, notify at \/targets\/0\/then\/2, http at \/targets\/0\/then\/3\./,
   );
-  // The request the agent could add again is not named.
-  assert.doesNotMatch(warning, /then\/3/);
   assert.equal(JSON.stringify(edited).includes("secret@"), false);
+  assert.equal(JSON.stringify(edited).includes("/relay/0"), false);
 });
