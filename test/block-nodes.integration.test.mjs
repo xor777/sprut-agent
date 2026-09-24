@@ -457,7 +457,7 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
   ]);
 });
 
-test("a scenario makes an HTTP request without repeating its query or key", async (t) => {
+test("a scenario makes an HTTP request and answers name only its scheme and host", async (t) => {
   const { hub, client } = await setup(t);
   const secret = "S3CRET-KEY-VALUE";
   // «Если протечка — включи реле по HTTP и дёрни вебхук.»
@@ -477,13 +477,15 @@ test("a scenario makes an HTTP request without repeating its query or key", asyn
     {
       configuration_pointer: "/targets/0/then/0",
       method: "GET",
-      url: "http://192.168.1.50/relay/0",
+      url: "http://192.168.1.50",
+      path: "not_shown",
       query: "not_shown",
     },
     {
       configuration_pointer: "/targets/0/then/1",
       method: "POST",
-      url: "https://maker.ifttt.com/trigger/leak/json",
+      url: "https://maker.ifttt.com",
+      path: "not_shown",
       query: "not_shown",
     },
   ]);
@@ -502,13 +504,15 @@ test("a scenario makes an HTTP request without repeating its query or key", asyn
     {
       type: "http",
       method: "GET",
-      url: "http://192.168.1.50/relay/0",
+      url: "http://192.168.1.50",
+      path: "not_shown",
       query: "not_shown",
     },
     {
       type: "http",
       method: "POST",
-      url: "https://maker.ifttt.com/trigger/leak/json",
+      url: "https://maker.ifttt.com",
+      path: "not_shown",
       query: "not_shown",
     },
   ]);
@@ -550,6 +554,174 @@ test("a scenario makes an HTTP request without repeating its query or key", asyn
     "/targets/0/then/4/url",
   ]);
   assert.equal(JSON.stringify(refused).includes("password1"), false);
+});
+
+// Services put the key in the path as often as in the query: Telegram
+// /bot<token>/, IFTTT /with/key/<key>, Slack, Discord and Home Assistant
+// webhook ids. A query name the redaction does not know (?key=) and a
+// password without a user name are keys too. No answer repeats any of them.
+test("answers name only the scheme and host of a request, whatever part of its URL holds the key", async (t) => {
+  const { hub, client } = await setup(t);
+  const token = "123456789:AAHsecretTelegramToken";
+  const key = "k3y-in-the-query";
+  const password = "r0uter-pass";
+  const telegram = {
+    type: "http",
+    method: "GET",
+    url: `https://api.telegram.org/bot${token}/sendMessage?chat_id=1&text=leak`,
+  };
+  const socket = {
+    type: "http",
+    method: "GET",
+    url: `http://192.168.1.60/cm?key=${key}&cmnd=Power%20On`,
+  };
+  const secrets = [token, key, password];
+  const leaks = (answer) =>
+    secrets.filter((secret) => JSON.stringify(answer).includes(secret));
+
+  const { prepared, index } = await createBlock(client, {
+    targets: [whenLeak([fanOn(), telegram, socket])],
+  });
+  assert.deepEqual(prepared.block_action_preview.http_requests, [
+    {
+      configuration_pointer: "/targets/0/then/1",
+      method: "GET",
+      url: "https://api.telegram.org",
+      path: "not_shown",
+      query: "not_shown",
+    },
+    {
+      configuration_pointer: "/targets/0/then/2",
+      method: "GET",
+      url: "http://192.168.1.60",
+      path: "not_shown",
+      query: "not_shown",
+    },
+  ]);
+  // The owner added a reboot of the router in the SprutHub interface, with
+  // the password and no user name in the URL.
+  const scenario = hub.state.scenarios.find((item) => item.index === index);
+  const stored = JSON.parse(scenario.data);
+  stored.targets[0].then.push({
+    type: "http",
+    blockId: 99,
+    method: "GET",
+    url: `http://:${password}@192.168.1.1/reboot`,
+  });
+  scenario.data = JSON.stringify(stored);
+
+  const summary = (
+    await call(client, "get_entity", { entity_ref: scenarioRef(index) })
+  ).entity.summary;
+  assert.deepEqual(summary.steps[0].then.slice(1), [
+    {
+      type: "http",
+      method: "GET",
+      url: "https://api.telegram.org",
+      path: "not_shown",
+      query: "not_shown",
+    },
+    {
+      type: "http",
+      method: "GET",
+      url: "http://192.168.1.60",
+      path: "not_shown",
+      query: "not_shown",
+    },
+    {
+      type: "http",
+      method: "GET",
+      url: "http://192.168.1.1",
+      path: "not_shown",
+    },
+  ]);
+  const configuration = (
+    await call(client, "get_entity", {
+      entity_ref: scenarioRef(index),
+      include: ["configuration"],
+    })
+  ).entity.configuration.value;
+  assert.deepEqual(
+    configuration.targets[0].then.slice(1).map(({ url }) => url),
+    ["[REDACTED]", "[REDACTED]", "[REDACTED]"],
+  );
+
+  // An edit made from that read keeps the three stored requests.
+  const edited = await prepareUpdate(client, index, (read) => {
+    read.targets[0].then.push({
+      type: "http",
+      method: "POST",
+      url: "http://192.168.1.50/",
+    });
+  });
+  assert.equal(edited.status, "prepared", JSON.stringify(edited));
+  const applied = await call(client, "apply_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(
+    storedData(hub, index)
+      .targets[0].then.slice(1)
+      .map(({ url }) => url),
+    [
+      telegram.url,
+      socket.url,
+      `http://:${password}@192.168.1.1/reboot`,
+      "http://192.168.1.50/",
+    ],
+  );
+
+  const answers = {
+    prepared,
+    created: await call(client, "get_native_change", {
+      change_ref: prepared.change_ref,
+    }),
+    summary,
+    configuration,
+    edited,
+    applied,
+    history: await call(client, "list_native_changes", { home_ref: homeRef }),
+  };
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(answers).map(([name, answer]) => [name, leaks(answer)]),
+    ),
+    Object.fromEntries(Object.keys(answers).map((name) => [name, []])),
+  );
+});
+
+// Copying a request read from get_entity into another branch would copy the
+// owner's hidden URL with it: the hidden URL is kept only where exactly one
+// node of the edit carries the stored node's blockId.
+test("an edit that copies a request with a hidden URL is refused where the copies are", async (t) => {
+  const { hub, client } = await setup(t);
+  const token = "123456789:AAHsecretTelegramToken";
+  const { index } = await createBlock(client, {
+    targets: [
+      whenLeak([
+        fanOn(),
+        {
+          type: "http",
+          method: "GET",
+          url: `https://api.telegram.org/bot${token}/sendMessage`,
+        },
+      ]),
+    ],
+  });
+  const before = hub.state.scenarios.find((item) => item.index === index).data;
+
+  const copied = await prepareUpdate(client, index, (read) => {
+    read.targets[0].else = [structuredClone(read.targets[0].then[1])];
+  });
+  assert.deepEqual(problemsOf(copied), [
+    "/targets/0/then/1/url",
+    "/targets/0/else/0/url",
+  ]);
+  assert.equal(JSON.stringify(copied).includes(token), false);
+  assert.equal(
+    hub.state.scenarios.find((item) => item.index === index).data,
+    before,
+  );
 });
 
 // «Ночник — такой же яркости, как свет в коридоре, когда тот меняется»,
