@@ -13,6 +13,7 @@
     "format": "biome format --write .",
     "start": "node src/server.mjs",
     "eval:agent": "node research/eval-agent.mjs",
+    "eval:judge-calibrate": "node research/eval-judge-calibrate.mjs",
     "eval:spruthub-master": "node research/evaluate-spruthub-master.mjs",
     "research:diff": "node research/compare-snapshots.mjs",
     "research:record": "node research/record-websocket.mjs",
