@@ -23,8 +23,8 @@ const projectRoot = path.resolve(
 );
 const homeRef = "spruthub://hub/sim-apartment-01";
 
-async function setup(t) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+async function setup(t, fixture = "apartment") {
+  const hub = await startSimulatedHub(await loadHomeFixture(fixture));
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-simulated-hub-"),
   );
@@ -186,6 +186,49 @@ test("public read tools see the simulated apartment as a native home", async (t)
     diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
     [],
   );
+});
+
+test("the house fixture keeps the apartment and serves a double-scale home to the shipped reads", async (t) => {
+  const { hub, client } = await setup(t, "house");
+  const houseRef = "spruthub://hub/sim-house-01";
+  const apartment = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => apartment.close());
+  const apartmentSnapshot = apartment.snapshot();
+  const houseSnapshot = hub.snapshot();
+  assert.deepEqual(
+    Object.keys(apartmentSnapshot).filter(
+      (key) =>
+        !key.startsWith("window/") &&
+        JSON.stringify(apartmentSnapshot[key]) !==
+          JSON.stringify(houseSnapshot[key]),
+    ),
+    [],
+  );
+
+  const services = hub.state.accessories.flatMap(({ services: list }) => list);
+  assert.ok(hub.state.rooms.length >= 20);
+  assert.ok(hub.state.accessories.length >= 160);
+  assert.ok(services.length >= 500);
+  assert.ok(hub.state.scenarios.length >= 40);
+
+  let pages = 0;
+  let bytes = 0;
+  const seen = new Set();
+  let page = await call(client, "read_services", { home_ref: houseRef });
+  for (;;) {
+    pages += 1;
+    bytes += JSON.stringify(page).length;
+    for (const service of page.services) seen.add(service.accessory.ref);
+    if (!page.next) break;
+    page = await call(client, page.next.tool, page.next.arguments);
+  }
+  assert.ok(pages > 1);
+  assert.ok(seen.size >= 160);
+  const inspected = await call(client, "inspect_home", { home_ref: houseRef });
+  assert.equal(inspected.entities.rooms.length, hub.state.rooms.length);
+  assertEveryRequestSupported(hub);
+  assert.deepEqual(hub.writes(), []);
+  t.diagnostic(`house read_services: ${pages} pages, ${bytes} bytes`);
 });
 
 test("a prepared characteristic value changes only that simulated characteristic", async (t) => {

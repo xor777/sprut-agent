@@ -7,9 +7,10 @@
 // stays conservative instead of being more convenient than the real hub; such
 // places carry a short note. It is not evidence about a live SprutHub.
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 
 export const SIMULATED_HUB_TOKEN = "simulated-hub-token";
@@ -434,6 +435,152 @@ const CHARACTERISTIC_TYPES = {
     minStep: 1,
     write: true,
   },
+  // The types below appear in the owner's home (2026-09-24 type counts) but
+  // their metadata was not captured: HomeKit ranges, and C_WattMeter
+  // characteristic names are the simulator's guess.
+  ProgrammableSwitchEvent: {
+    name: "Событие кнопки",
+    format: "int",
+    minValue: 0,
+    maxValue: 2,
+    minStep: 1,
+    validValues: enumValues([
+      ["SINGLE_PRESS", 0, "Одиночное нажатие"],
+      ["DOUBLE_PRESS", 1, "Двойное нажатие"],
+      ["LONG_PRESS", 2, "Долгое нажатие"],
+    ]),
+  },
+  ServiceLabelIndex: {
+    name: "Номер кнопки",
+    format: "int",
+    minValue: 1,
+    maxValue: 255,
+    minStep: 1,
+    events: false,
+  },
+  SlatType: {
+    name: "Тип ламелей",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    events: false,
+  },
+  CurrentSlatState: {
+    name: "Состояние ламелей",
+    format: "int",
+    minValue: 0,
+    maxValue: 2,
+    minStep: 1,
+  },
+  CurrentTiltAngle: {
+    name: "Текущий угол",
+    format: "int",
+    unit: "arcdegrees",
+    minValue: -90,
+    maxValue: 90,
+    minStep: 1,
+  },
+  TargetTiltAngle: {
+    name: "Целевой угол",
+    format: "int",
+    unit: "arcdegrees",
+    minValue: -90,
+    maxValue: 90,
+    minStep: 1,
+    write: true,
+  },
+  FilterChangeIndication: {
+    name: "Требуется замена фильтра",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["FILTER_OK", 0, "Нет"],
+      ["CHANGE_FILTER", 1, "Да"],
+    ]),
+  },
+  FilterLifeLevel: {
+    name: "Ресурс фильтра",
+    format: "double",
+    unit: "%",
+    minValue: 0,
+    maxValue: 100,
+    minStep: 1,
+  },
+  AirQuality: {
+    name: "Качество воздуха",
+    format: "int",
+    minValue: 0,
+    maxValue: 5,
+    minStep: 1,
+    validValues: enumValues([
+      ["UNKNOWN", 0, "Неизвестно"],
+      ["EXCELLENT", 1, "Отличное"],
+      ["GOOD", 2, "Хорошее"],
+      ["FAIR", 3, "Среднее"],
+      ["INFERIOR", 4, "Плохое"],
+      ["POOR", 5, "Очень плохое"],
+    ]),
+  },
+  PM2_5Density: {
+    name: "Плотность PM2.5",
+    format: "double",
+    unit: "µg/m³",
+    minValue: 0,
+    maxValue: 1000,
+    minStep: 1,
+  },
+  C_Watt: {
+    name: "Мощность",
+    format: "double",
+    unit: "W",
+    minValue: 0,
+    maxValue: 100000,
+  },
+  C_Volt: {
+    name: "Напряжение",
+    format: "double",
+    unit: "V",
+    minValue: 0,
+    maxValue: 1000,
+  },
+  C_KiloWattHour: {
+    name: "Энергия",
+    format: "double",
+    unit: "kWh",
+    minValue: 0,
+    maxValue: 10000000,
+  },
+  SecuritySystemCurrentState: {
+    name: "Текущее состояние охраны",
+    format: "int",
+    minValue: 0,
+    maxValue: 4,
+    minStep: 1,
+    validValues: enumValues([
+      ["STAY_ARM", 0, "Дома"],
+      ["AWAY_ARM", 1, "Не дома"],
+      ["NIGHT_ARM", 2, "Ночь"],
+      ["DISARMED", 3, "Снята"],
+      ["ALARM_TRIGGERED", 4, "Тревога"],
+    ]),
+  },
+  SecuritySystemTargetState: {
+    name: "Целевое состояние охраны",
+    format: "int",
+    minValue: 0,
+    maxValue: 3,
+    minStep: 1,
+    write: true,
+    validValues: enumValues([
+      ["STAY_ARM", 0, "Дома"],
+      ["AWAY_ARM", 1, "Не дома"],
+      ["NIGHT_ARM", 2, "Ночь"],
+      ["DISARM", 3, "Снять"],
+    ]),
+  },
 };
 
 const SERVICE_TYPES = [
@@ -530,6 +677,42 @@ const SERVICE_TYPES = [
     ["Active", "CurrentAirPurifierState", "TargetAirPurifierState"],
     ["C_FanSpeed", "Name"],
   ],
+  [
+    "StatelessProgrammableSwitch",
+    "Кнопка",
+    ["ProgrammableSwitchEvent"],
+    ["ServiceLabelIndex", "Name"],
+  ],
+  [
+    "Slat",
+    "Ламели",
+    ["SlatType", "CurrentSlatState"],
+    ["CurrentTiltAngle", "TargetTiltAngle", "Name"],
+  ],
+  [
+    "FilterMaintenance",
+    "Обслуживание фильтра",
+    ["FilterChangeIndication"],
+    ["FilterLifeLevel", "Name"],
+  ],
+  [
+    "AirQualitySensor",
+    "Датчик качества воздуха",
+    ["AirQuality"],
+    ["PM2_5Density", "Name"],
+  ],
+  [
+    "C_WattMeter",
+    "Счётчик электроэнергии",
+    ["C_Watt"],
+    ["C_Volt", "C_KiloWattHour", "Name"],
+  ],
+  [
+    "SecuritySystem",
+    "Охранная система",
+    ["SecuritySystemCurrentState", "SecuritySystemTargetState"],
+    ["Name"],
+  ],
 ].map(([type, name, required, optional]) => ({
   system: false,
   type,
@@ -596,11 +779,25 @@ function invalidParams(message) {
   return new SimulatorError(-32602, message);
 }
 
+// A fixture is a JSON home, or an .mjs module whose default export builds
+// one (the large house extends the apartment programmatically).
 export async function loadHomeFixture(nameOrPath) {
-  const file =
-    nameOrPath.includes("/") || nameOrPath.endsWith(".json")
-      ? path.resolve(nameOrPath)
-      : path.join(fixturesDirectory, `${nameOrPath}.json`);
+  if (nameOrPath.includes("/") || /\.(json|mjs)$/.test(nameOrPath)) {
+    return loadFixtureFile(path.resolve(nameOrPath));
+  }
+  const module = path.join(fixturesDirectory, `${nameOrPath}.mjs`);
+  return loadFixtureFile(
+    existsSync(module)
+      ? module
+      : path.join(fixturesDirectory, `${nameOrPath}.json`),
+  );
+}
+
+async function loadFixtureFile(file) {
+  if (file.endsWith(".mjs")) {
+    const { default: build } = await import(pathToFileURL(file).href);
+    return build({ loadHomeFixture });
+  }
   return JSON.parse(await readFile(file, "utf8"));
 }
 
