@@ -452,3 +452,98 @@ test("a scenario sends a notification when the bathroom leaks", async (t) => {
     "/targets/0/then/6/text",
   ]);
 });
+
+test("a scenario makes an HTTP request without repeating its query or key", async (t) => {
+  const { hub, client } = await setup(t);
+  const secret = "S3CRET-KEY-VALUE";
+  // «Если протечка — включи реле по HTTP и дёрни вебхук.»
+  const relay = {
+    type: "http",
+    method: "GET",
+    url: "http://192.168.1.50/relay/0?turn=on",
+  };
+  const webhook = {
+    type: "http",
+    method: "POST",
+    url: `https://maker.ifttt.com/trigger/leak/json?api_key=${secret}`,
+  };
+  const data = { targets: [whenLeak([relay, webhook])] };
+  const { prepared, index } = await createBlock(client, data);
+  assert.deepEqual(prepared.block_action_preview.http_requests, [
+    {
+      configuration_pointer: "/targets/0/then/0",
+      method: "GET",
+      url: "http://192.168.1.50/relay/0",
+      query: "not_shown",
+    },
+    {
+      configuration_pointer: "/targets/0/then/1",
+      method: "POST",
+      url: "https://maker.ifttt.com/trigger/leak/json",
+      query: "not_shown",
+    },
+  ]);
+  // The hub gets the whole URL; answers never repeat the key.
+  assert.deepEqual(storedData(hub, index), data);
+  const change = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  const summary = (
+    await call(client, "get_entity", { entity_ref: scenarioRef(index) })
+  ).entity.summary;
+  for (const answer of [prepared, change, summary]) {
+    assert.equal(JSON.stringify(answer).includes(secret), false);
+  }
+  assert.deepEqual(summary.steps[0].then, [
+    {
+      type: "http",
+      method: "GET",
+      url: "http://192.168.1.50/relay/0",
+      query: "not_shown",
+    },
+    {
+      type: "http",
+      method: "POST",
+      url: "https://maker.ifttt.com/trigger/leak/json",
+      query: "not_shown",
+    },
+  ]);
+
+  // The agent edits the BLOCK from what get_entity shows, the hidden URL
+  // included; the stored request stays as it is.
+  const edited = await prepareUpdate(client, index, (read) => {
+    read.targets[0].then.push(fanOn());
+  });
+  assert.equal(edited.status, "prepared", JSON.stringify(edited));
+  assert.equal(JSON.stringify(edited).includes(secret), false);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(storedData(hub, index).targets[0].then.slice(0, 2), [
+    relay,
+    webhook,
+  ]);
+
+  const http = (fields) => ({ type: "http", method: "GET", ...fields });
+  const refused = await prepareCreate(client, {
+    targets: [
+      whenLeak([
+        http({ url: "ftp://192.168.1.50/file" }),
+        // A user name and password would be repeated in every answer.
+        http({ url: "http://admin:password1@192.168.1.1/reboot" }),
+        http({ url: "relay/0?turn=on" }),
+        http({ url: "http://192.168.1.50/", method: "FETCH" }),
+        http({ url: "[REDACTED]" }),
+      ]),
+    ],
+  });
+  assert.deepEqual(problemsOf(refused), [
+    "/targets/0/then/0/url",
+    "/targets/0/then/1/url",
+    "/targets/0/then/2/url",
+    "/targets/0/then/3/method",
+    "/targets/0/then/4/url",
+  ]);
+  assert.equal(JSON.stringify(refused).includes("password1"), false);
+});
