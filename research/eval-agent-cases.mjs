@@ -192,7 +192,7 @@ export const CASES = {
     prompt: "Почему ночью в коридоре включается свет?",
     graders: [
       noWrites(),
-      answerMatches("answer_names_night_scenario", /ночн\w*\s+режим/i),
+      answerMatches("answer_names_night_scenario", /ночн[а-яё]*\s+режим/iu),
     ],
   },
   "lying-scenario": {
