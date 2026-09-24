@@ -210,6 +210,11 @@ test("home_overview query finds rooms, scenarios and extensions by name", async 
   ]);
   assert.equal(bedrooms.body.total, 2);
 
+  const kitchen = await overview(client, { query: "на кухне" });
+  assert.deepEqual(kitchen.body.matches, [
+    { kind: "room", ref: `${home}/room/4`, name: "Кухня", device_count: 4 },
+  ]);
+
   const buttons = await overview(client, { query: "кнопка у кровати" });
   assert.deepEqual(
     buttons.body.matches.map(({ kind, name, type, active }) => ({

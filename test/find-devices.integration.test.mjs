@@ -304,6 +304,60 @@ test("a room word finds both bedrooms' sensors with battery inline and technical
   );
 });
 
+test("everyday phrases with prepositions find the room's devices", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  fixture.accessories.push({
+    id: 40,
+    roomId: 30,
+    name: "Гирлянда",
+    extensionKey: "Controller:zigbee",
+    deviceId: "00158d0004a1b240",
+    services: [
+      {
+        sId: 13,
+        type: "Outlet",
+        name: "Гирлянда",
+        characteristics: [{ cId: 14, type: "On", value: true }],
+      },
+    ],
+  });
+  const { hub, call, home } = await setup(t, fixture);
+  const technical = new Set(["AccessoryInformation", "BatteryService"]);
+  const kitchenServices = hub.state.accessories
+    .filter(({ roomId }) => roomId === 4)
+    .flatMap(({ id, services }) =>
+      services
+        .filter(({ type }) => !technical.has(type))
+        .map(({ sId }) => `${home}/accessory/${id}/service/${sId}`),
+    );
+  assert.equal(kitchenServices.length, 5);
+
+  const kitchen = await call("find_devices", { query: "на кухне" });
+  assert.deepEqual(
+    listed(kitchen.body)
+      .map(({ service }) => service.ref)
+      .sort(),
+    kitchenServices.sort(),
+  );
+
+  const outlet = await call("find_devices", { query: "розетка на кухне" });
+  assert.deepEqual(
+    listed(outlet.body).map(({ device, service }) => [
+      device.name,
+      service.name,
+    ]),
+    [["Розетка чайника", "Розетка"]],
+  );
+
+  const garland = await call("find_devices", {
+    query: "гирлянда на балконе",
+  });
+  assert.deepEqual(
+    listed(garland.body).map(({ room, device }) => [room.name, device.name]),
+    [["Балкон", "Гирлянда"]],
+  );
+});
+
 test("without filters find_devices sums services, on and unavailable per room", async (t) => {
   const { hub, call, home } = await setup(
     t,
