@@ -1325,13 +1325,13 @@ function isExtensionProblem({ state, enabled }) {
 }
 
 // Russian names are matched by word stems: the query "в спальне" finds
-// "Спальня" and "Детская спальня", "гостиной" finds "Гостиная". Every query
-// word must occur in the name, except one-letter words and the function
-// words below: prepositions, conjunctions, particles and "весь/все", which
-// name no device ("все розетки на кухне" asks for the kitchen outlets). "не"
-// stays: a name filter cannot negate, and dropping it would answer the
-// opposite. Longer endings are tried first; a stem keeps at least three
-// letters.
+// "Спальня" and "Детская спальня", "гостиной" finds "Гостиная". The stem of
+// every query word must start a word of the name, except one-letter words
+// and the function words below: prepositions, conjunctions, particles and
+// "весь/все", which name no device ("все розетки на кухне" asks for the
+// kitchen outlets). "не" stays: a name filter cannot negate, and dropping it
+// would answer the opposite. Longer endings are tried first; a stem keeps at
+// least three letters.
 const IGNORED_WORDS = new Set([
   "во",
   "на",
@@ -1448,9 +1448,14 @@ export function queryStems(query) {
 // asks for that device and brings no relay list.
 const LIGHT_WORD = /^(?:свет|подсвет|освещ|ламп|light|lamp)/;
 
+// Every stem must start a word of the text: "не" does not match inside
+// "кухне", while "кухн" matches "Кухня".
 export function matchesStems(stems, text) {
-  const normalized = normalizeName(text);
-  return stems.length > 0 && stems.every((stem) => normalized.includes(stem));
+  const words = normalizeName(text).split(" ");
+  return (
+    stems.length > 0 &&
+    stems.every((stem) => words.some((word) => word.startsWith(stem)))
+  );
 }
 
 // Best first: the whole name, then a name that starts with the query, then
