@@ -1449,8 +1449,10 @@ export function serviceKind(service, accessory) {
 // - a target mode that is not OFF: TargetHeatingCoolingState (HAP 0 = OFF)
 //   or TargetHeaterCoolerState, for a thermostat heating or cooling.
 // OutletInUse only says that a load draws power and never decides; an open
-// cover is not "on". An unavailable device keeps its last values, which do
-// not say whether it is on.
+// cover is not "on". A service with none of these (an alarm, a lock, a
+// filter) has no on/off, even when it has writable characteristics. An
+// unavailable device keeps its last values, which do not say whether it is
+// on.
 const ON_CHARACTERISTICS = [
   "On",
   "Active",
@@ -1466,11 +1468,7 @@ function onState(kind, accessory, service) {
       ({ control }) => (control?.type ?? control?.key) === type,
     )?.control;
   const basis = ON_CHARACTERISTICS.find((type) => byType(type));
-  if (!basis) {
-    return characteristics.some(({ control }) => control?.write === true)
-      ? { applicable: true, on: null, reason: "no_on_off_characteristic" }
-      : { applicable: false };
-  }
+  if (!basis) return { applicable: false };
   if (accessory.online === false) {
     return { applicable: true, on: null, basis, reason: "unavailable" };
   }
