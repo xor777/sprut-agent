@@ -59,88 +59,15 @@ export class AutomationService {
   }
 
   async getNativeChangeContract(input) {
-    if (input.operation === "characteristic_value") {
-      if (!input.target_ref) {
-        throw new SprutHubError(
-          "target_required",
-          "Select one characteristic before reading its write contract.",
-          "get_entity",
-        );
-      }
-      const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
-      const characteristic = await this.client.getCharacteristic(target);
-      const contract = characteristicContract(characteristic.control);
-      const restoration = characteristicSettingRestoration(
-        contract,
-        typedNativeValue(characteristic.control.value),
-      );
+    const valueKind = nativeValueKind(input.operation);
+    if (valueKind) {
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
-        contract,
-        restore_supported: restoration.supported,
-        ...(restoration.limitation
-          ? { restore_limitation: restoration.limitation }
-          : {}),
-        physical_effect_reversible: false,
-      };
-    }
-    if (input.operation === "characteristic_option") {
-      const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
-      const { option } = await this.#readCharacteristicOption(
-        target,
-        input.option_key,
-      );
-      const state = characteristicOptionState(option);
-      const restoration = scalarValueRestoration(state.contract, state.value);
-      return {
-        status: "ok",
-        operation: input.operation,
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        contract: state.contract,
-        restore_supported: restoration.supported,
-        ...(restoration.limitation
-          ? { restore_limitation: restoration.limitation }
-          : {}),
-      };
-    }
-    if (input.operation === "window_option") {
-      const owner = parseWindowOptionOwner(input.target_ref, this.hubSerial);
-      if (owner.kind === "scenario") {
-        const { option } = await this.#readScenarioMetadataOption(
-          owner,
-          input.option_key,
-        );
-        const state = windowOptionState(option, { allowText: true });
-        const restoration = scalarValueRestoration(state.contract, state.value);
-        return {
-          status: "ok",
-          operation: input.operation,
-          target_ref: input.target_ref,
-          option_key: input.option_key,
-          contract: state.contract,
-          restore_supported: restoration.supported,
-          ...(restoration.limitation
-            ? { restore_limitation: restoration.limitation }
-            : {}),
-        };
-      }
-      const { option } = await this.#readWindowOption(owner, input.option_key);
-      await this.#rejectDirectScenarioMetadataWindow(owner.windowKey, option);
-      const state = windowOptionState(option);
-      const restoration = scalarValueRestoration(state.contract, state.value);
-      return {
-        status: "ok",
-        operation: input.operation,
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        contract: state.contract,
-        restore_supported: restoration.supported,
-        ...(restoration.limitation
-          ? { restore_limitation: restoration.limitation }
-          : {}),
+        ...(valueKind.contract
+          ? await valueKind.contract(this, input)
+          : await nativeValueContractFields(this, valueKind, input)),
       };
     }
     if (input.operation === "logic_assignment") {
@@ -151,34 +78,6 @@ export class AutomationService {
         operation: input.operation,
         target_ref: input.target_ref,
         contract: logicAssignmentContract(target, type, assigned !== null),
-      };
-    }
-    if (input.operation === "logic_active") {
-      const target = parseLogicRef(input.target_ref, this.hubSerial);
-      const logic = await this.client.getLogic(target);
-      if (!logic) throw logicNotFound();
-      return {
-        status: "ok",
-        operation: input.operation,
-        target_ref: input.target_ref,
-        contract: logicActiveContract(),
-      };
-    }
-    if (input.operation === "logic_option") {
-      const target = parseLogicRef(input.target_ref, this.hubSerial);
-      const { option } = await this.#readLogicOption(target, input.option_key);
-      const state = logicOptionState(option);
-      const restoration = scalarValueRestoration(state.contract, state.value);
-      return {
-        status: "ok",
-        operation: input.operation,
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        contract: state.contract,
-        restore_supported: restoration.supported,
-        ...(restoration.limitation
-          ? { restore_limitation: restoration.limitation }
-          : {}),
       };
     }
     if (input.operation === "accessory_placement") {
@@ -276,11 +175,9 @@ export class AutomationService {
   }
 
   async prepareNativeChange(input) {
-    if (input.operation === "characteristic_value") {
-      return this.#prepareCharacteristicChange(input);
-    }
-    if (input.operation === "characteristic_option") {
-      return this.#prepareCharacteristicOptionChange(input);
+    const valueKind = nativeValueKind(input.operation);
+    if (valueKind) {
+      return this.#prepareValueChange(valueKind, input);
     }
     if (input.operation === "block_create") {
       return this.#prepareBlockCreate(input);
@@ -300,9 +197,6 @@ export class AutomationService {
     if (input.operation === "logic_source_update") {
       return this.#prepareLogicSourceUpdate(input);
     }
-    if (input.operation === "window_option") {
-      return this.#prepareWindowOptionChange(input);
-    }
     if (input.operation === "logic_assignment") {
       return this.#prepareLogicAssignment(input);
     }
@@ -315,283 +209,23 @@ export class AutomationService {
     if (input.operation === "virtual_light_group") {
       return this.#prepareVirtualLightGroup(input);
     }
-    if (["logic_active", "logic_option"].includes(input.operation)) {
-      return this.#prepareLogicValueChange(input);
-    }
     throw unsupportedNativeOperation();
   }
 
-  async #prepareCharacteristicChange(input) {
-    const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
-    const characteristic = await this.client.getCharacteristic(target);
-    const contract = characteristicContract(characteristic.control);
-    const requestedValue = validateCharacteristicValue(input.value, contract);
-    const baselineValue = typedNativeValue(characteristic.control.value);
-    const virtualGroup = await this.#findOwnedVirtualGroupContext(target);
-    if (
-      !virtualGroup &&
-      isKnownCharacteristicSetting(contract.type) &&
-      valuesEqual(baselineValue, requestedValue)
-    ) {
-      return {
-        status: "already_desired",
-        operation: "characteristic_value",
-        target_ref: input.target_ref,
-        observed_value: baselineValue,
-        native_write_sent: false,
-      };
-    }
-    const id = this.store.newId();
-    const now = new Date().toISOString();
-    const change = {
-      id,
-      kind: "characteristic_value",
-      status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
-      reason: input.reason,
-      target_ref: input.target_ref,
-      target,
-      contract,
-      baseline_value: baselineValue,
-      requested_value: requestedValue,
-      ...(virtualGroup
-        ? {
-            virtual_group_change_ref: `spruthub-change://native/${virtualGroup.change_id}`,
-            group_characteristic_type: virtualGroup.characteristic_type,
-            group_member_targets: virtualGroup.members,
-          }
-        : {}),
-      native_write_sent: false,
-      native_acknowledged: false,
-      last_verification: freshVerification("baseline"),
-      created_at: now,
-      updated_at: now,
-      history: [{ status: "prepared", at: now }],
-    };
-    await this.store.save(change);
-    return publicNativeChange(change);
-  }
-
-  async #findOwnedVirtualGroupContext(target) {
-    const matches = [];
-    for (const change of await this.store.list()) {
-      if (
-        change.kind !== "virtual_light_group" ||
-        change.status !== "applied" ||
-        change.virtual_accessory_creation_owned !== true
-      ) {
-        continue;
-      }
-      for (const type of change.characteristic_types) {
-        if (
-          nativeTargetKey(change.virtual_target?.characteristics?.[type]) !==
-          nativeTargetKey(target)
-        ) {
-          continue;
-        }
-        matches.push({
-          change_id: change.id,
-          characteristic_type: type,
-          members: change.members.map((member) => ({
-            member_ref: member.ref,
-            target: structuredClone(member.characteristics[type]),
-          })),
-        });
-      }
-    }
-    if (matches.length > 1) {
-      throw new SprutHubError(
-        "incompatible_local_state",
-        "More than one owned virtual-light journal claims this characteristic.",
-        "list_native_changes",
-      );
-    }
-    return matches[0] ?? null;
-  }
-
-  async #prepareCharacteristicOptionChange(input) {
-    const target = parseCharacteristicRef(input.target_ref, this.hubSerial);
-    const { option } = await this.#readCharacteristicOption(
-      target,
-      input.option_key,
-    );
-    const { contract, value: baselineValue } =
-      characteristicOptionState(option);
-    const requestedValue = validateCharacteristicValue(input.value, contract);
-    if (valuesEqual(baselineValue, requestedValue)) {
-      return {
-        status: "already_desired",
-        operation: "characteristic_option",
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        observed_value: baselineValue,
-        native_write_sent: false,
-        owned_change_created: false,
-      };
-    }
-    const id = this.store.newId();
-    const now = new Date().toISOString();
-    const change = {
-      id,
-      kind: "characteristic_option",
-      status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
-      reason: input.reason,
-      target_ref: input.target_ref,
-      option_key: input.option_key,
-      target,
-      contract,
-      baseline_value: baselineValue,
-      requested_value: requestedValue,
-      native_write_sent: false,
-      native_acknowledged: false,
-      last_verification: freshVerification("baseline"),
-      created_at: now,
-      updated_at: now,
-      history: [{ status: "prepared", at: now }],
-    };
-    await this.store.save(change);
-    return publicNativeChange(change);
-  }
-
-  async #prepareWindowOptionChange(input) {
-    const owner = parseWindowOptionOwner(input.target_ref, this.hubSerial);
-    if (owner.kind === "scenario") {
-      return this.#prepareScenarioMetadataOption(input, owner);
-    }
-    const { option } = await this.#readWindowOption(owner, input.option_key);
-    await this.#rejectDirectScenarioMetadataWindow(owner.windowKey, option);
-    const { contract, value: baselineValue } = windowOptionState(option);
-    const requestedValue = validateCharacteristicValue(input.value, contract);
-    if (valuesEqual(baselineValue, requestedValue)) {
-      return {
-        status: "already_desired",
-        operation: "window_option",
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        observed_value: baselineValue,
-        native_write_sent: false,
-        owned_change_created: false,
-      };
-    }
-    const id = this.store.newId();
-    const now = new Date().toISOString();
-    const change = {
-      id,
-      kind: "window_option",
-      status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
-      reason: input.reason,
-      target_ref: input.target_ref,
-      option_key: input.option_key,
-      target: owner,
-      contract,
-      baseline_value: baselineValue,
-      requested_value: requestedValue,
-      native_write_sent: false,
-      native_acknowledged: false,
-      last_verification: freshVerification("baseline"),
-      created_at: now,
-      updated_at: now,
-      history: [{ status: "prepared", at: now }],
-    };
-    await this.store.save(change);
-    return publicNativeChange(change);
-  }
-
-  async #prepareScenarioMetadataOption(input, owner) {
-    const { scenario, option, windowKey } =
-      await this.#readScenarioMetadataOption(owner, input.option_key);
-    const { contract, value: baselineValue } = windowOptionState(option, {
-      allowText: true,
-    });
-    if (typeof input.value !== "string") {
-      throw new SprutHubError(
-        "invalid_native_value",
-        "BLOCK Name and Desc require a string value.",
-        "get_native_change_contract",
-      );
-    }
-    if (input.option_key === "Name")
-      requiredNativeName(input.value, "window_option");
-    const requestedText =
-      input.option_key === "Desc"
-        ? nativeScenarioDescription(
-            input.value,
-            await this.#provenBlockOwnershipMarker(
-              input.target_ref,
-              typeof scenario.desc === "string"
-                ? scenario.desc
-                : baselineValue.value,
-            ),
-          )
-        : input.value;
-    const requestedValue = validateCharacteristicValue(requestedText, contract);
-    if (valuesEqual(baselineValue, requestedValue)) {
-      return {
-        status: "already_desired",
-        operation: "window_option",
-        target_ref: input.target_ref,
-        option_key: input.option_key,
-        observed_value: baselineValue,
-        native_write_sent: false,
-        owned_change_created: false,
-      };
-    }
-    const id = this.store.newId();
-    const now = new Date().toISOString();
-    const change = {
-      id,
-      kind: "window_option",
-      status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
-      reason: input.reason,
-      target_ref: input.target_ref,
-      window_ref: `${configuredHomeRef(this.hubSerial)}/window/${encodeURIComponent(windowKey)}`,
-      option_key: input.option_key,
-      target: { windowKey },
-      owner_kind: "scenario",
-      owner_index: owner.index,
-      contract,
-      baseline_value: baselineValue,
-      requested_value: requestedValue,
-      native_write_sent: false,
-      native_acknowledged: false,
-      last_verification: freshVerification("baseline"),
-      created_at: now,
-      updated_at: now,
-      history: [{ status: "prepared", at: now }],
-    };
-    await this.store.save(change);
-    return publicNativeChange(change);
-  }
-
-  async #prepareLogicValueChange(input) {
-    const target = parseLogicRef(input.target_ref, this.hubSerial);
-    let option;
-    let contract;
-    let baselineValue;
-    if (input.operation === "logic_active") {
-      const logic = await this.client.getLogic(target);
-      if (!logic) throw logicNotFound();
-      contract = logicActiveContract();
-      baselineValue = logicActiveValue(logic);
-    } else {
-      ({ option } = await this.#readLogicOption(target, input.option_key));
-      ({ contract, value: baselineValue } = logicOptionState(option));
-    }
-    const requestedValue = validateCharacteristicValue(input.value, contract);
-    if (valuesEqual(baselineValue, requestedValue)) {
+  async #prepareValueChange(kind, input) {
+    const draft = kind.prepare
+      ? await kind.prepare(this, input)
+      : await nativeValueDraft(this, kind, input);
+    if (!draft.alwaysSend && valuesEqual(draft.value, draft.requested)) {
       return {
         status: "already_desired",
         operation: input.operation,
         target_ref: input.target_ref,
-        ...(input.operation === "logic_option"
-          ? { option_key: input.option_key }
-          : {}),
-        observed_value: baselineValue,
+        ...(kind.optionKey ? { option_key: input.option_key } : {}),
+        observed_value: draft.value,
         native_write_sent: false,
-        owned_change_created: false,
+        // The characteristic command no-op has never reported ownership.
+        ...(kind.command ? {} : { owned_change_created: false }),
       };
     }
     const id = this.store.newId();
@@ -603,13 +237,11 @@ export class AutomationService {
       home_ref: configuredHomeRef(this.hubSerial),
       reason: input.reason,
       target_ref: input.target_ref,
-      target,
-      ...(input.operation === "logic_option"
-        ? { option_key: input.option_key }
-        : {}),
-      contract,
-      baseline_value: baselineValue,
-      requested_value: requestedValue,
+      ...draft.fields,
+      contract: draft.contract,
+      baseline_value: draft.value,
+      requested_value: draft.requested,
+      ...draft.extra,
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -1391,10 +1023,7 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
-    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
-      change,
-      current,
-    );
+    const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
 
     await this.#persistNativeIntent(change, "applying", "apply");
@@ -1430,18 +1059,16 @@ export class AutomationService {
       return undefined;
     }
     const direction = nativeIntentDirection(change);
-    if (change.owner_kind === "scenario") {
-      const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
-        change,
-        change.observed_value,
-      );
-      if (ownerConflict) {
-        return {
-          direction,
-          outcome: "owner_binding_lost",
-          result: ownerConflict,
-        };
-      }
+    const ownerConflict = await this.#finishValueOwnerConflict(
+      change,
+      change.observed_value,
+    );
+    if (ownerConflict) {
+      return {
+        direction,
+        outcome: "owner_binding_lost",
+        result: ownerConflict,
+      };
     }
     let state;
     let groupMemberObservations;
@@ -1673,9 +1300,11 @@ export class AutomationService {
       if (change.kind === "virtual_light_group") {
         return this.#restoreVirtualLightGroup(change);
       }
-      if (change.kind === "characteristic_value") {
+      const valueKind = nativeValueKind(change.kind);
+      if (valueKind) {
+        // A command's restorability follows only its saved type and baseline.
         const restoration = nativeValueRestoration(change);
-        if (!restoration.supported) {
+        if (valueKind.command && !restoration.supported) {
           throw new SprutHubError(
             "restore_unsupported",
             restoration.limitation?.message ??
@@ -1683,12 +1312,6 @@ export class AutomationService {
             "get_native_change",
           );
         }
-        return this.#restoreValueChange(change);
-      }
-      if (["characteristic_option", "window_option"].includes(change.kind)) {
-        return this.#restoreValueChange(change);
-      }
-      if (["logic_active", "logic_option"].includes(change.kind)) {
         return this.#restoreValueChange(change);
       }
       if (change.kind === "logic_assignment") {
@@ -3710,25 +3333,7 @@ export class AutomationService {
 
   async #requireNativeChange(id) {
     const change = await this.store.get(id);
-    if (
-      ![
-        "characteristic_value",
-        "characteristic_option",
-        "window_option",
-        "logic_active",
-        "logic_option",
-        "logic_assignment",
-        "accessory_placement",
-        "room_create",
-        "virtual_light_group",
-        "block_create",
-        "block_data_update",
-        "block_action_pause",
-        "scenario_run",
-        "logic_source_create",
-        "logic_source_update",
-      ].includes(change?.kind)
-    ) {
+    if (!isNativeChange(change)) {
       throw new SprutHubError(
         "change_not_found",
         "The native change was not found for this configured hub.",
@@ -3741,225 +3346,20 @@ export class AutomationService {
     return change;
   }
 
-  async #readCharacteristicState(change, { requireWrite = false } = {}) {
-    const characteristic = await this.client.getCharacteristic(change.target);
-    const contract = characteristicContract(characteristic.control, {
-      requireWrite,
+  async #finishValueOwnerConflict(change, current) {
+    const reason = await nativeValueKind(change.kind).ownerConflict?.(
+      this,
+      change,
+    );
+    if (!reason) return null;
+    return this.#finishNative(change, "conflict", current, {
+      conflict_reason: reason,
+      last_verification: freshVerification("conflict"),
     });
-    if (
-      contract.type !== change.contract.type ||
-      contract.kind !== change.contract.kind
-    ) {
-      throw new SprutHubError(
-        "binding_changed",
-        "The selected characteristic contract changed after preparation.",
-        "prepare_native_change",
-      );
-    }
-    change.contract = contract;
-    return {
-      value: typedNativeValue(characteristic.control.value),
-      contract,
-    };
-  }
-
-  async #readCharacteristicOption(target, optionKey) {
-    if (typeof optionKey !== "string" || optionKey.length === 0) {
-      throw new SprutHubError(
-        "option_key_required",
-        "Select one characteristic option before reading its write contract.",
-        "get_entity",
-      );
-    }
-    const options = await this.client.getCharacteristicOptions(target);
-    const matches = options.filter(({ key }) => key === optionKey);
-    if (matches.length !== 1) {
-      throw new SprutHubError(
-        matches.length === 0
-          ? "characteristic_option_not_found"
-          : "incompatible_response",
-        matches.length === 0
-          ? "The selected characteristic option was not found."
-          : "SprutHub returned the selected characteristic option more than once.",
-        "get_entity",
-      );
-    }
-    return { option: matches[0] };
-  }
-
-  async #readCharacteristicOptionState(change, { requireWrite = false } = {}) {
-    const { option } = await this.#readCharacteristicOption(
-      change.target,
-      change.option_key,
-    );
-    const state = characteristicOptionState(option, { requireWrite });
-    assertOptionBinding(change, state.contract, "characteristic");
-    change.contract = state.contract;
-    return state;
-  }
-
-  async #readWindowOption(target, optionKey) {
-    assertWindowOptionWritable(target.windowKey);
-    if (typeof optionKey !== "string" || optionKey.length === 0) {
-      throw new SprutHubError(
-        "option_key_required",
-        "Select one window option before reading its write contract.",
-        "get_entity",
-      );
-    }
-    const window = await this.client.getWindow(target.windowKey);
-    const matches = window.options.filter(({ key }) => key === optionKey);
-    if (matches.length !== 1) {
-      throw new SprutHubError(
-        matches.length === 0
-          ? "window_option_not_found"
-          : "incompatible_response",
-        matches.length === 0
-          ? "The selected window option was not found."
-          : "SprutHub returned the selected window option more than once.",
-        "get_entity",
-      );
-    }
-    return { window, option: matches[0] };
-  }
-
-  async #readScenarioMetadataOption(owner, optionKey) {
-    if (!SCENARIO_METADATA_KEYS.has(optionKey)) {
-      throw new SprutHubError(
-        "unsupported_window_option",
-        "A scenario window_option target supports only Name and Desc.",
-        "get_entity",
-      );
-    }
-    const scenario = await this.client.getScenario(owner.index);
-    if (!scenario) throw scenarioNotFound();
-    if (scenario.type !== "BLOCK") throw unsupportedScenarioType();
-    if (
-      typeof scenario.optionsWindow !== "string" ||
-      scenario.optionsWindow.length === 0
-    ) {
-      throw new SprutHubError(
-        "options_window_unavailable",
-        "This scenario has no native options window for Name and Desc.",
-        "get_entity",
-      );
-    }
-    const { window, option } = await this.#readWindowOption(
-      { windowKey: scenario.optionsWindow },
-      optionKey,
-    );
-    return {
-      scenario,
-      window,
-      option,
-      windowKey: scenario.optionsWindow,
-    };
-  }
-
-  async #findScenarioRefForWindow(windowKey) {
-    const matches = (await this.client.listScenarios()).filter(
-      (scenario) =>
-        scenario.type === "BLOCK" && scenario.optionsWindow === windowKey,
-    );
-    if (matches.length !== 1) return undefined;
-    return `${configuredHomeRef(this.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
-  }
-
-  async #rejectDirectScenarioMetadataWindow(windowKey, option) {
-    if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
-    if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
-      return;
-    }
-    const scenarioRef = await this.#findScenarioRefForWindow(windowKey);
-    if (!scenarioRef) return;
-    throw scenarioOwnerRequired(scenarioRef, option.key);
-  }
-
-  async #finishScenarioMetadataOwnerConflict(change, current) {
-    if (change.owner_kind !== "scenario") return null;
-    const scenario = await this.client.getScenario(change.owner_index);
-    if (
-      scenario?.type !== "BLOCK" ||
-      scenario.optionsWindow !== change.target.windowKey
-    ) {
-      return this.#finishNative(change, "conflict", current, {
-        conflict_reason: "owner_window_changed",
-        last_verification: freshVerification("conflict"),
-      });
-    }
-    return null;
-  }
-
-  async #readWindowOptionState(change, { requireWrite = false } = {}) {
-    const { option } = await this.#readWindowOption(
-      change.target,
-      change.option_key,
-    );
-    const state = windowOptionState(option, {
-      requireWrite,
-      allowText: change.owner_kind === "scenario",
-    });
-    assertOptionBinding(change, state.contract, "window");
-    change.contract = state.contract;
-    return state;
-  }
-
-  async #readLogicOption(target, optionKey) {
-    if (typeof optionKey !== "string" || optionKey.length === 0) {
-      throw new SprutHubError(
-        "option_key_required",
-        "Select one logic option before reading its write contract.",
-        "get_entity",
-      );
-    }
-    const logic = await this.client.getLogic(target);
-    if (!logic) throw logicNotFound();
-    const options = await this.client.getLogicOptions(target);
-    const matches = options.filter(({ key }) => key === optionKey);
-    if (matches.length !== 1) {
-      throw new SprutHubError(
-        matches.length === 0
-          ? "logic_option_not_found"
-          : "incompatible_response",
-        matches.length === 0
-          ? "The selected logic option was not found."
-          : "SprutHub returned the selected logic option more than once.",
-        "get_entity",
-      );
-    }
-    return { logic, option: matches[0] };
-  }
-
-  async #readLogicValueState(change, { requireWrite = false } = {}) {
-    if (change.kind === "logic_active") {
-      const logic = await this.client.getLogic(change.target);
-      if (!logic) throw logicNotFound();
-      return {
-        value: logicActiveValue(logic),
-        contract: logicActiveContract({ requireWrite }),
-      };
-    }
-    const { option } = await this.#readLogicOption(
-      change.target,
-      change.option_key,
-    );
-    const state = logicOptionState(option, { requireWrite });
-    assertOptionBinding(change, state.contract, "logic");
-    change.contract = state.contract;
-    return state;
   }
 
   async #readNativeValueState(change, options = {}) {
-    if (change.kind === "characteristic_option") {
-      return this.#readCharacteristicOptionState(change, options);
-    }
-    if (change.kind === "window_option") {
-      return this.#readWindowOptionState(change, options);
-    }
-    if (["logic_active", "logic_option"].includes(change.kind)) {
-      return this.#readLogicValueState(change, options);
-    }
-    return this.#readCharacteristicState(change, options);
+    return nativeValueKind(change.kind).read(this, change, options);
   }
 
   async #readNativeValue(change, options = {}) {
@@ -3967,39 +3367,7 @@ export class AutomationService {
   }
 
   async #writeNativeValue(change, value) {
-    const nativeValue = { [value.kind]: value.value };
-    if (change.kind === "characteristic_option") {
-      return this.client.setCharacteristicOption({
-        ...change.target,
-        key: change.option_key,
-        value: nativeValue,
-      });
-    }
-    if (change.kind === "window_option") {
-      assertWindowOptionWritable(change.target.windowKey);
-      return this.client.updateWindowOption({
-        ...change.target,
-        key: change.option_key,
-        value: nativeValue,
-      });
-    }
-    if (change.kind === "logic_option") {
-      return this.client.setLogicOption({
-        ...change.target,
-        key: change.option_key,
-        value: nativeValue,
-      });
-    }
-    if (change.kind === "logic_active") {
-      return this.client.updateLogicActive({
-        ...change.target,
-        active: value.value,
-      });
-    }
-    return this.client.updateCharacteristic({
-      ...change.target,
-      value: nativeValue,
-    });
+    return nativeValueKind(change.kind).write(this, change, value);
   }
 
   async #restoreValueChange(change) {
@@ -4072,10 +3440,7 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
-    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
-      change,
-      current,
-    );
+    const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
@@ -4100,10 +3465,7 @@ export class AutomationService {
         last_verification: freshVerification("conflict"),
       });
     }
-    const ownerConflict = await this.#finishScenarioMetadataOwnerConflict(
-      change,
-      current,
-    );
+    const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
     if (change.status === "applied") {
       return this.#recordNativeObservation(
@@ -5132,29 +4494,6 @@ export class AutomationService {
       );
     }
     return matches[0] ?? null;
-  }
-
-  async #provenBlockOwnershipMarker(targetRef, desc) {
-    if (typeof desc !== "string") return null;
-    const index = parseScenarioRef(targetRef, this.hubSerial).index;
-    const homeRef = configuredHomeRef(this.hubSerial);
-    for (const change of await this.store.list()) {
-      if (
-        change.home_ref !== homeRef ||
-        change.kind !== "block_create" ||
-        change.status === "restored" ||
-        // Observed deletion ends marker ownership; a later config conflict does not.
-        change.owned_target_absent_observed === true ||
-        typeof change.marker !== "string" ||
-        change.applied_snapshot === undefined ||
-        change.scenario_index !== index ||
-        !desc.includes(`[${change.marker}]`)
-      ) {
-        continue;
-      }
-      return change.marker;
-    }
-    return null;
   }
 
   async previewBooleanAutomation(input) {
@@ -8061,14 +7400,571 @@ function publicAccessoryPlacement(snapshot, serial) {
   };
 }
 
-function isNativeValueChange(change) {
+// Scalar native settings share one prepare → apply → readback → restore
+// lifecycle. An entry holds only what is specific to its operation:
+// - inspect(service, input) reads the target for a contract or prepare and
+//   returns { fields, value, contract }; fields are the saved target identity.
+// - read(service, change, { requireWrite }) rereads a saved target, rejecting
+//   a changed binding; write(service, change, typedValue) sends one value.
+// - restoration(contract, baseline) decides restore; knownSetting(change)
+//   decides whether a third readback value is a manual change.
+// Optional: optionKey (input option_key selects the setting), command (a
+// runtime command that is never resent automatically and whose physical
+// effect restore does not reverse), contract and prepare overrides,
+// ownerConflict, and extra limitations.
+const NATIVE_VALUE_KINDS = {
+  characteristic_value: {
+    command: true,
+    restoration: characteristicSettingRestoration,
+    knownSetting: (change) =>
+      isKnownCharacteristicSetting(change.contract?.type),
+    inspect: inspectCharacteristicValue,
+    prepare: prepareCharacteristicValue,
+    read: readCharacteristicValueState,
+    write: (service, change, value) =>
+      service.client.updateCharacteristic({
+        ...change.target,
+        value: nativeScalarValue(value),
+      }),
+  },
+  characteristic_option: {
+    optionKey: true,
+    restoration: scalarValueRestoration,
+    knownSetting: () => true,
+    async inspect(service, input) {
+      const target = parseCharacteristicRef(
+        input.target_ref,
+        service.hubSerial,
+      );
+      const option = await readCharacteristicOption(
+        service.client,
+        target,
+        input.option_key,
+      );
+      return {
+        fields: { option_key: input.option_key, target },
+        ...characteristicOptionState(option),
+      };
+    },
+    async read(service, change, { requireWrite = false } = {}) {
+      const option = await readCharacteristicOption(
+        service.client,
+        change.target,
+        change.option_key,
+      );
+      return boundOptionState(
+        change,
+        characteristicOptionState(option, { requireWrite }),
+        "characteristic",
+      );
+    },
+    write: (service, change, value) =>
+      service.client.setCharacteristicOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeScalarValue(value),
+      }),
+  },
+  window_option: {
+    optionKey: true,
+    restoration: scalarValueRestoration,
+    knownSetting: () => true,
+    inspect: inspectWindowOption,
+    prepare: prepareWindowOption,
+    async read(service, change, { requireWrite = false } = {}) {
+      const option = await readWindowOption(
+        service.client,
+        change.target,
+        change.option_key,
+      );
+      return boundOptionState(
+        change,
+        windowOptionState(option, {
+          requireWrite,
+          allowText: change.owner_kind === "scenario",
+        }),
+        "window",
+      );
+    },
+    write(service, change, value) {
+      assertWindowOptionWritable(change.target.windowKey);
+      return service.client.updateWindowOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeScalarValue(value),
+      });
+    },
+    ownerConflict: scenarioWindowOwnerConflict,
+    limitations: windowOptionLimitations,
+  },
+  logic_active: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    async contract(service, input) {
+      const target = parseLogicRef(input.target_ref, service.hubSerial);
+      if (!(await service.client.getLogic(target))) throw logicNotFound();
+      return { contract: logicActiveContract() };
+    },
+    async inspect(service, input) {
+      const target = parseLogicRef(input.target_ref, service.hubSerial);
+      return {
+        fields: { target },
+        ...(await readLogicActive(service.client, target)),
+      };
+    },
+    read: (service, change) => readLogicActive(service.client, change.target),
+    write: (service, change, value) =>
+      service.client.updateLogicActive({
+        ...change.target,
+        active: value.value,
+      }),
+  },
+  logic_option: {
+    optionKey: true,
+    restoration: scalarValueRestoration,
+    knownSetting: () => true,
+    async inspect(service, input) {
+      const target = parseLogicRef(input.target_ref, service.hubSerial);
+      const option = await readLogicOption(
+        service.client,
+        target,
+        input.option_key,
+      );
+      return {
+        fields: { target, option_key: input.option_key },
+        ...logicOptionState(option),
+      };
+    },
+    async read(service, change, { requireWrite = false } = {}) {
+      const option = await readLogicOption(
+        service.client,
+        change.target,
+        change.option_key,
+      );
+      return boundOptionState(
+        change,
+        logicOptionState(option, { requireWrite }),
+        "logic",
+      );
+    },
+    write: (service, change, value) =>
+      service.client.setLogicOption({
+        ...change.target,
+        key: change.option_key,
+        value: nativeScalarValue(value),
+      }),
+  },
+};
+
+function nativeValueKind(kind) {
+  return Object.hasOwn(NATIVE_VALUE_KINDS, kind)
+    ? NATIVE_VALUE_KINDS[kind]
+    : undefined;
+}
+
+const OTHER_NATIVE_CHANGE_KINDS = new Set([
+  "logic_assignment",
+  "accessory_placement",
+  "room_create",
+  "virtual_light_group",
+  "block_create",
+  "block_data_update",
+  "block_action_pause",
+  "scenario_run",
+  "logic_source_create",
+  "logic_source_update",
+]);
+
+function isNativeChange(change) {
+  return (
+    isNativeValueChange(change) || OTHER_NATIVE_CHANGE_KINDS.has(change?.kind)
+  );
+}
+
+async function nativeValueContractFields(service, kind, input) {
+  const state = await kind.inspect(service, input);
+  const restoration = kind.restoration(state.contract, state.value);
+  return {
+    ...(kind.optionKey ? { option_key: input.option_key } : {}),
+    contract: state.contract,
+    restore_supported: restoration.supported,
+    ...(restoration.limitation
+      ? { restore_limitation: restoration.limitation }
+      : {}),
+    ...(kind.command ? { physical_effect_reversible: false } : {}),
+  };
+}
+
+async function nativeValueDraft(service, kind, input) {
+  const state = await kind.inspect(service, input);
+  return {
+    ...state,
+    requested: validateCharacteristicValue(input.value, state.contract),
+  };
+}
+
+function nativeScalarValue(typed) {
+  return { [typed.kind]: typed.value };
+}
+
+function boundOptionState(change, state, owner) {
+  assertOptionBinding(change, state.contract, owner);
+  change.contract = state.contract;
+  return state;
+}
+
+async function inspectCharacteristicValue(service, input) {
+  if (!input.target_ref) {
+    throw new SprutHubError(
+      "target_required",
+      "Select one characteristic before reading its write contract.",
+      "get_entity",
+    );
+  }
+  const target = parseCharacteristicRef(input.target_ref, service.hubSerial);
+  const characteristic = await service.client.getCharacteristic(target);
+  return {
+    fields: { target },
+    contract: characteristicContract(characteristic.control),
+    value: typedNativeValue(characteristic.control.value),
+  };
+}
+
+async function prepareCharacteristicValue(service, input) {
+  const { fields, contract, value } = await inspectCharacteristicValue(
+    service,
+    input,
+  );
+  const requested = validateCharacteristicValue(input.value, contract);
+  const virtualGroup = await ownedVirtualGroupContext(
+    service.store,
+    fields.target,
+  );
+  return {
+    fields,
+    contract,
+    value,
+    requested,
+    // A virtual group or a command with unknown semantics is still delivered.
+    alwaysSend:
+      Boolean(virtualGroup) || !isKnownCharacteristicSetting(contract.type),
+    extra: virtualGroup
+      ? {
+          virtual_group_change_ref: `spruthub-change://native/${virtualGroup.change_id}`,
+          group_characteristic_type: virtualGroup.characteristic_type,
+          group_member_targets: virtualGroup.members,
+        }
+      : {},
+  };
+}
+
+async function ownedVirtualGroupContext(store, target) {
+  const matches = [];
+  for (const change of await store.list()) {
+    if (
+      change.kind !== "virtual_light_group" ||
+      change.status !== "applied" ||
+      change.virtual_accessory_creation_owned !== true
+    ) {
+      continue;
+    }
+    for (const type of change.characteristic_types) {
+      if (
+        nativeTargetKey(change.virtual_target?.characteristics?.[type]) !==
+        nativeTargetKey(target)
+      ) {
+        continue;
+      }
+      matches.push({
+        change_id: change.id,
+        characteristic_type: type,
+        members: change.members.map((member) => ({
+          member_ref: member.ref,
+          target: structuredClone(member.characteristics[type]),
+        })),
+      });
+    }
+  }
+  if (matches.length > 1) {
+    throw new SprutHubError(
+      "incompatible_local_state",
+      "More than one owned virtual-light journal claims this characteristic.",
+      "list_native_changes",
+    );
+  }
+  return matches[0] ?? null;
+}
+
+async function readCharacteristicValueState(
+  service,
+  change,
+  { requireWrite = false } = {},
+) {
+  const characteristic = await service.client.getCharacteristic(change.target);
+  const contract = characteristicContract(characteristic.control, {
+    requireWrite,
+  });
+  if (
+    contract.type !== change.contract.type ||
+    contract.kind !== change.contract.kind
+  ) {
+    throw new SprutHubError(
+      "binding_changed",
+      "The selected characteristic contract changed after preparation.",
+      "prepare_native_change",
+    );
+  }
+  change.contract = contract;
+  return {
+    value: typedNativeValue(characteristic.control.value),
+    contract,
+  };
+}
+
+async function readCharacteristicOption(client, target, optionKey) {
+  if (typeof optionKey !== "string" || optionKey.length === 0) {
+    throw new SprutHubError(
+      "option_key_required",
+      "Select one characteristic option before reading its write contract.",
+      "get_entity",
+    );
+  }
+  const options = await client.getCharacteristicOptions(target);
+  const matches = options.filter(({ key }) => key === optionKey);
+  if (matches.length !== 1) {
+    throw new SprutHubError(
+      matches.length === 0
+        ? "characteristic_option_not_found"
+        : "incompatible_response",
+      matches.length === 0
+        ? "The selected characteristic option was not found."
+        : "SprutHub returned the selected characteristic option more than once.",
+      "get_entity",
+    );
+  }
+  return matches[0];
+}
+
+async function inspectWindowOption(service, input) {
+  const owner = parseWindowOptionOwner(input.target_ref, service.hubSerial);
+  if (owner.kind === "scenario") {
+    const { scenario, option, windowKey } = await readScenarioMetadataOption(
+      service.client,
+      owner,
+      input.option_key,
+    );
+    return {
+      fields: {
+        window_ref: `${configuredHomeRef(service.hubSerial)}/window/${encodeURIComponent(windowKey)}`,
+        option_key: input.option_key,
+        target: { windowKey },
+        owner_kind: "scenario",
+        owner_index: owner.index,
+      },
+      scenario,
+      ...windowOptionState(option, { allowText: true }),
+    };
+  }
+  const option = await readWindowOption(
+    service.client,
+    owner,
+    input.option_key,
+  );
+  await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
+  return {
+    fields: { option_key: input.option_key, target: owner },
+    ...windowOptionState(option),
+  };
+}
+
+async function prepareWindowOption(service, input) {
+  const { fields, contract, value, scenario } = await inspectWindowOption(
+    service,
+    input,
+  );
+  if (!scenario) {
+    return {
+      fields,
+      contract,
+      value,
+      requested: validateCharacteristicValue(input.value, contract),
+    };
+  }
+  if (typeof input.value !== "string") {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "BLOCK Name and Desc require a string value.",
+      "get_native_change_contract",
+    );
+  }
+  if (input.option_key === "Name")
+    requiredNativeName(input.value, "window_option");
+  const requestedText =
+    input.option_key === "Desc"
+      ? nativeScenarioDescription(
+          input.value,
+          await provenBlockOwnershipMarker(
+            service,
+            input.target_ref,
+            typeof scenario.desc === "string" ? scenario.desc : value.value,
+          ),
+        )
+      : input.value;
+  return {
+    fields,
+    contract,
+    value,
+    requested: validateCharacteristicValue(requestedText, contract),
+  };
+}
+
+async function provenBlockOwnershipMarker(service, targetRef, desc) {
+  if (typeof desc !== "string") return null;
+  const index = parseScenarioRef(targetRef, service.hubSerial).index;
+  const homeRef = configuredHomeRef(service.hubSerial);
+  for (const change of await service.store.list()) {
+    if (
+      change.home_ref !== homeRef ||
+      change.kind !== "block_create" ||
+      change.status === "restored" ||
+      // Observed deletion ends marker ownership; a later config conflict does not.
+      change.owned_target_absent_observed === true ||
+      typeof change.marker !== "string" ||
+      change.applied_snapshot === undefined ||
+      change.scenario_index !== index ||
+      !desc.includes(`[${change.marker}]`)
+    ) {
+      continue;
+    }
+    return change.marker;
+  }
+  return null;
+}
+
+async function readWindowOption(client, target, optionKey) {
+  assertWindowOptionWritable(target.windowKey);
+  if (typeof optionKey !== "string" || optionKey.length === 0) {
+    throw new SprutHubError(
+      "option_key_required",
+      "Select one window option before reading its write contract.",
+      "get_entity",
+    );
+  }
+  const window = await client.getWindow(target.windowKey);
+  const matches = window.options.filter(({ key }) => key === optionKey);
+  if (matches.length !== 1) {
+    throw new SprutHubError(
+      matches.length === 0
+        ? "window_option_not_found"
+        : "incompatible_response",
+      matches.length === 0
+        ? "The selected window option was not found."
+        : "SprutHub returned the selected window option more than once.",
+      "get_entity",
+    );
+  }
+  return matches[0];
+}
+
+async function readScenarioMetadataOption(client, owner, optionKey) {
+  if (!SCENARIO_METADATA_KEYS.has(optionKey)) {
+    throw new SprutHubError(
+      "unsupported_window_option",
+      "A scenario window_option target supports only Name and Desc.",
+      "get_entity",
+    );
+  }
+  const scenario = await client.getScenario(owner.index);
+  if (!scenario) throw scenarioNotFound();
+  if (scenario.type !== "BLOCK") throw unsupportedScenarioType();
+  if (
+    typeof scenario.optionsWindow !== "string" ||
+    scenario.optionsWindow.length === 0
+  ) {
+    throw new SprutHubError(
+      "options_window_unavailable",
+      "This scenario has no native options window for Name and Desc.",
+      "get_entity",
+    );
+  }
+  const option = await readWindowOption(
+    client,
+    { windowKey: scenario.optionsWindow },
+    optionKey,
+  );
+  return { scenario, option, windowKey: scenario.optionsWindow };
+}
+
+async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
+  if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
+  if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
+    return;
+  }
+  const matches = (await service.client.listScenarios()).filter(
+    (scenario) =>
+      scenario.type === "BLOCK" && scenario.optionsWindow === windowKey,
+  );
+  if (matches.length !== 1) return;
+  throw scenarioOwnerRequired(
+    `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`,
+    option.key,
+  );
+}
+
+async function scenarioWindowOwnerConflict(service, change) {
+  if (change.owner_kind !== "scenario") return undefined;
+  const scenario = await service.client.getScenario(change.owner_index);
+  return scenario?.type !== "BLOCK" ||
+    scenario.optionsWindow !== change.target.windowKey
+    ? "owner_window_changed"
+    : undefined;
+}
+
+function windowOptionLimitations(change) {
   return [
-    "characteristic_value",
-    "characteristic_option",
-    "window_option",
-    "logic_active",
-    "logic_option",
-  ].includes(change?.kind);
+    "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
+    ...(change.owner_kind === "scenario"
+      ? [
+          "Name, Desc, and BLOCK data are separate native changes. They can be prepared on a shared baseline and restored independently. A metadata write checks this field, BLOCK type, and the current scenario→optionsWindow binding, not sibling Name, Desc, data, or flags.",
+          "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A later observed change of this field still blocks restore even if the value later matches. A proven apply is not resent.",
+          "A proven create marker in Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
+        ]
+      : []),
+  ];
+}
+
+async function readLogicOption(client, target, optionKey) {
+  if (typeof optionKey !== "string" || optionKey.length === 0) {
+    throw new SprutHubError(
+      "option_key_required",
+      "Select one logic option before reading its write contract.",
+      "get_entity",
+    );
+  }
+  const logic = await client.getLogic(target);
+  if (!logic) throw logicNotFound();
+  const options = await client.getLogicOptions(target);
+  const matches = options.filter(({ key }) => key === optionKey);
+  if (matches.length !== 1) {
+    throw new SprutHubError(
+      matches.length === 0 ? "logic_option_not_found" : "incompatible_response",
+      matches.length === 0
+        ? "The selected logic option was not found."
+        : "SprutHub returned the selected logic option more than once.",
+      "get_entity",
+    );
+  }
+  return matches[0];
+}
+
+async function readLogicActive(client, target) {
+  const logic = await client.getLogic(target);
+  if (!logic) throw logicNotFound();
+  return { value: logicActiveValue(logic), contract: logicActiveContract() };
+}
+
+function isNativeValueChange(change) {
+  return nativeValueKind(change?.kind) !== undefined;
 }
 
 function nativeValueProvenApply(change) {
@@ -8100,33 +7996,18 @@ function isKnownCharacteristicSetting(type) {
 }
 
 function isRetryableNativeValueChange(change) {
-  return [
-    "characteristic_option",
-    "window_option",
-    "logic_active",
-    "logic_option",
-  ].includes(change?.kind);
+  const kind = nativeValueKind(change?.kind);
+  return kind !== undefined && !kind.command;
 }
 
 function hasKnownSettingSemantics(change) {
-  return (
-    ["characteristic_option", "window_option", "logic_option"].includes(
-      change?.kind,
-    ) ||
-    (change?.kind === "characteristic_value" &&
-      isKnownCharacteristicSetting(change.contract?.type))
-  );
+  return nativeValueKind(change?.kind)?.knownSetting(change) === true;
 }
 
 function nativeValueRestoration(change) {
-  if (isRetryableNativeValueChange(change)) {
-    return scalarValueRestoration(change.contract, change.baseline_value);
-  }
-  if (change?.kind !== "characteristic_value") return { supported: false };
-  return characteristicSettingRestoration(
-    change.contract,
-    change.baseline_value,
-  );
+  const kind = nativeValueKind(change?.kind);
+  if (!kind) return { supported: false };
+  return kind.restoration(change.contract, change.baseline_value);
 }
 
 function characteristicSettingRestoration(contract, baseline) {
@@ -9554,11 +9435,8 @@ function publicNativeChange(
       ],
     };
   }
-  const optionChange = [
-    "characteristic_option",
-    "window_option",
-    "logic_option",
-  ].includes(change.kind);
+  const kind = nativeValueKind(change.kind);
+  const optionChange = kind.optionKey === true;
   const valueChoices = optionChange
     ? {
         baseline: namedOptionValue(change, change.baseline_value),
@@ -9575,12 +9453,7 @@ function publicNativeChange(
     observedValue
       ? {
           requires_user_decision: true,
-          action_if_authorized:
-            change.kind === "characteristic_option"
-              ? "prepare_new_characteristic_option_change"
-              : change.kind === "window_option"
-                ? "prepare_new_window_option_change"
-                : "prepare_new_logic_option_change",
+          action_if_authorized: `prepare_new_${change.kind}_change`,
           effect: {
             replace: namedOptionValue(change, observedValue),
             with: namedOptionValue(change, change.baseline_value),
@@ -9640,32 +9513,19 @@ function publicNativeChange(
     ...(restoration.limitation
       ? { restore_limitation: restoration.limitation }
       : {}),
-    ...(change.kind === "characteristic_value"
-      ? { physical_effect_reversible: false }
-      : {}),
+    ...(kind.command ? { physical_effect_reversible: false } : {}),
     command_caused_observation: "unknown",
     limitations: [
       "Readback observes the value but cannot prove this command caused it.",
       "SprutHub exposes no native compare-and-set for this operation.",
       restoration.supported
-        ? change.kind === "characteristic_value"
+        ? kind.command
           ? "The saved setting can be restored only while its current value still matches this change; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
       "An option or logic-active write with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
-      ...(change.kind === "window_option"
-        ? [
-            "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
-            ...(change.owner_kind === "scenario"
-              ? [
-                  "Name, Desc, and BLOCK data are separate native changes. They can be prepared on a shared baseline and restored independently. A metadata write checks this field, BLOCK type, and the current scenario→optionsWindow binding, not sibling Name, Desc, data, or flags.",
-                  "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A later observed change of this field still blocks restore even if the value later matches. A proven apply is not resent.",
-                  "A proven create marker in Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
-                ]
-              : []),
-          ]
-        : []),
+      ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets
         ? [
             "Delivery is checked against every journal-known group member; a same-valued native virtual command may be suppressed by SprutHub.",
@@ -9731,25 +9591,7 @@ function publicPauseEffect(change, now = Date.now()) {
 }
 
 function changeSummary(change, homeRef) {
-  if (
-    [
-      "characteristic_value",
-      "characteristic_option",
-      "window_option",
-      "logic_active",
-      "logic_option",
-      "logic_assignment",
-      "accessory_placement",
-      "room_create",
-      "virtual_light_group",
-      "block_create",
-      "block_data_update",
-      "block_action_pause",
-      "scenario_run",
-      "logic_source_create",
-      "logic_source_update",
-    ].includes(change.kind)
-  ) {
+  if (isNativeChange(change)) {
     const reference = `spruthub-change://native/${change.id}`;
     return {
       change_ref: reference,
@@ -9889,11 +9731,9 @@ function invalidHistoryCursor(selection) {
 
 function nativeAffectedRefs(change, homeRef) {
   const refs = [canonicalEntityRef(change.target_ref, homeRef)];
-  if (
-    change.kind === "window_option" &&
-    typeof change.window_ref === "string"
-  ) {
-    refs.push(change.window_ref);
+  if (isNativeValueChange(change)) {
+    if (typeof change.window_ref === "string") refs.push(change.window_ref);
+    refs.push(...canonicalAncestors(refs[0]));
   }
   if (change.kind === "accessory_placement") {
     refs.push(
@@ -9920,15 +9760,7 @@ function nativeAffectedRefs(change, homeRef) {
       refs.push(...canonicalAncestors(ref));
     }
   }
-  if (
-    [
-      "characteristic_value",
-      "characteristic_option",
-      "logic_active",
-      "logic_option",
-      "logic_assignment",
-    ].includes(change.kind)
-  ) {
+  if (change.kind === "logic_assignment") {
     refs.push(...canonicalAncestors(refs[0]));
   } else if (
     [
