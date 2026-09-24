@@ -18582,6 +18582,48 @@ test("a room name longer than SprutHub keeps is refused before any write, and on
   );
 });
 
+test("a room_create an earlier version prepared with a name over 30 characters is refused at apply", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await firstClient.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Гостевая",
+      reason: "Создать гостевую комнату",
+    },
+  });
+  await firstClient.close();
+  const tooLong = "Комната для гостей на мансарде у окна";
+  const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
+  const journal = JSON.parse(await readFile(journalFile, "utf8"));
+  const id = prepared.structuredContent.change_ref.slice(
+    "spruthub-change://native/".length,
+  );
+  journal.changes[id].requested_name = tooLong;
+  await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const refused = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(refused.isError, true, refused.content[0]?.text);
+  assert.equal(refused.structuredContent.error.code, "name_too_long");
+  assert.equal(
+    hub.requests.some(({ room }) => room?.create),
+    false,
+  );
+  const recorded = await callChangeTool(
+    client,
+    "get_native_change",
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(recorded.status, "prepared");
+  assert.equal(recorded.native_write_sent, false);
+});
+
 test("a lost room-create response exposes one candidate and never repeats creation", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
