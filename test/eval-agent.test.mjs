@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, realpathSync } from "node:fs";
 import {
@@ -27,6 +28,7 @@ import {
   summaryLine,
 } from "../research/eval-agent.mjs";
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
+import { LABELS } from "../research/eval-judge-labels.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -110,7 +112,9 @@ else if (plan.exit) {
 } else {
   const model = plan.model ?? args[args.indexOf("--model") + 1];
   const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
-  const reply = plan.reply ?? { verdict: plan.verdict, quote: plan.quote, reason: "scripted" };
+  // quoteAnswer: quote the whole answer, read from the prompt as a model would.
+  const answer = /----- ANSWER (\\S+) -----\\n([\\s\\S]*)\\n----- END OF ANSWER \\1 -----/.exec(stdin)?.[2];
+  const reply = plan.reply ?? { verdict: plan.verdict, quote: plan.quoteAnswer ? answer : plan.quote, reason: "scripted" };
   emit({ type: "system", subtype: "init", model });
   emit({ type: "assistant", message: { model, content: [{ type: "tool_use", id: "toolu_judge", name: "StructuredOutput", input: reply }] } });
   emit({ type: "result", subtype: "success", is_error: plan.isError === true, result: plan.text ?? "", ...(plan.text === undefined ? { structured_output: reply } : {}), total_cost_usd: 0.0123, usage: { input_tokens: 1500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 90 } });
@@ -1593,6 +1597,69 @@ test("a judge reply that cannot be checked is a judge_error, never a pass or the
     judgePlan: { exit: 2 },
   });
   assert.equal(both.outcome.failure_class, "agent");
+});
+
+// `npm run eval:judge-calibrate` judges every labelled answer against its
+// case and home. With a scripted judge that passes everything, each
+// labelled fail is a disagreement and each pass an agreement; every label
+// must reach the judge (no case without a rubric, no crash).
+test("judge calibration runs every labelled answer and reports each disagreement", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut-judge-calib-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const record = path.join(directory, "judge-record.jsonl");
+  const judge = await writeScriptedJudge(directory);
+  const { stdout, code } = await new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [
+        path.join(repo, "research", "eval-judge-calibrate.mjs"),
+        "--concurrency",
+        "8",
+      ],
+      {
+        env: {
+          ...process.env,
+          SPRUT_EVAL_JUDGE_BIN: judge,
+          SCRIPTED_JUDGE: JSON.stringify({
+            verdict: "pass",
+            quoteAnswer: true,
+          }),
+          SCRIPTED_JUDGE_RECORD: record,
+        },
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, out) => resolve({ stdout: out, code: error?.code ?? 0 }),
+    );
+  });
+  const labelled = Object.entries(LABELS).flatMap(([caseName, labels]) =>
+    labels.map((label, at) => ({ id: `${caseName}/${at + 1}`, ...label })),
+  );
+  const calls = (await readFile(record, "utf8")).trim().split("\n");
+  assert.equal(calls.length, labelled.length);
+  for (const [caseName, labels] of Object.entries(LABELS)) {
+    const sure = labels.filter(({ ambiguous }) => !ambiguous);
+    const unsure = labels.filter(({ ambiguous }) => ambiguous);
+    const agree = (items) =>
+      `${items.filter(({ label }) => label === "pass").length}/${items.length}`;
+    assert.match(
+      stdout,
+      new RegExp(
+        `^CASE ${caseName} agree ${agree(sure)} ambiguous ${agree(unsure)} judge_errors 0$`,
+        "m",
+      ),
+      caseName,
+    );
+  }
+  for (const { id, label } of labelled) {
+    const line = new RegExp(
+      `^DISAGREE ${id.replace("/", "\\/")} label=fail judge=pass `,
+      "m",
+    );
+    if (label === "fail") assert.match(stdout, line, id);
+    else assert.doesNotMatch(stdout, line, id);
+  }
+  // Disagreements on unambiguous labels fail the command.
+  assert.equal(code, 1);
 });
 
 // The judge grades against the facts of the run's own home: every device
