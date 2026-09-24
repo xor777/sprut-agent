@@ -179,8 +179,8 @@ function settingsWindow(timeZone) {
   };
 }
 
-// settings is the home settings window, or null for a hub that refuses
-// window.get.
+// settings is the home settings window, null for a hub that refuses
+// window.get, or "no_reply" for one that never answers it.
 async function startHub({
   log = observedLog,
   respond,
@@ -202,6 +202,11 @@ async function startHub({
             log: { list: { log: listLog(log, request.params.log.list) } },
           },
         };
+      } else if (
+        request.params?.window?.get?.windowKey === "" &&
+        settings === "no_reply"
+      ) {
+        return;
       } else if (
         request.params?.window?.get?.windowKey === "" &&
         settings !== null
@@ -250,16 +255,16 @@ async function readLog(client, args) {
 const LOG_READ = { log: { list: { count: 500 } } };
 const ZONE_READ = { window: { get: { windowKey: "" } } };
 
-// Every read of the log is one log.list and one read of the home settings
-// window for its time zone, both on the selected home.
+// Every read of the log is one log.list on the selected home. The home
+// settings window, 99 KB on the owner's hub, is read once for its time zone
+// and not again on later reads.
 function assertOnlyLogReads(hub, calls) {
   assert.deepEqual(
     hub.requests
       .map(({ params }) => JSON.stringify(params))
       .sort()
       .join("\n"),
-    Array.from({ length: calls }, () => [LOG_READ, ZONE_READ])
-      .flat()
+    [...Array.from({ length: calls }, () => LOG_READ), ZONE_READ]
       .map((params) => JSON.stringify(params))
       .sort()
       .join("\n"),
@@ -365,6 +370,32 @@ test("read_hub_log keeps UTC and says so when the hub time zone cannot be read",
       JSON.stringify(page.limitations),
     );
   }
+});
+
+// A hub that never answers window.get must not hold back a log that
+// already arrived until the request timeout.
+test("read_hub_log returns the log in UTC without waiting out a hub that does not answer for its time zone", async (t) => {
+  const hub = await startHub({ settings: "no_reply" });
+  const client = await startClient(t, hub);
+
+  const began = Date.now();
+  const result = await readLog(client, { home_ref: homeRef });
+  const elapsed = Date.now() - began;
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert(elapsed < ORDINARY_HUB_TIMEOUT_MS / 2, `${elapsed} ms`);
+  const page = result.structuredContent;
+  assert.equal(page.time_zone, null);
+  assert.deepEqual(
+    page.entries.map(({ time }) => time),
+    expectedNewestFirst.map(({ native_time: time }) =>
+      new Date(time).toISOString(),
+    ),
+  );
+  assert.ok(
+    page.limitations.some((line) => /\bUTC\b/.test(line)),
+    JSON.stringify(page.limitations),
+  );
 });
 
 test("read_hub_log filters by level, text and the observed scenario formats without exposing redacted text", async (t) => {
