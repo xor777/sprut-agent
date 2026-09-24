@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
+import { FAKE_HUB_HOST } from "../test/support/fake-hub.mjs";
 
 const run = promisify(execFile);
 const projectRoot = path.resolve(
@@ -626,7 +627,7 @@ async function startInstalledClient(effectiveTransport, userHome) {
 
 async function startHub(t) {
   const requests = [];
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {

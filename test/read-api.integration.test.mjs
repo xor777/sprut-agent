@@ -5,7 +5,7 @@ import { WebSocketServer } from "ws";
 import { createSprutHubReader } from "../dist/plugin/dist/read.mjs";
 import { createSprutHubReader as createSourceSprutHubReader } from "../src/read-api.mjs";
 import { SprutHubError } from "../src/spruthub-client.mjs";
-import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
+import { FAKE_HUB_HOST, ORDINARY_HUB_TIMEOUT_MS } from "./support/fake-hub.mjs";
 
 const homeRef = "spruthub://hub/home-1";
 const temperatureRef = `${homeRef}/accessory/10/service/20/characteristic/30`;
@@ -160,7 +160,7 @@ test("the public reader preserves a useful source error without exposing connect
 async function startReadHub(t) {
   const requests = [];
   const state = { temperature: 0 };
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {

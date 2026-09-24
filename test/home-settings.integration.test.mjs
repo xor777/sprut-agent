@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
-import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
+import { FAKE_HUB_HOST, ORDINARY_HUB_TIMEOUT_MS } from "./support/fake-hub.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -348,7 +348,7 @@ async function startHub(
   ]);
   windows.get(selectedSerial).set(deviceWindowKey, deviceWindow());
   const requests = [];
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
     socket.on("message", (data) => {

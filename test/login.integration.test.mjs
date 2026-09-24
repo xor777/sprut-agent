@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { WebSocketServer } from "ws";
-import { ORDINARY_HUB_TIMEOUT_MS } from "./support/hub-timeouts.mjs";
+import { FAKE_HUB_HOST, ORDINARY_HUB_TIMEOUT_MS } from "./support/fake-hub.mjs";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -66,7 +66,7 @@ async function startHub(
   let connectionCount = 0;
   let nullAuthSent = false;
   let nullRoomListSent = false;
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ host: FAKE_HUB_HOST, port: 0 });
   await once(server, "listening");
   server.on("connection", (socket) => {
     connectionCount += 1;
@@ -264,7 +264,7 @@ async function startStalledHandshake(t) {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
   });
-  server.listen(0, "127.0.0.1");
+  server.listen(0, FAKE_HUB_HOST);
   await once(server, "listening");
   t.after(async () => {
     for (const socket of sockets) socket.destroy();
