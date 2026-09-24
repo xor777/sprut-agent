@@ -6009,7 +6009,7 @@ function blockContract() {
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0; a hub has not been observed running them, including whether a step clamps at the characteristic's range. A step is a number or a plain decimal string such as \"10\", and is sent as a number, the form the hub stores.",
       "A scenario target names an existing scenario of this home by its index and a mode from the web client: FIRE runs it, ACTIVATE turns it on, DEACTIVATE turns it off, ACTIVATE_AND_FIRE turns it on and runs it, RESET resets it (known only from the editor label «Сбросить»). A target that runs (FIRE, ACTIVATE_AND_FIRE) must not run its own BLOCK, directly or through running scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. A BLOCK may turn itself off. The modes follow the official editor; a hub has not been observed running any of them, including for a turned-off scenario.",
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
-      "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null or left out for all of them, or [{index, clients}] with a service's index and clients null or left out for all its recipients, or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled and state as read at preparation: a service that is not enabled or not LOADED may deliver nothing, and a PUSH to all services of a home without one goes nowhere, so tell the owner. The hub has not been observed storing or sending a notify.",
+      "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null or left out for all of them, or [{index, clients}] with a service's index and clients null or left out for all its recipients, or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled, state and, for all their recipients, recipient_count as read at preparation. Its warnings name a service that is not enabled or not LOADED (service_not_ready) or has no recipients (no_recipients), and a PUSH to all services of a home without one (no_notification_services): such a notification may reach no one, so tell the owner instead of promising it. The hub has not been observed storing or sending a notify.",
       "from («Установить из» in the web client) sets the target to the current value of another characteristic when the action runs: {type:\"from\", cId, hc, from_aId, from_sId, from_cId, from_hs, from_hc}, with value \"\" as the web client writes it or left out, and with the source's ids and its service and characteristic types from get_entity. The source must be readable, hold the same kind of value (yes/no, number or text) and not be the target itself; a target with listed values (a mode) takes them only from a characteristic of its own type. A value outside the target's range is not checked in advance, and what the hub does with it is not observed. block_action_preview shows the source with its value at preparation. A summary names the source, and the source device's relations name the rule with role source when the hub's scenario index lists the rule for that device, which is not observed for a device that is only a source. The hub has not been observed storing or running a from action.",
       "http makes a request with a method from the web client's list to an absolute http or https URL, with no body or headers, as the web client writes it. Any such URL is accepted: what the BLOCK calls, such as a device on the home network or a webhook, is the owner's request. A URL with a user name or password is refused. A key may sit in the path (Telegram /bot<token>/, webhook ids) or under any query name, so no answer repeats a URL: block_action_preview.http_requests and the summary show method, scheme and host of each request with path and query marked not_shown, and get_entity configuration and diffs show every URL other than scheme and host as [REDACTED]. An edit that sends [REDACTED] back keeps the stored URL only on the one node that carries its blockId from get_entity; [REDACTED] anywhere else, as in a copy of the node, is refused at its pointer. The hub has not been observed storing or sending a request; a scenario_run of a BLOCK with a request has no known targets.",
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
@@ -7956,8 +7956,10 @@ async function notificationServiceRecipients(client, service) {
 }
 
 // Checks the services and recipients of each PUSH notification the change
-// adds or changes against the home. A notification an edit keeps is written
-// as stored and is not read again.
+// adds or changes against the home, and reads the recipients of every
+// service one goes through, so that the preview can say when a service
+// reaches no one. A notification an edit keeps is written as stored and is
+// not read again.
 async function checkNotificationRecipients(context, client, report) {
   const written = context.notifications.filter(({ kept }) => !kept);
   if (!written.some(({ mode }) => mode === "PUSH")) return;
@@ -7966,7 +7968,13 @@ async function checkNotificationRecipients(context, client, report) {
     .map(({ index }) => index)
     .join(", ");
   for (const notification of written) {
-    if (notification.mode !== "PUSH" || notification.to === null) continue;
+    if (notification.mode !== "PUSH") continue;
+    if (notification.to === null) {
+      for (const service of context.notificationServices) {
+        await notificationServiceRecipients(client, service);
+      }
+      continue;
+    }
     for (const [position, entry] of notification.to.entries()) {
       const at = `${notification.path}.to[${position}]`;
       const service = context.notificationServices.find(
@@ -7979,8 +7987,8 @@ async function checkNotificationRecipients(context, client, report) {
         );
         continue;
       }
-      if (entry.clients === null) continue;
       const recipients = await notificationServiceRecipients(client, service);
+      if (entry.clients === null) continue;
       entry.clients.forEach((id, slot) => {
         if (recipients.some((item) => item.id === id)) return;
         report(
@@ -7992,7 +8000,10 @@ async function checkNotificationRecipients(context, client, report) {
   }
 }
 
-// What a notification of the preview goes through, as read at preparation.
+// What a notification of the preview goes through, as read at preparation,
+// with a warning for each service that may deliver nothing: one that is not
+// enabled and LOADED (such as the owner's FAILED Telegram), one without
+// recipients, and a PUSH to all services of a home that has none.
 function notificationPreview(notification, services = []) {
   const base = {
     configuration_pointer: blockPathToPointer(notification.path),
@@ -8000,43 +8011,64 @@ function notificationPreview(notification, services = []) {
     text: notification.text,
   };
   if (notification.mode !== "PUSH") return { ...base, delivery: "system" };
-  const service = ({ ref, name, enabled, state }) => ({
-    ref,
-    name,
-    enabled,
-    state,
-  });
-  if (notification.to === null) {
+  const toAll = notification.to === null;
+  const warnings = [];
+  const through = (
+    toAll
+      ? services.map((service) => ({ service, clients: null }))
+      : notification.to.map(({ index, clients }) => ({
+          index,
+          service: services.find((item) => item.index === index),
+          clients,
+        }))
+  ).map(({ index, service, clients }) => {
+    if (!service) return { index, binding: "not_found" };
+    const { ref, name, enabled, state, recipients } = service;
+    if (enabled !== true || state !== "LOADED") {
+      warnings.push({
+        code: "service_not_ready",
+        service_ref: ref,
+        message: `This notification service is ${enabled === true ? "enabled" : "not enabled"} and in state ${state}, not LOADED: it may deliver nothing. Tell the owner before promising the notification.`,
+      });
+    }
+    const count = Array.isArray(recipients) ? recipients.length : null;
+    if (clients === null && count === 0) {
+      warnings.push({
+        code: "no_recipients",
+        service_ref: ref,
+        message:
+          "This notification service has no recipients: nothing is delivered through it. Tell the owner; recipients are added to the service in SprutHub.",
+      });
+    }
     return {
-      ...base,
-      delivery: "all_notification_services",
-      services: services.map((item) => ({
-        ...service(item),
-        recipients: "all",
-      })),
+      ref,
+      name,
+      enabled,
+      state,
+      ...(clients === null
+        ? { recipients: "all", recipient_count: count }
+        : {
+            recipients: clients.map((id) => {
+              const recipient = recipients?.find((item) => item.id === id);
+              return recipient
+                ? { ref: recipient.ref, name: recipient.name }
+                : { id, binding: "not_found" };
+            }),
+          }),
     };
+  });
+  if (toAll && services.length === 0) {
+    warnings.push({
+      code: "no_notification_services",
+      message:
+        "The home has no notification service: a PUSH to all of them goes nowhere. Tell the owner.",
+    });
   }
   return {
     ...base,
-    delivery: "listed_services",
-    services: notification.to.map(({ index, clients }) => {
-      const found = services.find((item) => item.index === index);
-      if (!found) return { index, binding: "not_found" };
-      return {
-        ...service(found),
-        recipients:
-          clients === null
-            ? "all"
-            : clients.map((id) => {
-                const recipient = found.recipients?.find(
-                  (item) => item.id === id,
-                );
-                return recipient
-                  ? { ref: recipient.ref, name: recipient.name }
-                  : { id, binding: "not_found" };
-              }),
-      };
-    }),
+    delivery: toAll ? "all_notification_services" : "listed_services",
+    services: through,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
