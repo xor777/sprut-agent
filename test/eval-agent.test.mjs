@@ -9,6 +9,7 @@ import { WebSocket } from "ws";
 import {
   collectEvidence,
   integrityGraders,
+  main,
   parseClaudeStream,
   parseCodexStream,
   runCase,
@@ -22,11 +23,14 @@ import {
 // No model is called here. A scripted "agent" drives the real MCP server the
 // runner configures, and graders are checked against native writes.
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const homeRef = "spruthub://hub/sim-apartment-01";
-const on = (aId) => `${homeRef}/accessory/${aId}/service/13/characteristic/14`;
+const on = (aId) => `accessory/${aId}/service/13/characteristic/14`;
 
 const scriptedAgent = `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  process.stdout.write("9.9.9 (Scripted Code)\\n");
+  process.exit(0);
+}
 const repo = ${JSON.stringify(repo)};
 const { Client } = await import(repo + "/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js");
 const { StdioClientTransport } = await import(repo + "/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js");
@@ -48,7 +52,7 @@ async function call(name, input) {
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: result.content, is_error: result.isError === true }] } });
   return result.structuredContent;
 }
-await call("list_homes", {});
+const homeRef = (await call("list_homes", {})).selection.default_home_ref;
 if (process.env.SCRIPTED_AGENT_READ) {
   emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: process.env.SCRIPTED_AGENT_READ } }] } });
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_read", content: "text", is_error: false }] } });
@@ -63,16 +67,16 @@ if (process.env.SCRIPTED_AGENT_ROGUE) {
   socket.close();
 }
 for (const target of JSON.parse(process.env.SCRIPTED_AGENT_TURN_OFF)) {
-  const prepared = await call("prepare_native_change", { operation: "characteristic_value", target_ref: target, value: false, reason: "scripted" });
+  const prepared = await call("prepare_native_change", { operation: "characteristic_value", target_ref: homeRef + "/" + target, value: false, reason: "scripted" });
   await call("apply_native_change", { change_ref: prepared.change_ref });
 }
 await client.close();
 emit({ type: "result", subtype: "success", is_error: false, result: process.env.SCRIPTED_AGENT_ANSWER, num_turns: id + 1, total_cost_usd: 0, usage: { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 5, output_tokens: 7 } });
 `;
 
-async function scriptedRun(
+async function scriptedEnvironment(
   t,
-  { turnOff, answer = "Готово.", definition, rogue = false, read = "" },
+  { turnOff, answer = "Готово.", rogue = false, read = "" },
 ) {
   const directory = await mkdtemp(
     path.join(tmpdir(), "sprut-eval-agent-test-"),
@@ -103,6 +107,11 @@ async function scriptedRun(
     CLAUDECODE: "1",
     CLAUDE_CODE_ENTRYPOINT: "host-session",
   });
+  return { directory, record };
+}
+
+async function scriptedRun(t, { definition, ...options }) {
+  const { directory, record } = await scriptedEnvironment(t, options);
   const outcome = await runCase({
     caseName: "turn-off-room",
     definition,
@@ -281,8 +290,12 @@ test("a request with another client id fails the run even on one connection", as
 });
 
 const fakeCodex = `#!/usr/bin/env node
-import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  process.stdout.write("codex-cli 0.154.0-fake\\n");
+  process.exit(0);
+}
 appendFileSync(process.env.FAKE_CODEX_RECORD, JSON.stringify({ args, codexHome: process.env.CODEX_HOME, home: process.env.HOME }) + "\\n");
 if (args[0] === "plugin") {
   process.stdout.write("{}\\n");
@@ -291,6 +304,11 @@ if (args[0] === "plugin") {
 readFileSync(0, "utf8");
 const answerPath = args[args.indexOf("--output-last-message") + 1];
 writeFileSync(answerPath, "Готово.");
+mkdirSync(process.env.CODEX_HOME + "/sessions/2026/09/24", { recursive: true });
+writeFileSync(process.env.CODEX_HOME + "/sessions/2026/09/24/rollout-1.jsonl", [
+  { type: "session_meta", payload: { cli_version: "0.154.0-fake", model_provider: "openai" } },
+  { type: "turn_context", payload: { model: "gpt-fake", approval_policy: "on-request", sandbox_policy: { type: "workspace-write" }, permission_profile: { type: "managed" } } },
+].map((line) => JSON.stringify(line)).join("\\n") + "\\n");
 for (const event of [
   { type: "thread.started", thread_id: "t" },
   { type: "item.completed", item: { id: "1", type: "agent_message", text: "Готово." } },
@@ -347,10 +365,76 @@ test("the Codex harness restricts the agent's shell to the workspace and the plu
   assert.doesNotMatch(readable, new RegExp(`"${exec.codexHome}" =`));
   assert.doesNotMatch(readable, new RegExp(repo));
   assert.ok(!exec.args.includes("danger-full-access"));
+  // The rollout Codex keeps names the model and settings it actually used.
+  assert.ok(!exec.args.includes("--ephemeral"));
+  assert.equal(outcome.model.reported, "gpt-fake");
+  assert.deepEqual(outcome.harness_session, {
+    cli_version: "0.154.0-fake",
+    model: "gpt-fake",
+    model_provider: "openai",
+    approval_policy: "on-request",
+    sandbox_policy: "workspace-write",
+    permission_profile: "managed",
+  });
   assert.equal(
     outcome.graders.find(({ name }) => name === "run_completed").pass,
     true,
   );
+});
+
+test("repeated runs on both fixtures report passes, MCP medians and the house/apartment ratio", async (t) => {
+  const { directory } = await scriptedEnvironment(t, {
+    turnOff: [on(15), on(16)],
+  });
+  const evidence = path.join(directory, "evidence");
+  const lines = [];
+  const code = await main(
+    [
+      "turn-off-room",
+      "--repeat",
+      "2",
+      "--fixture",
+      "apartment,house",
+      "--evidence-dir",
+      evidence,
+    ],
+    { write: (text) => lines.push(text) },
+  );
+  assert.equal(code, 1);
+  const summary = JSON.parse(
+    await readFile(path.join(evidence, "summary.json"), "utf8"),
+  );
+  assert.equal(summary.harness, "claude");
+  assert.equal(summary.harness_version, "9.9.9 (Scripted Code)");
+  assert.equal(summary.model.requested, "sonnet");
+  assert.deepEqual(summary.model.reported, ["scripted"]);
+  assert.match(summary.plugin.server_sha256, /^[0-9a-f]{64}$/);
+  const byFixture = Object.fromEntries(
+    summary.cases.map((entry) => [entry.fixture, entry]),
+  );
+  // The living room of the house also has spots, which the script leaves on.
+  assert.equal(byFixture.apartment.passes, 2);
+  assert.equal(byFixture.apartment.runs, 2);
+  assert.equal(byFixture.house.passes, 0);
+  assert.deepEqual(byFixture.house.failure_classes, { agent: 2 });
+  assert.equal(byFixture.apartment.median_mcp_calls, 5);
+  assert.ok(byFixture.apartment.median_mcp_result_bytes > 1_000);
+  assert.equal(byFixture.apartment.median_tokens, 122);
+  const [scale] = summary.scale;
+  assert.equal(scale.case, "turn-off-room");
+  assert.equal(
+    scale.mcp_result_bytes_ratio,
+    Math.round(
+      (byFixture.house.median_mcp_result_bytes /
+        byFixture.apartment.median_mcp_result_bytes) *
+        100,
+    ) / 100,
+  );
+  assert.equal(
+    lines.filter((line) => /^(PASS|FAIL) turn-off-room@/.test(line)).length,
+    4,
+  );
+  assert.ok(lines.some((line) => line.includes("2/2")));
 });
 
 test("a scripted agent that also turns off the kitchen light fails the room boundary", async (t) => {
