@@ -49,6 +49,19 @@ async function call(name, input) {
   return result.structuredContent;
 }
 await call("list_homes", {});
+if (process.env.SCRIPTED_AGENT_READ) {
+  emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: process.env.SCRIPTED_AGENT_READ } }] } });
+  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_read", content: "text", is_error: false }] } });
+}
+if (process.env.SCRIPTED_AGENT_ROGUE) {
+  // A second connection that copies the MCP server's settings.
+  const { WebSocket } = await import(repo + "/node_modules/ws/wrapper.mjs");
+  const socket = new WebSocket(server.env.SPRUTHUB_URL, "json-rpc");
+  await new Promise((resolve) => socket.once("open", resolve));
+  socket.send(JSON.stringify({ id: 1, token: server.env.SPRUTHUB_TOKEN, serial: server.env.SPRUTHUB_SERIAL, cid: server.env.SPRUTHUB_CID, params: { characteristic: { update: { aId: 22, sId: 13, cId: 14, control: { value: { boolValue: false } } } } } }));
+  await new Promise((resolve) => socket.once("message", resolve));
+  socket.close();
+}
 for (const target of JSON.parse(process.env.SCRIPTED_AGENT_TURN_OFF)) {
   const prepared = await call("prepare_native_change", { operation: "characteristic_value", target_ref: target, value: false, reason: "scripted" });
   await call("apply_native_change", { change_ref: prepared.change_ref });
@@ -57,7 +70,10 @@ await client.close();
 emit({ type: "result", subtype: "success", is_error: false, result: process.env.SCRIPTED_AGENT_ANSWER, num_turns: id + 1, total_cost_usd: 0, usage: { input_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 5, output_tokens: 7 } });
 `;
 
-async function scriptedRun(t, { turnOff, answer = "Готово.", definition }) {
+async function scriptedRun(
+  t,
+  { turnOff, answer = "Готово.", definition, rogue = false, read = "" },
+) {
   const directory = await mkdtemp(
     path.join(tmpdir(), "sprut-eval-agent-test-"),
   );
@@ -78,6 +94,8 @@ async function scriptedRun(t, { turnOff, answer = "Готово.", definition })
     SCRIPTED_AGENT_RECORD: record,
     SCRIPTED_AGENT_TURN_OFF: JSON.stringify(turnOff),
     SCRIPTED_AGENT_ANSWER: answer,
+    SCRIPTED_AGENT_ROGUE: rogue ? "1" : "",
+    SCRIPTED_AGENT_READ: read,
     // A real home configured in the caller's shell must not reach the agent.
     SPRUTHUB_URL: "wss://real-home.invalid/spruthub",
     SPRUTHUB_TOKEN: "real-home-token",
@@ -179,6 +197,157 @@ test("a case's faults reach the hub and a stuck light fails the result, not the 
       params.characteristic.update.aId,
     ]),
     [["stuck_actuator", 15]],
+  );
+});
+
+test("a second hub connection beside the MCP server fails the run as isolation", async (t) => {
+  const { outcome, record } = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    rogue: true,
+  });
+
+  // Each run gets its own hub credentials, not the simulator defaults.
+  assert.notEqual(record.server.env.SPRUTHUB_TOKEN, "simulated-hub-token");
+  assert.notEqual(record.server.env.SPRUTHUB_CID, "simulated-hub-client");
+  const check = outcome.graders.find(
+    ({ name }) => name === "single_mcp_connection",
+  );
+  assert.equal(check.pass, false);
+  assert.match(check.detail, /concurrent/);
+  assert.equal(outcome.failure_class, "isolation");
+});
+
+test("reading the repository outside the plugin fails the run as isolation", async (t) => {
+  const outside = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    read: path.join(repo, "research", "eval-agent-cases.mjs"),
+  });
+  const bounds = outside.outcome.graders.find(
+    ({ name }) => name === "agent_stayed_in_bounds",
+  );
+  assert.equal(bounds.pass, false);
+  assert.match(bounds.detail, /eval-agent-cases\.mjs/);
+  assert.equal(outside.outcome.failure_class, "isolation");
+
+  const skill = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    read: path.join(
+      repo,
+      "dist",
+      "plugin",
+      "skills",
+      "spruthub-master",
+      "SKILL.md",
+    ),
+  });
+  assert.equal(
+    skill.outcome.graders.find(({ name }) => name === "agent_stayed_in_bounds")
+      .pass,
+    true,
+  );
+});
+
+test("a request with another client id fails the run even on one connection", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
+    token: "run-token",
+    cid: "run-mcp-client",
+  });
+  t.after(() => hub.close());
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  for (const [id, cid] of [
+    [1, "run-mcp-client"],
+    [2, "someone-else"],
+  ]) {
+    socket.send(
+      JSON.stringify({
+        id,
+        token: "run-token",
+        serial: hub.serial,
+        cid,
+        params: { room: { list: {} } },
+      }),
+    );
+    await once(socket, "message");
+  }
+  const check = integrityGraders(collectEvidence(hub, "")).find(
+    ({ name }) => name === "single_mcp_connection",
+  );
+  assert.equal(check.pass, false);
+  assert.match(check.detail, /someone-else/);
+});
+
+const fakeCodex = `#!/usr/bin/env node
+import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_CODEX_RECORD, JSON.stringify({ args, codexHome: process.env.CODEX_HOME, home: process.env.HOME }) + "\\n");
+if (args[0] === "plugin") {
+  process.stdout.write("{}\\n");
+  process.exit(0);
+}
+readFileSync(0, "utf8");
+const answerPath = args[args.indexOf("--output-last-message") + 1];
+writeFileSync(answerPath, "Готово.");
+for (const event of [
+  { type: "thread.started", thread_id: "t" },
+  { type: "item.completed", item: { id: "1", type: "agent_message", text: "Готово." } },
+  { type: "turn.completed", usage: { input_tokens: 5, cached_input_tokens: 0, output_tokens: 1 } },
+]) process.stdout.write(JSON.stringify(event) + "\\n");
+`;
+
+test("the Codex harness restricts the agent's shell to the workspace and the plugin", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "sprut-eval-codex-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const codex = path.join(directory, "fake-codex.mjs");
+  await writeFile(codex, fakeCodex);
+  await chmod(codex, 0o755);
+  const recordFile = path.join(directory, "record.jsonl");
+  const auth = path.join(directory, "auth.json");
+  await writeFile(auth, "{}");
+  const saved = { ...process.env };
+  t.after(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!Object.hasOwn(saved, key)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  });
+  Object.assign(process.env, {
+    SPRUT_EVAL_CODEX_BIN: codex,
+    SPRUT_EVAL_CODEX_AUTH: auth,
+    FAKE_CODEX_RECORD: recordFile,
+  });
+  const outcome = await runCase({
+    caseName: "read-temperature",
+    harness: "codex",
+    plugin: { dir: path.join(repo, "dist", "plugin") },
+    evidenceRoot: path.join(directory, "evidence"),
+    timeoutMs: 60_000,
+  });
+  const calls = (await readFile(recordFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const exec = calls.find(({ args }) => args[0] === "exec");
+  const config = Object.fromEntries(
+    exec.args
+      .flatMap((arg, index) => (exec.args[index - 1] === "-c" ? [arg] : []))
+      .map((entry) => [
+        entry.slice(0, entry.indexOf("=")),
+        entry.slice(entry.indexOf("=") + 1),
+      ]),
+  );
+  assert.equal(config.default_permissions, '"sprut_eval"');
+  const readable = config["permissions.sprut_eval.filesystem"];
+  assert.match(readable, /":minimal" = "read"/);
+  assert.match(readable, /":workspace_roots" = "write"/);
+  assert.match(readable, new RegExp(`${exec.codexHome}/plugins" = "read"`));
+  assert.doesNotMatch(readable, new RegExp(`"${exec.codexHome}" =`));
+  assert.doesNotMatch(readable, new RegExp(repo));
+  assert.ok(!exec.args.includes("danger-full-access"));
+  assert.equal(
+    outcome.graders.find(({ name }) => name === "run_completed").pass,
+    true,
   );
 });
 
