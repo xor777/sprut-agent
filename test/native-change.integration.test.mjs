@@ -725,7 +725,7 @@ function assembleIntervalFromContract(contract, { start, end, trigger }) {
 
 function assembleCharacteristicFromContract(
   contract,
-  { ref, service, characteristic, trigger, cond, value },
+  { ref, service, characteristic, trigger, cond, value, holdSeconds },
 ) {
   const form = publishedBlockNode(contract, "characteristic");
   const hs = requiredFieldName(form, "hs");
@@ -741,8 +741,29 @@ function assembleCharacteristicFromContract(
     [triggerField]: trigger,
     [condField]: cond,
     [valueField]: publishedScalarString(form, value),
-    ...structuredClone(form.constants ?? {}),
+    ...publishedHold(form, holdSeconds),
   };
+}
+
+function publishedHold(form, holdSeconds) {
+  if (holdSeconds === undefined) {
+    if (form.hold?.none === undefined) {
+      throw new Error("BLOCK characteristic does not publish hold.none");
+    }
+    return structuredClone(form.hold.none);
+  }
+  const heldFor = form.hold?.held_for;
+  if (heldFor?.time?.unit !== "milliseconds") {
+    throw new Error("BLOCK characteristic does not publish a hold in ms");
+  }
+  return { timeCond: heldFor.timeCond, time: holdSeconds * 1000 };
+}
+
+function publishedMode(form, mode) {
+  if (!Array.isArray(form.fields?.mode) || !form.fields.mode.includes(mode)) {
+    throw new Error(`BLOCK ${form.type} does not publish mode ${mode}`);
+  }
+  return mode;
 }
 
 function assembleServiceSetFromContract(
@@ -779,7 +800,10 @@ function assembleServiceSetFromContract(
   };
 }
 
-function assembleDelayFromContract(contract, { afterSeconds, targets }) {
+function assembleDelayFromContract(
+  contract,
+  { afterSeconds, targets, mode = "RESET", index },
+) {
   const form = publishedBlockNode(contract, "delay");
   const targetsField = Object.entries(form.children ?? {}).find(
     ([, rule]) =>
@@ -795,8 +819,8 @@ function assembleDelayFromContract(contract, { afterSeconds, targets }) {
   }
   return {
     type: form.type,
-    ...structuredClone(form.constants ?? {}),
-    index: form.fields.index.minimum,
+    mode: publishedMode(form, mode),
+    index: index ?? form.fields.index.minimum,
     time: nativeDelayTimeFromContract(contract, { seconds: afterSeconds }),
     [targetsField]: targets,
   };
@@ -824,7 +848,10 @@ function assembleConditionFromContract(contract, children) {
   };
 }
 
-function assembleIfFromContract(contract, { when, thenActions, elseActions }) {
+function assembleIfFromContract(
+  contract,
+  { when, thenActions, elseActions, mode = "EVERY" },
+) {
   const form = publishedBlockNode(contract, "if");
   if ((form.editor_optional ?? []).includes("state")) {
     throw new Error("BLOCK if publishes hub-assigned state as editor optional");
@@ -841,6 +868,7 @@ function assembleIfFromContract(contract, { when, thenActions, elseActions }) {
   publishedChild(form, elseField, "array");
   return {
     type: form.type,
+    mode: publishedMode(form, mode),
     ...structuredClone(form.constants ?? {}),
     [predicateField]: when,
     [thenField]: thenActions,
@@ -7087,6 +7115,7 @@ test("versioned BLOCK contract prepares different supported compositions", async
     "service",
     "delay",
     "scenario",
+    "clear_delay",
   ]);
 
   const nestedData = blockData({ nested: true });
@@ -8938,6 +8967,341 @@ test("relative actions and scenario runs outside the contract are refused before
   );
 });
 
+const windowStateRef = `${homeRef}/accessory/70/service/13/characteristic/15`;
+
+function installWindowSensor(hub) {
+  installEnumAccessory(hub, {
+    id: 70,
+    name: "Окно",
+    hs: "ContactSensor",
+    hc: "ContactSensorState",
+    values: [
+      { key: "CLOSED", name: "Закрыто", value: 0 },
+      { key: "OPEN", name: "Открыто", value: 1 },
+    ],
+  });
+  hub.state.accessories.find(
+    ({ id }) => id === 70,
+  ).services[0].characteristics[0].control.write = false;
+}
+
+// A motion light whose off timer keeps running and is cleared by motion.
+function heldMotionLightData() {
+  return {
+    targets: [
+      {
+        ...everyIf({
+          when: conditionGroup({
+            ...characteristicCondition(),
+            timeCond: ">",
+            time: 60_000,
+          }),
+          thenActions: [setAction(), { type: "clear_delay", index: 1 }],
+          elseActions: [
+            {
+              type: "delay",
+              index: 1,
+              mode: "CONTINUE",
+              time: 60_000,
+              targets: [setAction({ value: "false" })],
+            },
+          ],
+        }),
+        mode: "ONCE",
+      },
+    ],
+  };
+}
+
+test("a window held open, a one-time branch and a continued timer are created, read back and removed", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  installWindowSensor(hub);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+  const climateModeRef = `${climateServiceRef}/characteristic/31`;
+  const [
+    windowService,
+    windowState,
+    climateService,
+    climateMode,
+    motionService,
+    motion,
+    lampService,
+    lampOn,
+  ] = await Promise.all(
+    [
+      `${homeRef}/accessory/70/service/13`,
+      windowStateRef,
+      climateServiceRef,
+      climateModeRef,
+      `${homeRef}/accessory/32/service/13`,
+      motionCharacteristicRef,
+      serviceRef,
+      characteristicRef,
+    ].map((entity_ref) =>
+      client.callTool({ name: "get_entity", arguments: { entity_ref } }),
+    ),
+  );
+
+  // «Если окно открыто дольше 5 минут, выключи кондиционер» — один раз.
+  const windowOpenFiveMinutes = assembleCharacteristicFromContract(contract, {
+    ref: windowStateRef,
+    service: windowService,
+    characteristic: windowState,
+    trigger: true,
+    cond: "=",
+    value: 1,
+    holdSeconds: 300,
+  });
+  const lampSet = (value) =>
+    assembleServiceSetFromContract(contract, {
+      ref: characteristicRef,
+      service: lampService,
+      characteristic: lampOn,
+      value,
+    });
+  // Движение включает свет и снимает таймер; без движения таймер идёт дальше.
+  const offLater = assembleDelayFromContract(contract, {
+    mode: "CONTINUE",
+    afterSeconds: 120,
+    targets: [lampSet(false)],
+  });
+  const clearForm = publishedBlockNode(contract, "clear_delay");
+  requiredFieldSpec(clearForm, "index");
+  const cancelOff = { type: clearForm.type, index: offLater.index };
+  const data = assembleSupportedBlockFromContract(contract, {
+    targets: [
+      assembleIfFromContract(contract, {
+        mode: "ONCE",
+        when: assembleConditionFromContract(contract, [windowOpenFiveMinutes]),
+        thenActions: [
+          assembleServiceSetFromContract(contract, {
+            ref: climateModeRef,
+            service: climateService,
+            characteristic: climateMode,
+            value: 0,
+          }),
+        ],
+        elseActions: [],
+      }),
+      assembleIfFromContract(contract, {
+        when: assembleConditionFromContract(contract, [
+          assembleCharacteristicFromContract(contract, {
+            ref: motionCharacteristicRef,
+            service: motionService,
+            characteristic: motion,
+            trigger: true,
+            cond: "=",
+            value: true,
+          }),
+        ]),
+        thenActions: [lampSet(true), cancelOff],
+        elseActions: [offLater],
+      }),
+    ],
+  });
+  assert.deepEqual(
+    {
+      hold: {
+        timeCond: windowOpenFiveMinutes.timeCond,
+        time: windowOpenFiveMinutes.time,
+      },
+      ifMode: data.targets[0].mode,
+      delay: {
+        mode: offLater.mode,
+        index: offLater.index,
+        time: offLater.time,
+      },
+      cancel: cancelOff,
+    },
+    {
+      hold: { timeCond: ">", time: 300_000 },
+      ifMode: "ONCE",
+      delay: { mode: "CONTINUE", index: 1, time: 120_000 },
+      cancel: { type: "clear_delay", index: 1 },
+    },
+  );
+
+  const prepared = await prepareBlockCreate(client, {
+    name: "Окно и свет в коридоре",
+    data,
+    reason:
+      "Выключить кондиционер, если окно открыто дольше 5 минут; свет гаснет через 2 минуты без движения",
+  });
+  assert.deepEqual(prepared.structuredContent.diff.configuration.to.data, data);
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.configuration_matches, true);
+  const createdIndex = created.structuredContent.scenario_index;
+  assert.deepEqual(
+    scenarioData(hub, createdIndex),
+    withRuntimeBlockFields(data),
+  );
+
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === createdIndex),
+    false,
+  );
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("an existing BLOCK with ONCE, a hold, CONTINUE and clear_delay is updated, read back and restored", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const manual = heldMotionLightData();
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+
+  const read = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+  });
+  assert.equal(read.isError, undefined, read.content[0]?.text);
+  const edited = structuredClone(
+    read.structuredContent.entity.configuration.value,
+  );
+  edited.targets[0].if.conditions[0].time = 180_000;
+  edited.targets[0].else[0].time = 300_000;
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: edited,
+      reason: "Реагировать на движение дольше 3 минут и гасить свет через 5",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const stored = scenarioData(hub, "existing-block");
+  assert.deepEqual(
+    {
+      mode: stored.targets[0].mode,
+      hold: stored.targets[0].if.conditions[0].time,
+      clear: stored.targets[0].then[1].index,
+      delay: [stored.targets[0].else[0].mode, stored.targets[0].else[0].time],
+    },
+    { mode: "ONCE", hold: 180_000, clear: 1, delay: ["CONTINUE", 300_000] },
+  );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+});
+
+test("holds, branch modes, delay modes and delay clearing outside the contract are refused before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    [
+      "clear an absent delay",
+      (data) => {
+        data.targets[0].then[1].index = 2;
+      },
+      /no delay with that index/,
+    ],
+    [
+      "held shorter than",
+      (data) => {
+        data.targets[0].if.conditions[0].timeCond = "<";
+      },
+      /hold/,
+    ],
+    [
+      "hold without time",
+      (data) => {
+        data.targets[0].if.conditions[0].time = 0;
+      },
+      /hold/,
+    ],
+    [
+      "time without hold",
+      (data) => {
+        data.targets[0].if.conditions[0].timeCond = "";
+      },
+      /hold/,
+    ],
+    [
+      "unknown branch mode",
+      (data) => {
+        data.targets[0].mode = "SOMETIMES";
+      },
+      /EVERY or ONCE/,
+    ],
+    [
+      "unknown delay mode",
+      (data) => {
+        data.targets[0].else[0].mode = "PAUSE";
+      },
+      /RESET or CONTINUE/,
+    ],
+  ];
+  const results = [];
+  for (const [name, mutate, reason] of cases) {
+    const data = heldMotionLightData();
+    mutate(data);
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name,
+        description: "Не сохранять неподдержанную форму",
+        active: true,
+        on_start: false,
+        sync: false,
+        data,
+        reason: "Проверить границу условий и задержек",
+      },
+    });
+    results.push({
+      name,
+      code: prepared.structuredContent?.error?.code,
+      explained: reason.test(prepared.structuredContent?.error?.message ?? ""),
+    });
+  }
+  assert.deepEqual(
+    results,
+    cases.map(([name]) => ({
+      name,
+      code: "invalid_block_data",
+      explained: true,
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
 test("block_data_update wraps a single characteristic if predicate into a condition group before write", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
@@ -9156,7 +9520,7 @@ test("BLOCK preparation rejects delay index zero before any scenario write", asy
       isError: true,
       code: "invalid_block_data",
       message:
-        "Unsupported BLOCK data at root.targets[0].then[1]: RESET delay index must be a positive unique integer; time must be a positive integer.",
+        "Unsupported BLOCK data at root.targets[0].then[1]: delay index must be a positive unique integer; time must be a positive integer.",
     })),
   );
   assert.equal(
