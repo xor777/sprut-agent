@@ -695,6 +695,53 @@ test("query words match at the start of a word, not inside one", async (t) => {
   );
 });
 
+test("a query of several words that finds nothing says which words match alone", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  // Independent of the product: non-technical services with a word of the
+  // service, device or room name that starts with the given text.
+  const withWord = (start) =>
+    hub.state.accessories.flatMap((accessory) => {
+      const room = hub.state.rooms.find(({ id }) => id === accessory.roomId);
+      return accessory.services.filter(
+        ({ type, name }) =>
+          !["AccessoryInformation", "BatteryService"].includes(type) &&
+          `${name} ${accessory.name} ${room?.name ?? ""}`
+            .toLowerCase()
+            .split(/\s+/)
+            .some((word) => word.startsWith(start)),
+      );
+    }).length;
+
+  // No name has both words: the balcony has no light.
+  const balcony = await call("find_devices", { query: "свет на балконе" });
+  assert.equal(balcony.body.total, 0);
+  assert.deepEqual(balcony.body.query_words, {
+    matching_all: 0,
+    matching_each: { свет: withWord("свет"), балконе: 0 },
+  });
+
+  // Both words name the kitchen lamp, which is on: nothing of it is off.
+  const off = await call("find_devices", {
+    query: "свет на кухне",
+    state: "off",
+  });
+  assert.equal(off.body.total, 0);
+  assert.deepEqual(off.body.query_words, {
+    matching_all: 1,
+    matching_each: { свет: withWord("свет"), кухне: withWord("кухн") },
+  });
+
+  // One word or a found answer needs no breakdown.
+  const garage = await call("find_devices", { query: "гараж" });
+  assert.equal(Object.hasOwn(garage.body, "query_words"), false);
+  const on = await call("find_devices", {
+    query: "свет на кухне",
+    state: "on",
+  });
+  assert.equal(on.body.total, 1);
+  assert.equal(Object.hasOwn(on.body, "query_words"), false);
+});
+
 test("without filters find_devices sums services, on and unavailable per room", async (t) => {
   const { hub, call, home } = await setup(
     t,
