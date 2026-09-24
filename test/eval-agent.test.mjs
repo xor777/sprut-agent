@@ -1603,7 +1603,7 @@ test("a judge reply that cannot be checked is a judge_error, never a pass or the
 // case and home. With a scripted judge that passes everything, each
 // labelled fail is a disagreement and each pass an agreement; every label
 // must reach the judge (no case without a rubric, no crash).
-test("judge calibration runs every labelled answer and reports each disagreement", async (t) => {
+async function runCalibration(t, args) {
   const directory = await mkdtemp(path.join(tmpdir(), "sprut-judge-calib-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const record = path.join(directory, "judge-record.jsonl");
@@ -1611,11 +1611,7 @@ test("judge calibration runs every labelled answer and reports each disagreement
   const { stdout, code } = await new Promise((resolve) => {
     execFile(
       process.execPath,
-      [
-        path.join(repo, "research", "eval-judge-calibrate.mjs"),
-        "--concurrency",
-        "8",
-      ],
+      [path.join(repo, "research", "eval-judge-calibrate.mjs"), ...args],
       {
         env: {
           ...process.env,
@@ -1631,10 +1627,22 @@ test("judge calibration runs every labelled answer and reports each disagreement
       (error, out) => resolve({ stdout: out, code: error?.code ?? 0 }),
     );
   });
+  const calls = (await readFile(record, "utf8").catch(() => ""))
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  return { stdout, code, calls };
+}
+
+test("judge calibration runs every labelled answer and reports each disagreement", async (t) => {
+  const { stdout, code, calls } = await runCalibration(t, [
+    "--concurrency",
+    "8",
+  ]);
   const labelled = Object.entries(LABELS).flatMap(([caseName, labels]) =>
-    labels.map((label, at) => ({ id: `${caseName}/${at + 1}`, ...label })),
+    labels.map((label) => ({ ...label, id: `${caseName}/${label.id}` })),
   );
-  const calls = (await readFile(record, "utf8")).trim().split("\n");
   assert.equal(calls.length, labelled.length);
   for (const [caseName, labels] of Object.entries(LABELS)) {
     const sure = labels.filter(({ ambiguous }) => !ambiguous);
@@ -1660,6 +1668,28 @@ test("judge calibration runs every labelled answer and reports each disagreement
   }
   // Disagreements on unambiguous labels fail the command.
   assert.equal(code, 1);
+});
+
+// A label's id is written in the label, not taken from its place, so adding
+// a label does not renumber the ids that commits and notes cite. --ids runs
+// only the labels named.
+test("judge calibration selects labels by their own ids", async (t) => {
+  const picked = [
+    ["why-night-light", LABELS["why-night-light"].at(-1)],
+    ["offline-light", LABELS["offline-light"][0]],
+  ];
+  const { stdout, calls } = await runCalibration(t, [
+    "--ids",
+    picked.map(([caseName, { id }]) => `${caseName}/${id}`).join(","),
+  ]);
+  assert.equal(calls.length, 2, stdout);
+  for (const [caseName, { id, answer }] of picked) {
+    assert.ok(
+      calls.some(({ stdin }) => stdin.includes(answer)),
+      `${caseName}/${id}`,
+    );
+  }
+  assert.match(stdout, /^TOTAL agree \d+\/2 /m);
 });
 
 // The judge grades against the facts of the run's own home: every device
