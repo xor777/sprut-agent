@@ -10512,6 +10512,55 @@ test("a condition that changed back within a time is created and read back", asy
   assert.equal(removed.structuredContent.status, "restored");
 });
 
+test("an existing BLOCK whose if has no mode is updated as EVERY and keeps that form", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // The web client creates an if without mode and shows it as EVERY.
+  const { mode: _mode, ...modeless } = everyIf({
+    when: conditionGroup(characteristicCondition()),
+    thenActions: [setAction()],
+  });
+  const manual = { targets: [modeless] };
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+
+  const read = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+  });
+  const edited = structuredClone(
+    read.structuredContent.entity.configuration.value,
+  );
+  edited.targets[0].then[0].characteristics[0].value = "false";
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: edited,
+      reason: "По движению выключать свет, а не включать",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  const stored = scenarioData(hub, "existing-block");
+  assert.equal(Object.hasOwn(stored.targets[0], "mode"), false);
+  assert.equal(stored.targets[0].then[0].characteristics[0].value, "false");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+});
+
 test("an existing BLOCK with ONCE, a hold, CONTINUE and clear_delay is updated, read back and restored", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
