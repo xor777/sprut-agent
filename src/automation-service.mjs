@@ -8684,6 +8684,7 @@ function deviceCommandFailure(change, error) {
     status = error.requestSent === true ? "rejected" : "not_sent";
   }
   const changeRef = change ? `spruthub-change://native/${change.id}` : null;
+  const rejection = status === "rejected" ? writeRejection(error) : undefined;
   return {
     status,
     sent: status === "rejected" || status === "uncertain",
@@ -8699,6 +8700,7 @@ function deviceCommandFailure(change, error) {
         ? { action: error.action }
         : {}),
     },
+    ...(rejection ? { rejection } : {}),
     ...(status === "uncertain" ? { next: nativeChangeNext(changeRef) } : {}),
   };
 }
