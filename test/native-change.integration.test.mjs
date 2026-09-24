@@ -11546,6 +11546,91 @@ test("an update names the stored nodes it removes and warns when hub code goes w
   assert.deepEqual(removal(stored), code);
 });
 
+test("an update names the stored node it removes, not the sibling it edits", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const brightness = (value) => setAction({ cId: 16, hc: "Brightness", value });
+  const withoutBlockIds = (value) =>
+    JSON.parse(
+      JSON.stringify(value, (key, child) =>
+        key === "blockId" ? undefined : child,
+      ),
+    );
+  const removal = async (stored, edit) => {
+    hub.state.scenarios[0].data = JSON.stringify(
+      withRuntimeBlockFields(stored),
+    );
+    const data = edit(await readBlockConfiguration(client));
+    const prepared = await prepareBlockUpdate(client, data, "Правка BLOCK");
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    return {
+      removed_nodes:
+        prepared.structuredContent.block_action_preview.removed_nodes,
+      deletion_warnings: prepared.structuredContent.limitations.filter((line) =>
+        line.includes("This edit deletes stored nodes"),
+      ),
+    };
+  };
+
+  // «Не включать свет, а яркость поставить 30»: the On action goes, the
+  // Brightness action stays and changes.
+  const lightThenBrightness = {
+    targets: [
+      everyIf({
+        when: conditionGroup(characteristicCondition()),
+        thenActions: [setAction(), brightness("20")],
+      }),
+    ],
+  };
+  const dropOnSetBrightness = (data) => {
+    data.targets[0].then.splice(0, 1);
+    data.targets[0].then[0].characteristics[0].value = "30";
+    return data;
+  };
+  // «Убери запись в журнал, а свет по движению включай»: the if holding
+  // hub code goes, the next if stays and changes.
+  const codeThenLight = {
+    targets: [
+      webClientCodeBlock().targets[0],
+      everyIf({
+        when: conditionGroup(characteristicCondition()),
+        thenActions: [brightness("20")],
+      }),
+    ],
+  };
+  const dropCodeEditLight = (data) => {
+    data.targets.splice(0, 1);
+    data.targets[0].then[0].characteristics[0].value = "40";
+    return data;
+  };
+
+  assert.deepEqual(
+    {
+      action_as_read: await removal(lightThenBrightness, dropOnSetBrightness),
+      action_without_block_ids: await removal(lightThenBrightness, (data) =>
+        dropOnSetBrightness(withoutBlockIds(data)),
+      ),
+      if_as_read: await removal(codeThenLight, dropCodeEditLight),
+    },
+    {
+      action_as_read: {
+        removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
+        deletion_warnings: [],
+      },
+      action_without_block_ids: {
+        removed_nodes: [{ pointer: "/targets/0/then/0", type: "service" }],
+        deletion_warnings: [],
+      },
+      if_as_read: {
+        removed_nodes: [{ pointer: "/targets/0", type: "if" }],
+        deletion_warnings: [
+          "This edit deletes stored nodes this contract cannot write: code at /targets/0/then/0. Tell the owner before apply: block_data_update cannot add them back; only restore of this change or the SprutHub interface can.",
+        ],
+      },
+    },
+  );
+});
+
 test("a clear_delay for all delays of the BLOCK is created and read back", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
