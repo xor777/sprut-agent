@@ -1504,6 +1504,31 @@ test("answer_has_no_raw_refs catches native ids, not option numbers or plain num
   }
 });
 
+// Real answers named tools and native fields to the owner
+// («list_native_changes», «start_native_observation», «execution_error»);
+// the server instructions allow them only when the owner asks.
+test("answer_has_no_raw_refs catches tool and native field names", async (t) => {
+  const { grade } = await nativeSession(t);
+  const clean = (answer) =>
+    grade("turn-off-room", answer).answer_has_no_raw_refs;
+  for (const leaked of [
+    "Проверил list_native_changes: изменений не было.",
+    "Могу запустить start_native_observation до 23:00.",
+    "Флаг execution_error не выставлен.",
+    "Так прошивку не обновить: у prepare_native_change нет такой операции.",
+  ]) {
+    assert.equal(clean(leaked), false, leaked);
+  }
+  for (const plain of [
+    "Выключил люстру и торшер.",
+    "Часовой пояс хаба Europe/Moscow, журнал хранит записи с 09:42.",
+    "Сценарий «Night_Mode» выключает свет в 06:00.",
+    "Датчик с Zigbee ID 0x00158d0001a2b3c4 не в сети.",
+  ]) {
+    assert.equal(clean(plain), true, plain);
+  }
+});
+
 // Answers are judged by a model (research/eval-judge.mjs); here the model is
 // scripted, so what is checked is how its verdict becomes the grade.
 test("a judged case passes or fails on the judge's verdict, not on answer patterns", async (t) => {
