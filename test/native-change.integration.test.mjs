@@ -20395,21 +20395,20 @@ test("a turned-on LOGIC whose type its anchor does not list keeps its index as t
   );
 });
 
-// Whether logic.list shows the assignments of a turned-off LOGIC is not
-// known, so an empty scan does not show that no device uses it. Deleting it
-// could leave such a device with an assignment to a LOGIC that is gone. An
-// assignment the scan does show blocks the delete while the LOGIC is off, as
-// it does while it is on: turning it on would make it run there. Turned on
-// with the owner's consent, a LOGIC whose assignments the next restore finds
-// stays on until its scenario_active change is restored.
-test("restore of a turned-off LOGIC names its visible assignments, refuses while none are visible, and deletes it once it is on and unassigned", async (t) => {
+// SprutHub 3.0.0 (owner hub, 2026-09-24, live-conformance-3): an assignment
+// made while a LOGIC is on is still listed once it is off, and a turned-off
+// LOGIC cannot be newly assigned. So the home scan finds every device that
+// uses a turned-off LOGIC: what it finds blocks the delete, and with none
+// found restore deletes the LOGIC while it is off, without turning it on.
+test("restore of a turned-off LOGIC names its visible assignments and deletes it without turning it on once none are left", async (t) => {
   const { hub, client, stateDirectory, changeRef, created } =
     await createOwnedLogic(t, { active: false });
   assert.equal(created.status, "applied");
   assertIdentityMapping(created, { ready: false, reason: "logic_turned_off" });
   const logic = hub.state.scenarios.find(({ index }) => index === "created-1");
-  const assignment = ownAssignmentElsewhere();
-  hub.state.logics.push(assignment);
+  // With a window, restore could turn it on; it must not.
+  addScenarioOptionsWindow(hub, logic);
+  hub.state.logics.push(ownAssignmentElsewhere());
 
   assertAssignedLogicRestoreBlocked(
     await client.callTool({
@@ -20426,116 +20425,39 @@ test("restore of a turned-off LOGIC names its visible assignments, refuses while
   );
   assertCreatedLogicKept(hub);
   assert.equal(logic.active, false);
-  assert.deepEqual(scenarioWindowActiveUpdates(hub), []);
 
-  // With no assignment visible, the refusal says what turning it on means
-  // and does not hand the agent a plain next step to turn it on.
+  // The assignment is removed; after a restart the next restore scans the
+  // home again, finds none and deletes the LOGIC while it is off.
   hub.state.logics.length = 0;
-  const listsBefore = logicListReads(hub);
-  const refused = await client.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: changeRef },
-  });
-  assert.equal(refused.isError, true, refused.content[0]?.text);
-  assert.equal(
-    refused.structuredContent.error.code,
-    "logic_off_assignments_unverified",
-    refused.content[0]?.text,
-  );
-  assert.ok(logicListReads(hub) > listsBefore, "the home was scanned first");
-  assert.equal(
-    refused.structuredContent.scenario_ref,
-    `${homeRef}/scenario/created-1`,
-  );
-  assert.equal(refused.structuredContent.next, undefined);
-  assert.match(
-    refused.structuredContent.error.message,
-    /owner must agree/,
-    "turning it on is offered only with the owner's consent",
-  );
-  assertCreatedLogicKept(hub);
   const restartedClient = await startClient(t, hub, stateDirectory);
-  const stored = await callChangeTool(
-    restartedClient,
-    "get_native_change",
-    changeRef,
-  );
-  assert.equal(stored.status, "applied");
-  assertIdentityMapping(stored, { ready: false, reason: "logic_turned_off" });
-
-  // The owner agreed. Turned on, its assignment is found: it stays on, and
-  // restoring the scenario_active change turns it off again.
-  addScenarioOptionsWindow(hub, logic);
-  const turnOn = await prepareScenarioActive(
-    restartedClient,
-    `${homeRef}/scenario/created-1`,
-    true,
-  );
-  assert.equal(
-    (
-      await callChangeTool(
-        restartedClient,
-        "apply_native_change",
-        turnOn.change_ref,
-      )
-    ).status,
-    "applied",
-  );
-  const on = await callChangeTool(
-    restartedClient,
-    "get_native_change",
-    changeRef,
-  );
-  assertIdentityMapping(on, { ready: true, reason: undefined });
-  assignment.active = true;
-  hub.state.logics.push(assignment);
-  assertAssignedLogicRestoreBlocked(
-    await restartedClient.callTool({
-      name: "restore_native_change",
-      arguments: { change_ref: changeRef },
-    }),
-    {
-      tool: "restore_native_change",
-      type: "created-1",
-      scenarioIndex: "created-1",
-      hub,
-    },
-  );
-  assert.equal(logic.active, true);
-  assert.equal(
-    (
-      await callChangeTool(
-        restartedClient,
-        "restore_native_change",
-        turnOn.change_ref,
-      )
-    ).status,
-    "restored",
-  );
-  assert.equal(logic.active, false);
-
-  // Unassigned and on, it is deleted.
-  hub.state.logics.length = 0;
-  const turnOnAgain = await prepareScenarioActive(
-    restartedClient,
-    `${homeRef}/scenario/created-1`,
-    true,
-  );
-  await callChangeTool(
-    restartedClient,
-    "apply_native_change",
-    turnOnAgain.change_ref,
-  );
+  const listsBefore = logicListReads(hub);
   const restored = await callChangeTool(
     restartedClient,
     "restore_native_change",
     changeRef,
   );
   assert.equal(restored.status, "restored");
+  assert.equal(restored.logic_assignments_may_remain, undefined);
+  assert.ok(logicListReads(hub) > listsBefore, "the home was scanned first");
+  assert.deepEqual(
+    scenarioDeletes(hub).map(({ scenario }) => scenario.delete),
+    [{ index: "created-1" }],
+  );
   assert.equal(
     hub.state.scenarios.some(({ index }) => index === "created-1"),
     false,
   );
+  assert.deepEqual(
+    scenarioWindowActiveUpdates(hub),
+    [],
+    "it was not turned on to be deleted",
+  );
+  const stored = await callChangeTool(
+    await startClient(t, hub, stateDirectory),
+    "get_native_change",
+    changeRef,
+  );
+  assert.equal(stored.status, "restored");
 });
 
 function logicListReads(hub) {
@@ -22931,86 +22853,82 @@ test("a created BLOCK that SprutHub stores turned off reports it and stays owned
 });
 
 test("a LOGIC source change stays restorable after its scenario is turned off", async (t) => {
-  // Turned off, it stays owned, but restore deletes it only once it is on
-  // again: a turned-off LOGIC's assignments may not be listed.
-  await t.test("a created source is deleted once it is on", async (subtest) => {
-    const { hub, stateDirectory } = await setup(subtest);
-    const client = await startClient(subtest, hub, stateDirectory);
-    const prepared = await client.callTool({
-      name: "prepare_native_change",
-      arguments: {
-        operation: "logic_source_create",
-        target_ref: serviceRef,
-        name: "Ночная яркость",
-        description: "Приглушать свет ночью",
-        active: true,
-        on_start: false,
-        sync: false,
-        source: firstLogicSource,
-        reason: "Приглушать свет ночью",
-      },
-    });
-    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
-    const createRef = prepared.structuredContent.change_ref;
-    const created = await callChangeTool(
-      client,
-      "apply_native_change",
-      createRef,
-    );
-    assert.equal(created.status, "applied");
-    const scenario = hub.state.scenarios.find(
-      ({ index }) => index === created.scenario_index,
-    );
-    addScenarioOptionsWindow(hub, scenario);
+  // Turned off, it stays owned, and with no assignment found restore
+  // deletes it while it is off.
+  await t.test(
+    "a created source is deleted while it is off",
+    async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const client = await startClient(subtest, hub, stateDirectory);
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "logic_source_create",
+          target_ref: serviceRef,
+          name: "Ночная яркость",
+          description: "Приглушать свет ночью",
+          active: true,
+          on_start: false,
+          sync: false,
+          source: firstLogicSource,
+          reason: "Приглушать свет ночью",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      const createRef = prepared.structuredContent.change_ref;
+      const created = await callChangeTool(
+        client,
+        "apply_native_change",
+        createRef,
+      );
+      assert.equal(created.status, "applied");
+      const scenario = hub.state.scenarios.find(
+        ({ index }) => index === created.scenario_index,
+      );
+      addScenarioOptionsWindow(hub, scenario);
 
-    const turnOff = await prepareScenarioActive(
-      client,
-      created.scenario_ref,
-      false,
-    );
-    assert.equal(
-      (await callChangeTool(client, "apply_native_change", turnOff.change_ref))
-        .status,
-      "applied",
-    );
-    assert.equal(scenario.active, false);
-    const observed = await callChangeTool(
-      client,
-      "get_native_change",
-      createRef,
-    );
-    assert.equal(observed.status, "applied");
-    assert.equal(observed.restore_supported, true);
+      const turnOff = await prepareScenarioActive(
+        client,
+        created.scenario_ref,
+        false,
+      );
+      assert.equal(
+        (
+          await callChangeTool(
+            client,
+            "apply_native_change",
+            turnOff.change_ref,
+          )
+        ).status,
+        "applied",
+      );
+      assert.equal(scenario.active, false);
+      const observed = await callChangeTool(
+        client,
+        "get_native_change",
+        createRef,
+      );
+      assert.equal(observed.status, "applied");
+      assert.equal(observed.restore_supported, true);
+      const activeWrites = scenarioWindowActiveUpdates(hub).length;
 
-    const refused = await client.callTool({
-      name: "restore_native_change",
-      arguments: { change_ref: createRef },
-    });
-    assert.equal(refused.isError, true, refused.content[0]?.text);
-    assert.equal(
-      refused.structuredContent.error.code,
-      "logic_off_assignments_unverified",
-    );
-    assert.deepEqual(scenarioDeletes(hub), []);
-
-    const turnedOn = await callChangeTool(
-      client,
-      "restore_native_change",
-      turnOff.change_ref,
-    );
-    assert.equal(turnedOn.status, "restored");
-    assert.equal(scenario.active, true);
-    const restored = await callChangeTool(
-      client,
-      "restore_native_change",
-      createRef,
-    );
-    assert.equal(restored.status, "restored");
-    assert.deepEqual(
-      scenarioDeletes(hub).map(({ scenario: request }) => request.delete),
-      [{ index: created.scenario_index }],
-    );
-  });
+      const restored = await callChangeTool(
+        client,
+        "restore_native_change",
+        createRef,
+      );
+      assert.equal(restored.status, "restored");
+      assert.deepEqual(
+        scenarioDeletes(hub).map(({ scenario: request }) => request.delete),
+        [{ index: created.scenario_index }],
+      );
+      assert.equal(
+        scenarioWindowActiveUpdates(hub).length,
+        activeWrites,
+        "it was not turned on to be deleted",
+      );
+    },
+  );
 
   await t.test("an updated source is put back", async (subtest) => {
     const { hub, stateDirectory } = await setup(subtest);
