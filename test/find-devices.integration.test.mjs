@@ -143,11 +143,12 @@ test("find_devices state=on lists every service that is on, air purifiers includ
   );
   assert.equal(byDevice("Очиститель воздуха")[0].on_basis, "Active");
   assert.equal(byDevice("Люстра")[0].on_basis, "On");
+  // A relay's kind comes from its native type, not from its name.
   assert.deepEqual(
     byDevice("Выключатель гостиной").map(({ name, kind }) => [name, kind]),
     [
-      ["Споты", "light"],
-      ["Вентиляция", "outlet"],
+      ["Споты", "switch"],
+      ["Вентиляция", "switch"],
     ],
   );
   // The air conditioner is in mode OFF and the open curtains are not "on".
@@ -172,7 +173,54 @@ test("find_devices state=on lists every service that is on, air purifiers includ
   assert.deepEqual(hub.writes(), []);
 });
 
-test("living-room lights include relays named as lights and leave the ventilation relay on", async (t) => {
+// Native types of an appliance whose own settings a Switch or Outlet on the
+// same accessory may be; independent of the product's table.
+const APPLIANCE_TYPES = new Set([
+  "Thermostat",
+  "HeaterCooler",
+  "AirPurifier",
+  "HumidifierDehumidifier",
+]);
+
+// Independent of the product: refs of the services of these native types
+// that the simulator holds as on; Switch and Outlet only when they are not
+// on an appliance.
+function standaloneOn(state, home, types) {
+  return state.accessories.flatMap((accessory) => {
+    const appliance = accessory.services.some(({ type }) =>
+      APPLIANCE_TYPES.has(type),
+    );
+    return accessory.services
+      .filter(
+        (service) =>
+          types.includes(service.type) &&
+          !(appliance && ["Switch", "Outlet"].includes(service.type)) &&
+          service.characteristics.some(
+            ({ control }) =>
+              control.type === "On" && control.value.boolValue === true,
+          ),
+      )
+      .map(
+        (service) => `${home}/accessory/${accessory.id}/service/${service.sId}`,
+      );
+  });
+}
+
+// Service refs of a switches section: its entries, or every page of its
+// next call when the entries are not all.
+async function allSwitches(call, section) {
+  if (!section.next) return section.entries.map(({ ref }) => ref);
+  const refs = [];
+  let next = section.next;
+  while (next) {
+    const page = await call(next.tool, next.arguments);
+    refs.push(...listed(page.body).map(({ service }) => service.ref));
+    next = page.body.next;
+  }
+  return refs;
+}
+
+test("living-room lights list the lamps and beside them the room's relays, picked by name", async (t) => {
   const { hub, call, home } = await setup(t, await loadHomeFixture("house"));
   const living = `${home}/room/3`;
 
@@ -181,32 +229,50 @@ test("living-room lights include relays named as lights and leave the ventilatio
     kind: "light",
   });
 
-  const lights = listed(body);
   assert.deepEqual(
-    lights.map(({ device, service }) => [
+    listed(body).map(({ device, service }) => [
       device.name,
       service.name,
       service.type,
-      service.kind_basis ?? null,
     ]),
     [
-      ["Люстра", "Люстра", "Lightbulb", null],
-      ["Торшер", "Свет", "Lightbulb", null],
-      ["Светодиодная лента", "Лента", "Lightbulb", null],
-      ["Выключатель гостиной", "Споты", "Switch", "name"],
-      ["Выключатель гостиной", "Подсветка ниши", "Switch", "name"],
+      ["Люстра", "Люстра", "Lightbulb"],
+      ["Торшер", "Свет", "Lightbulb"],
+      ["Светодиодная лента", "Лента", "Lightbulb"],
     ],
   );
-  assert(lights.every(({ room }) => room.ref === living));
-  const commands = lights
-    .filter(({ service }) => service.on === true)
-    .map(({ service }) => {
-      const on = readingOf(service, "On");
-      assert.equal(on.writable, true);
-      return { target_ref: on.ref, value: false };
-    });
-  assert.equal(commands.length, 3);
+  // The room's relays and sockets: their names, not the tool, say which of
+  // them drive lamps.
+  const relays = body.switches;
+  assert.deepEqual(
+    relays.entries.map(({ device, name, room, on }) => [
+      device,
+      name,
+      room,
+      on,
+    ]),
+    [
+      ["Розетка телевизора", "Розетка", "Гостиная", true],
+      ["Выключатель гостиной", "Споты", "Гостиная", true],
+      ["Выключатель гостиной", "Подсветка ниши", "Гостиная", false],
+      ["Выключатель гостиной", "Вентиляция", "Гостиная", true],
+    ],
+  );
+  assert.equal(relays.total, 4);
+  assert.equal(Object.hasOwn(relays, "next"), false);
+  assert.equal(typeof relays.note, "string");
 
+  // «Выключи весь свет в гостиной»: the lamps that are on and, chosen by
+  // name, the spots relay.
+  const commands = [
+    ...listed(body)
+      .filter(({ service }) => service.on === true)
+      .map(({ service }) => readingOf(service, "On").ref),
+    ...relays.entries
+      .filter(({ name, on }) => on && /^(Споты|Подсветка)/.test(name))
+      .map(({ on_ref: ref }) => ref),
+  ].map((ref) => ({ target_ref: ref, value: false }));
+  assert.equal(commands.length, 3);
   const sent = await call("send_device_commands", {
     home_ref: home,
     commands,
@@ -216,30 +282,190 @@ test("living-room lights include relays named as lights and leave the ventilatio
     sent.body.results.map(({ status }) => status),
     ["applied", "applied", "applied"],
   );
+
   const after = await call("find_devices", {
     room_ref: living,
     kind: "light",
     state: "on",
   });
   assert.equal(after.body.total, 0);
+  assert.deepEqual(
+    after.body.switches.entries.map(({ device, name }) => [device, name]),
+    [
+      ["Розетка телевизора", "Розетка"],
+      ["Выключатель гостиной", "Вентиляция"],
+    ],
+  );
   const ventilation = hub.state.accessories
     .find(({ name }) => name === "Выключатель гостиной")
     .services.find(({ name }) => name === "Вентиляция");
   assert.equal(ventilation.characteristics[0].control.value.boolValue, true);
 });
 
-test("kind=light points to relays and sockets not named as lights, not to device settings", async (t) => {
+test("switches of an air conditioner are its functions: never on for the house and never offered as lights", async (t) => {
   const fixture = structuredClone(await loadHomeFixture("apartment"));
-  // An air conditioner's own switch for one of its functions.
+  // The air conditioner is in mode OFF; its display and sound stay on.
   fixture.accessories
     .find(({ id }) => id === 19)
-    .services.push({
-      sId: 20,
-      type: "Switch",
-      name: "Ионизатор",
-      characteristics: [{ cId: 21, type: "On", value: true }],
-    });
-  // A relay channel with a neutral name that may drive the kitchen lamp.
+    .services.push(
+      {
+        sId: 20,
+        type: "Switch",
+        name: "Дисплей",
+        characteristics: [{ cId: 21, type: "On", value: true }],
+      },
+      {
+        sId: 22,
+        type: "Switch",
+        name: "Звук",
+        characteristics: [{ cId: 23, type: "On", value: true }],
+      },
+      {
+        sId: 24,
+        type: "Switch",
+        name: "Тихий режим",
+        characteristics: [{ cId: 25, type: "On", value: false }],
+      },
+    );
+  const { hub, call, home } = await setup(t, fixture);
+  const living = `${home}/room/3`;
+  const conditioner = `${home}/accessory/19`;
+  const ofConditioner = (body) =>
+    listed(body).filter(({ device }) => device.ref === conditioner);
+
+  const climateOn = await call("find_devices", {
+    kind: "climate",
+    state: "on",
+  });
+  assert.equal(climateOn.body.total, 0);
+
+  const on = await call("find_devices", { state: "on" });
+  assert.deepEqual(ofConditioner(on.body), []);
+  assert.equal(on.body.device_functions, 3);
+  assert.deepEqual(
+    listed(on.body)
+      .map(({ service }) => service.ref)
+      .sort(),
+    servicesOnInState(hub.state, home)
+      .filter((ref) => !ref.startsWith(`${conditioner}/`))
+      .sort(),
+  );
+
+  const switchesOn = await call("find_devices", {
+    kind: "switch",
+    state: "on",
+  });
+  assert.deepEqual(
+    listed(switchesOn.body).map(({ device }) => device.name),
+    ["Розетка телевизора", "Розетка компьютера"],
+  );
+  assert.equal(switchesOn.body.device_functions, 3);
+
+  const summary = await call("find_devices", {});
+  assert.deepEqual(
+    summary.body.rooms.find(({ ref }) => ref === living),
+    { ref: living, name: "Гостиная", services: 9, on: 3, unavailable: 0 },
+  );
+
+  const lights = await call("find_devices", {
+    room_ref: living,
+    kind: "light",
+    state: "on",
+  });
+  assert.deepEqual(
+    lights.body.switches.entries.map(({ device, name }) => [device, name]),
+    [["Розетка телевизора", "Розетка"]],
+  );
+
+  // By name a function is found with its device, state and writable On.
+  const display = await call("find_devices", {
+    query: "дисплей кондиционера",
+  });
+  const [entry] = listed(display.body);
+  assert.deepEqual(
+    {
+      name: entry.service.name,
+      kind: entry.service.kind,
+      function_of: entry.service.function_of,
+      on: entry.service.on,
+    },
+    {
+      name: "Дисплей",
+      kind: "switch",
+      function_of: {
+        kind: "climate",
+        service_ref: `${conditioner}/service/13`,
+      },
+      on: true,
+    },
+  );
+  assert.equal(readingOf(entry.service, "On").writable, true);
+});
+
+test("a relay's generic channel beside its fan channel stays a relay", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  // A two-channel relay: the owner set channel 1 to a fan, channel 2 kept
+  // its generic name.
+  fixture.accessories.push({
+    id: 42,
+    roomId: 8,
+    name: "Реле ванной",
+    extensionKey: "Controller:zigbee",
+    deviceId: "00158d0004a1b242",
+    services: [
+      {
+        sId: 13,
+        type: "Fan",
+        name: "Вытяжка",
+        characteristics: [{ cId: 14, type: "On", value: false }],
+      },
+      {
+        sId: 15,
+        type: "Switch",
+        name: "Канал 2",
+        characteristics: [{ cId: 16, type: "On", value: true }],
+      },
+    ],
+  });
+  const { call, home } = await setup(t, fixture);
+  const bathroom = `${home}/room/8`;
+
+  const air = await call("find_devices", { kind: "air", room_ref: bathroom });
+  assert.deepEqual(
+    listed(air.body).map(({ device, service }) => [device.name, service.name]),
+    [
+      ["Вытяжка", "Вытяжка"],
+      ["Реле ванной", "Вытяжка"],
+    ],
+  );
+
+  const on = await call("find_devices", { state: "on", room_ref: bathroom });
+  const [channel] = listed(on.body);
+  assert.deepEqual(
+    [channel.service.name, channel.service.kind, channel.service.function_of],
+    ["Канал 2", "switch", undefined],
+  );
+  assert.equal(Object.hasOwn(on.body, "device_functions"), false);
+
+  const lights = await call("find_devices", {
+    kind: "light",
+    room_ref: bathroom,
+    state: "on",
+  });
+  assert.equal(lights.body.total, 0);
+  assert.deepEqual(
+    lights.body.switches.entries.map(({ device, name, on: value }) => [
+      device,
+      name,
+      value,
+    ]),
+    [["Реле ванной", "Канал 2", true]],
+  );
+});
+
+test("a light question in words lists the room's neutral relays beside the lamps", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  // A relay channel with a neutral name that may drive a kitchen lamp.
   fixture.accessories.push({
     id: 41,
     roomId: 4,
@@ -256,59 +482,76 @@ test("kind=light points to relays and sockets not named as lights, not to device
     ],
   });
   const { call, home } = await setup(t, fixture);
-  const kitchen = `${home}/room/4`;
 
-  const kitchenLights = await call("find_devices", {
-    room_ref: kitchen,
-    kind: "light",
+  const { body } = await call("find_devices", {
+    query: "свет на кухне",
     state: "on",
   });
+
   assert.deepEqual(
-    listed(kitchenLights.body).map(({ device }) => device.name),
-    ["Свет на кухне"],
+    listed(body).map(({ device, service }) => [device.name, service.name]),
+    [["Свет на кухне", "Свет"]],
   );
-  const hint = kitchenLights.body.outlets_not_named_as_lights;
-  assert.equal(hint.matches, 1);
-  assert.deepEqual(hint.next, {
-    tool: "find_devices",
-    arguments: {
-      home_ref: home,
-      room_ref: kitchen,
-      kind: "outlet",
-      state: "on",
+  assert.deepEqual(body.switches.entries, [
+    {
+      ref: `${home}/accessory/41/service/13`,
+      name: "Канал 1",
+      device: "Реле 2",
+      room: "Кухня",
+      on: true,
+      on_ref: `${home}/accessory/41/service/13/characteristic/14`,
     },
+  ]);
+  assert.equal(body.switches.total, 1);
+
+  // A question that is not about light carries no relays.
+  const temperature = await call("find_devices", {
+    query: "температура на кухне",
   });
-  const relays = await call(hint.next.tool, hint.next.arguments);
+  assert.equal(Object.hasOwn(temperature.body, "switches"), false);
+});
+
+test("kind=light lists lamps and counts every relay that is on, with a call for the rest", async (t) => {
+  const { hub, call, home } = await setup(t, await loadHomeFixture("house"));
+
+  const on = await call("find_devices", { kind: "light", state: "on" });
+
   assert.deepEqual(
-    listed(relays.body).map(({ device, service }) => [
-      device.name,
-      service.name,
-    ]),
-    [["Реле 2", "Канал 1"]],
+    listed(on.body)
+      .map(({ service }) => service.ref)
+      .sort(),
+    standaloneOn(hub.state, home, ["Lightbulb"]).sort(),
+  );
+  const relaysOn = standaloneOn(hub.state, home, ["Switch", "Outlet"]);
+  assert.equal(on.body.switches.total, relaysOn.length);
+  assert.deepEqual(
+    (await allSwitches(call, on.body.switches)).sort(),
+    relaysOn.sort(),
+  );
+  assert(
+    on.body.switches.entries.some(
+      ({ device, name }) =>
+        device === "Выключатель кухни" && name === "Споты кухня",
+    ),
   );
 
-  // In the whole home the TV and computer sockets and the relay are on;
-  // the air conditioner's ionizer is its own setting, not a relay.
-  const lights = await call("find_devices", { kind: "light", state: "on" });
-  assert.equal(lights.body.outlets_not_named_as_lights.matches, 3);
-  const outlets = await call("find_devices", { kind: "outlet" });
-  assert.equal(
-    listed(outlets.body).some(({ service }) => service.name === "Ионизатор"),
-    false,
+  // Without a state filter the house has more relays than one list shows:
+  // the next call lists them all.
+  const all = await call("find_devices", { kind: "light", values: false });
+  const relays = hub.state.accessories.flatMap(({ id, services }) =>
+    services
+      .filter(({ type }) => type === "Switch" || type === "Outlet")
+      .map(({ sId }) => `${home}/accessory/${id}/service/${sId}`),
   );
-  const climate = await call("find_devices", {
-    kind: "climate",
-    query: "кондиционер",
+  assert.equal(all.body.switches.total, relays.length);
+  assert(all.body.switches.entries.length < relays.length);
+  assert.deepEqual(all.body.switches.next, {
+    tool: "find_devices",
+    arguments: { home_ref: home, kind: "switch", values: false },
   });
   assert.deepEqual(
-    listed(climate.body).map(({ service }) => [
-      service.name,
-      service.kind_basis ?? null,
-    ]),
-    [
-      ["Кондиционер", null],
-      ["Ионизатор", "device"],
-    ],
+    (await allSwitches(call, all.body.switches)).sort(),
+    relays.sort(),
   );
 });
 
