@@ -225,6 +225,10 @@ test("a room rename the hub does not support is rejected, not uncertain", async 
     value: "Холл",
     reason: "Переименовать коридор",
   });
+  // The simulator implements room.update; refuse it the way a hub without
+  // the method answers, once for each apply below.
+  hub.refuseNext("room.update");
+  hub.refuseNext("room.update");
   const rejection = unsupported("room.update");
 
   const applied = await firstClient.callTool({
