@@ -1,6 +1,6 @@
 # `scenario_active`
 
-Сначала вызови `get_native_change_contract(operation="scenario_active", target_ref=...)` с ref существующего сценария из `home_overview(query)` или `get_entity`.
+Сначала вызови `get_native_change_contract(operation="scenario_active", target_ref=...)` с ref существующего сценария из `home_overview(list="scenarios")`, `home_overview(query)` или `get_entity`.
 
 - Операция выключает (`value=false`) или включает (`value=true`) существующий
   сценарий любого типа: BLOCK, LOGIC или GLOBAL. Флаг пишется так же, как в
