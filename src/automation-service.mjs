@@ -1970,16 +1970,38 @@ export class AutomationService {
     }
     const snapshot = roomSnapshot(room);
     if (!isDeepStrictEqual(snapshot, change.applied_snapshot)) {
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_room: snapshot,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+      return this.#finishChangedRoom(change, snapshot);
     }
     return this.#finishNative(change, "applied", undefined, {
       observed_room: snapshot,
       last_verification: freshVerification("created_room_observed"),
     });
+  }
+
+  async #finishChangedRoom(change, snapshot) {
+    const rename = await this.#appliedRoomRename(change, snapshot);
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_room: snapshot,
+      conflict_reason: rename ? "later_owned_change" : "manual_change",
+      restore_first_change_id: rename?.id,
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  // The agent's own later room_name change explains a new name of the
+  // created room; restoring it first lets this change delete the room.
+  async #appliedRoomRename(change, snapshot) {
+    const { name, ...rest } = snapshot;
+    const { name: _createdName, ...created } = change.applied_snapshot;
+    if (!isDeepStrictEqual(rest, created)) return undefined;
+    return (await this.store.list()).find(
+      (candidate) =>
+        candidate.kind === "room_name" &&
+        candidate.home_ref === change.home_ref &&
+        candidate.target?.id === change.created_room_id &&
+        candidate.status === "applied" &&
+        candidate.requested_value?.value === name,
+    );
   }
 
   async #recordUnownedRoomCandidates(change) {
@@ -2026,11 +2048,7 @@ export class AutomationService {
     }
     const snapshot = roomSnapshot(room);
     if (!isDeepStrictEqual(snapshot, change.applied_snapshot)) {
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_room: snapshot,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+      return this.#finishChangedRoom(change, snapshot);
     }
     const contents = await this.client.listAccessoriesInRoom(
       change.created_room_id,
@@ -9928,6 +9946,11 @@ function publicNativeChange(
       ...(change.room_contents
         ? { room_contents: structuredClone(change.room_contents) }
         : {}),
+      ...(change.conflict_reason === "later_owned_change"
+        ? {
+            restore_first_change_ref: `spruthub-change://native/${change.restore_first_change_id}`,
+          }
+        : {}),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent
@@ -9941,6 +9964,7 @@ function publicNativeChange(
       limitations: [
         "A matching room observed after a lost create response is a usable candidate but is not owned by this change.",
         "Deletion is allowed only for a confirmed created room whose configuration is unchanged and which contains no accessories.",
+        "A later applied room_name change of this room is named by restore_first_change_ref; restoring it first brings back the created name.",
         "SprutHub room creation and deletion are schema-confirmed but not live-confirmed in this slice.",
       ],
     };
