@@ -73,19 +73,25 @@ export const METHOD_EVIDENCE = {
   "server.ping": [SCHEMA_ONLY],
   "room.list": [OBSERVED, "2026-09-09-room-reading"],
   "room.get": [OBSERVED, "2026-09-09-room-reading"],
-  "room.create": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
-  "room.delete": [SCHEMA_ONLY, "UI code, 2026-09-11-device-placement"],
+  "room.create": [
+    OBSERVED,
+    "2026-09-24-live-conformance-2: applied, a 42-character name kept as its first 30",
+  ],
+  "room.delete": [
+    OBSERVED,
+    "2026-09-24-live-conformance-2: an empty created room deleted, its absence read back",
+  ],
   "room.update": [
     SCHEMA_ONLY,
-    "RoomUpdateRequest in 51547-Room.proto; the web client sends {id, name} and {id, visible} (2026-09-24-web-client-evidence); not seen answered live",
+    "RoomUpdateRequest in 51547-Room.proto; the web client sends {id, name} and {id, visible} (2026-09-24-web-client-evidence); sent live only with names whose first 30 characters equalled the current one, which stayed (2026-09-24-live-conformance-2)",
   ],
   "accessory.list": [
     OBSERVED,
-    "2026-09-09-motion-reading; an empty room omits accessories (owner hub, 2026-09-24)",
+    "2026-09-09-motion-reading; an empty room omits accessories (owner hub, 2026-09-24); no virtual field (2026-09-24-live-conformance-2)",
   ],
   "accessory.get": [
     OBSERVED,
-    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24",
+    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2)",
   ],
   "accessory.create": [OBSERVED, "2026-09-11-virtual-light-group"],
   "accessory.update": [OBSERVED, "2026-09-11-device-placement"],
@@ -1099,7 +1105,7 @@ const HANDLERS = {
     }
     const room = {
       id: nextId(state.rooms.map(({ id }) => id)),
-      name,
+      name: storedRoomName(name),
       order: state.rooms.length + 1,
       visible: true,
     };
@@ -1119,7 +1125,7 @@ const HANDLERS = {
       if (typeof input.name !== "string" || input.name.trim().length === 0) {
         throw invalidParams("Room name must be a non-empty string");
       }
-      room.name = input.name;
+      room.name = storedRoomName(input.name);
     }
     if (Object.hasOwn(input, "visible")) {
       if (typeof input.visible !== "boolean") {
@@ -1188,7 +1194,7 @@ const HANDLERS = {
     };
     state.accessories.push(accessory);
     // The create reply of the fake hubs omits `virtual`; the stored accessory
-    // keeps it, as accessory.get/list report it.
+    // keeps it, as accessory.get reports it.
     const { virtual: _virtual, ...reply } = accessory;
     return reply;
   },
@@ -2521,8 +2527,10 @@ function extensionChildren(state, extensionKey) {
     }));
 }
 
+// accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual
+// field for any accessory; accessory.get has it.
 function projectAccessory(accessory, expand) {
-  const { services, ...summary } = accessory;
+  const { services, virtual: _virtual, ...summary } = accessory;
   if (!expandIncludes(expand, "services")) return summary;
   return {
     ...summary,
@@ -2539,6 +2547,16 @@ function expandIncludes(expand, part) {
     typeof expand === "string" &&
     expand.split(",").some((item) => item.trim() === part)
   );
+}
+
+// The owner's hub (3.0.0, 2026-09-24) kept the first 30 characters of a
+// 42-character ASCII room name on room.create, and a rename whose first 30
+// characters equalled the current name left it unchanged. How it counts
+// characters outside ASCII was not seen; this cuts UTF-16 units.
+const ROOM_NAME_LIMIT = 30;
+
+function storedRoomName(name) {
+  return name.slice(0, ROOM_NAME_LIMIT);
 }
 
 function requireRoom(state, id) {
