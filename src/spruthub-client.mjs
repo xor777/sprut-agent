@@ -32,6 +32,11 @@ const ROOM_LISTING_SERVICE_LIMIT = 20;
 // edits made in the SprutHub app show up; writes of this client drop it at
 // once.
 const HOME_CATALOG_TTL_MS = 5 * 60_000;
+// How long a read waits for the home settings window when the hub's time
+// zone is not cached. The owner's hub answered in 133 ms for its 99 KB
+// window; a hub that answers later leaves that read's times in UTC rather
+// than hold back what was read.
+const HUB_TIME_ZONE_READ_MS = 2_000;
 // A BLOCK names its devices from the home catalog; the ones the catalog
 // lacks are read one by one up to this many, past that the catalog is read.
 const REFERENCED_ACCESSORY_READS = 16;
@@ -119,6 +124,7 @@ export class SprutHubClient {
   #configuredSerial;
   #connectingSocket;
   #homeCatalogs = new Map();
+  #hubTimeZones = new Map();
   #nextRequestId = 1;
   #observation;
   #observationClient;
@@ -721,15 +727,12 @@ export class SprutHubClient {
       );
     }
     const deadline = Date.now() + this.timeoutMs;
-    const [logRead, timeZone] = await Promise.all([
-      this.#request({ log: { list: { count } } }, deadline, { serial }).then(
-        (response) => ({ response }),
-        (error) => ({ error }),
-      ),
-      this.#hubTimeZone(serial, deadline),
-    ]);
-    const { response, error } = logRead;
-    if (error) {
+    let response;
+    try {
+      response = await this.#request({ log: { list: { count } } }, deadline, {
+        serial,
+      });
+    } catch (error) {
       if (
         error instanceof SprutHubError &&
         ["unsupported", "request_rejected"].includes(error.code)
@@ -754,6 +757,9 @@ export class SprutHubClient {
       ["log", "list", "log"],
       incompatibleHubLog,
     );
+    // Read after the log: a zone read that runs out of time closes the
+    // connection, which must not cost the log already read.
+    const timeZone = await this.#hubTimeZone(serial, deadline);
     return {
       status: "ok",
       home_ref: homeRef(serial),
@@ -771,12 +777,36 @@ export class SprutHubClient {
     };
   }
 
-  // The hub's time zone: TimeZone in the home settings window, which
-  // window.get returns for the root key "" (hub optionsWindow was "" on the
-  // live hub, research/protocol/2026-09-16-home-settings-window.md). null
-  // when the hub gives no single zone this process can apply; the caller
-  // then keeps UTC rather than guess an offset.
+  // The hub's time zone, kept per home as the home catalog is: for
+  // HOME_CATALOG_TTL_MS and until a write of this client. It is read within
+  // HUB_TIME_ZONE_READ_MS; a zone that is not read is not kept, so the next
+  // read asks again. null keeps UTC.
   async #hubTimeZone(serial, deadline) {
+    const cached = this.#hubTimeZones.get(serial);
+    if (
+      cached &&
+      cached.generation === this.#writeGeneration &&
+      Date.now() - cached.readAt < HOME_CATALOG_TTL_MS
+    ) {
+      return cached.zone;
+    }
+    const generation = this.#writeGeneration;
+    const zone = await this.#readHubTimeZone(
+      serial,
+      Math.min(deadline, Date.now() + HUB_TIME_ZONE_READ_MS),
+    );
+    if (zone !== null && generation === this.#writeGeneration) {
+      this.#hubTimeZones.set(serial, { zone, generation, readAt: Date.now() });
+    }
+    return zone;
+  }
+
+  // TimeZone in the home settings window, which window.get returns for the
+  // root key "" (hub optionsWindow was "" on the live hub,
+  // research/protocol/2026-09-16-home-settings-window.md). null when the hub
+  // gives no single zone this process can apply; the caller then keeps UTC
+  // rather than guess an offset.
+  async #readHubTimeZone(serial, deadline) {
     let response;
     try {
       response = await this.#request(
