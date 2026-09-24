@@ -613,6 +613,8 @@ function motionRule(targetAId, overrides = {}) {
     hs,
     characteristics: [{ type: "set", cId: 14, hc: "On", value: "true" }],
   });
+  // undefined in overrides.rule drops a key, as the UI shape leaves out mode
+  // and else.
   return JSON.stringify({
     targets: [
       {
@@ -624,7 +626,9 @@ function motionRule(targetAId, overrides = {}) {
         else: overrides.otherwise ?? [],
         then_delay: 0,
         else_delay: 0,
+        ...overrides.rule,
       },
+      ...(overrides.extraTargets ?? []),
     ],
   });
 }
@@ -770,6 +774,130 @@ test("motion-light-new runs the rule: branches, conditions, refs and side effect
     ),
     true,
   );
+
+  const lightOff = {
+    ...lightOn,
+    characteristics: [{ type: "set", cId: 14, hc: "On", value: "false" }],
+  };
+  const fanOn = { ...lightOn, aId: 36, hs: "Fan" };
+  const delayed = (time, targets, mode = "RESET") => ({
+    type: "delay",
+    index: 1,
+    mode,
+    time,
+    targets,
+  });
+  // Every top-level step runs when the BLOCK fires, not only its ifs.
+  assert.equal(await verdict(motionRule(35, { extraTargets: [fanOn] })), false);
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        extraTargets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [
+                {
+                  type: "characteristic",
+                  aId: 13,
+                  sId: 20,
+                  cId: 21,
+                  hs: "LightSensor",
+                  hc: "CurrentAmbientLightLevel",
+                  cond: "<",
+                  value: "30",
+                  trigger: false,
+                  time: 0,
+                  timeCond: "",
+                },
+              ],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+            then: [fanOn],
+            else: [],
+          },
+        ],
+      }),
+    ),
+    false,
+  );
+  // The branch that runs when motion ends must not touch anything else.
+  assert.equal(await verdict(motionRule(35, { otherwise: [fanOn] })), false);
+  // A switch-off that ends inside the evaluation window leaves the light off:
+  // no delay, or 120 ms written for 120 s.
+  for (const time of [0, 120]) {
+    assert.equal(
+      await verdict(
+        motionRule(35, { onMotion: [lightOn, delayed(time, [lightOff])] }),
+      ),
+      false,
+      `delay ${time}`,
+    );
+  }
+  // Right rules still pass: ONCE, the UI shape without mode and else, a
+  // delayed switch-off after motion ends, and one cancelled by new motion.
+  assert.equal(
+    await verdict(motionRule(35, { rule: { mode: "ONCE" } })),
+    true,
+    "ONCE",
+  );
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        condition: { trigger: true },
+        rule: { mode: undefined, else: undefined },
+      }),
+    ),
+    true,
+    "UI shape",
+  );
+  assert.equal(
+    await verdict(
+      motionRule(35, { otherwise: [delayed(120_000, [lightOff])] }),
+    ),
+    true,
+    "delayed switch-off in else",
+  );
+  assert.equal(
+    await verdict(
+      motionRule(35, {
+        onMotion: [lightOn, { type: "clear_delay", index: 1 }],
+        otherwise: [delayed(120_000, [lightOff])],
+      }),
+    ),
+    true,
+    "clear_delay",
+  );
+
+  // What the evaluator does not model fails as unsupported, never as a
+  // pass: a hold on the motion condition, a CONTINUE delay and a branch
+  // that repeats.
+  const { failureClass } = await import("../research/eval-agent.mjs");
+  for (const [label, data] of [
+    ["hold", motionRule(35, { condition: { timeCond: ">", time: 60_000 } })],
+    [
+      "CONTINUE delay",
+      motionRule(35, {
+        onMotion: [lightOn, delayed(120_000, [lightOff], "CONTINUE")],
+      }),
+    ],
+    ["repeating then", motionRule(35, { rule: { then_delay: 1_000 } })],
+  ]) {
+    const session = await createdRule(t, data);
+    const graders = gradeCase(
+      CASES["motion-light-new"],
+      collectEvidence(session.hub, "Готово."),
+    );
+    const rule = graders.find(
+      ({ name }) => name === "new_rule_turns_bathroom_light_on_motion",
+    );
+    assert.equal(rule.pass, false, label);
+    assert.equal(rule.unsupported, true, label);
+    assert.equal(failureClass(graders), "grader_unsupported", label);
+  }
 });
 
 test("read-temperature ties the value to the bedroom and accepts whole degrees", async (t) => {
