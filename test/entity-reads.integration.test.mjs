@@ -468,3 +468,66 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
   ]);
   assertReadOnly(hub, baseline);
 });
+
+test("entity reads name the home once and offer options once per entity", async (t) => {
+  const { hub, client } = await setup(t);
+  const motionSensor = `${homeRef}/accessory/13`;
+  const motion = `${motionSensor}/service/13/characteristic/14`;
+
+  const accessory = await read(client, { entity_ref: motionSensor });
+  assert.equal(accessory.home_ref, homeRef);
+  assert.equal(Object.hasOwn(accessory, "home"), false);
+  const characteristics = accessory.entity.services.flatMap(
+    ({ characteristics: items }) => items,
+  );
+  assert.deepEqual(
+    characteristics
+      .filter(({ options_available: available }) => available === true)
+      .map(({ ref }) => ref),
+    [motion],
+  );
+  for (const characteristic of characteristics) {
+    assert.equal(typeof characteristic.options_available, "boolean");
+    assert.equal(Object.hasOwn(characteristic, "option_scope"), false);
+  }
+  assert.deepEqual(accessory.entity.options_next, {
+    tool: "get_entity",
+    candidates: [{ entity_ref: motion, include: ["options"] }],
+  });
+  const [candidate] = accessory.entity.options_next.candidates;
+  const options = await read(client, candidate);
+  assert.deepEqual(
+    options.entity.options.map(({ key, configured_value: value }) => [
+      key,
+      value,
+    ]),
+    [
+      ["primary", 0],
+      ["ShowAllEvents", false],
+      ["Inversed", false],
+      ["SwitchOffTime", 60],
+    ],
+  );
+
+  const detail = await read(client, { entity_ref: motion });
+  assert.equal(detail.entity.options_available, true);
+  assert.deepEqual(detail.entity.options_next, {
+    tool: "get_entity",
+    arguments: { entity_ref: motion, include: ["options"] },
+  });
+  assert.equal(Object.hasOwn(options.entity, "options_next"), false);
+
+  const light = await read(client, { entity_ref: corridorOn });
+  assert.equal(light.entity.options_available, false);
+  assert.equal(Object.hasOwn(light.entity, "options_next"), false);
+  const lamp = await read(client, { entity_ref: `${homeRef}/accessory/14` });
+  assert.equal(Object.hasOwn(lamp.entity, "options_next"), false);
+
+  const part = await read(client, {
+    entity_ref: motionSensor,
+    pointer: "/services/1",
+  });
+  assert.equal(part.home_ref, homeRef);
+  assert.equal(Object.hasOwn(part, "home"), false);
+  assertReadOnly(hub);
+});
