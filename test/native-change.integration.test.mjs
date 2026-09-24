@@ -9426,6 +9426,30 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
       },
     ],
   );
+  // The agent must see which scenario a scenario target runs before apply.
+  const expectedRuns = [
+    {
+      configuration_pointer: "/targets/3/then/0",
+      scenario: {
+        ref: `${homeRef}/scenario/all-off`,
+        name: "Всё выключить",
+        type: "BLOCK",
+        active: true,
+      },
+    },
+  ];
+  assert.deepEqual(
+    prepared.structuredContent.block_action_preview.scenario_runs,
+    expectedRuns,
+  );
+  const stored = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.deepEqual(
+    stored.structuredContent.block_action_preview.scenario_runs,
+    expectedRuns,
+  );
 
   const created = await client.callTool({
     name: "apply_native_change",
