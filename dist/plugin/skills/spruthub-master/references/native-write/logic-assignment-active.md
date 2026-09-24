@@ -26,7 +26,8 @@
   утраты владения между процессами требует успешной записи журнала.
 - `logic_active` использует boolean value-change, общий журнал направления
   apply/restore, отдельный readback и защиту ручной правки; уже нужное значение
-  не создаёт change.
+  не создаёт change. Новое состояние передаётся в `value`; `active` без
+  `value` получает `invalid_native_value` с готовым `next`.
 
 На Sprut.hub `3.0.0b (20131)` для Lightbulb service подтверждён доступный тип
 `SmoothBrightnessChange`: после назначения его options `StartValue`, `EndValue`

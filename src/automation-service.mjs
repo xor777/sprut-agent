@@ -209,6 +209,13 @@ export class AutomationService {
   }
 
   async #prepareValueChange(kind, input) {
+    if (
+      ["scenario_active", "logic_active"].includes(input.operation) &&
+      input.value === undefined &&
+      typeof input.active === "boolean"
+    ) {
+      throw activeInsteadOfValue(input);
+    }
     const draft = kind.prepare
       ? await kind.prepare(this, input)
       : await nativeValueDraft(this, kind, input);
@@ -5318,6 +5325,27 @@ function unsupportedBlockMetadata(input) {
           operation: "window_option",
           target_ref: input.target_ref,
           option_key: typeof input.name === "string" ? "Name" : "Desc",
+        },
+      },
+    },
+  );
+}
+
+// block_create and logic_source_create take an initial active flag, so agents
+// switching an existing scenario or logic reach for it instead of value.
+function activeInsteadOfValue(input) {
+  return new SprutHubError(
+    "invalid_native_value",
+    `${input.operation} takes the new on/off state in value; active only sets the initial flag of block_create and logic_source_create. Prepare again with value=${input.active}.`,
+    "prepare_native_change",
+    {
+      next: {
+        tool: "prepare_native_change",
+        arguments: {
+          operation: input.operation,
+          target_ref: input.target_ref,
+          value: input.active,
+          reason: input.reason,
         },
       },
     },

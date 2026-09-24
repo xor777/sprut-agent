@@ -7,6 +7,10 @@
   только `index` и `active`; data, имя, описание, `onStart` и `sync` не
   отправляются. Это не удаление и не запуск: сценарий остаётся на хабе.
   `block_data_update` флаги не меняет, `active` меняется только здесь.
+- Новое состояние передаётся в `value`. Параметр `active` задаёт только
+  начальный флаг `block_create` и `logic_source_create`; `scenario_active` или
+  `logic_active` с `active` без `value` получает `invalid_native_value` с
+  готовым `next`.
 - Выключение не отнимает сценарий у прежних BLOCK, LOGIC и automation
   changes: их проверка владения не сравнивает `active`, поэтому созданный и
   потом выключенный сценарий по-прежнему удаляется своим restore или

@@ -17763,6 +17763,37 @@ test("scenario_active prepared with active instead of value points to value befo
   assert.equal(scenario.active, true);
 });
 
+test("logic_active prepared with active instead of value points to value", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.logics.push(assignedSmoothLogic());
+  const client = await startClient(t, hub, stateDirectory);
+  const misplaced = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_active",
+      target_ref: smoothLogicRef,
+      active: true,
+      reason: "Включить плавную яркость",
+    },
+  });
+  assert.equal(misplaced.isError, true);
+  assert.equal(
+    misplaced.structuredContent.error.code,
+    "invalid_native_value",
+    misplaced.content[0]?.text,
+  );
+  const followed = await client.callTool({
+    name: misplaced.structuredContent.next.tool,
+    arguments: misplaced.structuredContent.next.arguments,
+  });
+  assert.equal(followed.isError, undefined, followed.content[0]?.text);
+  assert.equal(followed.structuredContent.status, "prepared");
+  assert.deepEqual(followed.structuredContent.diff, {
+    value: { from: false, to: true, kind: "boolValue" },
+  });
+  assert.equal(hub.state.logics[0].active, false);
+});
+
 const twoChannelSwitch = {
   id: 40,
   roomId: 1,

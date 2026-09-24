@@ -403,7 +403,7 @@ server.registerTool(
         .union([z.boolean(), z.number(), z.string()])
         .optional()
         .describe(
-          "New value for characteristic_value, logic_active, scenario_active, room_name, service_name, service_visible, or an *_option operation.",
+          "New value for characteristic_value, an *_option operation, room_name, or service_name; true or false for logic_active, scenario_active, and service_visible.",
         ),
       option_key: z
         .string()
@@ -433,7 +433,12 @@ server.registerTool(
           "Shared controls for virtual_light_group; must be On and Brightness.",
         ),
       description: z.string().optional(),
-      active: z.boolean().optional(),
+      active: z
+        .boolean()
+        .optional()
+        .describe(
+          "Initial on/off flag for block_create and logic_source_create only. To turn an existing scenario or logic on or off, use scenario_active or logic_active with value.",
+        ),
       on_start: z.boolean().optional(),
       sync: z.boolean().optional(),
       data: z
