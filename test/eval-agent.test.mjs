@@ -119,6 +119,18 @@ test("a scripted agent that turns off only living room lights passes through the
   );
   assert.equal(outcome.pass, true);
   assert.equal(saved.pass, true);
+  const levels = Object.fromEntries(
+    saved.simulator_methods.map(({ method, level, requests }) => [
+      method,
+      [level, requests],
+    ]),
+  );
+  assert.deepEqual(levels["characteristic.update"], ["observed", 2]);
+  assert.ok(
+    saved.simulator_methods.every(({ level }) =>
+      ["observed", "schema_only", "guess"].includes(level),
+    ),
+  );
   assert.equal(outcome.metrics.mcp_tool_calls, 5);
   assert.equal(outcome.metrics.hub_writes, 2);
   assert.ok(outcome.metrics.mcp_tool_result_bytes > 1_000);

@@ -467,3 +467,128 @@ test("only allowlisted reads are reads, and link settings show in the home diff"
     ],
   );
 });
+
+test("the shipped hub log, room rename and service hide work on the simulated home", async (t) => {
+  const { hub, client } = await setup(t);
+
+  const seen = [];
+  let page = await call(client, "read_hub_log", {
+    home_ref: homeRef,
+    count: 4,
+  });
+  for (;;) {
+    seen.push(...page.entries);
+    if (!page.next) break;
+    page = await call(client, page.next.tool, page.next.arguments);
+  }
+  const times = seen.map(({ native_time: time }) => time);
+  assert.deepEqual(
+    times,
+    [...times].sort((left, right) => right - left),
+  );
+  assert.equal(new Set(times).size, times.length);
+  assert.equal(seen.length, hub.state.log.length);
+  // The night scenario fired yesterday at 23:00 hub time (UTC+3).
+  const yesterday = new Date(Date.now() + 3 * 3_600_000 - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  assert.ok(
+    seen.some(
+      ({ time, message }) =>
+        message.startsWith("Сценарий 5:") &&
+        new Date(Date.parse(time) + 3 * 3_600_000)
+          .toISOString()
+          .startsWith(`${yesterday}T23:00`),
+    ),
+  );
+
+  const renamed = await call(client, "prepare_native_change", {
+    operation: "room_name",
+    target_ref: `${homeRef}/room/7`,
+    value: "Офис",
+    reason: "Переименовать кабинет",
+  });
+  assert.equal(
+    (
+      await call(client, "apply_native_change", {
+        change_ref: renamed.change_ref,
+      })
+    ).status,
+    "applied",
+  );
+  const hidden = await call(client, "prepare_native_change", {
+    operation: "service_visible",
+    target_ref: `${homeRef}/accessory/17/service/13`,
+    value: false,
+    reason: "Скрыть ленту",
+  });
+  assert.equal(
+    (
+      await call(client, "apply_native_change", {
+        change_ref: hidden.change_ref,
+      })
+    ).status,
+    "applied",
+  );
+
+  assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
+    { key: "room/7/name", before: "Кабинет", after: "Офис" },
+    { key: "service/17.13/visible", before: true, after: false },
+  ]);
+  assert.deepEqual(
+    hub.writes().map(({ method, params }) => [method, params]),
+    [
+      ["room.update", { room: { update: { id: 7, name: "Офис" } } }],
+      [
+        "service.update",
+        { service: { update: { aId: 17, sId: 13, visible: false } } },
+      ],
+    ],
+  );
+  assertEveryRequestSupported(hub);
+  const touched = Object.fromEntries(
+    hub.touchedMethods().map(({ method, level }) => [method, level]),
+  );
+  assert.equal(touched["room.update"], "schema_only");
+  assert.equal(touched["service.update"], "schema_only");
+  assert.equal(touched["accessory.get"], "observed");
+});
+
+test("log.list pages newest first and returns entries strictly older than lastTime", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => hub.close());
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  let id = 0;
+  const list = async (request) => {
+    id += 1;
+    socket.send(
+      JSON.stringify({
+        id,
+        token: hub.token,
+        serial: hub.serial,
+        params: { log: { list: request } },
+      }),
+    );
+    const [data] = await once(socket, "message");
+    return JSON.parse(data.toString()).result.log.list.log;
+  };
+  const oldestFirst = hub.state.log.map(({ time }) => time);
+  assert.ok(oldestFirst.length >= 10);
+
+  const newest = await list({ count: 3 });
+  assert.deepEqual(
+    newest.map(({ time }) => time),
+    oldestFirst.slice(-3).reverse(),
+  );
+  const boundary = oldestFirst.at(-3);
+  const older = await list({ lastTime: boundary, count: 2 });
+  assert.deepEqual(
+    older.map(({ time }) => time),
+    oldestFirst
+      .filter((time) => time < boundary)
+      .slice(-2)
+      .reverse(),
+  );
+});
