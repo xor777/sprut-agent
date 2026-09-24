@@ -4786,9 +4786,12 @@ export class AutomationService {
     if (change.kind === "logic_source_create") {
       const refusal = createdLogicUnmappedRefusal(change);
       if (refusal) throw refusal;
-      // Scanned while the LOGIC is off too: an assignment made while it was
-      // on and still listed blocks the delete, and turning the LOGIC on to
-      // delete it would make it run there.
+      // SprutHub 3.0.0 (owner hub, 2026-09-24, research/protocol/
+      // 2026-09-24-live-conformance-3.md): an assignment made while the
+      // LOGIC is on is still listed by logic.list and logic.get once it is
+      // off, and a turned-off LOGIC cannot be newly assigned (Not found). So
+      // this scan finds every device that uses the LOGIC whether it is on or
+      // off, and with none found a turned-off LOGIC is deleted as it is.
       const type = createdLogicType(change);
       const assignments = await this.client.findLogicAssignments(type);
       if (assignments.length > 0) {
@@ -4826,11 +4829,8 @@ export class AutomationService {
         return this.#observeProvenScenarioChange(change, fresh);
       }
       if (change.kind === "logic_source_create") {
-        // Off at either read, the scan may have missed its assignments.
-        const refusal =
-          createdLogicUnmappedRefusal(change) ??
-          createdLogicOffRefusal(change, current.scenario) ??
-          createdLogicOffRefusal(change, fresh.scenario);
+        // The fresh read checked the type again.
+        const refusal = createdLogicUnmappedRefusal(change);
         if (refusal) throw refusal;
         // Saved with the restore intent: which type's assignments this
         // delete was checked against (logicDeleteAssignmentCheckUnproven).
@@ -10509,13 +10509,6 @@ function createdLogicMapping(change) {
   };
 }
 
-// Whether logic.list shows the assignments of a turned-off LOGIC has not been
-// observed: live-conformance-3 assigned none. Until a live run shows that it
-// does, a scan that finds no assignment of a turned-off LOGIC does not show
-// that no device uses it, so restore does not delete a turned-off LOGIC.
-// Once a live run shows the assignments, set this to true.
-const LOGIC_LIST_SHOWS_TURNED_OFF_ASSIGNMENTS = false;
-
 function createdLogicRefusalDetails(change) {
   return {
     change_ref: `spruthub-change://native/${change.id}`,
@@ -10536,22 +10529,6 @@ function createdLogicUnmappedRefusal(change) {
     mapping.reason,
     `${evidence}, so the type of the created LOGIC cannot be proven and its assignments cannot be checked. Restore will not delete it. The owner can delete it in the SprutHub app after checking that no device uses it.`,
     "get_native_change",
-    details,
-  );
-}
-
-// Why restore must not delete this created LOGIC while it is off, after a
-// scan that found no assignment and no BLOCK running it, or undefined.
-// Turning it on is left to the owner: it then runs wherever it is assigned.
-function createdLogicOffRefusal(change, scenario) {
-  if (scenario.active === true || LOGIC_LIST_SHOWS_TURNED_OFF_ASSIGNMENTS) {
-    return undefined;
-  }
-  const details = createdLogicRefusalDetails(change);
-  return new SprutHubError(
-    "logic_off_assignments_unverified",
-    `${details.scenario_ref} is turned off. No assignment of its type ${createdLogicType(change)} is visible across the home and no BLOCK runs it, but whether SprutHub lists the assignments of a turned-off LOGIC has not been observed, so that does not show that no device uses it. Restore will not delete it while it is off. Turning it on makes it run on any device that uses it, so the owner must agree first. If the owner agrees, turn it on with scenario_active and restore again; if that restore finds assignments, it deletes nothing and the LOGIC stays on, and restoring that scenario_active change turns it off again. Otherwise the owner can delete it in the SprutHub app.`,
-    undefined,
     details,
   );
 }
@@ -10599,9 +10576,9 @@ function logicSourceContract(mode) {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario while it is on, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; the scan runs while it is off too, and what it finds blocks the delete (logic_assignments_present, scenario_targets_present); after the scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict); a turned-off LOGIC with none found is refused with logic_off_assignments_unverified, because whether SprutHub lists a turned-off LOGIC's assignments has not been observed. Turning it on makes it run on any device that uses it, so only with the owner's agreement: turn it on with scenario_active and restore again; if that restore finds assignments, the LOGIC stays on and restoring that scenario_active change turns it off again. Otherwise the owner deletes it in the SprutHub app. An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted either",
+        "delete only the owned unchanged scenario, on or off, when no assignment of its type is found across the home and no BLOCK runs it with a scenario target; what the scan finds blocks the delete (logic_assignments_present, scenario_targets_present); SprutHub 3.0.0 lists an assignment made while the LOGIC was on after it is turned off and does not assign a turned-off LOGIC, so the scan covers a turned-off LOGIC too; after the scan the scenario is read again, and a change since the first read, including another scenario at the index, stops the delete (conflict). An unmapped LOGIC (logic_type_name_mismatch, logic_scenario_not_owned) is not deleted",
       active:
-        "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata: restore never writes active and does not compare it with the snapshots; restore of a create reads it and does not delete a turned-off LOGIC (see create)",
+        "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata: restore never writes active and does not compare it with the snapshots, and restore of a create deletes a turned-off LOGIC as it does a turned-on one (see create)",
     },
     limitations: [
       "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
@@ -11450,7 +11427,7 @@ function publicNativeChange(
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "A created LOGIC's native type is its scenario index. Deletion scans the current assignments of that type across the home and the scenario targets of BLOCKs; what the scan finds blocks it, whether the LOGIC is on or off. A turned-off LOGIC is not deleted even when none is found (logic_off_assignments_unverified): whether SprutHub lists a turned-off LOGIC's assignments has not been observed. SprutHub exposes no compare-and-set after that check.",
+        "A created LOGIC's native type is its scenario index. Deletion scans the current assignments of that type across the home and the scenario targets of BLOCKs; what the scan finds blocks it, whether the LOGIC is on or off. SprutHub exposes no compare-and-set after that check.",
         ...(logicDeleteAssignmentCheckUnproven(change)
           ? [
               "An earlier version deleted this LOGIC after checking the assignments of a type other than its own (its scenario index), so assignments of its own type may remain on devices (logic_assignments_may_remain).",
