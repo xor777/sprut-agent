@@ -5539,8 +5539,9 @@ function parseScenarioRef(ref, configuredSerial) {
   if (!match) {
     throw new SprutHubError(
       "invalid_scenario_ref",
-      "Use a home-qualified scenario reference returned by home_overview.",
+      "Use a home-qualified scenario reference from home_overview with list=scenarios.",
       "home_overview",
+      { next: { tool: "home_overview", arguments: { list: "scenarios" } } },
     );
   }
   const serial = decodeReferenceSegment(match[1]);

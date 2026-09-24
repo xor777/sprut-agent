@@ -4,6 +4,9 @@ S20260924-web-client-action-map, 2026-09-24. Цель: перечислить, �
 делает в официальном веб-клиенте, какой нативный RPC отправляет каждое действие
 и что из этого агент уже может сделать через sprut-agent на `main` 1bd4c68.
 Доказательство везде `S` (client code). Живой хаб и облако не вызывались.
+Колонка sprut-agent в строках A1, D1, E1 и G2 названа по инструментам после
+замены `list_homes`, `inspect_home`, `list_rooms` и `read_services` на
+`home_overview` и `find_devices`.
 
 Ответы на отдельные вопросы о формате BLOCK, журнале, уведомлениях,
 сопряжении и резервных копиях — в
@@ -71,7 +74,7 @@ S20260924-web-client-action-map, 2026-09-24. Цель: перечислить, �
 
 | № | Действие, компонент | RPC и payload | R/W | Частота | sprut-agent |
 | --- | --- | --- | --- | --- | --- |
-| A1 | Комнаты и карточки с текущими значениями; `Rooms`, `RoomServices`, `ServiceGrid` | `room.list`; `accessory.list {roomId, expand:"services,characteristics"}` | R | ежедневно | есть: `list_rooms`, `read_services` |
+| A1 | Комнаты и карточки с текущими значениями; `Rooms`, `RoomServices`, `ServiceGrid` | `room.list`; `accessory.list {roomId, expand:"services,characteristics"}` | R | ежедневно | есть: `home_overview`, `find_devices` |
 | A2 | Включить, яркость, позиция, уставка; `ServiceCard*`, `CharacteristicControl`, `CharacteristicPreviewScreen` | `characteristic.update {aId,sId,cId,control:{value}}` | W | ежедневно | есть: `send_device_commands`, `characteristic_value` |
 | A3 | Карточка устройства; `AccessoryScreen` | `accessory.get {id, expand:"services,characteristics"}` | R | ежедневно | есть: `get_entity` |
 | A4 | Лента событий устройства; `HistoryScreen` | `history.list {filter:{accessories:[{aId}]}, limit:50}`, далее `afterId` = id последней записи | R | еженедельно | нет |
@@ -125,7 +128,7 @@ S20260924-web-client-action-map, 2026-09-24. Цель: перечислить, �
 
 | № | Действие, компонент | RPC и payload | R/W | Частота | sprut-agent |
 | --- | --- | --- | --- | --- | --- |
-| D1 | Список сценариев, отметка активности; `Scenarios`, `ScenarioItem` | `scenario.list` | R | еженедельно | есть: `inspect_home` |
+| D1 | Список сценариев, отметка активности; `Scenarios`, `ScenarioItem` | `scenario.list` | R | еженедельно | есть: `home_overview` с `list=scenarios` |
 | D2 | Создать BLOCK; `ScenariosPlusModal` | `scenario.create {type:"BLOCK", name:"", desc:"", onStart:true, active:true, sync:false, data:""}` | W | настройка | есть: `block_create` |
 | D3 | BLOCK: триггер по характеристике и «держится N»; `Condition` | узел `characteristic` в `data` | W | настройка | частично: `timeCond` `">"` есть, `"<"` («поменялось на обратное в течение») нет |
 | D4 | BLOCK: время по дням недели; `Cron` | `cron:"0 MM HH ? * DAYS *"`, `mode:"NONE"` | W | настройка | есть |
@@ -159,7 +162,7 @@ S20260924-web-client-action-map, 2026-09-24. Цель: перечислить, �
 
 | № | Действие, компонент | RPC и payload | R/W | Частота | sprut-agent |
 | --- | --- | --- | --- | --- | --- |
-| E1 | Список расширений и их состояние; `ExtensionList` | `extension.list` | R | еженедельно | есть: `inspect_home` |
+| E1 | Список расширений и их состояние; `ExtensionList` | `extension.list` | R | еженедельно | есть: `home_overview` |
 | E2 | Настройки расширения; `ExtensionSettings` | `window.get`/`window.update {windowKey: extension.optionsWindow}` | W | настройка | частично: скаляры |
 | E3 | Рабочее окно плагина; `ExtensionSpacePlugin` | `window.get`/`window.update {windowKey: extension.mainWindow}` | W | настройка | частично: скаляры |
 | E4 | Устройства контроллера, в сети ли, прогресс; `ExtensionSpaceGeneric` | `extensionChild.list {extensionKey}`, события `extensionChild` | R | еженедельно | есть: `get_entity` include `children` |
@@ -183,7 +186,7 @@ S20260924-web-client-action-map, 2026-09-24. Цель: перечислить, �
 | № | Действие, компонент | RPC и payload | R/W | Частота | sprut-agent |
 | --- | --- | --- | --- | --- | --- |
 | G1 | Настройки хаба по разделам; `Settings`, `SettingsSection` | `window.get`/`window.update {windowKey: hub.optionsWindow}` | W | редко-админ | частично: чтение есть, запись закрыта намеренно |
-| G2 | Сведения о хабе; `HubAdminInfo` | `hub.list`, `hub.get` | R | редко | есть: `list_homes` (версия) |
+| G2 | Сведения о хабе; `HubAdminInfo` | `hub.list`, `hub.get` | R | редко | есть: `home_overview` (версия) |
 | G3 | Обновить ПО; `HubAdmin` | `hub.upgrade {serial}` | W | редко-админ | нет |
 | G4 | Перезагрузить; `HubAdmin` | `hub.restart {serial}` | W | редко-админ | нет |
 | G5 | Скачать резервную копию; `MenuHubActions` → `SystemDownloadModal` | `file.backups {}`, событие `file`, `file.filePart {path,start,length}`, `file.complete {path}` | R | редко-админ | нет |

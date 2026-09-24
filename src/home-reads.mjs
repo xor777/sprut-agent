@@ -21,6 +21,8 @@ import {
 
 const PROBLEM_LIMIT = 10;
 const MATCH_LIMIT = 10;
+const LIST_LIMIT = 50;
+const LIST_PAGE_BYTES = 16_000;
 const DEFAULT_LIMIT = 30;
 const DEFAULT_MAX_BYTES = 16_000;
 // Value reads by accessory or by room while they stay this few; above that
@@ -40,13 +42,26 @@ export class HomeReads {
     this.#client = client;
   }
 
-  async overview({ homeRef: requestedHomeRef, query } = {}) {
+  async overview(input = {}) {
     const client = this.#client;
-    const deadline = Date.now() + client.timeoutMs;
+    checkOverviewInput(input);
     const requestedSerial =
-      requestedHomeRef === undefined
-        ? null
-        : parseHomeArgument(requestedHomeRef);
+      input.homeRef === undefined ? null : parseHomeArgument(input.homeRef);
+    if (input.cursor !== undefined) {
+      const serial = requestedSerial ?? client.serial;
+      if (serial === null) {
+        throw invalidCursor({
+          tool: "home_overview",
+          args: overviewArgs(input, null),
+        });
+      }
+      return this.#continuePage(
+        overviewSelection(input, serial),
+        input.cursor,
+        buildListPage,
+      );
+    }
+    const deadline = Date.now() + client.timeoutMs;
     const account = await client.listHomes(deadline);
     const listed = {
       homes: account.homes.map(({ ref, name, online }) => ({
@@ -66,82 +81,62 @@ export class HomeReads {
     const home = account.homes.find(({ ref }) => ref === homeRef(serial));
     if (!home) throw homeNotFound();
 
+    // A list reads only what it lists; the overview and a query read all.
+    const list = input.list ?? null;
+    const query = input.query ?? null;
+    const needs = (part) => list === null || list === part;
     const generation = client.writeGeneration;
     const [rooms, accessories, scenarios, extensions] = await Promise.all([
-      client.nativeRooms(serial, deadline),
-      client.nativeAccessories(serial, deadline),
-      client.nativeScenarios(serial, deadline),
-      client.nativeExtensions(serial, deadline),
+      needs("rooms") ? client.nativeRooms(serial, deadline) : null,
+      needs("rooms") ? client.nativeAccessories(serial, deadline) : null,
+      needs("scenarios") ? client.nativeScenarios(serial, deadline) : null,
+      needs("extensions") ? client.nativeExtensions(serial, deadline) : null,
     ]);
     const observedAt = latest([
       account.freshness.hubResponseReceivedAt,
-      rooms.observedAt,
-      accessories.observedAt,
-      scenarios.observedAt,
-      extensions.observedAt,
+      rooms?.observedAt,
+      accessories?.observedAt,
+      scenarios?.observedAt,
+      extensions?.observedAt,
     ]);
-    client.rememberHomeCatalog(serial, {
-      rooms: rooms.rooms,
-      accessories: accessories.accessories,
-      observedAt: latest([rooms.observedAt, accessories.observedAt]),
-      generation,
-    });
-    const roomList = roomsWithDeviceCounts(
-      serial,
-      rooms.rooms,
-      accessories.accessories,
-    );
+    const roomList =
+      rooms &&
+      roomsWithDeviceCounts(serial, rooms.rooms, accessories.accessories);
+    if (rooms) {
+      client.rememberHomeCatalog(serial, {
+        rooms: rooms.rooms,
+        accessories: accessories.accessories,
+        observedAt: latest([rooms.observedAt, accessories.observedAt]),
+        generation,
+      });
+    }
     const selection =
       account.homes.length > 1 || account.selection.required === true
         ? listed
         : {};
 
-    if (query !== undefined) {
-      const matches = rankMatches(query, [
-        ...roomList.map((room) => ({ kind: "room", ...room })),
-        ...scenarios.scenarios.map(({ summary }) => ({
-          kind: "scenario",
-          ref: summary.ref,
-          name: summary.name,
-          type: summary.type,
-          active: summary.active,
-        })),
-        ...extensions.extensions.map((extension) => ({
-          kind: "extension",
-          ...extensionSummary(extension),
-        })),
-      ]);
-      const stems = queryStems(query);
-      const deviceMatches = accessories.accessories.reduce(
-        (count, accessory) =>
-          count +
-          (accessory.services ?? []).filter(
-            (service) =>
-              serviceKind(service, accessory).kind !== "technical" &&
-              matchesStems(stems, deviceText(service, accessory, rooms.rooms)),
-          ).length,
-        0,
-      );
-      return {
-        status: "ok",
-        home: { ref: home.ref, name: home.name },
-        ...selection,
-        query,
-        matches: matches.slice(0, MATCH_LIMIT),
-        total: matches.length,
-        ...(deviceMatches > 0
-          ? {
-              devices: {
-                matches: deviceMatches,
-                next: {
-                  tool: "find_devices",
-                  arguments: { home_ref: home.ref, query },
-                },
-              },
-            }
-          : {}),
-        observed_at: observedAt,
-      };
+    if (list !== null || query !== null) {
+      const paging = overviewSelection(input, serial);
+      return this.#firstListPage(paging, {
+        base: {
+          status: "ok",
+          home: { ref: home.ref, name: home.name },
+          ...selection,
+          ...(list === null ? {} : { list }),
+          ...(query === null ? {} : { query }),
+          observed_at: observedAt,
+        },
+        key: list ?? "matches",
+        entries: overviewEntries(paging, {
+          roomList,
+          scenarios: scenarios?.scenarios,
+          extensions: extensions?.extensions,
+        }),
+        extras:
+          list === null
+            ? deviceMatchesHint(home.ref, query, rooms, accessories)
+            : {},
+      });
     }
 
     const problems = [
@@ -185,7 +180,17 @@ export class HomeReads {
       },
       ...selection,
       rooms: roomList,
-      scenarios: scenarioCounts(scenarios.scenarios),
+      scenarios: {
+        ...scenarioCounts(scenarios.scenarios),
+        ...(scenarios.scenarios.length > 0
+          ? {
+              next: {
+                tool: "home_overview",
+                arguments: { home_ref: home.ref, list: "scenarios" },
+              },
+            }
+          : {}),
+      },
       extensions: extensions.extensions.map(extensionSummary),
       problems: problems.slice(0, PROBLEM_LIMIT),
       problems_total: problems.length,
@@ -205,7 +210,7 @@ export class HomeReads {
         : parseHomeArgument(input.homeRef);
     const selection = findSelection(input, serial);
     if (input.cursor !== undefined) {
-      return this.#continuePage(selection, input.cursor);
+      return this.#continuePage(selection, input.cursor, buildPage);
     }
     const deadline = Date.now() + client.timeoutMs;
     if (serial !== client.serial) {
@@ -335,6 +340,7 @@ export class HomeReads {
       id: randomBytes(8).toString("hex"),
       scope: selection.scope,
       expiresAt: Date.now() + SNAPSHOT_TTL_MS,
+      size: slots.length,
       base,
       slots,
       roomMatches: countBy(slots, ({ room }) => room.ref),
@@ -353,7 +359,25 @@ export class HomeReads {
     return page;
   }
 
-  #continuePage(selection, cursor) {
+  // The first page of a home_overview list or query; next pages continue
+  // the same snapshot.
+  #firstListPage(selection, { base, key, entries, extras }) {
+    const snapshot = {
+      id: randomBytes(8).toString("hex"),
+      scope: selection.scope,
+      expiresAt: Date.now() + SNAPSHOT_TTL_MS,
+      size: entries.length,
+      base,
+      key,
+      entries,
+      extras,
+    };
+    const page = buildListPage(snapshot, 0, selection);
+    if (page.next) this.#remember(snapshot);
+    return page;
+  }
+
+  #continuePage(selection, cursor, build) {
     const decoded = decodeCursor(cursor, selection);
     const now = Date.now();
     for (const [id, snapshot] of this.#snapshots) {
@@ -364,13 +388,13 @@ export class HomeReads {
       throw new SprutHubError(
         "stale_cursor",
         "This cursor's snapshot has expired; start the read again.",
-        "restart_find_devices",
-        { next: { tool: "find_devices", arguments: selection.args } },
+        `restart_${selection.tool}`,
+        { next: { tool: selection.tool, arguments: selection.args } },
       );
     }
     if (snapshot.scope !== selection.scope) throw invalidCursor(selection);
-    if (decoded.offset > snapshot.slots.length) throw invalidCursor(selection);
-    return buildPage(snapshot, decoded.offset, selection);
+    if (decoded.offset > snapshot.size) throw invalidCursor(selection);
+    return build(snapshot, decoded.offset, selection);
   }
 
   #remember(snapshot) {
@@ -418,6 +442,7 @@ function findSelection(input, serial) {
     ...(maxBytes === DEFAULT_MAX_BYTES ? {} : { max_bytes: maxBytes }),
   };
   return {
+    tool: "find_devices",
     args,
     scope: JSON.stringify(args),
     homeRef: home,
@@ -825,9 +850,9 @@ function decodeCursor(cursor, selection) {
 function invalidCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
-    "Use the cursor returned by find_devices with the same filters.",
-    "restart_find_devices",
-    { next: { tool: "find_devices", arguments: selection.args } },
+    `Use the cursor returned by ${selection.tool} with the same arguments.`,
+    `restart_${selection.tool}`,
+    { next: { tool: selection.tool, arguments: selection.args } },
   );
 }
 
@@ -927,6 +952,190 @@ function scenarioCounts(scenarios) {
 
 function extensionSummary({ ref, name, type, state, enabled }) {
   return { ref, name, type, state, enabled };
+}
+
+function scenarioEntry({ summary, native }) {
+  return {
+    ref: summary.ref,
+    name: summary.name,
+    type: summary.type,
+    active: summary.active,
+    on_start: summary.on_start,
+    sync: summary.sync,
+    execution_error: native.error === true,
+  };
+}
+
+// ---- home_overview lists ---------------------------------------------------
+
+// type filters scenarios and extensions; active and error only scenarios.
+// limit and cursor page a list or a query, never the overview itself.
+function checkOverviewInput(input) {
+  const allowed =
+    input.list === "scenarios"
+      ? ["type", "active", "error"]
+      : input.list === "extensions"
+        ? ["type"]
+        : [];
+  const refused = ["type", "active", "error"].filter(
+    (filter) => input[filter] !== undefined && !allowed.includes(filter),
+  );
+  if (refused.length > 0) {
+    throw new SprutHubError(
+      "invalid_filter",
+      `${refused.join(", ")} filter a list: type, active and error the scenarios (list=scenarios), type also the extensions (list=extensions).`,
+      "home_overview",
+      {
+        next: {
+          tool: "home_overview",
+          arguments: overviewArgs(
+            { ...input, list: "scenarios" },
+            input.homeRef ?? null,
+          ),
+        },
+      },
+    );
+  }
+  if (
+    input.list === undefined &&
+    input.query === undefined &&
+    (input.limit !== undefined || input.cursor !== undefined)
+  ) {
+    throw new SprutHubError(
+      "invalid_filter",
+      "limit and cursor page a list (list=scenarios, rooms or extensions) or a query.",
+      "home_overview",
+    );
+  }
+}
+
+function overviewArgs(input, home) {
+  return {
+    ...(home === null ? {} : { home_ref: home }),
+    ...(input.list === undefined ? {} : { list: input.list }),
+    ...(input.query === undefined ? {} : { query: input.query }),
+    ...(input.type === undefined ? {} : { type: input.type }),
+    ...(input.active === undefined ? {} : { active: input.active }),
+    ...(input.error === undefined ? {} : { error: input.error }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+  };
+}
+
+function overviewSelection(input, serial) {
+  const args = overviewArgs(input, homeRef(serial));
+  const list = input.list ?? null;
+  return {
+    tool: "home_overview",
+    args,
+    scope: JSON.stringify(["home_overview", args]),
+    list,
+    query: input.query ?? null,
+    type: input.type ?? null,
+    active: input.active ?? null,
+    error: input.error ?? null,
+    limit: input.limit ?? (list === null ? MATCH_LIMIT : LIST_LIMIT),
+  };
+}
+
+// The entries a list or a query pages through: a list in the hub's order,
+// or ranked by the query; a query without list mixes rooms, scenarios and
+// extensions with their kind.
+function overviewEntries(selection, { roomList, scenarios, extensions }) {
+  const sameType = (type) =>
+    selection.type === null ||
+    type.toLocaleLowerCase("en") === selection.type.toLocaleLowerCase("en");
+  const lists = {
+    rooms: () => roomList,
+    scenarios: () =>
+      scenarios
+        .filter(
+          ({ summary, native }) =>
+            sameType(summary.type) &&
+            (selection.active === null ||
+              summary.active === selection.active) &&
+            (selection.error === null ||
+              (native.error === true) === selection.error),
+        )
+        .map(scenarioEntry),
+    extensions: () =>
+      extensions.filter(({ type }) => sameType(type)).map(extensionSummary),
+  };
+  if (selection.list !== null) {
+    const entries = lists[selection.list]();
+    return selection.query === null
+      ? entries
+      : rankMatches(selection.query, entries);
+  }
+  return rankMatches(selection.query, [
+    ...roomList.map((room) => ({ kind: "room", ...room })),
+    ...scenarios.map((scenario) => ({
+      kind: "scenario",
+      ...scenarioEntry(scenario),
+    })),
+    ...extensions.map((extension) => ({
+      kind: "extension",
+      ...extensionSummary(extension),
+    })),
+  ]);
+}
+
+// How many services a name query matches, with the find_devices call that
+// lists them.
+function deviceMatchesHint(home, query, rooms, accessories) {
+  const stems = queryStems(query);
+  const matches = accessories.accessories.reduce(
+    (count, accessory) =>
+      count +
+      (accessory.services ?? []).filter(
+        (service) =>
+          serviceKind(service, accessory).kind !== "technical" &&
+          matchesStems(stems, deviceText(service, accessory, rooms.rooms)),
+      ).length,
+    0,
+  );
+  return matches > 0
+    ? {
+        devices: {
+          matches,
+          next: {
+            tool: "find_devices",
+            arguments: { home_ref: home, query },
+          },
+        },
+      }
+    : {};
+}
+
+// One page of a list snapshot: up to limit entries from offset within
+// LIST_PAGE_BYTES, at least one.
+function buildListPage(snapshot, offset, selection) {
+  const { entries } = snapshot;
+  const page = (end) => ({
+    ...snapshot.base,
+    total: entries.length,
+    returned: end - offset,
+    [snapshot.key]: entries.slice(offset, end),
+    ...snapshot.extras,
+    next:
+      end < entries.length
+        ? {
+            tool: selection.tool,
+            arguments: {
+              ...selection.args,
+              cursor: encodeCursor(snapshot.id, end),
+            },
+          }
+        : null,
+  });
+  let end = Math.min(offset + 1, entries.length);
+  while (
+    end < entries.length &&
+    end - offset < selection.limit &&
+    bytes(page(end + 1)) <= LIST_PAGE_BYTES
+  ) {
+    end += 1;
+  }
+  return page(end);
 }
 
 // FAILED is always a problem; any other state than LOADED of an enabled

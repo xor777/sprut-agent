@@ -2286,7 +2286,7 @@ export class SprutHubClient {
       throw entityNotFound("scenario", {
         next: {
           tool: "home_overview",
-          arguments: { home_ref: homeRef(parsed.serial) },
+          arguments: { home_ref: homeRef(parsed.serial), list: "scenarios" },
         },
       });
     }

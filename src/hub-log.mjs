@@ -64,8 +64,14 @@ function hubLogRequest(
     if (scenario?.kind !== "scenario" || scenario.serial !== home.serial) {
       throw new SprutHubError(
         "invalid_log_filter",
-        "scenario_ref must be a scenario reference of the same home from home_overview.",
+        "scenario_ref must be a scenario reference of the same home from home_overview with list=scenarios.",
         "home_overview",
+        {
+          next: {
+            tool: "home_overview",
+            arguments: { home_ref: homeRef, list: "scenarios" },
+          },
+        },
       );
     }
     scenarioIndex = scenario.scenarioIndex;

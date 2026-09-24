@@ -125,6 +125,10 @@ test("home_overview names the home, its rooms, scenario counts, extensions and p
       BLOCK: { active: 7, inactive: 1 },
       LOGIC: { active: 1, inactive: 0 },
     },
+    next: {
+      tool: "home_overview",
+      arguments: { home_ref: home, list: "scenarios" },
+    },
   });
   assert.equal(JSON.stringify(body).includes("Ночной режим"), false);
   assert.deepEqual(

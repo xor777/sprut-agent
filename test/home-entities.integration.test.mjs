@@ -3199,7 +3199,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(missing.structuredContent.error.action, "home_overview");
   assert.deepEqual(missing.structuredContent.next, {
     tool: "home_overview",
-    arguments: { home_ref: "spruthub://hub/home%2FA" },
+    arguments: { home_ref: "spruthub://hub/home%2FA", list: "scenarios" },
   });
 
   const missingRequests = hub.requests.slice(requestsBeforeMissing);
@@ -3232,7 +3232,11 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.equal(catalog.structuredContent.home.ref, "spruthub://hub/home%2FA");
-  assert.equal(catalog.structuredContent.scenarios.total, 3);
+  assert.equal(catalog.structuredContent.total, 3);
+  assert.equal(
+    catalog.structuredContent.scenarios.some(({ ref }) => ref === deletedRef),
+    false,
+  );
 
   hub.behavior.scenarioGetErrors.set("motion-block", {
     code: -32603,
@@ -3261,7 +3265,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(otherHome.structuredContent.error.code, "entity_not_found");
   assert.deepEqual(otherHome.structuredContent.next, {
     tool: "home_overview",
-    arguments: { home_ref: "spruthub://hub/home%20B" },
+    arguments: { home_ref: "spruthub://hub/home%20B", list: "scenarios" },
   });
 
   hub.behavior.missingScenarioGets.add("ghost-null");
@@ -3275,7 +3279,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(explicitNull.structuredContent.error.code, "entity_not_found");
   assert.deepEqual(explicitNull.structuredContent.next, {
     tool: "home_overview",
-    arguments: { home_ref: "spruthub://hub/home%2FA" },
+    arguments: { home_ref: "spruthub://hub/home%2FA", list: "scenarios" },
   });
 
   hub.behavior.scenarioGetErrors.set("global-code", {
