@@ -102,7 +102,6 @@ class GuardedHub {
     this.created = new Map();
     this.changes = new Map();
     this.calls = [];
-    this.allowLogicActivation = false;
     // The run's virtual accessory ids and its BLOCKs' options windows.
     this.virtualAIds = new Set();
     this.ownWindows = new Map();
@@ -278,12 +277,8 @@ class GuardedHub {
     }
     if (op === "scenario_active") {
       if (!owned || owned.kind === "room") refuse("not created by this run");
-      if (input.value === true) {
-        const allowed =
-          owned.kind === "block"
-            ? owned.activatable
-            : this.allowLogicActivation;
-        if (!allowed) refuse("turning this scenario on is not allowed");
+      if (input.value === true && !owned.activatable) {
+        refuse("turning this scenario on is not allowed");
       }
     }
     if (op === "logic_source_update" && owned?.kind !== "logic") {
@@ -2059,8 +2054,8 @@ async function stepPartialUpdates(ctx) {
     throw new GuardError("probe BLOCK is not activatable");
   }
   let previous = await readScenario(hub, ref);
-  // The web client turns a scenario on and off through one option of this
-  // window; the product sends scenario.update{index,active}. Read-only here.
+  // scenario_active writes the Active option of this window, as the web
+  // client does; the window is read here to see it agree with scenario.get.
   const windowRef = previous.options_window_ref;
   const windowActive = async (step, expected) => {
     const window = await readWindow(hub, windowRef);
@@ -2143,7 +2138,7 @@ async function stepPartialUpdates(ctx) {
 
   await check(
     "3a turn on",
-    "scenario.update{index,active:true}",
+    "window.update{windowKey,options:[Active=true]}",
     { operation: "scenario_active", value: true },
     ["active"],
     { active: true },
@@ -2184,7 +2179,7 @@ async function stepPartialUpdates(ctx) {
   );
   await check(
     "3e turn off",
-    "scenario.update{index,active:false}",
+    "window.update{windowKey,options:[Active=false]}",
     { operation: "scenario_active", value: false },
     ["active"],
     { active: false },
@@ -2256,7 +2251,6 @@ async function stepLogic(ctx) {
     scenario: true,
     changeRef: create.changeRef,
     verify: async () => !(await scenarioPresent(hub, ref)),
-    fallback: async (result) => activateLogicForRestore(ctx, ref, result),
   });
   const stored = await readScenario(hub, ref);
   const expectedDesc = `${PROBE_DESCRIPTION}\n\n[${create.prepared.ownership_marker}]`;
@@ -2362,33 +2356,6 @@ async function stepLogic(ctx) {
     deleted.verified ? "match" : "mismatch",
   );
   if (!deleted.verified) abort("created LOGIC was not removed");
-}
-
-// LOGIC create restore needs the new type mapped on the anchor service. If a
-// turned-off LOGIC is not listed there, turning it on (it is never assigned,
-// so it runs nothing) lets restore map and delete it.
-async function activateLogicForRestore(ctx, ref, result) {
-  if (result.status !== "applied" || result.logic_mapping_status === "mapped") {
-    return null;
-  }
-  ctx.hub.allowLogicActivation = true;
-  try {
-    const on = await prepareAndApply(ctx.hub, {
-      operation: "scenario_active",
-      target_ref: ref,
-      value: true,
-    });
-    row(
-      "4 cleanup fallback",
-      "scenario.update{index,active:true}",
-      "unassigned LOGIC turned on so restore can map its type",
-      describe(on),
-      on.applied?.status === "applied" ? "match" : "rejected",
-    );
-    return on.applied?.status === "applied" ? on.changeRef : null;
-  } finally {
-    ctx.hub.allowLogicActivation = false;
-  }
 }
 
 // --- step 6: manual run of a turned-off and a turned-on BLOCK ----------------
@@ -2515,7 +2482,7 @@ async function stepManualRun(ctx) {
   const afterOn = await watchVirtual(probe, v, undefined, base);
   row(
     "6g turn on",
-    "scenario.update{index,active:true}",
+    "window.update{windowKey,options:[Active=true]}",
     "applied; record whether turning on writes",
     `${on.applied?.status ?? describe(on)}; ${virtualChange(base, afterOn)}`,
     on.applied?.status === "applied" ? "observed" : "rejected",
@@ -2547,7 +2514,8 @@ async function stepManualRun(ctx) {
     },
   );
 
-  // The web client's path to turning it off: the window's Active option.
+  // The web client's and scenario_active's path to turning it off: the
+  // window's Active option, sent directly here to see what else it changes.
   const windowRef = r2.stored.options_window_ref;
   const offer = await hub.prepare({
     operation: "window_option",
@@ -2597,7 +2565,7 @@ async function stepManualRun(ctx) {
     });
     row(
       "6j fallback turn off",
-      "scenario.update{index,active:false}",
+      "window.update{windowKey,options:[Active=false]}",
       "applied",
       describe(off),
       off.applied?.status === "applied" ? "match" : "mismatch",
@@ -2834,16 +2802,7 @@ async function runRestore(hub, entry) {
     });
     return outcome;
   }
-  let result = await hub.restore(entry.changeRef);
-  if (result.status !== "restored" && entry.fallback) {
-    const fallbackChange = await entry.fallback(result);
-    if (fallbackChange) {
-      await hub.get(entry.changeRef);
-      result = await hub.restore(entry.changeRef);
-      // Still present: put the fallback's own change back.
-      if (result.status !== "restored") await hub.restore(fallbackChange);
-    }
-  }
+  const result = await hub.restore(entry.changeRef);
   const restored = result.status === "restored";
   const verified = restored && (entry.verify ? await entry.verify() : true);
   entry.done = verified;
