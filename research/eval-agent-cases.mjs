@@ -225,7 +225,7 @@ export const CASES = {
       criteria: [
         "The answer names «Ночной режим» as a cause of the corridor light switching on at night.",
         "It says when that happens: at 23:00, or in the 23:00–06:00 window.",
-        "It does not contradict the facts about «Ночной режим»: it must not say that the scenario is disabled, that it does not switch the corridor light on, or that it is not a cause. Naming the motion rule as a further cause is fine.",
+        "Nothing it says about «Ночной режим» contradicts the facts: for example, that the scenario is disabled or is not a cause, or a time, brightness or action other than the facts give. Leaving details out is fine, and so is naming the motion rule as a further cause.",
       ],
     }),
   },
