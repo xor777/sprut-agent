@@ -4875,6 +4875,11 @@ export class AutomationService {
       ...(autoOff ? { auto_off: autoOff } : {}),
       native_data: nativeData,
     };
+    const existingRules = relatedRules(
+      await this.client.listScenarioDetails(),
+      change,
+      change.home_ref,
+    ).map(({ rule }) => rule);
     await this.store.save(change);
 
     return {
@@ -4892,9 +4897,11 @@ export class AutomationService {
         sync: false,
         else_actions: [],
       },
+      existing_rules: existingRules,
       context: normalizeContext(context, change.home_ref),
       limitations: [
         "Preview does not change the hub and is not an atomic reservation.",
+        "existing_rules covers BLOCK scenarios that fire on this trigger and write this target. Apply reuses an equivalent rule and creates nothing next to a superset; a conflict is only reported, so the requested rule would run next to it.",
         "Scenario associations come from the accessory index and do not establish a direction or cover arbitrary code and bridges.",
         ...(autoOff
           ? [
@@ -4919,7 +4926,9 @@ export class AutomationService {
           ...(observation.kind === "owned_match"
             ? verifiedApplyFields(false)
             : {}),
-          ...(observation.kind === "equivalent" ? { created: false } : {}),
+          ...(["equivalent", "superset_conflict"].includes(observation.kind)
+            ? { created: false }
+            : {}),
         });
       }
       if (["creating", "uncertain"].includes(change.status)) {
@@ -5173,18 +5182,23 @@ export class AutomationService {
       scenarios.find(({ index }) => index === change.scenario_index) ??
       ownedCandidates[0];
     const owned = scenario !== undefined && ownedCandidates.includes(scenario);
-    const candidates = scenarios.filter(
-      (candidate) =>
-        !ownedCandidates.includes(candidate) && sameRuleBody(candidate, change),
+    const related = relatedRules(
+      scenarios.filter((candidate) => !ownedCandidates.includes(candidate)),
+      change,
+      configuredHomeRef(this.hubSerial),
     );
+    const equivalents = related
+      .filter(({ relation }) => relation === "equivalent")
+      .map((candidate) => candidate.scenario);
     return {
       scenario,
       owned,
       matches: owned && matchesExpected(scenario, change),
-      equivalent: candidates.find(matchesRequiredRuntime),
-      runtimeConflict: candidates.find(
+      equivalent: equivalents.find(matchesRequiredRuntime),
+      runtimeConflict: equivalents.find(
         (candidate) => !matchesRequiredRuntime(candidate),
       ),
+      superset: related.find(({ relation }) => relation === "superset"),
     };
   }
 
@@ -11177,28 +11191,12 @@ function buildNativeData(condition, action, autoOff) {
   };
 }
 
+// Only what the decision about this pair needs: mechanisms already tied to
+// the two devices. Home-wide catalogs stay out of the preview.
 function normalizeContext(context, homeReference) {
   return {
-    scenarios: context.scenarios.map(
-      ({ index, name, type, predefined, active }) => ({
-        index,
-        name,
-        type,
-        predefined,
-        active,
-      }),
-    ),
     source: normalizeSelectionContext(context.source, homeReference),
     target: normalizeSelectionContext(context.target, homeReference),
-    extensions: context.extensions.map(
-      ({ type, bundleType, name, enabled, state }) => ({
-        type,
-        bundle_type: bundleType,
-        name,
-        enabled,
-        state,
-      }),
-    ),
   };
 }
 
@@ -11216,30 +11214,8 @@ function normalizeSelectionContext(selection, homeReference) {
       direction: "not_established",
     })),
     assigned_logics: selection.assignedLogics,
-    available_logic_types: selection.logicTypes,
     links: selection.links.map(({ type }) => ({ type })),
-    options: selection.options.map((option) => ({
-      key: option.key,
-      name: option.name,
-      type: option.type,
-      value: typedValue(option.value),
-      read: option.read === true,
-      write: option.write === true,
-    })),
   };
-}
-
-function typedValue(value) {
-  for (const key of [
-    "boolValue",
-    "intValue",
-    "longValue",
-    "doubleValue",
-    "stringValue",
-  ]) {
-    if (Object.hasOwn(value ?? {}, key)) return value[key];
-  }
-  return null;
 }
 
 export function parseChangeRef(ref) {
@@ -11391,18 +11367,7 @@ function ruleMeaning(data) {
     return null;
   }
   return {
-    condition: {
-      aId: condition.aId,
-      sId: condition.sId,
-      cId: condition.cId,
-      value: condition.value,
-      cond: condition.cond,
-      trigger: condition.trigger,
-      hs: condition.hs,
-      hc: condition.hc,
-      time: condition.time,
-      timeCond: condition.timeCond,
-    },
+    condition: ruleCondition(condition),
     action: {
       aId: action.aId,
       sId: action.sId,
@@ -11429,6 +11394,223 @@ function ruleMeaning(data) {
         }
       : {}),
   };
+}
+
+function ruleCondition(condition) {
+  return {
+    aId: condition.aId,
+    sId: condition.sId,
+    cId: condition.cId,
+    value: condition.value,
+    cond: condition.cond,
+    trigger: condition.trigger,
+    hs: condition.hs,
+    hc: condition.hc,
+    time: condition.time,
+    timeCond: condition.timeCond,
+  };
+}
+
+// Existing BLOCK scenarios that fire on the requested trigger and write the
+// requested target, each with its relation to the requested rule.
+function relatedRules(scenarios, change, homeReference) {
+  return scenarios.flatMap((scenario) => {
+    const comparison = existingRuleRelation(scenario, change);
+    if (!comparison) return [];
+    return [
+      {
+        scenario,
+        relation: comparison.relation,
+        rule: {
+          ref: `${homeReference}/scenario/${encodeURIComponent(scenario.index)}`,
+          name: scenario.name,
+          relation: comparison.relation,
+          differences: comparison.differences,
+        },
+      },
+    ];
+  });
+}
+
+// equivalent: the same rule (runtime flags are listed as differences).
+// superset: it already sets the target to the requested value on this
+// trigger, with the requested auto-off if any, and does more (for example
+// turns the target off later); a new rule would duplicate it.
+// conflict: the same trigger and target with other behavior.
+function existingRuleRelation(scenario, change) {
+  if (scenario.type !== "BLOCK" || typeof scenario.data !== "string") {
+    return null;
+  }
+  const requested = ruleMeaning(change.native_data);
+  let data;
+  try {
+    data = JSON.parse(scenario.data);
+  } catch {
+    return null;
+  }
+  const existing = triggeredTargetRule(data, requested);
+  if (!requested || !existing) return null;
+  const runtime = runtimeDifferences(scenario);
+  if (sameRuleBody(scenario, change)) {
+    return { relation: "equivalent", differences: runtime };
+  }
+  const requestedAutoOff = requested.auto_off
+    ? [
+        autoOffDescription({
+          ...requested.auto_off,
+          value: requested.auto_off.action.value,
+        }),
+      ]
+    : [];
+  const existingAutoOff = existing.delayed.map(autoOffDescription);
+  const immediateMatches =
+    existing.immediate.length > 0 &&
+    existing.immediate.every((value) => value === requested.action.value);
+  const autoOffCovered = requestedAutoOff.every((wanted) =>
+    existingAutoOff.some((present) => isDeepStrictEqual(present, wanted)),
+  );
+  const differences = [];
+  if (!immediateMatches) {
+    differences.push({
+      field: "target_value",
+      existing: existing.immediate.map(blockValue),
+      requested: blockValue(requested.action.value),
+    });
+  }
+  if (!isDeepStrictEqual(existingAutoOff, requestedAutoOff)) {
+    differences.push({
+      field: "auto_off",
+      existing: existingAutoOff,
+      requested: requestedAutoOff,
+    });
+  }
+  differences.push(...existing.shape);
+  for (const [field, count] of [
+    ["other_actions", existing.otherActions],
+    ["else_actions", existing.elseActions],
+  ]) {
+    if (count > 0) differences.push({ field, existing: count, requested: 0 });
+  }
+  differences.push(...runtime);
+  const superset =
+    immediateMatches && autoOffCovered && existing.shape.length === 0;
+  return { relation: superset ? "superset" : "conflict", differences };
+}
+
+// The first top-level `if` of a BLOCK whose conditions include the requested
+// trigger and whose actions write the requested target characteristic.
+function triggeredTargetRule(data, requested) {
+  if (!requested || !Array.isArray(data?.targets)) return null;
+  const trigger = JSON.stringify(requested.condition);
+  const target = requested.action;
+  const rule = data.targets.find(
+    (candidate) =>
+      candidate?.type === "if" &&
+      candidate.if?.type === "condition" &&
+      Array.isArray(candidate.if.conditions) &&
+      candidate.if.conditions.some(
+        (condition) =>
+          condition?.type === "characteristic" &&
+          JSON.stringify(ruleCondition(condition)) === trigger,
+      ),
+  );
+  if (!rule || !Array.isArray(rule.then)) return null;
+  const immediate = [];
+  const delayed = [];
+  let otherActions = data.targets.length - 1;
+  const targetSettings = (node, onSetting) => {
+    if (
+      node?.type !== "service" ||
+      node.aId !== target.aId ||
+      node.sId !== target.sId ||
+      !Array.isArray(node.characteristics)
+    ) {
+      otherActions += 1;
+      return;
+    }
+    for (const setting of node.characteristics) {
+      if (setting?.type === "set" && setting.cId === target.cId) {
+        onSetting(setting.value);
+      } else {
+        otherActions += 1;
+      }
+    }
+  };
+  for (const action of rule.then) {
+    if (action?.type === "delay" && Array.isArray(action.targets)) {
+      for (const node of action.targets) {
+        targetSettings(node, (value) =>
+          delayed.push({
+            index: action.index,
+            mode: action.mode,
+            time: action.time,
+            value,
+          }),
+        );
+      }
+    } else {
+      targetSettings(action, (value) => immediate.push(value));
+    }
+  }
+  if (immediate.length === 0 && delayed.length === 0) return null;
+  const shape = [];
+  if (rule.if.conditions.length !== 1) {
+    shape.push({
+      field: "conditions",
+      existing: rule.if.conditions.length,
+      requested: 1,
+    });
+  }
+  if (rule.mode !== "EVERY") {
+    shape.push({
+      field: "mode",
+      existing: rule.mode ?? null,
+      requested: "EVERY",
+    });
+  }
+  if ((rule.then_delay ?? 0) !== 0) {
+    shape.push({
+      field: "then_delay",
+      existing: rule.then_delay,
+      requested: 0,
+    });
+  }
+  return {
+    immediate,
+    delayed,
+    otherActions,
+    elseActions: Array.isArray(rule.else) ? rule.else.length : 0,
+    shape,
+  };
+}
+
+function autoOffDescription({ index, mode, time, value }) {
+  return {
+    after_seconds: Number.isFinite(time) ? time / 1_000 : null,
+    timer_mode: mode ?? null,
+    target_value: blockValue(value),
+    timer_index: index ?? null,
+  };
+}
+
+function blockValue(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return value ?? null;
+}
+
+function runtimeDifferences(scenario) {
+  return [
+    ["active", scenario.active, true],
+    ["on_start", scenario.onStart, false],
+    ["sync", scenario.sync, false],
+  ]
+    .filter(([, existing, required]) => existing !== required)
+    .map(([field, existing, requested]) => ({
+      field,
+      existing: existing ?? null,
+      requested,
+    }));
 }
 
 function verifiedApplyFields(created) {
@@ -11484,6 +11666,13 @@ function observeReconciliation(change, reconciliation) {
       scenario: reconciliation.runtimeConflict,
     };
   }
+  if (reconciliation.superset) {
+    return {
+      kind: "superset_conflict",
+      scenario: reconciliation.superset.scenario,
+      existingRule: reconciliation.superset.rule,
+    };
+  }
   return reconciliation.scenario
     ? { kind: "ownership_conflict", scenario: reconciliation.scenario }
     : { kind: "absent" };
@@ -11510,6 +11699,13 @@ function observationState(observation) {
       };
     case "ownership_conflict":
       return { ...state, status: "conflict", owned: false };
+    case "superset_conflict":
+      return {
+        ...state,
+        status: "conflict",
+        owned: false,
+        conflict_reason: "existing_rule_superset",
+      };
     default:
       throw new Error(`Cannot persist ${observation.kind} observation.`);
   }
@@ -11539,6 +11735,17 @@ function observationResult(change, observation) {
       return runtimeConflictResult(change, observation.scenario);
     case "ownership_conflict":
       return ownershipConflictResult(change, observation.scenario.index);
+    case "superset_conflict":
+      return {
+        ...publicChange(change),
+        status: "conflict",
+        conflict_reason: "existing_rule_superset",
+        scenario_index: observation.scenario.index,
+        owned: false,
+        configuration_matches: false,
+        existing_rule: observation.existingRule,
+        action: "reuse_or_adjust_existing_rule",
+      };
     default:
       throw new Error(`Cannot describe ${observation.kind} observation.`);
   }

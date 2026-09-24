@@ -831,14 +831,6 @@ export class SprutHubClient {
         ["logic", "list", "logics"],
         true,
       );
-      const logicTypes = extractArray(
-        await this.#request(
-          { logic: { types: { aId: selected.aId, sId: selected.sId } } },
-          deadline,
-        ),
-        ["logic", "types", "logicTypes"],
-        true,
-      );
       const links = extractArray(
         await this.#request(
           {
@@ -855,42 +847,15 @@ export class SprutHubClient {
         ["link", "list", "links"],
         true,
       );
-      const options = extractArray(
-        await this.#request(
-          {
-            characteristic: {
-              getOptions: {
-                aId: selected.aId,
-                sId: selected.sId,
-                cId: selected.cId,
-              },
-            },
-          },
-          deadline,
-        ),
-        ["characteristic", "getOptions", "options"],
-        true,
-      );
       selections[role] = {
         room,
         accessories,
         directScenarios,
         assignedLogics,
-        logicTypes,
         links,
-        options,
       };
     }
-
-    const scenarios = extractArray(
-      await this.#request({ scenario: { list: {} } }, deadline),
-      ["scenario", "list", "scenarios"],
-    );
-    const extensions = extractArray(
-      await this.#request({ extension: { list: {} } }, deadline),
-      ["extension", "list", "extensions"],
-    );
-    return { ...selections, scenarios, extensions };
+    return selections;
   }
 
   async listScenarioDetails({ descriptionIncludes } = {}) {
