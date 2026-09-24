@@ -531,3 +531,135 @@ test("entity reads name the home once and offer options once per entity", async 
   assert.equal(Object.hasOwn(part, "home"), false);
   assertReadOnly(hub);
 });
+
+test("relations of the corridor light list only its own roles with branch, value and time", async (t) => {
+  const { hub, client } = await setup(t);
+  const motionScenario = `${homeRef}/scenario/3`;
+  const nightScenario = `${homeRef}/scenario/5`;
+  const allOffScenario = `${homeRef}/scenario/11`;
+  const onMotion =
+    "Датчик движения в коридоре / Движение: Обнаружено движение = true";
+
+  const result = await read(client, {
+    entity_ref: corridorOn,
+    include: ["relations"],
+  });
+  t.diagnostic(`corridor light On with relations: ${result.bytes} bytes`);
+  assert.ok(result.bytes <= 4096, `${result.bytes} bytes`);
+  const relations = result.entity.relations;
+  assert.deepEqual(
+    relations.scenario_roles.map(
+      ({ pointer: _pointer, same_device_actions: _same, ...role }) => role,
+    ),
+    [
+      {
+        scenario_ref: motionScenario,
+        scenario_name: "Свет в коридоре по движению",
+        active: true,
+        role: "action",
+        op: "set",
+        value: true,
+        branch: "then",
+        when: onMotion,
+      },
+      {
+        scenario_ref: motionScenario,
+        scenario_name: "Свет в коридоре по движению",
+        active: true,
+        role: "action",
+        op: "set",
+        value: false,
+        branch: "then",
+        when: onMotion,
+        delay: { seconds: 120, mode: "RESET" },
+      },
+      {
+        scenario_ref: nightScenario,
+        scenario_name: "Ночной режим",
+        active: true,
+        role: "action",
+        op: "set",
+        value: true,
+        branch: "then",
+        when: "23:00–06:00 every day",
+      },
+      {
+        scenario_ref: nightScenario,
+        scenario_name: "Ночной режим",
+        active: true,
+        role: "action",
+        op: "set",
+        value: false,
+        branch: "else",
+        when: "not (23:00–06:00 every day)",
+      },
+      {
+        scenario_ref: allOffScenario,
+        scenario_name: "Всё выключить",
+        active: true,
+        role: "action",
+        op: "set",
+        value: false,
+        branch: null,
+      },
+    ],
+  );
+  // At 23:00 the same step also dims the light; that is part of this role.
+  assert.deepEqual(relations.scenario_roles[2].same_device_actions, [
+    { characteristic: "Яркость", op: "set", value: 15, unit: "%" },
+  ]);
+  // Motion trigger, chandelier, corridor brightness and nine other lights.
+  assert.equal(relations.other_roles_count, 12);
+  assert.doesNotMatch(
+    JSON.stringify(relations.scenario_roles),
+    /accessory\/(?!14\/)\d+/,
+  );
+  for (const role of relations.scenario_roles) {
+    const node = await read(client, {
+      entity_ref: role.scenario_ref,
+      include: ["configuration"],
+      pointer: role.pointer,
+    });
+    assert.deepEqual(
+      { type: node.selection.value.type, cId: node.selection.value.cId },
+      { type: "set", cId: 14 },
+    );
+  }
+  assert.deepEqual(relations.checked, {
+    scenario_accessory_index: "found",
+    block_scenarios_read: 3,
+    logic_assignments: "checked_empty",
+    characteristic_links: "found",
+  });
+  assert.deepEqual(relations.unchecked, []);
+  assert.equal(typeof relations.limitation, "string");
+  assert.deepEqual(relations.assigned_logics, []);
+
+  const sensor = await read(client, {
+    entity_ref: `${homeRef}/accessory/13`,
+    include: ["relations"],
+  });
+  const sensorRelations = sensor.entity.relations;
+  assert.deepEqual(
+    sensorRelations.scenario_roles.map(
+      ({ pointer: _pointer, scenario_name: _name, ...role }) => role,
+    ),
+    [
+      {
+        scenario_ref: motionScenario,
+        active: true,
+        entity_ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
+        characteristic: "Обнаружено движение",
+        role: "trigger",
+        op: "=",
+        value: true,
+      },
+    ],
+  );
+  assert.equal(sensorRelations.other_roles_count, 2);
+  assert.deepEqual(
+    sensorRelations.unchecked.map(({ area, outcome }) => [area, outcome]),
+    [["characteristic_links", "not_read"]],
+  );
+  assertReadOnly(hub);
+});
