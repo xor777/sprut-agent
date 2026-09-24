@@ -14,9 +14,21 @@
   cron-узел также требует `type=cron`, `mode=NONE`, `offset=0`. `trigger=true`
   самого interval является временным trigger, поэтому фиктивная characteristic
   для запуска не нужна. Начало позже конца означает интервал через полночь.
-  Sunrise/sunset, недельные ограничения, standalone cron и равные края не
+  В границах interval sunrise/sunset, дни недели и равные края не
   поддерживаются. Упоминание ночи само по себе не требует расписания: interval
   выбирается только когда владелец задал повторяющиеся временные границы.
+- Момент времени как trigger — отдельный `cron` прямо в `condition.conditions`:
+  поля `trigger` у него нет, он запускает BLOCK в свой момент. Формы — в
+  `supported.time_trigger`: дни недели и время `0 MM HH ? * DAYS *` (`DAYS` —
+  `*` или имена `MON,TUE,…,SUN` через запятую), одна дата
+  `0 MM HH D M ? YYYY`, восход/закат `mode=SUNRISE|SUNSET` с
+  `cron=0 0 0 ? * DAYS *` и `offset` в минутах (минус — раньше). Пример «по
+  будням в 7:00»:
+  `{"type":"cron","mode":"NONE","cron":"0 0 7 ? * MON,TUE,WED,THU,FRI *","offset":0}`.
+  Эти формы взяты из схемы редактора, на хабе не наблюдались: имена дней, cron
+  восхода/заката и минуты offset — допущения; после первого ожидаемого момента
+  проверь `read_hub_log`. Дату «завтра» считай по часам хаба; прошедшая дата не
+  сработает.
 - В каждую ветвь включай только те разрешённые `service/set` значения, которые
   эта ветвь должна записать. Равное текущему значение остаётся будущей командой,
   а не сохранением ручного выбора: при исполнении ветви оно снова будет записано.
@@ -95,11 +107,12 @@
   [Наблюдение формы редактора](https://github.com/xor777/sprut-agent/blob/main/research/protocol/2026-09-15-block-if-condition-group.md)
   не заменяет live same-index update. Не копируй чужой BLOCK как образец
   синтаксиса: актуальные поля даёт контракт, а не эта карточка.
-- BLOCK manifest версии `2026-09-13` допускает `root.targets`, вложенные `if`
+- BLOCK manifest версии `2026-09-24` допускает `root.targets`, вложенные `if`
   (`EVERY`, нулевые branch delays), `AND`/`OR`, characteristic conditions с
   опубликованными comparisons, daily interval с вложенными cron-границами,
-  service/set и delay `RESET`. Условной форме нужен хотя бы один characteristic
-  или interval с `trigger=true`; action-only форме разрешены только корневые
+  cron-trigger, service/set и delay `RESET`. Условной форме нужен хотя бы один
+  characteristic или interval с `trigger=true` либо cron-trigger; action-only
+  форме разрешены только корневые
   literal `Lightbulb On=false` service/set targets. Одна характеристика не может
   быть условием и действием. Отказ из-за узла вне контракта (`notify`, `http`,
   `code`) называет его тип в `error.message`: такой существующий BLOCK

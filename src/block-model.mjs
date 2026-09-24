@@ -14,7 +14,13 @@ export const BLOCK_CHILD_FIELDS = {
   condition: {
     conditions: {
       shape: "array",
-      kinds: new Set(["condition", "characteristic", "interval", "code"]),
+      kinds: new Set([
+        "condition",
+        "characteristic",
+        "interval",
+        "cron",
+        "code",
+      ]),
     },
   },
   interval: {
@@ -116,8 +122,16 @@ const BLOCK_NODE_CONSTRAINTS = {
     editor_optional: ["blockId"],
   },
   cron: {
-    constants: { mode: "NONE", offset: 0 },
-    fields: { cron: "string" },
+    fields: {
+      mode: ["NONE", "SUNRISE", "SUNSET"],
+      cron: "string",
+      offset: "integer",
+    },
+    forms_by_position: {
+      "interval.start": "supported.daily_interval",
+      "interval.end": "supported.daily_interval",
+      "condition.conditions": "supported.time_trigger",
+    },
     editor_optional: ["blockId"],
   },
   service: {
@@ -141,6 +155,104 @@ const BLOCK_NODE_CONSTRAINTS = {
     editor_optional: ["blockId"],
   },
 };
+
+// A cron in condition.conditions fires its BLOCK at its moment. Only the
+// daily form 0 MM HH ? * * * is observed on a hub
+// (research/protocol/2026-09-13-native-daily-interval.md). The other forms
+// read the official editor schema's seven-field cron as Quartz: seconds
+// first, "?" for the unused day field, year last. Day names avoid Quartz's
+// 1=SUN numbering. The SUNRISE/SUNSET cron and minutes as the offset unit
+// are assumptions that still need a live check.
+const CRON_DAY_NAMES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const SUN_OFFSET = {
+  type: "integer",
+  unit: "minutes",
+  minimum: -720,
+  maximum: 720,
+  negative: "before",
+};
+
+export const TIME_TRIGGER = {
+  node: "cron",
+  position: "condition.conditions",
+  native_trigger: true,
+  clock: "selected_hub_local_wall_clock",
+  forms: {
+    days_at_time: { mode: "NONE", cron: "0 MM HH ? * DAYS *", offset: 0 },
+    one_date: { mode: "NONE", cron: "0 MM HH D M ? YYYY", offset: 0 },
+    sun: {
+      mode: ["SUNRISE", "SUNSET"],
+      cron: "0 0 0 ? * DAYS *",
+      offset: SUN_OFFSET,
+    },
+  },
+  fields: {
+    MM: "minute_0_to_59",
+    HH: "hour_0_to_23",
+    D: "day_of_month_1_to_31",
+    M: "month_1_to_12",
+    YYYY: "year_2000_to_2099",
+    DAYS: `* for every day, or comma-separated names from ${CRON_DAY_NAMES.join(",")}`,
+  },
+  evidence: "official_editor_schema_only",
+};
+
+const CRON_MINUTE = "([0-5]?\\d)";
+const CRON_HOUR = "([01]?\\d|2[0-3])";
+const DAYS_AT_TIME_CRON = new RegExp(
+  `^0 ${CRON_MINUTE} ${CRON_HOUR} \\? \\* (\\S+) \\*$`,
+);
+const ONE_DATE_CRON = new RegExp(
+  `^0 ${CRON_MINUTE} ${CRON_HOUR} (0?[1-9]|[12]\\d|3[01]) (0?[1-9]|1[0-2]) \\? (20\\d\\d)$`,
+);
+const SUN_CRON = /^0 0 0 \? \* (\S+) \*$/;
+
+// Returns why a standalone cron is outside TIME_TRIGGER, or null.
+export function timeTriggerProblem(node) {
+  const { forms } = TIME_TRIGGER;
+  const days = `DAYS is ${TIME_TRIGGER.fields.DAYS}`;
+  if (typeof node.cron !== "string") return "time trigger needs a cron string";
+  if (node.mode === "NONE") {
+    if (node.offset !== 0) return "time trigger at a clock time needs offset 0";
+    const weekly = DAYS_AT_TIME_CRON.exec(node.cron);
+    if (weekly && cronDaysValid(weekly[3])) return null;
+    const date = ONE_DATE_CRON.exec(node.cron);
+    if (date && calendarDateValid(date[3], date[4], date[5])) return null;
+    return `time trigger cron must be ${forms.days_at_time.cron} or ${forms.one_date.cron} in the selected hub's local wall clock; ${days}`;
+  }
+  if (node.mode === "SUNRISE" || node.mode === "SUNSET") {
+    const sun = SUN_CRON.exec(node.cron);
+    if (!sun || !cronDaysValid(sun[1])) {
+      return `time trigger ${node.mode} needs cron ${forms.sun.cron}; ${days}`;
+    }
+    if (
+      !Number.isSafeInteger(node.offset) ||
+      node.offset < SUN_OFFSET.minimum ||
+      node.offset > SUN_OFFSET.maximum
+    ) {
+      return `time trigger ${node.mode} offset must be whole ${SUN_OFFSET.unit} from ${SUN_OFFSET.minimum} to ${SUN_OFFSET.maximum}`;
+    }
+    return null;
+  }
+  return "time trigger mode must be NONE, SUNRISE or SUNSET";
+}
+
+function cronDaysValid(text) {
+  if (text === "*") return true;
+  const days = text.split(",");
+  return (
+    days.every((day) => CRON_DAY_NAMES.includes(day)) &&
+    new Set(days).size === days.length
+  );
+}
+
+function calendarDateValid(day, month, year) {
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return (
+    date.getUTCMonth() === Number(month) - 1 &&
+    date.getUTCDate() === Number(day)
+  );
+}
 
 export function publishedBlockNodes() {
   const children = publishedBlockChildren();

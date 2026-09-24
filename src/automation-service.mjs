@@ -6,6 +6,8 @@ import {
   BLOCK_CHILD_FIELDS,
   blockAffectedRefs,
   publishedBlockNodes,
+  TIME_TRIGGER,
+  timeTriggerProblem,
   visitKnownBlockNodes,
   wrapDirectCharacteristicIfPredicates,
 } from "./block-model.mjs";
@@ -5535,7 +5537,7 @@ function requiredNativeName(value, operation) {
 
 function blockContract() {
   return {
-    version: "2026-09-13",
+    version: "2026-09-24",
     source: {
       frontend_sha256:
         "81c1ef74ce21eb5ccff583255ba82fe766ff4cf6bc251c0566b7bd67436647f8",
@@ -5600,6 +5602,7 @@ function blockContract() {
             "boundary_rechecks_complete_condition_tree_then_selects_result_branch",
         },
       },
+      time_trigger: structuredClone(TIME_TRIGGER),
       nesting: [
         "if.if",
         "if.then",
@@ -5613,9 +5616,11 @@ function blockContract() {
     },
     limitations: [
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
-      "A conditional BLOCK requires at least one characteristic or daily interval condition with trigger=true; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
+      "A conditional BLOCK requires at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; this action-only slice accepts only literal Lightbulb On=false service/set targets.",
       "A supported characteristic directly in if.if is stored as condition/AND with that one leaf; existing AND/OR groups are not rewrapped.",
-      "Daily interval HH:mm values use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
+      "Daily interval and time_trigger times use the selected hub's local wall clock. This transport does not currently expose that hub's timezone, so timezone conversion requires separate evidence before apply.",
+      "time_trigger forms follow the official editor schema; a hub has not been observed saving or firing them. Day names, the SUNRISE/SUNSET cron and minutes as the offset unit are assumptions, so check read_hub_log after the first expected moment.",
+      "A time_trigger cron has no trigger flag and fires its BLOCK at its moment; how it evaluates when another trigger of the same condition fires is not observed. one_date is not checked against the hub clock, and a past date never fires.",
       "Daily interval creation and readback confirm stored native configuration, not firing at a minute boundary, immediate behavior when created inside the interval, or runtime across midnight.",
       "The same characteristic cannot be both a condition and an action in this slice.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
@@ -5749,6 +5754,7 @@ async function validateBlockData(
     actions: [],
     delayIndexes: new Set(),
     intervals: 0,
+    intervalBoundaries: new WeakSet(),
     triggers: 0,
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
       allowedIntentId: allowedPauseIntentId,
@@ -6324,11 +6330,17 @@ function validateBlockNode(node, kind, path, context) {
     if (start.hour === end.hour && start.minute === end.minute) {
       throw invalidBlock(path, "daily interval start and end must differ");
     }
+    context.intervalBoundaries.add(node.start);
+    context.intervalBoundaries.add(node.end);
     if (node.trigger) context.triggers += 1;
     return;
   }
   if (kind === "cron") {
-    parseDailyCron(node, path);
+    // Interval boundaries were checked above as daily crons.
+    if (context.intervalBoundaries.has(node)) return;
+    const problem = timeTriggerProblem(node);
+    if (problem) throw invalidBlock(path, problem);
+    context.triggers += 1;
     return;
   }
   if (kind === "service") {
