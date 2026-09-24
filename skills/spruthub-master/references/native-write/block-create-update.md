@@ -183,6 +183,11 @@
   [`scenario_active`](scenario-active.md) и интерфейсу хаба. Выключенный
   сценарий остаётся за change, restore data не отправляет `active` и оставляет
   его как есть, а restore create удаляет выключенный созданный сценарий.
+  Созданный сценарий, который другой BLOCK запускает целью `scenario`,
+  restore не удаляет: результат — conflict `scenario_targets_present` со
+  списком `referencing_scenario_targets` (scenario ref, имя, указатель узла и
+  `next` на `get_entity`). Сначала измени или убери эти цели, затем повтори
+  restore.
   Ручная правка имени, `onStart`/`sync` или data даёт conflict и
   сохраняется: повторный apply уже подтверждённого change не перезаписывает
   ручной откат, а `next` ведёт к новому prepare. Известный conflict не даёт

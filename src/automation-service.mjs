@@ -4699,6 +4699,20 @@ export class AutomationService {
         });
       }
     }
+    if (["block_create", "logic_source_create"].includes(change.kind)) {
+      const references = await scenarioTargetReferences(
+        this.client,
+        change.home_ref,
+        change.scenario_index,
+      );
+      if (references.length > 0) {
+        return this.#finishNative(change, "conflict", undefined, {
+          conflict_reason: "scenario_targets_present",
+          referencing_scenario_targets: references,
+          ...applied.fields,
+        });
+      }
+    }
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       if (["block_create", "logic_source_create"].includes(change.kind)) {
@@ -4746,6 +4760,7 @@ export class AutomationService {
       return this.#finishNative(change, "restored", undefined, {
         candidate_logic_types: undefined,
         logic_assignments: undefined,
+        referencing_scenario_targets: undefined,
         ...baseline.fields,
         ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
       });
@@ -5827,6 +5842,7 @@ function blockContract() {
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
       "Turning the scenario on or off with scenario_active or in the SprutHub interface is not a configuration edit: get, restore, and deletion of a created BLOCK ignore active, and restore never sends it.",
+      "Restore does not delete a created BLOCK or LOGIC that another BLOCK runs with a scenario target: the result is conflict scenario_targets_present naming those targets; change or remove them first, then restore again.",
       "SprutHub exposes no native compare-and-set; pre-write comparison does not close the remaining race window.",
       "block_action_preview may name known enum values of a simple root equality condition beside each service/set. That is the condition domain at evaluation, not execution, order, physical effect, or a trigger change. Compound, nested, unknown, or inapplicable forms stay undisclosed and are not an empty domain. History does not refresh the saved coverage.",
     ],
@@ -6107,6 +6123,42 @@ async function validateBlockData(
     );
   }
   return context;
+}
+
+// Scenario targets of other BLOCKs that run this scenario. Deleting it would
+// leave them pointing at nothing, so restore names them instead. BLOCK data
+// that cannot be parsed runs nothing the hub could resolve and is skipped.
+async function scenarioTargetReferences(client, homeRef, index) {
+  const references = [];
+  for (const summary of await client.listScenarios()) {
+    if (summary.type !== "BLOCK" || summary.index === index) continue;
+    const scenario = await client.getScenario(summary.index);
+    let data;
+    try {
+      data = JSON.parse(scenario?.data);
+    } catch {
+      continue;
+    }
+    const scenarioRef = `${homeRef}/scenario/${encodeURIComponent(summary.index)}`;
+    for (const run of blockScenarioRuns(data)) {
+      if (run.index !== index) continue;
+      const pointer = `/configuration/value${run.pointer}`;
+      references.push({
+        scenario_ref: scenarioRef,
+        name: scenario.name,
+        configuration_pointer: pointer,
+        next: {
+          tool: "get_entity",
+          arguments: {
+            entity_ref: scenarioRef,
+            include: ["configuration"],
+            pointer,
+          },
+        },
+      });
+    }
+  }
+  return references;
 }
 
 // Bounds the reads of one chain; a longer chain is refused, not assumed safe.
@@ -9639,7 +9691,7 @@ function logicSourceContract(mode) {
       update:
         "restore the exact saved source only while the observed applied source and metadata are unchanged",
       create:
-        "delete only the owned unchanged scenario after its native type is mapped and every current assignment of that type is absent",
+        "delete only the owned unchanged scenario after its native type is mapped, every current assignment of that type is absent, and no BLOCK runs it with a scenario target",
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata; restore neither checks nor writes active",
     },
@@ -9987,6 +10039,19 @@ function scenarioConflictAsksForNewPrepare(change) {
       change.conflict_reason === "manual_change" ||
       change.conflict_reason === "baseline_changed")
   );
+}
+
+// Shown only while the restore is blocked by them; a later get or restore
+// that finds none replaces the conflict.
+function publicScenarioTargetReferences(change) {
+  return change.status === "conflict" &&
+    change.conflict_reason === "scenario_targets_present"
+    ? {
+        referencing_scenario_targets: structuredClone(
+          change.referencing_scenario_targets,
+        ),
+      }
+    : {};
 }
 
 function unprovenApplyLimitation() {
@@ -10413,6 +10478,7 @@ function publicNativeChange(
       ...(change.logic_assignments
         ? { logic_assignments: structuredClone(change.logic_assignments) }
         : {}),
+      ...publicScenarioTargetReferences(change),
       restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
@@ -10423,7 +10489,7 @@ function publicNativeChange(
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
-        "Deletion requires a mapped native logic type and scans its current assignments, but SprutHub exposes no compare-and-set after that check.",
+        "Deletion requires a mapped native logic type and scans its current assignments and the scenario targets of BLOCKs, but SprutHub exposes no compare-and-set after that check.",
         ...(scenarioLacksProvenApply(change)
           ? [unprovenApplyLimitation()]
           : change.owned_target_absent_observed === true
@@ -10609,6 +10675,7 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
+      ...publicScenarioTargetReferences(change),
       restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
         ? { next: unprovenApplyNext(change) }
