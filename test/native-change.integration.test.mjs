@@ -2102,12 +2102,14 @@ async function startHub(port = 0) {
           ({ index }) => index === params.scenario.run.index,
         );
         assert.ok(scenario, "scenario.run must address an existing scenario");
-        const data = JSON.parse(scenario.data);
-        assert.ok(
-          data.targets.every(({ type }) => type === "service"),
-          "the fake hub executes only the observed action-only BLOCK form",
-        );
-        for (const target of data.targets) {
+        // Only the live-observed action-only BLOCK form changes values here.
+        // A manual run of conditions, delays, code or other scenario types
+        // has no observed semantics, so the fake acknowledges it unsimulated.
+        const data = scenario.type === "BLOCK" ? JSON.parse(scenario.data) : {};
+        const simulated =
+          Array.isArray(data.targets) &&
+          data.targets.every(({ type }) => type === "service");
+        for (const target of simulated ? data.targets : []) {
           const service = state.accessories
             .find(({ id }) => id === target.aId)
             ?.services.find(({ sId }) => sId === target.sId);
@@ -3055,7 +3057,7 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.equal(
     contract.structuredContent.contract.scope,
-    "one_action_only_light_off_BLOCK",
+    "any_active_scenario",
   );
 
   const prepared = await firstClient.callTool({
@@ -3069,6 +3071,8 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
   assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   assert.equal(prepared.structuredContent.status, "prepared");
   assert.equal(prepared.structuredContent.native_write_sent, false);
+  assert.equal(prepared.structuredContent.targets_known, true);
+  assert.deepEqual(prepared.structuredContent.effect, { predicted: true });
   assert.deepEqual(
     prepared.structuredContent.targets.map(({ characteristic_ref, value }) => ({
       characteristic_ref,
@@ -3572,6 +3576,386 @@ test("a persisted run intent becomes unknown after the final journal save is los
   });
   assert.equal(repeated.structuredContent.status, "uncertain");
   assert.equal(hub.requests.filter(({ scenario }) => scenario?.run).length, 1);
+});
+
+const brightnessRef = `${serviceRef}/characteristic/16`;
+
+function lampOn(hub, value) {
+  hub.state.accessories
+    .find(({ id }) => id === 34)
+    .services.find(({ sId }) => sId === 13)
+    .characteristics.find(({ cId }) => cId === 15).control.value = {
+    boolValue: value,
+  };
+}
+
+const runnableScenarioCases = [
+  {
+    key: "scene",
+    title: "BLOCK scene with any literal values and runtime flags",
+    install(hub) {
+      const scenario = {
+        index: "movie-scene",
+        name: "Кино",
+        desc: "Приглушить свет",
+        active: true,
+        onStart: false,
+        sync: true,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            {
+              type: "service",
+              aId: 34,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 15, hc: "On", value: "true" },
+                { type: "set", cId: 16, hc: "Brightness", value: "30" },
+              ],
+            },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: true,
+    targets: [
+      { characteristic_ref: characteristicRef, value: true },
+      { characteristic_ref: brightnessRef, value: 30 },
+    ],
+    effect: { predicted: true },
+    verification: "command_acknowledged_and_target_values_observed",
+    checkHome(hub) {
+      assert.deepEqual(currentCharacteristicValue(hub, characteristicRef), {
+        boolValue: true,
+      });
+      assert.deepEqual(currentCharacteristicValue(hub, brightnessRef), {
+        intValue: 30,
+      });
+    },
+  },
+  {
+    key: "conditional",
+    title: "BLOCK with a trigger and a condition",
+    install(hub) {
+      lampOn(hub, true);
+      const scenario = {
+        index: "leaving-home",
+        name: "Уходим из дома",
+        desc: "",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            {
+              type: "if",
+              mode: "EVERY",
+              if: {
+                type: "condition",
+                mode: "AND",
+                conditions: [characteristicCondition()],
+              },
+              // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+              then: [setAction({ value: "false" })],
+              else: [],
+              then_delay: 0,
+              else_delay: 0,
+            },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: true,
+    targets: [{ characteristic_ref: characteristicRef, value: false }],
+    effect: { predicted: false, reasons: ["conditions_evaluated_by_hub"] },
+    // The hub decides the branch; an unchanged lamp is not reported as a
+    // failed run.
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
+    key: "uninterpreted",
+    title: "BLOCK with an action this server does not interpret",
+    install(hub) {
+      lampOn(hub, true);
+      const scenario = {
+        index: "night-mode",
+        name: "Ночной режим",
+        desc: "",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            setAction({ value: "false" }),
+            { type: "code", blockId: 7, code: "global.nightMode();" },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: false,
+    targets: [{ characteristic_ref: characteristicRef, value: false }],
+    effect: { predicted: false, reasons: ["targets_unknown"] },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
+    key: "logic",
+    title: "LOGIC",
+    install(hub) {
+      const scenario = {
+        index: "evening-logic",
+        name: "Вечерняя яркость",
+        desc: "Set the initial brightness once",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "LOGIC",
+        data: firstLogicSource,
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: false,
+    targets: [],
+    effect: { predicted: false, reasons: ["targets_unknown"] },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
+    key: "global",
+    title: "GLOBAL",
+    install(hub) {
+      const scenario = {
+        index: "global-helpers",
+        name: "Общие функции",
+        desc: "",
+        active: true,
+        onStart: true,
+        sync: false,
+        type: "GLOBAL",
+        data: 'log.info("helpers ready");',
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    targetsKnown: false,
+    targets: [],
+    effect: { predicted: false, reasons: ["targets_unknown"] },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+];
+
+function installRunnableScenario(hub, key) {
+  return runnableScenarioCases.find((item) => item.key === key).install(hub);
+}
+
+function scenarioRuns(hub) {
+  return hub.requests
+    .filter(({ scenario }) => scenario?.run)
+    .map(({ scenario }) => scenario.run.index);
+}
+
+function hubConfigurationWrites(hub) {
+  return hub.requests.filter(
+    ({ scenario, characteristic }) =>
+      scenario?.create ||
+      scenario?.update ||
+      scenario?.delete ||
+      characteristic?.update,
+  );
+}
+
+async function prepareScenarioRun(client, targetRef, name) {
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: targetRef,
+      reason: `Запусти сценарий «${name}»`,
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  return prepared.structuredContent;
+}
+
+test("an active scenario of any type is run once by its prepared intent", async (t) => {
+  for (const scenarioCase of runnableScenarioCases) {
+    await t.test(scenarioCase.title, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const scenario = scenarioCase.install(hub);
+      const configuration = structuredClone(scenario);
+      const targetRef = scenarioRefFor(scenario);
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      const contract = await client.callTool({
+        name: "get_native_change_contract",
+        arguments: { operation: "scenario_run", target_ref: targetRef },
+      });
+      assert.equal(contract.isError, undefined, contract.content[0]?.text);
+
+      const prepared = await prepareScenarioRun(
+        client,
+        targetRef,
+        scenario.name,
+      );
+      assert.equal(prepared.status, "prepared");
+      assert.equal(prepared.scenario.type, scenario.type);
+      assert.equal(prepared.targets_known, scenarioCase.targetsKnown);
+      assert.deepEqual(
+        prepared.targets.map(({ characteristic_ref, value }) => ({
+          characteristic_ref,
+          value,
+        })),
+        scenarioCase.targets,
+      );
+      assert.deepEqual(prepared.effect, scenarioCase.effect);
+      assert.deepEqual(scenarioRuns(hub), []);
+
+      const applied = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(applied.status, "applied");
+      assert.equal(applied.command_delivery.status, "acknowledged");
+      assert.equal(applied.verification.result, scenarioCase.verification);
+      assert.deepEqual(scenarioRuns(hub), [scenario.index]);
+      scenarioCase.checkHome?.(hub);
+
+      const repeated = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(repeated.status, "applied");
+      assert.deepEqual(scenarioRuns(hub), [scenario.index]);
+      assert.deepEqual(hubConfigurationWrites(hub), []);
+      assert.deepEqual(scenario, configuration);
+    });
+  }
+});
+
+test("a turned-off scenario is not run and the agent is pointed to scenario_active", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const inactive = hub.state.scenarios.find(
+    ({ index }) => index === "existing-block",
+  );
+  assert.equal(inactive.active, false);
+  const targetRef = scenarioRefFor(inactive);
+
+  for (const [name, reason] of [
+    ["get_native_change_contract", undefined],
+    ["prepare_native_change", "Запусти выключенный сценарий"],
+  ]) {
+    const refused = await client.callTool({
+      name,
+      arguments: {
+        operation: "scenario_run",
+        target_ref: targetRef,
+        ...(reason ? { reason } : {}),
+      },
+    });
+    assert.equal(refused.isError, true, name);
+    assert.equal(
+      refused.structuredContent.error.code,
+      "scenario_inactive",
+      refused.content[0]?.text,
+    );
+    assert.deepEqual(refused.structuredContent.next, {
+      tool: "get_native_change_contract",
+      arguments: { operation: "scenario_active", target_ref: targetRef },
+    });
+  }
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: targetRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+
+  const scenarioReads = hub.requests.filter(({ scenario }) => scenario?.get);
+  const foreign = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_run",
+      target_ref: "spruthub://hub/other-home/scenario/existing-block",
+      reason: "Не запускать сценарий другого дома",
+    },
+  });
+  assert.equal(foreign.isError, true);
+  assert.equal(foreign.structuredContent.error.code, "unsupported_home_write");
+  assert.deepEqual(
+    hub.requests.filter(({ scenario }) => scenario?.get),
+    scenarioReads,
+  );
+  assert.deepEqual(scenarioRuns(hub), []);
+  assert.equal(inactive.active, false);
+});
+
+test("apply rechecks the exact scenario of any type and never resends a lost run", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const logic = installRunnableScenario(hub, "logic");
+  const global = installRunnableScenario(hub, "global");
+  const scene = installRunnableScenario(hub, "scene");
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const runs = [];
+  for (const scenario of [logic, global, scene]) {
+    runs.push(
+      await prepareScenarioRun(
+        firstClient,
+        scenarioRefFor(scenario),
+        scenario.name,
+      ),
+    );
+  }
+
+  logic.data = secondLogicSource;
+  global.active = false;
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== scene.index,
+  );
+  for (const run of runs) {
+    const conflict = await callChangeTool(
+      firstClient,
+      "apply_native_change",
+      run.change_ref,
+    );
+    assert.equal(conflict.status, "conflict", run.target_ref);
+    assert.equal(conflict.conflict_reason, "scenario_changed", run.target_ref);
+  }
+  assert.deepEqual(scenarioRuns(hub), []);
+
+  logic.data = firstLogicSource;
+  const lostAck = await prepareScenarioRun(
+    firstClient,
+    scenarioRefFor(logic),
+    logic.name,
+  );
+  hub.state.behavior.closeAfterScenarioRun = true;
+  const uncertain = await callChangeTool(
+    firstClient,
+    "apply_native_change",
+    lostAck.change_ref,
+  );
+  assert.equal(uncertain.status, "uncertain");
+  assert.equal(uncertain.command_delivery.status, "unknown");
+  await firstClient.close();
+
+  const restartedClient = await startClient(t, hub, stateDirectory);
+  const repeated = await callChangeTool(
+    restartedClient,
+    "apply_native_change",
+    lostAck.change_ref,
+  );
+  assert.equal(repeated.status, "uncertain");
+  assert.deepEqual(scenarioRuns(hub), [logic.index]);
 });
 
 test("an action-only BLOCK can be created without running and restoration removes only its configuration", async (t) => {
