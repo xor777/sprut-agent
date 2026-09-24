@@ -142,8 +142,10 @@ const BLOCK_NODE_CONSTRAINTS = {
     editor_optional: ["blockId"],
   },
   if: {
-    // ONCE follows the editor schema and SprutHub Wiki; not observed on a hub.
+    // The web client creates an if without mode and shows it as EVERY; ONCE
+    // was stored as sent on SprutHub 3.0.0, its run is not observed.
     fields: { mode: ["EVERY", "ONCE"] },
+    when_omitted: { mode: "EVERY" },
     modes: {
       EVERY: "run_the_chosen_branch_on_every_check",
       ONCE: "run_a_branch_only_when_the_condition_result_changes",
@@ -228,15 +230,17 @@ const BLOCK_NODE_CONSTRAINTS = {
   },
   delay: {
     fields: {
-      // CONTINUE follows the editor schema; not observed on a hub.
+      // The web client labels RESET "single timer" and CONTINUE "new timer";
+      // the run of either is not observed on a hub.
       mode: ["RESET", "CONTINUE"],
       index: { type: "integer", minimum: 1, unique: true },
       // Native delay.time is milliseconds; auto_off_after_seconds stays a separate public unit.
       time: { type: "integer", minimum: 1, unit: "milliseconds" },
     },
     modes: {
-      RESET: "new_entry_restarts_the_full_delay",
-      CONTINUE: "new_entry_keeps_the_running_delay_expected_not_observed",
+      RESET: "single_timer_new_entry_restarts_the_full_delay",
+      CONTINUE:
+        "new_timer_each_entry_starts_another_delay_expected_from_editor_label",
     },
     editor_optional: ["blockId"],
   },

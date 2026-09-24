@@ -5838,7 +5838,7 @@ function blockContract() {
       "The same characteristic cannot be both a condition and an action in this slice.",
       "toggle (boolean), inc and dec (numeric without listed values, value is a positive number step in the characteristic's unit, at most its max minus min and a multiple of its minStep) are stored as sent on SprutHub 3.0.0, with a step sent as a numeric string stored as a number; a hub has not been observed running them, including whether a step clamps at the characteristic's range.",
       "A scenario target runs an existing scenario of this home by its index with mode FIRE and must not run its own BLOCK, directly or through scenario targets of other BLOCKs; the chain is followed through up to 8 scenarios, a longer chain or unreadable BLOCK data is refused, and scenarios run from LOGIC code are not followed. It follows the official editor schema; a hub has not been observed running it, including for a turned-off scenario.",
-      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. What CONTINUE does on a repeated entry is an assumption.',
+      'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "clear_delay cancels a delay of the same BLOCK by its index; that index must belong to a delay in the data.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6684,7 +6684,8 @@ function validateBlockNode(node, kind, path, context) {
       return;
     }
     if (
-      !["EVERY", "ONCE"].includes(node.mode) ||
+      // An if without mode is EVERY, as the web client creates it.
+      (Object.hasOwn(node, "mode") && !["EVERY", "ONCE"].includes(node.mode)) ||
       node.then_delay !== 0 ||
       node.else_delay !== 0 ||
       !blockNode(node.if) ||
@@ -6693,7 +6694,7 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       throw invalidBlock(
         path,
-        "if needs mode EVERY or ONCE, a condition and zero-delay branches",
+        "if needs mode EVERY or ONCE (omitted means EVERY), a condition and zero-delay branches",
       );
     }
     return;
