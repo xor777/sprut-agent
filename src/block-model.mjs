@@ -173,7 +173,8 @@ export const CLEAR_ALL_DELAYS = 0;
 // positive period repeats it («Каждые» in the web client's TimeDelay, which
 // writes minutes and seconds as milliseconds and starts at 1000). A period
 // under a second is refused so that a repeated write cannot flood a device.
-// How long the repetition lasts on a hub is not observed.
+// SprutHub 3.0.0 stored a period of 60000 as sent (live-conformance-4); how
+// long the repetition lasts on a hub is not observed.
 export const BRANCH_REPEAT = {
   type: "integer",
   unit: "milliseconds",
@@ -208,15 +209,16 @@ export const NOTIFY_MODES = {
 // notification service, or one entry per service by the index of its
 // NOTIFICATION extension, with clients null for all its recipients or the
 // ids of its children. The client writes neither an empty list nor empty
-// clients; it sets them to null.
+// clients; it sets them to null. SprutHub 3.0.0 stores to null and clients
+// null as absent (live-conformance-4); both forms mean the same.
 export const NOTIFY_RECIPIENTS = {
-  all_services: null,
+  all_services: "null_or_omitted",
   listed_services: [
     {
       index:
         "index of a notification service: an extension with bundle_type NOTIFICATION (home_overview list=extensions)",
       clients:
-        "null for all its recipients, or ids of its children (get_entity include children)",
+        "null or omitted for all its recipients, or ids of its children (get_entity include children)",
     },
   ],
   with_mode_MESSAGE: "null_or_omitted",
@@ -543,7 +545,7 @@ export const TIME_TRIGGER = {
   evidence: {
     forms: "official_web_client_code",
     one_date: "official_editor_schema_only",
-    hub: "days_at_time, one_date and sun stored as sent on SprutHub 3.0.0; a days_at_time for every day fired at its minute of the hub clock (live-conformance-3); firing of one_date and sun not observed",
+    hub: "days_at_time, one_date and sun stored as sent on SprutHub 3.0.0, and every_n_minutes (0 0/15 * ? * * *, live-conformance-4); a days_at_time for every day fired at its minute of the hub clock (live-conformance-3); firing of the other forms not observed",
   },
 };
 
