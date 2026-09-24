@@ -41,14 +41,18 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
 // SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
-// Latin alike (characters, not bytes), and drops emoji; the room.create
-// answer already carries the kept name (owner hub, 2026-09-24,
+// Latin alike (characters, not bytes); the room.create answer already
+// carries the kept name, and the one emoji tried (🙂, outside the Basic
+// Multilingual Plane) was dropped (owner hub, 2026-09-24,
 // research/protocol/2026-09-24-live-conformance-3.md). Characters are
-// counted as Unicode code points; characters outside the Basic Multilingual
-// Plane, where the emoji are, are refused, since the one emoji tried was
-// dropped. Which other characters the hub drops was not checked.
+// counted as Unicode code points. As a precaution, every character outside
+// the BMP, every emoji and pictograph inside it (❤, ⭐, ☀) and the variation
+// selectors that turn a symbol into an emoji are refused; which of them the
+// hub drops was not checked.
 const ROOM_NAME_MAX_LENGTH = 32;
-const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and drops emoji, so a longer name, or one with emoji or other characters outside the Basic Multilingual Plane, is refused before any write. A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
+const ROOM_NAME_REFUSED_CHARACTER =
+  /\p{Extended_Pictographic}|[\uFE00-\uFE0F]/u;
+const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and dropped an emoji from one, so a longer name, or one with emoji, pictographs, variation selectors or other characters outside the Basic Multilingual Plane, is refused before any write (only one emoji was seen dropped; the rest are refused as a precaution). A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -1281,6 +1285,7 @@ export class AutomationService {
       if (phase === "right_lost") return publicStoredNativeChange(change);
       return this.#observeProvenNativeValue(change, current);
     }
+    nativeValueKind(change.kind).recheck?.(change);
     const { value: current, contract } =
       currentState ??
       (await this.#readNativeValueState(change, {
@@ -8963,6 +8968,9 @@ const NATIVE_VALUE_KINDS = {
     knownSetting: () => false,
     inspect: inspectRoomName,
     prepare: prepareRoomName,
+    // A change prepared by an earlier version may carry a name the hub
+    // would not keep.
+    recheck: (change) => roomNameWithinLimit(change.requested_value.value),
     read: (service, change) => readRoomName(service.client, change.target),
     write: (service, change, value) =>
       service.client.renameRoom(change.target.id, value.value),
@@ -9806,7 +9814,7 @@ function roomNameLimits() {
     max_length: ROOM_NAME_MAX_LENGTH,
     length_unit: "unicode_code_points",
     refused_characters:
-      "outside the Basic Multilingual Plane (U+10000 and above), such as emoji",
+      "emoji and pictographs (Unicode Extended_Pictographic), variation selectors U+FE00-U+FE0F, and any character outside the Basic Multilingual Plane (U+10000 and above); only one emoji was seen dropped, the rest are refused as a precaution",
   };
 }
 
@@ -9816,13 +9824,17 @@ function roomNameWithinLimit(name) {
   const characters = [...name];
   const unsupported = [
     ...new Set(
-      characters.filter((character) => character.codePointAt(0) > 0xffff),
+      characters.filter(
+        (character) =>
+          character.codePointAt(0) > 0xffff ||
+          ROOM_NAME_REFUSED_CHARACTER.test(character),
+      ),
     ),
   ];
   if (unsupported.length > 0) {
     throw new SprutHubError(
       "name_characters_unsupported",
-      `This name has ${unsupported.join(" ")}, which SprutHub drops from a room name (emoji and other characters outside the Basic Multilingual Plane). Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
+      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
       "prepare_native_change",
       { unsupported_characters: unsupported },
     );
@@ -9834,6 +9846,14 @@ function roomNameWithinLimit(name) {
     "prepare_native_change",
     { max_length: ROOM_NAME_MAX_LENGTH, name_length: characters.length },
   );
+}
+
+// A variation selector is invisible, so it is named by its code point only.
+function characterLabel(character) {
+  const code = `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+  return /[\uFE00-\uFE0F]/u.test(character)
+    ? `${code} (variation selector)`
+    : `${character} (${code})`;
 }
 
 async function inspectService(service, input, read) {

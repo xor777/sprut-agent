@@ -1780,10 +1780,11 @@ function roomRemovalProved() {
 // --- step 1n: room names beyond ASCII -----------------------------------------
 
 // The hub keeps the first 32 characters of a room name, Cyrillic and Latin
-// alike, and drops emoji (2026-09-24). The product refuses a longer name
-// (name_too_long) and one with characters outside the Basic Multilingual
-// Plane (name_characters_unsupported). Each name starts with the run's short
-// name (25 ASCII characters), so a cut name is still the run's.
+// alike, and dropped the emoji 🙂 (2026-09-24). The product refuses a longer
+// name (name_too_long) and one with emoji, pictographs, variation selectors
+// or characters outside the Basic Multilingual Plane
+// (name_characters_unsupported). Each name starts with the run's short name
+// (25 ASCII characters), so a cut name is still the run's.
 function roomNameCases(short) {
   return [
     { id: "cyrillic_32", name: `${short}абвгдеж` },
@@ -1794,7 +1795,13 @@ function roomNameCases(short) {
 
 // The product's refusal of a room name, or null for a name it sends.
 function roomNameRefusal(name) {
-  if ([...name].some((character) => character.codePointAt(0) > 0xffff)) {
+  if (
+    [...name].some(
+      (character) =>
+        character.codePointAt(0) > 0xffff ||
+        /\p{Extended_Pictographic}|[\uFE00-\uFE0F]/u.test(character),
+    )
+  ) {
     return "name_characters_unsupported";
   }
   return [...name].length > 32 ? "name_too_long" : null;
