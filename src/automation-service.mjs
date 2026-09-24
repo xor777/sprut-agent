@@ -212,7 +212,7 @@ export class AutomationService {
     const draft = kind.prepare
       ? await kind.prepare(this, input)
       : await nativeValueDraft(this, kind, input);
-    if (!draft.alwaysSend && valuesEqual(draft.value, draft.requested)) {
+    if (nativeValueAlreadyDesired(draft)) {
       return {
         status: "already_desired",
         operation: input.operation,
@@ -224,6 +224,10 @@ export class AutomationService {
         ...(kind.command ? {} : { owned_change_created: false }),
       };
     }
+    return publicNativeChange(await this.#recordValueChange(input, draft));
+  }
+
+  async #recordValueChange(input, draft) {
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -246,7 +250,7 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    return publicNativeChange(change);
+    return change;
   }
 
   async #prepareLogicAssignment(input) {
@@ -7773,6 +7777,10 @@ async function nativeValueDraft(service, kind, input) {
   };
 }
 
+function nativeValueAlreadyDesired(draft) {
+  return !draft.alwaysSend && valuesEqual(draft.value, draft.requested);
+}
+
 function nativeScalarValue(typed) {
   return { [typed.kind]: typed.value };
 }
@@ -7801,10 +7809,18 @@ async function inspectCharacteristicValue(service, input) {
 }
 
 async function prepareCharacteristicValue(service, input) {
-  const { fields, contract, value } = await inspectCharacteristicValue(
+  return characteristicValueDraft(
     service,
     input,
+    await inspectCharacteristicValue(service, input),
   );
+}
+
+async function characteristicValueDraft(
+  service,
+  input,
+  { fields, contract, value },
+) {
   const requested = validateCharacteristicValue(input.value, contract);
   const virtualGroup = await ownedVirtualGroupContext(
     service.store,
