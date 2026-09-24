@@ -1159,7 +1159,8 @@ test("read-temperature ties the value to the bedroom and accepts whole degrees",
 
 test("an answer with a bare id or number sign fails answer_has_no_raw_refs", async (t) => {
   const { grade } = await nativeSession(t);
-  const clean = (answer) => grade("turn-off-room", answer).answer_has_no_raw_refs;
+  const clean = (answer) =>
+    grade("turn-off-room", answer).answer_has_no_raw_refs;
   for (const leaked of [
     "Выключил люстру (id 15) и торшер.",
     "Выключил люстру (ID: 15).",

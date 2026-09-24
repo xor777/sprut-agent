@@ -112,6 +112,8 @@ const RAW_REFS = [
   /\b[a-z]+_refs?\b/i,
   /\/configuration\//i,
   /\b(?:Bridge|Controller):\w/,
+  /\bid\s*[:=#]?\s*\d/i,
+  /(?<![\w&])#\d/,
 ];
 
 const UNCONFIRMED =
