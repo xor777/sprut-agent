@@ -324,7 +324,7 @@ export class AutomationService {
       throw new SprutHubError(
         "room_not_found",
         "The selected destination room was not found.",
-        "inspect_home",
+        "home_overview",
       );
     }
     const baselineRoom = await this.client.getRoom(accessory.roomId);
@@ -425,7 +425,7 @@ export class AutomationService {
       throw new SprutHubError(
         "room_not_found",
         "The selected room was not found.",
-        "list_rooms",
+        "home_overview",
       );
     }
     const characteristicTypes = validateVirtualLightCharacteristicTypes(
@@ -4927,7 +4927,7 @@ export class AutomationService {
         throw new SprutHubError(
           "ambiguous_owned_scenario",
           "More than one LOGIC source carries this native change marker.",
-          "inspect_home",
+          "home_overview",
         );
       }
       scenario = matches[0] ?? null;
@@ -4962,7 +4962,7 @@ export class AutomationService {
       throw new SprutHubError(
         "ambiguous_owned_scenario",
         "More than one scenario carries this native change marker.",
-        "inspect_home",
+        "home_overview",
       );
     }
     return matches[0] ?? null;
@@ -5446,8 +5446,8 @@ function parseRoomRef(ref, configuredSerial, allowLegacy = false) {
   if (!legacy) {
     throw new SprutHubError(
       "invalid_room_ref",
-      "Use a home-qualified room reference returned by list_rooms.",
-      "list_rooms",
+      "Use a home-qualified room reference returned by home_overview.",
+      "home_overview",
     );
   }
   return Number(legacy[1]);
@@ -5552,8 +5552,8 @@ function parseConfiguredHomeRef(ref, configuredSerial) {
   if (!match) {
     throw new SprutHubError(
       "invalid_home_ref",
-      "Use a home reference returned by list_homes.",
-      "list_homes",
+      "Use a home reference returned by home_overview.",
+      "home_overview",
     );
   }
   const serial = decodeReferenceSegment(match[1]);
@@ -5566,8 +5566,8 @@ function parseScenarioRef(ref, configuredSerial) {
   if (!match) {
     throw new SprutHubError(
       "invalid_scenario_ref",
-      "Use a home-qualified scenario reference returned by inspect_home.",
-      "inspect_home",
+      "Use a home-qualified scenario reference returned by home_overview.",
+      "home_overview",
     );
   }
   const serial = decodeReferenceSegment(match[1]);
@@ -5725,7 +5725,7 @@ function requireEntityHome(ref, configuredSerial) {
     throw new SprutHubError(
       "invalid_entity_ref",
       "Use a home-qualified entity reference returned by SprutHub discovery.",
-      "inspect_home",
+      "home_overview",
     );
   }
   requireConfiguredHome(decodeReferenceSegment(match[1]), configuredSerial);
@@ -5735,7 +5735,7 @@ function scenarioNotFound() {
   return new SprutHubError(
     "scenario_not_found",
     "The selected SprutHub scenario was not found.",
-    "inspect_home",
+    "home_overview",
   );
 }
 
@@ -9662,7 +9662,7 @@ async function readRoomName(client, target) {
     throw new SprutHubError(
       "room_not_found",
       "The selected room was not found.",
-      "list_rooms",
+      "home_overview",
     );
   }
   return {

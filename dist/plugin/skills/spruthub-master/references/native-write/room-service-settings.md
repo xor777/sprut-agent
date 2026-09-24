@@ -1,6 +1,6 @@
 # `room_name`, `service_name`, `service_visible`
 
-Сначала вызови `get_native_change_contract` с нужной operation и `target_ref`: ref комнаты из `list_rooms` для `room_name`, ref сервиса из `get_entity` для `service_name` и `service_visible`.
+Сначала вызови `get_native_change_contract` с нужной operation и `target_ref`: ref комнаты из `home_overview` для `room_name`, ref сервиса из `get_entity` для `service_name` и `service_visible`.
 
 - `room_name` переименовывает комнату: `room.update` получает только `id` и
   `name`. `service_name` переименовывает один сервис, например канал

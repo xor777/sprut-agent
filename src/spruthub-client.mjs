@@ -113,8 +113,7 @@ export class SprutHubClient {
     this.timeoutMs = timeoutMs;
   }
 
-  async listHomes() {
-    const deadline = Date.now() + this.timeoutMs;
+  async listHomes(deadline = Date.now() + this.timeoutMs) {
     const { homes, observedAt } = await this.#listHomes(deadline);
     this.#availableHomeCount = homes.length;
     const selectedHome = homes.find((home) => home.serial === this.serial);
@@ -153,86 +152,77 @@ export class SprutHubClient {
     };
   }
 
-  async inspectHome(homeReference) {
-    const serial = parseHomeRef(homeReference);
-    const deadline = Date.now() + this.timeoutMs;
-    const { home, observedAt: homeObservedAt } = await this.#requireHome(
+  // Plain native reads of one home for the household reads in
+  // home-reads.mjs; each validates what it returns and one caller deadline
+  // covers them all.
+  async nativeRooms(serial, deadline) {
+    const response = await this.#request({ room: { list: {} } }, deadline, {
       serial,
-      deadline,
+    });
+    const rooms = extractNativeList(
+      response,
+      ["room", "list", "rooms"],
+      () =>
+        new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned an incompatible room list.",
+        ),
     );
-    const [roomsResponse, scenariosResponse, extensionsResponse] =
-      await Promise.all([
-        this.#request({ room: { list: {} } }, deadline, { serial }),
-        this.#request({ scenario: { list: {} } }, deadline, { serial }),
-        this.#request({ extension: { list: {} } }, deadline, { serial }),
-      ]);
-    const rooms = extractNativeList(roomsResponse, ["room", "list", "rooms"]);
-    const scenarios = extractNativeList(scenariosResponse, [
-      "scenario",
-      "list",
-      "scenarios",
-    ]);
-    const extensions = extractNativeList(extensionsResponse, [
-      "extension",
-      "list",
-      "extensions",
-    ]);
-    const normalizedExtensions = normalizeExtensions(serial, extensions);
     rooms.forEach((room) => {
       validateRoom(room);
     });
-    const observedAt = latestObservedAt([
-      homeObservedAt,
-      roomsResponse.responseReceivedAt,
-      scenariosResponse.responseReceivedAt,
-      extensionsResponse.responseReceivedAt,
-    ]);
-    return {
-      status: "ok",
-      home: normalizeHome(home, homeObservedAt),
-      entities: {
-        rooms: rooms.map((room) => ({
-          ref: roomRef(serial, room.id),
-          name: room.name,
-        })),
-        scenarios: scenarios.map((scenario) =>
-          normalizeScenarioSummary(serial, scenario),
-        ),
-        extensions: normalizedExtensions,
+    return { rooms, observedAt: response.responseReceivedAt };
+  }
+
+  async nativeAccessories(serial, deadline, { roomId } = {}) {
+    const response = await this.#request(
+      {
+        accessory: {
+          list: {
+            ...(roomId === undefined ? {} : { roomId }),
+            expand: "services,characteristics",
+          },
+        },
       },
-      coverage: [
-        capability(
-          "account_homes",
-          "hub.list",
-          "live_confirmed",
-          homeObservedAt,
-        ),
-        capability(
-          "rooms",
-          "room.list",
-          "live_confirmed",
-          roomsResponse.responseReceivedAt,
-        ),
-        capability(
-          "scenarios",
-          "scenario.list",
-          "live_confirmed",
-          scenariosResponse.responseReceivedAt,
-        ),
-        capability(
-          "extensions",
-          "extension.list",
-          "live_confirmed",
-          extensionsResponse.responseReceivedAt,
-        ),
-      ],
-      unsupported_in_this_slice: [
-        "pairing and controller actions",
-        "history of characteristic values and events, and unbounded monitoring",
-        "dashboards",
-        "backups",
-      ],
-      freshness: freshness(observedAt),
+      deadline,
+      { serial },
+    );
+    const accessories = extractNativeList(response, [
+      "accessory",
+      "list",
+      "accessories",
+    ]);
+    accessories.forEach(validateAccessory);
+    return { accessories, observedAt: response.responseReceivedAt };
+  }
+
+  async nativeScenarios(serial, deadline) {
+    const response = await this.#request({ scenario: { list: {} } }, deadline, {
+      serial,
+    });
+    const scenarios = extractNativeList(response, [
+      "scenario",
+      "list",
+      "scenarios",
+    ]).map((native) => ({
+      native,
+      summary: normalizeScenarioSummary(serial, native),
+    }));
+    return { scenarios, observedAt: response.responseReceivedAt };
+  }
+
+  async nativeExtensions(serial, deadline) {
+    const response = await this.#request(
+      { extension: { list: {} } },
+      deadline,
+      { serial },
+    );
+    return {
+      extensions: normalizeExtensions(
+        serial,
+        extractNativeList(response, ["extension", "list", "extensions"]),
+      ),
+      observedAt: response.responseReceivedAt,
     };
   }
 
@@ -634,9 +624,9 @@ export class SprutHubClient {
     if (serial !== this.serial) {
       throw new SprutHubError(
         "wrong_home",
-        "The hub log is read only from the configured SprutHub home. Use its home_ref from list_homes.",
-        "list_homes",
-        { next: { tool: "list_homes", arguments: {} } },
+        "The hub log is read only from the configured SprutHub home. Use its home_ref from home_overview.",
+        "home_overview",
+        { next: { tool: "home_overview", arguments: {} } },
       );
     }
     let response;
@@ -751,7 +741,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "room_not_found",
         "The selected SprutHub room was not found.",
-        "inspect_home",
+        "home_overview",
       );
     }
     validateRoom(roomContainer.get, parsedRoom.roomId);
@@ -1662,7 +1652,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "home_not_found",
         "The selected SprutHub home is not available to this account.",
-        "list_homes",
+        "home_overview",
       );
     }
     return { home, observedAt };
@@ -2327,7 +2317,7 @@ export class SprutHubClient {
     if (!scenario) {
       throw entityNotFound("scenario", {
         next: {
-          tool: "inspect_home",
+          tool: "home_overview",
           arguments: { home_ref: homeRef(parsed.serial) },
         },
       });
@@ -2768,7 +2758,7 @@ export class SprutHubClient {
         error = new SprutHubError(
           "unsupported",
           "SprutHub does not support this operation on the selected home.",
-          "inspect_home",
+          "home_overview",
           { capability_status: "unsupported" },
         );
       } else {
@@ -3241,7 +3231,7 @@ function entityNotFound(kind, details = {}) {
   return new SprutHubError(
     "entity_not_found",
     `The selected SprutHub ${kind} was not found.`,
-    "inspect_home",
+    "home_overview",
     details,
   );
 }
@@ -3290,15 +3280,6 @@ function normalizeHome(home, observedAt) {
   };
 }
 
-function capability(family, operation, status, observedAt) {
-  return {
-    family,
-    operation,
-    status,
-    observed_at: observedAt,
-  };
-}
-
 function freshness(observedAt) {
   return {
     hubResponseReceivedAt: observedAt,
@@ -3310,15 +3291,15 @@ function latestObservedAt(values) {
   return values.reduce((latest, value) => (value > latest ? value : latest));
 }
 
-function homeRef(serial) {
+export function homeRef(serial) {
   return `spruthub://hub/${encodeURIComponent(serial)}`;
 }
 
-function roomRef(serial, roomId) {
+export function roomRef(serial, roomId) {
   return `${homeRef(serial)}/room/${roomId}`;
 }
 
-function accessoryRef(serial, accessoryId) {
+export function accessoryRef(serial, accessoryId) {
   return `${homeRef(serial)}/accessory/${accessoryId}`;
 }
 
@@ -3360,7 +3341,7 @@ function logicRef(serial, accessoryId, serviceId, type) {
 
 function parseHomeRef(ref) {
   const parsed = parseEntityRef(ref);
-  if (parsed.kind !== "home") throw invalidEntityRef("list_homes");
+  if (parsed.kind !== "home") throw invalidEntityRef();
   return parsed.serial;
 }
 
@@ -3647,10 +3628,10 @@ function parseEntityId(value) {
   return id;
 }
 
-function invalidEntityRef(action = "inspect_home") {
+function invalidEntityRef(action = "home_overview") {
   return new SprutHubError(
     "invalid_entity_ref",
-    "Use a home-qualified reference returned by list_homes, inspect_home, or get_entity.",
+    "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
     action,
   );
 }
@@ -3659,7 +3640,7 @@ function invalidServiceScope() {
   return new SprutHubError(
     "invalid_service_scope",
     "room_ref must identify a room in the selected home_ref.",
-    "inspect_home",
+    "home_overview",
   );
 }
 
@@ -3698,9 +3679,9 @@ function invalidMessage() {
 function homeSelectionRequired() {
   return new SprutHubError(
     "home_selection_required",
-    "Call list_homes, choose one exact home, follow selection.pin, restart the same MCP application, and retry this operation.",
-    "list_homes",
-    { next: { tool: "list_homes", arguments: {} } },
+    "Call home_overview, choose one exact home, follow selection.pin, restart the same MCP application, and retry this operation.",
+    "home_overview",
+    { next: { tool: "home_overview", arguments: {} } },
   );
 }
 
@@ -3784,7 +3765,7 @@ function incompatibleExtensionIdentity() {
   return new SprutHubError(
     "incompatible_response",
     "SprutHub returned an extension without a unique native extensionKey.",
-    "inspect_home",
+    "home_overview",
   );
 }
 
@@ -3865,7 +3846,7 @@ function incompatibleExtensionChildIdentity() {
   return new SprutHubError(
     "incompatible_response",
     "SprutHub returned an extension child that does not match the requested identity.",
-    "inspect_home",
+    "home_overview",
   );
 }
 
@@ -4127,7 +4108,7 @@ export function includeReadFailedAction(errorCode) {
   ) {
     return "retry";
   }
-  if (errorCode === "unsupported") return "inspect_home";
+  if (errorCode === "unsupported") return "home_overview";
   return undefined;
 }
 
@@ -4137,7 +4118,7 @@ export function includeReadFailedNext(
 ) {
   if (errorCode === "unsupported") {
     return typeof homeRef === "string"
-      ? { tool: "inspect_home", arguments: { home_ref: homeRef } }
+      ? { tool: "home_overview", arguments: { home_ref: homeRef } }
       : undefined;
   }
   if (DETERMINISTIC_INCLUDE_FAILURES.has(errorCode)) return undefined;
@@ -4182,7 +4163,7 @@ function explainUnappliedInclude(entity, include, ownerContext) {
 function nextReadTowardOwner(entity, include, ownerContext) {
   if (entity.kind === "home") {
     return {
-      tool: "inspect_home",
+      tool: "home_overview",
       arguments: { home_ref: entity.ref },
     };
   }

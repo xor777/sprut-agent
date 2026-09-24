@@ -63,7 +63,7 @@
   по записанному index через `get_native_change`, `apply_native_change` или
   `restore_native_change` прекращает delete этого change: точная копия под
   тем же index не удаляется, `restore_supported=false`. `get_entity` и
-  `inspect_home` этот факт не записывают; ошибка чтения не считается
+  `home_overview` этот факт не записывают; ошибка чтения не считается
   отсутствием, а `local_state.saved=false` не обещает память после рестарта.
   Source readback не подтверждает callback lifecycle или физический эффект; JS
   локально не исполняется и не проходит обещанный полный static analysis.

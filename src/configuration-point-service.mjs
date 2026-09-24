@@ -290,8 +290,8 @@ export class ConfigurationPointService {
     } catch {
       throw new SprutHubError(
         "invalid_entity_ref",
-        "Use a home-qualified reference returned by list_homes, inspect_home, or get_entity.",
-        "inspect_home",
+        "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
+        "home_overview",
       );
     }
     if (parsed.serial !== serial) throw wrongHome();
@@ -761,8 +761,8 @@ function invalidCursor() {
 function invalidHomeRef() {
   return new SprutHubError(
     "invalid_home_ref",
-    "Use a home reference returned by list_homes.",
-    "list_homes",
+    "Use a home reference returned by home_overview.",
+    "home_overview",
   );
 }
 
@@ -770,7 +770,7 @@ function wrongHome() {
   return new SprutHubError(
     "wrong_home",
     "This configuration point belongs to another home. Use a home_ref for the configured SprutHub connection.",
-    "list_homes",
+    "home_overview",
   );
 }
 

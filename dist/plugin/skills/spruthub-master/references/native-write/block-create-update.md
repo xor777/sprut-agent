@@ -125,7 +125,7 @@
   записанному index через `get_native_change`, `apply_native_change` или
   `restore_native_change` не возвращает право удалить сценарий, даже если
   позже под тем же index появилась точная копия или копия с тем же marker
-  стоит под другим index. `get_entity` и `inspect_home` этот факт не
+  стоит под другим index. `get_entity` и `home_overview` этот факт не
   записывают. Ошибка чтения не считается отсутствием;
   `local_state.saved=false` не обещает память после рестарта. Запрос
   name/description или runtime-флагов в `block_data_update` отклоняется до

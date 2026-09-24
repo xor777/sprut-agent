@@ -840,7 +840,6 @@ test("controller children outside rooms are found with settings and a linked acc
     ({ name }) => name === "Шлюз Xiaomi",
   );
   assert.equal(controller.ref, xiaomiRef);
-  assert.equal(controller.child_count, 3);
   assert.equal(Object.hasOwn(controller, "spaces"), false);
   assert.equal(Object.hasOwn(controller, "children"), false);
 

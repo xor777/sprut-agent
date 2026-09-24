@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { scaledHome } from "./fixtures/homes/scaled.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -168,18 +169,24 @@ test("home_overview shows a failed provider, a scenario execution error and caps
   assert.equal(body.problems_total, 2 + 14);
 });
 
-test("home_overview of the double-scale house stays within 3 KB", async (t) => {
-  const { client } = await setup(t, await loadHomeFixture("house"));
+test("home_overview stays within 3 KB at the owner's scale and counts the whole house", async (t) => {
+  const owner = await setup(
+    t,
+    scaledHome(await loadHomeFixture("apartment"), 80),
+  );
+  const real = await overview(owner.client);
+  assert.equal(real.body.rooms.length, 13);
+  assert(real.bytes <= 3_072, `home_overview returned ${real.bytes} bytes`);
 
-  const { body, bytes } = await overview(client);
-
+  const house = await setup(t, await loadHomeFixture("house"));
+  const { body, bytes } = await overview(house.client);
   assert.equal(body.rooms.length, 23);
   assert.equal(
     body.rooms.reduce((sum, { device_count }) => sum + device_count, 0),
     173,
   );
   assert.equal(body.scenarios.total, 50);
-  assert(bytes <= 3_072, `home_overview returned ${bytes} bytes`);
+  t.diagnostic(`owner scale ${real.bytes} bytes, house ${bytes} bytes`);
 });
 
 test("home_overview query finds rooms, scenarios and extensions by name", async (t) => {

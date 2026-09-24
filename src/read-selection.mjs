@@ -12,7 +12,9 @@ export function validateReadSelection(selection) {
     typeof homeRef !== "string" ||
     !/^spruthub:\/\/hub\/[^/]+$/.test(homeRef)
   ) {
-    throw invalidSelection("homeRef must be a home reference from list_homes.");
+    throw invalidSelection(
+      "homeRef must be a home reference from home_overview.",
+    );
   }
   if (
     !Array.isArray(selection.readings) ||

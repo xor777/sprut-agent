@@ -49,8 +49,8 @@ function hubLogRequest(
   if (home.kind !== "home") {
     throw new SprutHubError(
       "invalid_home_ref",
-      "Use a home reference returned by list_homes.",
-      "list_homes",
+      "Use a home reference returned by home_overview.",
+      "home_overview",
     );
   }
   let scenarioIndex = null;
@@ -64,8 +64,8 @@ function hubLogRequest(
     if (scenario?.kind !== "scenario" || scenario.serial !== home.serial) {
       throw new SprutHubError(
         "invalid_log_filter",
-        "scenario_ref must be a scenario reference of the same home from inspect_home.",
-        "inspect_home",
+        "scenario_ref must be a scenario reference of the same home from home_overview.",
+        "home_overview",
       );
     }
     scenarioIndex = scenario.scenarioIndex;

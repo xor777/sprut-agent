@@ -59,10 +59,8 @@ const BLOCK_MARKER = /\[sprut-agent:(?:native|automation):[0-9a-f]{24}\]/;
 const LOGIC_MARKER = /\/\* \[sprut-agent:native:[0-9a-f]{24}\] \*\//;
 
 const READ_TOOLS = new Set([
-  "list_homes",
-  "inspect_home",
+  "home_overview",
   "get_entity",
-  "list_rooms",
   "read_services",
   "get_native_change_contract",
   "get_scenario_sdk",
@@ -95,6 +93,7 @@ class ProbeFailure extends Error {
 // The only path from this script to the MCP server.
 class GuardedHub {
   #client;
+  #listClient = null;
   constructor(client, prefix) {
     this.#client = client;
     this.prefix = prefix;
@@ -112,6 +111,36 @@ class GuardedHub {
   async read(tool, args) {
     if (!READ_TOOLS.has(tool)) throw new GuardError(`${tool} is not a read`);
     return this.#call(tool, args);
+  }
+
+  // Every room and scenario of the home for the safety snapshot. The MCP
+  // overview gives counts and name matches only, so these two lists are
+  // read with the product client, as the sweep does.
+  async lists() {
+    this.#listClient ??= await new SprutHubConnection({
+      env: serverEnvironment(report.state_directory),
+    }).getClient();
+    const [rooms, scenarios] = await Promise.all([
+      this.#listClient.listRooms(),
+      this.#listClient.listScenarios(),
+    ]);
+    return {
+      rooms: rooms.rooms,
+      scenarios: scenarios.map((scenario) => ({
+        ref: `${this.homeRef}/scenario/${encodeURIComponent(scenario.index)}`,
+        name: scenario.name,
+        type: scenario.type,
+        predefined: scenario.predefined === true,
+        active: scenario.active === true,
+        on_start: scenario.onStart === true,
+        sync: scenario.sync === true,
+      })),
+    };
+  }
+
+  async closeListClient() {
+    await this.#listClient?.close();
+    this.#listClient = null;
   }
 
   async prepare(input) {
@@ -629,14 +658,18 @@ async function main() {
   let probe;
   const readOnly = process.argv.includes("--read-only");
   try {
-    const homes = await hub.read("list_homes", {});
-    expectOk(homes, "list_homes");
-    if (homes.selection?.required) {
-      throw new Error("Several homes: pin one with list_homes selection.pin.");
+    const overview = await hub.read("home_overview", {});
+    expectOk(overview, "home_overview");
+    if (overview.selection?.required) {
+      throw new Error(
+        "Several homes: pin one with home_overview selection.pin.",
+      );
     }
-    hub.homeRef = homes.selection.default_home_ref;
-    const home = homes.homes.find(({ ref }) => ref === hub.homeRef);
-    report.hub = { firmware: home.firmware, model: home.model };
+    hub.homeRef = overview.home.ref;
+    report.hub = {
+      firmware: overview.home.firmware,
+      model: overview.home.model,
+    };
     probe = await ProbeClient.open(hub, stateDirectory);
 
     // The lamp is never a BLOCK target; its values and logic types are
@@ -710,6 +743,7 @@ async function main() {
     report.calls = hub.calls;
     if (abortReason) exitCode = 1;
     await client.close();
+    await hub.closeListClient();
     const reportPath = path.join(reportDirectory, "report.json");
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, {
       mode: 0o600,
@@ -845,13 +879,12 @@ async function lampValues(hub, lamp) {
 }
 
 async function homeSnapshot(hub, targets) {
-  const inspect = await hub.read("inspect_home", { home_ref: hub.homeRef });
-  expectOk(inspect, "inspect_home");
-  const rooms = inspect.entities.rooms
+  const lists = await hub.lists();
+  const rooms = lists.rooms
     .map(({ ref, name }) => ({ ref, name_sha256: sha256(name) }))
     .sort(byRef);
   const scenarios = [];
-  for (const scenario of inspect.entities.scenarios) {
+  for (const scenario of lists.scenarios) {
     const entry = {
       ref: scenario.ref,
       name_sha256: sha256(scenario.name),
@@ -1019,29 +1052,24 @@ async function readWindow(hub, windowRef) {
 }
 
 async function scenarioPresent(hub, ref) {
-  const inspect = await hub.read("inspect_home", { home_ref: hub.homeRef });
-  expectOk(inspect, "inspect_home");
-  return inspect.entities.scenarios.some((scenario) => scenario.ref === ref);
+  const { scenarios } = await hub.lists();
+  return scenarios.some((scenario) => scenario.ref === ref);
 }
 
 async function roomName(hub, ref) {
-  const rooms = await hub.read("list_rooms", {});
-  expectOk(rooms, "list_rooms");
-  return rooms.rooms.find((room) => room.ref === ref)?.name ?? null;
+  const { rooms } = await hub.lists();
+  return rooms.find((room) => room.ref === ref)?.name ?? null;
 }
 
 // Cheap check after every step: nothing outside this run's objects changed.
 async function houseUnchanged(ctx, id) {
-  const inspect = await ctx.hub.read("inspect_home", {
-    home_ref: ctx.hub.homeRef,
-  });
-  expectOk(inspect, "inspect_home");
+  const inspect = await ctx.hub.lists();
   const current = {
-    rooms: inspect.entities.rooms
+    rooms: inspect.rooms
       .filter(({ ref }) => !ctx.hub.created.has(ref))
       .map(({ ref, name }) => ({ ref, name_sha256: sha256(name) }))
       .sort(byRef),
-    scenarios: inspect.entities.scenarios
+    scenarios: inspect.scenarios
       .filter(({ ref }) => !ctx.hub.created.has(ref))
       .map((scenario) => ({
         ref: scenario.ref,
@@ -1064,10 +1092,7 @@ async function houseUnchanged(ctx, id) {
       }),
     ),
   };
-  const unknown = [
-    ...inspect.entities.rooms,
-    ...inspect.entities.scenarios,
-  ].filter(
+  const unknown = [...inspect.rooms, ...inspect.scenarios].filter(
     ({ ref, name }) =>
       !ctx.hub.created.has(ref) && isProbeName(name, ctx.prefix),
   );
@@ -1075,7 +1100,7 @@ async function houseUnchanged(ctx, id) {
     const diff = snapshotDiff(expected, current);
     row(
       `${id} house check`,
-      "inspect_home",
+      "room.list, scenario.list",
       "foreign rooms and scenarios unchanged",
       `${diff.length} difference(s), ${unknown.length} untracked probe object(s)`,
       "mismatch",
@@ -1237,11 +1262,17 @@ async function stepVirtualAccessory(ctx) {
   }
   // A bridge that adds new accessories by itself would export the probe to an
   // outside home; the accessory is created only when none does.
-  const inspect = await hub.read("inspect_home", { home_ref: hub.homeRef });
-  expectOk(inspect, "inspect_home");
-  const bridges = (inspect.entities.extensions ?? []).filter(
-    (extension) => extension.bundle_type === "BRIDGE",
-  );
+  // The overview names extensions only; the bundle type and options window
+  // come from each extension's entity read.
+  const overview = await hub.read("home_overview", { home_ref: hub.homeRef });
+  expectOk(overview, "home_overview");
+  const bridges = [];
+  for (const { ref } of overview.extensions ?? []) {
+    const extension = await hub.read("get_entity", { entity_ref: ref });
+    expectOk(extension, "get_entity");
+    if (extension.entity.bundle_type === "BRIDGE")
+      bridges.push(extension.entity);
+  }
   const autoAdd = [];
   for (const bridge of bridges) {
     const window = await readWindow(hub, bridge.options_window_ref);
@@ -2851,15 +2882,13 @@ async function runCleanup(hub, cleanup) {
 
 async function finalChecks(hub) {
   let ok = true;
-  const inspect = await hub.read("inspect_home", { home_ref: hub.homeRef });
-  expectOk(inspect, "inspect_home");
-  const leftovers = [
-    ...inspect.entities.rooms,
-    ...inspect.entities.scenarios,
-  ].filter(({ name }) => isProbeName(name, report.prefix));
+  const inspect = await hub.lists();
+  const leftovers = [...inspect.rooms, ...inspect.scenarios].filter(
+    ({ name }) => isProbeName(name, report.prefix),
+  );
   row(
     "5 no probe objects",
-    "inspect_home",
+    "room.list, scenario.list",
     "no room or scenario with the run prefix or short name",
     leftovers.length === 0
       ? "none left"
@@ -2876,7 +2905,7 @@ async function finalChecks(hub) {
     report.snapshot.diff = diff;
     row(
       "5 final snapshot",
-      "inspect_home, get_entity, read_services",
+      "room.list, scenario.list, get_entity, read_services",
       "equal to the initial snapshot",
       diff.length === 0
         ? `equal (sha256 ${report.snapshot.after_sha256.slice(0, 12)})`
