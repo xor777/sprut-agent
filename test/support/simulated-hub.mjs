@@ -1966,8 +1966,9 @@ function appendLog(state, entry) {
 // A BLOCK options window read on the owner's hub (3.0.0, 2026-09-24) had
 // Name (TEXT), Active, OnStart, Sync (CHECKBOX), Desc (TEXT_MULTILINE) and a
 // Remove button. The simulator keeps Name, Active and Desc in that order;
-// labels here are its own. Whether a LOGIC or GLOBAL has such a window was
-// not read, so they have none.
+// the labels and the GenericBoolean type of Active are its own, as the live
+// read recorded only keys and input types. Whether a LOGIC or GLOBAL has
+// such a window was not read, so they have none.
 function syncScenarioWindow(state, scenario) {
   if (scenario.type !== "BLOCK") return;
   const option = (key, name, type, inputType, value) => ({
