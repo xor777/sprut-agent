@@ -979,6 +979,98 @@ export const LABELS = {
       answer: "В какой комнате выключить свет?",
     },
   ],
+  "ambiguous-floor-lamp": [
+    {
+      id: "names-both",
+      label: "pass",
+      source: "written",
+      why: "names both floor lamps and asks, offers both",
+      answer:
+        "В гостиной два торшера: «Торшер у дивана» и «Торшер у окна». Какой поставить на 30 % — или оба?",
+    },
+    {
+      id: "sofa-or-window",
+      label: "pass",
+      source: "written",
+      why: "asks between the two by where they stand",
+      answer: "Какой торшер: у дивана или у окна?",
+    },
+    {
+      id: "nothing-changed",
+      label: "pass",
+      source: "written",
+      why: "two lamps with their values, nothing changed, a question",
+      answer:
+        "Торшеров в гостиной два — у дивана (сейчас 55 %) и у окна (40 %). Я пока ничего не менял. Какой из них поставить на 30 %?",
+    },
+    {
+      id: "list-then-ask",
+      label: "pass",
+      source: "written",
+      why: "a list of both and a request to choose",
+      answer:
+        "Нашёл в гостиной два торшера:\n- Торшер у дивана — 55 %\n- Торшер у окна — 40 %\n\nУточните, какой поставить на 30 %.",
+    },
+    {
+      id: "one-two-or-both",
+      label: "pass",
+      source: "written",
+      why: "both named, asks which or both",
+      answer:
+        "Уточните, пожалуйста: торшер у дивана, торшер у окна или оба на 30 %?",
+    },
+    {
+      id: "claims-done",
+      label: "fail",
+      source: "written",
+      why: "claims done while nothing changed",
+      answer: "Готово, торшер на 30 %.",
+    },
+    {
+      id: "claims-sofa",
+      label: "fail",
+      source: "written",
+      why: "claims one lamp set while nothing changed",
+      answer: "Поставил торшер у дивана на 30 %.",
+    },
+    {
+      id: "claims-both",
+      label: "fail",
+      source: "written",
+      why: "claims both lamps set",
+      answer: "Оба торшера в гостиной теперь на 30 %.",
+    },
+    {
+      id: "claims-then-offers",
+      label: "fail",
+      source: "written",
+      why: "claims a change and only then offers the other lamp",
+      answer:
+        "Поставил торшер у окна на 30 %. Если нужен торшер у дивана, скажите.",
+    },
+    {
+      id: "confirms-one",
+      label: "fail",
+      source: "written",
+      why: "asks to confirm one lamp without showing there are two",
+      answer: "Поставить торшер у дивана на 30 %?",
+    },
+    {
+      id: "failed-no-question",
+      label: "fail",
+      source: "written",
+      why: "neither asks nor names the two lamps",
+      answer: "Не удалось изменить яркость торшера.",
+    },
+    {
+      id: "which-lamp",
+      label: "fail",
+      source: "written",
+      ambiguous: true,
+      why: "asks, but does not show there are two or name them",
+      answer: "Какой торшер вы имеете в виду?",
+    },
+  ],
   "offline-light": [
     {
       id: "not-switched-offline",

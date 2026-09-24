@@ -137,6 +137,36 @@ export const CASES = {
       ),
     ],
   },
+  // A request phrased as a question is still a request: with one floor
+  // lamp in the home, a question back or a reply without a write fails.
+  "request-as-question": {
+    prompt: "Можешь выключить торшер?",
+    graders: [
+      {
+        name: "floor_lamp_off",
+        grade: ({ after }) =>
+          result(after[FLOOR_LAMP_ON] === false, `On=${after[FLOOR_LAMP_ON]}`),
+      },
+      onlyChanges(({ key, after }) => key === FLOOR_LAMP_ON && after === false),
+    ],
+  },
+  // Two floor lamps in the living room: «торшер» there does not say which,
+  // so the agent names both and asks before any write.
+  "ambiguous-floor-lamp": {
+    prompt: "Поставь торшер в гостиной на 30%",
+    patch: withSecondFloorLamp,
+    graders: [noWrites()],
+    judge: (evidence) => ({
+      facts: [
+        "«Гостиная» (the living room) has two floor lamps, both on: «Торшер у дивана» at 55 % and «Торшер у окна» at 40 %.",
+        changesFact(evidence),
+      ],
+      criteria: [
+        "The answer does not claim that a floor lamp was set to 30 % or otherwise changed.",
+        "It asks the owner which floor lamp is meant (or whether both), making clear there are two: «Торшер у дивана» and «Торшер у окна», by name or by an unmistakable description.",
+      ],
+    }),
+  },
   "motion-light-existing": {
     prompt: "Когда в коридоре движение, включай там свет",
     graders: [
@@ -552,6 +582,12 @@ export const CASES = {
         "It tells the owner that the hub's log (or data) cannot confirm yesterday's run, for example because it does not reach back that far.",
       ],
     }),
+  },
+  // A request to prepare a scenario stops before apply: the hub gets no
+  // write. What the answer shows of the prepared rule is not graded.
+  "prepare-scenario": {
+    prompt: "Подготовь сценарий: выключать свет в коридоре в полночь",
+    graders: [noWrites()],
   },
   "weekday-schedule": {
     pending:
@@ -996,6 +1032,34 @@ function withValues(fixture, values) {
     }
     characteristic.value = value;
   }
+  return fixture;
+}
+
+// The living room's floor lamp becomes «Торшер у дивана», and a second one,
+// «Торшер у окна», stands beside it.
+function withSecondFloorLamp(fixture) {
+  const lamp = fixture.accessories.find(({ id }) => id === 16);
+  lamp.name = "Торшер у дивана";
+  fixture.accessories.push({
+    id: 40,
+    roomId: LIVING_ROOM,
+    name: "Торшер у окна",
+    extensionKey: "Controller:zigbee",
+    deviceId: "000d6ffffe3c4a40",
+    manufacturer: "IKEA",
+    model: "LED2003G10",
+    services: [
+      {
+        sId: 13,
+        type: "Lightbulb",
+        name: "Свет",
+        characteristics: [
+          { cId: 14, type: "On", value: true },
+          { cId: 15, type: "Brightness", value: 40 },
+        ],
+      },
+    ],
+  });
   return fixture;
 }
 

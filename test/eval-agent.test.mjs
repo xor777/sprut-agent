@@ -1933,6 +1933,111 @@ test("an eval hub keeps its clock and log at noon hub time at any hour of the ma
   }
 });
 
+// «Можешь выключить торшер?» asks for the change: both homes have one floor
+// lamp, so a question back leaves it on and fails.
+test("request-as-question needs the only floor lamp off and nothing else", async (t) => {
+  for (const fixture of ["apartment", "house"]) {
+    const floorLamps = (await loadHomeFixture(fixture)).accessories.filter(
+      ({ name }) => /торшер/i.test(name),
+    );
+    assert.deepEqual(
+      floorLamps.map(({ id }) => id),
+      [16],
+      fixture,
+    );
+    const asked = await nativeSession(t, fixture);
+    assert.equal(
+      asked.grade("request-as-question", "Какой торшер выключить?")
+        .floor_lamp_off,
+      false,
+    );
+    const done = await nativeSession(t, fixture);
+    await done.send(setOn(16, 13, false));
+    assert.deepEqual(done.grade("request-as-question", "Выключил торшер."), {
+      floor_lamp_off: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    });
+    await done.send(setOn(15, 13, false));
+    assert.equal(
+      done.grade("request-as-question", "Выключил.").nothing_else_changed,
+      false,
+    );
+  }
+});
+
+// «Подготовь сценарий…» stops before apply: a created scenario fails it.
+test("prepare-scenario fails any write to the hub", async (t) => {
+  const prepared = await nativeSession(t);
+  assert.deepEqual(
+    prepared.grade(
+      "prepare-scenario",
+      "Подготовил сценарий: каждый день в 00:00 выключать свет в коридоре. Применить?",
+    ),
+    { no_writes: true, answer_has_no_raw_refs: true },
+  );
+  const created = await nativeSession(t);
+  await created.send({
+    scenario: {
+      create: {
+        name: "Свет в коридоре в полночь",
+        type: "BLOCK",
+        active: true,
+        data: JSON.stringify({ blockId: 1, targets: [] }),
+      },
+    },
+  });
+  assert.equal(
+    created.grade("prepare-scenario", "Создал сценарий.").no_writes,
+    false,
+  );
+});
+
+// Two floor lamps in the living room: the judge is told both, and any
+// write fails before it.
+test("ambiguous-floor-lamp starts with two living room floor lamps and fails a write", async (t) => {
+  for (const fixture of ["apartment", "house"]) {
+    const idle = await caseSession(t, "ambiguous-floor-lamp", fixture);
+    const home = idle.hub.snapshot();
+    assert.deepEqual(
+      [16, 40].map((aId) => [
+        home[`accessory/${aId}/name`],
+        home[`accessory/${aId}/roomId`],
+        home[`characteristic/${aId}.13.14/On`],
+        home[`characteristic/${aId}.13.15/Brightness`],
+      ]),
+      [
+        ["Торшер у дивана", 3, true, 55],
+        ["Торшер у окна", 3, true, 40],
+      ],
+      fixture,
+    );
+    const question = "Какой торшер: у дивана или у окна?";
+    assert.deepEqual(idle.grade(question), {
+      no_writes: true,
+      answer_has_no_raw_refs: true,
+    });
+    assert.ok(
+      CASES["ambiguous-floor-lamp"].judge(collectEvidence(idle.hub, question)),
+    );
+    const guessed = await caseSession(t, "ambiguous-floor-lamp", fixture);
+    await guessed.send({
+      characteristic: {
+        update: {
+          aId: 16,
+          sId: 13,
+          cId: 15,
+          control: { value: { intValue: 30 } },
+        },
+      },
+    });
+    assert.equal(
+      guessed.grade("Поставил торшер у дивана на 30 %.").no_writes,
+      false,
+    );
+  }
+});
+
 // The bedroom light off, or nothing changed and the answer asks which
 // bedroom: that question is the judge's, asked only when nothing changed.
 test("ambiguous-bedroom-light takes the bedroom light or leaves the home for a question", async (t) => {
