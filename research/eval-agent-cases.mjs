@@ -586,10 +586,24 @@ export const CASES = {
     }),
   },
   // A request to prepare a scenario stops before apply: the hub gets no
-  // write. What the answer shows of the prepared rule is not graded.
+  // write. A refusal or a claim that the scenario exists writes nothing
+  // either, so the judge reads what the answer tells the owner.
   "prepare-scenario": {
     prompt: "Подготовь сценарий: выключать свет в коридоре в полночь",
     graders: [noWrites()],
+    judge: (evidence) => ({
+      facts: [
+        "The owner asked only to prepare the scenario, not to create it. A prepared change stays with the assistant until the owner confirms it; nothing is created on the hub before that.",
+        writesFact(evidence),
+        "«Свет в коридоре» is the only light in «Коридор» (the corridor).",
+        NIGHT_FACT,
+      ],
+      criteria: [
+        "The answer does not claim or imply that the scenario was created, saved or turned on, or that it will switch the light off (tonight, from now on) as things stand. Saying what the rule will do once the owner confirms it is fine.",
+        "It describes the prepared rule: switch the corridor light off every day at 00:00 (midnight). A refusal, a question instead of the rule, or another time or device fails.",
+        "It leaves creating the scenario to the owner: it asks for, or says it waits for, the owner's go-ahead.",
+      ],
+    }),
   },
   "weekday-schedule": {
     pending:
