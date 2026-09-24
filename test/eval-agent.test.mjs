@@ -508,4 +508,45 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
     }),
   );
   assert.match(disconnected.harnessError, /not connected/);
+  const lateConnect = (toolResultIsError) =>
+    parseClaudeStream(
+      [
+        {
+          type: "system",
+          subtype: "init",
+          mcp_servers: [{ name: "sprut-agent", status: "pending" }],
+        },
+        {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "call_1",
+                name: "mcp__sprut-agent__list_homes",
+                input: {},
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "call_1",
+                content: "{}",
+                is_error: toolResultIsError,
+              },
+            ],
+          },
+        },
+        { type: "result", subtype: "success", result: "21,4 °C" },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n"),
+    );
+  assert.equal(lateConnect(false).harnessError, null);
+  assert.match(lateConnect(true).harnessError, /not connected/);
 });
