@@ -20664,6 +20664,43 @@ test("another LOGIC at the created LOGIC's index does not lend the change its ty
   assert.equal(hub.state.scenarios[index].name, "Новый LOGIC владельца");
 });
 
+// After the owner deletes the created LOGIC in the app, its type names
+// nothing the change owns: no logic_ref, no readiness to assign it. A copy
+// put back at the index later is another LOGIC, even with the marker.
+test("a created LOGIC the owner deleted lends the change no logic ref or readiness, nor does a copy at its index", async (t) => {
+  const { hub, client, changeRef, created } = await createOwnedLogic(t, {
+    active: true,
+  });
+  assertIdentityMapping(created, { ready: true, reason: undefined });
+  const logic = hub.state.scenarios.find(({ index }) => index === "created-1");
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== "created-1",
+  );
+
+  const assertUnmapped = (read) => {
+    assert.equal(read.status, "conflict");
+    assert.equal(read.restore_supported, false);
+    assert.equal(read.logic_mapping_status, "missing");
+    assert.equal(read.logic_mapping_reason, "logic_scenario_not_found");
+    assert.equal(read.logic_assignment_ready, false);
+    assert.equal(read.native_logic_type, undefined);
+    assert.equal(read.logic_ref, undefined);
+  };
+  assertUnmapped(await callChangeTool(client, "get_native_change", changeRef));
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: `${serviceRef}/logic/created-1`,
+    },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+
+  hub.state.scenarios.push(structuredClone(logic));
+  assertUnmapped(await callChangeTool(client, "get_native_change", changeRef));
+  assert.deepEqual(scenarioDeletes(hub), []);
+});
+
 // Before a created scenario is deleted, restore scans the home: logic.list
 // on every service for a LOGIC's assignments (about 250 services now, twice
 // that later) and every BLOCK for a scenario target, one read after another.
