@@ -2678,6 +2678,18 @@ async function storeEditorForms(ctx) {
     ({ bundle_type: bundleType }) => bundleType === "NOTIFICATION",
   );
   const text = "sprut-agent probe: never sent";
+  // Brightness from Hue of the virtual accessory.
+  const fromHue = (fields = {}) => ({
+    type: "from",
+    cId: virtual.brightness.ids.cId,
+    hc: "Brightness",
+    ...fields,
+    from_aId: virtual.hue.ids.aId,
+    from_sId: virtual.hue.ids.sId,
+    from_cId: virtual.hue.ids.cId,
+    from_hs: "Lightbulb",
+    from_hc: "Hue",
+  });
   const target = await createBlock(ctx, {
     label: "block-mode-target",
     data: { targets: [ifNode("EVERY", farDate(), [off()])] },
@@ -2712,27 +2724,21 @@ async function storeEditorForms(ctx) {
         else_delay: REPEAT_MS,
       },
     },
+    // The hub drops a from action's value "", a notify's to null and a
+    // recipient entry's clients null (live-conformance-4): the families
+    // name that form as stored.
     {
       id: "from",
       expected:
-        'from with value "" (Brightness from Hue of the virtual accessory) stored as sent',
+        'from with value "" (Brightness from Hue of the virtual accessory) stored without value',
       node: ifNode("EVERY", farDate(), [
-        lampAction(virtual, {
-          type: "from",
-          cId: virtual.brightness.ids.cId,
-          hc: "Brightness",
-          value: "",
-          from_aId: virtual.hue.ids.aId,
-          from_sId: virtual.hue.ids.sId,
-          from_cId: virtual.hue.ids.cId,
-          from_hs: "Lightbulb",
-          from_hc: "Hue",
-        }),
+        lampAction(virtual, fromHue({ value: "" })),
       ]),
+      stored: ifNode("EVERY", farDate(), [lampAction(virtual, fromHue())]),
     },
     {
       id: "notify",
-      expected: `notify MESSAGE without to, PUSH with to null${notificationService ? " and PUSH to one service" : ""} stored as sent`,
+      expected: `notify MESSAGE without to, PUSH with to null${notificationService ? " and PUSH to one service with clients null" : ""} stored without the null fields`,
       node: ifNode("EVERY", farDate(), [
         { type: "notify", text, mode: "MESSAGE" },
         { type: "notify", text, mode: "PUSH", to: null },
@@ -2743,6 +2749,20 @@ async function storeEditorForms(ctx) {
                 text,
                 mode: "PUSH",
                 to: [{ index: notificationService.index, clients: null }],
+              },
+            ]
+          : []),
+      ]),
+      stored: ifNode("EVERY", farDate(), [
+        { type: "notify", text, mode: "MESSAGE" },
+        { type: "notify", text, mode: "PUSH" },
+        ...(notificationService
+          ? [
+              {
+                type: "notify",
+                text,
+                mode: "PUSH",
+                to: [{ index: notificationService.index }],
               },
             ]
           : []),
