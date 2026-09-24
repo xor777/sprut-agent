@@ -23,6 +23,7 @@ import {
   parseCodexStream,
   runCase,
   startCaseHub,
+  summarizeRuns,
   summaryLine,
 } from "../research/eval-agent.mjs";
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
@@ -79,9 +80,11 @@ if (process.env.SCRIPTED_AGENT_ROGUE) {
   socket.close();
 }
 // A string turns that characteristic off; an object names another change.
+// A target the home lacks is refused at prepare and skipped.
 for (const change of resumed ? [] : JSON.parse(process.env.SCRIPTED_AGENT_TURN_OFF)) {
   const { operation = "characteristic_value", target = change, value = false } = typeof change === "string" ? {} : change;
   const prepared = await call("prepare_native_change", { operation, target_ref: homeRef + "/" + target, value, reason: "scripted" });
+  if (!prepared?.change_ref) continue;
   await call("apply_native_change", { change_ref: prepared.change_ref });
 }
 await client.close();
@@ -504,8 +507,10 @@ test("the Codex harness restricts the agent's shell to the workspace and the plu
 });
 
 test("repeated runs on both fixtures report passes, MCP medians and the house/apartment ratio", async (t) => {
+  // The spots (101) exist only in the house: the apartment refuses them at
+  // prepare, so both homes end with every living room light off.
   const { directory } = await scriptedEnvironment(t, {
-    turnOff: [on(15), on(16)],
+    turnOff: [on(15), on(16), on(101)],
   });
   const evidence = path.join(directory, "evidence");
   const lines = [];
@@ -521,7 +526,7 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
     ],
     { write: (text) => lines.push(text) },
   );
-  assert.equal(code, 1);
+  assert.equal(code, 0);
   const summary = JSON.parse(
     await readFile(path.join(evidence, "summary.json"), "utf8"),
   );
@@ -533,31 +538,42 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
   const byFixture = Object.fromEntries(
     summary.cases.map((entry) => [entry.fixture, entry]),
   );
-  // The living room of the house also has spots, which the script leaves on.
-  assert.equal(byFixture.apartment.passes, 2);
-  assert.equal(byFixture.apartment.runs, 2);
-  assert.equal(byFixture.house.passes, 0);
-  assert.deepEqual(byFixture.house.failure_classes, { agent: 2 });
-  assert.equal(byFixture.apartment.median_mcp_calls, 5);
-  assert.ok(byFixture.apartment.median_mcp_result_bytes > 1_000);
-  assert.equal(byFixture.apartment.median_tokens, 122);
+  for (const entry of Object.values(byFixture)) {
+    assert.equal(entry.runs, 2);
+    assert.equal(entry.passes, 2);
+    assert.equal(entry.unverified_passes, 0);
+    assert.equal(entry.failures, 0);
+    assert.equal(entry.failed, null);
+  }
+  assert.equal(byFixture.apartment.passed.median_mcp_calls, 6);
+  assert.equal(byFixture.house.passed.median_mcp_calls, 7);
+  assert.ok(byFixture.apartment.passed.median_mcp_result_bytes > 1_000);
+  assert.equal(byFixture.apartment.passed.median_tokens, 122);
   const [scale] = summary.scale;
   assert.equal(scale.case, "turn-off-room");
+  assert.equal(scale.basis, "passed runs");
   assert.equal(
     scale.mcp_result_bytes_ratio,
     Math.round(
-      (byFixture.house.median_mcp_result_bytes /
-        byFixture.apartment.median_mcp_result_bytes) *
+      (byFixture.house.passed.median_mcp_result_bytes /
+        byFixture.apartment.passed.median_mcp_result_bytes) *
         100,
     ) / 100,
   );
   assert.equal(
     lines.filter((line) =>
-      /^(?:PASS|FAIL\(agent\)) turn-off-room@(?:apartment|house) /.test(line),
+      /^PASS turn-off-room@(?:apartment|house) /.test(line),
     ).length,
     4,
   );
-  assert.ok(lines.some((line) => line.includes("2/2")));
+  assert.ok(
+    lines.some((line) =>
+      /^SUMMARY turn-off-room@apartment PASS 2 PASS\* 0 FAIL 0 of 2 passed: mcp_calls=6 .* failed: -$/.test(
+        line,
+      ),
+    ),
+    lines.join(""),
+  );
 
   // Hub-side cost: native requests and the bytes the hub sent back, per run
   // and as medians, with the house/apartment ratio.
@@ -590,30 +606,101 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
     const runs = await hubCost(entry);
     const middle = (key) => (runs[0][key] + runs[1][key]) / 2;
     assert.ok(middle("hub_response_bytes") > 0);
-    assert.equal(entry.median_hub_requests, middle("hub_requests"));
-    assert.equal(entry.median_hub_response_bytes, middle("hub_response_bytes"));
+    assert.equal(entry.passed.median_hub_requests, middle("hub_requests"));
+    assert.equal(
+      entry.passed.median_hub_response_bytes,
+      middle("hub_response_bytes"),
+    );
   }
   assert.equal(
     scale.hub_response_bytes_ratio,
     Math.round(
-      (byFixture.house.median_hub_response_bytes /
-        byFixture.apartment.median_hub_response_bytes) *
+      (byFixture.house.passed.median_hub_response_bytes /
+        byFixture.apartment.passed.median_hub_response_bytes) *
         100,
     ) / 100,
   );
   assert.equal(
     scale.hub_requests_ratio,
     Math.round(
-      (byFixture.house.median_hub_requests /
-        byFixture.apartment.median_hub_requests) *
+      (byFixture.house.passed.median_hub_requests /
+        byFixture.apartment.passed.median_hub_requests) *
         100,
     ) / 100,
   );
   assert.ok(
     lines.some((line) =>
-      /^SCALE turn-off-room .* hub_requests=[\d.]+ hub_bytes=[\d.]+/.test(line),
+      /^SCALE turn-off-room house\/apartment \(passed runs\) .* hub_requests=[\d.]+ hub_bytes=[\d.]+/.test(
+        line,
+      ),
     ),
   );
+});
+
+// A PASS* rests on simulator behavior without live evidence, and a failed
+// run may stop early or wander: neither is folded into the verified passes
+// or into the cost of passing runs.
+test("the summary keeps PASS* and failed runs apart from verified passes", () => {
+  const run = (fixture, pass, mcpCalls, unverified = []) => ({
+    case: "turn-off-room",
+    fixture,
+    pass,
+    failure_class: pass ? null : "agent",
+    expected_fail: null,
+    unverified_methods: unverified,
+    model: { requested: "sonnet", reported: "scripted" },
+    metrics: {
+      mcp_tool_calls: mcpCalls,
+      mcp_tool_result_bytes: mcpCalls * 100,
+      hub_requests: mcpCalls * 2,
+      hub_response_bytes: mcpCalls * 1_000,
+      tokens: { total_input: mcpCalls * 10, output: 0 },
+      wall_seconds: mcpCalls,
+    },
+  });
+  const summary = summarizeRuns(
+    [
+      run("apartment", true, 4),
+      run("apartment", true, 6, ["room.update"]),
+      run("apartment", false, 40),
+      run("house", true, 10),
+      run("house", false, 100),
+      run("house", false, 200),
+    ],
+    { harness: "claude", model: "sonnet", plugin: {} },
+  );
+  const [apartment, house] = summary.cases;
+  assert.deepEqual(
+    [apartment.passes, apartment.unverified_passes, apartment.failures],
+    [1, 1, 1],
+  );
+  assert.deepEqual(
+    [house.passes, house.unverified_passes, house.failures],
+    [1, 0, 2],
+  );
+  assert.equal(apartment.passed.median_mcp_calls, 5);
+  assert.equal(apartment.failed.median_mcp_calls, 40);
+  assert.equal(house.passed.median_mcp_calls, 10);
+  assert.equal(house.failed.median_mcp_calls, 150);
+  assert.deepEqual(summary.scale, [
+    {
+      case: "turn-off-room",
+      basis: "passed runs",
+      mcp_calls_ratio: 2,
+      mcp_result_bytes_ratio: 2,
+      tokens_ratio: 2,
+      hub_requests_ratio: 2,
+      hub_response_bytes_ratio: 2,
+    },
+  ]);
+
+  // Without a passing run on one home there is no cost ratio to compare.
+  const unmatched = summarizeRuns(
+    [run("apartment", true, 4), run("house", false, 100)],
+    { harness: "claude", model: "sonnet", plugin: {} },
+  );
+  assert.equal(unmatched.scale[0].mcp_calls_ratio, null);
+  assert.equal(unmatched.cases[1].passed, null);
 });
 
 test("the simulator records the size of each reply it sends", async (t) => {
