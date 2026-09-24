@@ -19789,7 +19789,7 @@ test("an owned LOGIC source remains editable and restorable while its type mappi
     created.structuredContent.logic_mapping_reason,
     "logic_type_not_visible_after_create",
   );
-  assert.equal(created.structuredContent.restore_supported, false);
+  assert.equal(created.structuredContent.restore_supported, true);
 
   const restartedClient = await startClient(t, hub, stateDirectory);
   const persisted = await restartedClient.callTool({
@@ -19801,19 +19801,6 @@ test("an owned LOGIC source remains editable and restorable while its type mappi
   assert.equal(
     persisted.structuredContent.logic_mapping_reason,
     "logic_type_not_visible_after_create",
-  );
-
-  const blockedRestore = await restartedClient.callTool({
-    name: "restore_native_change",
-    arguments: { change_ref: prepared.structuredContent.change_ref },
-  });
-  assert.equal(blockedRestore.structuredContent.status, "applied");
-  assert.equal(blockedRestore.structuredContent.restore_supported, false);
-  assert.equal(
-    hub.requests.some(
-      ({ scenario }) => scenario?.delete?.index === "created-1",
-    ),
-    false,
   );
 
   const update = await restartedClient.callTool({
@@ -19878,6 +19865,96 @@ test("an owned LOGIC source remains editable and restorable while its type mappi
     hub.requests.filter(({ scenario }) => scenario?.create?.type === "LOGIC")
       .length,
     1,
+  );
+});
+
+// SprutHub 3.0.0 did not list the type of a created turned-off LOGIC on its
+// anchor service (owner hub, 2026-09-24). The fake hides it the same way.
+async function createLogicWithUnlistedType(t) {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "logic_source_create",
+      target_ref: serviceRef,
+      name: "Выключенный LOGIC",
+      description: "Создан выключенным, тип не виден",
+      active: false,
+      on_start: false,
+      sync: false,
+      source: firstLogicSource,
+      reason: "Создать LOGIC и потом отменить его",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  hub.state.behavior.afterCreate = () => {
+    hub.state.logicTypes = hub.state.logicTypes.filter(
+      ({ type }) => type === smoothLogicType,
+    );
+  };
+  const created = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.structuredContent.change_ref,
+  );
+  assert.equal(created.status, "applied");
+  assert.equal(created.logic_mapping_status, "missing");
+  return { hub, client, changeRef: prepared.structuredContent.change_ref };
+}
+
+test("an owned LOGIC whose type SprutHub does not list is deleted by its restore", async (t) => {
+  const { hub, client, changeRef } = await createLogicWithUnlistedType(t);
+  // An assignment of a type the anchor offered before the create is not it.
+  hub.state.logics.push({
+    aId: 34,
+    sId: 13,
+    type: smoothLogicType,
+    name: "Плавное изменение яркости",
+    active: true,
+  });
+
+  const restored = await callChangeTool(
+    client,
+    "restore_native_change",
+    changeRef,
+  );
+  assert.equal(restored.status, "restored");
+  assert.deepEqual(
+    scenarioDeletes(hub).map(({ scenario }) => scenario.delete),
+    [{ index: "created-1" }],
+  );
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    false,
+  );
+  assert.equal(hub.state.logics.length, 1);
+});
+
+test("an owned LOGIC with an unlisted type stays while its anchor service has an assignment of a new type", async (t) => {
+  const { hub, client, changeRef } = await createLogicWithUnlistedType(t);
+  hub.state.logics.push({
+    aId: 34,
+    sId: 13,
+    type: "GeneratedLogicType1",
+    name: "Выключенный LOGIC",
+    active: false,
+  });
+
+  const refused = await callChangeTool(
+    client,
+    "restore_native_change",
+    changeRef,
+  );
+  assert.equal(refused.status, "conflict");
+  assert.equal(refused.conflict_reason, "logic_assignments_present");
+  assert.deepEqual(refused.logic_assignments, [
+    { ref: `${serviceRef}/logic/GeneratedLogicType1`, active: false },
+  ]);
+  assert.deepEqual(scenarioDeletes(hub), []);
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === "created-1"),
+    true,
   );
 });
 
