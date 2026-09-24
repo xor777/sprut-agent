@@ -22416,7 +22416,9 @@ test("a created BLOCK that SprutHub stores turned off reports it and stays owned
 });
 
 test("a LOGIC source change stays restorable after its scenario is turned off", async (t) => {
-  await t.test("a created source is deleted", async (subtest) => {
+  // Turned off, it stays owned, but restore deletes it only once it is on
+  // again: a turned-off LOGIC's assignments may not be listed.
+  await t.test("a created source is deleted once it is on", async (subtest) => {
     const { hub, stateDirectory } = await setup(subtest);
     const client = await startClient(subtest, hub, stateDirectory);
     const prepared = await client.callTool({
@@ -22446,7 +22448,16 @@ test("a LOGIC source change stays restorable after its scenario is turned off", 
     );
     addScenarioOptionsWindow(hub, scenario);
 
-    await turnScenarioOffWithChange(client, created.scenario_ref);
+    const turnOff = await prepareScenarioActive(
+      client,
+      created.scenario_ref,
+      false,
+    );
+    assert.equal(
+      (await callChangeTool(client, "apply_native_change", turnOff.change_ref))
+        .status,
+      "applied",
+    );
     assert.equal(scenario.active, false);
     const observed = await callChangeTool(
       client,
@@ -22454,7 +22465,26 @@ test("a LOGIC source change stays restorable after its scenario is turned off", 
       createRef,
     );
     assert.equal(observed.status, "applied");
+    assert.equal(observed.restore_supported, true);
 
+    const refused = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: createRef },
+    });
+    assert.equal(refused.isError, true, refused.content[0]?.text);
+    assert.equal(
+      refused.structuredContent.error.code,
+      "logic_off_assignments_unverified",
+    );
+    assert.deepEqual(scenarioDeletes(hub), []);
+
+    const turnedOn = await callChangeTool(
+      client,
+      "restore_native_change",
+      turnOff.change_ref,
+    );
+    assert.equal(turnedOn.status, "restored");
+    assert.equal(scenario.active, true);
     const restored = await callChangeTool(
       client,
       "restore_native_change",
