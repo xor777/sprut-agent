@@ -1892,6 +1892,47 @@ async function caseSession(t, caseName, fixture = "apartment") {
   return { hub, send, grade };
 }
 
+// log-diagnosis tells the judge that the log holds about 2.5 hours and
+// nothing from yesterday. An eval hub therefore starts its clock at noon hub
+// time on the machine's date, whatever the hour: started on the machine
+// clock at 00:30 its buffer would reach into yesterday's 23:00 hour, and at
+// 18:00 a manual run would be logged hours after the seeded entries.
+test("an eval hub keeps its clock and log at noon hub time at any hour of the machine", async (t) => {
+  const noon = Date.parse("2026-09-25T12:00:00+03:00");
+  for (const machine of ["00:30", "07:10", "18:00"]) {
+    t.mock.timers.enable({
+      apis: ["Date"],
+      now: Date.parse(`2026-09-25T${machine}:00+03:00`),
+    });
+    const session = await caseSession(t, "log-diagnosis");
+    const settings = await session.send({ window: { get: { windowKey: "" } } });
+    assert.equal(
+      settings.window.get.options.find(({ key }) => key === "Time").value
+        .stringValue,
+      "2026-09-25 - 12:00:00 (GMT+03:00)",
+      machine,
+    );
+    const log = (await session.send({ log: { list: { count: 200 } } })).log.list
+      .log;
+    const times = log.map(({ time }) => time);
+    assert.ok(Math.max(...times) <= noon, machine);
+    assert.ok(Math.min(...times) >= noon - 3 * 3_600_000, machine);
+    assert.ok(
+      !log.some(({ message }) => message.startsWith("Сценарий 5:")),
+      machine,
+    );
+    await session.send({ scenario: { run: { index: "11" } } });
+    const [manual] = (await session.send({ log: { list: { count: 1 } } })).log
+      .list.log;
+    assert.match(manual.message, /^Сценарий 11:/, machine);
+    assert.ok(
+      manual.time > Math.max(...times) && manual.time < noon + 60_000,
+      machine,
+    );
+    t.mock.timers.reset();
+  }
+});
+
 // The bedroom light off, or nothing changed and the answer asks which
 // bedroom: that question is the judge's, asked only when nothing changed.
 test("ambiguous-bedroom-light takes the bedroom light or leaves the home for a question", async (t) => {
