@@ -459,6 +459,31 @@ export const CASES = {
       onlyChanges(() => false),
     ],
   },
+  // The night light is off with an active LightbulbControl, and its new
+  // brightness shows only 1.5 s after the acknowledged write.
+  "dim-nightlight": {
+    prompt: "Поставь ночник на 30%",
+    faults: {
+      lampLogic: [{ aId: 26, sId: 13 }],
+      delayedReadback: [{ aId: 26, sId: 13, cId: 15, ms: 1_500 }],
+    },
+    graders: [
+      {
+        name: "nightlight_on_at_30",
+        grade: ({ after }) =>
+          result(
+            after["characteristic/26.13.15/Brightness"] === 30 &&
+              after["characteristic/26.13.14/On"] === true,
+            `Brightness=${after["characteristic/26.13.15/Brightness"]} On=${after["characteristic/26.13.14/On"]}`,
+          ),
+      },
+      onlyChanges(
+        ({ key, after }) =>
+          (key === "characteristic/26.13.15/Brightness" && after === 30) ||
+          (key === "characteristic/26.13.14/On" && after === true),
+      ),
+    ],
+  },
   // The hub applies the first fan command and never answers it.
   "lost-reply": {
     prompt: "Включи вытяжку в ванной",

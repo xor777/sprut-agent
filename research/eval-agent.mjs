@@ -32,7 +32,7 @@ const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const MCP_SERVER_NAME = "sprut-agent";
 const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
-const USAGE = `Usage: npm run eval:agent -- <case|all> [options]
+const USAGE = `Usage: npm run eval:agent -- <case[,case...]|all> [options]
 
 Cases: ${Object.keys(CASES).join(", ")}
 
@@ -76,7 +76,7 @@ export async function main(
       ? Object.keys(CASES).filter(
           (name) => values["include-pending"] || !CASES[name].pending,
         )
-      : [selected];
+      : selected.split(",");
   for (const name of caseNames) {
     if (!CASES[name]) throw new Error(`Unknown case ${name}\n${USAGE}`);
   }

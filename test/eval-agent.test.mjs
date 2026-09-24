@@ -1062,6 +1062,31 @@ test("offline-light fails a claimed success when the light stayed on", async (t)
   assert.equal(session.grade("x").nothing_else_changed, true);
 });
 
+test("dim-nightlight lets the lamp logic switch the light on after a delayed readback", async (t) => {
+  const dimmed = await caseSession(t, "dim-nightlight");
+  await dimmed.send({
+    characteristic: {
+      update: {
+        aId: 26,
+        sId: 13,
+        cId: 15,
+        control: { value: { intValue: 30 } },
+      },
+    },
+  });
+  assert.equal(dimmed.hub.snapshot()["characteristic/26.13.15/Brightness"], 20);
+  dimmed.hub.settle();
+  assert.deepEqual(dimmed.grade("Поставил 30 %."), {
+    nightlight_on_at_30: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const switched = await caseSession(t, "dim-nightlight");
+  await switched.send(setOn(26, 13, true));
+  assert.equal(switched.grade("Включил.").nightlight_on_at_30, false);
+});
+
 test("lost-reply fails a blind resend of a command the hub applied", async (t) => {
   const single = await caseSession(t, "lost-reply");
   assert.equal(await single.send(setOn(36, 13, true)), null);
