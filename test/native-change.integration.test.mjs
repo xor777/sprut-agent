@@ -9535,10 +9535,21 @@ test("a button toggles and steps a lamp and another trigger runs a scenario; cre
   );
 });
 
+function climateAction(action) {
+  return {
+    type: "service",
+    aId: 34,
+    sId: 14,
+    hs: "HeaterCooler",
+    characteristics: [action],
+  };
+}
+
 test("relative actions and scenario runs outside the contract are refused before send", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   installButton(hub);
   installAllOffScenario(hub);
+  installClimateFixture(hub);
   const client = await startClient(t, hub, stateDirectory);
   // Each refusal must say what to repair, not only that the data is invalid.
   const cases = [
@@ -9561,6 +9572,27 @@ test("relative actions and scenario runs outside the contract are refused before
       "negative step",
       lampAction({ type: "dec", cId: 16, hc: "Brightness", value: "-5" }),
       /dec step must be a positive number/,
+    ],
+    [
+      // A heating mode is a list of named values, not a quantity.
+      "step an enum",
+      climateAction({
+        type: "inc",
+        cId: 31,
+        hc: "TargetHeatingCoolingState",
+        value: "1",
+      }),
+      /inc .*listed values/,
+    ],
+    [
+      "step past the whole range",
+      lampAction({ type: "inc", cId: 16, hc: "Brightness", value: "150" }),
+      /inc step .*range 100/,
+    ],
+    [
+      "step off the native step",
+      climateAction({ type: "inc", cId: 32, hc: "C_FanSpeed", value: "15" }),
+      /inc step .*multiple of 10/,
     ],
     [
       "no step",
@@ -9619,6 +9651,40 @@ test("relative actions and scenario runs outside the contract are refused before
       explained: reason.test(prepared.structuredContent?.error?.message ?? ""),
     });
   }
+
+  // Steps on the native grid and within the range stay accepted.
+  const onGrid = await prepareBlockCreate(client, {
+    name: "Шаги по сетке",
+    data: {
+      targets: [
+        everyIf({
+          when: conditionGroup(buttonPress(0)),
+          thenActions: [
+            climateAction({
+              type: "dec",
+              cId: 30,
+              hc: "TargetTemperature",
+              value: "0.5",
+            }),
+            climateAction({
+              type: "inc",
+              cId: 32,
+              hc: "C_FanSpeed",
+              value: "20",
+            }),
+            lampAction({
+              type: "inc",
+              cId: 16,
+              hc: "Brightness",
+              value: "100",
+            }),
+          ],
+        }),
+      ],
+    },
+    reason: "Шаги кратны шагу характеристики",
+  });
+  assert.equal(onGrid.structuredContent.status, "prepared");
 
   const selfRun = structuredClone(blockData());
   selfRun.targets[0].then.push({
