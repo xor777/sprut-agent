@@ -6341,6 +6341,13 @@ function simpleRootEqualityEnumCoverage(
     return { reason: "inapplicable_form" };
   }
   if (leaf.cond !== "=") return { reason: "inapplicable_form" };
+  // The result also depends on how long the value has held, not only on it.
+  if (
+    leaf.timeCond !== CHARACTERISTIC_HOLD.none.timeCond ||
+    leaf.time !== CHARACTERISTIC_HOLD.none.time
+  ) {
+    return { reason: "held_condition" };
+  }
 
   const condition = validation.conditions.find(
     (candidate) => candidate.path === leafPath,
@@ -10612,7 +10619,7 @@ function publicNativeChange(
               "Every listed service/set remains a write when its enclosing action runs; equality with the preparation observation is not a no-op or a manual-control guarantee.",
               "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
               "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
-              "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
+              "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. A condition with a hold time is left undisclosed (held_condition). Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
             ]
           : []),
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
