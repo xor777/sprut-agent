@@ -587,115 +587,10 @@ export function blockAffectedRefs(data, homeRef) {
   return [...new Set(refs)];
 }
 
-export function inspectBlockRelations(
-  data,
-  { homeRef, scenarioRef, scenarioActive },
-) {
-  const roles = [];
-  const unresolved = [];
-  if (!isRecord(data)) {
-    return {
-      roles,
-      unresolved: [
-        {
-          area: "block_node",
-          outcome: "invalid",
-          ...blockRelationLocation(scenarioRef, "root"),
-        },
-      ],
-    };
-  }
-  visitKnownBlockNodes(
-    data,
-    (node, kind, path) => {
-      if (kind === "code") {
-        unresolved.push({
-          area: "block_code_condition",
-          outcome: "not_analyzed",
-          ...blockRelationLocation(scenarioRef, path),
-        });
-        return;
-      }
-      if (kind === "characteristic") {
-        const entityRef = characteristicRef(
-          homeRef,
-          node.aId,
-          node.sId,
-          node.cId,
-        );
-        if (!entityRef) {
-          unresolved.push(invalidReference(scenarioRef, path));
-          return;
-        }
-        roles.push({
-          scenario_ref: scenarioRef,
-          scenario_active: scenarioActive,
-          runtime_status: "not_observed",
-          role: isBlockTrigger(node, kind, path) ? "trigger" : "condition",
-          entity_ref: entityRef,
-          ...blockRelationLocation(scenarioRef, path),
-        });
-      }
-      if (kind !== "service") return;
-      for (const [index, action] of (node.characteristics ?? []).entries()) {
-        if (!SERVICE_ACTION_KINDS.includes(action?.type)) continue;
-        const entityRef = characteristicRef(
-          homeRef,
-          node.aId,
-          node.sId,
-          action.cId,
-        );
-        const actionPath = `${path}.characteristics[${index}]`;
-        if (!entityRef) {
-          unresolved.push(invalidReference(scenarioRef, actionPath));
-          continue;
-        }
-        const valueSource =
-          action.type === "set"
-            ? typeof action.value === "string"
-              ? "literal"
-              : undefined
-            : RELATIVE_VALUE_SOURCES[action.type];
-        roles.push({
-          scenario_ref: scenarioRef,
-          scenario_active: scenarioActive,
-          runtime_status: "not_observed",
-          role: "action_target",
-          entity_ref: entityRef,
-          ...blockRelationLocation(scenarioRef, actionPath),
-          ...(valueSource ? { value_source: valueSource } : {}),
-        });
-        if (!valueSource) {
-          unresolved.push({
-            area: "action_value_source",
-            outcome: "unknown",
-            ...blockRelationLocation(scenarioRef, actionPath),
-          });
-        }
-      }
-    },
-    (path, _reason, node) => {
-      unresolved.push({
-        area: "block_node",
-        outcome: "unsupported",
-        ...blockRelationLocation(scenarioRef, path),
-        ...(typeof node?.type === "string" ? { native_type: node.type } : {}),
-      });
-    },
-  );
-  return { roles, unresolved };
-}
-
 // code is read only as sprut-agent's own pause condition; writers never get it.
 function publishedChildTypes(rule) {
   return [...rule.kinds].filter((type) => type !== "code");
 }
-
-const RELATIVE_VALUE_SOURCES = {
-  toggle: "toggle",
-  inc: "increment",
-  dec: "decrement",
-};
 
 function visitBlockChild(child, path, rule, visit, invalidChild) {
   if (!isRecord(child) || !rule.kinds.has(child.type)) {
@@ -714,46 +609,6 @@ function unsupportedChildMessage(child, rule) {
   return BLOCK_CREATE_NODE_KINDS.includes(child.type)
     ? `node type ${child.type} is not allowed here; allowed here: ${allowed}`
     : `node type ${child.type} is not supported by this contract; allowed here: ${allowed}`;
-}
-
-function invalidReference(scenarioRef, path) {
-  return {
-    area: "block_reference",
-    outcome: "invalid",
-    ...blockRelationLocation(scenarioRef, path),
-  };
-}
-
-function blockRelationLocation(scenarioRef, path) {
-  const configurationPointer = blockConfigurationPointer(path);
-  return {
-    scenario_ref: scenarioRef,
-    configuration_pointer: configurationPointer,
-    next: {
-      tool: "get_entity",
-      arguments: {
-        entity_ref: scenarioRef,
-        include: ["configuration"],
-        pointer: configurationPointer,
-      },
-    },
-  };
-}
-
-function blockConfigurationPointer(path) {
-  const tokens = [];
-  for (const match of path.matchAll(/\.([^.[\]]+)|\[(\d+)\]/g)) {
-    tokens.push(match[1] ?? match[2]);
-  }
-  return tokens.length === 0
-    ? "/configuration/value"
-    : `/configuration/value/${tokens.join("/")}`;
-}
-
-function characteristicRef(homeRef, aId, sId, cId) {
-  return stableNativeId(aId) && stableNativeId(sId) && stableNativeId(cId)
-    ? `${homeRef}/accessory/${aId}/service/${sId}/characteristic/${cId}`
-    : null;
 }
 
 function bindingRefs(homeRef, aId, sId, cId) {

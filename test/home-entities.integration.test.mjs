@@ -1120,8 +1120,6 @@ test("characteristic detail keeps configuration separate from unlinked diagnosti
       type: "MotionDetectedFromCurrentMotionLevel",
       name: "Определение движения",
       active: true,
-      role: "service_assignment",
-      service_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
     },
   ]);
   assert.match(entity.diagnostics[0].text, /SensorDetectionSeconds.*61/);
@@ -1491,146 +1489,65 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const relationRequestSnapshot = [...hub.requests];
   const relations = result.structuredContent.entity.relations;
-  assert.deepEqual(relations.scenario_associations, [
-    {
-      ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      name: "Датчик управляет лампой",
-      type: "BLOCK",
-      predefined: false,
-      active: true,
-      on_start: false,
-      sync: false,
-      meaning: "accessory_index_association",
-      direction: "not_established",
-    },
-    {
-      ref: "spruthub://hub/home%2FA/scenario/global-code",
-      name: "Глобальный сценарий",
-      type: "GLOBAL",
-      predefined: false,
-      active: true,
-      on_start: false,
-      sync: false,
-      meaning: "accessory_index_association",
-      direction: "not_established",
-    },
-  ]);
+  const blockRef = "spruthub://hub/home%2FA/scenario/mixed-device-block";
+  const conditions = "/configuration/value/targets/1/if/conditions";
   assert.deepEqual(relations.scenario_roles, [
     {
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: true,
-      runtime_status: "not_observed",
+      scenario_ref: blockRef,
+      scenario_name: "Датчик управляет лампой",
+      active: true,
       role: "trigger",
-      entity_ref: characteristicRef,
-      configuration_pointer: "/configuration/value/targets/1/if/conditions/0",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer: "/configuration/value/targets/1/if/conditions/0",
-        },
-      },
+      op: "=",
+      value: true,
+      pointer: `${conditions}/0`,
     },
     {
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: true,
-      runtime_status: "not_observed",
+      scenario_ref: blockRef,
+      scenario_name: "Датчик управляет лампой",
+      active: true,
       role: "condition",
-      entity_ref: characteristicRef,
-      configuration_pointer: "/configuration/value/targets/1/if/conditions/1",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer: "/configuration/value/targets/1/if/conditions/1",
-        },
-      },
+      op: "=",
+      value: false,
+      pointer: `${conditions}/1`,
     },
     {
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: true,
-      runtime_status: "not_observed",
+      scenario_ref: blockRef,
+      scenario_name: "Датчик управляет лампой",
+      active: true,
       role: "condition",
-      entity_ref: characteristicRef,
-      configuration_pointer:
-        "/configuration/value/targets/1/if/conditions/3/conditions/1",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer:
-            "/configuration/value/targets/1/if/conditions/3/conditions/1",
-        },
-      },
-    },
-    {
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      scenario_active: true,
-      runtime_status: "not_observed",
-      role: "action_target",
-      entity_ref:
-        "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
-      configuration_pointer:
-        "/configuration/value/targets/1/then/0/characteristics/0",
-      value_source: "literal",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer: "/configuration/value/targets/1/then/0/characteristics/0",
-        },
-      },
+      op: "=",
+      value: true,
+      pointer: `${conditions}/3/conditions/1`,
     },
   ]);
-  const codeConditions = relations.unresolved_areas.filter(
+  // The lamp action is another entity's role: counted, not listed.
+  assert.equal(relations.other_roles_count, 1);
+  const codeConditions = relations.unchecked.filter(
     ({ area }) => area === "block_code_condition",
   );
   assert.deepEqual(codeConditions, [
     {
       area: "block_code_condition",
       outcome: "not_analyzed",
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      configuration_pointer: "/configuration/value/targets/1/if/conditions/2",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer: "/configuration/value/targets/1/if/conditions/2",
-        },
-      },
+      scenario_ref: blockRef,
+      pointer: `${conditions}/2`,
     },
     {
       area: "block_code_condition",
       outcome: "not_analyzed",
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      configuration_pointer:
-        "/configuration/value/targets/1/if/conditions/3/conditions/0",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer:
-            "/configuration/value/targets/1/if/conditions/3/conditions/0",
-        },
-      },
+      scenario_ref: blockRef,
+      pointer: `${conditions}/3/conditions/0`,
     },
   ]);
-  const associatedCode = relations.unresolved_areas.find(
-    ({ area }) => area === "associated_scenario_configuration",
+  const associatedCode = relations.unchecked.find(
+    ({ area }) => area === "scenario_code",
   );
   assert.deepEqual(associatedCode, {
-    area: "associated_scenario_configuration",
-    outcome: "not_read",
+    area: "scenario_code",
+    outcome: "not_analyzed",
     scenario_ref: "spruthub://hub/home%2FA/scenario/global-code",
+    scenario_name: "Глобальный сценарий",
     scenario_type: "GLOBAL",
-    limitation:
-      "An index association does not establish the scenario's role or effects.",
     next: {
       tool: "get_entity",
       arguments: {
@@ -1655,21 +1572,17 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   assert.doesNotMatch(JSON.stringify(associatedCodeDetail), /must-not-leak/);
   for (const evidence of [...relations.scenario_roles, ...codeConditions]) {
     const detail = await client.callTool({
-      name: evidence.next.tool,
-      arguments: evidence.next.arguments,
+      name: "get_entity",
+      arguments: {
+        entity_ref: evidence.scenario_ref,
+        include: ["configuration"],
+        pointer: evidence.pointer,
+      },
     });
     assert.equal(detail.isError, undefined, detail.content[0]?.text);
     assert.equal(
-      detail.structuredContent.selection.pointer,
-      evidence.configuration_pointer,
-    );
-    assert.equal(
       detail.structuredContent.selection.value.type,
-      evidence.area === "block_code_condition"
-        ? "code"
-        : evidence.role === "action_target"
-          ? "set"
-          : "characteristic",
+      evidence.area === "block_code_condition" ? "code" : "characteristic",
     );
   }
   assert.deepEqual(relations.assigned_logics, [
@@ -1678,8 +1591,6 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       type: "AssignedSensorLogic",
       name: "Назначенная logic",
       active: true,
-      role: "service_assignment",
-      service_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
     },
   ]);
   assert.deepEqual(relations.system_links, [
@@ -1687,88 +1598,41 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       type: "SYSTEM",
       index: "native-source/example",
       controller: "zigbee_1",
-      role: "system",
     },
   ]);
   assert.deepEqual(relations.characteristic_links, [
     {
       type: "OUT",
       index: "Virtual/32.15",
-      role: "inter_entity",
       related_characteristic_refs: [
         "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
       ],
     },
   ]);
+  assert.deepEqual(relations.checked, {
+    scenario_accessory_index: "found",
+    block_scenarios_read: 1,
+    logic_assignments: "found",
+    characteristic_links: "found",
+  });
   assert.deepEqual(
-    relations.scopes.map(
-      ({ area, outcome, source_ref, coverage, completeness }) => ({
-        area,
-        outcome,
-        source_ref,
-        ...(coverage === undefined ? {} : { coverage }),
-        ...(completeness === undefined ? {} : { completeness }),
-      }),
-    ),
+    relations.unchecked.filter(({ area }) => area === "block_node"),
     [
       {
-        area: "scenario_accessory_index",
-        outcome: "found",
-        source_ref: "spruthub://hub/home%2FA/accessory/32",
-        coverage: "native_accessory_index_for_selected_accessory",
-        completeness: "not_established",
-      },
-      {
-        area: "block_configuration",
-        outcome: "read",
-        source_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      },
-      {
-        area: "logic_assignments",
-        outcome: "found",
-        source_ref: "spruthub://hub/home%2FA/accessory/32/service/13",
-      },
-      {
-        area: "characteristic_links",
-        outcome: "found",
-        source_ref: characteristicRef,
+        area: "block_node",
+        outcome: "unrecognized",
+        scenario_ref: blockRef,
+        pointer: "/configuration/value/targets/0",
+        native_type: "notify",
       },
     ],
-  );
-  for (const scope of relations.scopes) {
-    assert.match(scope.observed_at, /^\d{4}-\d{2}-\d{2}T/);
-  }
-  assert.deepEqual(
-    relations.unresolved_areas.find(({ area }) => area === "block_node"),
-    {
-      area: "block_node",
-      outcome: "unsupported",
-      scenario_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-      configuration_pointer: "/configuration/value/targets/0",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
-          include: ["configuration"],
-          pointer: "/configuration/value/targets/0",
-        },
-      },
-      native_type: "notify",
-    },
-  );
-  assert.equal(
-    relations.unresolved_areas.some(
-      ({ area, native_type: nativeType }) =>
-        area === "block_node" && ["interval", "cron"].includes(nativeType),
-    ),
-    false,
   );
   const interval = await client.callTool({
     name: "get_entity",
     arguments: {
-      entity_ref: "spruthub://hub/home%2FA/scenario/mixed-device-block",
+      entity_ref: blockRef,
       include: ["configuration"],
-      pointer: "/configuration/value/targets/1/if/conditions/4",
+      pointer: `${conditions}/4`,
     },
   });
   assert.equal(interval.isError, undefined, interval.content[0]?.text);
@@ -1791,13 +1655,8 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     },
     trigger: true,
   });
-  assert.equal(
-    relations.unresolved_areas.some(
-      ({ area, outcome }) =>
-        area === "runtime_execution" && outcome === "not_observed",
-    ),
-    true,
-  );
+  // Runtime, index completeness and code stay named as not established.
+  assert.equal(typeof relations.limitation, "string");
   assert.equal(Object.hasOwn(relations, "direct_scenarios"), false);
   assert.equal(Object.hasOwn(relations, "links"), false);
 
@@ -1908,20 +1767,20 @@ test("get_entity relations preserve an inactive BLOCK state", async (t) => {
   );
   const [role] = result.structuredContent.entity.relations.scenario_roles;
   assert.deepEqual(
+    { active: role.active, role: role.role, pointer: role.pointer },
     {
-      scenario_active: role.scenario_active,
-      role: role.role,
-      configuration_pointer: role.configuration_pointer,
-    },
-    {
-      scenario_active: false,
+      active: false,
       role: "condition",
-      configuration_pointer: "/configuration/value/targets/0/if",
+      pointer: "/configuration/value/targets/0/if",
     },
   );
   const detail = await client.callTool({
-    name: role.next.tool,
-    arguments: role.next.arguments,
+    name: "get_entity",
+    arguments: {
+      entity_ref: role.scenario_ref,
+      include: ["configuration"],
+      pointer: role.pointer,
+    },
   });
   assert.equal(detail.isError, undefined, detail.content[0]?.text);
   assert.equal(detail.structuredContent.selection.value.type, "characteristic");
@@ -2008,36 +1867,42 @@ test("get_entity relations name toggled and stepped characteristics as action ta
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const relations = result.structuredContent.entity.relations;
+  // Toggle and increase target the lamp, not the sensor: counted, and not
+  // reported as unrecognized nodes.
   assert.deepEqual(
-    relations.scenario_roles
-      .filter(({ role }) => role === "action_target")
-      .map(({ entity_ref, configuration_pointer, value_source }) => ({
-        entity_ref,
-        configuration_pointer,
-        value_source,
-      })),
+    relations.scenario_roles.map(({ role }) => role),
+    ["trigger"],
+  );
+  assert.equal(relations.other_roles_count, 2);
+  assert.deepEqual(relations.unchecked, []);
+  const scenario = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: "spruthub://hub/home%2FA/scenario/button-block" },
+  });
+  assert.equal(scenario.isError, undefined, scenario.content[0]?.text);
+  assert.deepEqual(
+    scenario.structuredContent.entity.summary.steps[0].then.map(
+      ({ op, characteristic_type: type, value, ref }) => ({
+        op,
+        type,
+        value,
+        ref,
+      }),
+    ),
     [
       {
-        entity_ref:
-          "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
-        configuration_pointer:
-          "/configuration/value/targets/0/then/0/characteristics/0",
-        value_source: "toggle",
+        op: "toggle",
+        type: "On",
+        value: undefined,
+        ref: "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/30",
       },
       {
-        entity_ref:
-          "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/31",
-        configuration_pointer:
-          "/configuration/value/targets/0/then/0/characteristics/1",
-        value_source: "increment",
+        op: "increase",
+        type: "Brightness",
+        value: 10,
+        ref: "spruthub://hub/home%2FA/accessory/48/service/21/characteristic/31",
       },
     ],
-  );
-  assert.equal(
-    relations.unresolved_areas.some(({ area }) =>
-      ["block_node", "action_value_source"].includes(area),
-    ),
-    false,
   );
 });
 
@@ -2058,57 +1923,15 @@ test("empty accessory scenario index stays bounded without claiming no influence
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const relations = result.structuredContent.entity.relations;
-  assert.deepEqual(relations.scenario_associations, []);
-  assert.equal(
-    relations.scopes.find(({ area }) => area === "scenario_accessory_index")
-      .outcome,
-    "checked_empty",
-  );
-  assert.deepEqual(
-    relations.scopes.find(({ area }) => area === "scenario_accessory_index"),
-    {
-      area: "scenario_accessory_index",
-      outcome: "checked_empty",
-      source_ref: "spruthub://hub/home%2FA/accessory/32",
-      observed_at: relations.scopes[0].observed_at,
-      coverage: "native_accessory_index_for_selected_accessory",
-      completeness: "not_established",
-    },
-  );
-  assert.deepEqual(
-    relations.unresolved_areas
-      .filter(({ area }) =>
-        [
-          "scenario_index_coverage",
-          "scenario_code",
-          "dynamic_targets",
-        ].includes(area),
-      )
-      .map(({ area, outcome }) => ({
-        area,
-        outcome,
-      })),
-    [
-      {
-        area: "scenario_index_coverage",
-        outcome: "not_established",
-      },
-      {
-        area: "scenario_code",
-        outcome: "not_read",
-      },
-      {
-        area: "dynamic_targets",
-        outcome: "not_resolved",
-      },
-    ],
-  );
-  assert.equal(
-    relations.unresolved_areas.some(
-      ({ area }) => area === "unindexed_block_scenarios",
-    ),
-    false,
-  );
+  assert.deepEqual(relations.scenario_roles, []);
+  assert.deepEqual(relations.checked, {
+    scenario_accessory_index: "checked_empty",
+    block_scenarios_read: 0,
+    logic_assignments: "found",
+    characteristic_links: "checked_empty",
+  });
+  // An empty index does not prove that nothing else influences the sensor.
+  assert.equal(typeof relations.limitation, "string");
   assert.equal(
     hub.requests.some(({ params }) => params.scenario?.get),
     false,
@@ -2141,18 +1964,19 @@ test("failed accessory scenario index remains unknown without a catalog fallback
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const relations = result.structuredContent.entity.relations;
-  assert.deepEqual(relations.scenario_associations, []);
+  assert.deepEqual(relations.scenario_roles, []);
   assert.equal(
-    relations.scopes.find(({ area }) => area === "scenario_accessory_index")
-      .outcome,
-    "failed",
+    Object.hasOwn(relations.checked, "scenario_accessory_index"),
+    false,
   );
-  assert.equal(
-    relations.unresolved_areas.some(
-      ({ area, outcome }) =>
-        area === "scenario_accessory_index" && outcome === "failed",
-    ),
-    true,
+  assert.equal(Object.hasOwn(relations.checked, "block_scenarios_read"), false);
+  assert.deepEqual(
+    relations.unchecked.find(({ area }) => area === "scenario_accessory_index"),
+    {
+      area: "scenario_accessory_index",
+      outcome: "failed",
+      error_code: "request_rejected",
+    },
   );
   assert.equal(
     hub.requests.some(
@@ -2180,18 +2004,31 @@ test("accessory relations keep BLOCK evidence and defer recursive link reads", a
   assert.equal(result.isError, undefined, result.content[0]?.text);
   const entity = result.structuredContent.entity;
   assert.deepEqual(entity.include_resolution.applied, ["relations"]);
-  assert.equal(entity.relations.scenario_roles[0].role, "trigger");
-  assert.equal(entity.relations.assigned_logics[0].role, "service_assignment");
   assert.deepEqual(
-    entity.relations.scopes.find(({ area }) => area === "characteristic_links"),
-    {
-      area: "characteristic_links",
-      outcome: "not_read",
-      source_ref: "spruthub://hub/home%2FA/accessory/32",
-      observed_at: null,
-    },
+    entity.relations.scenario_roles.map(
+      ({ entity_ref: ref, characteristic, role }) => ({
+        ref,
+        characteristic,
+        role,
+      }),
+    ),
+    [
+      {
+        ref: "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
+        characteristic: "Обнаружено движение",
+        role: "trigger",
+      },
+    ],
   );
-  const unresolved = entity.relations.unresolved_areas.find(
+  assert.equal(
+    entity.relations.assigned_logics[0].type,
+    "MotionDetectedFromCurrentMotionLevel",
+  );
+  assert.equal(
+    Object.hasOwn(entity.relations.checked, "characteristic_links"),
+    false,
+  );
+  const unresolved = entity.relations.unchecked.find(
     ({ area }) => area === "characteristic_links",
   );
   assert.equal(unresolved.outcome, "not_read");
@@ -2253,20 +2090,20 @@ test("relation source failures stay scoped instead of becoming checked empty", a
       });
 
       assert.equal(result.isError, undefined, result.content[0]?.text);
-      const scope = result.structuredContent.entity.relations.scopes.find(
-        ({ area }) => area === "block_configuration",
+      const relations = result.structuredContent.entity.relations;
+      assert.equal(relations.checked.block_scenarios_read, 0);
+      assert.deepEqual(
+        relations.unchecked
+          .filter(({ area }) => area === "block_configuration")
+          .map(({ scenario_ref: ref, outcome }) => ({ ref, outcome })),
+        [
+          {
+            ref: "spruthub://hub/home%2FA/scenario/motion-block",
+            outcome: testCase.name,
+          },
+        ],
       );
-      assert.equal(scope.outcome, testCase.name);
-      assert.notEqual(scope.outcome, "checked_empty");
-      assert.equal(
-        result.structuredContent.entity.relations.unresolved_areas.some(
-          ({ area, scenario_ref, outcome }) =>
-            area === "block_configuration" &&
-            scenario_ref === "spruthub://hub/home%2FA/scenario/motion-block" &&
-            outcome === testCase.name,
-        ),
-        true,
-      );
+      assert.deepEqual(relations.scenario_roles, []);
     });
   }
 });

@@ -2,8 +2,12 @@ import { randomUUID } from "node:crypto";
 import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
-import { inspectBlockRelations } from "./block-model.mjs";
-import { blockBindings, blockSummary, decodeBlock } from "./block-summary.mjs";
+import {
+  blockBindings,
+  blockSummary,
+  decodeBlock,
+  relationRole,
+} from "./block-summary.mjs";
 import {
   inspectNativeOption,
   isSelectableNativeValidValue,
@@ -1937,7 +1941,14 @@ export class SprutHubClient {
   }
 
   async #readRelations(serial, accessory, services, characteristic, deadline) {
-    const accessoryReference = accessoryRef(serial, accessory.id);
+    const selectedRef = characteristic
+      ? characteristicRef(
+          serial,
+          accessory.id,
+          services[0].sId,
+          characteristic.cId,
+        )
+      : null;
     const associationPromise = this.#readRelationSource(
       { scenario: { list: { aId: accessory.id } } },
       deadline,
@@ -1985,112 +1996,193 @@ export class SprutHubClient {
       linkPromise,
     ]);
 
+    const checked = {};
+    const unchecked = [];
     const associations = associationRead.ok ? associationRead.value : [];
+    if (associationRead.ok) {
+      checked.scenario_accessory_index =
+        associations.length === 0 ? "checked_empty" : "found";
+    } else {
+      unchecked.push(
+        relationFailure("scenario_accessory_index", associationRead),
+      );
+    }
+    for (const association of associations) {
+      if (association.type === "BLOCK") continue;
+      unchecked.push({
+        area: "scenario_code",
+        outcome: "not_analyzed",
+        scenario_ref: association.ref,
+        scenario_name: association.name,
+        scenario_type: association.type,
+        next: {
+          tool: "get_entity",
+          arguments: {
+            entity_ref: association.ref,
+            include: ["configuration"],
+          },
+        },
+      });
+    }
+
     const blockReads = await Promise.all(
       associations
         .filter(({ type }) => type === "BLOCK")
         .map((summary) => this.#readRelationBlock(serial, summary, deadline)),
     );
-    const scopes = [
-      {
-        ...relationListScope(
-          "scenario_accessory_index",
-          accessoryReference,
-          associationRead,
-        ),
-        coverage: "native_accessory_index_for_selected_accessory",
-        completeness: "not_established",
-      },
-      ...blockReads.map(({ scope }) => scope),
-      ...logicReads.map((read, index) =>
-        relationListScope(
-          "logic_assignments",
-          serviceRef(serial, accessory.id, services[index].sId),
-          read,
-        ),
-      ),
-    ];
-    const assignedLogics = logicReads.flatMap((read, index) => {
-      if (!read.ok) return [];
-      const ownerRef = serviceRef(serial, accessory.id, services[index].sId);
-      return read.value.map((logic) => ({
-        ...logic,
-        role: "service_assignment",
-        service_ref: ownerRef,
-      }));
+    const readBlocks = blockReads.filter(({ data }) => data !== undefined);
+    if (associationRead.ok) checked.block_scenarios_read = readBlocks.length;
+    unchecked.push(...blockReads.flatMap(({ failure }) => failure ?? []));
+
+    const { roles, others } = await this.#relationRoles(
+      serial,
+      accessory,
+      selectedRef,
+      readBlocks,
+      unchecked,
+      deadline,
+    );
+
+    const assignedLogics = logicReads.flatMap((read) =>
+      read.ok ? read.value : [],
+    );
+    if (logicReads.some(({ ok }) => ok)) {
+      checked.logic_assignments =
+        assignedLogics.length === 0 ? "checked_empty" : "found";
+    }
+    logicReads.forEach((read, index) => {
+      if (read.ok) return;
+      unchecked.push({
+        ...relationFailure("logic_assignments", read),
+        source_ref: serviceRef(serial, accessory.id, services[index].sId),
+      });
     });
+
     const characteristicLinks = [];
     const systemLinks = [];
-    if (characteristic) {
-      const sourceRef = characteristicRef(
-        serial,
-        accessory.id,
-        services[0].sId,
-        characteristic.cId,
-      );
-      scopes.push(
-        relationListScope("characteristic_links", sourceRef, linkRead),
-      );
-      if (linkRead.ok) {
-        for (const link of linkRead.value) {
-          const { characteristics, ...identity } = link;
-          if (link.type === "SYSTEM") {
-            systemLinks.push(
-              sanitizeNativeData({ ...identity, role: "system" }),
-            );
-            continue;
-          }
-          characteristicLinks.push({
-            type: link.type,
-            index: sanitizeNativeData(link.index),
-            role: "inter_entity",
-            related_characteristic_refs: characteristics.map(
-              ({ aId, sId, cId }) => characteristicRef(serial, aId, sId, cId),
-            ),
-          });
-        }
-      }
-    } else {
-      scopes.push({
+    if (!characteristic) {
+      unchecked.push({
         area: "characteristic_links",
         outcome: "not_read",
-        source_ref: accessoryReference,
-        observed_at: null,
+        limitation:
+          "Accessory relations do not read every characteristic's links.",
+        next: {
+          tool: "get_entity",
+          candidates: services
+            .flatMap(
+              (service) =>
+                normalizeServiceDetail(serial, accessory, service, null)
+                  .characteristics,
+            )
+            .filter((candidate) => !isRedactedNode(candidate))
+            .map(({ ref }) => ({ entity_ref: ref, include: ["relations"] })),
+        },
+      });
+    } else if (linkRead.ok) {
+      for (const link of linkRead.value) {
+        const { characteristics, ...identity } = link;
+        if (link.type === "SYSTEM") {
+          systemLinks.push(sanitizeNativeData(identity));
+          continue;
+        }
+        characteristicLinks.push({
+          type: link.type,
+          index: sanitizeNativeData(link.index),
+          related_characteristic_refs: characteristics.map(
+            ({ aId, sId, cId }) => characteristicRef(serial, aId, sId, cId),
+          ),
+        });
+      }
+      checked.characteristic_links =
+        linkRead.value.length === 0 ? "checked_empty" : "found";
+    } else {
+      unchecked.push({
+        ...relationFailure("characteristic_links", linkRead),
+        source_ref: selectedRef,
       });
     }
 
-    const unresolvedAreas = relationUnresolvedAreas({
-      associationRead,
-      associations,
-      blockReads,
-      logicReads,
-      linkRead,
-      characteristic,
-      serial,
-      accessory,
-      services,
-      characteristicCandidates: services.flatMap((service) =>
-        normalizeServiceDetail(
-          serial,
-          accessory,
-          service,
-          null,
-        ).characteristics.filter((candidate) => !isRedactedNode(candidate)),
-      ),
-    });
     return {
-      scenario_associations: associations.map((summary) => ({
-        ...summary,
-        meaning: "accessory_index_association",
-        direction: "not_established",
-      })),
-      scenario_roles: blockReads.flatMap(({ roles }) => roles),
+      scenario_roles: roles,
+      other_roles_count: others,
       assigned_logics: assignedLogics,
       characteristic_links: characteristicLinks,
       system_links: systemLinks,
-      scopes,
-      unresolved_areas: unresolvedAreas,
+      checked,
+      unchecked,
+      limitation: RELATIONS_LIMITATION,
     };
+  }
+
+  // Roles of the selected characteristic (or of any characteristic of the
+  // selected accessory) in the read BLOCKs; roles about other entities are
+  // only counted.
+  async #relationRoles(
+    serial,
+    accessory,
+    selectedRef,
+    readBlocks,
+    unchecked,
+    deadline,
+  ) {
+    if (readBlocks.length === 0) return { roles: [], others: 0 };
+    const accessoryIds = new Set(
+      readBlocks.flatMap(({ data }) => [...blockBindings(data).accessoryIds]),
+    );
+    const context = await this.#blockNameContext(
+      serial,
+      { accessoryIds, scenarioIndexes: new Set() },
+      deadline,
+      { rooms: false },
+    );
+    if (!context.namesResolved) {
+      unchecked.push({ area: "names", outcome: "failed" });
+      // The selected accessory was already read; its own values still decode.
+      context.accessories = new Map([[accessory.id, accessory]]);
+    }
+    const matches = selectedRef
+      ? (record) => record.ref === selectedRef
+      : (record) => record.accessoryId === accessory.id;
+    const roles = [];
+    let others = 0;
+    for (const { summary, data } of readBlocks) {
+      const decoded = decodeBlock(data, context);
+      for (const record of decoded.records) {
+        if (!matches(record)) {
+          others += 1;
+          continue;
+        }
+        roles.push({
+          scenario_ref: summary.ref,
+          scenario_name: summary.name,
+          active: summary.active,
+          ...(selectedRef
+            ? {}
+            : {
+                entity_ref: record.ref,
+                characteristic: record.characteristic,
+              }),
+          ...relationRole(record),
+        });
+      }
+      for (const pointer of decoded.codeConditions) {
+        unchecked.push({
+          area: "block_code_condition",
+          outcome: "not_analyzed",
+          scenario_ref: summary.ref,
+          pointer,
+        });
+      }
+      for (const entry of decoded.unrecognized) {
+        unchecked.push({
+          area: "block_node",
+          outcome: "unrecognized",
+          scenario_ref: summary.ref,
+          ...entry,
+        });
+      }
+    }
+    return { roles, others };
   }
 
   async #readRelationBlock(serial, summary, deadline) {
@@ -2121,43 +2213,30 @@ export class SprutHubClient {
         return { scenario, normalized };
       },
     );
-    const sourceRef = summary.ref;
     if (!read.ok) {
       return {
-        scope: relationReadScope("block_configuration", sourceRef, read),
-        roles: [],
-        unresolved: [
-          {
-            area: "block_configuration",
-            outcome: read.outcome,
-            scenario_ref: sourceRef,
-          },
-        ],
+        summary,
+        failure: {
+          ...relationFailure("block_configuration", read),
+          scenario_ref: summary.ref,
+        },
       };
     }
-    const scope = relationReadScope("block_configuration", sourceRef, read);
-    let data;
     try {
-      data = JSON.parse(read.value.scenario.data);
+      return {
+        summary: read.value.normalized,
+        data: sanitizeNativeData(JSON.parse(read.value.scenario.data)),
+      };
     } catch {
       return {
-        scope,
-        roles: [],
-        unresolved: [
-          {
-            area: "block_configuration",
-            outcome: "invalid_json",
-            scenario_ref: sourceRef,
-          },
-        ],
+        summary,
+        failure: {
+          area: "block_configuration",
+          outcome: "invalid_json",
+          scenario_ref: summary.ref,
+        },
       };
     }
-    const inspected = inspectBlockRelations(data, {
-      homeRef: homeRef(serial),
-      scenarioRef: sourceRef,
-      scenarioActive: read.value.normalized.active,
-    });
-    return { scope, roles: inspected.roles, unresolved: inspected.unresolved };
   }
 
   async #readRelationSource(params, deadline, serial, extract) {
@@ -2305,7 +2384,12 @@ export class SprutHubClient {
   // read by a list of ids), room names, and the scenario catalog only when
   // the BLOCK runs another scenario. A failed read leaves refs unnamed
   // instead of failing the entity read.
-  async #blockNameContext(serial, { accessoryIds, scenarioIndexes }, deadline) {
+  async #blockNameContext(
+    serial,
+    { accessoryIds, scenarioIndexes },
+    deadline,
+    { rooms: readRooms = true } = {},
+  ) {
     const needAccessories = accessoryIds.size > 0;
     const needScenarios = scenarioIndexes.size > 0;
     const [accessoriesRead, roomsRead, scenariosRead] = await Promise.all([
@@ -2322,7 +2406,7 @@ export class SprutHubClient {
               ]),
           )
         : null,
-      needAccessories
+      needAccessories && readRooms
         ? this.#readRelationSource(
             { room: { list: {} } },
             deadline,
@@ -3652,142 +3736,12 @@ function relationFailureOutcome(error) {
   return "failed";
 }
 
-function relationListScope(area, sourceRef, read) {
-  return {
-    area,
-    outcome: read.ok
-      ? read.value.length === 0
-        ? "checked_empty"
-        : "found"
-      : read.outcome,
-    source_ref: sourceRef,
-    observed_at: read.observedAt,
-    ...(!read.ok ? { error_code: read.errorCode } : {}),
-  };
+function relationFailure(area, read) {
+  return { area, outcome: read.outcome, error_code: read.errorCode };
 }
 
-function relationReadScope(area, sourceRef, read) {
-  return {
-    area,
-    outcome: read.ok ? "read" : read.outcome,
-    source_ref: sourceRef,
-    observed_at: read.observedAt,
-    ...(!read.ok ? { error_code: read.errorCode } : {}),
-  };
-}
-
-function relationUnresolvedAreas({
-  associationRead,
-  associations,
-  blockReads,
-  logicReads,
-  linkRead,
-  characteristic,
-  serial,
-  accessory,
-  services,
-  characteristicCandidates,
-}) {
-  const unresolved = blockReads.flatMap(({ unresolved: items }) => items);
-  if (!associationRead.ok) {
-    unresolved.push({
-      area: "scenario_accessory_index",
-      outcome: associationRead.outcome,
-      source_ref: accessoryRef(serial, accessory.id),
-    });
-  }
-  unresolved.push({
-    area: "scenario_index_coverage",
-    outcome: "not_established",
-    source_ref: accessoryRef(serial, accessory.id),
-    limitation:
-      "The native accessory index is an addressed association lookup; its completeness for every influence is not established.",
-  });
-  for (const association of associations.filter(
-    ({ type }) => type !== "BLOCK",
-  )) {
-    unresolved.push({
-      area: "associated_scenario_configuration",
-      outcome: "not_read",
-      scenario_ref: association.ref,
-      scenario_type: association.type,
-      limitation:
-        "An index association does not establish the scenario's role or effects.",
-      next: {
-        tool: "get_entity",
-        arguments: {
-          entity_ref: association.ref,
-          include: ["configuration"],
-        },
-      },
-    });
-  }
-  unresolved.push(
-    {
-      area: "scenario_code",
-      outcome: "not_read",
-      limitation:
-        "This addressed read does not enumerate or inspect LOGIC, GLOBAL, or code outside returned associated BLOCK configurations.",
-    },
-    {
-      area: "dynamic_targets",
-      outcome: "not_resolved",
-      limitation:
-        "The native index and stored BLOCK roles do not resolve targets selected by code, extensions, or runtime state.",
-    },
-  );
-  logicReads.forEach((read, index) => {
-    if (read.ok) return;
-    unresolved.push({
-      area: "logic_assignments",
-      outcome: read.outcome,
-      source_ref: serviceRef(serial, accessory.id, services[index].sId),
-    });
-  });
-  if (characteristic && !linkRead.ok) {
-    unresolved.push({
-      area: "characteristic_links",
-      outcome: linkRead.outcome,
-      source_ref: characteristicRef(
-        serial,
-        accessory.id,
-        services[0].sId,
-        characteristic.cId,
-      ),
-    });
-  }
-  if (!characteristic) {
-    unresolved.push({
-      area: "characteristic_links",
-      outcome: "not_read",
-      source_ref: accessoryRef(serial, accessory.id),
-      limitation:
-        "Accessory relations do not recursively read every characteristic link.",
-      next: {
-        tool: "get_entity",
-        candidates: characteristicCandidates.map(({ ref }) => ({
-          entity_ref: ref,
-          include: ["relations"],
-        })),
-      },
-    });
-  }
-  unresolved.push(
-    {
-      area: "extensions",
-      outcome: "not_read",
-      limitation:
-        "Extension code and controller behavior are outside this entity-scoped read.",
-    },
-    {
-      area: "runtime_execution",
-      outcome: "not_observed",
-      limitation:
-        "Stored configuration does not prove that a command ran or caused a past event.",
-    },
-  );
-  return unresolved;
-}
+const RELATIONS_LIMITATION =
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. LOGIC and GLOBAL code, code conditions, code-selected targets and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&

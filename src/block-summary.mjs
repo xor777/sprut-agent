@@ -7,6 +7,8 @@
 // local wall clock, weekday names in field 5, "0/N" for every N, sun offset
 // in seconds; characteristic hold time and delay time in milliseconds.
 
+import { SERVICE_ACTION_KINDS } from "./block-model.mjs";
+
 const BASE_POINTER = "/configuration/value";
 const VALUE_FIELDS = [
   "boolValue",
@@ -23,6 +25,7 @@ const ACTION_OPS = {
   inc: "increase",
   dec: "decrease",
 };
+const ACTION_KINDS = new Set(SERVICE_ACTION_KINDS);
 
 // Accessory ids and FIRE scenario indexes a BLOCK names, so the caller reads
 // only the catalogs that the decoding needs.
@@ -300,7 +303,7 @@ function decodeService(node, pointer, chain, delay, state) {
     if (
       !isRecord(action) ||
       isRedacted(action) ||
-      !Object.hasOwn(ACTION_OPS, action.type)
+      !ACTION_KINDS.has(action.type)
     ) {
       actions.push(unrecognized(state, actionPointer, action));
       return;
@@ -320,7 +323,13 @@ function decodeService(node, pointer, chain, delay, state) {
     }
     const op = ACTION_OPS[action.type];
     const value =
-      action.type === "toggle" ? {} : decodeValue(action.value, target);
+      action.type === "toggle"
+        ? {}
+        : decodeValue(action.value, target, {
+            // increase/decrease steps are numeric even when the target is
+            // not in the catalog.
+            numeric: action.type !== "set",
+          });
     actions.push({
       op,
       ...targetNames(target),
@@ -634,7 +643,7 @@ function targetText(target) {
   return `${target.accessory.name}${service}: ${characteristic}`;
 }
 
-function decodeValue(raw, target) {
+function decodeValue(raw, target, { numeric = false } = {}) {
   if (target.sensitive) return { value: REDACTED };
   if (typeof raw !== "string") {
     return { value: raw === undefined ? null : raw, value_status: "not_text" };
@@ -646,7 +655,7 @@ function decodeValue(raw, target) {
   if (field === "boolValue" && (raw === "true" || raw === "false")) {
     value = raw === "true";
   } else if (
-    NUMBER_FIELDS.has(field) &&
+    (NUMBER_FIELDS.has(field) || (numeric && field === undefined)) &&
     raw.trim() !== "" &&
     Number.isFinite(Number(raw))
   ) {
