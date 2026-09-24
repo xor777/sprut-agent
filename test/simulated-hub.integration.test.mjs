@@ -83,6 +83,7 @@ test("public read tools see the simulated apartment as a native home", async (t)
       "Детская спальня",
       "Кабинет",
       "Ванная",
+      "Балкон",
     ],
   );
   assert.deepEqual(
@@ -764,5 +765,73 @@ test("an active lamp logic switches the lamp with its brightness", async (t) => 
   assert.deepEqual(
     hub.faultEvents().map(({ fault }) => fault),
     ["lamp_logic", "lamp_logic"],
+  );
+});
+
+test("the simulator omits empty native lists and stores BLOCK values as the hub does", async (t) => {
+  const { send } = await rawSession(t);
+  const list = async (params) => {
+    const [domain] = Object.keys(params);
+    return (await send(params)).result[domain].list;
+  };
+  // Observed on the owner's hub (2026-09-24): an empty list is omitted, not [].
+  assert.deepEqual(await list({ accessory: { list: { roomId: 30 } } }), {});
+  assert.deepEqual(await list({ logic: { list: { aId: 35, sId: 13 } } }), {});
+  assert.deepEqual(
+    await list({ link: { list: { aId: 35, sId: 13, cId: 14 } } }),
+    {},
+  );
+  assert.deepEqual(
+    await list({
+      extensionChild: { list: { extensionKey: "Bridge:homekit" } },
+    }),
+    {},
+  );
+  assert.deepEqual(await list({ scenario: { list: { aId: 30 } } }), {});
+  assert.equal(
+    (await list({ accessory: { list: { roomId: 8 } } })).accessories.length,
+    4,
+  );
+
+  // inc/dec values are stored as numbers, set values stay strings, and every
+  // node gets a blockId.
+  const created = await send({
+    scenario: {
+      create: {
+        name: "Ярче",
+        type: "BLOCK",
+        active: false,
+        data: JSON.stringify({
+          targets: [
+            {
+              type: "service",
+              aId: 16,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "inc", cId: 15, hc: "Brightness", value: "10" },
+                { type: "dec", cId: 15, hc: "Brightness", value: "5" },
+                { type: "set", cId: 14, hc: "On", value: "true" },
+              ],
+            },
+          ],
+        }),
+      },
+    },
+  });
+  const stored = JSON.parse(created.result.scenario.create.data);
+  const [service] = stored.targets;
+  assert.deepEqual(
+    service.characteristics.map(({ type, value }) => [type, value]),
+    [
+      ["inc", 10],
+      ["dec", 5],
+      ["set", "true"],
+    ],
+  );
+  assert.ok(
+    [service, ...service.characteristics].every(({ blockId }) =>
+      Number.isInteger(blockId),
+    ),
   );
 });
