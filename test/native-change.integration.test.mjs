@@ -9172,6 +9172,65 @@ test("time triggers outside the published forms are refused with a repairable re
   );
 });
 
+test("a pause of a branch started by a time trigger is refused like other triggers", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  // «По понедельникам и пятницам в 7:30 включать свет».
+  const mondayFridayMorning = {
+    targets: [
+      everyIf({
+        when: conditionGroup({
+          type: "cron",
+          mode: "NONE",
+          cron: "0 30 7 ? * MON,FRI *",
+          offset: 0,
+        }),
+        thenActions: [setAction()],
+      }),
+    ],
+  };
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRuntimeBlockFields(mondayFridayMorning),
+  );
+
+  // Wrapping the if would move the cron into the pause controller, where
+  // its registration as a trigger is not verified.
+  const wholeBranch = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/0",
+      duration_seconds: 60,
+      reason: "Не прятать временной триггер в паузу",
+    },
+  });
+  assert.equal(wholeBranch.isError, true, wholeBranch.content[0]?.text);
+  assert.equal(
+    wholeBranch.structuredContent.error.code,
+    "unsupported_pause_trigger_scope",
+  );
+  assert.deepEqual(wholeBranch.structuredContent.suggested_action_pointers, [
+    "/targets/0/then/0",
+  ]);
+
+  const actionOnly = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_action_pause",
+      target_ref: scenarioRef,
+      action_pointer: "/targets/0/then/0",
+      duration_seconds: 60,
+      reason: "Пропустить одно утро, не трогая расписание",
+    },
+  });
+  assert.equal(actionOnly.isError, undefined, actionOnly.content[0]?.text);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
+});
+
 function installButton(hub) {
   installEnumAccessory(hub, {
     id: 60,
