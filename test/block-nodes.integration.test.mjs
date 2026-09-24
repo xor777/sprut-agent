@@ -700,3 +700,46 @@ test("a scenario sets a value from another characteristic", async (t) => {
     ["/targets/0/then/0/characteristics/0/from_cId"],
   ]);
 });
+
+// The owner made these in the SprutHub interface: a request to a router with
+// its password in the URL and a notification left without text. The agent
+// cannot write either back, so an edit that deletes them says so first.
+test("an edit that deletes a request or notification the agent cannot write back names it", async (t) => {
+  const { hub, client } = await setup(t);
+  const stored = {
+    targets: [
+      whenLeak([
+        fanOn(),
+        {
+          type: "http",
+          method: "GET",
+          url: "http://admin:secret@192.168.1.1/reboot",
+        },
+        { type: "notify", text: "", mode: "MESSAGE" },
+        { type: "http", method: "GET", url: "http://192.168.1.50/relay/0" },
+      ]),
+    ],
+  };
+  const { index } = await createBlock(client, {
+    targets: [whenLeak([fanOn()])],
+  });
+  hub.state.scenarios.find((item) => item.index === index).data =
+    JSON.stringify(stored);
+
+  const edited = await prepareUpdate(client, index, (data) => {
+    data.targets[0].then = [data.targets[0].then[0]];
+  });
+  assert.equal(edited.status, "prepared", JSON.stringify(edited));
+  const warning = edited.limitations.find((text) =>
+    text.startsWith(
+      "This edit deletes stored nodes this contract cannot write",
+    ),
+  );
+  assert.match(
+    warning ?? "",
+    /http at \/targets\/0\/then\/1, notify at \/targets\/0\/then\/2\./,
+  );
+  // The request the agent could add again is not named.
+  assert.doesNotMatch(warning, /then\/3/);
+  assert.equal(JSON.stringify(edited).includes("secret@"), false);
+});
