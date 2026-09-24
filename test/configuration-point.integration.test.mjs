@@ -1393,6 +1393,90 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
   ]);
 });
 
+// Points saved before answers hid every request URL beyond scheme and host
+// hold a BLOCK's request URL as read, with a key in its path such as
+// Telegram's /bot<token>/.
+test("a point saved with a request URL as read shows and compares it hidden", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const token = "123456:telegram-token-must-not-leak";
+  const withRequest = (url) => {
+    const data = officeBlockData();
+    data.targets[0].then.push({
+      type: "http",
+      blockId: 20,
+      method: "GET",
+      url,
+    });
+    return data;
+  };
+  hub.state.scenarios[0].data = JSON.stringify(
+    withRequest("http://192.168.1.50/"),
+  );
+  const client = await startClient(t, hub, stateDirectory);
+  const saved = toolResult(
+    await client.callTool({
+      name: "save_configuration_point",
+      arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
+    }),
+  );
+  const pointDir = (await readdir(stateDirectory)).find((name) =>
+    name.startsWith("configuration-points-"),
+  );
+  const pointFile = path.join(
+    stateDirectory,
+    pointDir,
+    `${saved.point_ref.split("/").at(-1)}.json`,
+  );
+  const point = JSON.parse(await readFile(pointFile, "utf8"));
+  point.captured[0].settings.configuration.value = withRequest(
+    `https://api.telegram.org/bot${token}/sendMessage?chat_id=1`,
+  );
+  await writeFile(pointFile, `${JSON.stringify(point, null, 2)}\n`);
+  const read = async (compare) =>
+    toolResult(
+      await client.callTool({
+        name: "get_configuration_point",
+        arguments: { point_ref: saved.point_ref, compare },
+      }),
+    );
+
+  const shown = await read(false);
+  // The request now goes to the hub's own address, then it is gone.
+  const redirected = await read(true);
+  hub.state.scenarios[0].data = JSON.stringify(officeBlockData());
+  const removed = await read(true);
+
+  assert.equal(
+    JSON.stringify([shown, redirected, removed]).includes(token),
+    false,
+  );
+  const requestPath = ["configuration", "value", "targets", 0, "then", 0];
+  assert.deepEqual(
+    {
+      shown: capturedEntity(shown, scenarioRef).settings.configuration.value
+        .targets[0].then,
+      redirected: comparisonFor(redirected, scenarioRef),
+      removed: comparisonFor(removed, scenarioRef).changes,
+    },
+    {
+      shown: [{ type: "http", blockId: 20, method: "GET", url: "[REDACTED]" }],
+      redirected: {
+        entity_ref: scenarioRef,
+        kind: "scenario",
+        status: "unchanged",
+        changes: [],
+        not_compared: [{ path: [...requestPath, "url"], reason: "redacted" }],
+      },
+      removed: [
+        {
+          path: requestPath,
+          from: { type: "http", method: "GET", url: "[REDACTED]" },
+        },
+      ],
+    },
+  );
+});
+
 test("incomplete logic and window options are not compared as added, removed, or equal", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
