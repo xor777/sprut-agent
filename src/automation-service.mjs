@@ -6024,12 +6024,18 @@ async function validateBlockData(
     if (!scenarios.has(run.index)) {
       scenarios.set(run.index, await client.getScenario(run.index));
     }
-    if (!scenarios.get(run.index)) {
+    const record = scenarios.get(run.index);
+    if (!record) {
       throw invalidBlock(
         run.path,
         `scenario ${run.index} does not exist in this home`,
       );
     }
+    run.scenario = {
+      name: record.name,
+      type: record.type,
+      ...(typeof record.active === "boolean" ? { active: record.active } : {}),
+    };
   }
   if (scenarioIndex !== undefined) {
     for (const run of context.scenarioRuns) {
@@ -6287,6 +6293,17 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
         ...(branch ? { branch } : {}),
       };
     }),
+    ...(validation.scenarioRuns.length > 0
+      ? {
+          scenario_runs: validation.scenarioRuns.map((run) => ({
+            configuration_pointer: blockPathToPointer(run.path),
+            scenario: {
+              ref: `${homeRef}/scenario/${encodeURIComponent(run.index)}`,
+              ...run.scenario,
+            },
+          })),
+        }
+      : {}),
   };
 }
 
@@ -10141,12 +10158,13 @@ function publicStoredNativeChange(change) {
 }
 
 function publicBlockActionPreview(change, fresh) {
+  const preview = change.block_action_preview;
   return {
-    snapshot: {
-      ...structuredClone(change.block_action_preview.snapshot),
-      fresh,
-    },
-    actions: structuredClone(change.block_action_preview.actions),
+    snapshot: { ...structuredClone(preview.snapshot), fresh },
+    actions: structuredClone(preview.actions),
+    ...(preview.scenario_runs
+      ? { scenario_runs: structuredClone(preview.scenario_runs) }
+      : {}),
   };
 }
 
@@ -10708,6 +10726,7 @@ function publicNativeChange(
               "Every listed service/set remains a write when its enclosing action runs; equality with the preparation observation is not a no-op or a manual-control guarantee.",
               "Action comparisons use the saved preparation observation. Later reads of this change do not refresh it or predict the value at a future branch execution.",
               "The preview describes only service/set actions in this BLOCK. A branch does not write omitted characteristics, but other automation can still affect them.",
+              "scenario_runs names the scenario each scenario target runs, as read at preparation; what that scenario writes is not listed.",
               "Known enum branch coverage is the condition's listed values at preparation, not a promise that the action will run, its order, a physical effect, or a trigger change. A condition with a hold time is left undisclosed (held_condition). Undisclosed coverage is not an empty domain. Later reads of this change do not refresh that domain.",
             ]
           : []),
