@@ -2,13 +2,14 @@
 // SprutHub simulator and grades the result deterministically. A model run is
 // not part of `npm run check`; see DEVELOPMENT.md.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -104,9 +105,16 @@ export async function runCase({
   timeoutMs,
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-eval-run-"));
+  // Credentials of this run only: nothing in the repository or an earlier
+  // run lets another client pass as the MCP server.
+  const runId = randomUUID();
   const hub = await startSimulatedHub(
     await loadHomeFixture(definition.fixture ?? "apartment"),
-    { faults: definition.faults },
+    {
+      faults: definition.faults,
+      token: `eval-token-${runId}`,
+      cid: `eval-mcp-${runId}`,
+    },
   );
   const startedAt = new Date().toISOString();
   try {
@@ -136,7 +144,11 @@ export async function runCase({
           ? `harness error: ${transcript.harnessError}`
           : `exit=${run.exitCode} timed_out=${run.timedOut}`,
       },
-      ...integrityGraders(evidence),
+      ...integrityGraders(evidence, {
+        toolCalls: transcript.toolCalls,
+        allowedRoots: await withRealPaths([plugin.dir]),
+        forbiddenRoots: await withRealPaths([repo, evidenceRoot]),
+      }),
       ...gradeCase(definition, evidence),
     ];
     const outcome = {
@@ -216,6 +228,8 @@ export function collectEvidence(hub, answer) {
   return {
     answer: answer ?? "",
     requests: hub.requests,
+    connections: hub.connections(),
+    expectedCid: hub.cid,
     before,
     after,
     diff: diffHomeSnapshots(before, after),
@@ -224,11 +238,18 @@ export function collectEvidence(hub, answer) {
   };
 }
 
-// Checks of the run itself rather than the household result. A method the
-// simulator does not implement (-32601) means the run exercised behavior the
-// simulator cannot judge, so the run fails as simulator_gap whatever the
-// answer says.
-export function integrityGraders(evidence) {
+// Checks of the run itself rather than the household result:
+// - no_simulator_gap: a method the simulator does not implement (-32601)
+//   means the run exercised behavior the simulator cannot judge;
+// - single_mcp_connection: only the MCP server may talk to the hub. It has
+//   this run's client id and one connection at a time (a restarted server
+//   reconnects after its old socket closed); any other client id, a rejected
+//   token or two connections in use at once means something else reached
+//   the hub;
+// - agent_stayed_in_bounds (with the transcript): the agent's own tools did
+//   not name a path in the repository outside the plugin, in the evidence
+//   directory, or an auth.json.
+export function integrityGraders(evidence, run = null) {
   const gaps = [
     ...new Set(
       evidence.requests
@@ -236,7 +257,7 @@ export function integrityGraders(evidence) {
         .map(({ method }) => method ?? "invalid request"),
     ),
   ];
-  return [
+  const graders = [
     {
       name: "no_simulator_gap",
       pass: gaps.length === 0,
@@ -245,7 +266,68 @@ export function integrityGraders(evidence) {
           ? "every native method was simulated"
           : `simulator_gap: ${gaps.join(", ")}`,
     },
+    singleConnection(evidence),
   ];
+  if (run) graders.push(stayedInBounds(run));
+  return graders;
+}
+
+function singleConnection({ requests, connections, expectedCid }) {
+  const foreign = [
+    ...new Set(
+      requests
+        .filter(({ cid, error }) => cid !== expectedCid || error?.code === 401)
+        .map(({ cid, error }) =>
+          error?.code === 401 ? "rejected token" : `cid ${cid}`,
+        ),
+    ),
+  ];
+  const used = connections.filter(
+    ({ first_request_at: first }) => first !== null,
+  );
+  const concurrent = used.filter((connection) =>
+    used.some(
+      (other) =>
+        other.id < connection.id &&
+        (other.closed_at === null ||
+          other.closed_at > connection.first_request_at),
+    ),
+  );
+  const problems = [
+    ...foreign,
+    ...concurrent.map(({ id }) => `concurrent connection ${id}`),
+  ];
+  return {
+    name: "single_mcp_connection",
+    pass: problems.length === 0,
+    detail:
+      problems.length === 0
+        ? `${used.length} sequential MCP connection(s)`
+        : problems.join(", "),
+  };
+}
+
+function stayedInBounds({ toolCalls, allowedRoots, forbiddenRoots }) {
+  const within = (file, root) => file === root || file.startsWith(`${root}/`);
+  const violations = [];
+  for (const call of toolCalls.filter(({ mcp }) => !mcp)) {
+    const text = JSON.stringify(call.input ?? "");
+    for (const [file] of text.matchAll(/\/[^\s"'`<>|;&()\\]+/g)) {
+      const forbidden =
+        /(?:^|\/)auth\.json$/.test(file) ||
+        (forbiddenRoots.some((root) => within(file, root)) &&
+          !allowedRoots.some((root) => within(file, root)));
+      if (forbidden) violations.push(`${call.name}: ${file}`);
+    }
+  }
+  return {
+    name: "agent_stayed_in_bounds",
+    pass: violations.length === 0,
+    detail:
+      violations.length === 0
+        ? "no path outside the plugin and workspace"
+        : violations.slice(0, 5).join("; "),
+  };
 }
 
 // The first failed grader family names why a run failed; agent means the
@@ -256,6 +338,12 @@ function failureClass(graders) {
   );
   if (failed.size === 0) return null;
   if (failed.has("run_completed")) return "harness";
+  if (
+    failed.has("single_mcp_connection") ||
+    failed.has("agent_stayed_in_bounds")
+  ) {
+    return "isolation";
+  }
   if (failed.has("no_simulator_gap")) return "simulator_gap";
   return "agent";
 }
@@ -446,7 +534,24 @@ async function runCodex({ prompt, model, plugin, hub, scratch, timeoutMs }) {
     "features.tool_suggest": false,
     project_doc_max_bytes: 0,
     web_search: "disabled",
+    default_permissions: "sprut_eval",
   };
+  // The agent's shell commands read only system paths, the workspace
+  // (writable) and the installed plugin: not the repository, the evidence,
+  // HOME with connection.env or CODEX_HOME with auth.json. Checked offline
+  // with `codex sandbox` on codex-cli 0.154.0; MCP servers run outside it.
+  const readable = {
+    ":minimal": "read",
+    ":workspace_roots": "write",
+    ...Object.fromEntries(
+      (await withRealPaths([path.join(codexHome, "plugins"), marketplace])).map(
+        (root) => [root, "read"],
+      ),
+    ),
+  };
+  const permissions = `{${Object.entries(readable)
+    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`)
+    .join(", ")}}`;
   const args = [
     "exec",
     "--ephemeral",
@@ -458,6 +563,8 @@ async function runCodex({ prompt, model, plugin, hub, scratch, timeoutMs }) {
       "-c",
       `${key}=${JSON.stringify(value)}`,
     ]),
+    "-c",
+    `permissions.sprut_eval.filesystem=${permissions}`,
     "--output-last-message",
     answerPath,
     "-",
@@ -746,6 +853,19 @@ async function prepareEvidenceRoot(requested) {
   }
   await mkdir(root, { recursive: true });
   return root;
+}
+
+// Each path and, when it exists, its real path (macOS temp dirs live under
+// /private/var while tmpdir() reports /var).
+async function withRealPaths(paths) {
+  const all = new Set();
+  for (const item of paths) {
+    all.add(path.resolve(item));
+    try {
+      all.add(await realpath(item));
+    } catch {}
+  }
+  return [...all];
 }
 
 async function sha256File(file) {

@@ -817,6 +817,7 @@ export async function startSimulatedHub(
     host = "127.0.0.1",
     port = 0,
     token = SIMULATED_HUB_TOKEN,
+    cid = SIMULATED_HUB_CID,
     faults = {},
   } = {},
 ) {
@@ -845,9 +846,32 @@ export async function startSimulatedHub(
       protocols.has("json-rpc") ? "json-rpc" : false,
   });
   await once(server, "listening");
+  // Every WebSocket connection with the time of its first request and its
+  // close, so a grader can tell the MCP server's connection from another.
+  const connections = [];
   server.on("connection", (socket) => {
+    const connection = {
+      id: connections.length + 1,
+      opened_at: Date.now(),
+      first_request_at: null,
+      closed_at: null,
+      requests: 0,
+    };
+    connections.push(connection);
+    socket.on("close", () => {
+      connection.closed_at = Date.now();
+    });
     socket.on("message", (raw) => {
-      const reply = handleMessage(state, requests, token, raw, refusals);
+      connection.requests += 1;
+      connection.first_request_at ??= Date.now();
+      const reply = handleMessage(
+        state,
+        requests,
+        token,
+        raw,
+        refusals,
+        connection.id,
+      );
       if (reply) socket.send(JSON.stringify(reply));
     });
   });
@@ -857,6 +881,7 @@ export async function startSimulatedHub(
     url,
     serial: state.hub.serial,
     token,
+    cid,
     state,
     initialState,
     requests,
@@ -873,6 +898,7 @@ export async function startSimulatedHub(
     },
     touchedMethods: () => touchedMethods(requests),
     faultEvents: () => structuredClone(state.faultEvents),
+    connections: () => structuredClone(connections),
     // Applies delayed writes now, as the hub would have by the time a
     // grader looks at the home.
     settle: () => {
@@ -882,7 +908,7 @@ export async function startSimulatedHub(
       SPRUTHUB_URL: url,
       SPRUTHUB_TOKEN: token,
       SPRUTHUB_SERIAL: state.hub.serial,
-      SPRUTHUB_CID: SIMULATED_HUB_CID,
+      SPRUTHUB_CID: cid,
     }),
     snapshot: () => homeSnapshot(state),
     exportState: () => {
@@ -908,7 +934,14 @@ export async function startSimulatedHub(
   };
 }
 
-function handleMessage(state, requests, token, raw, refusals) {
+function handleMessage(
+  state,
+  requests,
+  token,
+  raw,
+  refusals,
+  connection = null,
+) {
   let message;
   try {
     message = JSON.parse(raw.toString());
@@ -921,6 +954,8 @@ function handleMessage(state, requests, token, raw, refusals) {
     at: new Date().toISOString(),
     method,
     serial: message?.serial ?? null,
+    cid: message?.cid ?? null,
+    connection,
     write: isWriteMethod(method),
     params: structuredClone(message?.params ?? null),
   };
