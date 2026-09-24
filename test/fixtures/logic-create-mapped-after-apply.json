@@ -1,0 +1,87 @@
+{
+  "source_commit": "d5076d69adffe449456e660122f98c15c020422e",
+  "captured_via": [
+    "prepare_native_change",
+    "apply_native_change",
+    "get_native_change"
+  ],
+  "change": {
+    "id": "a4217bc50e5a931ba2328ef3",
+    "kind": "logic_source_create",
+    "status": "applied",
+    "home_ref": "spruthub://hub/native-change-test-hub",
+    "target_ref": "spruthub://hub/native-change-test-hub/accessory/34/service/13",
+    "target": {
+      "aId": 34,
+      "sId": 13
+    },
+    "reason": "Создать LOGIC и потом отменить его",
+    "marker": "sprut-agent:native:a4217bc50e5a931ba2328ef3",
+    "baseline_logic_types": ["SmoothBrightnessChange"],
+    "requested_snapshot": {
+      "name": "Выключенный LOGIC",
+      "desc": "Создан выключенным, тип не виден",
+      "active": false,
+      "onStart": false,
+      "sync": false,
+      "type": "LOGIC",
+      "data": "info = {\n  name: \"Bedside start level\",\n  description: \"Set the initial brightness once\",\n  version: \"1.0\",\n  author: \"sprut-agent\",\n  onStart: false,\n  sourceServices: [HS.Lightbulb],\n  sourceCharacteristics: [HC.On],\n  options: [],\n  variables: { wasOn: false }\n};\n\nfunction trigger(source, value, variables, options, context) {\n  if (value === true && variables.wasOn === false) {\n    source.getService().getCharacteristic(HC.Brightness).setValue(15);\n  }\n  variables.wasOn = value === true;\n}\n\n/* [sprut-agent:native:a4217bc50e5a931ba2328ef3] */"
+    },
+    "native_write_sent": true,
+    "native_acknowledged": true,
+    "last_verification": {
+      "fresh": true,
+      "checked_at": "2026-09-24T15:30:04.275Z",
+      "result": "applied_logic_source"
+    },
+    "created_at": "2026-09-24T15:30:04.246Z",
+    "updated_at": "2026-09-24T15:30:04.275Z",
+    "history": [
+      {
+        "status": "prepared",
+        "at": "2026-09-24T15:30:04.246Z"
+      },
+      {
+        "status": "applying",
+        "at": "2026-09-24T15:30:04.257Z"
+      },
+      {
+        "status": "applied",
+        "at": "2026-09-24T15:30:04.260Z"
+      }
+    ],
+    "configuration_matches": true,
+    "write_intent": {
+      "direction": "apply",
+      "phase": "reconciled",
+      "acknowledged": true,
+      "at": "2026-09-24T15:30:04.257Z"
+    },
+    "scenario_index": "created-1",
+    "logic_mapping_status": "mapped",
+    "logic_assignment_ready": true,
+    "applied_snapshot": {
+      "index": "created-1",
+      "predefined": false,
+      "name": "Выключенный LOGIC",
+      "desc": "Set the initial brightness once",
+      "active": false,
+      "onStart": false,
+      "sync": false,
+      "type": "LOGIC",
+      "data": "info = {\n  name: \"Bedside start level\",\n  description: \"Set the initial brightness once\",\n  version: \"1.0\",\n  author: \"sprut-agent\",\n  onStart: false,\n  sourceServices: [HS.Lightbulb],\n  sourceCharacteristics: [HC.On],\n  options: [],\n  variables: { wasOn: false }\n};\n\nfunction trigger(source, value, variables, options, context) {\n  if (value === true && variables.wasOn === false) {\n    source.getService().getCharacteristic(HC.Brightness).setValue(15);\n  }\n  variables.wasOn = value === true;\n}\n\n/* [sprut-agent:native:a4217bc50e5a931ba2328ef3] */"
+    },
+    "observed_source_sha256": "3936adff55a9f7438a2236003261d9023db6a0ce2f5a63e738a622727f602a04",
+    "source_exact_match": true,
+    "editable_flags_exact_match": false,
+    "observed_editable_flags": {
+      "name": "Выключенный LOGIC",
+      "description": "Set the initial brightness once",
+      "active": false,
+      "on_start": false,
+      "sync": false,
+      "type": "LOGIC"
+    },
+    "native_logic_type": "OtherLogicType"
+  }
+}
