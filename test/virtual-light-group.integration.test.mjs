@@ -160,6 +160,8 @@ async function startHub() {
           },
         };
       } else if (params.accessory?.list) {
+        // SprutHub 3.0.0 lists accessories without virtual; only
+        // accessory.get reports it (owner hub, 2026-09-24).
         result = {
           accessory: {
             list: {
@@ -169,7 +171,9 @@ async function startHub() {
                     params.accessory.list.roomId === undefined ||
                     roomId === params.accessory.list.roomId,
                 )
-                .map((accessory) => structuredClone(accessory)),
+                .map(({ virtual: _virtual, ...accessory }) =>
+                  structuredClone(accessory),
+                ),
             },
           },
         };
@@ -1578,6 +1582,9 @@ test("a lost accessory-create response is never retried or claimed", async (t) =
     applied.structuredContent.virtual_accessory_creation_owned,
     false,
   );
+  assert.deepEqual(applied.structuredContent.candidate_accessories, [
+    { ref: `${homeRef}/accessory/90`, name: "Общий свет" },
+  ]);
   assert.equal(
     hub.requests.filter(({ accessory }) => accessory?.create).length,
     1,
@@ -1807,6 +1814,27 @@ test("a matching pre-existing virtual light is a conflict, not owned or duplicat
   );
   assert.equal(prepared.structuredContent.owned_change_created, false);
   assert.equal(hub.requests.some(isGroupWrite), false);
+});
+
+test("a physical light with the group's name is not taken for an existing group", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.accessories.push(
+    memberAccessory({ id: 81, sId: 16, name: "Общий свет" }),
+  );
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareGroup(client);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 81).virtual,
+    false,
+  );
 });
 
 test("apply revalidates member bindings before creating the group", async (t) => {
