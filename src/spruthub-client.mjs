@@ -413,7 +413,12 @@ export class SprutHubClient {
     });
     this.#startingObservationClient = candidate;
     try {
-      const result = await candidate.#startNativeObservation(input);
+      // The zone is read on this client, not on the observation's
+      // connection.
+      const result = await candidate.#startNativeObservation(
+        input,
+        (serial, deadline) => this.#hubTimeZone(serial, deadline),
+      );
       const previous = this.#observationClient;
       this.#observationClient = candidate;
       this.#startingObservationClient = undefined;
@@ -428,13 +433,16 @@ export class SprutHubClient {
     }
   }
 
-  async #startNativeObservation({
-    homeRef: selectedHomeRef,
-    characteristicRefs,
-    scenarioRef: selectedScenarioRef,
-    durationSeconds,
-    maxEvents,
-  }) {
+  async #startNativeObservation(
+    {
+      homeRef: selectedHomeRef,
+      characteristicRefs,
+      scenarioRef: selectedScenarioRef,
+      durationSeconds,
+      maxEvents,
+    },
+    readTimeZone,
+  ) {
     if (this.#observation && !isTerminalObservation(this.#observation.status)) {
       throw new SprutHubError(
         "observation_in_progress",
@@ -490,6 +498,9 @@ export class SprutHubClient {
       scenarioIndex: parsedScenario.scenarioIndex,
       durationSeconds,
       maxEvents,
+      // Times are given on this zone's clock, read once at the start; null
+      // keeps UTC.
+      timeZone: null,
       events: [],
       sequence: 0,
       startedAt: null,
@@ -526,6 +537,7 @@ export class SprutHubClient {
         }
       }
       await this.#readEntity(parsedScenario, new Set(), deadline);
+      observation.timeZone = await readTimeZone(serial, deadline);
       const response = await this.#request(
         { scenario: { subscribe: { index: parsedScenario.scenarioIndex } } },
         deadline,
@@ -570,10 +582,12 @@ export class SprutHubClient {
         return this.#observationResult(observation);
       }
       observation.status = "observing";
-      observation.startedAt = new Date().toISOString();
-      observation.endsAt = new Date(
-        Date.now() + durationSeconds * 1_000,
-      ).toISOString();
+      const startedAt = Date.now();
+      observation.startedAt = zonedTimestamp(startedAt, observation.timeZone);
+      observation.endsAt = zonedTimestamp(
+        startedAt + durationSeconds * 1_000,
+        observation.timeZone,
+      );
       observation.timer = setTimeout(() => {
         void this.#finishObservation(
           observation,
@@ -2867,7 +2881,7 @@ export class SprutHubClient {
     if (this.#observation?.status === "observing") {
       this.#observation.connection = {
         status: "lost",
-        lost_at: new Date().toISOString(),
+        lost_at: zonedTimestamp(Date.now(), this.#observation.timeZone),
       };
       void this.#finishObservation(
         this.#observation,
@@ -2893,7 +2907,7 @@ export class SprutHubClient {
   #handleNativeEvent(message) {
     const observation = this.#observation;
     if (observation?.status !== "observing") return;
-    const receivedAt = new Date().toISOString();
+    const receivedAt = zonedTimestamp(Date.now(), observation.timeZone);
     const characteristicEvent = message.event?.characteristic;
     if (characteristicEvent && typeof characteristicEvent === "object") {
       for (const characteristic of characteristicEvent.characteristics ?? []) {
@@ -2946,7 +2960,11 @@ export class SprutHubClient {
 
     const logMessages = message.event?.log?.log;
     for (const log of Array.isArray(logMessages) ? logMessages : []) {
-      const normalized = normalizeScenarioLog(log, observation.scenarioIndex);
+      const normalized = normalizeScenarioLog(
+        log,
+        observation.scenarioIndex,
+        observation.timeZone,
+      );
       if (!normalized || observation.status !== "observing") continue;
       this.#recordObservationEvent(observation, {
         kind: "scenario_log",
@@ -3029,7 +3047,7 @@ export class SprutHubClient {
       "truncated",
       "canceled",
     ].includes(status);
-    observation.endedAt = new Date().toISOString();
+    observation.endedAt = zonedTimestamp(Date.now(), observation.timeZone);
     for (const resolve of observation.waiters) resolve();
     observation.waiters.clear();
     this.#socket?.close();
@@ -3100,6 +3118,7 @@ export class SprutHubClient {
         characteristic_refs: observation.characteristicRefs,
         scenario_ref: observation.scenarioRef,
       },
+      time_zone: observation.timeZone,
       timing: {
         started_at: observation.startedAt,
         planned_end_at: observation.endsAt,
@@ -3117,7 +3136,10 @@ export class SprutHubClient {
       completion_reason: observation.completionReason,
       events: observation.events.map((event) => ({ ...event })),
       limitations: [
-        "received_at is local receipt time; source_timestamp is available only for selected native log messages and comes from their SprutHub time field.",
+        "received_at and timing come from this MCP process's clock: when it received each event and when the observation started and ended. source_timestamp is available only for selected native log messages and comes from their SprutHub time field.",
+        observation.timeZone === null
+          ? UTC_TIMES_LIMITATION
+          : "Times are on the hub's clock with its UTC offset (time_zone), the clock the owner reads.",
         "Characteristic frames are partial events, not complete saved characteristic state.",
         "Event frames did not identify a home; scope comes from keeping this connection selected to the requested home.",
         "Temporal proximity between scenario and characteristic events does not prove causality or physical effect.",
@@ -3139,9 +3161,9 @@ export class SprutHubClient {
   }
 }
 
-function normalizeScenarioLog(log, scenarioIndex) {
+function normalizeScenarioLog(log, scenarioIndex, timeZone) {
   if (!log || typeof log !== "object" || Array.isArray(log)) return null;
-  const sourceTimestamp = nativeLogTimestamp(log.time);
+  const sourceTimestamp = zonedTimestamp(log.time, timeZone);
   if (
     !isScenarioLogMessage(log.path, log.message, scenarioIndex) ||
     !LOG_LEVELS.has(log.level) ||
@@ -3165,6 +3187,10 @@ function nativeLogTimestamp(time) {
   const date = new Date(time);
   return Number.isNaN(date.valueOf()) ? null : date.toISOString();
 }
+
+// Said wherever times stay UTC because the hub's zone could not be read.
+export const UTC_TIMES_LIMITATION =
+  "The hub's time zone could not be read, so times are UTC (ending in Z), not the hub's local clock the owner uses; do not quote them as local time.";
 
 // An instant as ISO 8601 on the wall clock of timeZone with that zone's
 // offset at the instant (2026-09-25T09:42:00.118+03:00); UTC with Z when
