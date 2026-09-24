@@ -40,6 +40,10 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
 ]);
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
+// SprutHub 3.0.0 kept only the first 30 characters of a longer room name on
+// room.create and room.update (owner hub, 2026-09-24). UTF-16 code units
+// are counted, which is never fewer than the characters a hub may count.
+const ROOM_NAME_MAX_LENGTH = 30;
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -372,7 +376,9 @@ export class AutomationService {
 
   async #prepareRoomCreate(input) {
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
-    const name = requiredNativeName(input.name, "room creation").trim();
+    const name = roomNameWithinLimit(
+      requiredNativeName(input.name, "room creation").trim(),
+    );
     const rooms = await this.#listRoomRecords();
     const matching = rooms.filter((room) => room.name === name);
     if (matching.length > 0) {
@@ -5807,6 +5813,7 @@ function accessoryPlacementContract(accessory) {
 function roomCreateContract() {
   return {
     write: "room.create({name})",
+    name: { min_length: 1, max_length: ROOM_NAME_MAX_LENGTH },
     response: "RoomMessage",
     confirmation: "separate_room_get",
     restore:
@@ -5814,9 +5821,10 @@ function roomCreateContract() {
     evidence: {
       create_request: "official_frontend",
       create_response: "bundled_official_protobuf_schema",
-      live_create: false,
+      live_create: "SprutHub 3.0.0 rev 20131, 2026-09-24",
     },
     limitations: [
+      `SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name, so a longer name is refused before any write.`,
       "A lost create response cannot establish ownership from a matching name alone and is never retried blindly.",
       "Room deletion is not attempted when creation ownership, unchanged configuration, or emptiness is unconfirmed.",
     ],
@@ -9622,7 +9630,7 @@ async function inspectRoomName(service, input) {
 async function prepareRoomName(service, input) {
   const draft = nativeNameDraft(
     await inspectRoomName(service, input),
-    input.value,
+    roomNameWithinLimit(requiredNativeName(input.value, "room_name").trim()),
     "room_name",
   );
   if (valuesEqual(draft.value, draft.requested)) return draft;
@@ -9657,8 +9665,22 @@ async function readRoomName(client, target) {
   }
   return {
     value: { value: room.name, kind: "stringValue" },
-    contract: nativeNameContract("RoomName", "separate_room_get_readback"),
+    contract: {
+      ...nativeNameContract("RoomName", "separate_room_get_readback"),
+      max_length: ROOM_NAME_MAX_LENGTH,
+    },
   };
+}
+
+// A longer name is refused before any write instead of being cut.
+function roomNameWithinLimit(name) {
+  if (name.length <= ROOM_NAME_MAX_LENGTH) return name;
+  throw new SprutHubError(
+    "name_too_long",
+    `SprutHub keeps at most ${ROOM_NAME_MAX_LENGTH} characters of a room name, and this name has ${name.length}. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    "prepare_native_change",
+    { max_length: ROOM_NAME_MAX_LENGTH, name_length: name.length },
+  );
 }
 
 async function inspectService(service, input, read) {
@@ -10891,7 +10913,7 @@ function publicNativeChange(
         "A matching room observed after a lost create response is a usable candidate but is not owned by this change.",
         "Deletion is allowed only for a confirmed created room whose configuration is unchanged and which contains no accessories.",
         "A later applied room_name change of this room is named by restore_first_change_ref; restoring it first brings back the created name.",
-        "SprutHub room creation and deletion are schema-confirmed but not live-confirmed in this slice.",
+        `SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name; a longer name is refused before any write.`,
       ],
     };
   }
