@@ -38,6 +38,8 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
   "TargetHeatingCoolingState",
   "C_FanSpeed",
 ]);
+// Accessories read one by one to learn whether they are virtual.
+const VIRTUAL_CANDIDATE_LIMIT = 10;
 
 export class AutomationService {
   #writeSequence = Promise.resolve();
@@ -464,11 +466,10 @@ export class AutomationService {
       ),
     );
     const allAccessories = await this.client.listAccessories();
-    const matching = allAccessories.filter(
-      (accessory) =>
-        accessory.virtual === true &&
-        accessory.roomId === roomId &&
-        accessory.name === name,
+    const matching = await this.#virtualAccessories(
+      allAccessories.filter(
+        (accessory) => accessory.roomId === roomId && accessory.name === name,
+      ),
     );
     if (matching.length > 0) {
       return {
@@ -3104,18 +3105,38 @@ export class AutomationService {
 
   async #matchingVirtualLightCandidates(change, onlyNew = false) {
     const baseline = new Set(change.baseline_accessory_ids);
-    return (await this.client.listAccessories())
-      .filter(
-        (accessory) =>
-          (!onlyNew || !baseline.has(accessory.id)) &&
-          matchesVirtualLightCandidate(accessory, change, {
-            allowNormalizedName: onlyNew,
-          }),
-      )
+    const options = { allowNormalizedName: onlyNew };
+    const listed = (await this.client.listAccessories()).filter(
+      (accessory) =>
+        (!onlyNew || !baseline.has(accessory.id)) &&
+        hasVirtualLightShape(accessory, change, options),
+    );
+    return (await this.#virtualAccessories(listed))
+      .filter((accessory) => hasVirtualLightShape(accessory, change, options))
       .map(({ id, name }) => ({
         ref: `${change.home_ref}/accessory/${id}`,
         name,
       }));
+  }
+
+  // SprutHub 3.0.0 lists accessories without virtual; only accessory.get
+  // reports it (owner hub, 2026-09-24). Accessories picked from the list by
+  // room, name or services are therefore read one by one, and a bound keeps
+  // that to a few reads.
+  async #virtualAccessories(listed) {
+    if (listed.length > VIRTUAL_CANDIDATE_LIMIT) {
+      throw new SprutHubError(
+        "too_many_matching_accessories",
+        `More than ${VIRTUAL_CANDIDATE_LIMIT} accessories in this room match the virtual light by name or services, and SprutHub tells which are virtual only one accessory at a time. Nothing was written; rename or remove some of them first.`,
+        "list_rooms",
+      );
+    }
+    const virtual = [];
+    for (const { id } of listed) {
+      const accessory = await this.client.getAccessoryOrNull(id);
+      if (accessory?.virtual === true) virtual.push(accessory);
+    }
+    return virtual;
   }
 
   async #validateVirtualLightPreparation(change) {
@@ -8133,6 +8154,10 @@ function selectCreatedVirtualLight(accessory, change) {
       { requestSent: true },
     );
   }
+  return createdVirtualLightTarget(accessory, change);
+}
+
+function createdVirtualLightTarget(accessory, change) {
   const services = (accessory.services ?? []).filter(
     ({ type }) => type === "Lightbulb",
   );
@@ -8550,20 +8575,21 @@ function safeRestoringVirtualLightConfiguration(change, observation) {
   return true;
 }
 
-function matchesVirtualLightCandidate(
+// Room, name and services of the light a group change creates. Whether the
+// accessory is virtual is read separately with accessory.get.
+function hasVirtualLightShape(
   accessory,
   change,
   { allowNormalizedName = false } = {},
 ) {
   if (
-    accessory.virtual !== true ||
     accessory.roomId !== change.room_id ||
     (!allowNormalizedName && accessory.name !== change.requested_name)
   ) {
     return false;
   }
   try {
-    selectCreatedVirtualLight(accessory, change);
+    createdVirtualLightTarget(accessory, change);
     return true;
   } catch {
     return false;
