@@ -17473,6 +17473,68 @@ test("a scenario ref of another home is rejected before any scenario request", a
   assert.equal(hub.state.scenarios[0].active, true);
 });
 
+test("a scenario whose active state SprutHub omits is neither switched nor restored on a guess", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  const client = await startClient(t, hub, stateDirectory);
+  const assertIncompatible = (result) => {
+    assert.equal(result.isError, true, result.content[0]?.text);
+    assert.equal(
+      result.structuredContent.error.code,
+      "incompatible_response",
+      result.content[0]?.text,
+    );
+  };
+
+  delete scenario.active;
+  assertIncompatible(
+    await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "scenario_active",
+        target_ref: targetRef,
+        value: true,
+        reason: "Включить сценарий",
+      },
+    }),
+  );
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: targetRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+
+  scenario.active = true;
+  const pending = await prepareScenarioActive(client, targetRef, false);
+  delete scenario.active;
+  assertIncompatible(
+    await client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: pending.change_ref },
+    }),
+  );
+  assert.deepEqual(scenarioUpdates(hub), []);
+
+  scenario.active = true;
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    pending.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  delete scenario.active;
+  assertIncompatible(
+    await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: pending.change_ref },
+    }),
+  );
+  assert.deepEqual(scenarioUpdates(hub), [
+    { index: scenario.index, active: false },
+  ]);
+});
+
 async function turnScenarioOffWithChange(client, targetRef) {
   const prepared = await prepareScenarioActive(client, targetRef, false);
   const applied = await callChangeTool(
