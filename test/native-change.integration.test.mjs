@@ -297,6 +297,12 @@ function installClimateFixture(hub) {
 
 // Models a hub that stores a different name than requested, as it already
 // does for accessory names; the rule itself is unknown, so the test picks one.
+// SprutHub 3.0.0 kept the first 30 characters of a longer room name on
+// room.create and room.update (owner hub, 2026-09-24).
+function storedRoomName(name) {
+  return name.slice(0, 30);
+}
+
 function normalizedRoomOrServiceName(state, name) {
   if (!state.behavior.normalizeNextRoomOrServiceName) return name;
   state.behavior.normalizeNextRoomOrServiceName = false;
@@ -1810,7 +1816,7 @@ async function startHub(port = 0) {
         const room = {
           id: Math.max(...state.rooms.map(({ id }) => id), 0) + 1,
           order: state.rooms.length + 1,
-          name: params.room.create.name,
+          name: storedRoomName(params.room.create.name),
           visible: true,
         };
         state.rooms.push(room);
@@ -1831,7 +1837,9 @@ async function startHub(port = 0) {
         const update = params.room.update;
         const room = state.rooms.find(({ id }) => id === update.id);
         if (room && Object.hasOwn(update, "name")) {
-          room.name = normalizedRoomOrServiceName(state, update.name);
+          room.name = storedRoomName(
+            normalizedRoomOrServiceName(state, update.name),
+          );
         }
         if (room && Object.hasOwn(update, "visible")) {
           room.visible = update.visible;
@@ -18490,6 +18498,87 @@ test("static room discovery does not relax target-dependent reads or preparation
   assert.equal(
     hub.requests.some(({ room }) => room?.create),
     false,
+  );
+});
+
+test("a room name longer than SprutHub keeps is refused before any write, and one at the limit is stored whole", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const longest = "Комната для гостей на мансарде";
+  assert.equal(longest.length, 30);
+  const tooLong = `${longest} у окна`;
+
+  for (const request of [
+    { operation: "room_create", target_ref: homeRef, name: tooLong },
+    { operation: "room_name", target_ref: workshopRoomRef, value: tooLong },
+  ]) {
+    const refused = await client.callTool({
+      name: "prepare_native_change",
+      arguments: { ...request, reason: "Назвать комнату подробно" },
+    });
+    assert.equal(refused.isError, true, request.operation);
+    assert.equal(
+      refused.structuredContent.error.code,
+      "name_too_long",
+      refused.content[0]?.text,
+    );
+    assert.equal(refused.structuredContent.max_length, 30);
+    assert.equal(refused.structuredContent.name_length, tooLong.length);
+  }
+  assert.equal(
+    hub.requests.some(({ room }) => room?.create || room?.update),
+    false,
+  );
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  const createContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "room_create", target_ref: homeRef },
+  });
+  assert.equal(createContract.structuredContent.contract.name.max_length, 30);
+  const renameContract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "room_name", target_ref: workshopRoomRef },
+  });
+  assert.equal(renameContract.structuredContent.contract.max_length, 30);
+
+  const created = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: longest,
+      reason: "Назвать комнату подробно",
+    },
+  });
+  const createdApplied = await callChangeTool(
+    client,
+    "apply_native_change",
+    created.structuredContent.change_ref,
+  );
+  assert.equal(createdApplied.status, "applied");
+  assert.equal(createdApplied.room.name, longest);
+  const renamed = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_name",
+      target_ref: workshopRoomRef,
+      value: `${longest.slice(0, 29)}.`,
+      reason: "Назвать комнату подробно",
+    },
+  });
+  const renamedApplied = await callChangeTool(
+    client,
+    "apply_native_change",
+    renamed.structuredContent.change_ref,
+  );
+  assert.equal(renamedApplied.status, "applied");
+  assert.equal(
+    hub.state.rooms.find(({ id }) => id === 2).name,
+    `${longest.slice(0, 29)}.`,
   );
 });
 
