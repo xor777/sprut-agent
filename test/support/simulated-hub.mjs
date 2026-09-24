@@ -801,12 +801,39 @@ async function loadFixtureFile(file) {
   return JSON.parse(await readFile(file, "utf8"));
 }
 
+// Opt-in hub faults for a case; none is active by default. Their behavior is
+// the simulator's guess at what a live hub does in these situations:
+// - delayedReadback [{aId, sId, cId, ms}]: a value write is acknowledged at
+//   once and its value appears ms later (hub.settle() applies it at once);
+// - droppedReply [{method, aId?, sId?, cId?, times = 1}]: a matching request
+//   is applied and never answered, so the client times out;
+// - stuckActuators [{aId}]: the accessory reads as offline and acknowledges
+//   value writes without changing anything;
+// - lampLogic [{aId, sId}]: an active LightbulbControl logic is assigned to
+//   the service (see applyLampLogic).
 export async function startSimulatedHub(
   fixture,
-  { host = "127.0.0.1", port = 0, token = SIMULATED_HUB_TOKEN } = {},
+  {
+    host = "127.0.0.1",
+    port = 0,
+    token = SIMULATED_HUB_TOKEN,
+    faults = {},
+  } = {},
 ) {
-  const state = buildState(fixture);
+  const state = buildState(withFixtureFaults(fixture, faults));
   const initialState = structuredClone(state);
+  state.faults = {
+    delayedReadback: structuredClone(faults.delayedReadback ?? []),
+    droppedReply: (faults.droppedReply ?? []).map((rule) => ({
+      ...structuredClone(rule),
+      remaining: rule.times ?? 1,
+    })),
+    stuckActuators: new Set(
+      (faults.stuckActuators ?? []).map(({ aId }) => aId),
+    ),
+  };
+  state.faultEvents = [];
+  state.pending = new Set();
   const requests = [];
   // Queued explicit JSON-RPC error replies by method, for tests of a hub that
   // receives a request and refuses it without changing the home.
@@ -845,6 +872,12 @@ export async function startSimulatedHub(
       refusals.set(method, queue);
     },
     touchedMethods: () => touchedMethods(requests),
+    faultEvents: () => structuredClone(state.faultEvents),
+    // Applies delayed writes now, as the hub would have by the time a
+    // grader looks at the home.
+    settle: () => {
+      for (const pending of [...state.pending]) pending.apply();
+    },
     connectionEnv: () => ({
       SPRUTHUB_URL: url,
       SPRUTHUB_TOKEN: token,
@@ -852,12 +885,21 @@ export async function startSimulatedHub(
       SPRUTHUB_CID: SIMULATED_HUB_CID,
     }),
     snapshot: () => homeSnapshot(state),
-    exportState: () => ({
-      ...structuredClone(state),
-      links: Object.fromEntries(state.links),
-    }),
+    exportState: () => {
+      const { pending: _pending, currentRequest: _request, ...rest } = state;
+      return {
+        ...structuredClone(rest),
+        faults: {
+          ...rest.faults,
+          stuckActuators: [...rest.faults.stuckActuators],
+        },
+        links: Object.fromEntries(state.links),
+      };
+    },
     initialSnapshot: () => homeSnapshot(initialState),
     close: async () => {
+      for (const pending of state.pending) clearTimeout(pending.timer);
+      state.pending.clear();
       for (const client of server.clients) client.terminate();
       await new Promise((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -899,6 +941,7 @@ function handleMessage(state, requests, token, raw, refusals) {
   const refusal = refusals.get(method)?.shift();
   if (refusal) return fail(new SimulatorError(refusal.code, refusal.message));
   const handler = HANDLERS[method];
+  state.currentRequest = entry;
   if (!handler) {
     return fail(
       new SimulatorError(-32601, `unsupported by simulator: ${method}`),
@@ -906,7 +949,13 @@ function handleMessage(state, requests, token, raw, refusals) {
   }
   const [domain, operation] = method.split(".");
   try {
-    const value = handler(state, message.params[domain][operation] ?? {});
+    const input = message.params[domain][operation] ?? {};
+    const value = handler(state, input);
+    if (dropsReply(state, method, input)) {
+      recordFault(state, "dropped_reply", entry);
+      entry.replyDropped = true;
+      return null;
+    }
     return {
       id: message.id,
       result: { [domain]: { [operation]: structuredClone(value) } },
@@ -1106,9 +1155,27 @@ const HANDLERS = {
     }
     if (input.control && Object.hasOwn(input.control, "value")) {
       const value = checkedValue(characteristic.control, input.control.value);
-      const changed = !sameValue(characteristic.control.value, value);
-      characteristic.control.value = value;
-      if (changed) propagateVirtualLinks(state, input, value);
+      if (state.faults?.stuckActuators.has(characteristic.aId)) {
+        recordFault(state, "stuck_actuator", state.currentRequest);
+        return {};
+      }
+      const delay = state.faults?.delayedReadback.find((rule) =>
+        sameCharacteristic(rule, characteristic),
+      );
+      if (delay) {
+        recordFault(state, "delayed_readback", state.currentRequest);
+        const pending = {
+          apply: () => {
+            clearTimeout(pending.timer);
+            state.pending.delete(pending);
+            writeValue(state, characteristic, value);
+          },
+        };
+        pending.timer = setTimeout(pending.apply, delay.ms);
+        state.pending.add(pending);
+        return {};
+      }
+      writeValue(state, characteristic, value);
     }
     return {};
   },
@@ -2088,6 +2155,105 @@ function applyOptions(options, updates) {
     }
     option.value = structuredClone(update.value);
   }
+}
+
+function withFixtureFaults(fixture, faults) {
+  const stuck = new Set((faults.stuckActuators ?? []).map(({ aId }) => aId));
+  const lamps = faults.lampLogic ?? [];
+  if (stuck.size === 0 && lamps.length === 0) return fixture;
+  return {
+    ...fixture,
+    accessories: fixture.accessories.map((accessory) =>
+      stuck.has(accessory.id) ? { ...accessory, online: false } : accessory,
+    ),
+    logics: [
+      ...(fixture.logics ?? []),
+      ...lamps.map(({ aId, sId }) => ({
+        aId,
+        sId,
+        type: "LightbulbControl",
+        active: true,
+      })),
+    ],
+  };
+}
+
+function sameCharacteristic(rule, { aId, sId, cId }) {
+  return (
+    rule.aId === aId &&
+    (rule.sId === undefined || rule.sId === sId) &&
+    (rule.cId === undefined || rule.cId === cId)
+  );
+}
+
+function dropsReply(state, method, input) {
+  const rule = state.faults?.droppedReply.find(
+    (candidate) =>
+      candidate.remaining > 0 &&
+      candidate.method === method &&
+      ["aId", "sId", "cId"].every(
+        (key) => candidate[key] === undefined || candidate[key] === input[key],
+      ),
+  );
+  if (!rule) return false;
+  rule.remaining -= 1;
+  return true;
+}
+
+function recordFault(state, fault, entry) {
+  state.faultEvents?.push({
+    fault,
+    seq: entry?.seq ?? null,
+    method: entry?.method ?? null,
+    params: structuredClone(entry?.params ?? null),
+    at: new Date().toISOString(),
+  });
+}
+
+function writeValue(state, characteristic, value) {
+  const changed = !sameValue(characteristic.control.value, value);
+  characteristic.control.value = value;
+  if (changed) {
+    propagateVirtualLinks(state, characteristic, value);
+    applyLampLogic(state, characteristic);
+  }
+}
+
+// LightbulbControl ("Связь включения и уровня") as the simulator guesses it:
+// Brightness 0 turns the lamp off, Brightness above 0 turns it on, and
+// turning it on at Brightness 0 sets Brightness 100.
+function applyLampLogic(state, characteristic) {
+  const { aId, sId } = characteristic;
+  const active = state.logics.some(
+    (logic) =>
+      logic.aId === aId &&
+      logic.sId === sId &&
+      logic.type === "LightbulbControl" &&
+      logic.active,
+  );
+  if (!active) return;
+  const service = requireService(state, aId, sId);
+  const find = (type) =>
+    service.characteristics.find(({ control }) => control.type === type);
+  const on = find("On");
+  const brightness = find("Brightness");
+  if (!on || !brightness) return;
+  let target = null;
+  let value = null;
+  if (characteristic === brightness) {
+    target = on;
+    value = { boolValue: brightness.control.value.intValue > 0 };
+  } else if (
+    characteristic === on &&
+    on.control.value.boolValue === true &&
+    brightness.control.value.intValue === 0
+  ) {
+    target = brightness;
+    value = { intValue: 100 };
+  }
+  if (!target || sameValue(target.control.value, value)) return;
+  target.control.value = value;
+  recordFault(state, "lamp_logic", state.currentRequest);
 }
 
 function propagateVirtualLinks(state, source, value) {

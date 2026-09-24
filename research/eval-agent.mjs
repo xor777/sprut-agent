@@ -96,16 +96,17 @@ export async function main(argv = process.argv.slice(2)) {
 
 export async function runCase({
   caseName,
+  definition = CASES[caseName],
   harness,
   model,
   plugin,
   evidenceRoot,
   timeoutMs,
 }) {
-  const definition = CASES[caseName];
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-eval-run-"));
   const hub = await startSimulatedHub(
     await loadHomeFixture(definition.fixture ?? "apartment"),
+    { faults: definition.faults },
   );
   const startedAt = new Date().toISOString();
   try {
@@ -121,6 +122,7 @@ export async function runCase({
     if (typeof run.answer === "string" && run.answer.length > 0) {
       transcript.answer = run.answer;
     }
+    hub.settle();
     const evidence = collectEvidence(hub, transcript.answer);
     const graders = [
       {
@@ -172,6 +174,8 @@ export async function runCase({
         }),
       ),
       simulator_methods: hub.touchedMethods(),
+      faults: definition.faults ?? null,
+      fault_events: hub.faultEvents(),
       home_changes: evidence.diff,
       hub_writes: hub.requests
         .filter(({ write }) => write)
