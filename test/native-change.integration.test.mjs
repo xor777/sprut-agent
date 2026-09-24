@@ -3950,6 +3950,37 @@ const runnableScenarioCases = [
     verification: "command_acknowledged_effect_not_predicted",
   },
   {
+    key: "runs-another",
+    title: "BLOCK with literal actions that also runs another scenario",
+    install(hub) {
+      lampOn(hub, true);
+      installAllOffScenario(hub);
+      const scenario = {
+        index: "going-out",
+        name: "Выходим",
+        desc: "",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "BLOCK",
+        data: JSON.stringify({
+          targets: [
+            setAction({ value: "false" }),
+            { type: "scenario", index: "all-off", mode: "FIRE" },
+          ],
+        }),
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+    // What the other scenario writes is not read, so the effect of the run
+    // is not predicted even though every listed action is a literal set.
+    targetsKnown: false,
+    targets: [{ characteristic_ref: characteristicRef, value: false }],
+    effect: { predicted: false, reasons: ["targets_unknown"] },
+    verification: "command_acknowledged_effect_not_predicted",
+  },
+  {
     key: "logic",
     title: "LOGIC",
     install(hub) {
