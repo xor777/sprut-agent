@@ -4329,6 +4329,92 @@ test("apply rechecks the exact scenario and never resends a lost run", async (t)
   assert.deepEqual(scenarioRuns(hub), [logic.index]);
 });
 
+test("a LOGIC run does not copy the scenario source into the local journal", async (t) => {
+  const token = "tg-bot-token-5f19c7e2a4";
+  const { hub, stateDirectory } = await setup(t);
+  const logic = installRunnableScenario(hub, "logic");
+  logic.data = `const botToken = "${token}";\n${firstLogicSource}`;
+  const source = logic.data;
+  const journalFile = nativeChangeJournalFile(stateDirectory, hub.url);
+  const firstClient = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareScenarioRun(
+    firstClient,
+    scenarioRefFor(logic),
+    logic.name,
+  );
+  assert.equal((await readFile(journalFile, "utf8")).includes(token), false);
+  const applied = await callChangeTool(
+    firstClient,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  assert.deepEqual(scenarioRuns(hub), [logic.index]);
+
+  const edited = await prepareScenarioRun(
+    firstClient,
+    scenarioRefFor(logic),
+    logic.name,
+  );
+  logic.data = source.replace("setValue(15)", "setValue(40)");
+  const conflict = await callChangeTool(
+    firstClient,
+    "apply_native_change",
+    edited.change_ref,
+  );
+  assert.equal(conflict.status, "conflict");
+  assert.equal(conflict.conflict_reason, "scenario_changed");
+  assert.deepEqual(scenarioRuns(hub), [logic.index]);
+  assert.equal((await readFile(journalFile, "utf8")).includes(token), false);
+
+  // Runs prepared by earlier versions saved the source itself; they are
+  // compared with the hub the same way.
+  logic.data = source;
+  const legacy = [];
+  for (let index = 0; index < 2; index += 1) {
+    legacy.push(
+      await prepareScenarioRun(firstClient, scenarioRefFor(logic), logic.name),
+    );
+  }
+  await firstClient.close();
+  const journal = JSON.parse(await readFile(journalFile, "utf8"));
+  for (const { change_ref: changeRef } of legacy) {
+    journal.changes[
+      changeRef.slice("spruthub-change://native/".length)
+    ].baseline_snapshot = {
+      index: logic.index,
+      predefined: false,
+      name: logic.name,
+      desc: logic.desc,
+      active: true,
+      onStart: false,
+      sync: false,
+      type: "LOGIC",
+      data: source,
+    };
+  }
+  await writeFile(journalFile, `${JSON.stringify(journal, null, 2)}\n`);
+
+  const client = await startClient(t, hub, stateDirectory);
+  const legacyApplied = await callChangeTool(
+    client,
+    "apply_native_change",
+    legacy[0].change_ref,
+  );
+  assert.equal(legacyApplied.status, "applied");
+  assert.deepEqual(scenarioRuns(hub), [logic.index, logic.index]);
+  logic.data = source.replace("setValue(15)", "setValue(40)");
+  const legacyConflict = await callChangeTool(
+    client,
+    "apply_native_change",
+    legacy[1].change_ref,
+  );
+  assert.equal(legacyConflict.status, "conflict");
+  assert.equal(legacyConflict.conflict_reason, "scenario_changed");
+  assert.deepEqual(scenarioRuns(hub), [logic.index, logic.index]);
+});
+
 test("an action-only BLOCK can be created without running and restoration removes only its configuration", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const fixture = installNativeCommandFixture(hub);
