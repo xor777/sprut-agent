@@ -503,6 +503,9 @@ export async function startSimulatedHub(
   const state = buildState(fixture);
   const initialState = structuredClone(state);
   const requests = [];
+  // Queued explicit JSON-RPC error replies by method, for tests of a hub that
+  // receives a request and refuses it without changing the home.
+  const refusals = new Map();
   const server = new WebSocketServer({
     host,
     port,
@@ -512,7 +515,7 @@ export async function startSimulatedHub(
   await once(server, "listening");
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {
-      const reply = handleMessage(state, requests, token, raw);
+      const reply = handleMessage(state, requests, token, raw, refusals);
       if (reply) socket.send(JSON.stringify(reply));
     });
   });
@@ -526,6 +529,16 @@ export async function startSimulatedHub(
     initialState,
     requests,
     writes: () => requests.filter(({ write }) => write),
+    refuseNext: (method, error) => {
+      const queue = refusals.get(method) ?? [];
+      queue.push(
+        error ?? {
+          code: -32601,
+          message: `unsupported by simulator: ${method}`,
+        },
+      );
+      refusals.set(method, queue);
+    },
     connectionEnv: () => ({
       SPRUTHUB_URL: url,
       SPRUTHUB_TOKEN: token,
@@ -547,7 +560,7 @@ export async function startSimulatedHub(
   };
 }
 
-function handleMessage(state, requests, token, raw) {
+function handleMessage(state, requests, token, raw, refusals) {
   let message;
   try {
     message = JSON.parse(raw.toString());
@@ -577,6 +590,8 @@ function handleMessage(state, requests, token, raw) {
   if (method !== "hub.list" && message.serial !== state.hub.serial) {
     return fail(new SimulatorError(-32000, "Unknown hub serial"));
   }
+  const refusal = refusals.get(method)?.shift();
+  if (refusal) return fail(new SimulatorError(refusal.code, refusal.message));
   const handler = HANDLERS[method];
   if (!handler) {
     return fail(
