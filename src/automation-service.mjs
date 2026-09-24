@@ -6154,7 +6154,7 @@ async function validateBlockData(
   const context = {
     kept,
     removedNodes: edit === null ? null : removedBlockNodes(edit),
-    grownOrGroups: edit === null ? [] : grownOrGroups(data, edit),
+    grownOrGroups: edit === null ? [] : grownOrGroups(data, edit, editedFrom),
     problems: [],
     conditions: [],
     actions: [],
@@ -6591,20 +6591,53 @@ function sameServiceDevice(node, stored) {
 // their mode stays OR. The web client makes every group OR, which over one
 // condition means that condition; over several, any one of them runs the
 // branch, which the preview names so that the agent says so or sets AND.
-function grownOrGroups(data, edit) {
-  const grown = [];
-  visitKnownBlockNodes(data, (node, kind, path) => {
-    const stored = edit.counterparts.get(node);
+// A group without a stored counterpart, as when rules without blockIds
+// pair by position with another rule, grew from a stored one-condition OR
+// group the edit does not keep whose condition it holds.
+function grownOrGroups(data, edit, stored) {
+  const oneConditionOr = (group) =>
+    isRecord(group) &&
+    group.mode === "OR" &&
+    Array.isArray(group.conditions) &&
+    group.conditions.length <= 1;
+  const keptStored = new WeakSet();
+  const markKept = (value) => {
+    if (value === null || typeof value !== "object") return;
+    keptStored.add(value);
+    for (const child of Object.values(value)) markKept(child);
+  };
+  for (const node of edit.keptAs.values()) markKept(node);
+  // The conditions of stored one-condition OR groups the edit does not keep.
+  const sources = new Set();
+  visitKnownBlockNodes(stored, (node, kind) => {
     if (
       kind === "condition" &&
-      node.mode === "OR" &&
-      Array.isArray(node.conditions) &&
-      node.conditions.length > 1 &&
-      isRecord(stored) &&
-      stored.mode === "OR" &&
-      Array.isArray(stored.conditions) &&
-      stored.conditions.length <= 1
+      oneConditionOr(node) &&
+      node.conditions.length === 1 &&
+      !keptStored.has(node)
     ) {
+      sources.add(stableJson(canonicalBlockNode(node.conditions[0])));
+    }
+  });
+  const grown = [];
+  visitKnownBlockNodes(data, (node, kind, path) => {
+    if (
+      kind !== "condition" ||
+      edit.kept.has(node) ||
+      node.mode !== "OR" ||
+      !Array.isArray(node.conditions) ||
+      node.conditions.length <= 1
+    ) {
+      return;
+    }
+    const counterpart = edit.counterparts.get(node);
+    const grewFromStored =
+      counterpart === undefined
+        ? node.conditions.some((condition) =>
+            sources.has(stableJson(canonicalBlockNode(condition))),
+          )
+        : oneConditionOr(counterpart);
+    if (grewFromStored) {
       grown.push({
         pointer: blockPathToPointer(path),
         conditions: node.conditions.length,
