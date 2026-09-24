@@ -68,12 +68,10 @@ function assertEveryRequestSupported(hub) {
 test("public read tools see the simulated apartment as a native home", async (t) => {
   const { hub, client } = await setup(t);
 
-  const homes = await call(client, "list_homes", {});
-  assert.equal(homes.selection.default_home_ref, homeRef);
-
-  const inspected = await call(client, "inspect_home", { home_ref: homeRef });
+  const inspected = await call(client, "home_overview", {});
+  assert.equal(inspected.home.ref, homeRef);
   assert.deepEqual(
-    inspected.entities.rooms.map(({ name }) => name),
+    inspected.rooms.map(({ name }) => name),
     [
       "Прихожая",
       "Коридор",
@@ -86,27 +84,16 @@ test("public read tools see the simulated apartment as a native home", async (t)
       "Балкон",
     ],
   );
-  assert.deepEqual(
-    inspected.entities.scenarios.map(({ name, type, active }) => [
-      name,
-      type,
-      active,
-    ]),
-    [
-      ["Свет в коридоре по движению", "BLOCK", true],
-      ["Ночной режим", "BLOCK", true],
-      ["Свет в прихожей при открытии двери", "BLOCK", false],
-      ["Выключить свет в кабинете", "BLOCK", true],
-      ["Защита от протечки", "LOGIC", true],
-      ["Всё выключить", "BLOCK", true],
-      ["Кнопка у кровати: ночник", "BLOCK", true],
-      ["Кнопка у кровати: спать", "BLOCK", true],
-      ["Вечерний свет в гостиной", "BLOCK", true],
-    ],
-  );
+  assert.deepEqual(inspected.scenarios, {
+    total: 9,
+    by_type: {
+      BLOCK: { active: 7, inactive: 1 },
+      LOGIC: { active: 1, inactive: 0 },
+    },
+  });
   assert.ok(
-    inspected.entities.extensions.some(
-      ({ key }) => key === "Controller:zigbee",
+    inspected.extensions.some(
+      ({ ref }) => ref === `${homeRef}/extension/Controller%3Azigbee`,
     ),
   );
 
@@ -228,8 +215,8 @@ test("the house fixture keeps the apartment and serves a double-scale home to th
   }
   assert.ok(pages > 1);
   assert.ok(seen.size >= 160);
-  const inspected = await call(client, "inspect_home", { home_ref: houseRef });
-  assert.equal(inspected.entities.rooms.length, hub.state.rooms.length);
+  const inspected = await call(client, "home_overview", { home_ref: houseRef });
+  assert.equal(inspected.rooms.length, hub.state.rooms.length);
   assertEveryRequestSupported(hub);
   assert.deepEqual(hub.writes(), []);
   t.diagnostic(`house read_services: ${pages} pages, ${bytes} bytes`);

@@ -444,7 +444,7 @@ test("ordinary reads stay available without changing an active observation home"
   const client = await startClient(t, hub, { serial: null });
   const started = await startObservation(client, { duration_seconds: 2 });
 
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({ name: "home_overview", arguments: {} });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.deepEqual(
     homes.structuredContent.homes.map(({ ref }) => ref),
@@ -456,7 +456,7 @@ test("ordinary reads stay available without changing an active observation home"
       name: "get_entity",
       arguments: { entity_ref: characteristicRef },
     },
-    { name: "inspect_home", arguments: { home_ref: homeRef } },
+    { name: "home_overview", arguments: { home_ref: homeRef } },
     {
       name: "read_services",
       arguments: {

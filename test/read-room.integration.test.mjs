@@ -310,6 +310,17 @@ async function startHub(initialState = hubState) {
         return;
       }
 
+      if (request.params?.scenario?.list || request.params?.extension?.list) {
+        const [domain] = Object.keys(request.params);
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: { [domain]: { list: {} } },
+          }),
+        );
+        return;
+      }
+
       socket.send(
         JSON.stringify({
           id: request.id,
@@ -456,10 +467,8 @@ test("MCP discovers every room before reading the selected stable reference", as
   assert.deepEqual(
     tools.tools.map(({ name }) => name),
     [
-      "list_homes",
-      "inspect_home",
+      "home_overview",
       "get_entity",
-      "list_rooms",
       "preview_boolean_automation",
       "apply_automation_change",
       "get_scenario_sdk",
@@ -484,10 +493,8 @@ test("MCP discovers every room before reading the selected stable reference", as
   );
   for (const tool of tools.tools.filter(({ name }) =>
     [
-      "list_homes",
-      "inspect_home",
+      "home_overview",
       "get_entity",
-      "list_rooms",
       "get_automation_change",
       "read_services",
     ].includes(name),
@@ -501,18 +508,22 @@ test("MCP discovers every room before reading the selected stable reference", as
   }
 
   const catalog = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
-  assert.equal(catalog.isError, undefined);
-  assert.deepEqual(catalog.structuredContent.rooms, [
-    { ref: "spruthub://hub/test-hub/room/10", name: " Кухня " },
-    { ref: "spruthub://hub/test-hub/room/20", name: "Гостиная" },
-    { ref: "spruthub://hub/test-hub/room/30", name: "Office" },
-    { ref: "spruthub://hub/test-hub/room/31", name: "1 - Офис" },
-    { ref: "spruthub://hub/test-hub/room/40", name: "Кладовая" },
-    { ref: "spruthub://hub/test-hub/room/41", name: "Кладовая" },
-  ]);
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.deepEqual(
+    catalog.structuredContent.rooms.map(({ ref, name }) => ({ ref, name })),
+    [
+      { ref: "spruthub://hub/test-hub/room/10", name: " Кухня " },
+      { ref: "spruthub://hub/test-hub/room/20", name: "Гостиная" },
+      { ref: "spruthub://hub/test-hub/room/30", name: "Office" },
+      { ref: "spruthub://hub/test-hub/room/31", name: "1 - Офис" },
+      { ref: "spruthub://hub/test-hub/room/40", name: "Кладовая" },
+      { ref: "spruthub://hub/test-hub/room/41", name: "Кладовая" },
+    ],
+  );
+  const overviewRequests = hub.requests.length;
 
   const result = await client.callTool({
     name: "read_services",
@@ -584,23 +595,26 @@ test("MCP discovers every room before reading the selected stable reference", as
   assert.equal(reading.freshness.measurementAt, null);
   assert.match(reading.freshness.hubResponseReceivedAt, /^\d{4}-\d{2}-\d{2}T/);
 
-  assert.deepEqual(hub.requests, [
+  assert.deepEqual(
+    hub.requests.slice(0, overviewRequests).map(({ params }) => params),
+    [
+      { hub: { list: {} } },
+      { room: { list: {} } },
+      { accessory: { list: { expand: "services,characteristics" } } },
+      { scenario: { list: {} } },
+      { extension: { list: {} } },
+    ],
+  );
+  assert.deepEqual(hub.requests.slice(overviewRequests), [
     {
-      id: 1,
-      token: "synthetic-test-token",
-      serial: "test-hub",
-      cid: "sprut-agent-test",
-      params: { room: { list: {} } },
-    },
-    {
-      id: 2,
+      id: overviewRequests + 1,
       token: "synthetic-test-token",
       serial: "test-hub",
       cid: "sprut-agent-test",
       params: { room: { get: { id: 10 } } },
     },
     {
-      id: 3,
+      id: overviewRequests + 2,
       token: "synthetic-test-token",
       serial: "test-hub",
       cid: "sprut-agent-test",
@@ -1162,7 +1176,7 @@ test("read_services rejects cross-home scope and restarts an invalid bounded roo
     code: "invalid_service_scope",
     message: "room_ref must identify a room in the selected home_ref.",
     retryable: false,
-    action: "inspect_home",
+    action: "home_overview",
   });
   assert.equal(hub.requests.length, 0);
 
@@ -1695,14 +1709,26 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
   const client = await startMcpClient(t, hub);
 
   const catalog = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.deepEqual(catalog.structuredContent.rooms.slice(2), [
-    { ref: "spruthub://hub/test-hub/room/30", name: "Office" },
-    { ref: "spruthub://hub/test-hub/room/31", name: "1 - Офис" },
-    { ref: "spruthub://hub/test-hub/room/40", name: "Кладовая" },
-    { ref: "spruthub://hub/test-hub/room/41", name: "Кладовая" },
+    { ref: "spruthub://hub/test-hub/room/30", name: "Office", device_count: 0 },
+    {
+      ref: "spruthub://hub/test-hub/room/31",
+      name: "1 - Офис",
+      device_count: 0,
+    },
+    {
+      ref: "spruthub://hub/test-hub/room/40",
+      name: "Кладовая",
+      device_count: 0,
+    },
+    {
+      ref: "spruthub://hub/test-hub/room/41",
+      name: "Кладовая",
+      device_count: 1,
+    },
   ]);
 
   const selected = await client.callTool({
@@ -1729,9 +1755,9 @@ test("room catalog keeps duplicate and prefixed names for agent-side selection",
     assert.deepEqual(invalid.structuredContent.error, {
       code: "invalid_entity_ref",
       message:
-        "Use a home-qualified reference returned by list_homes, inspect_home, or get_entity.",
+        "Use a home-qualified reference returned by home_overview, read_services, or get_entity.",
       retryable: false,
-      action: "inspect_home",
+      action: "home_overview",
     });
   }
 });
@@ -1795,7 +1821,7 @@ test("empty, missing, incompatible, and unavailable room data remain distinct", 
       code: "room_not_found",
       message: "The selected SprutHub room was not found.",
       retryable: false,
-      action: "inspect_home",
+      action: "home_overview",
     },
   });
   assert.deepEqual(
@@ -1861,7 +1887,7 @@ test("incomplete room and service identifiers never become stable references", a
     incompatibleCatalogHub,
   );
   const incompatibleCatalog = await incompatibleCatalogClient.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.deepEqual(incompatibleCatalog.structuredContent.error, {
@@ -1876,7 +1902,7 @@ test("incomplete room and service identifiers never become stable references", a
   });
   const incompleteRoomClient = await startMcpClient(t, incompleteRoomHub);
   const incompleteRoom = await incompleteRoomClient.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(incompleteRoom.isError, true);

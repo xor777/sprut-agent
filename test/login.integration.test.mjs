@@ -391,7 +391,10 @@ test("the checkout MCP config returns credential setup and reads a configured ho
   await client.connect(transport);
   t.after(() => client.close());
 
-  const result = await client.callTool({ name: "list_homes", arguments: {} });
+  const result = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
 
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error.code, "configuration");
@@ -425,11 +428,11 @@ test("the checkout MCP config returns credential setup and reads a configured ho
   await configuredClient.connect(configuredTransport);
   t.after(() => configuredClient.close());
   const homes = await configuredClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
-  assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
+  assert.equal(homes.structuredContent.home.ref, "spruthub://hub/home%2FA");
   const room = await readRoomServices(
     configuredClient,
     "spruthub://hub/home%2FA/room/1",
@@ -458,7 +461,7 @@ test("the checkout MCP config returns credential setup and reads a configured ho
   await restartedClient.connect(restartedTransport);
   t.after(() => restartedClient.close());
   const restartedHomes = await restartedClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(
@@ -467,7 +470,7 @@ test("the checkout MCP config returns credential setup and reads a configured ho
     restartedHomes.content[0]?.text,
   );
   assert.equal(
-    restartedHomes.structuredContent.homes[0].ref,
+    restartedHomes.structuredContent.home.ref,
     "spruthub://hub/home%2FA",
   );
   assert.equal(
@@ -501,20 +504,20 @@ test("an installed multi-home profile explains and completes explicit home selec
 
   const client = await startInstalledProfileClient(t, configRoot);
   await client.listTools();
-  const blocked = await client.callTool({
-    name: "list_rooms",
-    arguments: {},
-  });
-  assert.equal(blocked.isError, true);
-  assert.equal(blocked.structuredContent.error.code, "home_selection_required");
-  assert.equal(blocked.structuredContent.error.action, "list_homes");
-  assert.deepEqual(blocked.structuredContent.next, {
-    tool: "list_homes",
-    arguments: {},
-  });
-
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({ name: "home_overview", arguments: {} });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
+  // Without a pinned home the overview explains the choice instead of
+  // reading one of the homes.
+  assert.equal(Object.hasOwn(homes.structuredContent, "rooms"), false);
+  assert.equal(homes.structuredContent.selection.required, true);
+  assert.deepEqual(
+    homes.structuredContent.homes.map(({ ref }) => ref),
+    ["spruthub://hub/home%2FA", "spruthub://hub/home%20B"],
+  );
+  assert.equal(
+    hub.requests.some(({ params }) => params.room?.list),
+    false,
+  );
   assert.deepEqual(homes.structuredContent.selection.options, [
     { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
     { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
@@ -533,11 +536,12 @@ test("an installed multi-home profile explains and completes explicit home selec
     { mode: 0o600 },
   );
   const restarted = await startInstalledProfileClient(t, configRoot);
-  const selectedHomes = await restarted.callTool({
-    name: "list_homes",
+  const rooms = await restarted.callTool({
+    name: "home_overview",
     arguments: {},
   });
-  assert.deepEqual(selectedHomes.structuredContent.selection, {
+  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  assert.deepEqual(rooms.structuredContent.selection, {
     required: false,
     default_home_ref: "spruthub://hub/home%20B",
     options: [
@@ -545,11 +549,6 @@ test("an installed multi-home profile explains and completes explicit home selec
       { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
     ],
   });
-  const rooms = await restarted.callTool({
-    name: "list_rooms",
-    arguments: {},
-  });
-  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
   assert.equal(
     rooms.structuredContent.rooms[0].ref,
     "spruthub://hub/home%20B/room/1",
@@ -560,7 +559,7 @@ test("an installed multi-home profile explains and completes explicit home selec
   );
 });
 
-test("installed list_rooms preserves a delayed login and a later user retry", async (t) => {
+test("an installed overview preserves a delayed login and a later user retry", async (t) => {
   const hub = await startHub(t, { delayFirstConnection: true });
   const directory = await mkdtemp(path.join(tmpdir(), "sprut delayed-login-"));
   t.after(() => rm(directory, { recursive: true }));
@@ -581,7 +580,7 @@ test("installed list_rooms preserves a delayed login and a later user retry", as
   const client = await startInstalledProfileClient(t, configRoot);
   await client.listTools();
   const delayed = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(delayed.isError, true);
@@ -590,7 +589,7 @@ test("installed list_rooms preserves a delayed login and a later user retry", as
   assert.equal(delayed.structuredContent.retry_after_seconds, 1);
 
   const recovered = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
@@ -618,11 +617,16 @@ test("an invalid file pin keeps the home catalog and explicit reads available", 
   );
 
   const client = await startInstalledProfileClient(t, configRoot);
-  const blocked = await client.callTool({ name: "list_rooms", arguments: {} });
-  assert.equal(blocked.isError, true);
-  assert.equal(blocked.structuredContent.error.code, "home_selection_required");
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.equal(Object.hasOwn(catalog.structuredContent, "rooms"), false);
+  assert.equal(
+    catalog.structuredContent.selection.reason,
+    "configured_home_unavailable",
+  );
   assert.deepEqual(catalog.structuredContent.selection.options, [
     { home_ref: "spruthub://hub/home%2FA", pin_value: "home/A" },
     { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
@@ -630,7 +634,7 @@ test("an invalid file pin keeps the home catalog and explicit reads available", 
   assert.equal(catalog.structuredContent.selection.pin.file, connectionFile);
 
   const explicit = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%20B" },
   });
   assert.equal(explicit.isError, undefined, explicit.content[0]?.text);
@@ -647,8 +651,12 @@ test("an invalid file pin keeps the home catalog and explicit reads available", 
     { mode: 0o600 },
   );
   const restarted = await startInstalledProfileClient(t, configRoot);
-  const rooms = await restarted.callTool({ name: "list_rooms", arguments: {} });
+  const rooms = await restarted.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  assert.equal(rooms.structuredContent.home.ref, "spruthub://hub/home%20B");
   assert.equal(
     hub.requests.filter(({ params }) => params.room?.list).at(-1).serial,
     "home B",
@@ -661,7 +669,10 @@ test("an invalid pin for one home still exposes the exact replacement", async (t
     serial: "missing-home",
   });
 
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.deepEqual(catalog.structuredContent.selection, {
     required: true,
@@ -696,14 +707,14 @@ test("an empty file pin is treated as no selection for a single home", async (t)
   );
 
   const client = await startInstalledProfileClient(t, configRoot);
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
-  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.deepEqual(catalog.structuredContent.selection, {
-    required: false,
-    default_home_ref: "spruthub://hub/home%2FA",
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: {},
   });
-  const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
-  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
+  assert.equal(catalog.structuredContent.home.ref, "spruthub://hub/home%2FA");
+  assert.equal(Object.hasOwn(catalog.structuredContent, "selection"), false);
+  assert.equal(catalog.structuredContent.rooms[0].name, "Офис");
 });
 
 for (const omitEmptyHomeList of [false, true]) {
@@ -712,7 +723,7 @@ for (const omitEmptyHomeList of [false, true]) {
     const client = await startClient(t, hub, await withSessionPath(t));
 
     const catalog = await client.callTool({
-      name: "list_homes",
+      name: "home_overview",
       arguments: {},
     });
     assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
@@ -721,10 +732,7 @@ for (const omitEmptyHomeList of [false, true]) {
       required: false,
       reason: "no_available_homes",
     });
-    const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
-    assert.equal(rooms.isError, true);
-    assert.equal(rooms.structuredContent.error.code, "no_homes_available");
-    assert.equal(rooms.structuredContent.error.action, "check_home_access");
+    assert.equal(Object.hasOwn(catalog.structuredContent, "home"), false);
   });
 }
 
@@ -746,7 +754,10 @@ test("a complete MCP environment points home selection back to that environment"
     configRoot,
     connectionEnv,
   );
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.deepEqual(catalog.structuredContent.selection.pin, {
     source: "environment",
@@ -760,7 +771,10 @@ test("a complete MCP environment points home selection back to that environment"
     ...connectionEnv,
     SPRUTHUB_SERIAL: "home B",
   });
-  const rooms = await restarted.callTool({ name: "list_rooms", arguments: {} });
+  const rooms = await restarted.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
   assert.equal(
     hub.requests.filter(({ params }) => params.room?.list).at(-1).serial,
@@ -791,7 +805,10 @@ test("an environment home pin wins over credentials loaded from the profile", as
   const client = await startInstalledProfileClient(t, configRoot, {
     SPRUTHUB_SERIAL: "missing-home",
   });
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
   assert.equal(
     catalog.structuredContent.selection.reason,
@@ -809,7 +826,7 @@ test("an environment home pin wins over credentials loaded from the profile", as
     SPRUTHUB_SERIAL: "home B",
   });
   const rooms = await restarted.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
@@ -867,7 +884,7 @@ test("a partial profile preserves safe credential guidance without reflecting cr
     t.after(() => client.close());
 
     const result = await client.callTool({
-      name: "list_homes",
+      name: "home_overview",
       arguments: {},
     });
     const credentialSetup = {
@@ -922,14 +939,11 @@ test("a partial profile preserves safe credential guidance without reflecting cr
     await configuredClient.connect(configuredTransport);
     t.after(() => configuredClient.close());
     const homes = await configuredClient.callTool({
-      name: "list_homes",
+      name: "home_overview",
       arguments: {},
     });
     assert.equal(homes.isError, undefined, homes.content[0]?.text);
-    assert.equal(
-      homes.structuredContent.homes[0].ref,
-      "spruthub://hub/home%2FA",
-    );
+    assert.equal(homes.structuredContent.home.ref, "spruthub://hub/home%2FA");
   }
 });
 
@@ -986,10 +1000,10 @@ test("explicit connection environment wins over conflicting file values", async 
   await client.connect(transport);
   t.after(() => client.close());
 
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({ name: "home_overview", arguments: {} });
 
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
-  assert.equal(homes.structuredContent.homes[0].ref, "spruthub://hub/home%2FA");
+  assert.equal(homes.structuredContent.home.ref, "spruthub://hub/home%2FA");
   const room = await readRoomServices(client, "spruthub://hub/home%2FA/room/1");
   assert.equal(room.isError, undefined, room.content[0]?.text);
   assert.equal(room.structuredContent.services[0].readings[0].value, 22.5);
@@ -1070,7 +1084,7 @@ test("complete explicit credentials ignore an unsafe default file", async (t) =>
       t.after(() => client.close());
 
       const homes = await client.callTool({
-        name: "list_homes",
+        name: "home_overview",
         arguments: {},
       });
       assert.equal(homes.isError, undefined, homes.content[0]?.text);
@@ -1128,7 +1142,7 @@ test("an incomplete explicit profile takes missing and blank values from the fil
   });
   await partialClient.connect(new StdioClientTransport(launch()));
   const homes = await partialClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
@@ -1153,12 +1167,12 @@ test("an incomplete explicit profile takes missing and blank values from the fil
   );
   t.after(() => blankClient.close());
   const blankHomes = await blankClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(blankHomes.isError, undefined, blankHomes.content[0]?.text);
   assert.equal(
-    blankHomes.structuredContent.homes[0].ref,
+    blankHomes.structuredContent.home.ref,
     "spruthub://hub/home%2FA",
   );
   assert.equal(passwordAnswers(), answeredBefore + 1);
@@ -1210,7 +1224,7 @@ test("a client template with blank connection variables uses the filled file", a
   );
   t.after(() => client.close());
 
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({ name: "home_overview", arguments: {} });
 
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.deepEqual(homes.structuredContent.selection, {
@@ -1265,7 +1279,10 @@ test("an unsafe credential file returns one fixable local error", async (t) => {
   await client.connect(transport);
   t.after(() => client.close());
 
-  const failed = await client.callTool({ name: "list_homes", arguments: {} });
+  const failed = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
 
   assert.equal(failed.isError, true);
   assert.equal(
@@ -1287,14 +1304,11 @@ test("an unsafe credential file returns one fixable local error", async (t) => {
   await repairedClient.connect(repairedTransport);
   t.after(() => repairedClient.close());
   const repaired = await repairedClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(repaired.isError, undefined, repaired.content[0]?.text);
-  assert.equal(
-    repaired.structuredContent.homes[0].ref,
-    "spruthub://hub/home%2FA",
-  );
+  assert.equal(repaired.structuredContent.home.ref, "spruthub://hub/home%2FA");
 });
 
 test("challenge login serves concurrent public reads and a restart reuses the session", async (t) => {
@@ -1303,9 +1317,9 @@ test("challenge login serves concurrent public reads and a restart reuses the se
   const client = await startClient(t, hub, sessionFile);
 
   const [catalog, overview] = await Promise.all([
-    client.callTool({ name: "list_homes", arguments: {} }),
+    client.callTool({ name: "home_overview", arguments: {} }),
     client.callTool({
-      name: "inspect_home",
+      name: "home_overview",
       arguments: { home_ref: "spruthub://hub/home%2FA" },
     }),
   ]);
@@ -1334,7 +1348,7 @@ test("challenge login serves concurrent public reads and a restart reuses the se
   await client.close();
   const restarted = await startClient(t, hub, sessionFile);
   const restartedCatalog = await restarted.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(
@@ -1355,9 +1369,12 @@ test("challenge login serves concurrent public reads and a restart reuses the se
 test("a rejected password stops once without exposing authentication data", async (t) => {
   const hub = await startHub(t, { outcome: "rejected" });
   const client = await startClient(t, hub, await withSessionPath(t));
-  const result = await client.callTool({ name: "list_homes", arguments: {} });
+  const result = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   const repeated = await client.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
 
@@ -1403,7 +1420,10 @@ test("a password loaded from the default file stays hidden in a hub rejection", 
   const client = new Client({ name: "file-redaction-test", version: "1.0.0" });
   await client.connect(transport);
   t.after(() => client.close());
-  const result = await client.callTool({ name: "list_homes", arguments: {} });
+  const result = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error.code, "authentication_failed");
   for (const secret of [login, password, token]) {
@@ -1414,7 +1434,10 @@ test("a password loaded from the default file stays hidden in a hub rejection", 
 test("password enrollment stops without answering on the user's behalf", async (t) => {
   const hub = await startHub(t, { outcome: "enroll" });
   const client = await startClient(t, hub, await withSessionPath(t));
-  const result = await client.callTool({ name: "list_homes", arguments: {} });
+  const result = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
 
   assert.equal(result.isError, true);
   assert.equal(
@@ -1439,7 +1462,7 @@ test("a write-bound home does not restrict explicit reads or follow their select
     serial: "home/A",
   });
   const catalog = await client.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
@@ -1468,7 +1491,7 @@ test("a write-bound home does not restrict explicit reads or follow their select
   );
 
   const defaultRooms = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(defaultRooms.isError, undefined, defaultRooms.content[0]?.text);
@@ -1518,7 +1541,10 @@ test("a stalled WebSocket handshake returns a bounded error without killing MCP"
   });
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = await client.callTool({ name: "list_homes", arguments: {} });
+    const result = await client.callTool({
+      name: "home_overview",
+      arguments: {},
+    });
     assert.equal(result.isError, true);
     assert.equal(result.structuredContent.error.code, "timeout");
     assert.equal(result.structuredContent.error.retryable, true);
@@ -1529,17 +1555,20 @@ test("a new MCP call starts a fresh auth flow after transport recovery", async (
   const hub = await startHub(t, { dropFirstConnection: true });
   const client = await startClient(t, hub, await withSessionPath(t));
 
-  const failed = await client.callTool({ name: "list_homes", arguments: {} });
+  const failed = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(failed.isError, true);
   assert.equal(failed.structuredContent.error.code, "connection_closed");
   assert.equal(failed.structuredContent.error.retryable, true);
 
   const recovered = await client.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
-  assert.equal(recovered.structuredContent.homes.length, 1);
+  assert.equal(recovered.structuredContent.home.ref, "spruthub://hub/home%2FA");
   assert.equal(hub.connectionCount, 3);
   assert.equal(
     hub.requests.filter(({ params }) => params.account?.auth).length,
@@ -1555,14 +1584,17 @@ test("a server delay allows a fresh user-initiated auth flow", async (t) => {
   const hub = await startHub(t, { delayFirstConnection: true });
   const client = await startClient(t, hub, await withSessionPath(t));
 
-  const delayed = await client.callTool({ name: "list_homes", arguments: {} });
+  const delayed = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(delayed.isError, true);
   assert.equal(delayed.structuredContent.error.code, "authentication_delayed");
   assert.equal(delayed.structuredContent.error.retryable, true);
   assert.equal(delayed.structuredContent.retry_after_seconds, 1);
 
   const recovered = await client.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
@@ -1576,32 +1608,36 @@ test("a null auth frame is contained and a later MCP call can recover", async (t
   const hub = await startHub(t, { nullFirstAuth: true });
   const client = await startClient(t, hub, await withSessionPath(t));
 
-  const invalid = await client.callTool({ name: "list_homes", arguments: {} });
+  const invalid = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(invalid.isError, true);
   assert.equal(invalid.structuredContent.error.code, "invalid_message");
   assert.equal(invalid.structuredContent.error.retryable, true);
 
   const recovered = await client.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);
-  assert.equal(recovered.structuredContent.homes.length, 1);
+  assert.equal(recovered.structuredContent.home.ref, "spruthub://hub/home%2FA");
 });
 
 test("a null ordinary RPC frame does not kill MCP or block the next read", async (t) => {
   const hub = await startHub(t, { nullFirstRoomList: true });
   const client = await startClient(t, hub, await withSessionPath(t));
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
-  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
 
-  const invalid = await client.callTool({ name: "list_rooms", arguments: {} });
+  const invalid = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(invalid.isError, true);
   assert.equal(invalid.structuredContent.error.code, "invalid_message");
   assert.equal(invalid.structuredContent.error.retryable, true);
 
   const recovered = await client.callTool({
-    name: "list_rooms",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(recovered.isError, undefined, recovered.content[0]?.text);

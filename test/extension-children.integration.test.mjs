@@ -832,19 +832,15 @@ test("controller children outside rooms are found with settings and a linked acc
   const client = await startClient(t, hub);
 
   const overview = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: homeRef },
   });
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
-  const controller = overview.structuredContent.entities.extensions.find(
+  const controller = overview.structuredContent.extensions.find(
     ({ name }) => name === "Шлюз Xiaomi",
   );
   assert.equal(controller.ref, xiaomiRef);
   assert.equal(controller.child_count, 3);
-  assert.equal(
-    controller.main_window_ref,
-    `${homeRef}/window/${encodeURIComponent("Controller/xiaomi_air/main")}`,
-  );
   assert.equal(Object.hasOwn(controller, "spaces"), false);
   assert.equal(Object.hasOwn(controller, "children"), false);
 
@@ -858,6 +854,10 @@ test("controller children outside rooms are found with settings and a linked acc
   assert.equal(extensionEntity.type, "xiaomi");
   assert.equal(extensionEntity.bundle_type, "CONTROLLER");
   assert.equal(extensionEntity.child_count, 3);
+  assert.equal(
+    extensionEntity.main_window_ref,
+    `${homeRef}/window/${encodeURIComponent("Controller/xiaomi_air/main")}`,
+  );
   assert.deepEqual(
     extensionEntity.spaces.map(({ key, type, label }) => ({
       key,
@@ -1452,8 +1452,8 @@ test("a pointer into unread children keeps the include read failure", async (t) 
   assertIncludeReadPointerError(unsupported, {
     code: "unsupported",
     retryable: false,
-    action: "inspect_home",
-    next: { tool: "inspect_home", arguments: { home_ref: homeRef } },
+    action: "home_overview",
+    next: { tool: "home_overview", arguments: { home_ref: homeRef } },
   });
   assert.notDeepEqual(
     unsupported.structuredContent.next,

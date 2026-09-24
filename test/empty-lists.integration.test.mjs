@@ -315,15 +315,11 @@ test("a home with nothing set up yet reads as empty", async (t) => {
   const hub = await startHub(t, { rooms: [], accessories: [] });
   const client = await startClient(t, hub);
 
-  const rooms = await call(client, "list_rooms", {});
-  assert.deepEqual(rooms.rooms, []);
-
-  const home = await call(client, "inspect_home", { home_ref: homeRef });
-  assert.deepEqual(home.entities, {
-    rooms: [],
-    scenarios: [],
-    extensions: [],
-  });
+  const home = await call(client, "home_overview", { home_ref: homeRef });
+  assert.deepEqual(home.rooms, []);
+  assert.deepEqual(home.scenarios, { total: 0, by_type: {} });
+  assert.deepEqual(home.extensions, []);
+  assert.deepEqual(home.problems, []);
 
   const services = await call(client, "read_services", {
     home_ref: homeRef,
@@ -430,7 +426,7 @@ test("a list reply without its list object or with a non-array list is not an em
     method === "room.list" ? { room: { list: { rooms: null } } } : undefined,
   );
   assert.equal(
-    (await callError(client, "list_rooms", {})).code,
+    (await callError(client, "home_overview", {})).code,
     "incompatible_response",
   );
 });

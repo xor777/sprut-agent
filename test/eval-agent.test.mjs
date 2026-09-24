@@ -63,7 +63,7 @@ async function call(name, input) {
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: result.content, is_error: result.isError === true }] } });
   return result.structuredContent;
 }
-const homeRef = (await call("list_homes", {})).selection.default_home_ref;
+const homeRef = (await call("home_overview", {})).home.ref;
 if (process.env.SCRIPTED_AGENT_READ) {
   emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: process.env.SCRIPTED_AGENT_READ } }] } });
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_read", content: "text", is_error: false }] } });
@@ -1930,7 +1930,7 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
           id: "item_2",
           type: "mcp_tool_call",
           server: "sprut-agent",
-          tool: "list_homes",
+          tool: "home_overview",
           arguments: {},
           result: { content: [{ type: "text", text: "{}" }] },
           error: null,
@@ -1961,7 +1961,7 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
     ]),
     [
       ["shell", false, Buffer.byteLength("скилл")],
-      ["mcp__sprut-agent__list_homes", true, 2],
+      ["mcp__sprut-agent__home_overview", true, 2],
     ],
   );
   assert.equal(codex.answer, "21,4 °C");
@@ -2013,7 +2013,7 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
               {
                 type: "tool_use",
                 id: "call_1",
-                name: "mcp__sprut-agent__list_homes",
+                name: "mcp__sprut-agent__home_overview",
                 input: {},
               },
             ],

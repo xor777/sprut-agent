@@ -55,19 +55,18 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
   await client.connect(transport);
 
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 24);
+  assert.equal(tools.tools.length, 22);
   assert.equal(
-    tools.tools.some(({ name }) => name === "list_homes"),
+    tools.tools.some(({ name }) => name === "home_overview"),
     true,
   );
 
-  const rooms = await client.callTool({ name: "list_rooms", arguments: {} });
-  assert.equal(rooms.isError, true);
-  assert.equal(rooms.structuredContent.error.action, "configure_credentials");
-  assert.equal(rooms.structuredContent.missing_field, "SPRUTHUB_LOGIN");
-
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(homes.isError, true);
+  assert.equal(homes.structuredContent.missing_field, "SPRUTHUB_LOGIN");
   assert.equal(homes.structuredContent.error.action, "configure_credentials");
   assert.deepEqual(homes.structuredContent.credential_setup, {
     file: path.join(configRoot, "sprut-agent", "connection.env"),

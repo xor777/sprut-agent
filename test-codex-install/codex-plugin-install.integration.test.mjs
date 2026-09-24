@@ -123,26 +123,26 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
 
   const firstClient = await startInstalledClient(effectiveTransport, userHome);
   const homes = await firstClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(
-    homes.structuredContent.homes[0].ref,
+    homes.structuredContent.home.ref,
     "spruthub://hub/installed-home",
   );
-  const rooms = await firstClient.callTool({
-    name: "list_rooms",
-    arguments: {},
-  });
-  assert.equal(rooms.isError, undefined, rooms.content[0]?.text);
+  const rooms = homes;
   assert.deepEqual(rooms.structuredContent.rooms, [
-    { ref: "spruthub://hub/installed-home/room/1", name: "Офис" },
+    {
+      ref: "spruthub://hub/installed-home/room/1",
+      name: "Офис",
+      device_count: 1,
+    },
   ]);
   const catalog = await firstClient.callTool({
     name: "read_services",
     arguments: {
-      home_ref: homes.structuredContent.homes[0].ref,
+      home_ref: homes.structuredContent.home.ref,
       representation: "catalog",
     },
   });
@@ -160,7 +160,7 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   const office = await firstClient.callTool({
     name: "read_services",
     arguments: {
-      home_ref: homes.structuredContent.homes[0].ref,
+      home_ref: homes.structuredContent.home.ref,
       room_ref: rooms.structuredContent.rooms[0].ref,
       max_bytes: 32_768,
     },
@@ -187,7 +187,7 @@ test("Codex installs the complete plugin, reads the office, and keeps the connec
   const restartedTransport = await getEffectiveTransport(cli, installedRoot);
   const secondClient = await startInstalledClient(restartedTransport, userHome);
   const restartedHomes = await secondClient.callTool({
-    name: "list_homes",
+    name: "home_overview",
     arguments: {},
   });
   assert.equal(
@@ -319,9 +319,12 @@ test("installation reports an occupied product MCP name and works after explicit
     installation.installedPath,
   );
   const client = await startInstalledClient(effectiveTransport, userHome);
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
-  assert.equal(homes.structuredContent.homes[0].name, "Дом");
+  assert.equal(homes.structuredContent.home.name, "Дом");
   await client.close();
 });
 
@@ -512,10 +515,13 @@ test("Codex completes the transition from the prior manual skill without removin
     installation.installedPath,
   );
   const client = await startInstalledClient(effectiveTransport, userHome);
-  const homes = await client.callTool({ name: "list_homes", arguments: {} });
+  const homes = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
   assert.equal(
-    homes.structuredContent.homes[0].ref,
+    homes.structuredContent.home.ref,
     "spruthub://hub/installed-home",
   );
   await client.close();
@@ -717,6 +723,11 @@ async function startHub(t) {
             },
           },
         });
+        return;
+      }
+      if (params.scenario?.list || params.extension?.list) {
+        const [domain] = Object.keys(params);
+        reply(socket, request.id, { [domain]: { list: {} } });
         return;
       }
       assert.fail(`unsupported SprutHub request: ${JSON.stringify(params)}`);

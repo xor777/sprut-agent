@@ -697,16 +697,16 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
   const hub = await startHub();
   const client = await startClient(t, hub);
 
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
-  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.deepEqual(
-    catalog.structuredContent.homes.map(({ ref, name }) => ({ ref, name })),
-    [
-      { ref: "spruthub://hub/home%2FA", name: "Одинаковый дом" },
-      { ref: "spruthub://hub/home%20B", name: "Одинаковый дом" },
-    ],
-  );
-  assert.deepEqual(catalog.structuredContent.selection, {
+  const overview = await client.callTool({
+    name: "home_overview",
+    arguments: { home_ref: "spruthub://hub/home%20B" },
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  assert.deepEqual(overview.structuredContent.homes, [
+    { ref: "spruthub://hub/home%2FA", name: "Одинаковый дом", online: true },
+    { ref: "spruthub://hub/home%20B", name: "Одинаковый дом", online: true },
+  ]);
+  assert.deepEqual(overview.structuredContent.selection, {
     required: false,
     default_home_ref: "spruthub://hub/home%2FA",
     options: [
@@ -714,20 +714,13 @@ test("home-qualified discovery keeps matching local IDs in different homes separ
       { home_ref: "spruthub://hub/home%20B", pin_value: "home B" },
     ],
   });
-  assert.equal(catalog.structuredContent.homes[0].access.ownership, "unknown");
-  assert.equal(
-    catalog.structuredContent.homes[0].access.native_owner,
-    "owner-a@example.invalid",
-  );
-
-  const overview = await client.callTool({
-    name: "inspect_home",
-    arguments: { home_ref: "spruthub://hub/home%20B" },
-  });
-  assert.equal(overview.isError, undefined, overview.content[0]?.text);
   assert.equal(overview.structuredContent.home.ref, "spruthub://hub/home%20B");
-  assert.deepEqual(overview.structuredContent.entities.rooms, [
-    { ref: "spruthub://hub/home%20B/room/1", name: "Гостиная" },
+  assert.deepEqual(overview.structuredContent.rooms, [
+    {
+      ref: "spruthub://hub/home%20B/room/1",
+      name: "Гостиная",
+      device_count: 1,
+    },
   ]);
   const room = await client.callTool({
     name: "get_entity",
@@ -2349,7 +2342,7 @@ test("get_entity resolves every requested include at the common entity boundary"
       entity_ref: "spruthub://hub/home%2FA",
       expectedApplied: [],
       expectedNext: {
-        tool: "inspect_home",
+        tool: "home_overview",
         arguments: { home_ref: "spruthub://hub/home%2FA" },
       },
     },
@@ -2578,7 +2571,7 @@ test("get_entity non-option next reads advance through known safe owner refs", a
   const homeOutcome =
     home.structuredContent.entity.include_resolution.not_applied[0];
   assert.deepEqual(homeOutcome.next, {
-    tool: "inspect_home",
+    tool: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
   const catalog = await client.callTool({
@@ -2586,7 +2579,7 @@ test("get_entity non-option next reads advance through known safe owner refs", a
     arguments: homeOutcome.next.arguments,
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.ok(catalog.structuredContent.entities.scenarios.length > 0);
+  assert.ok(catalog.structuredContent.scenarios.total > 0);
 
   const window = await client.callTool({
     name: "get_entity",
@@ -2677,10 +2670,10 @@ test("extension refs preserve native instance identity", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
   const overview = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
-  const bridgeRefs = overview.structuredContent.entities.extensions
+  const bridgeRefs = overview.structuredContent.extensions
     .filter(({ type }) => type === "yandex")
     .map(({ ref }) => ref);
   assert.deepEqual(bridgeRefs, [
@@ -2704,7 +2697,7 @@ test("extension catalog rejects missing and conflicting native identity", async 
   delete hub.states.get("home/A").extensions[0].extensionKey;
   const client = await startClient(t, hub);
   const result = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
   assert.equal(result.isError, true);
@@ -2725,7 +2718,7 @@ test("extension catalog rejects missing and conflicting native identity", async 
   extensions[1].extensionKey = extensions[0].extensionKey;
   const duplicateClient = await startClient(t, duplicateHub);
   const catalog = await duplicateClient.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
   assert.equal(catalog.isError, true);
@@ -2790,9 +2783,10 @@ test("native secrets are redacted from structured and text output", async (t) =>
     },
   });
   const overview = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
   const block = await client.callTool({
     name: "get_entity",
     arguments: {
@@ -3157,32 +3151,19 @@ test("freshness belongs to each completed native response", async (t) => {
   );
 });
 
-test("coverage names only observed operations and -32601 is unsupported", async (t) => {
+test("the overview is observed after its slowest native response and -32601 is unsupported", async (t) => {
   const hub = await startHub();
   hub.behavior.delayExtensionMs = 50;
   const client = await startClient(t, hub);
   const overview = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
-  const coverageByOperation = new Map(
-    overview.structuredContent.coverage.map((item) => [item.operation, item]),
-  );
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
   const extensionSentAt = hub.responseSentAt.findLast(({ request }) =>
     Boolean(request.params.extension?.list),
   ).at;
-  assert(
-    Date.parse(coverageByOperation.get("room.list").observed_at) <
-      extensionSentAt,
-  );
-  assert(
-    Date.parse(coverageByOperation.get("extension.list").observed_at) >=
-      extensionSentAt,
-  );
-  assert.deepEqual(
-    overview.structuredContent.coverage.map(({ operation }) => operation),
-    ["hub.list", "room.list", "scenario.list", "extension.list"],
-  );
+  assert(Date.parse(overview.structuredContent.observed_at) >= extensionSentAt);
   hub.behavior.unsupportedScenarioGet = true;
   const unsupported = await client.callTool({
     name: "get_entity",
@@ -3228,9 +3209,9 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   });
   assert.equal(missing.isError, true, missing.content[0]?.text);
   assert.equal(missing.structuredContent.error.code, "entity_not_found");
-  assert.equal(missing.structuredContent.error.action, "inspect_home");
+  assert.equal(missing.structuredContent.error.action, "home_overview");
   assert.deepEqual(missing.structuredContent.next, {
-    tool: "inspect_home",
+    tool: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
 
@@ -3263,14 +3244,8 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
     arguments: missing.structuredContent.next.arguments,
   });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  assert.deepEqual(
-    catalog.structuredContent.entities.scenarios.map(({ ref }) => ref),
-    [
-      "spruthub://hub/home%2FA/scenario/motion-block",
-      "spruthub://hub/home%2FA/scenario/global-code",
-      "spruthub://hub/home%2FA/scenario/only-on-A",
-    ],
-  );
+  assert.equal(catalog.structuredContent.home.ref, "spruthub://hub/home%2FA");
+  assert.equal(catalog.structuredContent.scenarios.total, 3);
 
   hub.behavior.scenarioGetErrors.set("motion-block", {
     code: -32603,
@@ -3298,7 +3273,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(otherHome.isError, true);
   assert.equal(otherHome.structuredContent.error.code, "entity_not_found");
   assert.deepEqual(otherHome.structuredContent.next, {
-    tool: "inspect_home",
+    tool: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%20B" },
   });
 
@@ -3312,7 +3287,7 @@ test("get_entity confirms a deleted scenario from catalog absence instead of a g
   assert.equal(explicitNull.isError, true);
   assert.equal(explicitNull.structuredContent.error.code, "entity_not_found");
   assert.deepEqual(explicitNull.structuredContent.next, {
-    tool: "inspect_home",
+    tool: "home_overview",
     arguments: { home_ref: "spruthub://hub/home%2FA" },
   });
 

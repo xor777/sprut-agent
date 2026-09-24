@@ -3773,7 +3773,7 @@ test("an unsupported scenario run is a persisted explicit rejection", async (t) 
   assert.deepEqual(persisted.structuredContent.command_delivery, {
     status: "rejected",
     native_acknowledged: false,
-    rejection: { code: "unsupported", action: "inspect_home" },
+    rejection: { code: "unsupported", action: "home_overview" },
     physical_delivery: "not_proven",
     atomic: false,
   });

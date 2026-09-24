@@ -633,34 +633,33 @@ test("selected home empty optionsWindow is an executable settings window with hu
   const hub = await startHub(t);
   const client = await startClient(t, hub);
 
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
+  const catalog = await client.callTool({
+    name: "home_overview",
+    arguments: { home_ref: selectedHomeRef },
+  });
   assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  const selected = catalog.structuredContent.homes.find(
-    ({ ref }) => ref === selectedHomeRef,
-  );
-  const other = catalog.structuredContent.homes.find(
-    ({ ref }) => ref === otherHomeRef,
-  );
+  const selected = catalog.structuredContent.home;
   assert.equal(selected.options_window_ref, selectedRootWindowRef);
-  assert.equal(Object.hasOwn(other, "options_window_ref"), false);
   const catalogText = JSON.stringify(catalog.structuredContent);
   assert.equal(catalogText.includes(hubClock), false);
   assert.equal(catalogText.includes(wifiSecret), false);
   assert.equal(catalogText.includes("padding-"), false);
 
-  const overview = await client.callTool({
-    name: "inspect_home",
-    arguments: { home_ref: selectedHomeRef },
+  const other = await client.callTool({
+    name: "home_overview",
+    arguments: { home_ref: otherHomeRef },
   });
-  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  assert.equal(other.isError, undefined, other.content[0]?.text);
   assert.equal(
-    overview.structuredContent.home.options_window_ref,
-    selectedRootWindowRef,
+    Object.hasOwn(other.structuredContent.home, "options_window_ref"),
+    false,
   );
 
   const window = await client.callTool({
     name: "get_entity",
-    arguments: { entity_ref: selected.options_window_ref },
+    arguments: {
+      entity_ref: selected.options_window_ref,
+    },
   });
   assert.equal(window.isError, undefined, window.content[0]?.text);
   const entity = window.structuredContent.entity;
@@ -887,32 +886,37 @@ test("empty device and extension windows are not the hub settings window", async
   const hub = await startHub(t, ownerContrastInventory());
   const client = await startClient(t, hub);
 
-  const catalog = await client.callTool({ name: "list_homes", arguments: {} });
-  assert.equal(catalog.isError, undefined, catalog.content[0]?.text);
-  const selected = catalog.structuredContent.homes.find(
-    ({ ref }) => ref === selectedHomeRef,
-  );
-  assert.equal(selected.options_window_ref, selectedRootWindowRef);
-
   const overview = await client.callTool({
-    name: "inspect_home",
+    name: "home_overview",
     arguments: { home_ref: selectedHomeRef },
   });
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
-  const emptyExtension = overview.structuredContent.entities.extensions.find(
+  assert.equal(
+    overview.structuredContent.home.options_window_ref,
+    selectedRootWindowRef,
+  );
+  const emptyExtension = overview.structuredContent.extensions.find(
     ({ ref }) => ref === emptyExtensionRef,
   );
-  const populatedExtension =
-    overview.structuredContent.entities.extensions.find(
-      ({ ref }) => ref === populatedExtensionRef,
-    );
-  assert.equal(emptyExtension.options_window_ref, null);
-  assert.equal(Object.hasOwn(emptyExtension, "main_window_ref"), false);
+  assert.ok(emptyExtension);
+
+  const populatedEntity = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: populatedExtensionRef },
+  });
   assert.equal(
-    populatedExtension.options_window_ref,
+    populatedEntity.isError,
+    undefined,
+    populatedEntity.content[0]?.text,
+  );
+  assert.equal(
+    populatedEntity.structuredContent.entity.options_window_ref,
     populatedOptionsWindowRef,
   );
-  assert.equal(populatedExtension.main_window_ref, populatedMainWindowRef);
+  assert.equal(
+    populatedEntity.structuredContent.entity.main_window_ref,
+    populatedMainWindowRef,
+  );
 
   const emptyExtensionEntity = await client.callTool({
     name: "get_entity",
@@ -963,7 +967,7 @@ test("empty device and extension windows are not the hub settings window", async
   const populatedListed = await client.callTool({
     name: "get_entity",
     arguments: {
-      entity_ref: populatedExtension.ref,
+      entity_ref: populatedExtensionRef,
       include: ["children"],
     },
   });
@@ -1072,7 +1076,9 @@ test("empty device and extension windows are not the hub settings window", async
 
   const homeWindow = await client.callTool({
     name: "get_entity",
-    arguments: { entity_ref: selected.options_window_ref },
+    arguments: {
+      entity_ref: overview.structuredContent.home.options_window_ref,
+    },
   });
   assert.equal(homeWindow.isError, undefined, homeWindow.content[0]?.text);
   assert.equal(
