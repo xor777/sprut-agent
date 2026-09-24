@@ -117,11 +117,7 @@ export class AutomationService {
       };
     }
     if (input.operation === "scenario_run") {
-      const target = parseScenarioRef(input.target_ref, this.hubSerial);
-      const scenario = await this.client.getScenario(target.index);
-      if (!scenario) throw scenarioNotFound();
-      const snapshot = scenarioSnapshot(scenario);
-      await validateScenarioRun(snapshot, this.client);
+      await this.#readRunnableScenario(input.target_ref);
       return {
         status: "ok",
         operation: input.operation,
@@ -754,12 +750,24 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
-  async #prepareScenarioRun(input) {
-    const target = parseScenarioRef(input.target_ref, this.hubSerial);
+  async #readRunnableScenario(targetRef) {
+    const target = parseScenarioRef(targetRef, this.hubSerial);
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) throw scenarioNotFound();
-    const snapshot = scenarioSnapshot(scenario);
-    const targets = await validateScenarioRun(snapshot, this.client);
+    const snapshot = runnableScenarioSnapshot(scenario);
+    if (!snapshot.active) throw inactiveScenarioRun(targetRef);
+    return { target, snapshot };
+  }
+
+  async #prepareScenarioRun(input) {
+    const { target, snapshot } = await this.#readRunnableScenario(
+      input.target_ref,
+    );
+    const plan = await scenarioRunPlan(
+      snapshot,
+      this.client,
+      configuredHomeRef(this.hubSerial),
+    );
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -771,7 +779,7 @@ export class AutomationService {
       target,
       reason: input.reason,
       baseline_snapshot: snapshot,
-      targets,
+      ...plan,
       native_write_sent: false,
       native_acknowledged: false,
       run_delivery: { status: "not_sent" },
@@ -3605,9 +3613,11 @@ export class AutomationService {
     }
     if (change.status !== "prepared") return publicStoredNativeChange(change);
     const scenario = await this.client.getScenario(change.target.index);
+    const current =
+      scenario === null ? null : runnableScenarioSnapshot(scenario);
     if (
-      scenario === null ||
-      !snapshotsEqual(scenarioSnapshot(scenario), change.baseline_snapshot)
+      current === null ||
+      !snapshotsEqual(current, change.baseline_snapshot)
     ) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "scenario_changed",
@@ -3615,11 +3625,12 @@ export class AutomationService {
         last_verification: freshVerification("scenario_changed"),
       });
     }
-    const targets = await validateScenarioRun(
-      scenarioSnapshot(scenario),
+    const plan = await scenarioRunPlan(
+      current,
       this.client,
+      configuredHomeRef(this.hubSerial),
     );
-    if (!isDeepStrictEqual(targets, change.targets)) {
+    if (!isDeepStrictEqual(plan, storedScenarioRunPlan(change))) {
       return this.#finishNative(change, "conflict", undefined, {
         conflict_reason: "scenario_changed",
         configuration_matches: false,
@@ -3656,7 +3667,7 @@ export class AutomationService {
       target_observations: observations,
       configuration_matches: true,
       last_verification: freshVerification(
-        scenarioRunObservationResult(observations),
+        scenarioRunObservationResult(change, observations),
       ),
     });
   }
@@ -3681,7 +3692,10 @@ export class AutomationService {
       const scenario = await this.client.getScenario(change.target.index);
       configurationMatches =
         scenario !== null &&
-        snapshotsEqual(scenarioSnapshot(scenario), change.baseline_snapshot);
+        snapshotsEqual(
+          runnableScenarioSnapshot(scenario),
+          change.baseline_snapshot,
+        );
       verification = freshVerification(
         configurationMatches
           ? "scenario_unchanged"
@@ -5226,6 +5240,20 @@ function scenarioNotFound() {
   );
 }
 
+function inactiveScenarioRun(targetRef) {
+  return new SprutHubError(
+    "scenario_inactive",
+    "This scenario is turned off. A manual run of a turned-off scenario has not been observed on SprutHub, so it is not sent. scenario_active turns it on and also re-arms its triggers; do that only if the owner wants it on, then prepare scenario_run again.",
+    "get_native_change_contract",
+    {
+      next: {
+        tool: "get_native_change_contract",
+        arguments: { operation: "scenario_active", target_ref: targetRef },
+      },
+    },
+  );
+}
+
 function unsupportedScenarioType() {
   return new SprutHubError(
     "unsupported_scenario_type",
@@ -5422,17 +5450,19 @@ function blockContract() {
 
 function scenarioRunContract() {
   return {
-    version: "2026-09-13",
+    version: "2026-09-24",
     write: "scenario.run({index})",
-    scope: "one_action_only_light_off_BLOCK",
-    required_configuration: {
-      type: "BLOCK",
-      active: true,
-      on_start: false,
-      sync: false,
-      targets: "literal_Lightbulb_On_false_service_set_actions_only",
+    scope: "any_active_scenario",
+    required_configuration: { active: true },
+    preparation: "read_without_execution",
+    effect: {
+      targets:
+        "literal service/set actions of a BLOCK that resolve to writable characteristics",
+      targets_known:
+        "false for LOGIC, GLOBAL and other types, and for BLOCK code, non-literal values, unresolved bindings, or uninterpreted nodes and fields",
+      predicted:
+        "true only for a BLOCK with known targets and no conditions, delays, or repeated targets; otherwise effect.reasons names what the hub decides during the run",
     },
-    preparation: "read_and_validate_without_execution",
     repeat:
       "one send per prepared change; prepare a new change for each explicit run",
     delivery: {
@@ -5448,13 +5478,17 @@ function scenarioRunContract() {
     restore_supported: false,
     evidence: {
       live_hub_version: "3.0.0b (20131)",
-      action_only_create_read: true,
-      explicit_repeat_run: true,
-      live_targets: 2,
+      live_run:
+        "active action-only BLOCK with two Lightbulb On=false targets, including an explicit repeat run",
+      not_observed: [
+        "a run of a turned-off scenario",
+        "whether a run evaluates or bypasses BLOCK conditions and triggers",
+        "delays, LOGIC, GLOBAL, and other scenario types",
+      ],
     },
     limitations: [
-      "Only active action-only Lightbulb On=false BLOCK scenarios with onStart=false and sync=false are supported.",
-      "Arbitrary code, conditions, delays, child scenarios, and unknown action nodes are rejected.",
+      "A turned-off scenario is refused because its manual run has not been observed; scenario_active turns it on and also re-arms its triggers.",
+      "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write, and read_hub_log with the scenario_ref shows what it did.",
       "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
       "SprutHub exposes no native compare-and-set; a race remains after the pre-run scenario check.",
     ],
@@ -5841,50 +5875,133 @@ function publicEnumCoverageValue(entry) {
   };
 }
 
-async function validateScenarioRun(snapshot, client) {
-  if (snapshot.type !== "BLOCK") throw unsupportedScenarioType();
-  const context = await validateBlockData(snapshot.data, client, {
-    allowUnknownFrom: null,
-    allowActionOnly: true,
-  });
-  if (
-    !isLiteralActionOnlyBlock(snapshot.data) ||
-    context.conditions.length > 0
-  ) {
-    throw new SprutHubError(
-      "unsupported_scenario_run",
-      "Only a BLOCK containing literal service/set targets and no conditions, delays, or code can be run by this path.",
-      "get_native_change_contract",
-    );
+// A run plan reports what can be read from the scenario before the hub runs
+// it. It never limits what may be run: the owner's request does.
+async function scenarioRunPlan(snapshot, client, homeRef) {
+  if (snapshot.type !== "BLOCK") {
+    return {
+      targets: [],
+      targets_known: false,
+      effect: { predicted: false, reasons: ["targets_unknown"] },
+    };
   }
-  requireActionOnlyRuntime(snapshot, context, "unsupported_scenario_run");
-  const homeRef = configuredHomeRef(client.serial);
-  const targets = context.actions.map((action) => ({
+  const shape = blockRunShape(snapshot.data);
+  const accessories = new Map();
+  const targets = [];
+  for (const action of shape.actions) {
+    if (!accessories.has(action.aId)) {
+      accessories.set(action.aId, await client.getAccessoryOrNull(action.aId));
+    }
+    const target = resolvedRunTarget(
+      action,
+      accessories.get(action.aId),
+      homeRef,
+    );
+    if (target) targets.push(target);
+  }
+  const targetsKnown =
+    shape.complete && targets.length === shape.actions.length;
+  const refs = new Set(targets.map((target) => target.characteristic_ref));
+  const reasons = [
+    ...(shape.conditions ? ["conditions_evaluated_by_hub"] : []),
+    ...(shape.delays ? ["delayed_actions"] : []),
+    ...(targetsKnown ? [] : ["targets_unknown"]),
+    ...(refs.size === targets.length ? [] : ["repeated_target"]),
+  ];
+  return {
+    targets,
+    targets_known: targetsKnown,
+    effect:
+      reasons.length === 0
+        ? { predicted: true }
+        : { predicted: false, reasons },
+  };
+}
+
+function blockRunShape(data) {
+  const shape = {
+    actions: [],
+    conditions: false,
+    delays: false,
+    // An uninterpreted field may change what an action writes.
+    complete: isRecord(data) && collectUnknownBlockFields(data).length === 0,
+  };
+  visitKnownBlockNodes(
+    data,
+    (node, kind) => {
+      if (
+        ["if", "condition", "characteristic", "interval", "code"].includes(kind)
+      ) {
+        shape.conditions = true;
+      }
+      if (kind === "delay") shape.delays = true;
+      if (kind !== "service" || !Array.isArray(node.characteristics)) return;
+      for (const action of node.characteristics) {
+        // Other child types reach the invalid-child callback below.
+        if (!isRecord(action) || action.type !== "set") continue;
+        if (
+          typeof action.value !== "string" ||
+          ![node.aId, node.sId, action.cId].every(
+            (id) => Number.isSafeInteger(id) && id >= 0,
+          )
+        ) {
+          shape.complete = false;
+          continue;
+        }
+        shape.actions.push({
+          aId: node.aId,
+          sId: node.sId,
+          cId: action.cId,
+          hs: node.hs,
+          hc: action.hc,
+          value: action.value,
+        });
+      }
+    },
+    () => {
+      shape.complete = false;
+    },
+  );
+  return shape;
+}
+
+function resolvedRunTarget(action, accessory, homeRef) {
+  const service = accessory?.services?.find(({ sId }) => sId === action.sId);
+  const control = service?.characteristics?.find(
+    ({ cId }) => cId === action.cId,
+  )?.control;
+  if (!control || service.type !== action.hs || control.type !== action.hc) {
+    return null;
+  }
+  let expected;
+  try {
+    const contract = characteristicContract(control, { requireWrite: true });
+    const value = parseBlockValue(action.value, contract.kind);
+    validateCharacteristicValue(value, contract);
+    expected = { value, kind: contract.kind };
+  } catch (error) {
+    if (error instanceof SprutHubError) return null;
+    throw error;
+  }
+  return {
     characteristic_ref: `${homeRef}/accessory/${action.aId}/service/${action.sId}/characteristic/${action.cId}`,
     target: { aId: action.aId, sId: action.sId, cId: action.cId },
     service_type: action.hs,
     characteristic_type: action.hc,
-    expected_value: {
-      value: action.parsed_value,
-      kind: action.contract_kind,
-    },
-  }));
-  const refs = targets.map(({ characteristic_ref: ref }) => ref);
-  if (new Set(refs).size !== refs.length) {
-    throw new SprutHubError(
-      "unsupported_scenario_run",
-      "A runnable native command must set each target characteristic at most once.",
-      "get_native_change_contract",
-    );
-  }
-  return targets;
+    expected_value: expected,
+  };
 }
 
-function requireActionOnlyRuntime(
-  snapshot,
-  validation,
-  code = "invalid_native_change",
-) {
+// Changes prepared before SPRUT-141 held only literal action-only BLOCKs.
+function storedScenarioRunPlan(change) {
+  return {
+    targets: change.targets,
+    targets_known: change.targets_known ?? true,
+    effect: change.effect ?? { predicted: true },
+  };
+}
+
+function requireActionOnlyRuntime(snapshot, validation) {
   if (validation.triggers > 0) return;
   if (
     snapshot.active === true &&
@@ -5894,7 +6011,7 @@ function requireActionOnlyRuntime(
     return;
   }
   throw new SprutHubError(
-    code,
+    "invalid_native_change",
     "An action-only native command must be active with onStart=false and sync=false.",
     "get_native_change_contract",
   );
@@ -8260,7 +8377,11 @@ function scenarioRunFailure(error) {
   };
 }
 
-function scenarioRunObservationResult(observations) {
+function scenarioRunObservationResult(change, observations) {
+  if (!storedScenarioRunPlan(change).effect.predicted) {
+    // Values that differ from a conditional or code action are not a failure.
+    return "command_acknowledged_effect_not_predicted";
+  }
   if (observations.every(({ matches }) => matches === true)) {
     return "command_acknowledged_and_target_values_observed";
   }
@@ -8364,6 +8485,37 @@ function scenarioSnapshot(scenario) {
     );
   }
   return nativeScenarioConfiguration(scenario, data);
+}
+
+// BLOCK data is parsed so hub projections do not look like edits. Other types
+// are compared exactly as returned; their code is not interpreted here.
+function runnableScenarioSnapshot(scenario) {
+  if (isRecord(scenario) && scenario.type === "BLOCK") {
+    return scenarioSnapshot(scenario);
+  }
+  if (
+    !isRecord(scenario) ||
+    typeof scenario.index !== "string" ||
+    typeof scenario.name !== "string" ||
+    typeof scenario.active !== "boolean" ||
+    typeof scenario.type !== "string"
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incomplete scenario configuration.",
+    );
+  }
+  return {
+    index: scenario.index,
+    predefined: scenario.predefined === true,
+    name: scenario.name,
+    desc: scenario.desc ?? null,
+    active: scenario.active,
+    onStart: scenario.onStart ?? null,
+    sync: scenario.sync ?? null,
+    type: scenario.type,
+    data: scenario.data ?? null,
+  };
 }
 
 function nativeScenarioConfiguration(scenario, data) {
@@ -9491,6 +9643,7 @@ function publicNativeChange(
     };
   }
   if (change.kind === "scenario_run") {
+    const plan = storedScenarioRunPlan(change);
     return {
       status: change.status,
       change_ref: `spruthub-change://native/${change.id}`,
@@ -9513,6 +9666,8 @@ function publicNativeChange(
         value: target.expected_value.value,
         kind: target.expected_value.kind,
       })),
+      targets_known: plan.targets_known,
+      effect: structuredClone(plan.effect),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       command_delivery: {
@@ -9539,6 +9694,16 @@ function publicNativeChange(
       restore_supported: false,
       limitations: [
         "Preparation and read-only inspection do not run the scenario.",
+        ...(plan.effect.predicted
+          ? []
+          : [
+              "SprutHub decides during the run which conditions, delays, and code let actions execute, so the effect is not predicted. Listed targets are only literal actions it may write; read_hub_log with this scenario_ref shows what it did.",
+            ]),
+        ...(plan.targets_known
+          ? []
+          : [
+              "Characteristics changed by code, other scenario types, or uninterpreted BLOCK parts are not listed as targets.",
+            ]),
         "An acknowledged run means SprutHub accepted scenario.run; target values are observed separately and do not prove physical delivery or causality.",
         "The target actions are not atomic, and a race remains after the pre-run scenario comparison.",
         "An unknown run outcome is never resent; prepare a new change only for a new explicit user request.",
