@@ -121,6 +121,13 @@ test("find_devices state=on lists every service that is on, air purifiers includ
   );
   assert.equal(body.total, on.length);
   assert.equal(body.next, null);
+  // One entry per room, in the home's room order, although the hub lists
+  // devices of one room apart.
+  const roomOrder = hub.state.rooms.map(({ id }) => `${home}/room/${id}`);
+  assert.deepEqual(
+    body.rooms.map(({ ref }) => ref),
+    roomOrder.filter((ref) => on.some(({ room }) => room.ref === ref)),
+  );
   assert(on.every(({ service }) => service.on === true));
   const byDevice = (name) =>
     on
