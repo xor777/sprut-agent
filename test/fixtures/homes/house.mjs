@@ -2,7 +2,7 @@
 // scenario ids, so its cases grade unchanged) plus a second storey, service
 // rooms and a yard. Sizes follow the owner's home at double scale (2026-09-24:
 // 13 rooms, 80 accessories, 254 services, 23 scenarios; the home is expected
-// to double): 23 rooms, 173 accessories, 508 services, 50 scenarios, with
+// to double): 23 rooms, 174 accessories, 511 services, 50 scenarios, with
 // its service type mix. Names, ids and values are invented. New rooms avoid
 // the words the apartment cases rely on (спальня, гостиная, кухня, ванная,
 // коридор, кабинет), so a household request keeps one meaning.
@@ -174,8 +174,10 @@ const fan = (name) => ({
 function namedDevices() {
   return [
     // Existing rooms get devices that do not change their cases' answers,
-    // except the living room: spots are on and a non-light ventilation
-    // relay sits on the same switch as the lights.
+    // except the living room and the kitchen: their spots are relay
+    // channels that are on, and in the living room a non-light ventilation
+    // relay sits on the same switch as the lights. Some devices of the new
+    // rooms are on as well, so whats-on grows with the home.
     accessory(3, "Выключатель гостиной", [
       relay("Споты", true),
       relay("Подсветка ниши"),
@@ -233,7 +235,10 @@ function namedDevices() {
     accessory(15, "Вентилятор в санузле", [fan("Вентилятор")]),
     accessory(15, "Датчик протечки в санузле", [leak()], { battery: 88 }),
     accessory(15, "Тёплый пол в санузле", [thermostat("Тёплый пол", 23.4)]),
-    accessory(15, "Полотенцесушитель", [outlet("Розетка"), meter(0, 96.2)]),
+    accessory(15, "Полотенцесушитель", [
+      outlet("Розетка", true),
+      meter(120, 96.2),
+    ]),
     accessory(16, "Свет в постирочной", [light("Свет")]),
     accessory(16, "Розетка стиральной машины", [
       outlet("Розетка"),
@@ -243,12 +248,12 @@ function namedDevices() {
       battery: 81,
     }),
     accessory(17, "Бойлер", [relay("Нагрев", true), meter(1480, 1873.4)]),
-    accessory(17, "Насос отопления", [relay("Насос")]),
+    accessory(17, "Насос отопления", [relay("Насос", true)]),
     accessory(17, "Датчик температуры в котельной", [temperature(19.8)]),
     accessory(17, "Рекуператор", [fan("Приток"), filter(7)]),
     accessory(18, "Свет в мастерской", [
       relay("Верхний свет"),
-      relay("Над верстаком"),
+      relay("Над верстаком", true),
       relay("Над стеллажом"),
     ]),
     accessory(18, "Розетка станка", [outlet("Розетка"), meter(0, 58.3)]),
@@ -293,6 +298,11 @@ function namedDevices() {
     accessory(22, "Свет в сауне", [light("Свет")]),
     accessory(22, "Термостат сауны", [thermostat("Печь", 24.3, 80)]),
     accessory(22, "Датчик температуры в сауне", [temperature(24.3)]),
+    // Added after the devices above so their ids stay as they were.
+    accessory(4, "Выключатель кухни", [
+      relay("Споты кухня", true),
+      relay("Подсветка столешницы"),
+    ]),
   ];
 }
 
@@ -769,7 +779,7 @@ export default async function house({ loadHomeFixture }) {
   return {
     ...fixture,
     description:
-      "Synthetic two-storey house: the apartment plus 14 rooms, 144 accessories and 41 scenarios, about double the owner's home. Built by test/fixtures/homes/house.mjs; names, ids and values are invented.",
+      "Synthetic two-storey house: the apartment plus 14 rooms, 145 accessories and 41 scenarios, about double the owner's home. Built by test/fixtures/homes/house.mjs; names, ids and values are invented.",
     hub: { ...fixture.hub, serial: "sim-house-01", name: "Дом в Сосновке" },
     rooms: [...fixture.rooms, ...ROOMS.map(([id, name]) => ({ id, name }))],
     accessories: [...fixture.accessories, ...added],
