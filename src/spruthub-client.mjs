@@ -2423,7 +2423,7 @@ export class SprutHubClient {
             deadline,
             serial,
             (response) =>
-              extractEntityArray(response, [
+              extractNativeList(response, [
                 "accessory",
                 "list",
                 "accessories",
@@ -2436,7 +2436,7 @@ export class SprutHubClient {
             deadline,
             serial,
             (response) =>
-              extractEntityArray(response, ["room", "list", "rooms"]),
+              extractNativeList(response, ["room", "list", "rooms"]),
           )
         : null,
       needScenarios
