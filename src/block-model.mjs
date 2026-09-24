@@ -137,6 +137,8 @@ const RELATIVE_STEP = {
   characteristic_without_valid_values: true,
 };
 
+export const CLEAR_ALL_DELAYS = 0;
+
 const BLOCK_NODE_CONSTRAINTS = {
   root: {
     editor_optional: ["blockId"],
@@ -244,10 +246,15 @@ const BLOCK_NODE_CONSTRAINTS = {
     },
     editor_optional: ["blockId"],
   },
-  // Follows the editor schema; not observed on a hub.
+  // The web client offers index 0 as "All delays"; stored as sent on
+  // SprutHub 3.0.0 with a delay index, its run is not observed.
   clear_delay: {
     fields: {
-      index: { type: "integer", refers_to: "index of a delay in this BLOCK" },
+      index: {
+        type: "integer",
+        all_delays: CLEAR_ALL_DELAYS,
+        refers_to: "index of a delay in this BLOCK",
+      },
     },
     editor_optional: ["blockId"],
   },
