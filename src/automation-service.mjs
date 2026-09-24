@@ -15,6 +15,7 @@ import {
   canonicalBlock,
   canonicalBlockNode,
   HTTP_METHODS,
+  httpUrlHidden,
   isBlockTrigger,
   NOTIFY_MODES,
   normalizeBlockRequest,
@@ -27,6 +28,7 @@ import {
   TIME_TRIGGER,
   timeTriggerProblem,
   visitKnownBlockNodes,
+  withHiddenHttpUrls,
 } from "./block-model.mjs";
 import {
   inspectNativeOption,
@@ -6009,7 +6011,7 @@ function blockContract() {
       'if mode ONCE, delay mode CONTINUE, clear_delay and a characteristic hold follow what the official web client writes; a hub has not been observed running them. A hold is timeCond ">" (has not changed for) or "<" (changed back within) with time in milliseconds; what "<" does on the hub is known only from the client label. An if without mode is EVERY; an if may leave out else or set it to null for no else branch, and may leave out then_delay and else_delay, which mean 0 (SprutHub 3.0.0 stores such an if with mode EVERY, both delays 0 and no else). A positive then_delay or else_delay repeats that branch every so many milliseconds, at least 1000 («Каждые» in the web client); how long a hub keeps repeating it is not observed. The web client labels RESET "single timer" and CONTINUE "new timer", so CONTINUE is expected to start another delay for each entry and run its actions once per entry.',
       "notify sends its text as a notification, as the web client writes it. Mode PUSH goes through the home's notification services (extensions with bundle_type NOTIFICATION in home_overview list=extensions): to null or left out for all of them, or [{index, clients}] with a service's index and clients null or left out for all its recipients, or recipient ids from get_entity include children. Mode MESSAGE is the editor's «Системное» notification without recipients; where the hub shows it is not known. The text is the owner's message, sent as written; [REDACTED] is refused. block_action_preview.notifications shows each notification the change adds or changes, with its text and the services it goes through with enabled and state as read at preparation: a service that is not enabled or not LOADED may deliver nothing, and a PUSH to all services of a home without one goes nowhere, so tell the owner. The hub has not been observed storing or sending a notify.",
       "from («Установить из» in the web client) sets the target to the current value of another characteristic when the action runs: {type:\"from\", cId, hc, from_aId, from_sId, from_cId, from_hs, from_hc}, with value \"\" as the web client writes it or left out, and with the source's ids and its service and characteristic types from get_entity. The source must be readable, hold the same kind of value (yes/no, number or text) and not be the target itself; a target with listed values (a mode) takes them only from a characteristic of its own type. A value outside the target's range is not checked in advance, and what the hub does with it is not observed. block_action_preview shows the source with its value at preparation. A summary names the source, and the source device's relations name the rule with role source when the hub's scenario index lists the rule for that device, which is not observed for a device that is only a source. The hub has not been observed storing or running a from action.",
-      "http makes a request with a method from the web client's list to an absolute http or https URL, with no body or headers, as the web client writes it. Any such URL is accepted: what the BLOCK calls, such as a device on the home network or a webhook, is the owner's request. A URL with a user name or password is refused, since answers would repeat it. block_action_preview.http_requests and the summary show method, scheme, host and path of each request, not the query or fragment; answers show a URL with a user name and password, or whose query carries a credential-shaped parameter such as api_key, as [REDACTED], and an edit that sends [REDACTED] back for a node with the same blockId keeps the stored URL. The hub has not been observed storing or sending a request; a scenario_run of a BLOCK with a request has no known targets.",
+      "http makes a request with a method from the web client's list to an absolute http or https URL, with no body or headers, as the web client writes it. Any such URL is accepted: what the BLOCK calls, such as a device on the home network or a webhook, is the owner's request. A URL with a user name or password is refused. A key may sit in the path (Telegram /bot<token>/, webhook ids) or under any query name, so no answer repeats a URL: block_action_preview.http_requests and the summary show method, scheme and host of each request with path and query marked not_shown, and get_entity configuration and diffs show every URL other than scheme and host as [REDACTED]. An edit that sends [REDACTED] back keeps the stored URL only on the one node that carries its blockId from get_entity; [REDACTED] anywhere else, as in a copy of the node, is refused at its pointer. The hub has not been observed storing or sending a request; a scenario_run of a BLOCK with a request has no known targets.",
       "clear_delay cancels a delay of the same BLOCK by its index, which must belong to a delay in the data, or all its delays with index 0.",
       "Name and Desc are separate window_option writes on the owning scenario ref; this operation writes only data.",
       "Runtime flags, type, orders, and JS source are not opened by this contract.",
@@ -6461,14 +6463,43 @@ function keptBlockSubtrees(data, stored) {
   return { kept, keptAs, counterparts, removed };
 }
 
-// get_entity shows credential-shaped text of a stored BLOCK, such as a URL
-// with ?api_key=, as [REDACTED]. An edit made from that read sends the mark
-// back; where the node with the same blockId and type holds, at the same
-// field, a string the answers hide, the stored string is put back so that
-// the node stays as stored. A mark anywhere else stays and is refused or
-// written as sent.
+// get_entity shows a stored request URL other than scheme and host
+// (httpUrlHidden) and other credential-shaped text of a BLOCK as
+// [REDACTED]. An edit made from that read sends the mark back. Where
+// exactly one node of the edit and one stored node carry the same blockId
+// and type, the stored string is put back at each field the answers hide,
+// so that the node stays as stored. A mark on a node whose blockId the edit
+// carries more than once stays, and so does one without a stored node:
+// copying the node would otherwise copy the owner's hidden URL or text into
+// another branch. validateBlockNode refuses such a mark in a URL or a
+// notification text with its pointer.
 function restoreHiddenBlockStrings(data, stored) {
-  const storedNodes = new Map();
+  const storedNodes = nodesByBlockId(stored);
+  for (const [blockId, requested] of nodesByBlockId(data)) {
+    const originals = storedNodes.get(blockId) ?? [];
+    if (requested.length !== 1 || originals.length !== 1) continue;
+    const [node] = requested;
+    const [original] = originals;
+    if (original.type !== node.type) continue;
+    for (const [key, field] of Object.entries(node)) {
+      if (field === REDACTED_MARK && hiddenBlockString(original, key)) {
+        node[key] = original[key];
+      }
+    }
+  }
+}
+
+// Whether answers show a stored node's string field as [REDACTED].
+function hiddenBlockString(node, key) {
+  const value = node[key];
+  if (typeof value !== "string") return false;
+  if (node.type === "http" && key === "url") return httpUrlHidden(value);
+  return sanitizeNativeData(value, key) === REDACTED_MARK;
+}
+
+// The typed nodes of BLOCK data by blockId, anywhere in the data.
+function nodesByBlockId(data) {
+  const nodes = new Map();
   const collect = (value) => {
     if (Array.isArray(value)) {
       for (const item of value) collect(item);
@@ -6476,33 +6507,12 @@ function restoreHiddenBlockStrings(data, stored) {
     }
     if (!isRecord(value)) return;
     if (Number.isSafeInteger(value.blockId) && typeof value.type === "string") {
-      storedNodes.set(value.blockId, value);
+      nodes.set(value.blockId, [...(nodes.get(value.blockId) ?? []), value]);
     }
     for (const child of Object.values(value)) collect(child);
   };
-  collect(stored);
-  const restore = (value) => {
-    if (Array.isArray(value)) {
-      for (const item of value) restore(item);
-      return;
-    }
-    if (!isRecord(value)) return;
-    const original = storedNodes.get(value.blockId);
-    if (original !== undefined && original.type === value.type) {
-      for (const [key, field] of Object.entries(value)) {
-        const hidden = original[key];
-        if (
-          field === REDACTED_MARK &&
-          typeof hidden === "string" &&
-          sanitizeNativeData(hidden, key) === REDACTED_MARK
-        ) {
-          value[key] = hidden;
-        }
-      }
-    }
-    for (const child of Object.values(value)) restore(child);
-  };
-  restore(data);
+  collect(data);
+  return nodes;
 }
 
 // The data an edit writes: each subtree it keeps is replaced by the stored
@@ -6993,7 +7003,7 @@ function blockActionPreview(validation, data, homeRef, capturedAt) {
             ),
         }
       : {}),
-    // Requests this change adds or changes; the query is not shown.
+    // Requests this change adds or changes, by scheme and host only.
     ...(validation.httpRequests.some(({ kept }) => !kept)
       ? {
           http_requests: validation.httpRequests
@@ -7628,7 +7638,7 @@ function validateBlockNode(node, kind, path, context) {
     } else if (node.text.includes(REDACTED_MARK)) {
       report(
         field("text"),
-        `notify text contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; write the message itself`,
+        `notify text contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; the stored text is kept only on the one node of the edit that carries its blockId from get_entity, so write the message itself for a new or copied notification`,
       );
     }
     if (!Object.hasOwn(NOTIFY_MODES, node.mode)) {
@@ -7816,7 +7826,7 @@ function httpUrlProblem(url) {
   const absolute = "url must be an absolute http or https URL";
   if (typeof url !== "string" || url === "") return absolute;
   if (url.includes(REDACTED_MARK)) {
-    return `url contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; write the URL itself`;
+    return `url contains ${REDACTED_MARK}, which sprut-agent shows in place of a URL it does not repeat; the stored URL is kept only on the one node of the edit that carries its blockId from get_entity, so write the URL itself for a new or copied request`;
   }
   if (/\s/.test(url)) return `${absolute} without spaces`;
   let parsed;
@@ -7829,7 +7839,7 @@ function httpUrlProblem(url) {
     return "url scheme must be http or https";
   }
   if (parsed.username !== "" || parsed.password !== "") {
-    return "a URL with a user name or password is refused: sprut-agent would repeat it in its answers; set up such a request in the SprutHub interface";
+    return "a URL with a user name or password is refused; set up such a request in the SprutHub interface";
   }
   return null;
 }
@@ -11357,8 +11367,8 @@ function blockDataUpdateDiff(change) {
         canonicalBlock(change.baseline_snapshot.data),
         canonicalBlock(change.requested_snapshot.data),
       ),
-      from: structuredClone(change.baseline_snapshot.data),
-      to: structuredClone(change.requested_snapshot.data),
+      from: withHiddenHttpUrls(change.baseline_snapshot.data),
+      to: withHiddenHttpUrls(change.requested_snapshot.data),
     };
   }
   return diff;
@@ -11368,7 +11378,7 @@ function blockCreateSnapshot(change) {
   const request = blockCreateRequest(change);
   return {
     ...request,
-    data: structuredClone(change.requested_snapshot.data),
+    data: withHiddenHttpUrls(change.requested_snapshot.data),
   };
 }
 

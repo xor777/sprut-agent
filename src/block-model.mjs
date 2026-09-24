@@ -225,8 +225,7 @@ export const NOTIFY_RECIPIENTS = {
 // The web client's Http node: a method from its list and the URL as typed,
 // with no body or headers. Any absolute http or https URL is accepted, as in
 // the editor: what the BLOCK calls (a device on the home network, a webhook)
-// is the owner's request. A user name or password in the URL is refused:
-// every answer would repeat it, and redaction does not recognize it there.
+// is the owner's request. A user name or password in the URL is refused.
 export const HTTP_METHODS = [
   "GET",
   "POST",
@@ -243,12 +242,60 @@ export const HTTP_URL = {
   schemes: ["http", "https"],
   user_name_or_password: "refused",
   shown_in_answers:
-    "scheme, host and path; the query and fragment are not shown",
+    "scheme and host (with port) only; path and query are marked not_shown",
+  in_configuration_and_diffs:
+    "[REDACTED] unless the URL is only scheme and host; sending [REDACTED] back keeps the stored URL on the one node that carries its blockId",
 };
 
-// The part of a request URL that answers show: scheme, host, port and path.
-// Returns null for a URL that does not parse.
+const NOT_SHOWN = "not_shown";
+const HIDDEN_URL = "[REDACTED]";
+
+// Answers name a request only by scheme and host: a service may carry its
+// key in the path (Telegram /bot<token>/, IFTTT /with/key/<key>, Slack,
+// Discord and Home Assistant webhook ids), under any query name, or as a
+// password before the host. Returns {url} with path and query marked
+// not_shown where the URL has them, or {url: "not_shown"} for a URL that is
+// not an http or https URL.
 export function shownHttpUrl(url) {
+  const parsed = parsedHttpUrl(url);
+  if (!parsed) return { url: NOT_SHOWN };
+  return {
+    url: parsed.origin,
+    ...(parsed.pathname !== "/" ? { path: NOT_SHOWN } : {}),
+    ...(parsed.search || parsed.hash ? { query: NOT_SHOWN } : {}),
+  };
+}
+
+// Whether configuration and diffs hide a request URL: every URL other than
+// exactly scheme and host, with or without the closing slash.
+export function httpUrlHidden(url) {
+  const parsed = parsedHttpUrl(url);
+  return !parsed || (url !== parsed.origin && url !== `${parsed.origin}/`);
+}
+
+// BLOCK data with every request URL that httpUrlHidden hides replaced by
+// [REDACTED], wherever the http node sits, also under nodes outside this
+// contract. The data itself is not changed.
+export function withHiddenHttpUrls(value) {
+  if (Array.isArray(value)) return value.map(withHiddenHttpUrls);
+  if (!isRecord(value)) return value;
+  const copy = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      withHiddenHttpUrls(child),
+    ]),
+  );
+  if (
+    copy.type === "http" &&
+    typeof copy.url === "string" &&
+    httpUrlHidden(copy.url)
+  ) {
+    copy.url = HIDDEN_URL;
+  }
+  return copy;
+}
+
+function parsedHttpUrl(url) {
   if (typeof url !== "string") return null;
   let parsed;
   try {
@@ -256,10 +303,7 @@ export function shownHttpUrl(url) {
   } catch {
     return null;
   }
-  return {
-    url: `${parsed.origin}${parsed.pathname}`,
-    ...(parsed.search || parsed.hash ? { query: "not_shown" } : {}),
-  };
+  return ["http:", "https:"].includes(parsed.protocol) ? parsed : null;
 }
 
 const BLOCK_NODE_CONSTRAINTS = {

@@ -148,15 +148,17 @@ function decodeStep(node, pointer, chain, delay, state) {
   }
   if (node.type === "notify") return [decodeNotify(node)];
   if (node.type === "http") {
-    // The query may carry a key: only scheme, host and path are shown.
+    // A key may sit anywhere after the host: only scheme and host are shown
+    // (shownHttpUrl), here and when withShownHttpUrls already cut the URL.
     const shown = shownHttpUrl(node.url);
     return [
       {
         type: "http",
         method: textOrNull(node.method),
-        url: shown?.url ?? textOrNull(node.url),
-        ...(shown?.query || node.query === HIDDEN_QUERY
-          ? { query: HIDDEN_QUERY }
+        url: shown.url,
+        ...(shown.path || node.path === NOT_SHOWN ? { path: NOT_SHOWN } : {}),
+        ...(shown.query || node.query === NOT_SHOWN
+          ? { query: NOT_SHOWN }
           : {}),
       },
     ];
@@ -164,11 +166,12 @@ function decodeStep(node, pointer, chain, delay, state) {
   return [unrecognized(state, pointer, node)];
 }
 
-const HIDDEN_QUERY = "not_shown";
+const NOT_SHOWN = "not_shown";
 
-// BLOCK data with each request URL cut to scheme, host and path before the
-// data is redacted for a summary: redaction hides a whole URL whose query
-// carries a key, and the summary would lose where the request goes.
+// BLOCK data with each request URL cut to scheme and host, with path and
+// query marked not_shown, before the data is redacted for a summary:
+// redaction would hide a whole URL whose query carries a key, and the
+// summary would lose where the request goes.
 export function withShownHttpUrls(value) {
   if (Array.isArray(value)) return value.map(withShownHttpUrls);
   if (!isRecord(value)) return value;
@@ -178,11 +181,7 @@ export function withShownHttpUrls(value) {
       withShownHttpUrls(child),
     ]),
   );
-  const shown = copy.type === "http" ? shownHttpUrl(copy.url) : null;
-  if (shown) {
-    copy.url = shown.url;
-    if (shown.query) copy.query = HIDDEN_QUERY;
-  }
+  if (copy.type === "http") Object.assign(copy, shownHttpUrl(copy.url));
   return copy;
 }
 

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
+import { withHiddenHttpUrls } from "./block-model.mjs";
 import {
   blockBindings,
   blockSummary,
@@ -4479,7 +4480,10 @@ function normalizeScenarioConfiguration(scenario) {
     try {
       return {
         format: "json",
-        value: sanitizeNativeData(JSON.parse(scenario.data)),
+        // A request URL other than scheme and host may carry a key.
+        value: sanitizeNativeData(
+          withHiddenHttpUrls(JSON.parse(scenario.data)),
+        ),
       };
     } catch {
       return {
