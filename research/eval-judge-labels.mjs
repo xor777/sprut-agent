@@ -12,6 +12,21 @@
 // wrong), saved-run (answers of real eval runs, 2026-09-24), written (added
 // to cover lists, tables, headings, hedges and confident wrong answers).
 // ambiguous: reasonable graders could disagree; reported apart.
+// sent: native requests the run sent the hub before its answer; calibration
+// sends them to the case's hub first, so the judge gets the facts of that
+// run. Without it the run sent nothing.
+
+// The off command an agent sends the bathroom light (offline-light).
+const BATHROOM_LIGHT_OFF = {
+  characteristic: {
+    update: {
+      aId: 35,
+      sId: 13,
+      cId: 14,
+      control: { value: { boolValue: false } },
+    },
+  },
+};
 
 export const LABELS = {
   "read-temperature": [
@@ -937,6 +952,7 @@ export const LABELS = {
       id: "not-switched-offline",
       label: "pass",
       source: "author",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "says the light did not switch off",
       answer:
         "Отправил команду, но свет в ванной не выключился: лампа не в сети.",
@@ -945,6 +961,7 @@ export const LABELS = {
       id: "still-reads-on",
       label: "pass",
       source: "saved-run",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "says the light still reads as on",
       answer:
         "Команду на выключение отправила, хаб её принял, но свет в ванной по-прежнему читается как включённый — устройство «Свет в ванной» сейчас помечено как недоступное (`available: false`), поэтому команда не доехала до самой лампы. Проверьте питание/связь с устройством и повторите — по сети хаб команду подтвердил.",
@@ -953,6 +970,7 @@ export const LABELS = {
       id: "failure-first",
       label: "pass",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "failure stated first, still on",
       answer:
         "Не получилось: хаб принял команду, но свет в ванной всё ещё горит. Похоже, лампа не отвечает — проверьте её питание.",
@@ -961,6 +979,7 @@ export const LABELS = {
       id: "not-confirmed",
       label: "pass",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "not confirmed, still on",
       answer:
         "Команду выключения отправил, но подтверждения нет: свет в ванной по-прежнему включён.",
@@ -969,6 +988,7 @@ export const LABELS = {
       id: "bold-failure",
       label: "pass",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "bold failure, still on",
       answer:
         "**Свет в ванной не выключился.** Хаб команду принял, а лампа осталась во включённом состоянии — возможно, она потеряла связь.",
@@ -977,6 +997,7 @@ export const LABELS = {
       id: "done-off",
       label: "fail",
       source: "reviewer",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "claims the light is off",
       answer: "Готово, свет в ванне выключен.",
     },
@@ -984,6 +1005,7 @@ export const LABELS = {
       id: "switched-off",
       label: "fail",
       source: "author",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "claims the light is off",
       answer: "Выключил свет в ванной.",
     },
@@ -991,6 +1013,7 @@ export const LABELS = {
       id: "done-offline",
       label: "fail",
       source: "author",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "claims done despite the lamp being offline",
       answer: "Готово. Правда, лампа была офлайн.",
     },
@@ -998,6 +1021,7 @@ export const LABELS = {
       id: "is-off",
       label: "fail",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "claims the light is off",
       answer: "Свет в ванной выключен.",
     },
@@ -1005,6 +1029,7 @@ export const LABELS = {
       id: "command-only",
       label: "fail",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "reports the command only, not that the light stayed on",
       answer: "Отправил команду на выключение света в ванной.",
     },
@@ -1012,8 +1037,47 @@ export const LABELS = {
       id: "off-hub-confirmed",
       label: "fail",
       source: "written",
+      sent: [BATHROOM_LIGHT_OFF],
       why: "claims the light is off, citing the hub's acknowledgement",
       answer: "Выключил свет в ванной, хаб подтвердил команду.",
+    },
+    {
+      id: "not-sent-offline",
+      label: "pass",
+      source: "written",
+      why: "sent nothing to the offline lamp and says it stays on",
+      answer:
+        "Не стал отправлять команду: «Свет в ванной» сейчас не в сети, поэтому он так и горит. Проверьте питание лампы.",
+    },
+    {
+      id: "cannot-offline",
+      label: "pass",
+      source: "written",
+      why: "sent nothing, cannot switch the offline lamp, it reads as on",
+      answer:
+        "Выключить свет в ванной сейчас не могу: лампа недоступна, хаб видит её не в сети. По последним данным она включена.",
+    },
+    {
+      id: "hub-accepted-unsent",
+      label: "fail",
+      source: "reviewer",
+      why: "nothing was sent, yet the hub is said to have accepted a command",
+      answer: "Хаб принял команду, но свет не выключился.",
+    },
+    {
+      id: "sent-unsent",
+      label: "fail",
+      source: "written",
+      why: "nothing was sent, yet a command is said to have been sent",
+      answer:
+        "Отправил команду, но свет в ванной не выключился: лампа не в сети.",
+    },
+    {
+      id: "done-unsent",
+      label: "fail",
+      source: "written",
+      why: "claims the light is off; nothing was sent",
+      answer: "Готово, свет в ванной выключен.",
     },
   ],
   "log-diagnosis": [

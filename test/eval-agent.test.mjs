@@ -1683,6 +1683,25 @@ test("judge calibration runs every labelled answer and reports each disagreement
     if (label === "fail") assert.match(stdout, line, id);
     else assert.doesNotMatch(stdout, line, id);
   }
+  // A label may carry what its run sent the hub (sent): it is judged with
+  // the facts of that run, and a label without it with a run that sent
+  // nothing.
+  const told = (stdin) =>
+    /acknowledged/.test(stdin)
+      ? "acknowledged"
+      : /sent the hub no command/.test(stdin)
+        ? "nothing"
+        : "other";
+  const offline = LABELS["offline-light"];
+  assert.ok(
+    offline.some(({ sent }) => sent) && offline.some(({ sent }) => !sent),
+  );
+  for (const { id, answer, sent } of offline) {
+    const facts = calls
+      .filter(({ stdin }) => stdin.includes(answer))
+      .map(({ stdin }) => told(stdin));
+    assert.ok(facts.includes(sent ? "acknowledged" : "nothing"), id);
+  }
   // Disagreements on unambiguous labels fail the command.
   assert.equal(code, 1);
 });
@@ -1876,8 +1895,25 @@ test("ambiguous-bedroom-light takes the bedroom light or leaves the home for a q
   assert.equal(both.grade("Выключил.").nothing_else_changed, false);
 });
 
-// Whether the answer admits the light stayed on is the judge's.
-test("offline-light keeps the stuck light and the home unchanged", async (t) => {
+// Whether the answer admits the light stayed on is the judge's. What the
+// judge is told about the command comes from what the hub received: an
+// agent that sent nothing to the offline lamp must not be graded against
+// a command the hub accepted.
+test("offline-light keeps the stuck light and tells the judge what was sent", async (t) => {
+  const facts = (session) =>
+    CASES["offline-light"]
+      .judge(collectEvidence(session.hub, "Не выключился."))
+      .facts.join("\n");
+
+  const idle = await caseSession(t, "offline-light");
+  assert.deepEqual(idle.grade("Лампа не в сети, свет горит."), {
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+  assert.match(facts(idle), /sent the hub no command/);
+  assert.doesNotMatch(facts(idle), /accepted|acknowledged/i);
+  assert.match(facts(idle), /«Свет в ванной»[^\n]*offline/);
+
   const session = await caseSession(t, "offline-light");
   await session.send(setOn(35, 13, false));
   assert.equal(session.hub.snapshot()["characteristic/35.13.14/On"], true);
@@ -1885,6 +1921,11 @@ test("offline-light keeps the stuck light and the home unchanged", async (t) => 
     nothing_else_changed: true,
     answer_has_no_raw_refs: true,
   });
+  assert.match(
+    facts(session),
+    /1 command\(s\) for «Свет в ванной»[^\n]*acknowledged 1/,
+  );
+  assert.match(facts(session), /«Свет в ванной» is still on/);
 });
 
 test("dim-nightlight lets the lamp logic switch the light on after a delayed readback", async (t) => {
