@@ -8,20 +8,25 @@
 // BLOCK is turned on only when its sole trigger is a one-date cron in
 // FAR_FUTURE_YEAR or later. The owner's devices, scenarios, rooms and settings
 // are only read. Everything created is restored (deleted) in reverse order and
-// the final home snapshot must equal the initial one.
+// the final home snapshot must equal the initial one. A final sweep then
+// deletes, through the product client, every inert object of this run that
+// the product owns but its restore left behind, and fails the run for it.
+// `--sweep-only <prefix> [--state-dir <dir>]` runs only that sweep.
 //
 // Output: a JSON report in a new temporary directory and a console table.
 // Hub names are stored only as SHA-256; credentials never pass through here.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { AutomationStore } from "../src/automation-store.mjs";
+import { SprutHubConnection } from "../src/spruthub-connection.mjs";
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -45,6 +50,12 @@ const PROBE_DESCRIPTION = "sprut-agent live conformance probe; safe to delete";
 const ORPHANING_FAMILIES = new Set(["inc", "dec"]);
 const REASON =
   "Owner-authorized live conformance probe; only objects created by this run are changed and all are removed.";
+const PROBE_PREFIX = /^zz-sprut-agent-probe-\d{8}T\d{6}Z$/;
+// How the product marks what it creates (src/automation-service.mjs): the
+// desc of a BLOCK and the source of a LOGIC carry the change marker. A room
+// has no field for one; its proof is the run's room_create in the journal.
+const BLOCK_MARKER = /\[sprut-agent:(?:native|automation):[0-9a-f]{24}\]/;
+const LOGIC_MARKER = /\/\* \[sprut-agent:native:[0-9a-f]{24}\] \*\//;
 
 const READ_TOOLS = new Set([
   "list_homes",
@@ -305,6 +316,7 @@ function abort(reason) {
 }
 
 async function main() {
+  if (process.argv.includes("--sweep-only")) return sweepOnly();
   const prefix = `zz-sprut-agent-probe-${new Date()
     .toISOString()
     .replace(/[-:]/g, "")
@@ -343,6 +355,7 @@ async function main() {
   const hub = new GuardedHub(client, prefix);
   const cleanup = [];
   let exitCode = 0;
+  const readOnly = process.argv.includes("--read-only");
   try {
     const homes = await hub.read("list_homes", {});
     expectOk(homes, "list_homes");
@@ -369,7 +382,7 @@ async function main() {
     run.before = before;
     const ctx = { hub, targets, before, cleanup, prefix };
 
-    if (process.argv.includes("--read-only")) {
+    if (readOnly) {
       // Rehearses discovery and both snapshots without any write.
       row("1-4", "-", "-", "--read-only: no write sent", "skipped");
     } else {
@@ -385,6 +398,15 @@ async function main() {
     try {
       const clean = await runCleanup(hub, cleanup);
       if (!clean) exitCode = 1;
+      if (hub.homeRef && !readOnly) {
+        const entries = await runSweep({
+          prefix,
+          stateDirectory,
+          homeRef: hub.homeRef,
+          sweptIsFailure: true,
+        });
+        if (entries?.length !== 0) exitCode = 1;
+      }
       if (hub.homeRef) {
         const ok = await finalChecks(hub);
         if (!ok) exitCode = 1;
@@ -403,6 +425,7 @@ async function main() {
     });
     printTable();
     console.log(`\nReport: ${reportPath}`);
+    console.log(`State directory: ${stateDirectory}`);
     if (abortReason) console.log(`Stopped: ${abortReason}`);
   }
   return exitCode;
@@ -1866,6 +1889,200 @@ function snapshotDiff(before, after) {
     }
   }
   return diff;
+}
+
+// --- sweep -------------------------------------------------------------------
+
+// Manual recovery: sweep one earlier run's objects without a probe.
+async function sweepOnly() {
+  const prefix = optionValue("--sweep-only");
+  if (!PROBE_PREFIX.test(prefix ?? "")) {
+    console.error(
+      "--sweep-only needs a run prefix such as zz-sprut-agent-probe-20260924T121158Z.",
+    );
+    return 2;
+  }
+  const stateDirectory = optionValue("--state-dir");
+  const entries = await runSweep({
+    prefix,
+    stateDirectory,
+    homeRef: null,
+    sweptIsFailure: false,
+  });
+  printTable();
+  if (!stateDirectory) {
+    console.log(
+      "\nProbe rooms are only reported without --state-dir: their proof of ownership is the run's change journal (state_directory in its report).",
+    );
+  }
+  return entries?.every(({ outcome }) => outcome === "deleted") ? 0 : 1;
+}
+
+// Runs the sweep through its own product client and records one row per
+// object. Returns the entries, or null when the sweep could not finish.
+async function runSweep({ prefix, stateDirectory, homeRef, sweptIsFailure }) {
+  let entries;
+  try {
+    const client = await new SprutHubConnection({
+      env: serverEnvironment(stateDirectory),
+    }).getClient();
+    try {
+      const clientHomeRef =
+        client.serial === null
+          ? null
+          : `spruthub://hub/${encodeURIComponent(client.serial)}`;
+      if (clientHomeRef === null || (homeRef && clientHomeRef !== homeRef)) {
+        throw new Error("the product client did not select the probed home");
+      }
+      entries = await sweepProbeObjects({
+        client,
+        prefix,
+        changes: await readJournal(client, stateDirectory),
+      });
+    } finally {
+      await client.close();
+    }
+  } catch (error) {
+    row("5 sweep", "-", "sweep completes", error.message, "mismatch");
+    return null;
+  }
+  report.sweep = entries.map((entry) => ({
+    ...entry,
+    ref: relativeRef(entry.ref),
+  }));
+  if (entries.length === 0) {
+    row("5 sweep", "room.list, scenario.list", "nothing left", "none", "match");
+  }
+  for (const entry of entries) {
+    const deleted = entry.outcome === "deleted";
+    row(
+      `5 sweep ${relativeRef(entry.ref)}`,
+      `${entry.kind}.delete`,
+      "nothing left",
+      deleted
+        ? "deleted by the sweep; restore had left it"
+        : `left: ${entry.reason}`,
+      deleted && !sweptIsFailure ? "match" : "mismatch",
+    );
+  }
+  return entries;
+}
+
+async function readJournal(client, stateDirectory) {
+  if (!stateDirectory) return null;
+  const store = new AutomationStore({
+    directory: stateDirectory,
+    hubUrl: client.url,
+    hubSerial: client.serial,
+  });
+  try {
+    await access(store.file);
+  } catch {
+    return null;
+  }
+  return store.list();
+}
+
+// Deletes, directly through the product client, every room and scenario of
+// the run (name starts with prefix) that the product provably created and
+// that cannot act: a scenario with the product's marker and active=false, a
+// room from the run's room_create with no accessories. Everything else with
+// the prefix is left and reported. `changes` is the run's change journal, or
+// null when it is not available. The product's restore is not used: the
+// sweep exists for objects that restore could not remove.
+export async function sweepProbeObjects({ client, prefix, changes }) {
+  const entries = [];
+  const homeRef = `spruthub://hub/${encodeURIComponent(client.serial)}`;
+  for (const summary of await client.listScenarios()) {
+    if (!String(summary.name).startsWith(prefix)) continue;
+    entries.push({
+      kind: "scenario",
+      ref: `${homeRef}/scenario/${encodeURIComponent(summary.index)}`,
+      name: summary.name,
+      ...(await settle(() => sweepScenario(client, summary.index))),
+    });
+  }
+  for (const room of (await client.listRooms()).rooms) {
+    if (!room.name.startsWith(prefix)) continue;
+    entries.push({
+      kind: "room",
+      ref: room.ref,
+      name: room.name,
+      ...(await settle(() =>
+        sweepRoom(client, Number(room.ref.split("/").at(-1)), changes),
+      )),
+    });
+  }
+  return entries;
+}
+
+async function sweepScenario(client, index) {
+  const scenario = await client.getScenario(index);
+  if (scenario === null) return { outcome: "gone" };
+  const marked =
+    scenario.type === "BLOCK"
+      ? BLOCK_MARKER.test(scenario.desc ?? "")
+      : scenario.type === "LOGIC" && LOGIC_MARKER.test(scenario.data ?? "");
+  if (!marked) return left("no_ownership_marker");
+  if (scenario.active !== false) {
+    return left(scenario.active === true ? "active" : "active_unknown");
+  }
+  return deleteAndVerify(
+    () => client.deleteScenario(index),
+    () => client.getScenario(index),
+  );
+}
+
+async function sweepRoom(client, id, changes) {
+  if (changes === null) return left("journal_unavailable");
+  const created = changes.some(
+    (change) =>
+      change.kind === "room_create" &&
+      change.room_creation_owned === true &&
+      change.created_room_id === id,
+  );
+  if (!created) return left("no_ownership_marker");
+  if ((await client.listAccessoriesInRoom(id)).length > 0) {
+    return left("not_empty");
+  }
+  return deleteAndVerify(
+    () => client.deleteRoom(id),
+    () => client.getRoom(id),
+  );
+}
+
+// A delete without a clear answer may still have happened; only a readback
+// decides, and a failed readback leaves the object reported, not deleted.
+async function deleteAndVerify(remove, read) {
+  let failure;
+  try {
+    await remove();
+  } catch (error) {
+    failure = error;
+  }
+  if ((await read()) === null) return { outcome: "deleted" };
+  return left(
+    failure
+      ? `delete_failed ${failure.code ?? failure.message}`
+      : "still_present",
+  );
+}
+
+async function settle(action) {
+  try {
+    return await action();
+  } catch (error) {
+    return left(`error ${error.code ?? error.message}`);
+  }
+}
+
+function left(reason) {
+  return { outcome: "left", reason };
+}
+
+function optionValue(name) {
+  const index = process.argv.indexOf(name);
+  return index === -1 ? undefined : process.argv[index + 1];
 }
 
 // --- helpers -----------------------------------------------------------------
