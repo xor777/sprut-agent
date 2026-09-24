@@ -16227,3 +16227,318 @@ function assertCurrentLogicSourceMismatch(
     `${tool} must not delete after a source mismatch`,
   );
 }
+
+const scenarioActiveCases = [
+  {
+    type: "BLOCK",
+    install(hub) {
+      const scenario = hub.state.scenarios.find(
+        ({ index }) => index === "existing-block",
+      );
+      scenario.active = true;
+      return scenario;
+    },
+  },
+  {
+    type: "LOGIC",
+    install(hub) {
+      const scenario = {
+        index: "evening-logic",
+        name: "Вечерняя яркость",
+        desc: "Set the initial brightness once",
+        active: true,
+        onStart: false,
+        sync: false,
+        type: "LOGIC",
+        data: firstLogicSource,
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+  },
+  {
+    type: "GLOBAL",
+    install(hub) {
+      const scenario = {
+        index: "global-helpers",
+        name: "Общие функции",
+        desc: "",
+        active: true,
+        onStart: true,
+        sync: false,
+        type: "GLOBAL",
+        data: 'log.info("helpers ready");',
+      };
+      hub.state.scenarios.push(scenario);
+      return scenario;
+    },
+  },
+];
+
+function scenarioRefFor(scenario) {
+  return `${homeRef}/scenario/${encodeURIComponent(scenario.index)}`;
+}
+
+function scenarioUpdates(hub) {
+  return hub.requests
+    .filter(({ scenario }) => scenario?.update)
+    .map(({ scenario }) => scenario.update);
+}
+
+function scenarioWithoutActive(scenario) {
+  const { active: _active, ...configuration } = structuredClone(scenario);
+  return configuration;
+}
+
+async function prepareScenarioActive(client, targetRef, value) {
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_active",
+      target_ref: targetRef,
+      value,
+      reason: "Выключить сценарий, пока хозяева в отъезде",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  return prepared.structuredContent;
+}
+
+async function callChangeTool(client, name, changeRef) {
+  const result = await client.callTool({
+    name,
+    arguments: { change_ref: changeRef },
+  });
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  return result.structuredContent;
+}
+
+test("an existing scenario of any type is turned off and back on through its active flag only", async (t) => {
+  for (const scenarioCase of scenarioActiveCases) {
+    await t.test(scenarioCase.type, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const scenario = scenarioCase.install(hub);
+      const targetRef = scenarioRefFor(scenario);
+      const configuration = scenarioWithoutActive(scenario);
+      const firstClient = await startClient(subtest, hub, stateDirectory);
+
+      const contract = await firstClient.callTool({
+        name: "get_native_change_contract",
+        arguments: { operation: "scenario_active", target_ref: targetRef },
+      });
+      assert.equal(contract.isError, undefined, contract.content[0]?.text);
+      assert.equal(contract.structuredContent.contract.kind, "boolValue");
+      assert.equal(contract.structuredContent.restore_supported, true);
+
+      const prepared = await prepareScenarioActive(
+        firstClient,
+        targetRef,
+        false,
+      );
+      assert.equal(prepared.status, "prepared");
+      assert.equal(prepared.operation, "scenario_active");
+      assert.deepEqual(prepared.diff, {
+        value: { from: true, to: false, kind: "boolValue" },
+      });
+      assert.deepEqual(scenarioUpdates(hub), []);
+
+      const applied = await callChangeTool(
+        firstClient,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(applied.status, "applied");
+      assert.equal(applied.native_acknowledged, true);
+      assert.deepEqual(applied.observed_value, {
+        value: false,
+        kind: "boolValue",
+      });
+      assert.deepEqual(scenarioUpdates(hub), [
+        { index: scenario.index, active: false },
+      ]);
+      assert.equal(scenario.active, false);
+      assert.deepEqual(scenarioWithoutActive(scenario), configuration);
+
+      const history = await firstClient.callTool({
+        name: "list_native_changes",
+        arguments: { home_ref: homeRef, entity_ref: targetRef },
+      });
+      assert.deepEqual(
+        history.structuredContent.changes.map(
+          ({ change_ref, operation, recorded_status }) => ({
+            change_ref,
+            operation,
+            recorded_status,
+          }),
+        ),
+        [
+          {
+            change_ref: prepared.change_ref,
+            operation: "scenario_active",
+            recorded_status: "applied",
+          },
+        ],
+      );
+
+      await firstClient.close();
+      const secondClient = await startClient(subtest, hub, stateDirectory);
+      const restored = await callChangeTool(
+        secondClient,
+        "restore_native_change",
+        prepared.change_ref,
+      );
+      assert.equal(restored.status, "restored");
+      assert.deepEqual(scenarioUpdates(hub), [
+        { index: scenario.index, active: false },
+        { index: scenario.index, active: true },
+      ]);
+      assert.equal(scenario.active, true);
+      assert.deepEqual(scenarioWithoutActive(scenario), configuration);
+    });
+  }
+});
+
+test("a hand-toggled scenario is neither overwritten on apply nor reclaimed on restore", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const targetRef = scenarioRefFor(scenario);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const stale = await prepareScenarioActive(client, targetRef, false);
+  scenario.active = false;
+  const refused = await callChangeTool(
+    client,
+    "apply_native_change",
+    stale.change_ref,
+  );
+  assert.equal(refused.status, "conflict");
+  assert.equal(refused.conflict_reason, "baseline_changed");
+  assert.deepEqual(scenarioUpdates(hub), []);
+
+  scenario.active = true;
+  const prepared = await prepareScenarioActive(client, targetRef, false);
+  const applied = await callChangeTool(
+    client,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  scenario.active = true;
+  const observed = await callChangeTool(
+    client,
+    "get_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(observed.status, "conflict");
+  assert.equal(observed.manual_change_observed, true);
+
+  scenario.active = false;
+  const restored = await callChangeTool(
+    client,
+    "restore_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(restored.status, "conflict");
+  assert.equal(restored.conflict_reason, "manual_change");
+  assert.deepEqual(scenarioUpdates(hub), [
+    { index: scenario.index, active: false },
+  ]);
+  assert.equal(scenario.active, false);
+});
+
+test("a lost scenario.update response is settled by readback without a second update", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const scenario = scenarioActiveCases[0].install(hub);
+  const firstClient = await startClient(t, hub, stateDirectory);
+  const prepared = await prepareScenarioActive(
+    firstClient,
+    scenarioRefFor(scenario),
+    false,
+  );
+  hub.state.behavior.closeAfterScenarioUpdate = true;
+
+  const applied = await callChangeTool(
+    firstClient,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.native_acknowledged, false);
+  assert.equal(applied.recovered_after_uncertain_write, true);
+
+  await firstClient.close();
+  const secondClient = await startClient(t, hub, stateDirectory);
+  const repeated = await callChangeTool(
+    secondClient,
+    "apply_native_change",
+    prepared.change_ref,
+  );
+  assert.equal(repeated.status, "applied");
+  assert.deepEqual(scenarioUpdates(hub), [
+    { index: scenario.index, active: false },
+  ]);
+  assert.equal(scenario.active, false);
+});
+
+test("an already inactive scenario creates no change or write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const scenario = hub.state.scenarios.find(
+    ({ index }) => index === "existing-block",
+  );
+  assert.equal(scenario.active, false);
+
+  const prepared = await prepareScenarioActive(
+    client,
+    scenarioRefFor(scenario),
+    false,
+  );
+  assert.deepEqual(prepared, {
+    status: "already_desired",
+    operation: "scenario_active",
+    target_ref: scenarioRefFor(scenario),
+    observed_value: { value: false, kind: "boolValue" },
+    native_write_sent: false,
+    owned_change_created: false,
+  });
+  const history = await client.callTool({
+    name: "list_native_changes",
+    arguments: { home_ref: homeRef, entity_ref: scenarioRefFor(scenario) },
+  });
+  assert.deepEqual(history.structuredContent.changes, []);
+  assert.deepEqual(scenarioUpdates(hub), []);
+});
+
+test("a scenario ref of another home is rejected before any scenario request", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.scenarios[0].active = true;
+  const client = await startClient(t, hub, stateDirectory);
+  const foreignRef = "spruthub://hub/other-home/scenario/existing-block";
+
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "scenario_active", target_ref: foreignRef },
+  });
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "scenario_active",
+      target_ref: foreignRef,
+      value: false,
+      reason: "Не трогать сценарий другого дома",
+    },
+  });
+  for (const refused of [contract, prepared]) {
+    assert.equal(refused.isError, true);
+    assert.equal(
+      refused.structuredContent?.error?.code,
+      "unsupported_home_write",
+      refused.content[0]?.text,
+    );
+  }
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.get || scenario?.update),
+    false,
+  );
+  assert.equal(hub.state.scenarios[0].active, true);
+});
