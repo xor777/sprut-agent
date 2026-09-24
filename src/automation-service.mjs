@@ -5813,7 +5813,7 @@ function scenarioRunContract() {
     limitations: [
       "GLOBAL, built-in (predefined), and other non-BLOCK, non-LOGIC scenarios are refused with scenario_run_unverified_type until a manual run is verified on a hub: a GLOBAL run may register its timers and subscriptions again. Ask the owner to run such a scenario in the SprutHub app.",
       "A turned-off scenario is refused because its manual run has not been observed; scenario_active turns it on and also re-arms its triggers.",
-      "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write, and read_hub_log with the scenario_ref shows what it did.",
+      "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write. start_native_observation for this scenario, active during the run, shows what it did; the hub log kept no scenario lines without such a subscription.",
       "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
       "SprutHub exposes no native compare-and-set; a race remains after the pre-run scenario check.",
     ],
@@ -10448,7 +10448,7 @@ function publicNativeChange(
         ...(plan.effect.predicted
           ? []
           : [
-              "SprutHub decides during the run which conditions, delays, and code let actions execute, so the effect is not predicted. Listed targets are only literal actions it may write; read_hub_log with this scenario_ref shows what it did.",
+              "SprutHub decides during the run which conditions, delays, and code let actions execute, so the effect is not predicted. Listed targets are only literal actions it may write; start_native_observation for this scenario, active during the run, shows what it did.",
             ]),
         ...(plan.targets_known
           ? []
