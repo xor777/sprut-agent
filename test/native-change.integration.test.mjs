@@ -293,6 +293,14 @@ function installClimateFixture(hub) {
   });
 }
 
+// Models a hub that stores a different name than requested, as it already
+// does for accessory names; the rule itself is unknown, so the test picks one.
+function normalizedRoomOrServiceName(state, name) {
+  if (!state.behavior.normalizeNextRoomOrServiceName) return name;
+  state.behavior.normalizeNextRoomOrServiceName = false;
+  return name.replace(/\s*·\s*/g, " ");
+}
+
 function currentCharacteristicValue(hub, ref) {
   const match =
     /\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(ref);
@@ -1533,6 +1541,7 @@ async function startHub(port = 0) {
       invalidNextRoomList: false,
       missingRoomGetAsNotFoundError: false,
       normalizeNextAccessoryName: false,
+      normalizeNextRoomOrServiceName: false,
       rejectNextRoomGetAsInternalError: false,
       recalculateBlockRooms: false,
       projectBlockDerivedFields: false,
@@ -1683,7 +1692,9 @@ async function startHub(port = 0) {
         // RoomUpdateRequest {id, name, visible}: only present fields change.
         const update = params.room.update;
         const room = state.rooms.find(({ id }) => id === update.id);
-        if (room && Object.hasOwn(update, "name")) room.name = update.name;
+        if (room && Object.hasOwn(update, "name")) {
+          room.name = normalizedRoomOrServiceName(state, update.name);
+        }
         if (room && Object.hasOwn(update, "visible")) {
           room.visible = update.visible;
         }
@@ -1695,7 +1706,7 @@ async function startHub(port = 0) {
           .find(({ id }) => id === update.aId)
           ?.services.find(({ sId }) => sId === update.sId);
         if (service && Object.hasOwn(update, "name")) {
-          service.name = update.name;
+          service.name = normalizedRoomOrServiceName(state, update.name);
         }
         if (service && Object.hasOwn(update, "visible")) {
           service.visible = update.visible;
@@ -19409,6 +19420,73 @@ test("a room or service setting changed by hand is neither overwritten on apply 
         settingCase.update(settingCase.requested),
       ]);
       assert.equal(target[settingCase.field], settingCase.requested);
+    });
+  }
+});
+
+test("a room or service name the hub stored differently stays uncertain and a new change can set it again", async (t) => {
+  const requested = "Свет · диван";
+  const stored = "Свет диван";
+  for (const settingCase of roomServiceSettingCases.filter(
+    ({ field }) => field === "name",
+  )) {
+    await t.test(settingCase.operation, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const target = settingCase.locate(settingCase.install(hub));
+      const client = await startClient(subtest, hub, stateDirectory);
+
+      const prepared = await preparedRoomServiceSetting(
+        client,
+        settingCase,
+        requested,
+      );
+      hub.state.behavior.normalizeNextRoomOrServiceName = true;
+      const applied = await callChangeTool(
+        client,
+        "apply_native_change",
+        prepared.change_ref,
+      );
+      // The hub's own normalization is not the owner's edit: the change
+      // neither claims the requested name nor reports a manual change.
+      assert.equal(applied.status, "uncertain");
+      assert.equal(applied.manual_change_observed, undefined);
+      assert.deepEqual(applied.observed_value, {
+        value: stored,
+        kind: "stringValue",
+      });
+      assert.equal(target.name, stored);
+
+      for (const tool of ["apply_native_change", "restore_native_change"]) {
+        const repeated = await callChangeTool(
+          client,
+          tool,
+          prepared.change_ref,
+        );
+        assert.equal(repeated.status, "uncertain", tool);
+        assert.equal(repeated.manual_change_observed, undefined, tool);
+      }
+      assert.deepEqual(roomServiceUpdates(hub), [
+        settingCase.update(requested),
+      ]);
+      assert.equal(target.name, stored);
+
+      const again = await preparedRoomServiceSetting(
+        client,
+        settingCase,
+        requested,
+      );
+      assert.deepEqual(again.diff.value, {
+        from: stored,
+        to: requested,
+        kind: "stringValue",
+      });
+      const reapplied = await callChangeTool(
+        client,
+        "apply_native_change",
+        again.change_ref,
+      );
+      assert.equal(reapplied.status, "applied");
+      assert.equal(target.name, requested);
     });
   }
 });
