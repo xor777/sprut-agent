@@ -597,6 +597,84 @@ test("the session catalog is reused, dropped by this process's writes and refres
   );
 });
 
+// A lamp added in the SprutHub app: a copy of the desk lamp (on) under a
+// new id, name and room.
+function addLampInHub(hub, id, roomId, name) {
+  const lamp = structuredClone(
+    hub.state.accessories.find((accessory) => accessory.id === 32),
+  );
+  lamp.id = id;
+  lamp.roomId = roomId;
+  lamp.name = name;
+  for (const service of lamp.services) {
+    service.aId = id;
+    for (const characteristic of service.characteristics) {
+      characteristic.aId = id;
+    }
+  }
+  hub.state.accessories.push(lamp);
+}
+
+test("a room read sees devices moved or added in the SprutHub app after the catalog", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  // In the SprutHub app: the floor lamp (on) moves to the bedroom, a lamp
+  // is added there and another on the empty balcony.
+  hub.state.accessories.find(({ id }) => id === 16).roomId = 5;
+  addLampInHub(hub, 60, 5, "Лампа у кровати");
+  addLampInHub(hub, 61, 30, "Фонарь на балконе");
+
+  const bedroom = await call("find_devices", {
+    room_ref: `${home}/room/5`,
+    kind: "light",
+    state: "on",
+  });
+  assert.deepEqual(
+    listed(bedroom.body)
+      .map(({ device }) => device.name)
+      .sort(),
+    ["Лампа у кровати", "Торшер"],
+  );
+  assert.equal(methods(bedroom.native)[0], "accessory.list{roomId}");
+
+  const balcony = await call("find_devices", {
+    room_ref: `${home}/room/30`,
+    kind: "light",
+  });
+  assert.deepEqual(
+    listed(balcony.body).map(({ device }) => device.name),
+    ["Фонарь на балконе"],
+  );
+});
+
+test("refresh re-reads names changed in the SprutHub app that a query cannot notice", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  const first = await call("find_devices", { query: "лампа" });
+  assert.deepEqual(
+    listed(first.body).map(({ device }) => device.name),
+    ["Настольная лампа"],
+  );
+  addLampInHub(hub, 60, 5, "Лампа у кровати");
+  hub.state.rooms.find(({ id }) => id === 5).name = "Спальня родителей";
+
+  const refreshed = await call("find_devices", {
+    query: "лампа",
+    refresh: true,
+  });
+  assert.deepEqual(
+    listed(refreshed.body).map(({ room, device }) => [room.name, device.name]),
+    [
+      ["Спальня родителей", "Лампа у кровати"],
+      ["Кабинет", "Настольная лампа"],
+    ],
+  );
+  assert(methods(refreshed.native).includes("room.list"));
+  assert(refreshed.body.catalog_observed_at > first.body.catalog_observed_at);
+});
+
 test("a broad match reads values with one whole-home request", async (t) => {
   const { call } = await setup(t, await loadHomeFixture("house"));
   await call("home_overview", {});
