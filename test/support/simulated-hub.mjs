@@ -123,11 +123,10 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "{index, data}: 2026-09-13-native-daily-interval",
   ],
-  // The web client turns a scenario on and off through window.update; the
-  // active field of ScenarioUpdateRequest has not been read back live.
+  // The product no longer sends it; a run that does shows up here.
   "scenario.update {active}": [
-    SCHEMA_ONLY,
-    "active in ScenarioUpdateRequest; live readback pending (2026-09-24-web-client-evidence, 2026-09-24-live-conformance)",
+    OBSERVED,
+    "acknowledged and ignored for a BLOCK and a LOGIC (2026-09-24-live-conformance-2, steps 3a, 3e, 4)",
   ],
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
@@ -143,8 +142,19 @@ export const METHOD_EVIDENCE = {
   ],
   "log.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
   "log.unsubscribe": [SCHEMA_ONLY],
-  "window.get": [OBSERVED, "2026-09-10-window-setting"],
-  "window.update": [OBSERVED, "2026-09-10-window-setting"],
+  "window.get": [
+    OBSERVED,
+    "2026-09-10-window-setting; a BLOCK options window with Name, Active, OnStart, Sync and Desc (2026-09-24-live-conformance-2)",
+  ],
+  "window.update": [
+    OBSERVED,
+    "2026-09-10-window-setting; Name and Desc of a BLOCK options window (2026-09-24-live-conformance-2)",
+  ],
+  // The product switches a scenario only with this write.
+  "window.update {Active}": [
+    SCHEMA_ONLY,
+    "the web client switches a scenario with the Active option of its options window (2026-09-24-web-client-evidence, 4); the option was read on a live BLOCK window, its write not read back live (2026-09-24-live-conformance-2)",
+  ],
   "extension.list": [OBSERVED, "2026-09-16-extension-child-read"],
   "extension.get": [OBSERVED, "2026-09-16-extension-child-read"],
   "extensionChild.list": [OBSERVED, "2026-09-17-extension-child-empty-list"],
@@ -158,6 +168,16 @@ function evidenceKey(method, params) {
     const input = params?.scenario?.update;
     if (isRecord(input) && Object.hasOwn(input, "active")) {
       return "scenario.update {active}";
+    }
+  }
+  if (method === "window.update") {
+    const input = params?.window?.update;
+    if (
+      isScenarioWindowKey(input?.windowKey) &&
+      Array.isArray(input.options) &&
+      input.options.some((option) => option?.key === "Active")
+    ) {
+      return "window.update {Active}";
     }
   }
   return method ?? "(invalid request)";
@@ -1456,7 +1476,7 @@ const HANDLERS = {
     };
     if (scenario.type === "BLOCK") {
       scenario.data = normalizeBlockData(input.data);
-      scenario.optionsWindow = `scenario-options-${state.nextWindow++}`;
+      scenario.optionsWindow = scenarioWindowKey(state);
       scenario.rooms = blockRooms(state, scenario.data);
     } else if (scenario.type === "LOGIC") {
       if (typeof input.data !== "string") {
@@ -1473,7 +1493,10 @@ const HANDLERS = {
   },
   "scenario.update": (state, input) => {
     const scenario = requireScenario(state, input.index);
-    for (const key of ["active", "onStart", "sync"]) {
+    // The owner's hub acknowledged active here and kept the flag, for a BLOCK
+    // and a LOGIC (2026-09-24); a BLOCK is switched through its options
+    // window. onStart and sync were not sent live.
+    for (const key of ["onStart", "sync"]) {
       if (typeof input[key] === "boolean") scenario[key] = input[key];
     }
     // BLOCK name/desc are edited through the scenario options window; the
@@ -1541,19 +1564,34 @@ const HANDLERS = {
   "log.subscribe": (state) => ({ uuid: subscriptionUuid(state, "log") }),
   "log.unsubscribe": () => ({}),
 
-  "window.get": (state, { windowKey }) => state.windows[windowKey] ?? null,
+  "window.get": (state, { windowKey }) => {
+    const window = state.windows[windowKey];
+    if (!window) return null;
+    const scenario = scenarioOfWindow(state, windowKey);
+    if (!scenario) return window;
+    // Active shows the scenario's flag, as it did on the owner's hub.
+    const view = structuredClone(window);
+    const active = view.options.find(({ key }) => key === "Active");
+    if (active) active.value = { boolValue: scenario.active };
+    return view;
+  },
   "window.update": (state, { windowKey, options }) => {
     const window = state.windows[windowKey];
     if (!window) throw notFound(`Window ${windowKey}`);
+    const scenario = scenarioOfWindow(state, windowKey);
+    const active = Array.isArray(options)
+      ? options.find((option) => option?.key === "Active")
+      : undefined;
+    if (scenario && active && typeof active.value?.boolValue !== "boolean") {
+      throw invalidParams("Active must be a boolValue");
+    }
     applyOptions(window.options, options);
-    const scenario = state.scenarios.find(
-      (candidate) => candidate.optionsWindow === windowKey,
-    );
-    if (scenario) {
-      for (const option of window.options) {
-        if (option.key === "Name") scenario.name = option.value.stringValue;
-        if (option.key === "Desc") scenario.desc = option.value.stringValue;
-      }
+    // Only the options this update carries reach the scenario. That Active
+    // switches it is the web client's path, not read back on a live hub.
+    for (const { key, value } of scenario ? options : []) {
+      if (key === "Name") scenario.name = value.stringValue;
+      if (key === "Desc") scenario.desc = value.stringValue;
+      if (key === "Active") scenario.active = value.boolValue;
     }
     return {};
   },
@@ -1651,7 +1689,7 @@ function buildState(fixture) {
     };
     if (input.type === "BLOCK") {
       scenario.data = normalizeBlockData(JSON.stringify(input.data));
-      scenario.optionsWindow = `scenario-options-${state.nextWindow++}`;
+      scenario.optionsWindow = scenarioWindowKey(state);
       scenario.rooms = blockRooms(state, scenario.data);
     } else {
       scenario.data = Array.isArray(input.data)
@@ -1919,26 +1957,58 @@ function appendLog(state, entry) {
   }
 }
 
+// A BLOCK options window read on the owner's hub (3.0.0, 2026-09-24) had
+// Name (TEXT), Active, OnStart, Sync (CHECKBOX), Desc (TEXT_MULTILINE) and a
+// Remove button. The simulator keeps Name, Active and Desc in that order;
+// labels here are its own. Whether a LOGIC or GLOBAL has such a window was
+// not read, so they have none.
 function syncScenarioWindow(state, scenario) {
   if (scenario.type !== "BLOCK") return;
-  const text = (key, name, inputType, value) => ({
+  const option = (key, name, type, inputType, value) => ({
     key,
     name,
-    type: "GenericString",
+    type,
     inputType,
     read: true,
     write: true,
     disabled: false,
-    value: { stringValue: value },
+    value,
   });
   state.windows[scenario.optionsWindow] = {
     windowKey: scenario.optionsWindow,
     label: { text: "Настройки сценария" },
     options: [
-      text("Name", "Имя", "TEXT", scenario.name),
-      text("Desc", "Описание", "TEXT_MULTILINE", scenario.desc),
+      option("Name", "Имя", "GenericString", "TEXT", {
+        stringValue: scenario.name,
+      }),
+      // window.get shows the scenario's flag here.
+      option("Active", "Активен", "GenericBoolean", "CHECKBOX", {
+        boolValue: scenario.active,
+      }),
+      option("Desc", "Описание", "GenericString", "TEXT_MULTILINE", {
+        stringValue: scenario.desc,
+      }),
     ],
   };
+}
+
+const SCENARIO_WINDOW_PREFIX = "scenario-options-";
+
+function scenarioWindowKey(state) {
+  return `${SCENARIO_WINDOW_PREFIX}${state.nextWindow++}`;
+}
+
+function isScenarioWindowKey(windowKey) {
+  return (
+    typeof windowKey === "string" &&
+    windowKey.startsWith(SCENARIO_WINDOW_PREFIX)
+  );
+}
+
+function scenarioOfWindow(state, windowKey) {
+  return state.scenarios.find(
+    (candidate) => candidate.optionsWindow === windowKey,
+  );
 }
 
 // The hub adds editor blockIds (and runtime `state` on `if`) to stored BLOCK
