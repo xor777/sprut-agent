@@ -862,6 +862,56 @@ function assembleSupportedBlockFromContract(contract, { targets }) {
   return { [targetsField]: targets };
 }
 
+// Fills a published time-trigger form token by token, e.g. MM, HH, DAYS.
+function assembleTimeTriggerFromContract(
+  contract,
+  formName,
+  { mode, offsetMinutes = 0, ...tokens },
+) {
+  const trigger = contract.supported?.time_trigger;
+  const form = trigger?.forms?.[formName];
+  if (trigger?.node !== "cron" || form === null || typeof form !== "object") {
+    throw new Error(`BLOCK contract does not publish time trigger ${formName}`);
+  }
+  if (
+    !publishedChild(
+      publishedBlockNode(contract, "condition"),
+      "conditions",
+      "array",
+    ).types.includes("cron")
+  ) {
+    throw new Error("BLOCK condition does not accept a cron trigger");
+  }
+  const selectedMode = Array.isArray(form.mode) ? mode : form.mode;
+  if (Array.isArray(form.mode) && !form.mode.includes(mode)) {
+    throw new Error(`time trigger ${formName} does not publish mode ${mode}`);
+  }
+  let offset = form.offset;
+  if (typeof form.offset === "object") {
+    if (form.offset.unit !== "minutes") {
+      throw new Error(`time trigger ${formName} offset is not in minutes`);
+    }
+    offset = offsetMinutes;
+  }
+  return {
+    type: "cron",
+    mode: selectedMode,
+    cron: form.cron
+      .split(" ")
+      .map((token) =>
+        Object.hasOwn(tokens, token) ? String(tokens[token]) : token,
+      )
+      .join(" "),
+    offset,
+  };
+}
+
+function scenarioData(hub, index) {
+  return JSON.parse(
+    hub.state.scenarios.find((item) => item.index === index).data,
+  );
+}
+
 function dailyIntervalBlockData({
   start = [22, 30],
   end = [6, 15],
@@ -6990,7 +7040,7 @@ test("versioned BLOCK contract prepares different supported compositions", async
   });
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
   assert.equal(contract.structuredContent.status, "ok");
-  assert.equal(contract.structuredContent.contract.version, "2026-09-13");
+  assert.equal(contract.structuredContent.contract.version, "2026-09-24");
   assert.equal(
     contract.structuredContent.contract.source.frontend_sha256,
     "81c1ef74ce21eb5ccff583255ba82fe766ff4cf6bc251c0566b7bd67436647f8",
@@ -7723,7 +7773,7 @@ test("daily interval contract lets a client repair cron before preparation", asy
     arguments: { operation: "block_create" },
   });
   assert.equal(contract.isError, undefined, contract.content[0]?.text);
-  assert.equal(contract.structuredContent.contract.version, "2026-09-13");
+  assert.equal(contract.structuredContent.contract.version, "2026-09-24");
   assert.deepEqual(
     contract.structuredContent.contract.supported.daily_interval,
     {
@@ -8259,6 +8309,228 @@ test("daily interval BLOCK rejects ambiguous or unsupported schedules before sen
       testCase.name,
     );
   }
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
+test("weekday, one-date and sunset time triggers are created, read back and removed without device writes", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const contract = (
+    await client.callTool({
+      name: "get_native_change_contract",
+      arguments: { operation: "block_create" },
+    })
+  ).structuredContent.contract;
+
+  // «По будням в 7:00», «25 сентября 2026 в 9:00», «через 30 минут после заката».
+  const weekdays = assembleTimeTriggerFromContract(contract, "days_at_time", {
+    MM: 0,
+    HH: 7,
+    DAYS: "MON,TUE,WED,THU,FRI",
+  });
+  const oneDate = assembleTimeTriggerFromContract(contract, "one_date", {
+    MM: 0,
+    HH: 9,
+    D: 25,
+    M: 9,
+    YYYY: 2026,
+  });
+  const afterSunset = assembleTimeTriggerFromContract(contract, "sun", {
+    mode: "SUNSET",
+    DAYS: "*",
+    offsetMinutes: 30,
+  });
+  assert.deepEqual(
+    [weekdays, oneDate, afterSunset],
+    [
+      {
+        type: "cron",
+        mode: "NONE",
+        cron: "0 0 7 ? * MON,TUE,WED,THU,FRI *",
+        offset: 0,
+      },
+      { type: "cron", mode: "NONE", cron: "0 0 9 25 9 ? 2026", offset: 0 },
+      { type: "cron", mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 30 },
+    ],
+  );
+  const data = {
+    targets: [
+      everyIf({ when: conditionGroup(weekdays), thenActions: [setAction()] }),
+      everyIf({
+        when: conditionGroup(oneDate),
+        thenActions: [setAction({ cId: 16, hc: "Brightness", value: "80" })],
+      }),
+      everyIf({
+        when: conditionGroup(afterSunset),
+        thenActions: [setAction({ cId: 18, hc: "TargetMode", value: "home" })],
+      }),
+    ],
+  };
+
+  const prepared = await prepareBlockCreate(client, {
+    name: "Свет по расписанию",
+    data,
+    reason: "По будням в 7:00, завтра в 9:00 и после заката",
+  });
+  assert.deepEqual(prepared.structuredContent.diff.configuration.to.data, data);
+  const created = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(created.isError, undefined, created.content[0]?.text);
+  assert.equal(created.structuredContent.status, "applied");
+  assert.equal(created.structuredContent.configuration_matches, true);
+  const createdIndex = created.structuredContent.scenario_index;
+  assert.deepEqual(
+    scenarioData(hub, createdIndex),
+    withRuntimeBlockFields(data),
+  );
+
+  const removed = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(removed.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.scenarios.some(({ index }) => index === createdIndex),
+    false,
+  );
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("an existing BLOCK with a sunrise trigger is updated, read back and restored", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const manual = {
+    targets: [
+      everyIf({
+        when: conditionGroup({
+          type: "cron",
+          mode: "SUNRISE",
+          cron: "0 0 0 ? * * *",
+          offset: -10,
+        }),
+        thenActions: [setAction({ value: "false" })],
+      }),
+    ],
+  };
+  hub.state.scenarios[0].data = JSON.stringify(withRuntimeBlockFields(manual));
+
+  const read = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+  });
+  assert.equal(read.isError, undefined, read.content[0]?.text);
+  const edited = structuredClone(
+    read.structuredContent.entity.configuration.value,
+  );
+  edited.targets[0].if.conditions[0].cron = "0 0 0 ? * SAT,SUN *";
+  edited.targets[0].if.conditions[0].offset = 20;
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "block_data_update",
+      target_ref: scenarioRef,
+      data: edited,
+      reason: "По выходным выключать свет через 20 минут после восхода",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.configuration_matches, true);
+  const stored = scenarioData(hub, "existing-block");
+  assert.deepEqual(stored.targets[0].if.conditions[0], {
+    type: "cron",
+    blockId: 3,
+    mode: "SUNRISE",
+    cron: "0 0 0 ? * SAT,SUN *",
+    offset: 20,
+  });
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    scenarioData(hub, "existing-block"),
+    withRuntimeBlockFields(manual),
+  );
+  assert.equal(
+    hub.requests.some(({ characteristic }) => characteristic?.update),
+    false,
+  );
+});
+
+test("time triggers outside the published forms are refused with a repairable reason before send", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    ["numeric days", { mode: "NONE", cron: "0 0 7 ? * 2-6 *", offset: 0 }],
+    ["day range", { mode: "NONE", cron: "0 0 7 ? * MON-FRI *", offset: 0 }],
+    ["repeated day", { mode: "NONE", cron: "0 0 7 ? * MON,MON *", offset: 0 }],
+    ["no such date", { mode: "NONE", cron: "0 0 9 30 2 ? 2027", offset: 0 }],
+    ["date without year", { mode: "NONE", cron: "0 0 9 25 9 ? *", offset: 0 }],
+    ["clock time offset", { mode: "NONE", cron: "0 0 7 ? * * *", offset: 15 }],
+    [
+      "sunset clock time",
+      { mode: "SUNSET", cron: "0 30 18 ? * * *", offset: 0 },
+    ],
+    [
+      "sunset far offset",
+      { mode: "SUNSET", cron: "0 0 0 ? * * *", offset: 721 },
+    ],
+    ["unknown mode", { mode: "NOON", cron: "0 0 12 ? * * *", offset: 0 }],
+  ];
+  const results = [];
+  for (const [name, trigger] of cases) {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name,
+        description: "Не сохранять неподдержанное расписание",
+        active: true,
+        on_start: false,
+        sync: false,
+        data: {
+          targets: [
+            everyIf({
+              when: conditionGroup({ type: "cron", ...trigger }),
+              thenActions: [setAction()],
+            }),
+          ],
+        },
+        reason: "Проверить границу временного trigger",
+      },
+    });
+    results.push({
+      name,
+      code: prepared.structuredContent?.error?.code,
+      repairable: /time trigger/.test(
+        prepared.structuredContent?.error?.message ?? "",
+      ),
+    });
+  }
+  assert.deepEqual(
+    results,
+    cases.map(([name]) => ({
+      name,
+      code: "invalid_block_data",
+      repairable: true,
+    })),
+  );
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
     false,
