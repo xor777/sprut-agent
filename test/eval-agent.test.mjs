@@ -223,7 +223,9 @@ test("a pass that rests on simulator behavior not seen on a live hub is marked",
     /^PASS\* \(unverified: room\.update\) rename-room@apartment /,
   );
 
-  // scenario.update is observed for data; its active flag is not yet.
+  // SprutHub 3.0.0 acknowledged scenario.update {active} and kept the flag,
+  // so the product switches a scenario only through the Active option of its
+  // options window. That write has not been read back on a live hub yet.
   const disabled = await scriptedRun(t, {
     caseName: "disable-scenario",
     turnOff: [
@@ -232,17 +234,27 @@ test("a pass that rests on simulator behavior not seen on a live hub is marked",
     answer: "Отключил «Ночной режим».",
   });
   assert.equal(disabled.outcome.pass, true);
+  assert.deepEqual(
+    disabled.saved.hub_writes.map(({ method, params }) => [
+      method,
+      params.window?.update?.options,
+    ]),
+    [["window.update", [{ key: "Active", value: { boolValue: false } }]]],
+  );
   const levels = Object.fromEntries(
     disabled.saved.simulator_methods.map(({ method, level }) => [
       method,
       level,
     ]),
   );
-  assert.equal(levels["scenario.update {active}"], "schema_only");
-  assert.equal(levels["scenario.update"], undefined);
+  assert.equal(levels["window.update {Active}"], "schema_only");
+  assert.equal(levels["scenario.update {active}"], undefined);
+  assert.deepEqual(disabled.saved.unverified_methods, [
+    "window.update {Active}",
+  ]);
   assert.match(
     summaryLine(disabled.outcome),
-    /^PASS\* \(unverified: scenario\.update \{active\}\) disable-scenario@apartment /,
+    /^PASS\* \(unverified: window\.update \{Active\}\) disable-scenario@apartment /,
   );
 });
 
@@ -649,6 +661,21 @@ async function nativeSession(t, fixture = "apartment") {
   return { hub, send, grade, detail };
 }
 
+// SprutHub 3.0.0 ignored scenario.update {active} (owner hub, 2026-09-24);
+// the web client switches a scenario through the Active option of its
+// options window.
+async function switchScenario(session, index, active) {
+  const { scenario } = await session.send({ scenario: { get: { index } } });
+  await session.send({
+    window: {
+      update: {
+        windowKey: scenario.get.optionsWindow,
+        options: [{ key: "Active", value: { boolValue: active } }],
+      },
+    },
+  });
+}
+
 const setOn = (aId, sId, value) => ({
   characteristic: {
     update: {
@@ -677,21 +704,26 @@ test("disable-scenario needs the flag of the named scenario and nothing else", a
   );
 
   const disabled = await nativeSession(t);
-  await disabled.send({ scenario: { update: { index: "5", active: false } } });
+  await switchScenario(disabled, "5", false);
   assert.deepEqual(disabled.grade("disable-scenario", "Отключил."), {
     night_scenario_disabled: true,
     nothing_else_changed: true,
     answer_has_no_raw_refs: true,
   });
 
+  // The hub acknowledges scenario.update {active} and keeps the flag.
+  const ignored = await nativeSession(t);
+  await ignored.send({ scenario: { update: { index: "5", active: false } } });
+  assert.equal(
+    ignored.grade("disable-scenario", "Отключил.").night_scenario_disabled,
+    false,
+  );
+
   const rewritten = await nativeSession(t);
+  await switchScenario(rewritten, "5", false);
   await rewritten.send({
     scenario: {
-      update: {
-        index: "5",
-        active: false,
-        data: JSON.stringify({ targets: [] }),
-      },
+      update: { index: "5", data: JSON.stringify({ targets: [] }) },
     },
   });
   assert.equal(
@@ -700,8 +732,8 @@ test("disable-scenario needs the flag of the named scenario and nothing else", a
   );
 
   const both = await nativeSession(t);
-  await both.send({ scenario: { update: { index: "5", active: false } } });
-  await both.send({ scenario: { update: { index: "3", active: false } } });
+  await switchScenario(both, "5", false);
+  await switchScenario(both, "3", false);
   assert.equal(
     both.grade("disable-scenario", "Отключил.").nothing_else_changed,
     false,
@@ -735,7 +767,7 @@ test("an ambiguous scenario request passes a question naming both rules and fail
   );
 
   const guessed = await nativeSession(t);
-  await guessed.send({ scenario: { update: { index: "3", active: false } } });
+  await switchScenario(guessed, "3", false);
   assert.equal(
     guessed.grade(
       "disable-scenario-ambiguous",

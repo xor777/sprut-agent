@@ -839,3 +839,46 @@ test("the simulator omits empty native lists and stores BLOCK values as the hub 
     ),
   );
 });
+
+// Owner's hub, 3.0.0, 2026-09-24: scenario.update {active} was acknowledged
+// and changed nothing, for a BLOCK and a LOGIC; the BLOCK options window had
+// an Active CHECKBOX that showed the flag.
+test("the simulator switches a BLOCK only through the Active option of its options window", async (t) => {
+  const { send } = await rawSession(t);
+  const scenario = async (index) =>
+    (await send({ scenario: { get: { index } } })).result.scenario.get;
+  const windowActive = async (windowKey) =>
+    (await send({ window: { get: { windowKey } } })).result.window.get.options
+      .filter(({ key }) => key === "Active")
+      .map(({ inputType, value }) => [inputType, value]);
+  const writeWindow = (windowKey, key, value) =>
+    send({ window: { update: { windowKey, options: [{ key, value }] } } });
+
+  const ignored = await send({
+    scenario: { update: { index: "5", active: false } },
+  });
+  assert.deepEqual(ignored.result, { scenario: { update: {} } });
+  const night = await scenario("5");
+  assert.equal(night.active, true);
+  assert.deepEqual(await windowActive(night.optionsWindow), [
+    ["CHECKBOX", { boolValue: true }],
+  ]);
+
+  await writeWindow(night.optionsWindow, "Active", { boolValue: false });
+  assert.equal((await scenario("5")).active, false);
+  assert.deepEqual(await windowActive(night.optionsWindow), [
+    ["CHECKBOX", { boolValue: false }],
+  ]);
+  // Another option of the same window leaves the flag as it is.
+  await writeWindow(night.optionsWindow, "Name", { stringValue: "Ночь" });
+  assert.deepEqual(
+    [(await scenario("5")).name, (await scenario("5")).active],
+    ["Ночь", false],
+  );
+  // The motion rule next to it keeps its own flag.
+  assert.equal((await scenario("3")).active, true);
+
+  // A LOGIC ignores the flag too; its options window was not read live.
+  await send({ scenario: { update: { index: "9", active: false } } });
+  assert.equal((await scenario("9")).active, true);
+});
