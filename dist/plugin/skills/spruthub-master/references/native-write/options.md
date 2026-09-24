@@ -11,9 +11,13 @@
   `optionsWindow`, затем обычный scalar prepare/apply/restore через
   `window.update`. Прямой window-ref не открывает TEXT/TEXT_MULTILINE Name/Desc
   и не обходит marker; если окно принадлежит BLOCK, отказ указывает на
-  владельца-сценария, иначе это обычный unsupported TEXT. Ключ `Name` или
-  `Desc` сам по себе не делает окно сценарием: NUMBER/CHECKBOX/LIST с тем же
-  ключом остаются обычными window_option. Известный `GenericBoolean`/`GenericInteger`/`GenericLong`/`GenericDouble`
+  владельца-сценария, иначе это обычный unsupported TEXT. `Active` окна
+  сценария любого типа — его флаг включения: window_option отказывает с
+  `scenario_owner_required` и `next` на контракт
+  [`scenario_active`](scenario-active.md), который проверяет и
+  `scenario.get`. Ключ `Name`, `Desc` или `Active` сам по себе не делает окно
+  сценарием: NUMBER/CHECKBOX/LIST с тем же ключом в окне устройства остаются
+  обычными window_option. Известный `GenericBoolean`/`GenericInteger`/`GenericLong`/`GenericDouble`
   обязан совпадать с envelope. Явные min/max/step и список сохраняются и
   проверяются; LIST, в котором хотя бы один вариант противоречит явному
   диапазону или шагу, целиком несовместим. Отсутствующие ограничения не

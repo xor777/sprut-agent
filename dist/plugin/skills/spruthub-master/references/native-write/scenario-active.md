@@ -7,7 +7,9 @@
   веб-клиенте SprutHub: `window.update` окна настроек сценария
   (`optionsWindow`) с одной опцией `Active`; data, имя, описание, `onStart` и
   `sync` не отправляются. Это не удаление и не запуск: сценарий остаётся на
-  хабе. `block_data_update` флаги не меняет, `active` меняется только здесь.
+  хабе. `block_data_update` флаги не меняет, `active` меняется только здесь:
+  `window_option` с ref окна сценария и `option_key=Active` отказывает с
+  `scenario_owner_required` и `next` сюда.
 - SprutHub 3.0.0 принимает `scenario.update {index, active}` с ACK, но флаг
   не меняет, поэтому этот путь не используется. Change, записанный, когда
   операция ещё отправляла `scenario.update`, сверяется тем же чтением, а

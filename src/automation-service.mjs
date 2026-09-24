@@ -5605,6 +5605,25 @@ function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
   );
 }
 
+function scenarioActiveOwnerRequired(scenarioRef) {
+  return new SprutHubError(
+    "scenario_owner_required",
+    "Active in a scenario's options window is that scenario's on/off flag. It is switched with scenario_active on the scenario ref, which confirms it with scenario.get as well as the window; nothing was sent.",
+    "get_native_change_contract",
+    scenarioRef
+      ? {
+          next: {
+            tool: "get_native_change_contract",
+            arguments: {
+              operation: "scenario_active",
+              target_ref: scenarioRef,
+            },
+          },
+        }
+      : {},
+  );
+}
+
 function unsupportedBlockMetadata(input) {
   return new SprutHubError(
     "unsupported_block_metadata",
@@ -9512,6 +9531,18 @@ async function readScenarioMetadataOption(client, owner, optionKey) {
 }
 
 async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
+  if (option.key === "Active") {
+    // window_option confirms only the window, not scenario.get.
+    const owners = (await service.client.listScenarios()).filter(
+      (scenario) => scenario.optionsWindow === windowKey,
+    );
+    if (owners.length === 0) return;
+    throw scenarioActiveOwnerRequired(
+      owners.length === 1
+        ? `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(owners[0].index)}`
+        : undefined,
+    );
+  }
   if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
   if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
     return;
