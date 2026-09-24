@@ -11334,6 +11334,79 @@ test("an if the edit keeps is written as the hub stores it, not as the agent tid
   );
 });
 
+// The web client makes every condition group with mode OR
+// (research/protocol/2026-09-24-web-client-evidence.md). Over one condition
+// that means the condition; an agent adding «only at night» to it gets
+// «motion or night» unless it sets AND.
+test("an update that grows a web client's one-condition OR group warns that any of its conditions runs the branch", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  installWorkModeAccessory(hub);
+  const stored = withRuntimeBlockFields({
+    targets: [
+      {
+        ...motionLightIf(...IF_DEFAULT_KEYS),
+        if: conditionGroup(characteristicCondition(), "OR"),
+      },
+    ],
+  });
+  const atNight = workModeEquals(workModeNight.value, false);
+  const preview = async (edit) => {
+    hub.state.scenarios[0].data = JSON.stringify(stored);
+    const data = edit(await readBlockConfiguration(client));
+    const prepared = await prepareBlockUpdate(
+      client,
+      data,
+      "Свет по движению только ночью",
+    );
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+    const { block_action_preview: shown, diff } = prepared.structuredContent;
+    assert(
+      (shown.warnings ?? []).every(
+        ({ message }) => typeof message === "string",
+      ),
+    );
+    return {
+      warnings: (shown.warnings ?? []).map(({ message: _, ...rest }) => rest),
+      written_mode: diff.data.to.targets[0].if.mode,
+    };
+  };
+
+  const outcomes = {
+    grown_or: await preview((data) => {
+      data.targets[0].if.conditions.push(atNight);
+      return data;
+    }),
+    grown_and: await preview((data) => {
+      data.targets[0].if.conditions.push(atNight);
+      data.targets[0].if.mode = "AND";
+      return data;
+    }),
+    action_added: await preview((data) => {
+      data.targets[0].then.push(
+        setAction({ cId: 16, hc: "Brightness", value: "30" }),
+      );
+      return data;
+    }),
+  };
+
+  assert.deepEqual(outcomes, {
+    grown_or: {
+      warnings: [
+        {
+          code: "or_group_grown",
+          pointer: "/targets/0/if",
+          mode: "OR",
+          conditions: 2,
+        },
+      ],
+      written_mode: "OR",
+    },
+    grown_and: { warnings: [], written_mode: "AND" },
+    action_added: { warnings: [], written_mode: "OR" },
+  });
+});
+
 test("an update that adds an if with the web client's defaults applies and restores when the hub writes them out", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
