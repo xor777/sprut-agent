@@ -654,9 +654,20 @@ test("relations of the corridor light list only its own roles with branch, value
         op: "=",
         value: true,
       },
+      // The fixture's evening living-room rule also reads this sensor's light level.
+      {
+        scenario_ref: `${homeRef}/scenario/14`,
+        active: true,
+        entity_ref: `${homeRef}/accessory/13/service/20/characteristic/21`,
+        characteristic: "Освещенность",
+        role: "condition",
+        op: "<",
+        value: 30,
+        unit: "lux",
+      },
     ],
   );
-  assert.equal(sensorRelations.other_roles_count, 2);
+  assert.equal(sensorRelations.other_roles_count, 4);
   assert.deepEqual(
     sensorRelations.unchecked.map(({ area, outcome }) => [area, outcome]),
     [["characteristic_links", "not_read"]],

@@ -343,19 +343,16 @@ test("a device without scenarios, logic, links or options reads as checked empty
     entity_ref: lampRef,
     include: ["relations", "options"],
   });
+  // A read options array, empty or not, is the checked scope.
   assert.deepEqual(lamp.entity.options, []);
-  assert.equal(lamp.entity.option_scope.status, "checked_empty");
-  assert.deepEqual(
-    Object.fromEntries(
-      lamp.entity.relations.scopes.map(({ area, outcome }) => [area, outcome]),
-    ),
-    {
-      scenario_accessory_index: "checked_empty",
-      logic_assignments: "checked_empty",
-      characteristic_links: "checked_empty",
-    },
-  );
-  assert.deepEqual(lamp.entity.relations.scenario_associations, []);
+  assert.deepEqual(lamp.entity.relations.checked, {
+    scenario_accessory_index: "checked_empty",
+    block_scenarios_read: 0,
+    logic_assignments: "checked_empty",
+    characteristic_links: "checked_empty",
+  });
+  assert.deepEqual(lamp.entity.relations.unchecked, []);
+  assert.deepEqual(lamp.entity.relations.scenario_roles, []);
   assert.deepEqual(lamp.entity.relations.assigned_logics, []);
   assert.deepEqual(lamp.entity.relations.characteristic_links, []);
 
