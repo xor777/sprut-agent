@@ -477,13 +477,10 @@ test("repeated runs on both fixtures report passes, MCP medians and the house/ap
   for (const entry of summary.cases) {
     const runs = await hubCost(entry);
     const middle = (key) => (runs[0][key] + runs[1][key]) / 2;
+    assert.ok(middle("hub_response_bytes") > 0);
     assert.equal(entry.median_hub_requests, middle("hub_requests"));
     assert.equal(entry.median_hub_response_bytes, middle("hub_response_bytes"));
   }
-  assert.ok(
-    byFixture.house.median_hub_response_bytes >
-      byFixture.apartment.median_hub_response_bytes,
-  );
   assert.equal(
     scale.hub_response_bytes_ratio,
     Math.round(

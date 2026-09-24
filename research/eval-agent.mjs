@@ -229,6 +229,7 @@ export async function runCase({
         cost_usd: transcript.costUsd ?? null,
         turns: transcript.turns ?? null,
         hub_requests: hub.requests.length,
+        hub_response_bytes: sum(hub.requests, "responseBytes"),
         hub_writes: hub.requests.filter(({ write }) => write).length,
       },
       answer: evidence.answer,
@@ -418,7 +419,8 @@ export function failureClass(graders) {
 }
 
 // MCP calls and MCP result bytes are the cross-harness measure: the harness's
-// own tools (Read, Skill, shell) differ between Claude Code and Codex.
+// own tools (Read, Skill, shell) differ between Claude Code and Codex. hub=
+// is what the MCP server cost the hub: native requests and reply bytes.
 export function summaryLine(outcome) {
   const tokens = outcome.metrics.tokens;
   const graderText = outcome.graders
@@ -430,6 +432,7 @@ export function summaryLine(outcome) {
     `${outcome.case}@${outcome.fixture}`,
     `${outcome.harness}/${outcome.model.reported ?? outcome.model.requested ?? "default"}`,
     `mcp=${outcome.metrics.mcp_tool_calls}/${outcome.metrics.mcp_tool_result_bytes}B`,
+    `hub=${outcome.metrics.hub_requests}/${outcome.metrics.hub_response_bytes}B`,
     `tools=${outcome.metrics.tool_calls}`,
     `tokens_in=${tokens?.total_input ?? "?"} out=${tokens?.output ?? "?"}`,
     `${outcome.metrics.wall_seconds}s`,
@@ -468,6 +471,12 @@ export function summarizeRuns(
       median_mcp_result_bytes: median(
         runs.map(({ metrics }) => metrics.mcp_tool_result_bytes),
       ),
+      median_hub_requests: median(
+        runs.map(({ metrics }) => metrics.hub_requests),
+      ),
+      median_hub_response_bytes: median(
+        runs.map(({ metrics }) => metrics.hub_response_bytes),
+      ),
       median_tokens: median(
         runs.map(({ metrics }) =>
           metrics.tokens
@@ -500,6 +509,14 @@ export function summarizeRuns(
         small.median_mcp_result_bytes,
       ),
       tokens_ratio: ratio(entry.median_tokens, small.median_tokens),
+      hub_requests_ratio: ratio(
+        entry.median_hub_requests,
+        small.median_hub_requests,
+      ),
+      hub_response_bytes_ratio: ratio(
+        entry.median_hub_response_bytes,
+        small.median_hub_response_bytes,
+      ),
     });
   }
   return {
@@ -521,7 +538,7 @@ function summaryTable(summary) {
   return [
     ...summary.cases.map(
       (entry) =>
-        `SUMMARY ${entry.case}@${entry.fixture}${entry.expected_fail ? " (expected to fail)" : ""} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} tokens=${entry.median_tokens}${
+        `SUMMARY ${entry.case}@${entry.fixture}${entry.expected_fail ? " (expected to fail)" : ""} ${entry.passes}/${entry.runs} mcp_calls=${entry.median_mcp_calls} mcp_bytes=${entry.median_mcp_result_bytes} hub_requests=${entry.median_hub_requests} hub_bytes=${entry.median_hub_response_bytes} tokens=${entry.median_tokens}${
           Object.keys(entry.failure_classes).length > 0
             ? ` failures=${JSON.stringify(entry.failure_classes)}`
             : ""
@@ -529,7 +546,7 @@ function summaryTable(summary) {
     ),
     ...summary.scale.map(
       (entry) =>
-        `SCALE ${entry.case} house/apartment mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio}`,
+        `SCALE ${entry.case} house/apartment mcp_calls=${entry.mcp_calls_ratio} mcp_bytes=${entry.mcp_result_bytes_ratio} tokens=${entry.tokens_ratio} hub_requests=${entry.hub_requests_ratio} hub_bytes=${entry.hub_response_bytes_ratio}`,
     ),
   ];
 }

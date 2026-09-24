@@ -870,6 +870,7 @@ export async function startSimulatedHub(
     socket.on("message", (raw) => {
       connection.requests += 1;
       connection.first_request_at ??= Date.now();
+      const recorded = requests.length;
       const reply = handleMessage(
         state,
         requests,
@@ -878,7 +879,13 @@ export async function startSimulatedHub(
         refusals,
         connection.id,
       );
-      if (reply) socket.send(JSON.stringify(reply));
+      const text = reply ? JSON.stringify(reply) : null;
+      // The hub-side cost of the request: bytes of the reply frame sent (0
+      // for a dropped reply).
+      if (requests.length > recorded) {
+        requests.at(-1).responseBytes = text ? Buffer.byteLength(text) : 0;
+      }
+      if (text) socket.send(text);
     });
   });
   const address = server.address();
