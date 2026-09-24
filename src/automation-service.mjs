@@ -1009,6 +1009,7 @@ export class AutomationService {
           await this.#sendDeviceCommand(item, changes, homeRef, reason),
         );
       }
+      await this.#warnLevelsStoredWhileOff(items, results);
       return deviceCommandsResult(homeRef, results);
     });
   }
@@ -1027,11 +1028,20 @@ export class AutomationService {
       try {
         inspected = await inspectCharacteristicValue(this, input);
         const draft = await characteristicValueDraft(this, input, inspected);
+        const accessory = await this.#deviceCommandAccessory(
+          accessories,
+          targets[index].aId,
+        );
         items.push({
           command,
           input,
           draft,
-          name: await this.#deviceCommandName(accessories, targets[index]),
+          name: deviceCommandName(accessory, targets[index]),
+          onTarget: lightLevelOnTarget(
+            accessory,
+            targets[index],
+            draft.contract.type,
+          ),
         });
       } catch (error) {
         if (!isDeviceCommandRejection(error)) throw error;
@@ -1044,26 +1054,48 @@ export class AutomationService {
     return items;
   }
 
-  async #deviceCommandName(accessories, { aId, sId }) {
+  async #deviceCommandAccessory(accessories, aId) {
     if (!accessories.has(aId)) {
       accessories.set(
         aId,
         this.client.getAccessory(aId).catch((error) => {
-          // The name only labels the result; a transport failure still stops
-          // the call before any write, other read problems leave it unnamed.
+          // The accessory only names the result and finds a lamp's On; a
+          // transport failure still stops the call before any write, other
+          // read problems leave the result unnamed and without that check.
           if (!isDeviceCommandRejection(error)) throw error;
           return null;
         }),
       );
     }
-    const accessory = await accessories.get(aId);
-    if (typeof accessory?.name !== "string") return null;
-    const service = accessory.services?.find((entry) => entry.sId === sId);
-    return sanitizeNativeData(
-      typeof service?.name === "string"
-        ? `${accessory.name} / ${service.name}`
-        : accessory.name,
-    );
+    return accessories.get(aId);
+  }
+
+  // A light level applied to a lamp that is still off after the whole call
+  // is only stored, so an agent must not report the lamp as lit at that
+  // level. The results are already final: a failed On read leaves the item
+  // without a warning.
+  async #warnLevelsStoredWhileOff(items, results) {
+    const onValues = new Map();
+    for (const [index, { onTarget }] of items.entries()) {
+      if (!onTarget || results[index].status !== "applied") continue;
+      const key = nativeTargetKey(onTarget);
+      if (!onValues.has(key)) {
+        onValues.set(
+          key,
+          this.client
+            .getCharacteristic(onTarget)
+            .then(({ control }) => control?.value?.boolValue)
+            .catch(() => undefined),
+        );
+      }
+      if ((await onValues.get(key)) === false) {
+        results[index].warning = {
+          code: "device_off_level_stored",
+          message:
+            "The lamp is off, so this level is only stored and shows when the lamp is turned on; it was not turned on.",
+        };
+      }
+    }
   }
 
   async #sendDeviceCommand(
@@ -8283,6 +8315,31 @@ function latestSentValueCommand(changes, homeRef, target) {
     }
   }
   return latest;
+}
+
+function deviceCommandName(accessory, { sId }) {
+  if (typeof accessory?.name !== "string") return null;
+  const service = accessory.services?.find((entry) => entry.sId === sId);
+  return sanitizeNativeData(
+    typeof service?.name === "string"
+      ? `${accessory.name} / ${service.name}`
+      : accessory.name,
+  );
+}
+
+const LIGHT_LEVEL_TYPES = new Set([
+  "Brightness",
+  "ColorTemperature",
+  "Hue",
+  "Saturation",
+]);
+
+function lightLevelOnTarget(accessory, { aId, sId }, type) {
+  if (!LIGHT_LEVEL_TYPES.has(type)) return null;
+  const on = accessory?.services
+    ?.find((entry) => entry.sId === sId)
+    ?.characteristics?.find(({ control }) => control?.type === "On");
+  return Number.isInteger(on?.cId) ? { aId, sId, cId: on.cId } : null;
 }
 
 function nativeChangeNext(changeRef) {
