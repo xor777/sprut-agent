@@ -135,7 +135,7 @@ export class HomeReads {
         }),
         extras:
           list === null
-            ? deviceMatchesHint(home.ref, query, rooms, accessories)
+            ? deviceMatchesHint(serial, query, rooms, accessories)
             : {},
       });
     }
@@ -1345,27 +1345,20 @@ function overviewEntries(selection, { roomList, scenarios, extensions }) {
 }
 
 // How many services a name query matches, with the find_devices call that
-// lists them.
-function deviceMatchesHint(home, query, rooms, accessories) {
-  const stems = queryStems(query);
-  const matches = accessories.accessories.reduce(
-    (count, accessory) =>
-      count +
-      (accessory.services ?? []).filter(
-        (service) =>
-          serviceKind(service) !== "technical" &&
-          matchesStems(stems, deviceText(service, accessory, rooms.rooms)),
-      ).length,
-    0,
-  );
-  return matches > 0
+// lists them: counted as that call selects them, so a light word classifies
+// the question there too, and the relays it lists beside the lamps count
+// apart.
+function deviceMatchesHint(serial, query, rooms, accessories) {
+  const selection = findSelection({ query }, serial);
+  const catalog = { rooms: rooms.rooms, accessories: accessories.accessories };
+  const candidates = selectCandidates(catalog, selection);
+  const switches = switchCandidates(catalog, selection, candidates).length;
+  return candidates.length + switches > 0
     ? {
         devices: {
-          matches,
-          next: {
-            tool: "find_devices",
-            arguments: { home_ref: home, query },
-          },
+          matches: candidates.length,
+          ...(switches > 0 ? { switches } : {}),
+          next: { tool: "find_devices", arguments: selection.args },
         },
       }
     : {};
