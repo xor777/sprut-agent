@@ -132,31 +132,18 @@ const expectedNewestFirst = [
   },
 ];
 
-// The unconfirmed lastTime contract is modelled in each plausible direction,
-// so paging is checked against the hub rather than against one guess. Every
-// fake answers a plain count with the newest entries.
-function listLog(log, { lastTime, count }, lastTimeSemantics) {
-  if (lastTime === undefined) return log.slice(-count);
-  const window = {
-    before_exclusive: () =>
-      log.filter(({ time }) => time < lastTime).slice(-count),
-    before_inclusive: () =>
-      log.filter(({ time }) => time <= lastTime).slice(-count),
-    oldest_before_inclusive: () =>
-      log.filter(({ time }) => time <= lastTime).slice(0, count),
-    after_exclusive: () =>
-      log.filter(({ time }) => time > lastTime).slice(0, count),
-    ignored: () => log.slice(-count),
-  }[lastTimeSemantics];
-  assert(window, `unknown lastTime semantics ${lastTimeSemantics}`);
-  return window();
+// Live hub, firmware 3.0.0 (2026-09-24): log.list keeps a ring buffer of its
+// newest 128 entries, a larger count returns the same buffer, and lastTime
+// returns only entries newer than it.
+const BUFFER_SIZE = 128;
+function listLog(log, { lastTime, count }) {
+  return log
+    .slice(-BUFFER_SIZE)
+    .filter(({ time }) => lastTime === undefined || time > lastTime)
+    .slice(-count);
 }
 
-async function startHub({
-  log = observedLog,
-  lastTimeSemantics = "before_exclusive",
-  respond,
-} = {}) {
+async function startHub({ log = observedLog, respond } = {}) {
   const requests = [];
   const server = new WebSocketServer({ port: 0 });
   await once(server, "listening");
@@ -170,11 +157,7 @@ async function startHub({
       } else if (request.params?.log?.list) {
         reply = {
           result: {
-            log: {
-              list: {
-                log: listLog(log, request.params.log.list, lastTimeSemantics),
-              },
-            },
+            log: { list: { log: listLog(log, request.params.log.list) } },
           },
         };
       } else {
@@ -237,7 +220,7 @@ test("read_hub_log returns the hub execution log newest first with ISO time, lev
   assert.equal(result.isError, undefined, result.content[0]?.text);
   assert.deepEqual(
     hub.requests.map(({ params }) => params),
-    [{ log: { list: { count: 100 } } }],
+    [{ log: { list: { count: 500 } } }],
   );
   assertOnlyLogListRequests(hub);
   const page = result.structuredContent;
@@ -246,11 +229,12 @@ test("read_hub_log returns the hub execution log newest first with ISO time, lev
   assert.equal(page.order, "newest_first");
   assert.equal(page.content_origin, "spruthub_native_log");
   assert.deepEqual(page.entries, expectedNewestFirst);
+  assert.equal(page.buffer_entries, 8);
+  assert.equal(page.oldest_entry_at, "2026-09-11T09:23:55.092Z");
   assert.equal(page.page.returned, 8);
-  assert.equal(page.page.filtered_out, 0);
-  assert.equal(page.next, null);
+  assert.equal(page.page.matched_total, 8);
+  assert.equal(page.page.truncated, false);
   assert.equal(page.native.returned_count, 8);
-  assert.equal(page.native.retention, "unknown");
   assert.equal(typeof page.freshness.hubResponseReceivedAt, "string");
   const text = result.content[0].text;
   assert.equal(text.includes("must-not-leak"), false, text);
@@ -272,7 +256,7 @@ test("read_hub_log filters by level, text and the observed scenario formats with
     messages(warnings),
     [1789120490705, 1789120490701, 1789118635092],
   );
-  assert.equal(warnings.structuredContent.page.filtered_out, 5);
+  assert.equal(warnings.structuredContent.page.matched_total, 3);
 
   const delay = await readLog(client, {
     home_ref: homeRef,
@@ -294,7 +278,7 @@ test("read_hub_log filters by level, text and the observed scenario formats with
     messages(scenario),
     [1789120490692, 1789120490687, 1789120490684, 1789118635092],
   );
-  assert.equal(scenario.structuredContent.page.filtered_out, 4);
+  assert.equal(scenario.structuredContent.page.matched_total, 4);
 
   const scenarioErrors = await readLog(client, {
     home_ref: homeRef,
@@ -314,166 +298,106 @@ test("read_hub_log filters by level, text and the observed scenario formats with
     });
     assert.equal(hidden.isError, undefined, hidden.content[0]?.text);
     assert.deepEqual(hidden.structuredContent.entries, []);
-    assert.equal(hidden.structuredContent.page.filtered_out, 8);
+    assert.equal(hidden.structuredContent.page.matched_total, 0);
   }
 
   assert.equal(hub.requests.length, 8);
   assertOnlyLogListRequests(hub);
   for (const { params } of hub.requests) {
-    assert.deepEqual(params, { log: { list: { count: 100 } } });
+    assert.deepEqual(params, { log: { list: { count: 500 } } });
   }
 });
 
-function denseLog() {
+// About three hours of a quiet home: mostly Zigbee controller lines, one
+// scenario run before the retained buffer and one inside it.
+function ringLog() {
   const log = [];
-  let time = 1789120000000;
-  for (let index = 0; index < 36; index += 1) {
-    // Pairs of entries share one millisecond, so page boundaries fall inside
-    // same-time groups.
-    if (index % 3 !== 1) time += 1;
-    log.push({
-      time,
-      level: "LOG_LEVEL_INFO",
-      path: "Scenario.ScenarioBlock.Target.jBlock",
-      message: `Сценарий 23: step ${String(index).padStart(2, "0")} ${"x".repeat(90)}`,
-    });
+  for (let index = 0; index < 200; index += 1) {
+    const time = 1789120000000 + index * 60_000;
+    log.push(
+      index === 10 || index === 150
+        ? {
+            time,
+            level: "LOG_LEVEL_INFO",
+            path: "Scenario.ScenarioBlock.Target.jBlock",
+            message: `Сценарий 23: jTargetDelay_4 time=3000, mode=RESET, index=${index}`,
+          }
+        : {
+            time,
+            level: index % 40 === 0 ? "LOG_LEVEL_WARN" : "LOG_LEVEL_INFO",
+            path: "Controllers.zigbee",
+            message: `Zigbee 0x00158d00${String(index).padStart(8, "0")}: attribute report ${"x".repeat(60)}`,
+          },
+    );
   }
   return log;
 }
 
-// Pages must show the log newest first down to the oldest time shown, with
-// nothing skipped and nothing repeated. Equal native_time keeps the hub order
-// only inside one page, so order within a millisecond is not compared.
-// Fixture messages are unique.
-function assertNoGapOrRepeat(seen, log) {
-  const times = seen.map(({ time }) => time);
-  assert.deepEqual(
-    times,
-    times.toSorted((a, b) => b - a),
-    "pages are not newest first",
-  );
-  const messages = seen.map(({ message }) => message);
-  assert.equal(new Set(messages).size, messages.length, "an entry repeated");
-  const oldest = Math.min(...times);
-  assert.deepEqual(
-    messages.filter((_, index) => times[index] > oldest).toSorted(),
-    log
-      .filter(({ time }) => time > oldest)
-      .map(({ message }) => message)
-      .toSorted(),
-    "an entry newer than the oldest one shown was skipped",
-  );
-}
-
-function allMessages(log) {
-  return log.map(({ message }) => message).toSorted();
-}
-
-// Follows next the way an agent does and reports how paging ended.
-async function pageThrough(client, args) {
-  const seen = [];
-  let pages = 0;
-  for (;;) {
-    pages += 1;
-    assert(pages <= 60, "paging did not terminate");
-    const result = await readLog(client, args);
-    if (result.isError) return { seen, pages, error: result.structuredContent };
-    const { entries, next, page } = result.structuredContent;
-    assert(Buffer.byteLength(result.content[0].text) <= page.max_bytes);
-    seen.push(
-      ...entries.map(({ native_time: time, message }) => ({ time, message })),
-    );
-    if (next === null) return { seen, pages, endReason: page.end_reason };
-    assert.equal(next.tool, "read_hub_log");
-    args = next.arguments;
-  }
-}
-
-for (const [lastTimeSemantics, pagesToTheEnd] of [
-  ["before_exclusive", true],
-  ["before_inclusive", true],
-  ["oldest_before_inclusive", false],
-  ["after_exclusive", false],
-  ["ignored", false],
-]) {
-  test(`read_hub_log shows every entry once or refuses paging when log.list lastTime is ${lastTimeSemantics}`, async (t) => {
-    const log = denseLog();
-    const hub = await startHub({ log, lastTimeSemantics });
-    const client = await startClient(t, hub);
-    const firstPage = { home_ref: homeRef, count: 5, max_bytes: 2_048 };
-
-    const { seen, pages, error, endReason } = await pageThrough(
-      client,
-      firstPage,
-    );
-
-    // Whatever lastTime means, pages never skip or repeat an entry.
-    assertNoGapOrRepeat(seen, log);
-    assert.equal(hub.requests.length, pages);
-    assertOnlyLogListRequests(hub);
-    if (pagesToTheEnd) {
-      assert.equal(error, undefined, JSON.stringify(error));
-      assert.deepEqual(
-        seen.map(({ message }) => message).toSorted(),
-        allMessages(log),
-      );
-      assert.equal(endReason, "hub_returned_fewer_than_requested");
-      assert(pages > 2, `expected several pages, got ${pages}`);
-    } else {
-      assert.equal(
-        error?.error.code,
-        "unsupported_log_paging",
-        `paging ended with ${endReason} after ${seen.length} of ${log.length} entries`,
-      );
-      assert.equal(error.entries, undefined);
-      assert.deepEqual(error.next, {
-        tool: "read_hub_log",
-        arguments: firstPage,
-      });
-    }
-  });
-}
-
-test("read_hub_log does not present unreachable older entries as the end of the log", async (t) => {
-  const log = [];
-  let time = 1789120000000;
-  const add = (message) =>
-    log.push({
-      time,
-      level: "LOG_LEVEL_INFO",
-      path: "Scenario.ScenarioBlock.Target.jBlock",
-      message: `Сценарий 23: ${message}`,
-    });
-  for (let index = 0; index < 3; index += 1) {
-    time += 1;
-    add(`before burst ${index}`);
-  }
-  time += 1;
-  for (let index = 0; index < 70; index += 1) add(`burst ${index}`);
-  for (let index = 0; index < 2; index += 1) {
-    time += 10;
-    add(`after burst ${index}`);
-  }
+test("read_hub_log reports what the hub still retains, so an older run reads as not retained rather than absent", async (t) => {
+  const log = ringLog();
   const hub = await startHub({ log });
   const client = await startClient(t, hub);
 
-  const { seen, error, endReason } = await pageThrough(client, {
+  const result = await readLog(client, {
     home_ref: homeRef,
-    count: 5,
+    scenario_ref: scenarioRef,
   });
 
-  assert.equal(error, undefined, JSON.stringify(error));
-  assertNoGapOrRepeat(seen, log);
-  assert.equal(
-    endReason,
-    seen.length < log.length
-      ? "older_entries_unreachable"
-      : "hub_returned_fewer_than_requested",
-    `${seen.length} of ${log.length} entries shown`,
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  const page = result.structuredContent;
+  assert.deepEqual(
+    page.entries.map(({ native_time: time }) => time),
+    [log[150].time],
+  );
+  assert.equal(page.page.matched_total, 1);
+  assert.equal(page.page.truncated, false);
+  assert.equal(page.buffer_entries, BUFFER_SIZE);
+  // The run at index 10 is older than everything the hub kept.
+  const oldestRetained = log.at(-BUFFER_SIZE).time;
+  assert.equal(page.oldest_entry_at, new Date(oldestRetained).toISOString());
+  assert(Date.parse(page.oldest_entry_at) > log[10].time);
+  assert.deepEqual(
+    hub.requests.map(({ params }) => params),
+    [{ log: { list: { count: 500 } } }],
   );
 });
 
-test("read_hub_log keeps progress when one message is larger than the page", async (t) => {
+test("read_hub_log returns the newest matches that fit max_bytes and says how many matched", async (t) => {
+  const log = ringLog();
+  const hub = await startHub({ log });
+  const client = await startClient(t, hub);
+  const retainedNewestFirst = log
+    .slice(-BUFFER_SIZE)
+    .map(({ time }) => time)
+    .reverse();
+
+  const result = await readLog(client, { home_ref: homeRef, max_bytes: 4_096 });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert(Buffer.byteLength(result.content[0].text) <= 4_096);
+  const page = result.structuredContent;
+  const shown = page.entries.map(({ native_time: time }) => time);
+  assert(shown.length > 0);
+  assert.deepEqual(shown, retainedNewestFirst.slice(0, shown.length));
+  assert.equal(page.page.returned, shown.length);
+  assert.equal(page.page.matched_total, BUFFER_SIZE);
+  assert.equal(page.page.truncated, true);
+  assert.equal(page.buffer_entries, BUFFER_SIZE);
+
+  const warnings = await readLog(client, {
+    home_ref: homeRef,
+    min_level: "warn",
+    max_bytes: 4_096,
+  });
+  assert.equal(warnings.isError, undefined, warnings.content[0]?.text);
+  assert.deepEqual(
+    warnings.structuredContent.entries.map(({ native_time: time }) => time),
+    [log[160].time, log[120].time, log[80].time],
+  );
+  assert.equal(warnings.structuredContent.page.truncated, false);
+});
+
+test("read_hub_log shortens one message larger than max_bytes instead of returning nothing", async (t) => {
   const log = [
     {
       time: 1789120000001,
@@ -491,24 +415,19 @@ test("read_hub_log keeps progress when one message is larger than the page", asy
   const hub = await startHub({ log });
   const client = await startClient(t, hub);
 
-  const first = await readLog(client, { home_ref: homeRef, max_bytes: 2_048 });
-  assert.equal(first.isError, undefined, first.content[0]?.text);
-  assert(Buffer.byteLength(first.content[0].text) <= 2_048);
-  const [large] = first.structuredContent.entries;
-  assert.equal(first.structuredContent.entries.length, 1);
+  const result = await readLog(client, { home_ref: homeRef, max_bytes: 2_048 });
+
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert(Buffer.byteLength(result.content[0].text) <= 2_048);
+  const [large] = result.structuredContent.entries;
+  assert.equal(result.structuredContent.entries.length, 1);
   assert.equal(large.native_time, 1789120000002);
   assert.equal(large.message_truncated, true);
   assert.equal(large.message_chars, log[1].message.length);
   assert(log[1].message.startsWith(large.message));
   assert(large.message.length > 100);
-
-  const second = await readLog(client, first.structuredContent.next.arguments);
-  assert.equal(second.isError, undefined, second.content[0]?.text);
-  assert.deepEqual(
-    second.structuredContent.entries.map(({ message }) => message),
-    ["Сценарий 23 - old"],
-  );
-  assert.equal(second.structuredContent.next, null);
+  assert.equal(result.structuredContent.page.matched_total, 2);
+  assert.equal(result.structuredContent.page.truncated, true);
 });
 
 test("read_hub_log reports an empty hub answer as returned entries, not as a quiet home", async (t) => {
@@ -522,13 +441,10 @@ test("read_hub_log reports an empty hub answer as returned entries, not as a qui
 
     assert.equal(result.isError, undefined, result.content[0]?.text);
     assert.deepEqual(result.structuredContent.entries, []);
-    assert.equal(result.structuredContent.next, null);
     assert.equal(result.structuredContent.native.returned_count, 0);
-    assert.equal(result.structuredContent.native.retention, "unknown");
-    assert.equal(
-      result.structuredContent.page.end_reason,
-      "hub_returned_fewer_than_requested",
-    );
+    assert.equal(result.structuredContent.buffer_entries, 0);
+    assert.equal(result.structuredContent.oldest_entry_at, null);
+    assert.equal(result.structuredContent.page.matched_total, 0);
   }
 });
 
@@ -596,8 +512,8 @@ test("read_hub_log rejects an incompatible native log shape", async (t) => {
   }
 });
 
-test("read_hub_log rejects another home, a foreign scenario, a secret filter and a foreign cursor before reading the log", async (t) => {
-  const hub = await startHub({ log: denseLog() });
+test("read_hub_log rejects another home, a foreign scenario and a secret filter before reading the log", async (t) => {
+  const hub = await startHub();
   const client = await startClient(t, hub);
 
   const otherHome = await readLog(client, { home_ref: otherHomeRef });
@@ -614,8 +530,8 @@ test("read_hub_log rejects another home, a foreign scenario, a secret filter and
     "invalid_log_filter",
   );
 
-  // The filter is echoed in filters and next, so text the result would have
-  // to redact is refused; redacted log text could not match it anyway.
+  // The page echoes contains in filters, so text the result would have to
+  // redact is refused; redacted log text could not match it anyway.
   for (const contains of [
     connectionToken,
     "Authorization: Bearer account-secret-must-not-leak",
@@ -629,32 +545,5 @@ test("read_hub_log rejects another home, a foreign scenario, a secret filter and
     assert.equal(secretFilter.content[0].text.includes("must-not-leak"), false);
   }
 
-  const garbage = await readLog(client, {
-    home_ref: homeRef,
-    before: "not-a-cursor",
-  });
-  assert.equal(garbage.isError, true);
-  assert.equal(garbage.structuredContent.error.code, "invalid_cursor");
   assert.equal(hub.requests.length, 0);
-
-  const first = await readLog(client, { home_ref: homeRef, count: 2 });
-  assert.equal(first.isError, undefined, first.content[0]?.text);
-  assert.equal(hub.requests.length, 1);
-  const otherScope = await readLog(client, {
-    ...first.structuredContent.next.arguments,
-    contains: "step",
-  });
-  assert.equal(otherScope.isError, true);
-  assert.equal(otherScope.structuredContent.error.code, "invalid_cursor");
-  assert.deepEqual(otherScope.structuredContent.next, {
-    tool: "read_hub_log",
-    arguments: {
-      home_ref: homeRef,
-      count: 2,
-      max_bytes: 16_000,
-      contains: "step",
-    },
-  });
-  assert.equal(hub.requests.length, 1);
-  assertOnlyLogListRequests(hub);
 });
