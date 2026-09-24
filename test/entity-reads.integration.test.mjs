@@ -663,3 +663,73 @@ test("relations of the corridor light list only its own roles with branch, value
   );
   assertReadOnly(hub);
 });
+
+test("a large room gives its size and hands the device list to read_services", async (t) => {
+  const study = `${homeRef}/room/7`;
+  const { hub, client } = await setup(t, (hub) => {
+    // Seven more desk lamps (information + light service each) take the
+    // study from 7 to 21 services.
+    const lamp = hub.state.accessories.find(({ id }) => id === 32);
+    for (let id = 201; id <= 207; id += 1) {
+      const clone = structuredClone(lamp);
+      clone.id = id;
+      clone.name = `Настольная лампа ${id}`;
+      for (const service of clone.services) {
+        service.aId = id;
+        for (const characteristic of service.characteristics) {
+          characteristic.aId = id;
+        }
+      }
+      hub.state.accessories.push(clone);
+    }
+  });
+  const baseline = hub.snapshot();
+
+  const living = await read(client, { entity_ref: `${homeRef}/room/3` });
+  assert.deepEqual(
+    living.entity.accessories.map(({ name }) => name),
+    [
+      "Люстра",
+      "Торшер",
+      "Светодиодная лента",
+      "Шторы в гостиной",
+      "Кондиционер",
+      "Розетка телевизора",
+    ],
+  );
+
+  const large = await read(client, { entity_ref: study });
+  t.diagnostic(`study with 21 services: ${large.bytes} bytes`);
+  const catalog = {
+    tool: "read_services",
+    arguments: {
+      home_ref: homeRef,
+      room_ref: study,
+      representation: "catalog",
+    },
+  };
+  assert.deepEqual(large.entity, {
+    kind: "room",
+    ref: study,
+    name: "Кабинет",
+    accessory_count: 10,
+    service_count: 21,
+    next: catalog,
+  });
+  const listed = await client.callTool({
+    name: catalog.tool,
+    arguments: catalog.arguments,
+  });
+  assert.equal(listed.isError, undefined, listed.content[0]?.text);
+  assert.equal(listed.structuredContent.services.length, 21);
+  assert.equal(listed.structuredContent.next, null);
+
+  const withRelations = await read(client, {
+    entity_ref: study,
+    include: ["relations"],
+  });
+  assert.deepEqual(withRelations.entity.include_resolution.not_applied, [
+    { include: "relations", reason: "related_entity_scoped", next: catalog },
+  ]);
+  assertReadOnly(hub, baseline);
+});
