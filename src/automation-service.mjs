@@ -4400,13 +4400,6 @@ export class AutomationService {
         scenarioChangeObservation(change, current, "restored"),
       );
     }
-    if (
-      change.kind === "logic_source_create" &&
-      change.applied_snapshot !== undefined &&
-      current.scenario !== null
-    ) {
-      recordLogicTypeCheck(change, current);
-    }
     if (change.applied_snapshot !== undefined) {
       return this.#observeProvenScenarioChange(change, current);
     }
@@ -4708,13 +4701,6 @@ export class AutomationService {
         : this.#reconcileScenarioApply(change, false);
     }
     const current = await this.#observeScenarioChange(change);
-    if (
-      change.kind === "logic_source_create" &&
-      change.applied_snapshot !== undefined &&
-      current.scenario !== null
-    ) {
-      recordLogicTypeCheck(change, current);
-    }
     this.#adoptRequestedLogicSource(
       change,
       current,
@@ -4912,11 +4898,19 @@ export class AutomationService {
       }
       scenario = matches[0] ?? null;
     }
-    const logicTypes =
-      change.kind === "logic_source_create"
-        ? await this.#readLogicTypeCatalog(change.target)
-        : [];
-    return { scenario, logicTypes };
+    if (change.kind !== "logic_source_create") {
+      return { scenario, logicTypes: [] };
+    }
+    const current = {
+      scenario,
+      logicTypes: await this.#readLogicTypeCatalog(change.target),
+    };
+    // Every read of a created LOGIC at its recorded index checks its type;
+    // an adopting read records the index first (adoptRequestedLogicSource).
+    if (change.scenario_index !== undefined) {
+      recordLogicTypeCheck(change, current);
+    }
+    return current;
   }
 
   async #observeBlock(change) {
@@ -10398,10 +10392,16 @@ function logicTypeListed(entries, type) {
 
 // The latest read's view of the type on the anchor: listed with the
 // scenario's name, not listed while the LOGIC is off or on, or listed with
-// another name.
+// another name. A scenario at the index without this change's ownership
+// marker is another one (indices may be reused, as room ids are): its type
+// is not this change's. A read without the scenario keeps the last check.
 function recordLogicTypeCheck(change, current) {
   const type = createdLogicType(change);
   if (type === undefined || current.scenario === null) return;
+  if (!logicSourceCarriesOwnershipMarker(change, current.scenario)) {
+    change.logic_type_check = "not_owned";
+    return;
+  }
   const entry = current.logicTypes.find((item) => item.type === type);
   change.logic_type_check = entry
     ? entry.name === current.scenario.name
@@ -10419,6 +10419,9 @@ function createdLogicMapping(change) {
   }
   if (change.logic_type_check === "name_mismatch") {
     return { status: "missing", reason: "logic_type_name_mismatch" };
+  }
+  if (change.logic_type_check === "not_owned") {
+    return { status: "missing", reason: "logic_scenario_not_owned" };
   }
   const assignmentReady = change.logic_type_check === "listed";
   return {
@@ -10449,9 +10452,13 @@ function createdLogicDeleteRefusal(change, scenario) {
   };
   const mapping = createdLogicMapping(change);
   if (mapping.status !== "mapped") {
+    const evidence =
+      mapping.reason === "logic_type_name_mismatch"
+        ? `SprutHub lists type ${createdLogicType(change)} on ${change.target_ref} under a name other than this LOGIC's`
+        : `the scenario at ${scenarioRef} does not carry this change's ownership marker`;
     return new SprutHubError(
-      "logic_type_name_mismatch",
-      `SprutHub lists type ${createdLogicType(change)} on ${change.target_ref} under a name other than this LOGIC's, so the type of ${scenarioRef} cannot be proven and its assignments cannot be checked. Restore will not delete it; the LOGIC stays on the hub. The owner can delete it in the SprutHub app after checking that no device uses it.`,
+      mapping.reason,
+      `${evidence}, so the type of the created LOGIC cannot be proven and its assignments cannot be checked. Restore will not delete it. The owner can delete it in the SprutHub app after checking that no device uses it.`,
       "get_native_change",
       details,
     );
@@ -10509,7 +10516,7 @@ function logicSourceContract(mode) {
         : ["source"],
     assignment: {
       mapping:
-        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch)",
+        "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker, which is another LOGIC (logic_scenario_not_owned)",
       separate_operation: "logic_assignment",
     },
     restore: {

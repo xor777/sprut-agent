@@ -25,6 +25,9 @@
   названа не как сценарий, mapping нет (`logic_mapping_status=missing`,
   `logic_type_name_mismatch`): `logic_ref` не выдаётся, restore отвечает
   этой ошибкой и не удаляет; при совпадении имён mapping возвращается.
+  Сценарий по этому index без маркера владения в source — уже другой LOGIC
+  (index мог быть использован заново): mapping нет
+  (`logic_scenario_not_owned`), его type этому change не принадлежит.
   Restore удаляет созданный LOGIC только включённым: видны ли назначения
   выключенного LOGIC в `logic.list`, на хабе не проверяли, и пустой обход
   этого не доказывает. Выключенный LOGIC restore не удаляет и отвечает
