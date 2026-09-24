@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { canonicalBlock } from "./block-model.mjs";
+import { canonicalBlock, withHiddenHttpUrls } from "./block-model.mjs";
 import {
   CONFIGURATION_POINT_FORMAT_VERSION,
   ConfigurationPointStore,
@@ -147,8 +147,8 @@ export class ConfigurationPointService {
   async get({ point_ref: pointRef, compare = false }) {
     const { serial, id } = parseConfigurationPointRef(pointRef);
     this.#requireSerial(serial);
-    const point = await this.storeFor(serial).get(id);
-    if (!point) {
+    const stored = await this.storeFor(serial).get(id);
+    if (!stored) {
       throw new SprutHubError(
         "configuration_point_not_found",
         "No configuration point with this reference exists for the selected home.",
@@ -156,6 +156,7 @@ export class ConfigurationPointService {
         { next: { tool: "list_configuration_points", arguments: {} } },
       );
     }
+    const point = withRequestUrlsHidden(stored);
     const entity = publicPointEntity(point, serial);
     if (!compare) return { status: "ok", entity };
     this.#requireClient();
@@ -463,6 +464,33 @@ function notCapturedOption(entityRef, optionKey, reason) {
     entity_ref: entityRef,
     ...(optionKey ? { option_key: optionKey } : {}),
     reason,
+  };
+}
+
+// A point holds a scenario configuration as get_entity returned it when the
+// point was saved. Points saved before get_entity hid every request URL
+// beyond scheme and host hold such a URL as read, and a key may sit in its
+// path (Telegram /bot<token>/), so a point is shown and compared with the
+// rule get_entity applies now.
+function withRequestUrlsHidden(point) {
+  return {
+    ...point,
+    captured: point.captured.map((captured) => {
+      const configuration = captured.settings?.configuration;
+      if (captured.kind !== "scenario" || configuration?.format !== "json") {
+        return captured;
+      }
+      return {
+        ...captured,
+        settings: {
+          ...captured.settings,
+          configuration: {
+            ...configuration,
+            value: withHiddenHttpUrls(configuration.value),
+          },
+        },
+      };
+    }),
   };
 }
 
