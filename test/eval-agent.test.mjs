@@ -1175,10 +1175,60 @@ test("motion-light-new runs the rule: branches, conditions, refs and side effect
   );
 
   // What the evaluator does not model fails as unsupported, never as a
-  // pass: a hold on the motion condition, a CONTINUE delay and a branch
-  // that repeats.
+  // pass: a CONTINUE delay, a branch that repeats, a hold shorter than the
+  // evaluation window, a hold on another characteristic and "changed back
+  // within".
+  const motionHeld = (value, timeCond, time, extra = {}) => ({
+    type: "characteristic",
+    aId: 38,
+    sId: 13,
+    cId: 14,
+    hs: "MotionSensor",
+    hc: "MotionDetected",
+    cond: "=",
+    value,
+    trigger: true,
+    time,
+    timeCond,
+    ...extra,
+  });
+  const ifNode = (conditions, then, otherwise = []) => ({
+    type: "if",
+    mode: "EVERY",
+    if: { type: "condition", mode: "AND", conditions },
+    then,
+    else: otherwise,
+    then_delay: 0,
+    else_delay: 0,
+  });
+  const block = (...targets) => JSON.stringify({ targets });
+  const ruleGraders = async (data) => {
+    const session = await createdRule(t, data);
+    const graders = gradeCase(
+      CASES["motion-light-new"],
+      collectEvidence(session.hub, "Готово."),
+    );
+    return {
+      graders,
+      rule: graders.find(
+        ({ name }) => name === "new_rule_turns_bathroom_light_on_motion",
+      ),
+    };
+  };
+  const lightSensorHeld = {
+    type: "characteristic",
+    aId: 13,
+    sId: 20,
+    cId: 21,
+    hs: "LightSensor",
+    hc: "CurrentAmbientLightLevel",
+    cond: "<",
+    value: "30",
+    trigger: false,
+    time: 60_000,
+    timeCond: ">",
+  };
   for (const [label, data] of [
-    ["hold", motionRule(35, { condition: { timeCond: ">", time: 60_000 } })],
     [
       "CONTINUE delay",
       motionRule(35, {
@@ -1186,18 +1236,71 @@ test("motion-light-new runs the rule: branches, conditions, refs and side effect
       }),
     ],
     ["repeating then", motionRule(35, { rule: { then_delay: 1_000 } })],
+    [
+      "hold shorter than the window",
+      motionRule(35, { condition: { timeCond: ">", time: 5_000 } }),
+    ],
+    [
+      "hold on another characteristic",
+      block(ifNode([motionHeld("true", "", 0), lightSensorHeld], [lightOn])),
+    ],
+    [
+      "changed back within",
+      block(
+        ifNode([motionHeld("true", "", 0)], [lightOn]),
+        ifNode([motionHeld("false", "<", 300_000)], [lightOff]),
+      ),
+    ],
   ]) {
-    const session = await createdRule(t, data);
-    const graders = gradeCase(
-      CASES["motion-light-new"],
-      collectEvidence(session.hub, "Готово."),
-    );
-    const rule = graders.find(
-      ({ name }) => name === "new_rule_turns_bathroom_light_on_motion",
-    );
+    const { graders, rule } = await ruleGraders(data);
     assert.equal(rule.pass, false, label);
     assert.equal(rule.unsupported, true, label);
     assert.equal(failureClass(graders), "grader_unsupported", label);
+  }
+
+  // A hold at least as long as the evaluation window cannot come true
+  // inside it on the characteristic that just changed: the common "no
+  // motion for 5 minutes, then off" is graded, not guessed.
+  const offAfterQuiet = await ruleGraders(
+    block(
+      ifNode([motionHeld("true", "", 0)], [lightOn]),
+      ifNode([motionHeld("false", ">", 300_000)], [lightOff]),
+    ),
+  );
+  assert.equal(offAfterQuiet.rule.pass, true, offAfterQuiet.rule.detail);
+  // Motion held for a minute before the light comes on leaves the owner in
+  // the dark for that minute.
+  const heldMotion = await ruleGraders(
+    motionRule(35, { condition: { timeCond: ">", time: 60_000 } }),
+  );
+  assert.equal(heldMotion.rule.pass, false);
+  assert.notEqual(heldMotion.rule.unsupported, true);
+  assert.equal(failureClass(heldMotion.graders), "agent");
+
+  // What the evaluator can run already breaks the task: the part it cannot
+  // run does not excuse it.
+  for (const [label, data] of [
+    [
+      "corridor light with a CONTINUE delay",
+      motionRule(14, {
+        onMotion: [
+          { ...lightOn, aId: 14 },
+          delayed(120_000, [{ ...lightOff, aId: 14 }], "CONTINUE"),
+        ],
+      }),
+    ],
+    [
+      "light off on motion beside a hold",
+      block(
+        ifNode([motionHeld("true", "", 0)], [lightOff]),
+        ifNode([motionHeld("false", ">", 5_000)], [lightOff]),
+      ),
+    ],
+  ]) {
+    const { graders, rule } = await ruleGraders(data);
+    assert.equal(rule.pass, false, label);
+    assert.notEqual(rule.unsupported, true, label);
+    assert.equal(failureClass(graders), "agent", label);
   }
 });
 
