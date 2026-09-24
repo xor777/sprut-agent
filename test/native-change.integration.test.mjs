@@ -8432,7 +8432,7 @@ test("block_data_update wraps a single characteristic if predicate into a condit
   );
   assert.equal(
     rejectedUnknown.structuredContent.error.message,
-    "Unsupported BLOCK data at root.targets[0].if: child type must be one of condition, characteristic.",
+    "Unsupported BLOCK data at root.targets[0].if: node type code is not supported by this contract; allowed here: condition, characteristic.",
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
@@ -8585,6 +8585,96 @@ test("BLOCK grammar rejects known nodes in unsupported child slots before send",
       name,
       isError: true,
       code: "invalid_block_data",
+    })),
+  );
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.create || scenario?.update),
+    false,
+  );
+});
+
+test("an existing BLOCK with a node outside the contract names that node type and stays unsent", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const cases = [
+    {
+      type: "notify",
+      add: (data) => {
+        data.targets[0].then.push({
+          type: "notify",
+          text: "Свет включён",
+          mode: "PUSH",
+        });
+      },
+    },
+    {
+      type: "http",
+      add: (data) => {
+        data.targets.push({
+          type: "http",
+          url: "http://example.invalid/hook",
+          method: "GET",
+        });
+      },
+    },
+    {
+      type: "code",
+      add: (data) => {
+        data.targets.push({ type: "code", code: "log.info('manual');" });
+      },
+    },
+    {
+      type: "code",
+      add: (data) => {
+        data.targets[0].if.conditions.push({
+          type: "code",
+          code: "return global.guestMode !== true;",
+        });
+      },
+    },
+  ];
+  const results = [];
+
+  for (const testCase of cases) {
+    const manual = blockData();
+    delete manual.vendorConfiguration;
+    testCase.add(manual);
+    hub.state.scenarios[0].data = JSON.stringify(
+      withRuntimeBlockFields(manual),
+    );
+    const read = await client.callTool({
+      name: "get_entity",
+      arguments: { entity_ref: scenarioRef, include: ["configuration"] },
+    });
+    assert.equal(read.isError, undefined, read.content[0]?.text);
+    const edited = structuredClone(
+      read.structuredContent.entity.configuration.value,
+    );
+    edited.targets[0].then[1].time = 120_000;
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_data_update",
+        target_ref: scenarioRef,
+        data: edited,
+        reason: "Выключать свет через две минуты",
+      },
+    });
+    results.push({
+      isError: prepared.isError,
+      code: prepared.structuredContent?.error?.code,
+      namesType: new RegExp(`node type ${testCase.type}\\b`).test(
+        prepared.structuredContent?.error?.message ?? "",
+      ),
+    });
+  }
+
+  assert.deepEqual(
+    results,
+    cases.map(() => ({
+      isError: true,
+      code: "invalid_block_data",
+      namesType: true,
     })),
   );
   assert.equal(
