@@ -11426,14 +11426,14 @@ test("an update that grows a web client's one-condition OR group warns that any 
   });
   // «При движении ночью яркость 30»: all the conditions of the motion rule
   // grown by «at night», with another action.
-  const motionAtNight = () => ({
+  const motionAtNight = (mode = "AND") => ({
     type: "condition",
-    mode: "AND",
+    mode,
     conditions: [characteristicCondition(), atNight],
   });
-  const nightDim = () =>
+  const nightDim = (mode = "AND") =>
     everyIf({
-      when: motionAtNight(),
+      when: motionAtNight(mode),
       thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
     });
   const motionRule = () => ({
@@ -11445,6 +11445,11 @@ test("an update that grows a web client's one-condition OR group warns that any 
   });
   const nightDimThenMotion = withRuntimeBlockFields({
     targets: [nightDim(), motionRule()],
+  });
+  // With the group left OR, as the web client makes it, only the actions
+  // tell the two rules apart.
+  const motionThenOrNightDim = withRuntimeBlockFields({
+    targets: [motionRule(), nightDim("OR")],
   });
   // The same two as condition groups of one if.
   const nestedMotionGroups = withRuntimeBlockFields({
@@ -11571,6 +11576,10 @@ test("an update that grows a web client's one-condition OR group warns that any 
       mergeNightDim(0),
       nightDimThenMotion,
     ),
+    grown_or_merging_the_or_rule_after_it_without_block_ids: await preview(
+      mergeNightDim(1),
+      motionThenOrNightDim,
+    ),
     grown_nested_or_merging_the_group_before_it_without_block_ids:
       await preview((data) => {
         const edited = withoutBlockIds(data);
@@ -11636,6 +11645,11 @@ test("an update that grows a web client's one-condition OR group warns that any 
     grown_or_merging_the_rule_before_it_without_block_ids: {
       warnings: grownAt("/targets/0/if"),
       removed_nodes: [{ pointer: "/targets/0", type: "if" }],
+      written_mode: "OR",
+    },
+    grown_or_merging_the_or_rule_after_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [{ pointer: "/targets/1", type: "if" }],
       written_mode: "OR",
     },
     grown_nested_or_merging_the_group_before_it_without_block_ids: {
