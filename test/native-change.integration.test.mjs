@@ -11424,6 +11424,53 @@ test("an update that grows a web client's one-condition OR group warns that any 
       },
     ],
   });
+  // «При движении ночью яркость 30»: all the conditions of the motion rule
+  // grown by «at night», with another action.
+  const motionAtNight = () => ({
+    type: "condition",
+    mode: "AND",
+    conditions: [characteristicCondition(), atNight],
+  });
+  const nightDim = () =>
+    everyIf({
+      when: motionAtNight(),
+      thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
+    });
+  const motionRule = () => ({
+    ...motionLightIf(...IF_DEFAULT_KEYS),
+    if: conditionGroup(characteristicCondition(), "OR"),
+  });
+  const motionThenNightDim = withRuntimeBlockFields({
+    targets: [motionRule(), nightDim()],
+  });
+  const nightDimThenMotion = withRuntimeBlockFields({
+    targets: [nightDim(), motionRule()],
+  });
+  // The same two as condition groups of one if.
+  const nestedMotionGroups = withRuntimeBlockFields({
+    targets: [
+      {
+        ...motionLightIf(...IF_DEFAULT_KEYS),
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            motionAtNight(),
+            conditionGroup(characteristicCondition(), "OR"),
+          ],
+        },
+      },
+    ],
+  });
+  // The motion rule takes «at night» and the other rule is deleted. The
+  // deleted rule tests every condition of the grown one; the motion rule
+  // keeps its action and its group's mode.
+  const mergeNightDim = (deleted) => (data) => {
+    const edited = withoutBlockIds(data);
+    edited.targets.splice(deleted, 1);
+    edited.targets[0].if.conditions.push(atNight);
+    return edited;
+  };
 
   const outcomes = {
     grown_or: await preview((data) => {
@@ -11516,6 +11563,21 @@ test("an update that grows a web client's one-condition OR group warns that any 
         edited.targets[0].if.conditions[0].conditions.push(atNight);
         return edited;
       }, nestedGroups),
+    grown_or_merging_the_rule_after_it_without_block_ids: await preview(
+      mergeNightDim(1),
+      motionThenNightDim,
+    ),
+    grown_or_merging_the_rule_before_it_without_block_ids: await preview(
+      mergeNightDim(0),
+      nightDimThenMotion,
+    ),
+    grown_nested_or_merging_the_group_before_it_without_block_ids:
+      await preview((data) => {
+        const edited = withoutBlockIds(data);
+        edited.targets[0].if.conditions.splice(0, 1);
+        edited.targets[0].if.conditions[0].conditions.push(atNight);
+        return edited;
+      }, nestedMotionGroups),
   };
 
   const grownAt = (pointer) => [
@@ -11560,6 +11622,23 @@ test("an update that grows a web client's one-condition OR group warns that any 
       written_mode: "OR",
     },
     grown_nested_or_after_deleting_the_group_before_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if/conditions/0"),
+      removed_nodes: [
+        { pointer: "/targets/0/if/conditions/0", type: "condition" },
+      ],
+      written_mode: "AND",
+    },
+    grown_or_merging_the_rule_after_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [{ pointer: "/targets/1", type: "if" }],
+      written_mode: "OR",
+    },
+    grown_or_merging_the_rule_before_it_without_block_ids: {
+      warnings: grownAt("/targets/0/if"),
+      removed_nodes: [{ pointer: "/targets/0", type: "if" }],
+      written_mode: "OR",
+    },
+    grown_nested_or_merging_the_group_before_it_without_block_ids: {
       warnings: grownAt("/targets/0/if/conditions/0"),
       removed_nodes: [
         { pointer: "/targets/0/if/conditions/0", type: "condition" },
