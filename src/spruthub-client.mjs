@@ -35,9 +35,11 @@ const HOME_CATALOG_TTL_MS = 5 * 60_000;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
-// than hold back what was read. The window read itself keeps the request
-// deadline, so that its answer still comes and a request that runs out of
-// time does not close the connection under the others.
+// than hold back what was read. The window read itself has a full request
+// timeout of its own, whatever time the read that started it has left, so
+// that its answer still comes. Only a hub that does not answer it within
+// that timeout closes the connection under the other requests, as any
+// request that runs out of time does.
 const HUB_TIME_ZONE_WAIT_MS = 2_000;
 // A BLOCK names its devices from the home catalog; the ones the catalog
 // lacks are read one by one up to this many, past that the catalog is read.
@@ -782,9 +784,10 @@ export class SprutHubClient {
 
   // The hub's time zone, kept per home as the home catalog is: for
   // HOME_CATALOG_TTL_MS and until a write of this client. A caller waits for
-  // it at most HUB_TIME_ZONE_WAIT_MS and then keeps UTC (null); the read goes
-  // on, later callers share it, and its answer is kept when it comes. A zone
-  // that is not read is not kept, so the next read asks again.
+  // it at most HUB_TIME_ZONE_WAIT_MS within its own deadline and then keeps
+  // UTC (null); the read goes on with its own request timeout, later callers
+  // share it, and its answer is kept when it comes. A zone that is not read
+  // is not kept, so the next read asks again.
   async #hubTimeZone(serial, deadline) {
     const cached = this.#hubTimeZones.get(serial);
     if (
@@ -799,16 +802,18 @@ export class SprutHubClient {
     if (reading?.generation !== generation) {
       reading = {
         generation,
-        zone: this.#readHubTimeZone(serial, deadline).then((zone) => {
-          if (zone !== null && generation === this.#writeGeneration) {
-            this.#hubTimeZones.set(serial, {
-              zone,
-              generation,
-              readAt: Date.now(),
-            });
-          }
-          return zone;
-        }),
+        zone: this.#readHubTimeZone(serial, Date.now() + this.timeoutMs).then(
+          (zone) => {
+            if (zone !== null && generation === this.#writeGeneration) {
+              this.#hubTimeZones.set(serial, {
+                zone,
+                generation,
+                readAt: Date.now(),
+              });
+            }
+            return zone;
+          },
+        ),
       };
       this.#hubTimeZoneReads.set(serial, reading);
       const forget = () => {
