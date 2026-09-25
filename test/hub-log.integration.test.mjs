@@ -254,7 +254,11 @@ async function startHub({
   });
 }
 
-async function startClient(t, hub) {
+async function startClient(
+  t,
+  hub,
+  { timeoutMs = ORDINARY_HUB_TIMEOUT_MS } = {},
+) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -265,7 +269,7 @@ async function startClient(t, hub) {
       SPRUTHUB_TOKEN: connectionToken,
       SPRUTHUB_SERIAL: "home/A",
       SPRUTHUB_CID: "hub-log-test",
-      SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
+      SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
     },
     stderr: "pipe",
   });
@@ -477,6 +481,49 @@ test("read_hub_log stops waiting for a slow hub time zone without closing the re
     later.structuredContent.entries[0].time,
     expectedNewestFirst[0].time,
   );
+  assertOnlyLogReads(hub, 3);
+  assert.equal(hub.connections, 1);
+});
+
+// A read whose log took most of its time starts the zone read late. The
+// window read has a request timeout of its own, not what that read has left:
+// the read keeps UTC once its time runs out, and the window read answered
+// after it does not close the connection under the next read.
+test("read_hub_log that reaches the hub time zone late in its time does not close the requests beside it", async (t) => {
+  const log = { result: { log: { list: { log: observedLog } } } };
+  let logReads = 0;
+  const hub = await startHub({
+    settingsDelayMs: 2_000,
+    respond: async () => {
+      logReads += 1;
+      // 3 s of the 4 s request timeout: the zone read starts with 1 s left.
+      if (logReads === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+      // The second read's log is still on the connection when the first
+      // read's time runs out; the hub answers it after the window.
+      if (logReads === 2) await hub.settingsAnswered;
+      return log;
+    },
+  });
+  const client = await startClient(t, hub, { timeoutMs: 4_000 });
+
+  const first = readLog(client, { home_ref: homeRef });
+  await new Promise((resolve) => setTimeout(resolve, 3_300));
+  const second = readLog(client, { home_ref: homeRef });
+  const firstResult = await first;
+  const secondResult = await second;
+  const later = await readLog(client, { home_ref: homeRef });
+
+  const outcome = (result) =>
+    result.isError
+      ? result.structuredContent?.error?.code
+      : result.structuredContent.time_zone;
+  assert.deepEqual([firstResult, secondResult, later].map(outcome), [
+    null,
+    "Europe/Moscow",
+    "Europe/Moscow",
+  ]);
   assertOnlyLogReads(hub, 3);
   assert.equal(hub.connections, 1);
 });
