@@ -19,6 +19,7 @@ import {
   extensionRef,
   extensionSearchAction,
   homeRef,
+  isHubReadFailure,
   parseEntityRef,
   roomRef,
   runningActionEnd,
@@ -322,12 +323,40 @@ export class DeviceSearches {
   }
 
   // A new device with the accessories its window links, read fresh so a
-  // rename or move after the join shows.
+  // rename or move after the join shows. A read of this device that fails
+  // leaves it unreadable; the search state and other devices are still
+  // reported.
   async #newDevice(search, child, deadline) {
     const device = publicChild(search, child);
-    if (!child.optionsWindow) {
-      return { ...device, accessory_status: "pending", accessories: [] };
+    const unreadable = (readError) => ({
+      ...device,
+      accessory_status: "unreadable",
+      ...(readError ? { read_error: readError } : {}),
+      accessories: [],
+      next: { tool: "get_entity", arguments: { entity_ref: device.ref } },
+    });
+    try {
+      const accessories = await this.#linkedAccessories(
+        search,
+        child,
+        deadline,
+      );
+      if (accessories === null) return unreadable(null);
+      return {
+        ...device,
+        accessory_status: accessories.length > 0 ? "found" : "pending",
+        accessories,
+      };
+    } catch (error) {
+      if (!isDeviceReadFailure(error)) throw error;
+      return unreadable(error.code);
     }
+  }
+
+  // The accessories a device's window links; none yet while the hub has
+  // not made one, null when the window's list cannot be read.
+  async #linkedAccessories(search, child, deadline) {
+    if (!child.optionsWindow) return [];
     let ids = search.linked.get(child.id);
     if (!ids) {
       const window = await this.#client.nativeWindow(
@@ -336,17 +365,8 @@ export class DeviceSearches {
         deadline,
       );
       const linked = windowLinkedAccessoryIds(window);
-      if (linked.status === "unreliable_form") {
-        return {
-          ...device,
-          accessory_status: "unreadable",
-          accessories: [],
-          next: { tool: "get_entity", arguments: { entity_ref: device.ref } },
-        };
-      }
-      if (linked.ids.length === 0) {
-        return { ...device, accessory_status: "pending", accessories: [] };
-      }
+      if (linked.status === "unreliable_form") return null;
+      if (linked.ids.length === 0) return [];
       ids = linked.ids;
       search.linked.set(child.id, ids);
     }
@@ -361,11 +381,7 @@ export class DeviceSearches {
         accessories.push(await this.#accessory(search, accessory, deadline));
       }
     }
-    return {
-      ...device,
-      accessory_status: accessories.length > 0 ? "found" : "pending",
-      accessories,
-    };
+    return accessories;
   }
 
   async #accessory(search, accessory, deadline) {
@@ -424,16 +440,7 @@ export class DeviceSearches {
   #report(search, view) {
     const ended = search.ended;
     const active = view.active;
-    const result =
-      view.newDevices.length === 0
-        ? active === false
-          ? "no_new_device"
-          : "waiting"
-        : view.newDevices.every(
-              ({ accessory_status: status }) => status !== "pending",
-            )
-          ? "joined"
-          : "joining";
+    const result = searchResult(view);
     const changed =
       view.fingerprint === null || view.fingerprint !== search.lastFingerprint;
     if (view.fingerprint !== null) search.lastFingerprint = view.fingerprint;
@@ -463,7 +470,7 @@ export class DeviceSearches {
       ...(search.timeZone === null
         ? { limitations: [UTC_TIMES_LIMITATION] }
         : {}),
-      ...reportGuidance(search, result, active),
+      ...reportGuidance(search, view, result),
     };
   }
 
@@ -728,17 +735,37 @@ function refusedByHub(error, ref, step) {
   );
 }
 
+// A read of one device that failed: the hub refused it or did not answer
+// in time, or answered in a form this client cannot read.
+function isDeviceReadFailure(error) {
+  return (
+    isHubReadFailure(error) ||
+    (error instanceof SprutHubError && error.code === "incompatible_response")
+  );
+}
+
+// What the search has brought: waiting (nothing new yet), joining (a new
+// device whose accessory the hub has not made yet), unreadable (a new
+// device whose accessory could not be read), joined (every new device
+// with its accessory) or no_new_device (ended with nothing new).
+function searchResult(view) {
+  const statuses = view.newDevices.map(
+    ({ accessory_status: status }) => status,
+  );
+  if (statuses.length === 0) {
+    return view.active === false ? "no_new_device" : "waiting";
+  }
+  if (statuses.includes("pending")) return "joining";
+  if (statuses.includes("unreadable")) return "unreadable";
+  return "joined";
+}
+
 // Whether a wait has something to return: a change since the previous
-// answer, or nothing left to wait for (the search ended and every new
-// device has its accessory).
+// answer, or nothing left to wait for (the search ended and no new device
+// waits for its accessory).
 function worthReturning(search, view) {
   if (view.fingerprint !== search.lastFingerprint) return true;
-  return (
-    view.active === false &&
-    view.newDevices.every(
-      ({ accessory_status: status }) => status !== "pending",
-    )
-  );
+  return view.active === false && searchResult(view) !== "joining";
 }
 
 function getCall(search) {
@@ -749,8 +776,8 @@ function stopCall(search) {
   return { tool: "stop_device_search", arguments: { search_ref: search.ref } };
 }
 
-function reportGuidance(search, result, active) {
-  const running = active !== false;
+function reportGuidance(search, view, result) {
+  const running = view.active !== false;
   if (result === "no_new_device") {
     return {
       hint: "The search ended and no new device joined. Tell the owner and offer to start it again once the device is in pairing mode near the hub.",
@@ -758,6 +785,16 @@ function reportGuidance(search, result, active) {
         tool: "start_device_search",
         arguments: { extension_ref: search.extensionRef },
       },
+    };
+  }
+  if (result === "unreadable") {
+    const device = view.newDevices.find(
+      ({ accessory_status: status }) => status === "unreadable",
+    );
+    return {
+      hint: "A new device is listed, but its accessory could not be read now. Read the device with its next (get_entity), or call get_device_search again.",
+      next: running ? getCall(search) : device.next,
+      ...(running ? { stop: stopCall(search) } : {}),
     };
   }
   if (result === "joined") {
