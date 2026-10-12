@@ -564,7 +564,16 @@ function selectCandidates(catalog, selection) {
     for (const service of accessory.services ?? []) {
       const kind = serviceKind(service);
       if (kind === "technical" && !selection.includeTechnical) continue;
-      if (selection.kind !== null && kind !== selection.kind) continue;
+      // A device's offline notification sits in its information service,
+      // which follows the kind of its device.
+      const ofKind =
+        kind === selection.kind ||
+        (selection.notify &&
+          service.type === "AccessoryInformation" &&
+          (accessory.services ?? []).some(
+            (other) => serviceKind(other) === selection.kind,
+          ));
+      if (selection.kind !== null && !ofKind) continue;
       if (selection.stems !== null) {
         const text = deviceText(service, accessory, catalog.rooms);
         const lamp =

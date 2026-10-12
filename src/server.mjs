@@ -170,7 +170,7 @@ server.registerTool(
         .literal(true)
         .optional()
         .describe(
-          "Only services with a characteristic whose SprutHub notification is on, device information and battery services included; that characteristic shows notify: true. A device's C_Online with notify is its offline notification.",
+          "Only services with a characteristic whose SprutHub notification is on, device information and battery services included; that characteristic shows notify: true. A device's C_Online with notify is its offline notification; with kind, the information service follows its device's kind.",
         ),
       include_technical: z
         .boolean()

@@ -10748,6 +10748,14 @@ async function readCharacteristicNotify(client, target) {
       "get_entity",
     );
   }
+  // A notification carries the characteristic's value.
+  if (isSensitiveNativeNode(characteristic.control)) {
+    throw new SprutHubError(
+      "sensitive_native_data",
+      "The selected characteristic holds sensitive data, which a notification would send; its notification is not changed here.",
+      "get_entity",
+    );
+  }
   if (!characteristicNotifyOffered(service, characteristic)) {
     throw new SprutHubError(
       "notification_not_offered",
