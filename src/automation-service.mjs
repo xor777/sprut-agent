@@ -9944,6 +9944,7 @@ function characteristicNotifyLimitations() {
   return [
     "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. Only the device read (accessory.get) reports it; baseline, readback and restore use that read, so a restore writes back the value read before the change, on for a notification that was on, such as a new virtual accessory's C_Online.",
     "Through which notification services and to which recipients SprutHub sends these notifications was not observed: notification_services shows the home's services as read, with a warning for each that may deliver nothing. Tell the owner the setting is on, not that a message will arrive.",
+    "The setting has no value condition: SprutHub notifies on each change of the characteristic, so a door sensor likely notifies on closing as well as on opening (not observed). For one value only, such as «only when the door opens», prepare a BLOCK scenario with a condition on that value and a notify action instead.",
   ];
 }
 
