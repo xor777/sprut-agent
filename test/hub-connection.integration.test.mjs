@@ -45,11 +45,16 @@ const accessoryRead = (id) => (params) => params.accessory?.get?.id === id;
 async function startRelay(hub) {
   const rules = [];
   const connections = [];
+  const handshake = { delayMs: 0, started: () => {} };
   const server = new WebSocketServer({
     host: FAKE_HUB_HOST,
     port: 0,
     handleProtocols: (protocols) =>
       protocols.has("json-rpc") ? "json-rpc" : false,
+    verifyClient: (_info, accept) => {
+      handshake.started(Date.now());
+      setTimeout(() => accept(true), handshake.delayMs);
+    },
   });
   await once(server, "listening");
   server.on("connection", (client) => {
@@ -120,6 +125,17 @@ async function startRelay(hub) {
           for (const forward of rule.held.splice(0)) forward();
         },
       };
+    },
+    // New connections take delayMs to open; the promise resolves when the
+    // next one starts.
+    slowHandshakes(delayMs) {
+      handshake.delayMs = delayMs;
+      return new Promise((resolve) => {
+        handshake.started = (at) => {
+          handshake.started = () => {};
+          resolve(at);
+        };
+      });
     },
     // Every open connection stops passing frames either way and stays open,
     // as a connection whose peer is gone without a close.
@@ -387,5 +403,40 @@ test(
       floorLampOn,
     );
     assert.equal(relay.connections.length, 1);
+  },
+);
+
+// A call that has to open a new connection with little of its time left
+// does not give the attempt up for a call that joined it with time to spare.
+test(
+  "a new connection is not given up with the time of the call that started it",
+  BOUNDED,
+  async (t) => {
+    const { relay, call } = await setup(t);
+    assertAnswered(await call("get_entity", { entity_ref: floorLamp }));
+    const quiet = relay.hold(() => true);
+
+    // The first read makes the connection silent through its timeout; the
+    // second, started a second later, gets its home list there afterwards
+    // and opens a new connection with about a second left.
+    const first = call("get_entity", { entity_ref: hallLight });
+    await sleep(1_000);
+    const late = call("get_entity", { entity_ref: hallLight });
+    const firstOutcome = await first;
+    const opening = relay.slowHandshakes(2_000);
+    quiet.release();
+    await opening;
+    const joined = call("get_entity", { entity_ref: floorLampOn });
+    const lateOutcome = await late;
+    const joinedOutcome = await joined;
+
+    assertTimedOut(firstOutcome);
+    assertTimedOut(lateOutcome);
+    assertAnswered(joinedOutcome);
+    assert.equal(
+      joinedOutcome.result.structuredContent.entity.ref,
+      floorLampOn,
+    );
+    assert.equal(relay.connections.length, 2);
   },
 );
