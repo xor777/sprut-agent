@@ -272,6 +272,7 @@ export class AutomationService {
         native_write_sent: false,
         // The characteristic command no-op has never reported ownership.
         ...(kind.command ? {} : { owned_change_created: false }),
+        ...(kind.notes ? kind.notes(draft) : {}),
       };
     }
     return publicNativeChange(await this.#recordValueChange(input, draft));
@@ -8224,11 +8225,34 @@ function notificationPreview(notification, services = []) {
   };
   if (notification.mode !== "PUSH") return { ...base, delivery: "system" };
   const toAll = notification.to === null;
+  const { through, warnings } = notificationServicesShown(
+    services,
+    notification.to,
+  );
+  if (toAll && services.length === 0) {
+    warnings.push({
+      code: "no_notification_services",
+      message:
+        "The home has no notification service: a PUSH to all of them goes nowhere. Tell the owner.",
+    });
+  }
+  return {
+    ...base,
+    delivery: toAll ? "all_notification_services" : "listed_services",
+    services: through,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+}
+
+// The services a notification to (null for all of them) goes through, each
+// with its state and recipients as read, and a warning for each one that
+// may deliver nothing.
+function notificationServicesShown(services, to) {
   const warnings = [];
   const through = (
-    toAll
+    to === null
       ? services.map((service) => ({ service, clients: null }))
-      : notification.to.map(({ index, clients }) => ({
+      : to.map(({ index, clients }) => ({
           index,
           service: services.find((item) => item.index === index),
           clients,
@@ -8277,17 +8301,21 @@ function notificationPreview(notification, services = []) {
           }),
     };
   });
-  if (toAll && services.length === 0) {
-    warnings.push({
-      code: "no_notification_services",
-      message:
-        "The home has no notification service: a PUSH to all of them goes nowhere. Tell the owner.",
-    });
+  return { through, warnings };
+}
+
+// The home's notification services as read now, for a characteristic's own
+// notification. Through which of them, and to whom, SprutHub sends it was
+// not observed, so each is shown with its state and recipient count and
+// the warnings a BLOCK notification to all of them would get.
+async function characteristicNotificationServices(client) {
+  const services = await readNotificationServices(client);
+  for (const service of services) {
+    await notificationServiceRecipients(client, service);
   }
+  const { through, warnings } = notificationServicesShown(services, null);
   return {
-    ...base,
-    delivery: toAll ? "all_notification_services" : "listed_services",
-    services: through,
+    services: through.map(({ recipients: _all, ...service }) => service),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
@@ -9860,9 +9888,16 @@ const NATIVE_VALUE_KINDS = {
         input.target_ref,
         service.hubSerial,
       );
+      const setting = await readCharacteristicNotify(service.client, target);
       return {
         fields: { target },
-        ...(await readCharacteristicNotify(service.client, target)),
+        ...setting,
+        // Kept with a prepared change, as read at preparation.
+        extra: {
+          notification_services: await characteristicNotificationServices(
+            service.client,
+          ),
+        },
       };
     },
     read: (service, change) =>
@@ -9872,12 +9907,22 @@ const NATIVE_VALUE_KINDS = {
         ...change.target,
         notify: value.value,
       }),
-    limitations: () => [
-      "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. Only the device read (accessory.get) reports it; baseline, readback and restore use that read, so a restore writes back the value read before the change, on for a notification that was on, such as a new virtual accessory's C_Online.",
-      "Through which notification services and to which recipients SprutHub sends these notifications was not observed: the home's notification services and their state are its NOTIFICATION extensions (home_overview). Tell the owner the setting is on, not that a message will arrive.",
-    ],
+    limitations: characteristicNotifyLimitations,
+    // What a contract or an already_desired answer says of the setting, as
+    // a prepared change does: setting it on is not a message delivered.
+    notes: (state) => ({
+      notification_services: state.extra.notification_services,
+      limitations: characteristicNotifyLimitations(),
+    }),
   },
 };
+
+function characteristicNotifyLimitations() {
+  return [
+    "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. Only the device read (accessory.get) reports it; baseline, readback and restore use that read, so a restore writes back the value read before the change, on for a notification that was on, such as a new virtual accessory's C_Online.",
+    "Through which notification services and to which recipients SprutHub sends these notifications was not observed: notification_services shows the home's services as read, with a warning for each that may deliver nothing. Tell the owner the setting is on, not that a message will arrive.",
+  ];
+}
 
 function nativeValueKind(kind) {
   return Object.hasOwn(NATIVE_VALUE_KINDS, kind)
@@ -9915,6 +9960,7 @@ async function nativeValueContractFields(service, kind, input) {
       ? { restore_limitation: restoration.limitation }
       : {}),
     ...(kind.command ? { physical_effect_reversible: false } : {}),
+    ...(kind.notes ? kind.notes(state) : {}),
   };
 }
 
@@ -12640,6 +12686,11 @@ function publicNativeChange(
       },
     },
     ...(change.warnings ? { warnings: structuredClone(change.warnings) } : {}),
+    ...(change.notification_services
+      ? {
+          notification_services: structuredClone(change.notification_services),
+        }
+      : {}),
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
     ...(change.write_intent
