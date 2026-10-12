@@ -1026,7 +1026,8 @@ async function loadFixtureFile(file) {
 // characteristic EVENT_UPDATE frame this often with the current value of the
 // home's characteristics in turn, as the owner's hub sends every socket
 // characteristic and room events (35 in 120 s at rest,
-// 2026-10-12-device-pairing H12). Without it the simulator sends no events.
+// 2026-10-12-device-pairing H12). Without it the simulator sends no events
+// at rest, only those its own changes cause.
 export async function startSimulatedHub(
   fixture,
   {
