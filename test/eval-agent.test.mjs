@@ -2398,6 +2398,48 @@ test("add-leak-sensor needs the ZigBee search and the joined sensor placed in th
   });
 });
 
+// The hub lists a new ZigBee device under its model, which reads like a
+// field name (lumi.sensor_wleak.aq1); the owner sees that name in
+// SprutHub, so quoting it is fine even after the accessory is renamed. A
+// tool name is still caught.
+test("answer_has_no_raw_refs lets a name the hub shows pass and still catches tool names", async (t) => {
+  const session = await caseSession(t, "add-leak-sensor");
+  await session.send({
+    extension: {
+      action: {
+        extensionKey: "Controller:zigbee",
+        spaceKey: "main",
+        actionId: 1,
+        state: true,
+      },
+    },
+  });
+  for (let waited = 0; waited < 8_000; waited += 100) {
+    if (session.hub.state.accessories.some(({ id }) => id === 900)) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await session.send({
+    accessory: {
+      update: { id: 900, roomId: 8, name: "Датчик протечки у ванны" },
+    },
+  });
+  const clean = (answer) => session.grade(answer).answer_has_no_raw_refs;
+
+  for (const quoted of [
+    "Датчик lumi.sensor_wleak.aq1 подключён и теперь называется «Датчик протечки у ванны».",
+    "Новое устройство: lumi.sensor_wleak.aq1, сервис «Протечка».",
+  ]) {
+    assert.equal(clean(quoted), true, quoted);
+  }
+  for (const leaked of [
+    "Запустил start_device_search, датчик lumi.sensor_wleak.aq1 подключён.",
+    "Датчик подключён, accessory_status: found.",
+    "Датчик lumi.sensor_wleak.aq1 подключён (spruthub://hub/x/accessory/900).",
+  ]) {
+    assert.equal(clean(leaked), false, leaked);
+  }
+});
+
 test("weekday-schedule grades the cron by day and waits for weekday triggers", async (t) => {
   assert.match(CASES["weekday-schedule"].pending, /wave2\/block-nodes/);
   const rule = (cron) =>
