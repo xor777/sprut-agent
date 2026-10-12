@@ -258,24 +258,5 @@ captures сохраняются с правами `0600` в исключённо
 ## Правила и задачи
 
 Git использует Conventional Commits; RED/GREEN, ревью, ветки и рабочая копия
-описаны в [AGENTS.md](AGENTS.md). Задачи, результаты и приёмка ведутся в
-[проекте SPRUT](https://plan.nuanu.ai/project/SPRUT), порядок работы — в
-[документе команды](https://plan.nuanu.ai/project/SPRUT/docs/178).
-
-<details>
-<summary>Подключение Plan для работы над репозиторием</summary>
-
-Локальный `.codex/config.toml` подключает Plan только в этом репозитории и
-исключён из Git:
-
-```toml
-[mcp_servers.plan]
-url = "https://api-plan.nuanu.ai/mcp"
-http_headers = { Authorization = "Bearer ВАШ_КЛЮЧ_АГЕНТА" }
-```
-
-Используй ключ внешнего агента с доступом к SPRUT и права `0600`. Для OAuth
-убери `http_headers`, выполни `codex mcp login plan` из корня и перезапусти
-клиент после изменения конфигурации.
-
-</details>
+описаны в [AGENTS.md](AGENTS.md). Текущее состояние, следующие шаги и принятые
+решения — в [PLAN.md](PLAN.md); отдельного трекера задач нет.
