@@ -2841,13 +2841,30 @@ export class SprutHubClient {
     }
   }
 
+  // Calls that need a connection while one is opening share the attempt.
+  // It has the request timeout of its own: a call whose time runs out
+  // first stops waiting without giving the attempt up for the others.
   async #connect(deadline) {
     if (this.#socket?.readyState === WebSocket.OPEN) return this.#socket;
-    if (this.#connectPromise) return this.#connectPromise;
+    if (deadline - Date.now() <= 0) throw timeoutError();
+    this.#connectPromise ??= this.#openConnection();
+    let timer;
+    try {
+      return await Promise.race([
+        this.#connectPromise,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(timeoutError()),
+            deadline - Date.now(),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) throw timeoutError();
-
+  #openConnection() {
     const connection = new Promise((resolve, reject) => {
       const socket = new WebSocket(this.url, "json-rpc");
       this.#connectingSocket = socket;
@@ -2857,7 +2874,7 @@ export class SprutHubClient {
         settled = true;
         reject(timeoutError());
         socket.terminate();
-      }, remainingMs);
+      }, this.timeoutMs);
       const failBeforeOpen = () => {
         if (settled) return;
         settled = true;
@@ -2898,16 +2915,14 @@ export class SprutHubClient {
         this.#handleConnectionLoss(socket);
       });
     });
-    this.#connectPromise = connection;
-
-    try {
-      return await connection;
-    } finally {
+    const forget = () => {
       if (this.#connectPromise === connection) {
         this.#connectPromise = undefined;
         this.#connectingSocket = undefined;
       }
-    }
+    };
+    connection.then(forget, forget);
+    return connection;
   }
 
   #handleMessage(data, socket) {
