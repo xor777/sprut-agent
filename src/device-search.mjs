@@ -42,6 +42,10 @@ const EVENT_DOMAINS = ["extension", "extensionChild", "accessory"];
 const START_CONFIRM_MS = 1_000;
 // A search seen ended within this long of its end counts as expired.
 const EXPIRY_TOLERANCE_MS = 3_000;
+// A device that joined may still be getting its accessory when the search
+// ends; this long after the end a device still without one is reported as
+// not added. How long the hub takes was not observed: one longest wait.
+const ACCESSORY_GRACE_MS = 20_000;
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
 // Searches kept in this process.
@@ -156,7 +160,9 @@ export class DeviceSearches {
     // showed ends this watch as unknown, and a search that shows later is
     // found by start_device_search, not resent.
     search.startRead = true;
-    if (view.active === false && !search.seenRunning) search.ended = "unknown";
+    if (view.active === false && !search.seenRunning) {
+      endWatch(search, "unknown");
+    }
     search.lastFingerprint = view.fingerprint;
     if (view.active === true && !replyLost) {
       return this.#startResult(search, view, "started");
@@ -264,20 +270,23 @@ export class DeviceSearches {
         changed: fields.map((field) => PUBLIC_FIELD[field]),
       }));
     const active = search.ended === null && search.active === true;
-    return {
+    const view = {
       active,
       newDevices,
       newTotal: added.length,
       changedDevices,
       changedTotal: changed.length,
-      fingerprint: JSON.stringify([
-        active,
-        search.endsAt,
-        search.ended,
-        newDevices,
-        changedDevices,
-      ]),
     };
+    view.result = searchResult(search, view);
+    view.fingerprint = JSON.stringify([
+      active,
+      search.endsAt,
+      search.ended,
+      view.result,
+      newDevices,
+      changedDevices,
+    ]);
+    return view;
   }
 
   // A read right after a write: a read that fails leaves the state unknown
@@ -294,6 +303,7 @@ export class DeviceSearches {
         newTotal: 0,
         changedDevices: [],
         changedTotal: 0,
+        result: "waiting",
         fingerprint: null,
       };
     }
@@ -314,12 +324,15 @@ export class DeviceSearches {
     if (!search.seenRunning && !search.stopSent && !search.startRead) return;
     // Once the search is seen ended it stays so: a later run is another
     // search with its own baseline.
-    search.ended = search.stopSent
-      ? "stopped"
-      : search.endsAt !== null &&
-          Date.now() >= search.endsAt - EXPIRY_TOLERANCE_MS
-        ? "expired"
-        : "unknown";
+    endWatch(
+      search,
+      search.stopSent
+        ? "stopped"
+        : search.endsAt !== null &&
+            Date.now() >= search.endsAt - EXPIRY_TOLERANCE_MS
+          ? "expired"
+          : "unknown",
+    );
   }
 
   // A new device with the accessories its window links, read fresh so a
@@ -440,7 +453,7 @@ export class DeviceSearches {
   #report(search, view) {
     const ended = search.ended;
     const active = view.active;
-    const result = searchResult(view);
+    const result = view.result;
     const changed =
       view.fingerprint === null || view.fingerprint !== search.lastFingerprint;
     if (view.fingerprint !== null) search.lastFingerprint = view.fingerprint;
@@ -558,6 +571,7 @@ export class DeviceSearches {
       startRead: options.startedBeforeWatch === true,
       endsAt: null,
       ended: null,
+      endedAt: null,
       stopSent: false,
       linked: new Map(),
       rooms: new Map(),
@@ -744,28 +758,46 @@ function isDeviceReadFailure(error) {
   );
 }
 
+// Marks the watch ended (stopped, expired or unknown) from now on; an
+// expired search ended at its end time.
+function endWatch(search, how) {
+  const now = Date.now();
+  search.ended = how;
+  search.endedAt =
+    how === "expired" && search.endsAt !== null
+      ? Math.min(now, search.endsAt)
+      : now;
+}
+
 // What the search has brought: waiting (nothing new yet), joining (a new
-// device whose accessory the hub has not made yet), unreadable (a new
+// device whose accessory the hub has not made yet), not_added (the search
+// ended a while ago and a new device still has none), unreadable (a new
 // device whose accessory could not be read), joined (every new device
 // with its accessory) or no_new_device (ended with nothing new).
-function searchResult(view) {
+function searchResult(search, view) {
   const statuses = view.newDevices.map(
     ({ accessory_status: status }) => status,
   );
   if (statuses.length === 0) {
     return view.active === false ? "no_new_device" : "waiting";
   }
-  if (statuses.includes("pending")) return "joining";
+  if (statuses.includes("pending")) {
+    return view.active === false &&
+      search.endedAt !== null &&
+      Date.now() >= search.endedAt + ACCESSORY_GRACE_MS
+      ? "not_added"
+      : "joining";
+  }
   if (statuses.includes("unreadable")) return "unreadable";
   return "joined";
 }
 
 // Whether a wait has something to return: a change since the previous
 // answer, or nothing left to wait for (the search ended and no new device
-// waits for its accessory).
+// may still get its accessory).
 function worthReturning(search, view) {
   if (view.fingerprint !== search.lastFingerprint) return true;
-  return view.active === false && searchResult(view) !== "joining";
+  return view.active === false && view.result !== "joining";
 }
 
 function getCall(search) {
@@ -785,6 +817,12 @@ function reportGuidance(search, view, result) {
         tool: "start_device_search",
         arguments: { extension_ref: search.extensionRef },
       },
+    };
+  }
+  if (result === "not_added") {
+    return {
+      hint: "The search has ended and the hub has made no accessory for a new device listed here; its status and error are the hub's text. Tell the owner the device was not added: it may not be supported, or its pairing failed. If the hub adds it later, get_device_search still shows it.",
+      next: null,
     };
   }
   if (result === "unreadable") {
