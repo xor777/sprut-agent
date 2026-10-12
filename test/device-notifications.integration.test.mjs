@@ -89,10 +89,14 @@ async function notifyOf(client, ref) {
   return (await call(client, "get_entity", { entity_ref: ref })).entity.notify;
 }
 
-// The services find_devices lists for notify=true, as service ref → refs of
-// the characteristics it marks notify: true.
+// The services find_devices lists for notify=true in the whole home, as
+// service ref → refs of the characteristics it marks notify: true.
 async function notifyingServices(client) {
-  const page = await call(client, "find_devices", { notify: true });
+  return notifyingOf(await call(client, "find_devices", { notify: true }));
+}
+
+function notifyingOf(page) {
+  assert.equal(page.next, null);
   return Object.fromEntries(
     page.rooms.flatMap(({ devices }) =>
       devices.flatMap(({ services }) =>
@@ -192,8 +196,65 @@ test("«сообщай, если датчик протечки на кухне �
   const touched = Object.fromEntries(
     hub.touchedMethods().map(({ method, level }) => [method, level]),
   );
-  assert.equal(touched["characteristic.update {notify}"], "schema_only");
+  assert.equal(touched["characteristic.update {notify}"], "observed");
   assert.equal(touched["characteristic.update"], undefined);
+});
+
+// The owner turned the sensor's offline notification on in the SprutHub
+// app. Only accessory.get reports notify; accessory.list and
+// characteristic.get leave it out whatever it is, as on the owner's hub
+// (2026-10-12-notifications-live), so a read from them would take it for
+// off and a restore would leave it off.
+test("«выключи уведомление о пропаже датчика протечки», set on in the app, is off until restore turns it back on", async (t) => {
+  const home = await startHub(t);
+  const { hub } = home;
+  const online = hub.state.accessories
+    .find(({ id }) => id === 23)
+    .services.find(({ sId }) => sId === 1)
+    .characteristics.find(({ cId }) => cId === 8);
+  online.notify = true;
+  const client = await startClient(t, home);
+  const kitchen = `${homeRef}/room/4`;
+  const kitchenNotifying = async () =>
+    Object.keys(
+      notifyingOf(
+        await call(client, "find_devices", { room_ref: kitchen, notify: true }),
+      ),
+    );
+
+  // «Какие уведомления включены?», for the home and for the kitchen.
+  assert.equal(await notifyOf(client, kitchenLeakOnline), true);
+  assert.deepEqual(await notifyingServices(client), {
+    [`${kitchenLeak}/service/1`]: [kitchenLeakOnline],
+  });
+  assert.deepEqual(await kitchenNotifying(), [`${kitchenLeak}/service/1`]);
+
+  const prepared = await prepareNotify(client, kitchenLeakOnline, false);
+  assert.deepEqual(prepared.diff, {
+    value: { from: true, to: false, kind: "boolValue" },
+  });
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(online.notify, false);
+  assert.equal(await notifyOf(client, kitchenLeakOnline), false);
+  assert.deepEqual(await notifyingServices(client), {});
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(restored.status, "restored");
+  assert.deepEqual(
+    notifyWrites(hub).map(([, params]) => params.characteristic.update),
+    [
+      { aId: 23, sId: 1, cId: 8, notify: false },
+      { aId: 23, sId: 1, cId: 8, notify: true },
+    ],
+  );
+  assert.equal(online.notify, true);
+  assert.equal(await notifyOf(client, kitchenLeakOnline), true);
+  assert.deepEqual(await kitchenNotifying(), [`${kitchenLeak}/service/1`]);
 });
 
 test("«уведомляй, когда открывается входная дверь» turns on the door sensor's notification, and a second request finds it already on", async (t) => {

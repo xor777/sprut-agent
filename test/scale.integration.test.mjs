@@ -271,3 +271,83 @@ test("what lights are on fits one page at the owner's lamp count and at twice it
   }
   t.diagnostic(`find_devices {kind: light, state: on}: ${sizes.join(", ")}`);
 });
+
+// «Какие уведомления включены?» Only accessory.get reports a
+// characteristic's notification (owner hub, 2026-10-12-notifications-live),
+// so the whole-home answer reads each accessory once. It lists only the
+// notifications that are on: the same answer at the owner's size and at
+// twice it.
+test("which notifications are on lists the same ones at the owner's size and at twice it, reading each accessory once", async (t) => {
+  const apartment = await loadHomeFixture("apartment");
+  const runs = [];
+  for (const size of [80, 160]) {
+    const { hub, client } = await connect(t, scaledHome(apartment, size));
+    // Turned on in the SprutHub app: the kitchen leak sensor going offline
+    // and the front door opening.
+    const characteristic = (aId, sId, cId) =>
+      hub.state.accessories
+        .find(({ id }) => id === aId)
+        .services.find((service) => service.sId === sId)
+        .characteristics.find((item) => item.cId === cId);
+    characteristic(23, 1, 8).notify = true;
+    characteristic(11, 13, 14).notify = true;
+    const before = hub.requests.length;
+    const started = performance.now();
+    const result = await client.callTool({
+      name: "find_devices",
+      arguments: { notify: true },
+    });
+    const ms = Math.round(performance.now() - started);
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    const native = hub.requests.slice(before);
+    const byId = (left, right) => left - right;
+    assert.deepEqual(
+      native
+        .filter(({ method }) => method === "accessory.get")
+        .map(({ params }) => params.accessory.get.id)
+        .sort(byId),
+      hub.state.accessories.map(({ id }) => id).sort(byId),
+    );
+    runs.push({
+      size,
+      ms,
+      requests: native.length,
+      replyBytes: native.reduce(
+        (sum, { responseBytes }) => sum + responseBytes,
+        0,
+      ),
+      bytes: Buffer.byteLength(result.content[0].text),
+      body: result.structuredContent,
+    });
+  }
+  for (const { body } of runs) {
+    assert.equal(body.next, null);
+    assert.deepEqual(
+      listed(body).map(({ service }) => [
+        service.ref,
+        [...(service.values ?? []), ...(service.characteristics ?? [])]
+          .filter(({ notify }) => notify === true)
+          .map(({ ref }) => ref),
+      ]),
+      [
+        [
+          `${home}/accessory/11/service/13`,
+          [`${home}/accessory/11/service/13/characteristic/14`],
+        ],
+        [
+          `${home}/accessory/23/service/1`,
+          [`${home}/accessory/23/service/1/characteristic/8`],
+        ],
+      ],
+    );
+  }
+  assert.equal(runs[0].bytes, runs[1].bytes);
+  t.diagnostic(
+    `find_devices {notify: true}: ${runs
+      .map(
+        ({ size, ms, requests, replyBytes, bytes }) =>
+          `${size} accessories ${requests}req/${replyBytes}B native, ${bytes}B answer, ${ms}ms`,
+      )
+      .join("; ")}`,
+  );
+});

@@ -106,8 +106,8 @@ export const METHOD_EVIDENCE = {
   "characteristic.setOptions": [SCHEMA_ONLY],
   "characteristic.update": [OBSERVED, "2026-09-11-virtual-light-group"],
   "characteristic.update {notify}": [
-    SCHEMA_ONLY,
-    "CharacteristicUpdateRequest.notify in 63189-Characteristic.proto; the web client's NotificationsScreen sends {aId, sId, cId, notify} (2026-09-24-web-client-action-map B8); not sent live",
+    OBSERVED,
+    "2026-10-12-notifications-live: true and false on a virtual lamp's On, read back in accessory.get only",
   ],
   "link.list": [OBSERVED, "2026-09-11-virtual-light-group"],
   "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
@@ -1289,8 +1289,10 @@ const HANDLERS = {
       )
       .map((accessory) => projectAccessory(accessory, expand)),
   }),
-  "accessory.get": (state, { id }) =>
-    state.accessories.find((accessory) => accessory.id === id) ?? null,
+  "accessory.get": (state, { id }) => {
+    const accessory = state.accessories.find((item) => item.id === id);
+    return accessory ? withNotify(accessory) : null;
+  },
   "accessory.create": (state, { name, roomId, services }) => {
     requireRoom(state, roomId);
     if (typeof name !== "string" || name.length === 0) {
@@ -1340,9 +1342,9 @@ const HANDLERS = {
     };
     state.accessories.push(accessory);
     // The create reply of the fake hubs omits `virtual`; the stored accessory
-    // keeps it, as accessory.get reports it.
+    // keeps it, as accessory.get reports it. notify was not seen in it.
     const { virtual: _virtual, ...reply } = accessory;
-    return reply;
+    return withoutNotifyIn(reply);
   },
   "accessory.update": (state, input) => {
     const accessory = requireAccessory(state, input.id);
@@ -1394,7 +1396,10 @@ const HANDLERS = {
     return {};
   },
 
-  "characteristic.get": (state, input) => findCharacteristic(state, input),
+  "characteristic.get": (state, input) => {
+    const characteristic = findCharacteristic(state, input);
+    return characteristic && withoutNotify(characteristic);
+  },
   "characteristic.getOptions": (state, input) => {
     requireCharacteristic(state, input);
     return {
@@ -1416,8 +1421,7 @@ const HANDLERS = {
       characteristic.linkProcessing = input.linkProcessing;
     }
     // CharacteristicUpdateRequest.notify, as the web client's Notifications
-    // screen sends it. A characteristic that never had it set leaves it out
-    // here; whether a live hub reports false instead is not known.
+    // screen sends it (2026-10-12-notifications-live).
     if (Object.hasOwn(input, "notify")) {
       if (typeof input.notify !== "boolean") {
         throw invalidParams("Characteristic notify must be a boolean");
@@ -2971,7 +2975,8 @@ function extensionChildren(state, extensionKey) {
 }
 
 // accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual
-// field for any accessory; accessory.get has it.
+// field for any accessory; accessory.get has it. Nor has it notify
+// (2026-10-12-notifications-live).
 function projectAccessory(accessory, expand) {
   const { services, virtual: _virtual, ...summary } = accessory;
   if (!expandIncludes(expand, "services")) return summary;
@@ -2979,9 +2984,39 @@ function projectAccessory(accessory, expand) {
     ...summary,
     services: services.map(({ characteristics, ...service }) =>
       expandIncludes(expand, "characteristics")
-        ? { ...service, characteristics }
+        ? { ...service, characteristics: characteristics.map(withoutNotify) }
         : service,
     ),
+  };
+}
+
+// Only accessory.get reports a characteristic's notification setting, on
+// every characteristic, false where it was never set; accessory.list and
+// characteristic.get leave it out whatever its value (owner hub, 3.0.0,
+// 2026-10-12-notifications-live). The state keeps notify only where it was
+// written or is on from the start.
+function withNotify(accessory) {
+  return mapCharacteristics(accessory, (characteristic) => ({
+    ...characteristic,
+    notify: characteristic.notify ?? false,
+  }));
+}
+
+function withoutNotifyIn(accessory) {
+  return mapCharacteristics(accessory, withoutNotify);
+}
+
+function withoutNotify({ notify: _notify, ...characteristic }) {
+  return characteristic;
+}
+
+function mapCharacteristics(accessory, map) {
+  return {
+    ...accessory,
+    services: accessory.services.map((service) => ({
+      ...service,
+      characteristics: service.characteristics.map(map),
+    })),
   };
 }
 
