@@ -659,8 +659,9 @@ test("a stop after the search ended unseen sends nothing", async (t) => {
 
 // The agent's search ended while nobody read it, then the owner started
 // another in the SprutHub app. The old watch is over: its stop must not
-// close the owner's network, and a new start watches the owner's run
-// under a new ref.
+// close the owner's network, its answer must say that the network is still
+// open by that later search, and a new start watches the owner's run under
+// a new ref with its own stop.
 test("a watch whose search ended unseen does not act on a search started later in the app", async (t) => {
   const { hub, client } = await setup(
     t,
@@ -677,6 +678,10 @@ test("a watch whose search ended unseen does not act on a search started later i
     hub.state.extensions
       .find(({ extensionKey }) => extensionKey === ZIGBEE)
       .spaces[0].actions.find(({ id }) => id === 1).state;
+  const startAgain = {
+    tool: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  };
 
   const stale = await call(client, "stop_device_search", {
     search_ref: ours.search_ref,
@@ -684,6 +689,11 @@ test("a watch whose search ended unseen does not act on a search started later i
   assert.equal(stale.stop_sent, false);
   assert.equal(stale.active, false);
   assert.equal(stale.ended, "expired");
+  assert.equal(stale.later_search.active, true);
+  assert(stale.later_search.seconds_left > 50, stale);
+  assert.equal(typeof stale.hints.search, "string");
+  assert.deepEqual(stale.next, startAgain);
+  assert.equal(stale.stop, undefined);
   assert.equal(running(), true);
 
   const owners = await call(client, "start_device_search", {
@@ -693,14 +703,61 @@ test("a watch whose search ended unseen does not act on a search started later i
   assert.notEqual(owners.search_ref, ours.search_ref);
   assert.equal(owners.active, true);
   assert(owners.seconds_left > 50, owners);
+  assert.deepEqual(owners.stop, {
+    tool: "stop_device_search",
+    arguments: { search_ref: owners.search_ref },
+  });
   const old = await call(client, "get_device_search", {
     search_ref: ours.search_ref,
     wait_seconds: 0,
   });
   assert.equal(old.ended, "expired");
   assert.equal(old.active, false);
+  assert.equal(old.later_search.active, true);
+  assert.deepEqual(old.next, startAgain);
   assert.equal(searchActions(hub).length, 1);
   assert.equal(running(), true);
+});
+
+// The same, with the agent's next start before any read of the old ref: the
+// start sees that the old watch's search has ended and watches the owner's
+// run under a new ref instead of returning the old one, whose stop would
+// close the owner's network.
+test("a start after a watch's search ended unseen watches the search started later in the app", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500 }),
+  );
+  const ours = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+  hub.state.discoveryTimeMs = 60_000;
+  startNatively(hub);
+
+  const owners = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(owners.status, "already_running");
+  assert.notEqual(owners.search_ref, ours.search_ref);
+  assert.equal(owners.active, true);
+  assert(owners.seconds_left > 50, owners);
+
+  const old = await call(client, "stop_device_search", {
+    search_ref: ours.search_ref,
+  });
+  assert.equal(old.stop_sent, false);
+  assert.equal(old.ended, "expired");
+  assert.equal(old.later_search.active, true);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+  ]);
+  assert.equal(
+    hub.state.extensions
+      .find(({ extensionKey }) => extensionKey === ZIGBEE)
+      .spaces[0].actions.find(({ id }) => id === 1).state,
+    true,
+  );
 });
 
 // A watch of a search that already ran does not count devices that joined
