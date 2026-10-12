@@ -1140,11 +1140,11 @@ test("a start whose watch cannot be saved opens no network and says how to fix t
   const refused = await toolError(client, "start_device_search", {
     extension_ref: zigbeeRef,
   });
+  assert.deepEqual(searchActions(hub), []);
   assert.equal(refused.error.code, "state_storage_unavailable");
   assert.equal(refused.error.action, "restore_state_storage_then_retry");
   assert.match(refused.error.message, /SPRUT_AGENT_STATE_DIR/);
   assert(!JSON.stringify(refused).includes(stateDirectory), refused);
-  assert.deepEqual(searchActions(hub), []);
 
   // Once the directory can be written, the same start opens the network.
   await chmod(stateDirectory, 0o700);

@@ -73,8 +73,10 @@ export class DeviceSearches {
       };
       // Watches not written for days go first, so none of them is taken
       // for the controller's latest.
-      await this.#store(target.serial).prune();
-      const latest = await this.#latest(target);
+      const latest = await beforeStartSent(async () => {
+        await this.#store(target.serial).prune();
+        return this.#latest(target);
+      });
       return latest === null
         ? begin(null)
         : this.#using(
@@ -130,7 +132,7 @@ export class DeviceSearches {
     const timeZone = await client.hubTimeZone(target.serial, deadline);
     if (current) {
       this.#updateState(current, extension);
-      await this.#save(current);
+      await beforeStartSent(() => this.#save(current));
     }
     if (action.state === true) {
       // A resend would restart the hub's timer and keep the network open
@@ -662,7 +664,7 @@ export class DeviceSearches {
     };
     // Kept before the start is sent: a start whose watch cannot be kept is
     // not sent.
-    await this.#save(search);
+    await beforeStartSent(() => this.#save(search));
     return search;
   }
 
@@ -955,6 +957,22 @@ function refusedByHub(error, ref, step) {
       next: { tool: "get_entity", arguments: { entity_ref: ref } },
     },
   );
+}
+
+// Runs a step of the state directory that comes before the start is sent.
+// When it fails, the agent learns that nothing reached the hub and how to
+// fix the directory; the file system's error names the path, so it is left
+// out.
+async function beforeStartSent(step) {
+  try {
+    return await step();
+  } catch {
+    throw new SprutHubError(
+      "state_storage_unavailable",
+      "The device search could not be saved in the local state directory, so this call sent nothing to the hub and did not open the network. Make that directory writable, or set SPRUT_AGENT_STATE_DIR to a writable directory and restart the MCP server; then start the search again.",
+      "restore_state_storage_then_retry",
+    );
+  }
 }
 
 // A read of one device that failed: the hub refused it or did not answer
