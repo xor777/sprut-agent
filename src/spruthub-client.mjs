@@ -128,8 +128,6 @@ export class SprutHubClient {
   #homeCatalogs = new Map();
   #hubTimeZones = new Map();
   #hubTimeZoneReads = new Map();
-  // When each connection last carried a frame from the hub.
-  #lastMessageAt = new WeakMap();
   #nextRequestId = 1;
   #observation;
   #observationClient;
@@ -2806,7 +2804,6 @@ export class SprutHubClient {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
     const id = this.#nextRequestId++;
-    const sentAt = performance.now();
     const response = new Promise((resolve, reject) => {
       // Only this request runs out of time: the others on the connection
       // keep theirs, and a reply that comes later finds no request under its
@@ -2814,11 +2811,7 @@ export class SprutHubClient {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(timeoutError());
-        if ((this.#lastMessageAt.get(socket) ?? -1) < sentAt) {
-          this.#retire(socket);
-        } else {
-          this.#closeIfRetired(socket);
-        }
+        this.#retire(socket);
       }, remainingMs);
       this.#pending.set(id, { resolve, reject, timer, socket });
     });
@@ -2906,10 +2899,7 @@ export class SprutHubClient {
         });
         resolve(socket);
       });
-      socket.on("message", (data) => {
-        this.#lastMessageAt.set(socket, performance.now());
-        this.#handleMessage(data, socket);
-      });
+      socket.on("message", (data) => this.#handleMessage(data, socket));
       socket.on("close", () => {
         if (!settled) failBeforeOpen();
         this.#handleConnectionLoss(socket);
@@ -3030,14 +3020,15 @@ export class SprutHubClient {
     }
   }
 
-  // A connection that has carried nothing since a request that ran out of
-  // time was sent may be gone without a close, as when the network drops.
-  // It takes no new requests: the next one opens a new connection, so a
-  // retry gets through at once without waiting on a probe. The requests
-  // already on it keep their own time, so a write sent there still gets its
-  // answer from a hub that is only slow, and it closes once they have
-  // settled. The subscriptions of an observation stay on their connection,
-  // so for an observation the connection is lost.
+  // A connection on which a request ran out of time may be gone without a
+  // close, as when the network drops, or may no longer answer; frames on it
+  // prove nothing, since the hub sends events to every socket. It takes no
+  // new requests: the next one opens a new connection, so a retry gets
+  // through at once without waiting on a probe. The requests already on it
+  // keep their own time, so a write sent there still gets its answer from a
+  // hub that is only slow, and it closes once they have settled. The
+  // subscriptions of an observation stay on their connection, so for an
+  // observation the connection is lost.
   #retire(socket) {
     if (this.#socket === socket) {
       if (this.#observation?.status === "observing") {
