@@ -1213,6 +1213,40 @@ test("a new device whose reads fail is reported unreadable beside the search sta
   assert.equal(stopped.new_devices[0].accessory_status, "unreadable");
   assert.deepEqual(stopped.new_devices[0].next, readChild);
 
+  // The hub answers the accessory in a form this client cannot read (here
+  // without its online flag): that device is unreadable, the report stands.
+  const sensor = hub.state.accessories.find(({ id }) => id === 200);
+  delete sensor.online;
+  const garbled = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  sensor.online = true;
+  assert.equal(garbled.status, "ended");
+  assert.equal(garbled.ended, "stopped");
+  assert.equal(garbled.result, "unreadable");
+  assert.deepEqual(
+    garbled.new_devices.map(({ ref, accessory_status, read_error, next }) => ({
+      ref,
+      accessory_status,
+      read_error,
+      next,
+    })),
+    [
+      {
+        ref: sensorChildRef,
+        accessory_status: "unreadable",
+        read_error: "incompatible_response",
+        next: readChild,
+      },
+    ],
+  );
+  assert.deepEqual(Object.keys(garbled.hints), ["unreadable"]);
+  assert.deepEqual(garbled.next, {
+    tool: "get_device_search",
+    arguments: { search_ref: started.search_ref },
+  });
+
   // Read again, the device shows its accessory.
   const joined = await call(client, "get_device_search", {
     search_ref: started.search_ref,
