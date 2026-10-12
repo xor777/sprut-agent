@@ -44,10 +44,6 @@ const EVENT_DOMAINS = ["extension", "extensionChild", "accessory"];
 const START_CONFIRM_MS = 1_000;
 // A search seen ended within this long of its end counts as expired.
 const EXPIRY_TOLERANCE_MS = 3_000;
-// A device that joined may still be getting its accessory when the search
-// ends; this long after the end a device still without one is reported as
-// not added. How long the hub takes was not observed: one longest wait.
-const ACCESSORY_GRACE_MS = 20_000;
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
 // Watches this process keeps in memory, so that its calls on one search
@@ -302,7 +298,7 @@ export class DeviceSearches {
       changedDevices,
       changedTotal: changed.length,
     };
-    view.result = searchResult(search, view);
+    view.result = searchResult(view);
     view.fingerprint = createHash("sha256")
       .update(
         JSON.stringify([
@@ -380,9 +376,10 @@ export class DeviceSearches {
   }
 
   // A new device with the accessories its window links, read fresh so a
-  // rename or move after the join shows. A read of this device that fails
-  // leaves it unreadable; the search state and other devices are still
-  // reported.
+  // rename or move after the join shows, and its outcome as the hub shows
+  // it: found (an accessory), failed (an error and no accessory), pending
+  // (neither yet) or unreadable. A read of this device that fails leaves
+  // it unreadable; the search state and other devices are still reported.
   async #newDevice(search, child, deadline) {
     const device = publicChild(search, child);
     const unreadable = (readError) => ({
@@ -401,7 +398,12 @@ export class DeviceSearches {
       if (accessories === null) return unreadable(null);
       return {
         ...device,
-        accessory_status: accessories.length > 0 ? "found" : "pending",
+        accessory_status:
+          accessories.length > 0
+            ? "found"
+            : child.error !== null
+              ? "failed"
+              : "pending",
         accessories,
       };
     } catch (error) {
@@ -527,7 +529,7 @@ export class DeviceSearches {
       ...(search.timeZone === null
         ? { limitations: [UTC_TIMES_LIMITATION] }
         : {}),
-      ...reportGuidance(search, view, result),
+      ...reportGuidance(search, view),
     };
   }
 
@@ -618,7 +620,6 @@ export class DeviceSearches {
       startRead: running,
       endsAt: null,
       ended: null,
-      endedAt: null,
       stopSent: false,
       linked: new Map(),
       rooms: new Map(),
@@ -807,7 +808,6 @@ function storedWatch(search) {
     start_read: search.startRead,
     ends_at: search.endsAt,
     ended: search.ended,
-    ended_at: search.endedAt,
     stop_sent: search.stopSent,
     last_fingerprint: search.lastFingerprint,
   };
@@ -844,7 +844,6 @@ function loadedWatch(serial, watch) {
     startRead: watch.start_read,
     endsAt: watch.ends_at,
     ended: watch.ended,
-    endedAt: watch.ended_at,
     stopSent: watch.stop_sent,
     linked: new Map(),
     rooms: new Map(),
@@ -943,46 +942,37 @@ function isDeviceReadFailure(error) {
   );
 }
 
-// Marks the watch ended (stopped, expired or unknown) from now on; an
-// expired search ended at its end time.
+// Marks the watch ended (stopped, expired or unknown) from now on.
 function endWatch(search, how) {
-  const now = Date.now();
   search.ended = how;
-  search.endedAt =
-    how === "expired" && search.endsAt !== null
-      ? Math.min(now, search.endsAt)
-      : now;
 }
 
-// What the search has brought: waiting (nothing new yet), joining (a new
-// device whose accessory the hub has not made yet), not_added (the search
-// ended a while ago and a new device still has none), unreadable (a new
-// device whose accessory could not be read), joined (every new device
-// with its accessory) or no_new_device (ended with nothing new).
-function searchResult(search, view) {
-  const statuses = view.newDevices.map(
-    ({ accessory_status: status }) => status,
-  );
-  if (statuses.length === 0) {
+// What the search has brought, summed up over its new devices: waiting
+// (nothing new yet), joined (a new device has its accessory), joining (the
+// hub is still adding one), unreadable (one could not be read now), failed
+// (the hub shows an error for each) or no_new_device (ended with nothing
+// new). The hints say what to do for each outcome present.
+function searchResult(view) {
+  const outcomes = deviceOutcomes(view);
+  if (outcomes.size === 0) {
     return view.active === false ? "no_new_device" : "waiting";
   }
-  if (statuses.includes("pending")) {
-    return view.active === false &&
-      search.endedAt !== null &&
-      Date.now() >= search.endedAt + ACCESSORY_GRACE_MS
-      ? "not_added"
-      : "joining";
-  }
-  if (statuses.includes("unreadable")) return "unreadable";
-  return "joined";
+  if (outcomes.has("found")) return "joined";
+  if (outcomes.has("pending")) return "joining";
+  if (outcomes.has("unreadable")) return "unreadable";
+  return "failed";
+}
+
+function deviceOutcomes(view) {
+  return new Set(view.newDevices.map(({ accessory_status: status }) => status));
 }
 
 // Whether a wait has something to return: a change since the previous
-// answer, or nothing left to wait for (the search ended and no new device
-// may still get its accessory).
+// answer, or nothing left to wait for (the search ended and the hub is
+// adding no new device).
 function worthReturning(search, view) {
   if (view.fingerprint !== search.lastFingerprint) return true;
-  return view.active === false && view.result !== "joining";
+  return view.active === false && !deviceOutcomes(view).has("pending");
 }
 
 function getCall(search) {
@@ -993,50 +983,51 @@ function stopCall(search) {
   return { tool: "stop_device_search", arguments: { search_ref: search.ref } };
 }
 
-function reportGuidance(search, view, result) {
+// One hint for each outcome among the new devices, and for the search
+// itself when it ended with nothing new; next goes on reading while the
+// search runs or the hub may still change a device.
+function reportGuidance(search, view) {
   const running = view.active !== false;
-  if (result === "no_new_device") {
-    return {
-      hint: `The search ended and no new device is listed${
-        search.startedBeforeWatch
-          ? ": the search was already running when the count of new devices began, and devices that joined before that are not counted"
-          : ""
-      }.${
-        view.changedTotal > 0
-          ? " Earlier devices of the controller changed (changed_devices): a device paired again keeps its entry and shows there, not as new."
-          : ""
-      } Tell the owner and offer to start the search again once the device is in pairing mode near the hub.`,
-      next: {
-        tool: "start_device_search",
-        arguments: { extension_ref: search.extensionRef },
-      },
-    };
+  const outcomes = deviceOutcomes(view);
+  const hints = {};
+  if (outcomes.size === 0 && !running) {
+    hints.search = `The search ended and no new device is listed${
+      search.startedBeforeWatch
+        ? ": the search was already running when the count of new devices began, and devices that joined before that are not counted"
+        : ""
+    }.${
+      view.changedTotal > 0
+        ? " Earlier devices of the controller changed (changed_devices): a device paired again keeps its entry and shows there, not as new."
+        : ""
+    } Tell the owner and offer to start the search again once the device is in pairing mode near the hub.`;
   }
-  if (result === "not_added") {
-    return {
-      hint: "The search has ended and the hub has made no accessory for a new device listed here; its status and error are the hub's text. Tell the owner the device was not added: it may not be supported, or its pairing failed. If the hub adds it later, get_device_search still shows it.",
-      next: null,
-    };
+  if (outcomes.has("found")) {
+    hints.found = `A new device joined. Set each new accessory's room and name with prepare_native_change operation accessory_placement (target_ref, room_ref, name, reason).${running ? " Stop the search once no other device is to be added." : ""}`;
   }
-  if (result === "unreadable") {
-    const device = view.newDevices.find(
-      ({ accessory_status: status }) => status === "unreadable",
-    );
-    return {
-      hint: "A new device is listed, but its accessory could not be read now. Read the device with its next (get_entity), or call get_device_search again.",
-      next: running ? getCall(search) : device.next,
-      ...(running ? { stop: stopCall(search) } : {}),
-    };
+  if (outcomes.has("pending")) {
+    hints.pending = running
+      ? "The hub is still adding a new device; its status and progress are the hub's text. Wait for it with next."
+      : "The search has ended and the hub is still adding a new device: it shows no error; its status and progress are the hub's text. Check again later with next; if it stays so, tell the owner the device may not be supported or its pairing did not finish.";
   }
-  if (result === "joined") {
-    return {
-      hint: `A new device joined. Set each new accessory's room and name with prepare_native_change operation accessory_placement (target_ref, room_ref, name, reason).${running ? " Stop the search once no other device is to be added." : ""}`,
-      next: running ? getCall(search) : null,
-      ...(running ? { stop: stopCall(search) } : {}),
-    };
+  if (outcomes.has("unreadable")) {
+    hints.unreadable =
+      "A new device's accessory could not be read now. Read the device with its next (get_entity), or call get_device_search again.";
+  }
+  if (outcomes.has("failed")) {
+    hints.failed =
+      "The hub shows an error for a new device and has made no accessory for it; its status and error are the hub's text. Tell the owner the device was not added: it may not be supported, or its pairing failed. If the hub adds it later, get_device_search still shows it.";
   }
   return {
-    next: getCall(search),
+    ...(Object.keys(hints).length > 0 ? { hints } : {}),
+    next:
+      running || outcomes.has("pending") || outcomes.has("unreadable")
+        ? getCall(search)
+        : outcomes.size === 0
+          ? {
+              tool: "start_device_search",
+              arguments: { extension_ref: search.extensionRef },
+            }
+          : null,
     ...(running ? { stop: stopCall(search) } : {}),
   };
 }
