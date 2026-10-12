@@ -2317,6 +2317,32 @@ test("rename-room, hide-service and run-scenario grade the native change", async
   assert.equal(twice.grade("Запустил.").scenario_ran_once, false);
 });
 
+test("notify-offline grades the kitchen leak sensor's offline notification and nothing else", async (t) => {
+  const notify = (aId, sId, cId) => ({
+    characteristic: { update: { aId, sId, cId, notify: true } },
+  });
+  for (const fixture of ["apartment", "house"]) {
+    const right = await caseSession(t, "notify-offline", fixture);
+    await right.send(notify(23, 1, 8));
+    assert.deepEqual(right.grade("Включил уведомление."), {
+      kitchen_leak_offline_notification: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    });
+  }
+  // The bathroom sensor, or a notification of a leak instead of going
+  // offline.
+  for (const target of [notify(37, 1, 8), notify(23, 13, 14)]) {
+    const wrong = await caseSession(t, "notify-offline");
+    await wrong.send(target);
+    assert.deepEqual(wrong.grade("Включил уведомление."), {
+      kitchen_leak_offline_notification: false,
+      nothing_else_changed: false,
+      answer_has_no_raw_refs: true,
+    });
+  }
+});
+
 test("weekday-schedule grades the cron by day and waits for weekday triggers", async (t) => {
   assert.match(CASES["weekday-schedule"].pending, /wave2\/block-nodes/);
   const rule = (cron) =>

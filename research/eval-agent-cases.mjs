@@ -29,6 +29,9 @@ const KITCHEN = 4;
 const KITCHEN_LAMP = 22;
 const BATHROOM_LIGHT = { aId: 35, sId: 13, cId: 14 };
 const BATHROOM_MOTION = { aId: 38, sId: 13, cId: 14 };
+// The notify setting of C_Online of the kitchen leak sensor («Датчик
+// протечки под мойкой»).
+const KITCHEN_LEAK_ONLINE_NOTIFY = "characteristic/23.1.8/notify";
 
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
@@ -532,6 +535,21 @@ export const CASES = {
           ),
       },
       onlyChanges(({ key }) => key === "service/17.13/visible"),
+    ],
+  },
+  // SprutHub's own notification on the sensor's C_Online, not a scenario.
+  "notify-offline": {
+    prompt: "Сообщай мне, если датчик протечки на кухне уйдёт из сети",
+    graders: [
+      {
+        name: "kitchen_leak_offline_notification",
+        grade: ({ after }) =>
+          result(
+            after[KITCHEN_LEAK_ONLINE_NOTIFY] === true,
+            `${KITCHEN_LEAK_ONLINE_NOTIFY}=${after[KITCHEN_LEAK_ONLINE_NOTIFY]}`,
+          ),
+      },
+      onlyChanges(({ key }) => key === KITCHEN_LEAK_ONLINE_NOTIFY),
     ],
   },
   "run-scenario": {
