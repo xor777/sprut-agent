@@ -151,6 +151,15 @@ async function waitForResult(client, searchRef, results, waitSeconds = 10) {
   assert.fail(`get_device_search did not reach ${results.join(" or ")}`);
 }
 
+// Resolves once the simulated hub has made accessory id.
+async function accessoryCreated(hub, id) {
+  for (let waited = 0; waited < 8_000; waited += 50) {
+    if (hub.state.accessories.some((accessory) => accessory.id === id)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`accessory ${id} was not created`);
+}
+
 function startNatively(hub, state = true) {
   return hub.request({
     extension: {
@@ -541,6 +550,77 @@ test("a start whose reply is lost is unknown with the search state read back", a
   const joined = await waitForResult(client, unknown.search_ref, ["joined"]);
   assert.equal(joined.new_devices[0].accessories[0].ref, sensorRef);
   assert.equal(searchActions(hub).length, 1);
+});
+
+// A read of one new device that the hub does not answer or refuses leaves
+// that device unreadable, not the whole report: the search state, the
+// stop and the device itself still reach the agent.
+test("a new device whose reads fail is reported unreadable beside the search state", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ pairing: [leakSensor()] }),
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await accessoryCreated(hub, 200);
+  const readChild = {
+    tool: "get_entity",
+    arguments: { entity_ref: sensorChildRef },
+  };
+
+  // The window that links the device's accessory is not answered in time.
+  hub.delayReplies("window.get", 5_000);
+  const silent = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  hub.delayReplies("window.get", 0);
+  assert.equal(silent.status, "searching");
+  assert.equal(silent.active, true);
+  assert.equal(silent.ends_at, started.ends_at);
+  assert.notEqual(silent.result, "joined");
+  assert.deepEqual(
+    silent.new_devices.map(({ ref, accessory_status, accessories, next }) => ({
+      ref,
+      accessory_status,
+      accessories,
+      next,
+    })),
+    [
+      {
+        ref: sensorChildRef,
+        accessory_status: "unreadable",
+        accessories: [],
+        next: readChild,
+      },
+    ],
+  );
+
+  // The hub refuses the accessory read after the stop: the network is
+  // closed and said so, the device still listed.
+  hub.refuseNext("accessory.get", { code: -32000, message: "Busy" });
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(stopped.active, false);
+  assert.equal(stopped.ended, "stopped");
+  assert.notEqual(stopped.result, "joined");
+  assert.equal(stopped.new_devices[0].accessory_status, "unreadable");
+  assert.deepEqual(stopped.new_devices[0].next, readChild);
+
+  // Read again, the device shows its accessory.
+  const joined = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(joined.result, "joined");
+  assert.equal(joined.new_devices[0].accessories[0].ref, sensorRef);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
 });
 
 test("devices of another controller are neither reported nor touched", async (t) => {
