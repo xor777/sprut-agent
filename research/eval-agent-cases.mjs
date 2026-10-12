@@ -874,20 +874,54 @@ function noWrites() {
   };
 }
 
-// The owner reads the answer: native refs and ids are noise at best.
+// The owner reads the answer: native refs and ids are noise at best. A
+// name the hub shows the owner may be quoted as it is, even one that reads
+// like a field name (a ZigBee model as lumi.sensor_wleak.aq1), so the
+// hub's names in the run are taken out before the patterns are matched.
 function noRawRefs() {
   return {
     name: "answer_has_no_raw_refs",
-    grade: ({ answer }) => {
-      const found = RAW_REFS.map((pattern) => pattern.exec(answer)).find(
-        Boolean,
-      );
+    grade: ({ answer, initialState, finalState }) => {
+      let text = answer;
+      for (const name of hubNames([initialState, finalState])) {
+        text = text.replaceAll(name, "…");
+      }
+      const found = RAW_REFS.map((pattern) => pattern.exec(text)).find(Boolean);
       return result(
         !found,
         found ? `raw ref in answer: ${found[0]}` : "no raw refs",
       );
     },
   };
+}
+
+// Names the hub shows the owner in a run's states: rooms, accessories and
+// their services, scenarios, extension children, and devices that pair
+// during the run. Longest first, so a name inside another is not cut out
+// of it.
+function hubNames(states) {
+  const names = new Set();
+  const add = (name) => {
+    if (typeof name === "string" && name.length > 0) names.add(name);
+  };
+  for (const state of states) {
+    if (!state) continue;
+    for (const room of state.rooms ?? []) add(room.name);
+    for (const accessory of state.accessories ?? []) {
+      add(accessory.name);
+      for (const service of accessory.services ?? []) add(service.name);
+    }
+    for (const scenario of state.scenarios ?? []) add(scenario.name);
+    for (const extension of state.extensions ?? []) {
+      for (const child of extension.children ?? []) add(child.name);
+    }
+    for (const child of state.joining ?? []) add(child.name);
+    for (const device of state.pairing ?? []) {
+      add(device.childName);
+      add(device.accessory?.name);
+    }
+  }
+  return [...names].sort((a, b) => b.length - a.length);
 }
 
 function onlyChanges(allowed, name = "nothing_else_changed") {
