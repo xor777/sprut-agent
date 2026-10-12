@@ -565,8 +565,9 @@ export const CASES = {
   "add-leak-sensor": {
     prompt: "Добавь новый датчик протечки в ванную",
     // An agent may wait for the sensor in its turn or end the turn with the
-    // owner's step and check when the owner replies; both are right.
-    followUps: ["Перевёл, индикатор мигает"],
+    // owner's step and check when the owner replies; both are right, so the
+    // reply fits either. The client starts the MCP server anew each turn.
+    followUps: ["Ну что, получилось?"],
     patch: withNewLeakSensor,
     graders: [
       {
