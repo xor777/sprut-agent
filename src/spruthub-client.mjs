@@ -37,9 +37,7 @@ const HOME_CATALOG_TTL_MS = 5 * 60_000;
 // window; a hub that answers later leaves that read's times in UTC rather
 // than hold back what was read. The window read itself has a full request
 // timeout of its own, whatever time the read that started it has left, so
-// that its answer still comes. Only a hub that does not answer it within
-// that timeout closes the connection under the other requests, as any
-// request that runs out of time does.
+// that a late answer still serves the reads after it.
 const HUB_TIME_ZONE_WAIT_MS = 2_000;
 // A BLOCK names its devices from the home catalog; the ones the catalog
 // lacks are read one by one up to this many, past that the catalog is read.
@@ -130,6 +128,8 @@ export class SprutHubClient {
   #homeCatalogs = new Map();
   #hubTimeZones = new Map();
   #hubTimeZoneReads = new Map();
+  // When each connection last carried a frame from the hub.
+  #lastMessageAt = new WeakMap();
   #nextRequestId = 1;
   #observation;
   #observationClient;
@@ -2806,14 +2806,21 @@ export class SprutHubClient {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
     const id = this.#nextRequestId++;
+    const sentAt = performance.now();
     const response = new Promise((resolve, reject) => {
+      // Only this request runs out of time: the others on the connection
+      // keep theirs, and a reply that comes later finds no request under its
+      // id and is dropped.
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(timeoutError());
-        this.#handleConnectionLoss(socket);
-        socket.terminate();
+        if ((this.#lastMessageAt.get(socket) ?? -1) < sentAt) {
+          this.#retire(socket);
+        } else {
+          this.#closeIfRetired(socket);
+        }
       }, remainingMs);
-      this.#pending.set(id, { resolve, reject, timer });
+      this.#pending.set(id, { resolve, reject, timer, socket });
     });
 
     socket.send(
@@ -2882,7 +2889,10 @@ export class SprutHubClient {
         });
         resolve(socket);
       });
-      socket.on("message", (data) => this.#handleMessage(data));
+      socket.on("message", (data) => {
+        this.#lastMessageAt.set(socket, performance.now());
+        this.#handleMessage(data, socket);
+      });
       socket.on("close", () => {
         if (!settled) failBeforeOpen();
         this.#handleConnectionLoss(socket);
@@ -2900,12 +2910,15 @@ export class SprutHubClient {
     }
   }
 
-  #handleMessage(data) {
+  #handleMessage(data, socket) {
     let message;
     try {
       message = parseSprutHubMessage(data);
     } catch (error) {
-      if (this.#observation?.status === "observing") {
+      if (
+        this.#socket === socket &&
+        this.#observation?.status === "observing"
+      ) {
         this.#observation.connection = {
           status: "unknown",
           error_code: "invalid_message",
@@ -2916,13 +2929,17 @@ export class SprutHubClient {
           "invalid_message",
           false,
         );
-        this.#socket?.terminate();
+        socket.terminate();
       }
-      for (const { reject, timer } of this.#pending.values()) {
-        clearTimeout(timer);
-        reject(error);
+      // The frame cannot be matched to a request, so each one on this
+      // connection may have lost its reply.
+      for (const [id, pending] of this.#pending) {
+        if (pending.socket !== socket) continue;
+        this.#pending.delete(id);
+        clearTimeout(pending.timer);
+        pending.reject(error);
       }
-      this.#pending.clear();
+      this.#closeIfRetired(socket);
       return;
     }
 
@@ -2931,6 +2948,7 @@ export class SprutHubClient {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.#pending.delete(message.id);
+    this.#closeIfRetired(pending.socket);
 
     if (message.error) {
       let error;
@@ -2967,23 +2985,26 @@ export class SprutHubClient {
   }
 
   #handleConnectionLoss(socket) {
-    if (this.#socket !== socket) return;
-    this.#socket = undefined;
-    if (this.#observation?.status === "observing") {
-      this.#observation.connection = {
-        status: "lost",
-        lost_at: zonedTimestamp(Date.now(), this.#observation.timeZone),
-      };
-      void this.#finishObservation(
-        this.#observation,
-        "connection_lost",
-        "connection_closed",
-        false,
-      );
+    if (this.#socket === socket) {
+      this.#socket = undefined;
+      if (this.#observation?.status === "observing") {
+        this.#observation.connection = {
+          status: "lost",
+          lost_at: zonedTimestamp(Date.now(), this.#observation.timeZone),
+        };
+        void this.#finishObservation(
+          this.#observation,
+          "connection_lost",
+          "connection_closed",
+          false,
+        );
+      }
     }
-    for (const { reject, timer } of this.#pending.values()) {
-      clearTimeout(timer);
-      reject(
+    for (const [id, pending] of this.#pending) {
+      if (pending.socket !== socket) continue;
+      this.#pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(
         new SprutHubError(
           "connection_closed",
           "The SprutHub connection closed before the response arrived.",
@@ -2992,7 +3013,34 @@ export class SprutHubClient {
         ),
       );
     }
-    this.#pending.clear();
+  }
+
+  // A connection that has carried nothing since a request that ran out of
+  // time was sent may be gone without a close, as when the network drops.
+  // It takes no new requests: the next one opens a new connection, so a
+  // retry gets through at once without waiting on a probe. The requests
+  // already on it keep their own time, so a write sent there still gets its
+  // answer from a hub that is only slow, and it closes once they have
+  // settled. The subscriptions of an observation stay on their connection,
+  // so for an observation the connection is lost.
+  #retire(socket) {
+    if (this.#socket === socket) {
+      if (this.#observation?.status === "observing") {
+        this.#handleConnectionLoss(socket);
+        socket.terminate();
+        return;
+      }
+      this.#socket = undefined;
+    }
+    this.#closeIfRetired(socket);
+  }
+
+  #closeIfRetired(socket) {
+    if (socket === this.#socket) return;
+    for (const pending of this.#pending.values()) {
+      if (pending.socket === socket) return;
+    }
+    socket.terminate();
   }
 
   #handleNativeEvent(message) {
