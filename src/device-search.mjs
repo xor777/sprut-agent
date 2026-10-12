@@ -834,7 +834,15 @@ function reportGuidance(search, view, result) {
   const running = view.active !== false;
   if (result === "no_new_device") {
     return {
-      hint: "The search ended and no new device joined. Tell the owner and offer to start it again once the device is in pairing mode near the hub.",
+      hint: `The search ended and no new device is listed${
+        search.startedBeforeWatch
+          ? ": the search was already running when this watch began, and devices that joined before are not counted"
+          : ""
+      }.${
+        view.changedTotal > 0
+          ? " Earlier devices of the controller changed (changed_devices): a device paired again keeps its entry and shows there, not as new."
+          : ""
+      } Tell the owner and offer to start the search again once the device is in pairing mode near the hub.`,
       next: {
         tool: "start_device_search",
         arguments: { extension_ref: search.extensionRef },
