@@ -1197,6 +1197,20 @@ export async function startSimulatedHub(
       else replyDelays.delete(method);
     },
     touchedMethods: () => touchedMethods(requests),
+    // Lets a device in pairing mode (a fixture's pairing entry) join the
+    // controller now, outside any search, as the hub would one whose join
+    // it accepted just before the network closed (not observed).
+    joinNow: (input) => {
+      const device = pairingDevice(input);
+      state.pairing.push(device);
+      announceJoining(
+        state,
+        state.extensions.find(
+          ({ extensionKey }) => extensionKey === device.extensionKey,
+        ),
+        device,
+      );
+    },
     faultEvents: () => structuredClone(state.faultEvents),
     connections: () => structuredClone(connections),
     // Applies delayed writes now, as the hub would have by the time a
@@ -2006,6 +2020,14 @@ function endDiscovery(state, extension) {
   pushExtension(state, extension);
 }
 
+// A fixture's device in pairing mode, with the child id its accessory
+// carries.
+function pairingDevice(input) {
+  const device = structuredClone(input);
+  device.accessory.deviceId ??= `device-${device.accessory.id}`;
+  return device;
+}
+
 function extensionActions(extension) {
   return (extension.spaces ?? []).flatMap(({ actions }) => actions ?? []);
 }
@@ -2198,13 +2220,7 @@ function buildState(fixture, hubTime) {
     // The hub's DiscoveryTime and the devices in pairing mode (see
     // startDiscovery); joining holds devices announced and not yet paired.
     discoveryTimeMs: fixture.hub.discoveryTimeMs ?? 60_000,
-    pairing: structuredClone(fixture.pairing ?? []).map((device) => ({
-      ...device,
-      accessory: {
-        ...device.accessory,
-        deviceId: device.accessory.deviceId ?? `device-${device.accessory.id}`,
-      },
-    })),
+    pairing: (fixture.pairing ?? []).map(pairingDevice),
     joining: [],
     logicCatalog: structuredClone(fixture.logicTypes ?? {}),
     logics: [],
