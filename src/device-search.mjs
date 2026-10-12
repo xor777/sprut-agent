@@ -458,7 +458,7 @@ export class DeviceSearches {
       devices_before: search.baseline.size,
       ...(search.startedBeforeWatch
         ? {
-            note: "The search was already running: devices that joined before this call are not counted as new.",
+            note: "The search was already running when the count of new devices began: devices that joined before that are not counted as new.",
           }
         : {}),
       ...(report.active !== false ? { owner_step: OWNER_STEP } : {}),
@@ -856,7 +856,7 @@ function reportGuidance(search, view, result) {
     return {
       hint: `The search ended and no new device is listed${
         search.startedBeforeWatch
-          ? ": the search was already running when this watch began, and devices that joined before are not counted"
+          ? ": the search was already running when the count of new devices began, and devices that joined before that are not counted"
           : ""
       }.${
         view.changedTotal > 0
