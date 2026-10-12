@@ -459,6 +459,52 @@ test("a search that ends with nothing new says so and offers a new start", async
   assert.equal(searchActions(hub).length, 1);
 });
 
+// The agent's search ended while nobody read it, then the owner started
+// another in the SprutHub app. The old watch is over: its stop must not
+// close the owner's network, and a new start watches the owner's run
+// under a new ref.
+test("a watch whose search ended unseen does not act on a search started later in the app", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500 }),
+  );
+  const ours = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+  // The owner's run lasts the usual minute.
+  hub.state.discoveryTimeMs = 60_000;
+  startNatively(hub);
+  const running = () =>
+    hub.state.extensions
+      .find(({ extensionKey }) => extensionKey === ZIGBEE)
+      .spaces[0].actions.find(({ id }) => id === 1).state;
+
+  const stale = await call(client, "stop_device_search", {
+    search_ref: ours.search_ref,
+  });
+  assert.equal(stale.stop_sent, false);
+  assert.equal(stale.active, false);
+  assert.equal(stale.ended, "expired");
+  assert.equal(running(), true);
+
+  const owners = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(owners.status, "already_running");
+  assert.notEqual(owners.search_ref, ours.search_ref);
+  assert.equal(owners.active, true);
+  assert(owners.seconds_left > 50, owners);
+  const old = await call(client, "get_device_search", {
+    search_ref: ours.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(old.ended, "expired");
+  assert.equal(old.active, false);
+  assert.equal(searchActions(hub).length, 1);
+  assert.equal(running(), true);
+});
+
 // A watch of a search that already ran does not count devices that joined
 // before it, and a device paired again keeps its entry and shows only
 // among changed devices: the end with nothing new must not say that no
