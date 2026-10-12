@@ -4562,23 +4562,40 @@ export function isSensitiveNativeNode(value, key = "") {
     [value?.key, value?.name, value?.type, value?.ref].some(
       (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
     ) ||
+    namesOptionSecret(value) ||
     holdsKeyMaterial(value)
   );
 }
 
-// An option named after a key or code whose string value looks like key
-// material, for names no rule knows (a device, bind or cloud key): 16 to
-// 128 hex digits with both digits and letters, byte separators and 0x
-// allowed, or base64 of 16 to 64 bytes with upper case, lower case and
-// digits. Ordinary values under such names stay visible: a layout "us", a
-// manufacturer code "115F", a 16-digit product code. Identifiers in hex,
-// such as an IEEE address or an extended PAN ID, are not named key or code.
-function holdsKeyMaterial(node) {
-  if (typeof node.key !== "string" || !/key|code/i.test(node.key)) {
-    return false;
+// Option keys that are a secret on their own but name ordinary things as
+// parts of other names or in text: Pin, Pass and Key as the whole key, and
+// a session held in a string (SessionId, not SessionTimeout). A hardware
+// GpioPin, a KeyRepeatDelay or a JavaScript variable pass stay visible.
+function namesOptionSecret(node) {
+  if (typeof node.key !== "string") return false;
+  const parts = credentialKeyParts(node.key);
+  if (parts.length === 1 && ["key", "pass", "pin"].includes(parts[0])) {
+    return true;
   }
+  return parts.includes("session") && optionStringValue(node) !== null;
+}
+
+// An option named after a key or code whose string value looks like key
+// material, for names no rule knows (a device, bind or cloud key).
+function holdsKeyMaterial(node) {
   const text = optionStringValue(node);
-  return text !== null && looksLikeKeyMaterial(text.trim());
+  return (
+    typeof node.key === "string" &&
+    text !== null &&
+    isKeyMaterialUnder(node.key, text)
+  );
+}
+
+// Whether a name says key or code and the text under it looks like key
+// material. The same rule decides for an option and for a label in hub
+// text (containsLabelledKeyMaterial).
+function isKeyMaterialUnder(name, text) {
+  return /key|code|ключ|код/iu.test(name) && looksLikeKeyMaterial(text.trim());
 }
 
 function optionStringValue(node) {
@@ -4591,7 +4608,16 @@ function optionStringValue(node) {
   return null;
 }
 
+// 16 to 128 hex digits with both digits and letters, byte separators and
+// 0x allowed; base64 of 16 to 64 bytes with upper case, lower case and
+// digits; or 16 to 64 decimal bytes, as a zigbee2mqtt network_key
+// [1, 3, 5, …]. Ordinary values under key or code names stay visible: a
+// layout "us", a manufacturer code "115F", a 16-digit product code, a
+// short channel list. Identifiers in hex, such as an IEEE address or an
+// extended PAN ID, are not named key or code.
 function looksLikeKeyMaterial(text) {
+  const bytes = /^\[?\s*(\d{1,3}(?:\s*,\s*\d{1,3}){15,63})\s*\]?$/.exec(text);
+  if (bytes) return bytes[1].split(",").every((byte) => Number(byte) <= 255);
   const hex = text.replace(/0x/gi, "").replace(/[\s:,-]/g, "");
   if (/^[\da-f]{16,128}$/i.test(hex)) {
     return /\d/.test(hex) && /[a-f]/i.test(hex);
@@ -4882,7 +4908,9 @@ function isSensitiveKey(key) {
 // Names of key material and of codes that grant access, by whole name parts
 // so TimeZone, KeyboardLayout, KeyCode or testManufacturerCode stay visible:
 // the ZigBee controller's NetworkKey, LinkKey and InstallCode, the HomeKit
-// PinCodeVisible (owner's hub, 2026-10-12), a keypad passcode, a Wi-Fi PSK.
+// PinCodeVisible (owner's hub, 2026-10-12), a keypad passcode, a Wi-Fi PSK
+// or WPA key, a Tuya LocalKey, a lock's UserCode or AdminPin, an MQTT or
+// access point password named MqttPass or ApPass, a Cookie.
 const KEY_MATERIAL_PARTS = new Set([
   "installcode",
   "linkkey",
@@ -4904,6 +4932,7 @@ const KEY_QUALIFIERS = new Set([
   "crypto",
   "encryption",
   "link",
+  "local",
   "master",
   "network",
   "nwk",
@@ -4912,15 +4941,20 @@ const KEY_QUALIFIERS = new Set([
   "security",
   "shared",
   "signing",
+  "wep",
+  "wpa",
 ]);
 const CODE_QUALIFIERS = new Set([
   "access",
   "activation",
+  "admin",
   "auth",
   "confirmation",
+  "guest",
   "install",
   "installation",
   "login",
+  "master",
   "pair",
   "pairing",
   "pass",
@@ -4929,25 +4963,62 @@ const CODE_QUALIFIERS = new Set([
   "secret",
   "setup",
   "unlock",
+  "user",
   "verification",
+]);
+// A pin is a PIN code when it says whose or what it opens; a hardware
+// GpioPin, LedPin or ResetPin says none of these.
+const PIN_QUALIFIERS = new Set([
+  "access",
+  "admin",
+  "alarm",
+  "auth",
+  "device",
+  "door",
+  "guest",
+  "keypad",
+  "lock",
+  "login",
+  "master",
+  "owner",
+  "pair",
+  "pairing",
+  "security",
+  "service",
+  "setup",
+  "sim",
+  "unlock",
+  "user",
 ]);
 
 function namesKeyMaterial(key) {
   const parts = credentialKeyParts(key);
-  return parts.some(
-    (part, index) =>
-      KEY_MATERIAL_PARTS.has(part) ||
-      (parts[index + 1] === "key" && KEY_QUALIFIERS.has(part)) ||
-      (parts[index + 1] === "code" && CODE_QUALIFIERS.has(part)),
+  const last = parts.at(-1);
+  return (
+    parts.some(
+      (part, index) =>
+        KEY_MATERIAL_PARTS.has(part) ||
+        (parts[index + 1] === "key" && KEY_QUALIFIERS.has(part)) ||
+        (parts[index + 1] === "code" && CODE_QUALIFIERS.has(part)) ||
+        (parts[index + 1] === "pin" && PIN_QUALIFIERS.has(part)),
+    ) ||
+    // A password under a short name: MqttPass, wifiPass, ApPass; not
+    // PassThrough. A bare Pass is an option rule (namesOptionSecret).
+    (last === "pass" && parts.length > 1) ||
+    last === "cookie" ||
+    last === "cookies"
   );
 }
 
+// Name parts split at case changes and at _ - / . and spaces, so that a
+// cluster attribute path /1/0101_DoorLock/0005_PinCode/255 or a dotted
+// zigbee.networkKey has the same parts as PinCode or NetworkKey.
 function credentialKeyParts(key) {
   return key
     .trim()
     .replace(/([a-z\d])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .split(/[_\s-]+/)
+    .split(/[_\s\-/.]+/)
     .map((part) => part.replace(/^\$+/u, "").toLowerCase())
     .filter(Boolean);
 }
@@ -5014,8 +5085,60 @@ function redactSensitiveText(text, role = "data") {
     /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]*[?&;](?:code|token|access_token|auth|key|api_?key|secret|password|passwd|pass|pin)=[^&\s"'<>#]/i.test(
       text,
     ) ||
+    // The same link without its host, as the web client also gives it:
+    // /user/login?code=…
+    /\/[^\s"'<>?#]{0,512}\?(?:[^\s"'<>#]{0,512}?[&;])?(?:code|token|access_token|auth|key|api_?key|secret|password|passwd|pass|pin)=[^&;\s"'<>#]/i.test(
+      text,
+    ) ||
+    // A HomeKit setup payload, which pairs a controller with the bridge.
+    /\bX-HM:\/\/[\dA-Z]{9}/i.test(text) ||
+    // A Wi-Fi QR payload with a password: WIFI:T:WPA;S:<ssid>;P:<password>;;
+    /\bWIFI:(?:[^;]*;)*?P:[^;]/.test(text) ||
+    containsLabelledKeyMaterial(text) ||
     containsSensitiveAssignment(text, role);
   return containsCredential ? "[REDACTED]" : text;
+}
+
+// A key under a label that names a key or code: the label, : or =, then
+// the key itself (isKeyMaterialUnder), optionally quoted. «<b>Install
+// code</b>: 83FE…» in device HTML, «Ключ сети: [1, 3, …]», "deviceKey":
+// "9c2e…". Tags between the label and the key are skipped. Prose under
+// such a label («Network key: изменён») and hex under other labels (an
+// IEEE address) stay. Each value shape takes at most one byte or character
+// more than key material has, so a longer value fails looksLikeKeyMaterial
+// and a long run of hex pairs and colons is not rescanned in full at every
+// colon.
+const KEY_VALUE_SHAPES = [
+  // Decimal bytes, in brackets or not.
+  /[ \t]?["']?\[?[ \t]?(\d{1,3}(?:[ \t]?,[ \t]?\d{1,3}){0,64})/y,
+  // Hex, with or without byte separators and 0x.
+  /[ \t]?["']?((?:0x)?[\dA-Fa-f]{2}(?:[ \t]?[:,-]?[ \t]?(?:0x)?[\dA-Fa-f]{2}){0,64})(?![\dA-Za-z])/y,
+  // Base64, standard or URL-safe.
+  /[ \t]?["']?([A-Za-z\d+/_-]{1,89}={0,2})(?![\w+/=-])/y,
+];
+const KEY_LABEL = /([\p{L}\d]+(?:[ _-][\p{L}\d]+){0,3})["']?[ \t]*$/u;
+
+function containsLabelledKeyMaterial(text) {
+  const plain = text.includes("<")
+    ? text.replace(/<\/?[A-Za-z][^<>]*>/g, " ")
+    : text;
+  for (const separator of plain.matchAll(/[:=]/g)) {
+    const values = KEY_VALUE_SHAPES.map((shape) => {
+      shape.lastIndex = separator.index + 1;
+      return shape.exec(plain)?.[1];
+    }).filter((value) => value !== undefined && looksLikeKeyMaterial(value));
+    if (values.length === 0) continue;
+    const label = KEY_LABEL.exec(
+      plain.slice(Math.max(0, separator.index - 64), separator.index),
+    )?.[1];
+    if (
+      label !== undefined &&
+      values.some((value) => isKeyMaterialUnder(label, value))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function containsSensitiveAssignment(text, role) {
