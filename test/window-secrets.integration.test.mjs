@@ -944,3 +944,140 @@ test("setup payloads, Wi-Fi QR, relative login links, labelled keys and keys und
     "Test.Profile": "Open /user/profile?tab=main",
   });
 });
+
+// Settings named after key material that hold no key: a flag that turns
+// install codes on, a PIN length, and codes that are not secrets: a Pronto
+// IR code, a Broadlink IR code and product and scene identifiers. Hidden,
+// they would also be unwritable. A Broadlink RF code (a gate remote) and a
+// filled InstallCode stay hidden.
+const IR_WINDOW = "Controller/zigbee/Child/00158d0001e0f1a2/";
+// Learned IR (0000), carrier 0x6D, two burst pairs once, none repeated.
+const PRONTO_CODE = "0000 006D 0002 0000 0157 00AC 0015 0689";
+// Broadlink packets: 0x26 is infrared, 0xb2 a 433 MHz remote; then the
+// repeat count and the length of the pulse data.
+const BROADLINK_IR_CODE = "JgAOAJSSEzcTEhQ2ExITNw0F";
+const BROADLINK_RF_CODE = "sgAOAJSSEzcTEhQ2ExITNw0F";
+const PRODUCT_KEY = "6a1f9c3e7b2d4085";
+const PRODUCT_CODE = "8C2F1E9A7B3D4F60";
+const SCENE_CODE = "0a1b2c3d4e5f6071";
+const FILLED_INSTALL_CODE = "1F2E3D4C5B6A79880716253443526170";
+
+function irWindow() {
+  const number = (key, name, value) =>
+    option(
+      key,
+      name,
+      "GenericInteger",
+      "NUMBER",
+      { intValue: value },
+      { minValue: 4, maxValue: 8, minStep: 1 },
+    );
+  const checkbox = (key, name, value) =>
+    option(key, name, "GenericBoolean", "CHECKBOX", { boolValue: value });
+  return {
+    windowKey: IR_WINDOW,
+    label: { text: "Пульт и замок" },
+    options: [
+      checkbox("InstallCodeEnabled", "Install code", true),
+      checkbox("UseInstallCode", "Использовать install code", false),
+      number("PinCodeLength", "Длина PIN-кода", 4),
+      number("PasscodeLength", "Длина кода", 6),
+      number("MaxPINCodeLength", "Наибольшая длина PIN-кода", 8),
+      text("IrCode", "ИК-код", PRONTO_CODE),
+      text("LearnedCode", "Выученный код", BROADLINK_IR_CODE),
+      text("ProductKey", "Ключ продукта", PRODUCT_KEY),
+      status("ProductCode", "Код изделия", PRODUCT_CODE),
+      text("SceneCode", "Код сцены", SCENE_CODE),
+      text("RemoteRfCode", "Код радиопульта", BROADLINK_RF_CODE),
+      text("InstallCode", "Install code", FILLED_INSTALL_CODE),
+    ],
+  };
+}
+
+test("flag and length settings named after codes, IR codes and product identifiers stay shown and writable", async (t) => {
+  const { hub, answers, ok } = await setup(t);
+  hub.state.windows[IR_WINDOW] = irWindow();
+  const irWindowRef = windowRef(IR_WINDOW);
+  hub.state.log.push(
+    {
+      time: Date.now(),
+      level: "LOG_LEVEL_INFO",
+      path: "Test.Ir",
+      message: `IR code: ${PRONTO_CODE}`,
+    },
+    {
+      time: Date.now(),
+      level: "LOG_LEVEL_INFO",
+      path: "Test.Product",
+      message: `Product key: ${PRODUCT_KEY}`,
+    },
+  );
+
+  const shown = (await ok("get_entity", { entity_ref: irWindowRef })).entity;
+  const log = await ok("read_hub_log", { home_ref: homeRef });
+  const writes = {};
+  for (const [optionKey, value] of [
+    ["InstallCodeEnabled", false],
+    ["PinCodeLength", 6],
+  ]) {
+    const prepared = await ok("prepare_native_change", {
+      operation: "window_option",
+      target_ref: irWindowRef,
+      option_key: optionKey,
+      value,
+      reason: "Владелец попросил",
+    });
+    const applied = await ok("apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    writes[optionKey] = {
+      status: applied.status,
+      diff: applied.diff.value,
+    };
+  }
+  const options = Object.fromEntries(
+    hub.state.windows[IR_WINDOW].options.map(({ key, value }) => [key, value]),
+  );
+
+  assert.deepEqual(shownOptions(shown.options), {
+    InstallCodeEnabled: true,
+    UseInstallCode: false,
+    PinCodeLength: 4,
+    PasscodeLength: 6,
+    MaxPINCodeLength: 8,
+    IrCode: PRONTO_CODE,
+    LearnedCode: BROADLINK_IR_CODE,
+    ProductKey: PRODUCT_KEY,
+    ProductCode: PRODUCT_CODE,
+    SceneCode: SCENE_CODE,
+  });
+  // RemoteRfCode and InstallCode.
+  assert.equal(hiddenCount(shown.options), 2);
+  assert.deepEqual(
+    leakedSecrets(answers, { BROADLINK_RF_CODE, FILLED_INSTALL_CODE }),
+    [],
+  );
+  assert.deepEqual(
+    Object.fromEntries(
+      log.entries
+        .filter(({ path: logPath }) => logPath.startsWith("Test."))
+        .map(({ path: logPath, message }) => [logPath, message]),
+    ),
+    {
+      "Test.Ir": `IR code: ${PRONTO_CODE}`,
+      "Test.Product": `Product key: ${PRODUCT_KEY}`,
+    },
+  );
+  assert.deepEqual(writes, {
+    InstallCodeEnabled: {
+      status: "applied",
+      diff: { from: true, to: false, kind: "boolValue" },
+    },
+    PinCodeLength: {
+      status: "applied",
+      diff: { from: 4, to: 6, kind: "intValue" },
+    },
+  });
+  assert.deepEqual(options.InstallCodeEnabled, { boolValue: false });
+  assert.deepEqual(options.PinCodeLength, { intValue: 6 });
+});
