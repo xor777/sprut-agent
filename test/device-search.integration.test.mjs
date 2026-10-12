@@ -255,6 +255,48 @@ test("an extension shows its search actions and the overview marks the controlle
   assert.deepEqual(searchActions(hub), []);
 });
 
+// An action the client cannot read (here without a numeric id) is left out
+// and flagged; the controller, its other actions and its search stay
+// usable.
+test("an action the client cannot read leaves the controller and its search usable", async (t) => {
+  const fixture = await apartment();
+  const zigbee = fixture.extensions.find(
+    ({ extensionKey }) => extensionKey === ZIGBEE,
+  );
+  zigbee.spaces[0].actions.push({
+    id: "reset",
+    button: "Сброс",
+    type: "ACTION_BUTTON",
+  });
+  const { hub, client } = await setup(t, fixture);
+
+  const entity = (await call(client, "get_entity", { entity_ref: zigbeeRef }))
+    .entity;
+  assert.deepEqual(entity.spaces[0].actions, [
+    { id: 1, label: "Поиск", type: "ACTION_DISCOVERY", active: false },
+  ]);
+  assert.equal(entity.spaces[0].actions_unreadable, true);
+  assert.equal(entity.spaces[1].actions_unreadable, undefined);
+
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(started.status, "started");
+  const report = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(report.active, true);
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(stopped.stop_sent, true);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
+});
+
 test("a new leak sensor joins during the search, is placed in the bathroom and read", async (t) => {
   const { hub, client } = await setup(
     t,
