@@ -1681,24 +1681,28 @@ async function houseUnchanged(ctx, id) {
 
 async function stepRoom(ctx) {
   const { hub, before, prefix } = ctx;
-  // room_create restore lists the room's accessories. Prove first that the
-  // product reads an empty room; otherwise the created room cannot be removed.
+  // room_create restore lists the room's accessories. When the home has an
+  // empty room, prove first that the product reads it. Without one the probe
+  // room is the first empty room read; reading an empty room has been seen
+  // live since 2026-09-24, and the sweep removes a probe room by its name if
+  // restore cannot.
   const occupied = new Set(before.services.map(({ room_ref }) => room_ref));
   const emptyRoom = before.rooms.find(({ ref }) => !occupied.has(ref));
+  const probe = emptyRoom
+    ? await hub.read("get_entity", {
+        entity_ref: emptyRoom.ref,
+        max_bytes: 4_096,
+      })
+    : { status: "ok" };
   if (!emptyRoom) {
     row(
-      "1 room lifecycle",
-      "room.create/update/delete",
-      "empty-room read works before creating a room",
-      "no existing empty room to prove it",
-      "blocked",
+      "1 preflight empty room",
+      "-",
+      "existing empty room is readable",
+      "no existing empty room; the probe room is read first",
+      "skipped",
     );
-    return;
   }
-  const probe = await hub.read("get_entity", {
-    entity_ref: emptyRoom.ref,
-    max_bytes: 4_096,
-  });
   if (probe.status !== "ok") {
     row(
       "1 preflight empty room",
