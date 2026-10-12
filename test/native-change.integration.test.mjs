@@ -11662,6 +11662,138 @@ test("an update that grows a web client's one-condition OR group warns that any 
   });
 });
 
+// Without blockIds, rules pair by what they test and do, and the pair also
+// decides which stored code the edit keeps. «При движении ночью яркость 30»
+// merged into a rule with hub code shares more with its own stored rule
+// than with the code rule, so the code is checked as new code and refused.
+// The refusal tells the agent to keep the blockIds; with them the code stays.
+test("an edit without blockIds that pairs stored code away is refused at the code with a hint to keep the blockIds", async (t) => {
+  const nightDim = () =>
+    everyIf({
+      when: {
+        type: "condition",
+        mode: "AND",
+        conditions: [
+          characteristicCondition(),
+          workModeEquals(workModeNight.value, false),
+        ],
+      },
+      thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
+    });
+  const cases = [
+    {
+      name: "code action",
+      // The web client's code rule: motion runs hub code.
+      codeRule: () => webClientCodeBlock().targets[0],
+      codePointer: "/targets/0/then/1",
+      code: (data) => data.targets[0].then[1],
+      merge(rule, night) {
+        rule.if.mode = "AND";
+        rule.if.conditions.push(night.if.conditions[1]);
+        rule.then.unshift(night.then[0]);
+      },
+    },
+    {
+      name: "code condition",
+      // Motion and a hub code check turn the lamp on.
+      codeRule: () =>
+        everyIf({
+          when: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              characteristicCondition(),
+              { type: "code", code: hallCode },
+            ],
+          },
+          thenActions: [setAction()],
+        }),
+      codePointer: "/targets/0/if/conditions/1",
+      code: (data) => data.targets[0].if.conditions[1],
+      merge(rule, night) {
+        rule.if.conditions.push(night.if.conditions[1]);
+        rule.then = night.then;
+      },
+    },
+  ];
+  const withoutBlockIds = (value) =>
+    JSON.parse(
+      JSON.stringify(value, (key, child) =>
+        key === "blockId" ? undefined : child,
+      ),
+    );
+  const hint = /keep the blockIds get_entity returned/;
+  for (const item of cases) {
+    await t.test(item.name, async (subtest) => {
+      const { hub, stateDirectory } = await setup(subtest);
+      const client = await startClient(subtest, hub, stateDirectory);
+      installWorkModeAccessory(hub);
+      hub.state.scenarios[0].data = JSON.stringify(
+        withRuntimeBlockFields({ targets: [nightDim(), item.codeRule()] }),
+      );
+      const storedCode = item.code({
+        targets: [scenarioData(hub, "existing-block").targets[1]],
+      });
+      // The night rule is deleted; the code rule takes its condition and
+      // action.
+      const merge = (read) => {
+        const edited = structuredClone(read);
+        const [night] = edited.targets.splice(0, 1);
+        item.merge(edited.targets[0], night);
+        return edited;
+      };
+      const read = await readBlockConfiguration(client);
+
+      const refused = await prepareBlockUpdate(
+        client,
+        withoutBlockIds(merge(read)),
+        "Ночью при движении яркость 30",
+      );
+      assert.equal(refused.isError, true);
+      const [problem, ...others] = refused.structuredContent.problems;
+      assert.deepEqual(others, []);
+      assert.equal(problem.pointer, item.codePointer);
+      assert.match(
+        problem.message,
+        /^node type code is not supported by this contract/,
+      );
+      assert.match(problem.message, hint);
+
+      // Code the agent changed keeps its blockId; its refusal has no hint.
+      const changedCode = merge(read);
+      item.code(changedCode).code = "log.info('night');";
+      const changed = await prepareBlockUpdate(
+        client,
+        changedCode,
+        "Ночью при движении яркость 30",
+      );
+      assert.equal(changed.isError, true);
+      assert.deepEqual(
+        changed.structuredContent.problems.map(({ pointer }) => pointer),
+        [item.codePointer],
+      );
+      assert.doesNotMatch(changed.structuredContent.problems[0].message, hint);
+
+      const kept = await prepareBlockUpdate(
+        client,
+        merge(read),
+        "Ночью при движении яркость 30",
+      );
+      assert.equal(kept.isError, undefined, kept.content[0]?.text);
+      const { diff, block_action_preview: shown } = kept.structuredContent;
+      assert.deepEqual(item.code(diff.data.to), storedCode);
+      assert.deepEqual(
+        shown.removed_nodes.map(({ pointer, type }) => ({ pointer, type })),
+        [{ pointer: "/targets/0", type: "if" }],
+      );
+      assert.equal(
+        hub.requests.filter(({ scenario }) => scenario?.update).length,
+        0,
+      );
+    });
+  }
+});
+
 test("an update that adds an if with the web client's defaults applies and restores when the hub writes them out", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
