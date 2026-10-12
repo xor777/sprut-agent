@@ -772,10 +772,9 @@ test("a new device that gets no accessory is reported not added some time after 
 });
 
 // The hub may add a device just after it closes the network, when the
-// watch has already said nothing joined. The restart that answer offers
-// keeps counting from the earlier start, so that device is reported rather
-// than taken for one that was there before.
-test("a restart after a search that listed nothing reports a device the hub added after its end", async (t) => {
+// watch has already said nothing joined (a join accepted before the end;
+// not observed). The search's own ref still reports it.
+test("a device the hub adds after the search ended shows on that search", async (t) => {
   const { hub, client } = await setup(
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
@@ -793,25 +792,52 @@ test("a restart after a search that listed nothing reports a device the hub adde
   hub.joinNow(leakSensor({ joinAfterMs: 0, interviewMs: 100 }));
   await accessoryCreated(hub, 200);
 
-  const again = await call(client, "start_device_search", {
-    extension_ref: zigbeeRef,
-  });
-  assert.equal(again.status, "started");
-  assert.notEqual(again.search_ref, first.search_ref);
-  assert.equal(again.devices_before, first.devices_before);
-  const report = await call(client, "get_device_search", {
-    search_ref: again.search_ref,
+  const late = await call(client, "get_device_search", {
+    search_ref: first.search_ref,
     wait_seconds: 0,
   });
-  assert.equal(report.result, "joined");
+  assert.equal(late.status, "ended");
+  assert.equal(late.result, "joined");
   assert.deepEqual(
-    report.new_devices.map(({ ref, accessories }) => ({
+    late.new_devices.map(({ ref, accessories }) => ({
       ref,
       accessories: accessories.map(({ ref: accessory }) => accessory),
     })),
     [{ ref: sensorChildRef, accessories: [sensorRef] }],
   );
-  assert.equal(searchActions(hub).length, 2);
+  assert.equal(searchActions(hub).length, 1);
+});
+
+// The owner pairs a device in the SprutHub app after the agent's search
+// ended with nothing new. A later search counts from its own start: the
+// owner's device is not reported as joined, so the agent does not move or
+// rename it.
+test("a device the owner pairs in the app after a search found nothing is not new to the next search", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500 }),
+  );
+  const first = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await waitForResult(client, first.search_ref, ["no_new_device"]);
+
+  hub.state.pairing.push(leakSensor({ joinAfterMs: 0, interviewMs: 100 }));
+  startNatively(hub);
+  await accessoryCreated(hub, 200);
+  startNatively(hub, false);
+
+  const next = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(next.status, "started");
+  assert.equal(next.devices_before, first.devices_before + 1);
+  const report = await call(client, "get_device_search", {
+    search_ref: next.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(report.result, "waiting");
+  assert.deepEqual(report.new_devices, []);
 });
 
 test("a search is refused for a controller that cannot search, a stopped one and the ZLL search", async (t) => {
