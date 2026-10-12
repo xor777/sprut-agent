@@ -459,6 +459,47 @@ test("a search that ends with nothing new says so and offers a new start", async
   assert.equal(searchActions(hub).length, 1);
 });
 
+// Two starts of one controller at once (two agent turns, a retry beside
+// the first call) open the network once: a second start would restart the
+// hub's timer (P3).
+test("two starts at once send one start", async (t) => {
+  const { hub, client } = await setup(t, await apartment());
+  const starts = await Promise.all([
+    call(client, "start_device_search", { extension_ref: zigbeeRef }),
+    call(client, "start_device_search", { extension_ref: zigbeeRef }),
+  ]);
+  assert.deepEqual(starts.map(({ status }) => status).sort(), [
+    "already_running",
+    "started",
+  ]);
+  assert.equal(starts[0].search_ref, starts[1].search_ref);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+  ]);
+});
+
+// The network closed by its timer while nobody read the search: a stop
+// sends nothing, since a stop of a search that does not run would act on
+// whatever the controller does next.
+test("a stop after the search ended unseen sends nothing", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500 }),
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(stopped.stop_sent, false);
+  assert.equal(stopped.active, false);
+  assert.equal(stopped.ended, "expired");
+  assert.equal(searchActions(hub).length, 1);
+});
+
 // The agent's search ended while nobody read it, then the owner started
 // another in the SprutHub app. The old watch is over: its stop must not
 // close the owner's network, and a new start watches the owner's run
