@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1395,4 +1395,40 @@ test("an unknown search ref points at the controller to read again", async (t) =
       arguments: { entity_ref: zigbeeRef },
     });
   }
+});
+
+// Watches are kept in the state directory only for a few days: a new
+// search removes those not written for 3 days, and their refs are then
+// unknown.
+test("a search not touched for days is removed when a new one starts", async (t) => {
+  const { client, stateDirectory } = await setup(t, await apartment());
+  const old = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await call(client, "stop_device_search", { search_ref: old.search_ref });
+  const watches = path.join(
+    stateDirectory,
+    (await readdir(stateDirectory)).find((name) =>
+      name.startsWith("device-searches-"),
+    ),
+  );
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60_000);
+  for (const name of await readdir(watches)) {
+    await utimes(path.join(watches, name), fourDaysAgo, fourDaysAgo);
+  }
+
+  const fresh = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(fresh.status, "started");
+  assert.equal((await readdir(watches)).length, 1);
+  const unknown = await toolError(client, "get_device_search", {
+    search_ref: old.search_ref,
+  });
+  assert.equal(unknown.error.code, "device_search_not_found");
+  const kept = await call(client, "get_device_search", {
+    search_ref: fresh.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(kept.active, true);
 });
