@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
@@ -925,6 +925,72 @@ test("the probe sends one direct room.create under the run's short name and the 
   );
 });
 
+// The owner's devices keep their notifications: the probe turns a
+// notification on and off only on the run's virtual lamp, which nobody
+// switches, so it sends nothing.
+test("the guard sets a notification only on the run's virtual accessory and only to true or false", async (t) => {
+  const g = await guardSetup(t);
+  const virtual = await runVirtual(g);
+  const virtualOn = `${virtual.serviceRef}/characteristic/${virtual.onCId}`;
+  const notify = (target_ref, value) => ({
+    operation: "characteristic_notify",
+    target_ref,
+    value,
+  });
+  const before = g.hub.writes().length;
+  // The kitchen leak sensor's online state and the hallway lamp.
+  for (const ref of [
+    `${g.homeRef}/accessory/23/service/1/characteristic/8`,
+    `${g.homeRef}/accessory/12/service/13/characteristic/14`,
+  ]) {
+    await assert.rejects(
+      g.guard.prepare(notify(ref, true)),
+      conformance.GuardError,
+    );
+  }
+  await assert.rejects(
+    g.guard.prepare(notify(virtualOn, "true")),
+    conformance.GuardError,
+  );
+  assert.deepEqual(sweepWrites(g.hub, before), []);
+
+  const on = await guardApply(g.guard, notify(virtualOn, true));
+  const characteristic = g.hub.state.accessories
+    .find(({ id }) => id === virtual.aId)
+    .services.find(({ sId }) => sId === virtual.sId)
+    .characteristics.find(({ cId }) => cId === virtual.onCId);
+  assert.equal(characteristic.notify, true);
+  const restored = await g.guard.restore(on.changeRef);
+  assert.equal(restored.status, "restored");
+  assert.equal(characteristic.notify, false);
+  assert.deepEqual(
+    sweepWrites(g.hub, before).map(({ method, params }) => [
+      method,
+      params.characteristic?.update,
+    ]),
+    [
+      [
+        "characteristic.update",
+        {
+          aId: virtual.aId,
+          sId: virtual.sId,
+          cId: virtual.onCId,
+          notify: true,
+        },
+      ],
+      [
+        "characteristic.update",
+        {
+          aId: virtual.aId,
+          sId: virtual.sId,
+          cId: virtual.onCId,
+          notify: false,
+        },
+      ],
+    ],
+  );
+});
+
 test("virtual_light_group is only prepared, for the run's virtual accessory name and room", async (t) => {
   const g = await guardSetup(t);
   const virtual = await runVirtual(g);
@@ -1009,5 +1075,69 @@ test("--read-only runs the read steps and sends the hub no write", async (t) => 
   assert.deepEqual(
     [...new Set(hub.writes().map(({ method }) => method))],
     ["history.list"],
+  );
+});
+
+// Step N, rehearsed on the simulator as the live run makes it: the run's
+// virtual lamp gets a notification on its On, read back and restored; the
+// simulated virtual accessory has no C_Online, so that part is skipped.
+test("step N turns a notification on and off only on the run's virtual accessory", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  const scratch = await mkdtemp(path.join(tmpdir(), "sprut-agent-step-n-"));
+  t.after(async () => {
+    await hub.close();
+    await rm(scratch, { recursive: true, force: true });
+  });
+  const result = await runFile(process.execPath, [script, "--only", "1,V,N"], {
+    cwd: repoRoot,
+    env: {
+      PATH: process.env.PATH,
+      HOME: scratch,
+      TMPDIR: scratch,
+      ...hub.connectionEnv(),
+      SPRUTHUB_TIMEOUT_MS: "5000",
+    },
+  }).catch((error) => error);
+  assert.equal(result.code ?? 0, 0, result.stdout);
+  const reportPath = /^Report: (.+)$/m.exec(result.stdout)?.[1];
+  const steps = JSON.parse(await readFile(reportPath, "utf8")).steps.filter(
+    ({ step }) => step.startsWith("N"),
+  );
+  assert.ok(steps.length > 0, result.stdout);
+  assert.deepEqual(
+    steps.filter(
+      ({ verdict }) => !["match", "observed", "skipped"].includes(verdict),
+    ),
+    [],
+  );
+  assert.ok(
+    steps.some(
+      ({ step, verdict }) =>
+        step.startsWith("N C_Online") && verdict === "skipped",
+    ),
+  );
+  const notifyWrites = hub
+    .writes()
+    .filter(
+      ({ method, params }) =>
+        method === "characteristic.update" &&
+        Object.hasOwn(params.characteristic.update, "notify"),
+    )
+    .map(({ params }) => params.characteristic.update);
+  assert.deepEqual(
+    notifyWrites.map(({ notify }) => notify),
+    [true, false],
+  );
+  // Only the run's virtual accessory, which the run deleted.
+  const fixtureIds = new Set(
+    (await loadHomeFixture("apartment")).accessories.map(({ id }) => id),
+  );
+  assert.ok(notifyWrites.every(({ aId }) => !fixtureIds.has(aId)));
+  assert.ok(
+    hub.state.accessories.every(({ services }) =>
+      services.every(({ characteristics }) =>
+        characteristics.every(({ notify }) => notify !== true),
+      ),
+    ),
   );
 });
