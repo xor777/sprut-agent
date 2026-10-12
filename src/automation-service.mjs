@@ -9826,7 +9826,7 @@ const NATIVE_VALUE_KINDS = {
         notify: value.value,
       }),
     limitations: () => [
-      "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. A characteristic that never had it on may omit notify; that reads as off, as the web client shows it, and a restore writes off explicitly.",
+      "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. Only the device read (accessory.get) reports it; baseline, readback and restore use that read, so a restore writes back the value read before the change, on for a notification that was on, such as a new virtual accessory's C_Online.",
       "Through which notification services and to which recipients SprutHub sends these notifications was not observed: the home's notification services and their state are its NOTIFICATION extensions (home_overview). Tell the owner the setting is on, not that a message will arrive.",
     ],
   },
@@ -10733,8 +10733,9 @@ async function readServiceVisible(client, target) {
   };
 }
 
-// Read from accessory.get, which the web client's Notifications screen
-// shows: the service type decides whether a notification is offered.
+// Read from accessory.get, the only read that reports notify
+// (2026-10-12-notifications-live); the service type decides whether a
+// notification is offered.
 async function readCharacteristicNotify(client, target) {
   const accessory = await client.getAccessoryOrNull(target.aId);
   const service = accessory?.services?.find(({ sId }) => sId === target.sId);

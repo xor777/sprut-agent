@@ -3542,9 +3542,12 @@ export function characteristicNotifyOffered(service, characteristic) {
   return !NOTIFY_EXCLUDED_SERVICE_TYPES.has(service?.type) && type !== "Name";
 }
 
-// The notification setting as the web client shows it: a characteristic
-// that never had it set may omit notify, which the client shows as off.
-// Anything but a boolean is unknown (null).
+// The notification setting of a characteristic from accessory.get, the only
+// read that reports it (false where it was never set; accessory.list and
+// characteristic.get leave it out whatever it is, owner hub 3.0.0,
+// research/protocol/2026-10-12-notifications-live.md). A missing one reads
+// as off, as the web client shows it; anything but a boolean is unknown
+// (null). Never pass a characteristic from another read.
 export function characteristicNotifyOn(characteristic) {
   const notify = characteristic?.notify;
   if (notify === undefined || notify === null) return false;

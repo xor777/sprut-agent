@@ -31,6 +31,9 @@ const DEFAULT_MAX_BYTES = 16_000;
 // one whole-home read is fewer native requests.
 const TARGETED_ACCESSORY_READS = 4;
 const TARGETED_ROOM_READS = 2;
+// A notification answer reads every matched accessory with accessory.get,
+// this many at a time.
+const NOTIFY_READ_CONCURRENCY = 8;
 const NOT_EVALUATED_LIMIT = 10;
 const SWITCH_LIMIT = 10;
 const REMAINING_ROOM_LIMIT = 10;
@@ -255,6 +258,10 @@ export class HomeReads {
       selection.roomId !== null;
     let values = null;
     let observedAt = catalog.observedAt;
+    // Only accessory.get reports a characteristic's notification; the
+    // accessory lists leave it out whatever it is (owner hub, 3.0.0,
+    // research/protocol/2026-10-12-notifications-live.md).
+    let valuesByAccessory = false;
     if (needValues && read.fresh) {
       values = byId(catalog.accessories);
       observedAt = read.valuesObservedAt;
@@ -266,6 +273,7 @@ export class HomeReads {
         [...candidates, ...switchCandidates(catalog, selection, candidates)],
         deadline,
         selection.roomId,
+        selection.notify,
       );
       if (fresh.stale && !refreshed) {
         read = await client.homeCatalog(serial, deadline, { refresh: true });
@@ -297,7 +305,22 @@ export class HomeReads {
         }
         values = byId(fresh.accessories);
         observedAt = fresh.observedAt;
+        valuesByAccessory = fresh.byAccessory === true;
       }
+    }
+    // A room or a refreshed catalog was read as a list: the matched
+    // accessories are read again, each with accessory.get.
+    if (selection.notify && !valuesByAccessory) {
+      const reads = await readEachAccessory(
+        client,
+        serial,
+        accessoryIdsOf(candidates),
+      );
+      values = byId(reads.flatMap(({ accessory }) => accessory ?? []));
+      observedAt = latest([
+        observedAt,
+        ...reads.map(({ observedAt: at }) => at),
+      ]);
     }
 
     const base = {
@@ -599,7 +622,8 @@ function selectCandidates(catalog, selection) {
 // the answer lists. A relay's name need not say that it drives a lamp; the
 // agent reads the names.
 function switchCandidates(catalog, selection, candidates) {
-  if (!selection.lightQuestion) return [];
+  // A notification answer lists what notifies, not what may drive a lamp.
+  if (!selection.lightQuestion || selection.notify) return [];
   const listed = new Set(
     candidates.map(
       ({ accessory, service }) => `${accessory.id}/${service.sId}`,
@@ -722,10 +746,13 @@ function notifies({ service }) {
   );
 }
 
-// notify: true on a characteristic whose SprutHub notification is on; off
-// is the usual case and is left out.
-function notifyMark(service, characteristic) {
-  return characteristicNotifyOffered(service, characteristic) &&
+// notify: true on a characteristic whose SprutHub notification is on, in a
+// notification answer (shown), whose values come from accessory.get; off is
+// the usual case and is left out. Other answers read accessory lists, which
+// never report it, and mark nothing.
+function notifyMark(service, characteristic, shown = true) {
+  return shown &&
+    characteristicNotifyOffered(service, characteristic) &&
     characteristicNotifyOn(characteristic) === true
     ? { notify: true }
     : {};
@@ -748,7 +775,8 @@ function deviceText(service, accessory, rooms) {
 // requests; a selected room is read whole with accessory.list {roomId}, so
 // a device moved or added there shows. A targeted read that disagrees with
 // the catalog (an accessory gone, added, renamed, moved or changed) marks
-// the catalog stale.
+// the catalog stale. eachAccessory (a notification answer) reads every
+// accessory outside a room with accessory.get, however many.
 async function readValues(
   client,
   serial,
@@ -756,20 +784,33 @@ async function readValues(
   candidates,
   deadline,
   roomId,
+  eachAccessory = false,
 ) {
   const generation = client.writeGeneration;
-  const accessoryIds = [...new Set(candidates.map((c) => c.accessory.id))];
+  const accessoryIds = accessoryIdsOf(candidates);
   const roomIds =
     roomId === null
       ? [...new Set(candidates.map((c) => c.accessory.roomId))]
       : [roomId];
   if (roomId === null && accessoryIds.length === 0) {
-    return { accessories: [], observedAt: catalog.observedAt, stale: false };
+    return {
+      accessories: [],
+      observedAt: catalog.observedAt,
+      stale: false,
+      byAccessory: true,
+    };
   }
-  if (roomId === null && accessoryIds.length <= TARGETED_ACCESSORY_READS) {
-    const reads = await Promise.all(
-      accessoryIds.map((id) => client.nativeAccessory(serial, id, deadline)),
-    );
+  if (
+    roomId === null &&
+    (eachAccessory || accessoryIds.length <= TARGETED_ACCESSORY_READS)
+  ) {
+    const reads = eachAccessory
+      ? await readEachAccessory(client, serial, accessoryIds)
+      : await Promise.all(
+          accessoryIds.map((id) =>
+            client.nativeAccessory(serial, id, deadline),
+          ),
+        );
     const accessories = reads.map(({ accessory }) => accessory);
     return {
       accessories: accessories.filter(Boolean),
@@ -779,6 +820,7 @@ async function readValues(
           !accessories[index] ||
           catalog.identities.get(id) !== accessoryIdentity(accessories[index]),
       ),
+      byAccessory: true,
     };
   }
   if (roomIds.length <= TARGETED_ROOM_READS) {
@@ -815,6 +857,41 @@ async function readValues(
     // An accessory in a room the catalog does not know means new rooms.
     stale: read.accessories.some(({ roomId }) => !knownRooms.has(roomId)),
   };
+}
+
+function accessoryIdsOf(candidates) {
+  return [...new Set(candidates.map(({ accessory }) => accessory.id))];
+}
+
+// accessory.get of each accessory, NOTIFY_READ_CONCURRENCY at a time, each
+// with its own timeout: one deadline for a whole home of reads would cut a
+// large home short. An accessory gone from the hub reads as null.
+async function readEachAccessory(client, serial, ids) {
+  const reads = new Array(ids.length);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < ids.length) {
+      const index = next++;
+      try {
+        reads[index] = await client.nativeAccessory(
+          serial,
+          ids[index],
+          Date.now() + client.timeoutMs,
+        );
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(NOTIFY_READ_CONCURRENCY, ids.length) },
+      worker,
+    ),
+  );
+  return reads;
 }
 
 // What decides a matched service: its kind, availability and on/off from
@@ -899,6 +976,7 @@ function serviceEntry(serial, item, selection) {
           selection.values === "on_off"
             ? [on?.basis, ...VALUES_OF_STATE]
             : null,
+          selection.notify,
         )
       : [];
   return {
@@ -926,7 +1004,14 @@ function serviceEntry(serial, item, selection) {
     // show; its refs stay so the agent can still read it.
     ...(values.length > 0
       ? { values }
-      : { characteristics: characteristicRefs(serial, accessory, service) }),
+      : {
+          characteristics: characteristicRefs(
+            serial,
+            accessory,
+            service,
+            selection.notify,
+          ),
+        }),
   };
 }
 
@@ -936,8 +1021,15 @@ function serviceEntry(serial, item, selection) {
 // with every value were 13-15 KB on 2026-09-24, most of it color.
 const VALUES_OF_STATE = ["Brightness"];
 
-// Readable values of a service; with types, only those types.
-function characteristicValues(serial, accessory, service, types = null) {
+// Readable values of a service; with types, only those types. notify marks
+// the notifications that are on (notifyMark).
+function characteristicValues(
+  serial,
+  accessory,
+  service,
+  types = null,
+  notify = false,
+) {
   return (service.characteristics ?? [])
     .filter(
       ({ control }) =>
@@ -963,7 +1055,7 @@ function characteristicValues(serial, accessory, service, types = null) {
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
         ...(control.write === true ? { writable: true } : {}),
-        ...notifyMark(service, characteristic),
+        ...notifyMark(service, characteristic, notify),
         ref: characteristicRef(
           serial,
           accessory.id,
@@ -974,7 +1066,7 @@ function characteristicValues(serial, accessory, service, types = null) {
     });
 }
 
-function characteristicRefs(serial, accessory, service) {
+function characteristicRefs(serial, accessory, service, notify = false) {
   return (service.characteristics ?? [])
     .filter(
       ({ control }) =>
@@ -989,7 +1081,7 @@ function characteristicRefs(serial, accessory, service) {
             ...(characteristic.control.write === true
               ? { writable: true }
               : {}),
-            ...notifyMark(service, characteristic),
+            ...notifyMark(service, characteristic, notify),
             ref: characteristicRef(
               serial,
               accessory.id,

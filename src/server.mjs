@@ -170,7 +170,7 @@ server.registerTool(
         .literal(true)
         .optional()
         .describe(
-          "Only services with a characteristic whose SprutHub notification is on, device information and battery services included; that characteristic shows notify: true. A device's C_Online with notify is its offline notification; with kind, the information service follows its device's kind.",
+          "Only services with a characteristic whose SprutHub notification is on, device information and battery services included; that characteristic shows notify: true, which no other answer shows. A device's C_Online with notify is its offline notification; with kind, the information service follows its device's kind. Only a device read reports notify, so this reads each matched device from the hub, one request per device, 8 at a time: the whole home costs a request per device; narrow with room_ref, kind or query when the question allows.",
         ),
       include_technical: z
         .boolean()
