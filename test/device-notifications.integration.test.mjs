@@ -325,3 +325,72 @@ test("a notification is refused before any write where the web client offers non
   });
   assert.deepEqual(history.changes, []);
 });
+
+// «Какие датчики пришлют уведомление?» A device's offline notification sits
+// in its information service, which is of no household kind; with a kind
+// it belongs to the device.
+test("find_devices with a kind keeps the offline notification of a device of that kind", async (t) => {
+  const home = await startHub(t);
+  const client = await startClient(t, home);
+  const prepared = await prepareNotify(client, kitchenLeakOnline, true);
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+
+  const sensors = await call(client, "find_devices", {
+    kind: "sensor",
+    notify: true,
+  });
+  assert.deepEqual(
+    sensors.rooms.flatMap(({ devices }) =>
+      devices.flatMap(({ services }) => services.map(({ ref }) => ref)),
+    ),
+    [`${kitchenLeak}/service/1`],
+  );
+  const lights = await call(client, "find_devices", {
+    kind: "light",
+    notify: true,
+  });
+  assert.equal(lights.total, 0);
+});
+
+// A notification sends the characteristic's value: one that holds a secret
+// is not offered, as get_entity does not show it.
+test("a characteristic that holds a secret gets no notification", async (t) => {
+  const home = await startHub(t);
+  const { hub } = home;
+  hub.state.accessories
+    .find(({ id }) => id === 23)
+    .services.push({
+      aId: 23,
+      sId: 50,
+      name: "Облако",
+      type: "Switch",
+      visible: true,
+      characteristics: [
+        {
+          aId: 23,
+          sId: 50,
+          cId: 51,
+          hasOptions: false,
+          control: {
+            type: "C_AccessToken",
+            name: "Access token",
+            read: true,
+            write: true,
+            events: false,
+            value: { stringValue: "token-value" },
+          },
+        },
+      ],
+    });
+  const client = await startClient(t, home);
+  const error = await refused(client, "prepare_native_change", {
+    operation: "characteristic_notify",
+    target_ref: `${kitchenLeak}/service/50/characteristic/51`,
+    value: true,
+    reason: "Уведомление",
+  });
+  assert.equal(error.code, "sensitive_native_data");
+  assert.deepEqual(notifyWrites(hub), []);
+});
