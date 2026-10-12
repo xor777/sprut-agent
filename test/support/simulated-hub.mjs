@@ -995,6 +995,11 @@ async function loadFixtureFile(file) {
 // wall clock on the machine's hub-local date; the clock then runs at the
 // machine's pace. It places the seeded log, the settings window's time and
 // the log lines of later runs. Without it the hub clock is the machine's.
+// eventEveryMs sends every connection, without a subscription, a
+// characteristic EVENT_UPDATE frame this often with the current value of the
+// home's characteristics in turn, as the owner's hub sends every socket
+// characteristic and room events (35 in 120 s at rest,
+// 2026-10-12-device-pairing H12). Without it the simulator sends no events.
 export async function startSimulatedHub(
   fixture,
   {
@@ -1004,6 +1009,7 @@ export async function startSimulatedHub(
     cid = SIMULATED_HUB_CID,
     faults = {},
     hubTime,
+    eventEveryMs,
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
@@ -1047,8 +1053,33 @@ export async function startSimulatedHub(
       requests: 0,
     };
     connections.push(connection);
+    let nextEvent = 0;
+    const sendEvent = () => {
+      const characteristics = state.accessories.flatMap(({ services }) =>
+        services.flatMap((service) => service.characteristics),
+      );
+      if (characteristics.length === 0) return;
+      const { aId, sId, cId, control } =
+        characteristics[nextEvent++ % characteristics.length];
+      socket.send(
+        JSON.stringify({
+          event: {
+            characteristic: {
+              event: "EVENT_UPDATE",
+              characteristics: [
+                { aId, sId, cId, control: { value: control.value } },
+              ],
+            },
+          },
+        }),
+      );
+    };
+    const events = eventEveryMs
+      ? setInterval(sendEvent, eventEveryMs)
+      : undefined;
     socket.on("close", () => {
       connection.closed_at = Date.now();
+      clearInterval(events);
     });
     socket.on("message", (raw) => {
       connection.requests += 1;
