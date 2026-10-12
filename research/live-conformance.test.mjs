@@ -313,12 +313,11 @@ test("the sweep deletes a recorded, unlinked virtual accessory before its room",
   const foreign = await createVirtual(client, otherRoomId);
   // Recorded, but linked to a real lamp: deleting it would change that lamp.
   const linked = await createVirtual(client, otherRoomId);
-  const on = linked.services[0].characteristics.find(
-    ({ control }) => control.type === "On",
-  );
+  const lamp = linked.services.find(({ type }) => type === "Lightbulb");
+  const on = lamp.characteristics.find(({ control }) => control.type === "On");
   await client.addVirtualLink({
     aId: linked.id,
-    sId: linked.services[0].sId,
+    sId: lamp.sId,
     cId: on.cId,
     tAId: 35,
     tSId: 13,
@@ -1078,11 +1077,13 @@ test("--read-only runs the read steps and sends the hub no write", async (t) => 
   );
 });
 
-// Step N, rehearsed on the simulator as the live run makes it: the run's
-// virtual lamp gets a notification on its On, read back and restored; the
-// simulated virtual accessory has no C_Online, so that part is skipped.
-test("step N turns a notification on and off only on the run's virtual accessory", async (t) => {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+// Step N, rehearsed on the simulator as the live run makes it
+// (research/protocol/2026-10-12-notifications-live.md): the run's virtual
+// lamp gets a notification on its On, read back and restored to off; the
+// virtual accessory's C_Online, on from the start, is turned off and
+// restored to on. The owner's notification settings, which only
+// accessory.get reports, are compared before and after.
+async function runStepN(t, hub) {
   const scratch = await mkdtemp(path.join(tmpdir(), "sprut-agent-step-n-"));
   t.after(async () => {
     await hub.close();
@@ -1098,23 +1099,9 @@ test("step N turns a notification on and off only on the run's virtual accessory
       SPRUTHUB_TIMEOUT_MS: "5000",
     },
   }).catch((error) => error);
-  assert.equal(result.code ?? 0, 0, result.stdout);
   const reportPath = /^Report: (.+)$/m.exec(result.stdout)?.[1];
   const steps = JSON.parse(await readFile(reportPath, "utf8")).steps.filter(
     ({ step }) => step.startsWith("N"),
-  );
-  assert.ok(steps.length > 0, result.stdout);
-  assert.deepEqual(
-    steps.filter(
-      ({ verdict }) => !["match", "observed", "skipped"].includes(verdict),
-    ),
-    [],
-  );
-  assert.ok(
-    steps.some(
-      ({ step, verdict }) =>
-        step.startsWith("N C_Online") && verdict === "skipped",
-    ),
   );
   const notifyWrites = hub
     .writes()
@@ -1124,20 +1111,99 @@ test("step N turns a notification on and off only on the run's virtual accessory
         Object.hasOwn(params.characteristic.update, "notify"),
     )
     .map(({ params }) => params.characteristic.update);
+  return { result, steps, notifyWrites };
+}
+
+// The kitchen leak sensor's offline notification, which the owner turned
+// on in the SprutHub app.
+function ownerNotification(hub) {
+  return hub.state.accessories
+    .find(({ id }) => id === 23)
+    .services.find(({ sId }) => sId === 1)
+    .characteristics.find(({ cId }) => cId === 8);
+}
+
+test("step N turns a notification on and off only on the run's virtual accessory and restores C_Online to on", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  ownerNotification(hub).notify = true;
+  const { result, steps, notifyWrites } = await runStepN(t, hub);
+  assert.equal(result.code ?? 0, 0, result.stdout);
   assert.deepEqual(
-    notifyWrites.map(({ notify }) => notify),
-    [true, false],
+    steps.filter(({ verdict }) => !["match", "observed"].includes(verdict)),
+    [],
   );
-  // Only the run's virtual accessory, which the run deleted.
+  assert.deepEqual(
+    steps.map(({ step }) => step),
+    [
+      "N find_devices home",
+      "N On before",
+      "N On on",
+      "N On find_devices",
+      "N On restore",
+      "N C_Online before",
+      "N C_Online off",
+      "N C_Online find_devices",
+      "N C_Online restore",
+      "N owner notifications",
+    ],
+  );
+  // The whole-home answer lists the owner's notification and the virtual
+  // accessory's C_Online.
+  assert.equal(
+    steps.find(({ step }) => step === "N find_devices home").details.services,
+    2,
+  );
+  // The comparison sees the owner's notification that is on.
+  assert.match(
+    steps.find(({ step }) => step === "N owner notifications").observed,
+    /^0 changed; 1 of \d+ characteristic\(s\) with notify on/,
+  );
+  // Only the run's virtual accessory, which the run deleted: On on and
+  // off, C_Online off and on.
   const fixtureIds = new Set(
     (await loadHomeFixture("apartment")).accessories.map(({ id }) => id),
   );
   assert.ok(notifyWrites.every(({ aId }) => !fixtureIds.has(aId)));
-  assert.ok(
-    hub.state.accessories.every(({ services }) =>
-      services.every(({ characteristics }) =>
-        characteristics.every(({ notify }) => notify !== true),
+  assert.deepEqual(
+    notifyWrites.map(({ cId, notify }) => [cId, notify]),
+    [
+      [notifyWrites[0].cId, true],
+      [notifyWrites[0].cId, false],
+      [8, false],
+      [8, true],
+    ],
+  );
+  assert.equal(ownerNotification(hub).notify, true);
+  assert.deepEqual(
+    hub.state.accessories.flatMap(({ id, services }) =>
+      services.flatMap(({ sId, characteristics }) =>
+        characteristics
+          .filter(({ notify }) => notify === true)
+          .map(({ cId }) => `${id}.${sId}.${cId}`),
       ),
     ),
+    ["23.1.8"],
   );
+});
+
+// The owner turns a notification on in the SprutHub app while the step
+// runs; the run cannot tell that from its own write, so it stops.
+test("step N fails when an owner notification changes during the step", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  const record = hub.requests.push;
+  hub.requests.push = function push(entry) {
+    if (
+      entry.method === "characteristic.update" &&
+      entry.params?.characteristic?.update?.notify === true
+    ) {
+      ownerNotification(hub).notify = true;
+    }
+    return record.call(this, entry);
+  };
+  const { result, steps } = await runStepN(t, hub);
+  assert.notEqual(result.code ?? 0, 0, result.stdout);
+  const owners = steps.find(({ step }) => step === "N owner notifications");
+  assert.equal(owners.verdict, "mismatch");
+  assert.match(owners.observed, /^1 changed;/);
+  assert.deepEqual(owners.details.changed, ["23.1.8"]);
 });

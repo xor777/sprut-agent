@@ -1324,15 +1324,16 @@ const HANDLERS = {
       online: true,
       virtual: true,
       services: [
+        virtualInformationService(id, name),
         {
           aId: id,
-          sId: 1,
+          sId: VIRTUAL_SERVICE_ID,
           name: serviceInput.name ?? name,
           type: serviceInput.type,
           visible: true,
           characteristics: types.map((type, index) =>
-            buildCharacteristic(id, 1, {
-              cId: index + 1,
+            buildCharacteristic(id, VIRTUAL_SERVICE_ID, {
+              cId: VIRTUAL_SERVICE_ID + 1 + index,
               type,
               value: defaultValue(type),
             }),
@@ -2001,6 +2002,35 @@ function buildAccessory(state, input) {
     };
   }
   return accessory;
+}
+
+// A created virtual accessory has an information service at sId 1 with
+// C_Online at cId 8, its notification on from the start, and its own
+// service at sId 13 (owner hub, 3.0.0, 2026-10-12-notifications-live). The
+// other information characteristics follow a physical device's; they were
+// not read on a virtual one.
+const VIRTUAL_SERVICE_ID = 13;
+
+function virtualInformationService(id, name) {
+  const characteristics = [
+    ["Identify", false],
+    ["Manufacturer", ""],
+    ["Model", ""],
+    ["Name", name],
+    ["SerialNumber", `SN-${id}`],
+    ["FirmwareRevision", "1.0"],
+    ["C_Online", true],
+  ].map(([type, value], index) =>
+    buildCharacteristic(id, 1, { cId: index + 2, type, value }),
+  );
+  characteristics.at(-1).notify = true;
+  return {
+    aId: id,
+    sId: 1,
+    name: "Информация об аксессуаре",
+    type: "AccessoryInformation",
+    characteristics,
+  };
 }
 
 function buildCharacteristic(aId, sId, { cId, type, value, control = {} }) {
