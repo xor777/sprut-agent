@@ -1497,6 +1497,25 @@ export class SprutHubClient {
     }
   }
 
+  // The notification setting of one characteristic, as the web client's
+  // Notifications screen writes it; nothing else of the characteristic is
+  // sent.
+  async updateCharacteristicNotify({ aId, sId, cId, notify }) {
+    const response = await this.#request(
+      { characteristic: { update: { aId, sId, cId, notify } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.characteristic;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the notification setting.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async getWindow(windowKey) {
     const response = await this.#request(
       { window: { get: { windowKey } } },
@@ -3506,6 +3525,32 @@ function latestObservedAt(values) {
   return values.reduce((latest, value) => (value > latest ? value : latest));
 }
 
+// The characteristics the web client's Notifications screen offers a
+// notification for: the device's online state (C_Online of its information
+// service) and every characteristic but a name of the other services, apart
+// from extended information and camera streams (app.16735171810a795a9f2d.js,
+// NotificationsScreen with its service and characteristic filters).
+const NOTIFY_EXCLUDED_SERVICE_TYPES = new Set([
+  "AccessoryInformation",
+  "C_AccessoryExtInfo",
+  "CameraRTPStreamManagement",
+]);
+
+export function characteristicNotifyOffered(service, characteristic) {
+  const type = characteristic?.control?.type ?? characteristic?.control?.key;
+  if (service?.type === "AccessoryInformation") return type === "C_Online";
+  return !NOTIFY_EXCLUDED_SERVICE_TYPES.has(service?.type) && type !== "Name";
+}
+
+// The notification setting as the web client shows it: a characteristic
+// that never had it set may omit notify, which the client shows as off.
+// Anything but a boolean is unknown (null).
+export function characteristicNotifyOn(characteristic) {
+  const notify = characteristic?.notify;
+  if (notify === undefined || notify === null) return false;
+  return typeof notify === "boolean" ? notify : null;
+}
+
 export function homeRef(serial) {
   return `spruthub://hub/${encodeURIComponent(serial)}`;
 }
@@ -4030,6 +4075,12 @@ function normalizeCharacteristicDetail(
       typeof characteristic.hasOptions === "boolean"
         ? characteristic.hasOptions
         : null,
+    // SprutHub's own notification on a change of this characteristic (for
+    // C_Online, the device going offline or online); only where the web
+    // client offers it.
+    ...(characteristicNotifyOffered(service, characteristic)
+      ? { notify: characteristicNotifyOn(characteristic) }
+      : {}),
     freshness: {
       observed_at: observedAt,
       source_timestamp: null,

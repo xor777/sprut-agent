@@ -7,6 +7,8 @@ import { randomBytes } from "node:crypto";
 import {
   accessoryIdentity,
   accessoryRef,
+  characteristicNotifyOffered,
+  characteristicNotifyOn,
   characteristicRef,
   extractTypedValue,
   homeRef,
@@ -248,6 +250,7 @@ export class HomeReads {
     const needValues =
       summary ||
       selection.state !== null ||
+      selection.notify ||
       selection.values !== "none" ||
       selection.roomId !== null;
     let values = null;
@@ -330,6 +333,7 @@ export class HomeReads {
     const notApplicable = {};
     let deviceFunctions = 0;
     for (const item of evaluated) {
+      if (selection.notify && !notifies(item)) continue;
       // An appliance's own setting is not a device that is on, off or
       // unavailable of its own.
       if (stateFilter !== null && item.appliance !== null) {
@@ -499,6 +503,7 @@ function findSelection(input, serial) {
     ...(input.kind === undefined ? {} : { kind: input.kind }),
     ...(input.state === undefined ? {} : { state: input.state }),
     ...(input.values === undefined ? {} : { values: input.values }),
+    ...(input.notify === true ? { notify: true } : {}),
     ...(input.includeTechnical === true ? { include_technical: true } : {}),
     ...(limit === DEFAULT_LIMIT ? {} : { limit }),
     ...(maxBytes === DEFAULT_MAX_BYTES ? {} : { max_bytes: maxBytes }),
@@ -533,14 +538,17 @@ function findSelection(input, serial) {
         : input.values === true || input.state === undefined
           ? "all"
           : "on_off",
-    includeTechnical: input.includeTechnical === true,
+    // A device's offline notification sits in its information service.
+    notify: input.notify === true,
+    includeTechnical: input.includeTechnical === true || input.notify === true,
     limit,
     maxBytes,
     filtered:
       query !== null ||
       roomId !== null ||
       input.kind !== undefined ||
-      input.state !== undefined,
+      input.state !== undefined ||
+      input.notify === true,
   };
 }
 
@@ -696,6 +704,22 @@ function keepsSwitch(item, state) {
   }
   if (state === "unavailable") return item.available === false;
   return true;
+}
+
+// Whether a service has a characteristic whose SprutHub notification is on.
+function notifies({ service }) {
+  return (service.characteristics ?? []).some(
+    (characteristic) => notifyMark(service, characteristic).notify === true,
+  );
+}
+
+// notify: true on a characteristic whose SprutHub notification is on; off
+// is the usual case and is left out.
+function notifyMark(service, characteristic) {
+  return characteristicNotifyOffered(service, characteristic) &&
+    characteristicNotifyOn(characteristic) === true
+    ? { notify: true }
+    : {};
 }
 
 function onUnknown({ onState }) {
@@ -930,6 +954,7 @@ function characteristicValues(serial, accessory, service, types = null) {
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
         ...(control.write === true ? { writable: true } : {}),
+        ...notifyMark(service, characteristic),
         ref: characteristicRef(
           serial,
           accessory.id,
@@ -955,6 +980,7 @@ function characteristicRefs(serial, accessory, service) {
             ...(characteristic.control.write === true
               ? { writable: true }
               : {}),
+            ...notifyMark(service, characteristic),
             ref: characteristicRef(
               serial,
               accessory.id,

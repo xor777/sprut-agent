@@ -37,6 +37,8 @@ import {
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import {
+  characteristicNotifyOffered,
+  characteristicNotifyOn,
   isSensitiveNativeNode,
   SprutHubError,
   sanitizeNativeData,
@@ -9800,6 +9802,34 @@ const NATIVE_VALUE_KINDS = {
     write: (service, change, value) =>
       service.client.updateService(change.target, { visible: value.value }),
   },
+  // SprutHub's own notification on a change of one characteristic; on the
+  // C_Online characteristic of a device's information service, on the
+  // device going offline or online.
+  characteristic_notify: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => false,
+    async inspect(service, input) {
+      const target = parseCharacteristicRef(
+        input.target_ref,
+        service.hubSerial,
+      );
+      return {
+        fields: { target },
+        ...(await readCharacteristicNotify(service.client, target)),
+      };
+    },
+    read: (service, change) =>
+      readCharacteristicNotify(service.client, change.target),
+    write: (service, change, value) =>
+      service.client.updateCharacteristicNotify({
+        ...change.target,
+        notify: value.value,
+      }),
+    limitations: () => [
+      "This is SprutHub's own per-characteristic notification setting, written with characteristic.update {notify} as the web client's Notifications screen writes it. A characteristic that never had it on may omit notify; that reads as off, as the web client shows it, and a restore writes off explicitly.",
+      "Through which notification services and to which recipients SprutHub sends these notifications was not observed: the home's notification services and their state are its NOTIFICATION extensions (home_overview). Tell the owner the setting is on, not that a message will arrive.",
+    ],
+  },
 };
 
 function nativeValueKind(kind) {
@@ -10697,6 +10727,45 @@ async function readServiceVisible(client, target) {
     value: { value: visible, kind: "boolValue" },
     contract: {
       type: "ServiceVisible",
+      kind: "boolValue",
+      confirmation: "separate_accessory_get_readback",
+    },
+  };
+}
+
+// Read from accessory.get, which the web client's Notifications screen
+// shows: the service type decides whether a notification is offered.
+async function readCharacteristicNotify(client, target) {
+  const accessory = await client.getAccessoryOrNull(target.aId);
+  const service = accessory?.services?.find(({ sId }) => sId === target.sId);
+  const characteristic = service?.characteristics?.find(
+    ({ cId }) => cId === target.cId,
+  );
+  if (!characteristic?.control) {
+    throw new SprutHubError(
+      "characteristic_not_found",
+      "The selected characteristic was not found on its accessory.",
+      "get_entity",
+    );
+  }
+  if (!characteristicNotifyOffered(service, characteristic)) {
+    throw new SprutHubError(
+      "notification_not_offered",
+      "SprutHub offers a notification for the device's online state (the C_Online characteristic of its information service) and for the characteristics of its other services, not for a name, other device information, extended information or a camera stream. Pick such a characteristic from get_entity: it carries notify.",
+      "get_entity",
+    );
+  }
+  const notify = characteristicNotifyOn(characteristic);
+  if (notify === null) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub reported this characteristic's notification setting in an unknown form, so it cannot be changed or restored safely.",
+    );
+  }
+  return {
+    value: { value: notify, kind: "boolValue" },
+    contract: {
+      type: "CharacteristicNotify",
       kind: "boolValue",
       confirmation: "separate_accessory_get_readback",
     },
