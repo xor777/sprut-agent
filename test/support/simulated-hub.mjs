@@ -1024,6 +1024,10 @@ export async function startSimulatedHub(
   // Queued explicit JSON-RPC error replies by method, for tests of a hub that
   // receives a request and refuses it without changing the home.
   const refusals = new Map();
+  // Milliseconds by method before a reply is sent, for tests of a hub that
+  // answers slowly (the owner's 81 accessory.get took about 9 s,
+  // 2026-10-12-notifications-live). The request is handled at once.
+  const replyDelays = new Map();
   const server = new WebSocketServer({
     host,
     port,
@@ -1064,7 +1068,17 @@ export async function startSimulatedHub(
       if (requests.length > recorded) {
         requests.at(-1).responseBytes = text ? Buffer.byteLength(text) : 0;
       }
-      if (text) socket.send(text);
+      const delay =
+        requests.length > recorded
+          ? replyDelays.get(requests.at(-1).method)
+          : undefined;
+      if (text && delay) {
+        setTimeout(() => {
+          if (socket.readyState === socket.OPEN) socket.send(text);
+        }, delay);
+      } else if (text) {
+        socket.send(text);
+      }
     });
   });
   const address = server.address();
@@ -1103,6 +1117,12 @@ export async function startSimulatedHub(
         },
       );
       refusals.set(method, queue);
+    },
+    // Replies to this method from now on are sent ms after the request is
+    // handled; 0 sends them at once again.
+    delayReplies: (method, ms) => {
+      if (ms > 0) replyDelays.set(method, ms);
+      else replyDelays.delete(method);
     },
     touchedMethods: () => touchedMethods(requests),
     faultEvents: () => structuredClone(state.faultEvents),

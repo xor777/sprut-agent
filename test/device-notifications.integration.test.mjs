@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -44,7 +45,11 @@ async function startHub(t) {
   return { hub, stateDirectory };
 }
 
-async function startClient(t, { hub, stateDirectory }) {
+async function startClient(
+  t,
+  { hub, stateDirectory },
+  { timeoutMs = 2000 } = {},
+) {
   const client = new Client({ name: "notifications-test", version: "1.0.0" });
   await client.connect(
     new StdioClientTransport({
@@ -54,7 +59,7 @@ async function startClient(t, { hub, stateDirectory }) {
       env: {
         PATH: process.env.PATH,
         ...hub.connectionEnv(),
-        SPRUTHUB_TIMEOUT_MS: "2000",
+        SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
         SPRUT_AGENT_STATE_DIR: stateDirectory,
       },
       stderr: "pipe",
@@ -413,6 +418,49 @@ test("find_devices with a kind keeps the offline notification of a device of tha
     notify: true,
   });
   assert.equal(lights.total, 0);
+});
+
+// The owner renamed the kitchen leak sensor in the SprutHub app after this
+// process read the home, and the hub answers slowly: the owner's 81
+// accessory.get took about 9 s against a 10 s request timeout
+// (2026-10-12-notifications-live). The device reads already carry the new
+// name; a whole-home re-read on the time they left would run out of it.
+test("«какие уведомления включены» after a rename in the app answers with the new name when the device reads take most of the timeout", async (t) => {
+  const home = await startHub(t);
+  const { hub } = home;
+  const client = await startClient(t, home, { timeoutMs: 600 });
+  await call(client, "home_overview", {});
+  const sensor = hub.state.accessories.find(({ id }) => id === 23);
+  sensor.name = "Протечка у мойки";
+  sensor.services
+    .find(({ sId }) => sId === 13)
+    .characteristics.find(({ cId }) => cId === 14).notify = true;
+  // 29 accessories read 8 at a time: four rounds of 200 ms, past 600 ms,
+  // each read well within it.
+  hub.delayReplies("accessory.get", 200);
+
+  const question = client.callTool({
+    name: "find_devices",
+    arguments: { notify: true },
+  });
+  await delay(250);
+  // Another question asked while the notifications are being read.
+  const meanwhile = client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: frontDoor },
+  });
+  const [answer, other] = await Promise.all([question, meanwhile]);
+  assert.equal(answer.isError, undefined, answer.content[0]?.text);
+  assert.equal(other.isError, undefined, other.content[0]?.text);
+  assert.deepEqual(
+    answer.structuredContent.rooms.flatMap(({ name, devices }) =>
+      devices.map((device) => [name, device.name, device.ref]),
+    ),
+    [["Кухня", "Протечка у мойки", kitchenLeak]],
+  );
+  assert.deepEqual(notifyingOf(answer.structuredContent), {
+    [`${kitchenLeak}/service/13`]: [kitchenLeakDetected],
+  });
 });
 
 // A notification sends the characteristic's value: one that holds a secret
