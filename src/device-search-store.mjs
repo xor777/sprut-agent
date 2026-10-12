@@ -14,8 +14,8 @@ import { hubStateFingerprint, stateDirectory } from "./automation-store.mjs";
 // client may start the MCP server anew for each turn, and the owner's reply
 // to the pairing step comes in a later turn.
 const FORMAT_VERSION = 1;
-// A watch not written for this long is removed when a new one is saved.
-export const DEVICE_SEARCH_KEEP_MS = 3 * 24 * 60 * 60_000;
+// A watch not written for this long is removed when a search starts.
+const KEEP_MS = 3 * 24 * 60 * 60_000;
 const ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -90,7 +90,7 @@ export class DeviceSearchStore {
     await this.#write(() => unlink(this.#file(id)).catch(ignoreMissing));
   }
 
-  // Removes watches not written for DEVICE_SEARCH_KEEP_MS.
+  // Removes watches not written for KEEP_MS.
   async prune() {
     await this.#write(async () => {
       let names;
@@ -100,7 +100,7 @@ export class DeviceSearchStore {
         if (error.code === "ENOENT") return;
         throw error;
       }
-      const before = Date.now() - DEVICE_SEARCH_KEEP_MS;
+      const before = Date.now() - KEEP_MS;
       for (const name of names) {
         if (!name.endsWith(".json")) continue;
         const file = path.join(this.directory, name);
