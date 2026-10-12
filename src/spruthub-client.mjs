@@ -4543,17 +4543,61 @@ function normalizeWindowControl(option) {
   };
 }
 
+// A PINCODE field shows a pairing code; a QR_CODE field encodes one (the
+// HomeKit setup payload), a hub user's login link or the access point's
+// Wi-Fi password (owner's hub, 2026-10-12).
+const SECRET_INPUT_TYPES = new Set(["PASSWORD", "PINCODE", "QR_CODE"]);
+
 export function isSensitiveNativeNode(value, key = "") {
   if (isSensitiveContainerKey(key)) return true;
   if (!value || typeof value !== "object") return false;
   return (
-    value?.inputType === "PASSWORD" ||
-    value?.input_type === "PASSWORD" ||
+    SECRET_INPUT_TYPES.has(value?.inputType) ||
+    SECRET_INPUT_TYPES.has(value?.input_type) ||
     value?.sensitive === true ||
     Object.keys(value ?? {}).some(isSensitiveKey) ||
     [value?.key, value?.name, value?.type, value?.ref].some(
       (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
-    )
+    ) ||
+    holdsKeyMaterial(value)
+  );
+}
+
+// An option named after a key or code whose string value looks like key
+// material, for names no rule knows (a device, bind or cloud key): 16 to
+// 128 hex digits with both digits and letters, byte separators and 0x
+// allowed, or base64 of 16 to 64 bytes with upper case, lower case and
+// digits. Ordinary values under such names stay visible: a layout "us", a
+// manufacturer code "115F", a 16-digit product code. Identifiers in hex,
+// such as an IEEE address or an extended PAN ID, are not named key or code.
+function holdsKeyMaterial(node) {
+  if (typeof node.key !== "string" || !/key|code/i.test(node.key)) {
+    return false;
+  }
+  const text = optionStringValue(node);
+  return text !== null && looksLikeKeyMaterial(text.trim());
+}
+
+function optionStringValue(node) {
+  for (const candidate of [node.value, node.configured_value]) {
+    if (typeof candidate === "string") return candidate;
+    if (typeof candidate?.stringValue === "string") {
+      return candidate.stringValue;
+    }
+  }
+  return null;
+}
+
+function looksLikeKeyMaterial(text) {
+  const hex = text.replace(/0x/gi, "").replace(/[\s:,-]/g, "");
+  if (/^[\da-f]{16,128}$/i.test(hex)) {
+    return /\d/.test(hex) && /[a-f]/i.test(hex);
+  }
+  return (
+    /^(?:[A-Za-z\d+/]{22,88}={0,2}|[A-Za-z\d_-]{22,88})$/.test(text) &&
+    /[A-Z]/.test(text) &&
+    /[a-z]/.test(text) &&
+    /\d/.test(text)
   );
 }
 
@@ -4825,7 +4869,74 @@ export function isRedactedNode(value) {
 const sensitiveKeyPattern =
   /(?:password|passwd|secret|credential|authorization|(?:api|access|refresh|client|private|wifi)[_-]?(?:key|token|secret|password)|token)/i;
 function isSensitiveKey(key) {
-  return sensitiveKeyPattern.test(key) || isPairingCodeKey(key);
+  return (
+    sensitiveKeyPattern.test(key) ||
+    isPairingCodeKey(key) ||
+    namesKeyMaterial(key)
+  );
+}
+
+// Names of key material and of codes that grant access, by whole name parts
+// so TimeZone, KeyboardLayout, KeyCode or testManufacturerCode stay visible:
+// the ZigBee controller's NetworkKey, LinkKey and InstallCode, the HomeKit
+// PinCodeVisible (owner's hub, 2026-10-12), a keypad passcode, a Wi-Fi PSK.
+const KEY_MATERIAL_PARTS = new Set([
+  "installcode",
+  "linkkey",
+  "networkkey",
+  "nwkkey",
+  "otp",
+  "passcode",
+  "passphrase",
+  "pincode",
+  "psk",
+  "setupcode",
+  "totp",
+]);
+const KEY_QUALIFIERS = new Set([
+  "aes",
+  "auth",
+  "beacon",
+  "bind",
+  "crypto",
+  "encryption",
+  "link",
+  "master",
+  "network",
+  "nwk",
+  "private",
+  "secret",
+  "security",
+  "shared",
+  "signing",
+]);
+const CODE_QUALIFIERS = new Set([
+  "access",
+  "activation",
+  "auth",
+  "confirmation",
+  "install",
+  "installation",
+  "login",
+  "pair",
+  "pairing",
+  "pass",
+  "pin",
+  "security",
+  "secret",
+  "setup",
+  "unlock",
+  "verification",
+]);
+
+function namesKeyMaterial(key) {
+  const parts = credentialKeyParts(key);
+  return parts.some(
+    (part, index) =>
+      KEY_MATERIAL_PARTS.has(part) ||
+      (parts[index + 1] === "key" && KEY_QUALIFIERS.has(part)) ||
+      (parts[index + 1] === "code" && CODE_QUALIFIERS.has(part)),
+  );
 }
 
 function credentialKeyParts(key) {
@@ -4877,7 +4988,7 @@ function isSensitiveAssignmentKey(key) {
   ) {
     return true;
   }
-  if (isPairingCodeKey(key)) return true;
+  if (isPairingCodeKey(key) || namesKeyMaterial(key)) return true;
   return (
     last === "key" &&
     parts.some((part) => ["access", "api", "private", "secret"].includes(part))
@@ -4895,6 +5006,11 @@ function redactSensitiveText(text, role = "data") {
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
     // A URL with a user name and password, as in a BLOCK request.
     /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i.test(text) ||
+    // A link whose query carries a login code, token or key, as the hub
+    // user's login link …/user/login?code=… (owner's hub, 2026-10-12).
+    /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]*[?&;](?:code|token|access_token|auth|key|api_?key|secret|password|passwd|pass|pin)=[^&\s"'<>#]/i.test(
+      text,
+    ) ||
     containsSensitiveAssignment(text, role);
   return containsCredential ? "[REDACTED]" : text;
 }

@@ -12548,13 +12548,18 @@ function publicNativeChange(
   }
   const kind = nativeValueKind(change.kind);
   const optionChange = kind.optionKey === true;
+  // A change saved before its option was hidden (a keypad passcode written
+  // as a NUMBER) holds the option's values; they are shown hidden, as
+  // get_entity shows the option now.
+  const hidden = optionChange && optionValuesHidden(change, observedValue);
+  const shownValue = (typed) => (hidden ? hiddenOptionValue(typed) : typed);
+  const namedValue = (typed) =>
+    hidden ? hiddenOptionValue(typed) : namedOptionValue(change, typed);
   const valueChoices = optionChange
     ? {
-        baseline: namedOptionValue(change, change.baseline_value),
-        requested: namedOptionValue(change, change.requested_value),
-        ...(observedValue
-          ? { observed: namedOptionValue(change, observedValue) }
-          : {}),
+        baseline: namedValue(change.baseline_value),
+        requested: namedValue(change.requested_value),
+        ...(observedValue ? { observed: namedValue(observedValue) } : {}),
       }
     : undefined;
   const conflictResolution =
@@ -12566,8 +12571,8 @@ function publicNativeChange(
           requires_user_decision: true,
           action_if_authorized: `prepare_new_${change.kind}_change`,
           effect: {
-            replace: namedOptionValue(change, observedValue),
-            with: namedOptionValue(change, change.baseline_value),
+            replace: namedValue(observedValue),
+            with: namedValue(change.baseline_value),
           },
         }
       : undefined;
@@ -12581,8 +12586,8 @@ function publicNativeChange(
     ...(change.window_ref ? { window_ref: change.window_ref } : {}),
     diff: {
       value: {
-        from: change.baseline_value.value,
-        to: change.requested_value.value,
+        from: shownValue(change.baseline_value).value,
+        to: shownValue(change.requested_value).value,
         kind: change.requested_value.kind,
       },
     },
@@ -12592,7 +12597,7 @@ function publicNativeChange(
     ...(change.write_intent
       ? { write_intent: structuredClone(change.write_intent) }
       : {}),
-    ...(observedValue ? { observed_value: observedValue } : {}),
+    ...(observedValue ? { observed_value: shownValue(observedValue) } : {}),
     ...(valueChoices ? { value_choices: valueChoices } : {}),
     ...(verification ? { verification } : {}),
     ...(change.conflict_reason
@@ -12644,6 +12649,26 @@ function publicNativeChange(
           ]
         : []),
     ],
+  };
+}
+
+function optionValuesHidden(change, observedValue) {
+  return [change.baseline_value, change.requested_value, observedValue].some(
+    (typed) =>
+      typed != null &&
+      isSensitiveNativeNode({
+        key: change.option_key,
+        type: change.contract?.type,
+        input_type: change.contract?.input_type,
+        value: typed.value,
+      }),
+  );
+}
+
+function hiddenOptionValue(typed) {
+  return {
+    value: { redacted: true, reason: "sensitive_native_data" },
+    kind: typed.kind,
   };
 }
 

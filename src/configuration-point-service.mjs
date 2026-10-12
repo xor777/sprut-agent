@@ -8,6 +8,7 @@ import {
 } from "./configuration-point-store.mjs";
 import {
   isRedactedNode,
+  isSensitiveNativeNode,
   parseEntityRef,
   SprutHubError,
 } from "./spruthub-client.mjs";
@@ -156,7 +157,7 @@ export class ConfigurationPointService {
         { next: { tool: "list_configuration_points", arguments: {} } },
       );
     }
-    const point = withRequestUrlsHidden(stored);
+    const point = withSecretOptionsHidden(withRequestUrlsHidden(stored));
     const entity = publicPointEntity(point, serial);
     if (!compare) return { status: "ok", entity };
     this.#requireClient();
@@ -488,6 +489,36 @@ function withRequestUrlsHidden(point) {
             ...configuration,
             value: withHiddenHttpUrls(configuration.value),
           },
+        },
+      };
+    }),
+  };
+}
+
+// A point holds window and logic options as get_entity showed them when it
+// was saved. An option hidden since then, such as a keypad passcode kept as
+// an ordinary NUMBER, is shown and compared hidden, as get_entity shows it
+// now.
+function withSecretOptionsHidden(point) {
+  return {
+    ...point,
+    captured: point.captured.map((captured) => {
+      const options = captured.settings?.options;
+      if (!isPlainObject(options)) return captured;
+      return {
+        ...captured,
+        settings: {
+          ...captured.settings,
+          options: Object.fromEntries(
+            Object.entries(options).map(([key, option]) => [
+              key,
+              isPlainObject(option) &&
+              !isHidden(option) &&
+              isSensitiveNativeNode({ ...option, key })
+                ? redactedMarker()
+                : option,
+            ]),
+          ),
         },
       };
     }),

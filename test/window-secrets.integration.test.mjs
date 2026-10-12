@@ -366,7 +366,7 @@ test("keys, pairing codes and login links in option windows reach no answer, whi
   });
   // NetworkKey, LinkKey, InstallCode, DeviceKey and CloudKey.
   assert.equal(hiddenCount(zigbee.options), 5);
-  assert.deepEqual(zigbeeOptions.selected, zigbee.options);
+  assert.deepEqual(zigbeeOptions.selection.value, zigbee.options);
   assert.deepEqual(shownOptions(homekit.options), {
     AutoAddNewAccessory: false,
     SetupId: "Q2K7",
