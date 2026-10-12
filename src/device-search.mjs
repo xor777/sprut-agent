@@ -122,7 +122,7 @@ export class DeviceSearches {
       timeZone,
       baseline,
     );
-    let status = "started";
+    let replyLost = false;
     try {
       await client.extensionAction(
         target.serial,
@@ -144,21 +144,32 @@ export class DeviceSearches {
         throw refusedByHub(error, target.ref, "start");
       }
       // The start may have reached the hub: what runs is read back below.
-      status = "unknown";
+      replyLost = true;
     }
     let view = await this.#readAfterWrite(search);
-    if (view.active === false && status === "started") {
+    if (view.active === false && !replyLost) {
       await this.#wake(START_CONFIRM_MS);
       view = await this.#readAfterWrite(search);
     }
-    if (view.active !== true) status = "unknown";
     // From now on a search not shown running has ended: a start that never
     // showed ends this watch as unknown, and a search that shows later is
     // found by start_device_search, not resent.
     search.startRead = true;
     if (view.active === false && !search.seenRunning) search.ended = "unknown";
     search.lastFingerprint = view.fingerprint;
-    return this.#startResult(search, view, status);
+    if (view.active === true && !replyLost) {
+      return this.#startResult(search, view, "started");
+    }
+    return {
+      ...this.#startResult(search, view, "unknown"),
+      message: `${replyLost ? "The hub did not answer the start" : "The hub acknowledged the start"}${
+        view.active === true
+          ? ", and the search shows as running."
+          : view.active === false
+            ? ", but the search does not show as running. Read the controller with get_entity before starting again."
+            : ", and the search could not be read back; get_device_search reads it again."
+      }`,
+    };
   }
 
   async #stop(search) {
@@ -401,14 +412,6 @@ export class DeviceSearches {
       ...(search.startedBeforeWatch
         ? {
             note: "The search was already running: devices that joined before this call are not counted as new.",
-          }
-        : {}),
-      ...(status === "unknown"
-        ? {
-            message:
-              view.active === true
-                ? "The hub did not confirm the start, but the search shows as running."
-                : "The hub did not confirm the start and the search does not show as running; get_device_search reads it again.",
           }
         : {}),
       ...(report.active !== false ? { owner_step: OWNER_STEP } : {}),
