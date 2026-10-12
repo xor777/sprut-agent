@@ -6170,6 +6170,7 @@ async function validateBlockData(
   const context = {
     kept,
     lostStoredNodes: edit === null ? new Set() : removedNodeForms(edit),
+    blockIdsAbove: edit === null ? new WeakSet() : nodesWithBlockIdsAbove(data),
     removedNodes: edit === null ? null : removedBlockNodes(edit),
     grownOrGroups: edit === null ? [] : grownOrGroups(data, edit),
     problems: [],
@@ -6818,17 +6819,39 @@ function reportUnknownFieldChanges(data, storedData, report) {
 // Unknown fields of an edited node must be those of the stored node it was
 // edited from, with the same values; a new node has none.
 // An edit keeps stored code or another node this contract cannot write only
-// under the stored node it pairs with. Without blockIds that pair is found
-// by content and may be another rule: the node is then refused as new while
-// the same stored node is removed with the rule it sits in. The agent is
-// told how to keep it.
+// under the stored node it pairs with. Without blockIds, on the node or on a
+// node above it, that pair is found by content and may be another rule: the
+// node is then refused as new while the same stored node is removed with
+// the rule it sits in. The agent is told how to keep it. With every blockId
+// kept the node was moved, and blockIds would not help: content alone does
+// not tell, since moved code is the same code.
 function storedNodeHint(node, context) {
   return isRecord(node) &&
     typeof node.type === "string" &&
-    !Number.isSafeInteger(node.blockId) &&
+    !context.blockIdsAbove.has(node) &&
     context.lostStoredNodes.has(stableJson(canonicalBlockNode(node)))
     ? "; the stored BLOCK has the same node in a part this edit removes: keep the blockIds get_entity returned, on it and on the nodes above it, so that the edit is matched to the stored nodes it came from and the node stays as stored"
     : "";
+}
+
+// The nodes of BLOCK data that carry a blockId, as do all nodes above them.
+function nodesWithBlockIdsAbove(data) {
+  const nodes = new WeakSet();
+  const visit = (value, chained) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, chained);
+      return;
+    }
+    if (!isRecord(value)) return;
+    let own = chained;
+    if (typeof value.type === "string") {
+      own = chained && Number.isSafeInteger(value.blockId);
+      if (own) nodes.add(value);
+    }
+    for (const child of Object.values(value)) visit(child, own);
+  };
+  visit(data, true);
+  return nodes;
 }
 
 // Every typed node of the stored subtrees an edit removes, in canonicalBlock
