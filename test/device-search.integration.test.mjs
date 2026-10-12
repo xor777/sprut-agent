@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, utimes } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1127,6 +1127,32 @@ test("a start the hub refuses is a rejection with nothing started", async (t) =>
   });
   assert.equal(started.status, "started");
   assert.equal(searchActions(hub).length, 2);
+});
+
+// The watch is written before the start is sent: a search the state
+// directory cannot keep would be lost to the owner's reply in the next
+// turn, so the network is not opened and the agent learns how to fix it.
+test("a start whose watch cannot be saved opens no network and says how to fix the state directory", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
+  await chmod(stateDirectory, 0o555);
+
+  const refused = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  assert.equal(refused.error.action, "restore_state_storage_then_retry");
+  assert.match(refused.error.message, /SPRUT_AGENT_STATE_DIR/);
+  assert(!JSON.stringify(refused).includes(stateDirectory), refused);
+  assert.deepEqual(searchActions(hub), []);
+
+  // Once the directory can be written, the same start opens the network.
+  await chmod(stateDirectory, 0o700);
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(started.status, "started");
+  assert.equal(searchActions(hub).length, 1);
 });
 
 test("a start whose reply is lost is unknown with the search state read back", async (t) => {
