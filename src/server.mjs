@@ -1132,7 +1132,10 @@ async function getHomeReads() {
 
 async function getDeviceSearches() {
   const client = await getHubClient();
-  deviceSearches ??= new DeviceSearches(client);
+  deviceSearches ??= new DeviceSearches({
+    client,
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+  });
   return deviceSearches;
 }
 

@@ -8,9 +8,11 @@
 // again as the truth and pushed events only wake that read.
 //
 // A search is not a configuration change: it has no restore, ends by
-// itself and waits for a person, so it is kept in this process only, not
-// in the change journal.
-import { randomUUID } from "node:crypto";
+// itself and waits for a person, so it is not in the change journal. Its
+// watch is kept in the state directory beside it (device-search-store.mjs),
+// so a server started anew for the owner's reply still knows it.
+import { createHash, randomUUID } from "node:crypto";
+import { DeviceSearchStore } from "./device-search-store.mjs";
 import { serviceKind } from "./home-reads.mjs";
 import {
   accessoryRef,
@@ -48,7 +50,8 @@ const EXPIRY_TOLERANCE_MS = 3_000;
 const ACCESSORY_GRACE_MS = 20_000;
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
-// Searches kept in this process.
+// Watches this process keeps in memory, so that its calls on one search
+// share it; the others are read again from the state directory.
 const SEARCH_LIMIT = 20;
 const SEARCH_REF_PART = "/device_search/";
 
@@ -57,34 +60,45 @@ const OWNER_STEP =
 
 export class DeviceSearches {
   #client;
+  #stateDirectory;
+  #stores = new Map();
   #searches = new Map();
   #locks = new Map();
 
-  constructor(client) {
+  constructor({ client, stateDirectory }) {
     this.#client = client;
+    this.#stateDirectory = stateDirectory;
   }
 
   async start({ extensionRef: ref, spaceKey = DEVICE_SEARCH_SPACE }) {
     const target = this.#target(ref);
-    return this.#exclusive(target.extensionKey, () =>
-      this.#start(target, spaceKey),
-    );
+    return this.#exclusive(target.extensionKey, async () => {
+      const { search, result } = await this.#start(target, spaceKey);
+      await this.#save(search);
+      return result;
+    });
   }
 
   async get(searchRef, waitSeconds = 0) {
-    const search = this.#search(searchRef);
+    const search = await this.#search(searchRef);
     const until = Date.now() + waitSeconds * 1_000;
     let view = await this.#read(search);
     while (Date.now() < until && !worthReturning(search, view)) {
       await this.#wake(Math.min(POLL_MS, until - Date.now()));
       view = await this.#read(search);
     }
-    return this.#report(search, view);
+    const report = this.#report(search, view);
+    await this.#save(search);
+    return report;
   }
 
   async stop(searchRef) {
-    const search = this.#search(searchRef);
-    return this.#exclusive(search.extensionKey, () => this.#stop(search));
+    const search = await this.#search(searchRef);
+    return this.#exclusive(search.extensionKey, async () => {
+      const report = await this.#stop(search);
+      await this.#save(search);
+      return report;
+    });
   }
 
   async #start(target, spaceKey) {
@@ -98,15 +112,18 @@ export class DeviceSearches {
     const action = searchActionOrRefuse(extension, spaceKey, target.ref);
     const timeZone = await client.hubTimeZone(target.serial, deadline);
     // The controller's latest watch goes on or has ended by now.
-    const current = this.#latest(target.extensionKey);
-    if (current) this.#updateState(current, extension);
+    const current = await this.#latest(target);
+    if (current) {
+      this.#updateState(current, extension);
+      await this.#save(current);
+    }
     if (action.state === true) {
       // A resend would restart the hub's timer and keep the network open
       // longer (P3), so a running search is only watched.
       const search =
         current && current.ended === null
           ? current
-          : this.#remember(
+          : await this.#remember(
               target,
               extension,
               action,
@@ -115,10 +132,13 @@ export class DeviceSearches {
             );
       const view = await this.#read(search);
       search.lastFingerprint = view.fingerprint;
-      return this.#startResult(search, view, "already_running");
+      return {
+        search,
+        result: this.#startResult(search, view, "already_running"),
+      };
     }
 
-    const search = this.#remember(
+    const search = await this.#remember(
       target,
       extension,
       action,
@@ -139,11 +159,11 @@ export class DeviceSearches {
       );
     } catch (error) {
       if (!(error instanceof SprutHubError) || !error.requestSent) {
-        this.#forget(search);
+        await this.#forget(search);
         throw error;
       }
       if (error.hubError !== undefined) {
-        this.#forget(search);
+        await this.#forget(search);
         throw refusedByHub(error, target.ref, "start");
       }
       // The start may have reached the hub: what runs is read back below.
@@ -163,17 +183,20 @@ export class DeviceSearches {
     }
     search.lastFingerprint = view.fingerprint;
     if (view.active === true && !replyLost) {
-      return this.#startResult(search, view, "started");
+      return { search, result: this.#startResult(search, view, "started") };
     }
     return {
-      ...this.#startResult(search, view, "unknown"),
-      message: `${replyLost ? "The hub did not answer the start" : "The hub acknowledged the start"}${
-        view.active === true
-          ? ", and the search shows as running."
-          : view.active === false
-            ? ", but the search does not show as running. Read the controller with get_entity before starting again."
-            : ", and the search could not be read back; get_device_search reads it again."
-      }`,
+      search,
+      result: {
+        ...this.#startResult(search, view, "unknown"),
+        message: `${replyLost ? "The hub did not answer the start" : "The hub acknowledged the start"}${
+          view.active === true
+            ? ", and the search shows as running."
+            : view.active === false
+              ? ", but the search does not show as running. Read the controller with get_entity before starting again."
+              : ", and the search could not be read back; get_device_search reads it again."
+        }`,
+      },
     };
   }
 
@@ -281,14 +304,18 @@ export class DeviceSearches {
       changedTotal: changed.length,
     };
     view.result = searchResult(search, view);
-    view.fingerprint = JSON.stringify([
-      active,
-      search.endsAt,
-      search.ended,
-      view.result,
-      newDevices,
-      changedDevices,
-    ]);
+    view.fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify([
+          active,
+          search.endsAt,
+          search.ended,
+          view.result,
+          newDevices,
+          changedDevices,
+        ]),
+      )
+      .digest("hex");
     return view;
   }
 
@@ -591,7 +618,7 @@ export class DeviceSearches {
     };
   }
 
-  #remember(target, extension, action, timeZone, baseline) {
+  async #remember(target, extension, action, timeZone, baseline) {
     const search = {
       ref: `${target.ref}${SEARCH_REF_PART}${randomUUID()}`,
       serial: target.serial,
@@ -602,6 +629,7 @@ export class DeviceSearches {
       actionId: action.id,
       actionLabel: typeof action.button === "string" ? action.button : null,
       timeZone,
+      startedAt: Date.now(),
       baseline: new Map(baseline.devices.map((child) => [child.id, child])),
       startedBeforeWatch: baseline.startedBeforeWatch,
       newSeen: false,
@@ -616,28 +644,82 @@ export class DeviceSearches {
       rooms: new Map(),
       lastFingerprint: null,
     };
+    // Kept before the start is sent: a start whose watch cannot be kept is
+    // not sent.
+    await this.#store(target.serial).prune();
+    await this.#save(search);
+    this.#keep(search);
+    return search;
+  }
+
+  async #forget(search) {
+    this.#searches.delete(search.ref);
+    await this.#store(search.serial).delete(searchId(search.ref));
+  }
+
+  #keep(search) {
+    this.#searches.delete(search.ref);
     this.#searches.set(search.ref, search);
     while (this.#searches.size > SEARCH_LIMIT) {
       this.#searches.delete(this.#searches.keys().next().value);
     }
+  }
+
+  async #save(search) {
+    await this.#store(search.serial).save(
+      searchId(search.ref),
+      storedWatch(search),
+    );
+  }
+
+  #store(serial) {
+    let store = this.#stores.get(serial);
+    if (!store) {
+      store = new DeviceSearchStore({
+        directory: this.#stateDirectory,
+        hubUrl: this.#client.url,
+        hubSerial: serial,
+      });
+      this.#stores.set(serial, store);
+    }
+    return store;
+  }
+
+  // The controller's most recently started watch, from this process or an
+  // earlier one.
+  async #latest(target) {
+    let latest = null;
+    for (const watch of await this.#store(target.serial).list()) {
+      if (
+        watch.extension_key === target.extensionKey &&
+        (latest === null || watch.started_at > latest.started_at)
+      ) {
+        latest = watch;
+      }
+    }
+    for (const search of this.#searches.values()) {
+      if (
+        search.extensionKey === target.extensionKey &&
+        (latest === null || search.startedAt > latest.started_at)
+      ) {
+        latest = { ref: search.ref, started_at: search.startedAt };
+      }
+    }
+    return latest === null ? null : this.#load(target.serial, latest);
+  }
+
+  // The watch of a kept record; the one this process holds, if any.
+  #load(serial, watch) {
+    const held = this.#searches.get(watch.ref);
+    if (held) return held;
+    const search = loadedWatch(serial, watch);
+    this.#keep(search);
     return search;
   }
 
-  #forget(search) {
-    this.#searches.delete(search.ref);
-  }
-
-  #latest(extensionKey) {
-    let latest = null;
-    for (const search of this.#searches.values()) {
-      if (search.extensionKey === extensionKey) latest = search;
-    }
-    return latest;
-  }
-
-  #search(searchRef) {
-    const search = this.#searches.get(searchRef);
-    if (search) return search;
+  async #search(searchRef) {
+    const held = this.#searches.get(searchRef);
+    if (held) return held;
     const at = searchRef.lastIndexOf(SEARCH_REF_PART);
     let controller = null;
     try {
@@ -648,9 +730,14 @@ export class DeviceSearches {
     } catch {
       controller = null;
     }
+    if (controller !== null) {
+      const serial = this.#client.selectedSerial();
+      const watch = await this.#store(serial).get(searchId(searchRef));
+      if (watch?.ref === searchRef) return this.#load(serial, watch);
+    }
     throw new SprutHubError(
       "device_search_not_found",
-      "This MCP process does not know this search, for example after a restart. Read the controller to see whether its search still runs; start_device_search returns a running search without restarting it.",
+      "No device search with this ref is kept: it was not started by this product, or it is older than 3 days. Read the controller to see whether its search runs; start_device_search returns a running search without restarting it.",
       controller ? "get_entity" : "home_overview",
       {
         next: controller
@@ -711,6 +798,84 @@ function childState(child) {
     optionsWindow:
       typeof child.optionsWindow === "string" ? child.optionsWindow : "",
   };
+}
+
+// The watch as kept in the state directory: what a later process needs to
+// go on comparing the controller's devices and judging its search. Names of
+// the devices before are not kept; reports take them from the hub.
+function storedWatch(search) {
+  return {
+    ref: search.ref,
+    extension_key: search.extensionKey,
+    extension_name: search.extensionName,
+    space_key: search.spaceKey,
+    action_id: search.actionId,
+    action_label: search.actionLabel,
+    time_zone: search.timeZone,
+    started_at: search.startedAt,
+    started_before_watch: search.startedBeforeWatch,
+    baseline: [...search.baseline.values()].map((child) => ({
+      id: child.id,
+      space_key: child.spaceKey,
+      online: child.online,
+      status: child.status,
+      progress: child.progress,
+      error: child.error,
+    })),
+    new_seen: search.newSeen,
+    active: search.active,
+    seen_running: search.seenRunning,
+    start_read: search.startRead,
+    ends_at: search.endsAt,
+    ended: search.ended,
+    ended_at: search.endedAt,
+    stop_sent: search.stopSent,
+    last_fingerprint: search.lastFingerprint,
+  };
+}
+
+function loadedWatch(serial, watch) {
+  return {
+    ref: watch.ref,
+    serial,
+    extensionKey: watch.extension_key,
+    extensionRef: extensionRef(serial, watch.extension_key),
+    extensionName: watch.extension_name,
+    spaceKey: watch.space_key,
+    actionId: watch.action_id,
+    actionLabel: watch.action_label,
+    timeZone: watch.time_zone,
+    startedAt: watch.started_at,
+    baseline: new Map(
+      watch.baseline.map((child) => [
+        child.id,
+        {
+          id: child.id,
+          spaceKey: child.space_key,
+          online: child.online,
+          status: child.status,
+          progress: child.progress,
+          error: child.error,
+        },
+      ]),
+    ),
+    startedBeforeWatch: watch.started_before_watch,
+    newSeen: watch.new_seen,
+    active: watch.active,
+    seenRunning: watch.seen_running,
+    startRead: watch.start_read,
+    endsAt: watch.ends_at,
+    ended: watch.ended,
+    endedAt: watch.ended_at,
+    stopSent: watch.stop_sent,
+    linked: new Map(),
+    rooms: new Map(),
+    lastFingerprint: watch.last_fingerprint,
+  };
+}
+
+function searchId(ref) {
+  return ref.slice(ref.lastIndexOf(SEARCH_REF_PART) + SEARCH_REF_PART.length);
 }
 
 function publicChild(search, child) {
