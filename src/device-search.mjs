@@ -46,9 +46,6 @@ const START_CONFIRM_MS = 1_000;
 const EXPIRY_TOLERANCE_MS = 3_000;
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
-// Watches this process keeps in memory, so that its calls on one search
-// share it; the others are read again from the state directory.
-const SEARCH_LIMIT = 20;
 const SEARCH_REF_PART = "/device_search/";
 
 const OWNER_STEP =
@@ -58,7 +55,7 @@ export class DeviceSearches {
   #client;
   #stateDirectory;
   #stores = new Map();
-  #searches = new Map();
+  #inUse = new Map();
   #locks = new Map();
 
   constructor({ client, stateDirectory }) {
@@ -69,35 +66,59 @@ export class DeviceSearches {
   async start({ extensionRef: ref, spaceKey = DEVICE_SEARCH_SPACE }) {
     const target = this.#target(ref);
     return this.#exclusive(target.extensionKey, async () => {
-      const { search, result } = await this.#start(target, spaceKey);
-      await this.#save(search);
-      return result;
+      const begin = async (current) => {
+        const { search, result } = await this.#start(target, spaceKey, current);
+        await this.#save(search);
+        return result;
+      };
+      // Watches not written for days go first, so none of them is taken
+      // for the controller's latest.
+      await this.#store(target.serial).prune();
+      const latest = await this.#latest(target);
+      return latest === null
+        ? begin(null)
+        : this.#using(
+            latest.ref,
+            async () => loadedWatch(target.serial, latest),
+            begin,
+          );
     });
   }
 
   async get(searchRef, waitSeconds = 0) {
-    const search = await this.#search(searchRef);
-    const until = Date.now() + waitSeconds * 1_000;
-    let view = await this.#read(search);
-    while (Date.now() < until && !worthReturning(search, view)) {
-      await this.#wake(Math.min(POLL_MS, until - Date.now()));
-      view = await this.#read(search);
-    }
-    const report = this.#report(search, view);
-    await this.#save(search);
-    return report;
+    return this.#using(
+      searchRef,
+      () => this.#find(searchRef),
+      async (search) => {
+        const until = Date.now() + waitSeconds * 1_000;
+        let view = await this.#read(search);
+        while (Date.now() < until && !worthReturning(search, view)) {
+          await this.#wake(Math.min(POLL_MS, until - Date.now()));
+          view = await this.#read(search);
+        }
+        const report = this.#report(search, view);
+        await this.#save(search);
+        return report;
+      },
+    );
   }
 
   async stop(searchRef) {
-    const search = await this.#search(searchRef);
-    return this.#exclusive(search.extensionKey, async () => {
-      const report = await this.#stop(search);
-      await this.#save(search);
-      return report;
-    });
+    return this.#using(
+      searchRef,
+      () => this.#find(searchRef),
+      (search) =>
+        this.#exclusive(search.extensionKey, async () => {
+          const report = await this.#stop(search);
+          await this.#save(search);
+          return report;
+        }),
+    );
   }
 
-  async #start(target, spaceKey) {
+  // current: the controller's latest watch, which goes on or has ended by
+  // now.
+  async #start(target, spaceKey, current) {
     const client = this.#client;
     const deadline = Date.now() + client.timeoutMs;
     const { extension } = await client.nativeExtension(
@@ -107,8 +128,6 @@ export class DeviceSearches {
     );
     const action = searchActionOrRefuse(extension, spaceKey, target.ref);
     const timeZone = await client.hubTimeZone(target.serial, deadline);
-    // The controller's latest watch goes on or has ended by now.
-    const current = await this.#latest(target);
     if (current) {
       this.#updateState(current, extension);
       await this.#save(current);
@@ -643,23 +662,12 @@ export class DeviceSearches {
     };
     // Kept before the start is sent: a start whose watch cannot be kept is
     // not sent.
-    await this.#store(target.serial).prune();
     await this.#save(search);
-    this.#keep(search);
     return search;
   }
 
   async #forget(search) {
-    this.#searches.delete(search.ref);
     await this.#store(search.serial).delete(searchId(search.ref));
-  }
-
-  #keep(search) {
-    this.#searches.delete(search.ref);
-    this.#searches.set(search.ref, search);
-    while (this.#searches.size > SEARCH_LIMIT) {
-      this.#searches.delete(this.#searches.keys().next().value);
-    }
   }
 
   async #save(search) {
@@ -682,8 +690,8 @@ export class DeviceSearches {
     return store;
   }
 
-  // The controller's most recently started watch, from this process or an
-  // earlier one.
+  // The kept record of the controller's most recently started watch, by
+  // this process or an earlier one.
   async #latest(target) {
     let latest = null;
     for (const watch of await this.#store(target.serial).list()) {
@@ -694,29 +702,29 @@ export class DeviceSearches {
         latest = watch;
       }
     }
-    for (const search of this.#searches.values()) {
-      if (
-        search.extensionKey === target.extensionKey &&
-        (latest === null || search.startedAt > latest.started_at)
-      ) {
-        latest = { ref: search.ref, started_at: search.startedAt };
-      }
+    return latest;
+  }
+
+  // Runs use with the watch of ref. Calls of this process that use one
+  // watch at the same time share it, so a wait sees a stop beside it;
+  // between calls the state directory holds it.
+  async #using(ref, load, use) {
+    let entry = this.#inUse.get(ref);
+    if (!entry) {
+      entry = { search: load(), calls: 0 };
+      this.#inUse.set(ref, entry);
     }
-    return latest === null ? null : this.#load(target.serial, latest);
+    entry.calls += 1;
+    try {
+      return await use(await entry.search);
+    } finally {
+      entry.calls -= 1;
+      if (entry.calls === 0) this.#inUse.delete(ref);
+    }
   }
 
-  // The watch of a kept record; the one this process holds, if any.
-  #load(serial, watch) {
-    const held = this.#searches.get(watch.ref);
-    if (held) return held;
-    const search = loadedWatch(serial, watch);
-    this.#keep(search);
-    return search;
-  }
-
-  async #search(searchRef) {
-    const held = this.#searches.get(searchRef);
-    if (held) return held;
+  // The kept watch of a search ref, or the error that it is unknown.
+  async #find(searchRef) {
     const at = searchRef.lastIndexOf(SEARCH_REF_PART);
     let controller = null;
     try {
@@ -730,7 +738,7 @@ export class DeviceSearches {
     if (controller !== null) {
       const serial = this.#client.selectedSerial();
       const watch = await this.#store(serial).get(searchId(searchRef));
-      if (watch?.ref === searchRef) return this.#load(serial, watch);
+      if (watch?.ref === searchRef) return loadedWatch(serial, watch);
     }
     throw new SprutHubError(
       "device_search_not_found",
