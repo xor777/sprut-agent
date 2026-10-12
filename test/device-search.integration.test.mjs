@@ -490,6 +490,33 @@ test("a search is refused for a controller that cannot search, a stopped one and
   assert.deepEqual(searchActions(hub), []);
 });
 
+test("a start the hub refuses is a rejection with nothing started", async (t) => {
+  const { hub, client } = await setup(t, await apartment());
+  hub.refuseNext("extension.action", {
+    code: -32603,
+    message: "Controller is busy",
+  });
+
+  const refused = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(refused.error.code, "request_rejected");
+  assert.equal(refused.hub_effect, "not_applied");
+  assert.equal(refused.rejection.hub_message, "Controller is busy");
+  assert.deepEqual(refused.next, {
+    tool: "get_entity",
+    arguments: { entity_ref: zigbeeRef },
+  });
+  assert.equal(searchActions(hub).length, 1);
+
+  // The next start is an ordinary start, not a watch of the refused one.
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(started.status, "started");
+  assert.equal(searchActions(hub).length, 2);
+});
+
 test("a start whose reply is lost is unknown with the search state read back", async (t) => {
   const { hub, client } = await setup(
     t,
