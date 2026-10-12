@@ -209,6 +209,11 @@ export class AutomationService {
   }
 
   async prepareNativeChange(input) {
+    // Text with the redaction mark is refused here; a value carrying it, with
+    // the value's contract (validateCharacteristicValue).
+    for (const field of ["name", "description", "source"]) {
+      refuseRedactionMark(input[field], field);
+    }
     const valueKind = nativeValueKind(input.operation);
     if (valueKind) {
       return this.#prepareValueChange(valueKind, input);
@@ -2272,6 +2277,7 @@ export class AutomationService {
           last_verification: freshVerification("baseline_absent_missing"),
         });
       }
+      refuseRedactedChangeTexts(change);
       await this.#validateVirtualLightPreparation(change);
       await this.#validatePhysicalLinkBaselines(change);
       await this.#persistVirtualLightStep(change, "creating_accessory");
@@ -4011,6 +4017,9 @@ export class AutomationService {
   }
 
   async #persistNativeIntent(change, status, direction) {
+    // Every apply write but a virtual light group's records its intent here
+    // first; a change prepared by an earlier version may carry the mark.
+    if (direction === "apply") refuseRedactedChangeTexts(change);
     const now = new Date().toISOString();
     Object.assign(change, {
       status,
@@ -4992,6 +5001,9 @@ export class AutomationService {
   }
 
   async previewBooleanAutomation(input) {
+    // The scenario is created with this name and the reason as its Desc.
+    refuseRedactionMark(input.name, "name");
+    refuseRedactionMark(input.reason, "reason");
     const source = parseCharacteristicRef(
       input.source_characteristic_ref,
       this.hubSerial,
@@ -7874,6 +7886,40 @@ function validateBlockNode(node, kind, path, context) {
 // get_entity may carry it; it is never the owner's text or URL.
 const REDACTED_MARK = "[REDACTED]";
 
+// Text with the mark that an agent writes is a copy of an answer, as a
+// scenario Desc with a camera link read as [REDACTED]: written, it would
+// replace the owner's name, description, value or source on the hub for
+// good. BLOCK data has its own rules (validateBlockNode,
+// restoreHiddenBlockStrings).
+function refuseRedactionMark(text, field) {
+  if (typeof text !== "string" || !text.includes(REDACTED_MARK)) return;
+  throw new SprutHubError(
+    "invalid_native_value",
+    `The ${field} contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; it is not the owner's text, and writing it would replace the stored text with the mark. Ask the owner for the full new ${field} and send it without ${REDACTED_MARK}.`,
+  );
+}
+
+// The names, descriptions and LOGIC source a prepared change writes; its
+// scalar value is checked again by validateCharacteristicValue.
+function refuseRedactedChangeTexts(change) {
+  const requested = change.requested_snapshot;
+  const texts = {
+    accessory_placement: { name: requested?.name },
+    room_create: { name: change.requested_name },
+    virtual_light_group: { name: change.create_request?.name },
+    block_create: { name: requested?.name, description: requested?.desc },
+    logic_source_create: {
+      name: requested?.name,
+      description: requested?.desc,
+      source: requested?.data,
+    },
+    logic_source_update: { source: requested?.data },
+  }[change.kind];
+  for (const [field, text] of Object.entries(texts ?? {})) {
+    refuseRedactionMark(text, field);
+  }
+}
+
 // The characteristic a from action copies, as the web client writes it: the
 // source's ids and types in from_* fields and value "" or none (the hub
 // stores it without value), since the value comes from the source when the
@@ -8892,6 +8938,7 @@ function typedNativeValue(value) {
 }
 
 function validateCharacteristicValue(value, contract) {
+  refuseRedactionMark(value, "value");
   const validated = validateNativeScalarValue(value, contract);
   if (!validated.valid) {
     throw new SprutHubError("invalid_native_value", validated.message);
