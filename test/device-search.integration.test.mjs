@@ -501,6 +501,30 @@ test("a search that ends with nothing new says so and offers a new start", async
   assert.equal(searchActions(hub).length, 1);
 });
 
+// An agent whose messages reach the owner only after its turn ends starts
+// the search, ends the turn and reads it when the owner replies, after the
+// network has closed: the device that joined meanwhile is still reported.
+test("a device that joined while nobody read the search is reported after it ended", async (t) => {
+  const { client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500, pairing: [leakSensor()] }),
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+  const report = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(report.status, "ended");
+  assert.equal(report.ended, "expired");
+  assert.equal(report.result, "joined");
+  assert.equal(report.new_devices[0].ref, sensorChildRef);
+  assert.equal(report.new_devices[0].accessories[0].ref, sensorRef);
+});
+
 // Two starts of one controller at once (two agent turns, a retry beside
 // the first call) open the network once: a second start would restart the
 // hub's timer (P3).

@@ -53,7 +53,7 @@ const SEARCH_LIMIT = 20;
 const SEARCH_REF_PART = "/device_search/";
 
 const OWNER_STEP =
-  "Tell the owner to put the new device into pairing mode now, as its manufacturer describes, close to the hub. Until ends_at the network is open: any device in pairing mode within range can join, not only the owner's. Then call next to wait for the hub to report the device.";
+  "Tell the owner to put the new device into pairing mode now, as its manufacturer describes, close to the hub. Until ends_at the network is open: any device in pairing mode within range can join, not only the owner's. Then call next to wait for the hub to report the device. If the owner sees your messages only after your turn ends, tell them to put the device into pairing mode now, end the turn, and call get_device_search when they reply: a device that joined is still reported after the search ended.";
 
 export class DeviceSearches {
   #client;
