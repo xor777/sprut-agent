@@ -177,7 +177,7 @@ export class DeviceSearches {
     // found by start_device_search, not resent.
     search.startRead = true;
     if (view.active === false && !search.seenRunning) {
-      endWatch(search, "unknown");
+      search.ended = "unknown";
     }
     search.lastFingerprint = view.fingerprint;
     if (view.active === true && !replyLost) {
@@ -360,7 +360,7 @@ export class DeviceSearches {
         Date.now() >= search.endsAt
       ) {
         search.active = false;
-        endWatch(search, "expired");
+        search.ended = "expired";
         return;
       }
       search.active = true;
@@ -373,15 +373,12 @@ export class DeviceSearches {
     if (!search.seenRunning && !search.stopSent && !search.startRead) return;
     // Once the search is seen ended it stays so: a later run is watched by
     // another search (start_device_search).
-    endWatch(
-      search,
-      search.stopSent
-        ? "stopped"
-        : search.endsAt !== null &&
-            Date.now() >= search.endsAt - EXPIRY_TOLERANCE_MS
-          ? "expired"
-          : "unknown",
-    );
+    search.ended = search.stopSent
+      ? "stopped"
+      : search.endsAt !== null &&
+          Date.now() >= search.endsAt - EXPIRY_TOLERANCE_MS
+        ? "expired"
+        : "unknown";
   }
 
   // A new device with the accessories its window links, read fresh so a
@@ -959,11 +956,6 @@ function isDeviceReadFailure(error) {
     isHubReadFailure(error) ||
     (error instanceof SprutHubError && error.code === "incompatible_response")
   );
-}
-
-// Marks the watch ended (stopped, expired or unknown) from now on.
-function endWatch(search, how) {
-  search.ended = how;
 }
 
 // What the search has brought, summed up over its new devices: waiting
