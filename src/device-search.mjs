@@ -340,8 +340,8 @@ export class DeviceSearches {
     search.active = false;
     // A start not shown yet is not an end while #start reads it back.
     if (!search.seenRunning && !search.stopSent && !search.startRead) return;
-    // Once the search is seen ended it stays so: a later run is another
-    // search with its own baseline.
+    // Once the search is seen ended it stays so: a later run is watched by
+    // another search (start_device_search).
     endWatch(
       search,
       search.stopSent
