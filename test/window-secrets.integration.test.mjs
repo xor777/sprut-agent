@@ -740,3 +740,207 @@ test("text carrying [REDACTED] from an answer is never written over the owner's 
   assert.equal(scenario("3").desc, "Летний режим");
   assert.deepEqual(leakedSecrets(answers, { cameraKey }), []);
 });
+
+// Secrets that reach answers as free text or under names the first rule
+// missed (review of c8c3784, 2026-10-12). The text shapes are those of the
+// hub's own values: the HomeKit setup payload behind the bridge's QR code,
+// the access point's Wi-Fi QR, a user's login link, which the web client
+// also gives without its host, and a key under a label in device HTML. The
+// names are those of ZigBee device windows (a cluster attribute path such
+// as /1/0101_DoorLock/0005_PinCode/255), of extension settings and of
+// zigbee2mqtt-style configs, where a network key is a list of decimal
+// bytes. Every value is made up.
+const LOCK_WINDOW = "Controller/zigbee/Child/00158d0001d0e1f2/";
+const SETUP_PAYLOAD = "X-HM://0026PZ9ERM8T4";
+const WIFI_PASSWORD = "dacha-pass-2026";
+const RELATIVE_LOGIN_CODE = "Qm7tR2xV9pLk3Ws8Zb1N";
+const LABELLED_INSTALL_CODE = "6D2F04A19B83E75C0D4A6E91B2C8F357A1D0";
+const BYTE_KEY = "[1, 3, 5, 7, 9, 11, 13, 15, 0, 2, 4, 6, 8, 10, 12, 13]";
+const LOCK_SECRETS = {
+  "/1/0101_DoorLock/0005_PinCode/255": "pin-code-7391",
+  "Zigbee/NetworkKey": "net-key-73a9",
+  "zigbee.networkKey": "net-key-41b2",
+  "wifi.passphrase": "correct horse dacha",
+  Pin: "pin-4826-x",
+  AdminPin: "admin-pin-1357",
+  UserCode: "user-code-2468",
+  MqttPass: "mqtt-pw-8812",
+  wifiPass: "wifi-pw-5531",
+  ApPass: "ap-pw-7720",
+  WpaKey: "wpa-k-1188",
+  WEPKey: "wep-k-3344",
+  LocalKey: "lk-9a8b7c",
+  Cookie: "SID-7f3k-cookie",
+  Session: "sess-55aa-token",
+  Key: "k-1234-key",
+  TransportKey: "79,27,113,4,200,17,9,64,250,33,18,77,5,140,91,6",
+};
+
+function lockWindow() {
+  return {
+    windowKey: LOCK_WINDOW,
+    label: { text: "Замок" },
+    options: [
+      ...Object.entries(LOCK_SECRETS).map(([key, value]) =>
+        text(key, key, value),
+      ),
+      // Look-alikes of the names above that are ordinary settings.
+      option(
+        "SessionTimeout",
+        "Таймаут сессии, мин",
+        "GenericInteger",
+        "NUMBER",
+        { intValue: 30 },
+        { minValue: 1, maxValue: 120, minStep: 1 },
+      ),
+      option(
+        "ResetPin",
+        "Вывод сброса",
+        "GenericInteger",
+        "NUMBER",
+        { intValue: 4 },
+        { minValue: 0, maxValue: 39, minStep: 1 },
+      ),
+      option("PassThrough", "Транзит", "GenericBoolean", "CHECKBOX", {
+        boolValue: false,
+      }),
+      option(
+        "KeyRepeatDelay",
+        "Повтор кнопки, мс",
+        "GenericInteger",
+        "NUMBER",
+        { intValue: 250 },
+        { minValue: 0, maxValue: 1000, minStep: 10 },
+      ),
+      text("ChannelMask", "Каналы", "11, 15, 20, 25"),
+    ],
+  };
+}
+
+test("setup payloads, Wi-Fi QR, relative login links, labelled keys and keys under path, dotted or short names reach no answer, while look-alikes stay", async (t) => {
+  const { hub, answers, ok } = await setup(t);
+  hub.state.windows[LOCK_WINDOW] = lockWindow();
+  const wifiQr = `WIFI:S:dacha-ap;T:WPA;P:${WIFI_PASSWORD};H:false;;`;
+  const relativeLogin = `/user/login?code=${RELATIVE_LOGIN_CODE}`;
+  const ieee = "IEEE: 00:12:4b:00:24:c1:a2:b3";
+  hub.state.windows[""].options.push(
+    option("homekit_html", "HomeKit", "GenericString", "HTML", {
+      stringValue: `<p>Код для HomeKit: <b>${SETUP_PAYLOAD}</b></p>`,
+    }),
+    option("ap_info", "Точка доступа", "GenericString", "INFO", {
+      stringValue: `Точка доступа: ${wifiQr}`,
+    }),
+    option("user_1_url", "Ссылка входа", "GenericString", "HTML", {
+      stringValue: `<a href="${relativeLogin}">Войти</a>`,
+    }),
+    option("zigbee_html", "ZigBee", "GenericString", "HTML", {
+      stringValue: `<b>Install code</b>: ${LABELLED_INSTALL_CODE}`,
+    }),
+    option("network_html", "Сеть", "GenericString", "HTML", {
+      stringValue: `<b>Ключ сети</b>: ${BYTE_KEY}`,
+    }),
+    option("radio_html", "Радио", "GenericString", "HTML", {
+      stringValue: `<b>IEEE</b>: 00:12:4b:00:24:c1:a2:b3<br><b>Network key</b>: изменён 12.10`,
+    }),
+    option("links_info", "Ссылки", "GenericString", "INFO", {
+      stringValue: "Профиль: /user/profile?tab=main; WIFI: подключено",
+    }),
+    status("BridgeStatus", "Мост", `Ожидает сопряжения: ${SETUP_PAYLOAD}`),
+    status("ApStatus", "Точка доступа", wifiQr),
+    status("LastLogin", "Последний вход", relativeLogin),
+    status("RadioInfo", "Радио", `Install code: ${LABELLED_INSTALL_CODE}`),
+    status("RadioIds", "Адреса", ieee),
+  );
+  const logLines = {
+    "Test.HomeKit": `HomeKit: setup payload ${SETUP_PAYLOAD}`,
+    "Test.Ap": `AP ready: ${wifiQr}`,
+    "Test.Login": `Login link ${relativeLogin} issued`,
+    "Test.Install": `<b>Install code</b>: ${LABELLED_INSTALL_CODE}`,
+    "Test.Mqtt": `MQTT config: mqttPass=${LOCK_SECRETS.MqttPass}`,
+    "Test.Lock": `Lock: adminPin: ${LOCK_SECRETS.AdminPin}`,
+    "Test.Zigbee": `{"zigbee.networkKey": "${LOCK_SECRETS["zigbee.networkKey"]}"}`,
+    "Test.Ieee": ieee,
+    "Test.Profile": "Open /user/profile?tab=main",
+  };
+  for (const [logPath, message] of Object.entries(logLines)) {
+    hub.state.log.push({
+      time: Date.now(),
+      level: "LOG_LEVEL_INFO",
+      path: logPath,
+      message,
+    });
+  }
+
+  await ok("home_overview", {});
+  const lock = (await ok("get_entity", { entity_ref: windowRef(LOCK_WINDOW) }))
+    .entity;
+  const settings = (
+    await ok("get_entity", {
+      entity_ref: settingsWindowRef,
+      include: ["diagnostics"],
+      max_bytes: 32_768,
+    })
+  ).entity;
+  const log = await ok("read_hub_log", { home_ref: homeRef, limit: 50 });
+
+  assert.deepEqual(
+    leakedSecrets(answers, {
+      SETUP_PAYLOAD,
+      WIFI_PASSWORD,
+      RELATIVE_LOGIN_CODE,
+      LABELLED_INSTALL_CODE,
+      BYTE_KEY,
+      ...LOCK_SECRETS,
+    }),
+    [],
+  );
+  assert.deepEqual(shownOptions(lock.options), {
+    SessionTimeout: 30,
+    ResetPin: 4,
+    PassThrough: false,
+    KeyRepeatDelay: 250,
+    ChannelMask: "11, 15, 20, 25",
+  });
+  assert.equal(hiddenCount(lock.options), Object.keys(LOCK_SECRETS).length);
+  const diagnostics = Object.fromEntries(
+    settings.diagnostics.map(({ key, text: shown }) => [key, shown]),
+  );
+  for (const key of [
+    "homekit_html",
+    "ap_info",
+    "user_1_url",
+    "zigbee_html",
+    "network_html",
+  ]) {
+    assert.equal(diagnostics[key], "[REDACTED]", key);
+  }
+  assert.equal(
+    diagnostics.radio_html,
+    "<b>IEEE</b>: 00:12:4b:00:24:c1:a2:b3<br><b>Network key</b>: изменён 12.10",
+  );
+  assert.equal(
+    diagnostics.links_info,
+    "Профиль: /user/profile?tab=main; WIFI: подключено",
+  );
+  const settingsShown = shownOptions(settings.options);
+  for (const key of ["BridgeStatus", "ApStatus", "LastLogin", "RadioInfo"]) {
+    assert.equal(settingsShown[key], "[REDACTED]", key);
+  }
+  assert.equal(settingsShown.RadioIds, ieee);
+  const messages = Object.fromEntries(
+    log.entries
+      .filter(({ path: logPath }) => logPath.startsWith("Test."))
+      .map(({ path: logPath, message }) => [logPath, message]),
+  );
+  assert.deepEqual(messages, {
+    "Test.HomeKit": "[REDACTED]",
+    "Test.Ap": "[REDACTED]",
+    "Test.Login": "[REDACTED]",
+    "Test.Install": "[REDACTED]",
+    "Test.Mqtt": "[REDACTED]",
+    "Test.Lock": "[REDACTED]",
+    "Test.Zigbee": "[REDACTED]",
+    "Test.Ieee": ieee,
+    "Test.Profile": "Open /user/profile?tab=main",
+  });
+});
