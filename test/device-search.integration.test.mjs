@@ -74,31 +74,42 @@ async function apartment({ pairing = [], discoveryTimeMs } = {}) {
   };
 }
 
+// A simulated hub and an MCP server for it with a temporary state
+// directory. connect() starts another server process on the same hub and
+// state directory, as a client that starts the server anew each turn.
 async function setup(t, fixture, hubOptions = {}) {
   const hub = await startSimulatedHub(fixture, hubOptions);
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-device-search-"),
   );
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["src/server.mjs"],
-    cwd: projectRoot,
-    env: {
-      PATH: process.env.PATH,
-      ...hub.connectionEnv(),
-      SPRUTHUB_TIMEOUT_MS: "2000",
-      SPRUT_AGENT_STATE_DIR: stateDirectory,
-    },
-    stderr: "pipe",
-  });
-  const client = new Client({ name: "device-search-test", version: "1.0.0" });
-  await client.connect(transport);
+  const clients = [];
   t.after(async () => {
-    await client.close();
+    for (const client of clients) await client.close();
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  const connect = async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/server.mjs"],
+      cwd: projectRoot,
+      env: {
+        PATH: process.env.PATH,
+        ...hub.connectionEnv(),
+        SPRUTHUB_TIMEOUT_MS: "2000",
+        SPRUT_AGENT_STATE_DIR: stateDirectory,
+      },
+      stderr: "pipe",
+    });
+    const client = new Client({
+      name: "device-search-test",
+      version: "1.0.0",
+    });
+    clients.push(client);
+    await client.connect(transport);
+    return client;
+  };
+  return { hub, client: await connect(), connect, stateDirectory };
 }
 
 async function call(client, name, args) {
@@ -523,6 +534,57 @@ test("a device that joined while nobody read the search is reported after it end
   assert.equal(report.result, "joined");
   assert.equal(report.new_devices[0].ref, sensorChildRef);
   assert.equal(report.new_devices[0].accessories[0].ref, sensorRef);
+});
+
+// A client that starts the MCP server anew each turn (Claude Code -p
+// --resume, chat bot gateways): the agent starts the search and ends its
+// turn with the owner's step; the sensor joins while no server runs; the
+// owner's reply reaches a new server process.
+test("a search survives an MCP server restart between its start and the owner's reply", async (t) => {
+  const { hub, client, connect } = await setup(
+    t,
+    await apartment({ pairing: [leakSensor({ joinAfterMs: 1_500 })] }),
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(started.status, "started");
+  await client.close();
+  await accessoryCreated(hub, 200);
+
+  const nextTurn = await connect();
+  const report = await call(nextTurn, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(report.status, "searching");
+  assert.equal(report.result, "joined");
+  assert.equal(report.ends_at, started.ends_at);
+  assert.deepEqual(
+    report.new_devices.map(({ ref, accessories }) => ({
+      ref,
+      accessories: accessories.map(({ ref: accessory }) => accessory),
+    })),
+    [{ ref: sensorChildRef, accessories: [sensorRef] }],
+  );
+
+  // A start in the new process returns the same search without a resend,
+  // and its stop closes the network.
+  const again = await call(nextTurn, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(again.status, "already_running");
+  assert.equal(again.search_ref, started.search_ref);
+  assert.equal(again.devices_before, started.devices_before);
+  const stopped = await call(nextTurn, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(stopped.ended, "stopped");
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
 });
 
 // Two starts of one controller at once (two agent turns, a retry beside
