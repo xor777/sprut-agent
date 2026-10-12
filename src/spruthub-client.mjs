@@ -103,6 +103,26 @@ export class SprutHubError extends Error {
   }
 }
 
+// Errors that describe the hub connection rather than the command itself.
+export const HUB_TRANSPORT_ERROR_CODES = new Set([
+  "authentication_delayed",
+  "authentication_failed",
+  "connection_closed",
+  "connection_failed",
+  "invalid_message",
+  "timeout",
+]);
+
+// A read the hub refused with an error reply, or that the connection did
+// not complete: what the hub holds is not known. Other errors, such as a
+// reply the client cannot understand, are not read failures.
+export function isHubReadFailure(error) {
+  return (
+    error instanceof SprutHubError &&
+    (error.hubError !== undefined || HUB_TRANSPORT_ERROR_CODES.has(error.code))
+  );
+}
+
 export function parseSprutHubMessage(data) {
   let message;
   try {

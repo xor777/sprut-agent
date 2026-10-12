@@ -39,6 +39,8 @@ import {
 import {
   characteristicNotifyOffered,
   characteristicNotifyOn,
+  HUB_TRANSPORT_ERROR_CODES,
+  isHubReadFailure,
   isSensitiveNativeNode,
   SprutHubError,
   sanitizeNativeData,
@@ -10019,26 +10021,6 @@ async function nativeValueDraft(service, kind, input) {
 
 function nativeValueAlreadyDesired(draft) {
   return !draft.alwaysSend && valuesEqual(draft.value, draft.requested);
-}
-
-// Errors that describe the hub connection rather than the command itself.
-const HUB_TRANSPORT_ERROR_CODES = new Set([
-  "authentication_delayed",
-  "authentication_failed",
-  "connection_closed",
-  "connection_failed",
-  "invalid_message",
-  "timeout",
-]);
-
-// A read the hub refused with an error reply, or that the connection did
-// not complete: what the hub holds is not known. Other errors, such as a
-// reply the client cannot understand, are not read failures.
-function isHubReadFailure(error) {
-  return (
-    error instanceof SprutHubError &&
-    (error.hubError !== undefined || HUB_TRANSPORT_ERROR_CODES.has(error.code))
-  );
 }
 
 function isDeviceCommandRejection(error) {
