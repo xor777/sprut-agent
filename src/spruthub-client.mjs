@@ -256,11 +256,16 @@ export class SprutHubClient {
     };
   }
 
-  rememberHomeCatalog(serial, { rooms, accessories, observedAt, generation }) {
+  // builtAt is kept from the catalog that a targeted read updated: the
+  // entries it did not read are as old as before.
+  rememberHomeCatalog(
+    serial,
+    { rooms, accessories, observedAt, generation, builtAt = Date.now() },
+  ) {
     const catalog = {
       serial,
       generation,
-      builtAt: Date.now(),
+      builtAt,
       observedAt,
       rooms,
       accessories,

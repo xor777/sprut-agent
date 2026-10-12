@@ -1275,6 +1275,27 @@ test("the session catalog is reused, dropped by this process's writes and refres
     ["Торшер у окна"],
   );
 
+  // Moved in the app to a room made after the catalog: the read names the
+  // room too.
+  hub.state.rooms.push({ id: 50, name: "Веранда", order: 10, visible: true });
+  floorLamp.roomId = 50;
+  const moved = await call("find_devices", { query: "торшер" });
+  assert.deepEqual(
+    listed(moved.body).map(({ room, device }) => [room.name, device.name]),
+    [["Веранда", "Торшер у окна"]],
+  );
+
+  // Paired again in the app: the floor lamp is gone and its name is on a
+  // device under a new id. The read finds the old one gone and looks the
+  // name up in the home again.
+  hub.state.accessories.splice(hub.state.accessories.indexOf(floorLamp), 1);
+  addLampInHub(hub, 62, 3, "Торшер у окна");
+  const repaired = await call("find_devices", { query: "торшер" });
+  assert.deepEqual(
+    listed(repaired.body).map(({ device }) => [device.ref, device.name]),
+    [[`${home}/accessory/62`, "Торшер у окна"]],
+  );
+
   // A write by this process drops the catalog at once.
   const prepared = await call("prepare_native_change", {
     operation: "service_name",

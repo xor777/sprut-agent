@@ -275,7 +275,34 @@ export class HomeReads {
         selection.roomId,
         selection.notify,
       );
-      if (fresh.stale && !refreshed) {
+      if (fresh.stale && !refreshed && fresh.byAccessory) {
+        // The device reads carry the current name, room and services of
+        // each accessory they read: those catalog entries are updated
+        // instead of re-reading the home on the deadline the reads have
+        // spent (the owner's 81 accessory.get took about 9 s of a 10 s
+        // timeout, 2026-10-12-notifications-live).
+        catalog = await withAccessoriesRead(client, serial, catalog, fresh);
+        candidates = selectCandidates(catalog, selection);
+        values = byId(fresh.accessories);
+        observedAt = fresh.observedAt;
+        valuesByAccessory = true;
+        // The name asked for left the devices the catalog had under it,
+        // and may now be another's, such as a device paired again under a
+        // new id: the home is read again, on a deadline of its own.
+        if (candidates.length === 0 && selection.query !== null) {
+          read = await client.homeCatalog(
+            serial,
+            Date.now() + client.timeoutMs,
+            { refresh: true },
+          );
+          refreshed = true;
+          catalog = read.catalog;
+          candidates = selectCandidates(catalog, selection);
+          values = byId(catalog.accessories);
+          observedAt = read.valuesObservedAt;
+          valuesByAccessory = false;
+        }
+      } else if (fresh.stale && !refreshed) {
         read = await client.homeCatalog(serial, deadline, { refresh: true });
         catalog = read.catalog;
         // Devices moved out of a room deleted in the SprutHub app.
@@ -814,6 +841,8 @@ async function readValues(
     const accessories = reads.map(({ accessory }) => accessory);
     return {
       accessories: accessories.filter(Boolean),
+      // Every accessory read, those the hub no longer has included.
+      readIds: accessoryIds,
       observedAt: latest(reads.map(({ observedAt }) => observedAt)),
       stale: accessoryIds.some(
         (id, index) =>
@@ -821,6 +850,7 @@ async function readValues(
           catalog.identities.get(id) !== accessoryIdentity(accessories[index]),
       ),
       byAccessory: true,
+      generation,
     };
   }
   if (roomIds.length <= TARGETED_ROOM_READS) {
@@ -857,6 +887,29 @@ async function readValues(
     // An accessory in a room the catalog does not know means new rooms.
     stale: read.accessories.some(({ roomId }) => !knownRooms.has(roomId)),
   };
+}
+
+// The catalog with the accessories a targeted read found in place of its
+// entries for them and without those it found gone; the other entries and
+// the time the catalog was read stay. A room the catalog does not know
+// takes one room list, on a deadline of its own.
+async function withAccessoriesRead(client, serial, catalog, read) {
+  const found = byId(read.accessories);
+  const readIds = new Set(read.readIds);
+  const accessories = catalog.accessories
+    .filter(({ id }) => !readIds.has(id) || found.has(id))
+    .map((accessory) => found.get(accessory.id) ?? accessory);
+  const knownRooms = new Set(catalog.rooms.map(({ id }) => id));
+  const rooms = read.accessories.some(({ roomId }) => !knownRooms.has(roomId))
+    ? (await client.nativeRooms(serial, Date.now() + client.timeoutMs)).rooms
+    : catalog.rooms;
+  return client.rememberHomeCatalog(serial, {
+    rooms,
+    accessories,
+    observedAt: catalog.observedAt,
+    builtAt: catalog.builtAt,
+    generation: read.generation,
+  });
 }
 
 function accessoryIdsOf(candidates) {
