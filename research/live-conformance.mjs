@@ -17,8 +17,9 @@
 // LOGIC, whose source is an info object and an empty trigger, runs nothing,
 // so it may be on and may be assigned, only to the virtual accessory; its
 // stored source is read back as that inert form before it is assigned or
-// turned on while assigned. The owner's devices, scenarios, rooms and
-// settings are only read. Everything created is restored (deleted) in
+// turned on while assigned. A characteristic's notification is turned on
+// and off only on that virtual accessory. The owner's devices, scenarios,
+// rooms and settings are only read. Everything created is restored (deleted) in
 // reverse order and the final home snapshot must equal the initial one. A
 // final sweep then deletes, through the product client, every inert object
 // of this run that the product owns but its restore left behind, the run's
@@ -112,6 +113,7 @@ const PREPARE_OPERATIONS = new Set([
   "logic_assignment",
   "scenario_run",
   "virtual_light_group",
+  "characteristic_notify",
 ]);
 
 export class GuardError extends Error {}
@@ -414,6 +416,11 @@ export class GuardedHub {
     );
   }
 
+  #isVirtualCharacteristic(ref) {
+    const match = /^(.*\/service\/\d+)\/characteristic\/\d+$/.exec(ref ?? "");
+    return match !== null && this.#isVirtualService(match[1]);
+  }
+
   #checkPrepare(input) {
     const { operation: op, target_ref: target } = input;
     const refuse = (why) => {
@@ -506,6 +513,16 @@ export class GuardedHub {
     }
     if (op === "scenario_run" && owned?.kind !== "block") {
       refuse("BLOCK not created by this run");
+    }
+    // The owner's devices keep their notifications; nobody switches the
+    // run's virtual lamp, so its notification sends nothing.
+    if (op === "characteristic_notify") {
+      if (!this.#isVirtualCharacteristic(target)) {
+        refuse("only on the run's virtual accessory");
+      }
+      if (typeof input.value !== "boolean") {
+        refuse("the value must be true or false");
+      }
     }
     if (op === "scenario_run" && owned?.stayOff) {
       refuse("this BLOCK stays off for the whole run");
@@ -1114,6 +1131,7 @@ const STEPS = [
   ["V", stepVirtualAccessory],
   ["Vp", stepPhysicalAccessory, "read"],
   ["Vd", stepVirtualDuplicate],
+  ["N", stepNotifications],
   ["2", stepBlockStorage],
   ["2i", stepIfForms],
   ["2w", stepOwnerWindows, "read"],
@@ -2283,6 +2301,229 @@ async function stepVirtualDuplicate(ctx) {
       : "mismatch",
   );
   if (!unchanged) abort("preparing a virtual light group changed the home");
+}
+
+// --- step N: a characteristic's notification on the virtual lamp ----------
+
+// characteristic_notify was written from the web client's code and the
+// schema (2026-09-24-web-client-action-map B8). The notification of the
+// run's virtual lamp is turned on, read back and restored; nobody switches
+// that lamp, so nothing is sent. The same is done for its C_Online when the
+// virtual accessory has one. Raw reads record where the hub reports notify;
+// the notify settings of the owner's devices are compared before and after.
+async function stepNotifications(ctx) {
+  const { hub, probe, virtual } = ctx;
+  if (!virtual) {
+    row(
+      "N notifications",
+      "characteristic.update{notify}",
+      "the run's virtual accessory exists",
+      "not run: no virtual accessory",
+      "blocked",
+    );
+    return;
+  }
+  const { aId } = virtual.on.ids;
+  const ownersBefore = ownerNotifySettings(
+    await probe.listAccessories(),
+    hub.virtualAIds,
+  );
+  const onDone = await probeNotify(ctx, "N On", virtual.on.ids);
+  const accessory = await probe.getAccessoryOrNull(aId);
+  const info = accessory?.services?.find(
+    ({ type }) => type === "AccessoryInformation",
+  );
+  const online = info?.characteristics?.find(
+    ({ control }) => control?.type === "C_Online",
+  );
+  if (!online) {
+    row(
+      "N C_Online",
+      "accessory.get{id}",
+      "C_Online in the virtual accessory's information service",
+      `none; services: ${(accessory?.services ?? []).map(({ type }) => type).join(", ") || "none"}`,
+      "skipped",
+    );
+  } else if (onDone) {
+    await probeNotify(ctx, "N C_Online", {
+      aId,
+      sId: info.sId,
+      cId: online.cId,
+    });
+  }
+  const ownersAfter = ownerNotifySettings(
+    await probe.listAccessories(),
+    hub.virtualAIds,
+  );
+  const keys = new Set([...ownersBefore.keys(), ...ownersAfter.keys()]);
+  const changed = [...keys].filter(
+    (key) => ownersBefore.get(key) !== ownersAfter.get(key),
+  );
+  const on = [...ownersAfter.values()].filter((value) => value === true);
+  row(
+    "N owner notifications",
+    "accessory.list{expand}",
+    "every notify of the owner's devices as before",
+    `${changed.length} changed; ${on.length} of ${ownersAfter.size} characteristic(s) with notify on`,
+    changed.length === 0 ? "match" : "mismatch",
+    changed.length > 0 ? { changed } : undefined,
+  );
+  if (changed.length > 0) abort("an owner notification setting changed");
+}
+
+// Turns one notification of the virtual accessory on, reads it back and
+// restores it. Returns whether it ended restored.
+async function probeNotify(ctx, label, ids) {
+  const { hub, probe } = ctx;
+  const ref = `${hub.homeRef}/accessory/${ids.aId}/service/${ids.sId}/characteristic/${ids.cId}`;
+  const shown = async () =>
+    (await hub.read("get_entity", { entity_ref: ref })).entity?.notify;
+  const rawBefore = await rawNotify(probe, ids);
+  const before = await shown();
+  row(
+    `${label} before`,
+    "accessory.get, characteristic.get, accessory.list",
+    "notify off on a new virtual characteristic",
+    `${describeRawNotify(rawBefore)}; get_entity notify ${before}`,
+    before === false ? "match" : "mismatch",
+    { raw: rawBefore },
+  );
+  if (before !== false) return false;
+
+  const turnedOn = await prepareAndApply(hub, {
+    operation: "characteristic_notify",
+    target_ref: ref,
+    value: true,
+  });
+  if (!turnedOn.applied) {
+    row(
+      `${label} on`,
+      "characteristic.update{aId,sId,cId,notify}",
+      "applied",
+      describe(turnedOn),
+      "rejected",
+    );
+    return false;
+  }
+  const entry = pushCleanup(ctx, {
+    label: `${label} notification`,
+    changeRef: turnedOn.changeRef,
+    verify: async () => (await rawNotify(probe, ids)).get.value !== true,
+  });
+  const rawOn = await rawNotify(probe, ids);
+  const afterOn = await shown();
+  row(
+    `${label} on`,
+    "characteristic.update{aId,sId,cId,notify:true}",
+    "applied; notify true in accessory.get and get_entity",
+    `${turnedOn.applied.status}; ${describeRawNotify(rawOn)}; get_entity notify ${afterOn}`,
+    turnedOn.applied.status === "applied" &&
+      rawOn.get.value === true &&
+      afterOn === true
+      ? "match"
+      : "mismatch",
+    { raw: rawOn },
+  );
+  const listed = await notifyListed(hub, ref);
+  row(
+    `${label} find_devices`,
+    "accessory.list{expand}",
+    "find_devices notify=true lists it with notify: true",
+    listed ? "listed" : "not listed",
+    listed ? "match" : "mismatch",
+  );
+
+  const restored = await runRestore(hub, entry);
+  const rawOff = await rawNotify(probe, ids);
+  const afterOff = await shown();
+  row(
+    `${label} restore`,
+    "characteristic.update{aId,sId,cId,notify:false}",
+    "restored; notify off in accessory.get and get_entity",
+    `${restored.observed}; ${describeRawNotify(rawOff)}; get_entity notify ${afterOff}`,
+    restored.verified && afterOff === false ? "match" : "mismatch",
+    { raw: rawOff },
+  );
+  if (!restored.verified) abort(`${label} notification was not restored`);
+  return restored.verified;
+}
+
+// notify of one characteristic as accessory.get, characteristic.get and
+// accessory.list report it: absent, or the value as sent.
+async function rawNotify(probe, ids) {
+  const field = (characteristic) =>
+    characteristic && Object.hasOwn(characteristic, "notify")
+      ? { present: true, value: characteristic.notify }
+      : { present: false, value: null };
+  const inAccessory = (accessory) =>
+    accessory?.services
+      ?.find(({ sId }) => sId === ids.sId)
+      ?.characteristics?.find(({ cId }) => cId === ids.cId);
+  const [accessory, characteristic, list] = await Promise.all([
+    probe.getAccessoryOrNull(ids.aId),
+    probe.getCharacteristic(ids),
+    probe.listAccessories(),
+  ]);
+  return {
+    get: field(inAccessory(accessory)),
+    characteristic: field(characteristic),
+    list: field(inAccessory(list.find(({ id }) => id === ids.aId))),
+  };
+}
+
+function describeRawNotify(raw) {
+  const one = ({ present, value }) => (present ? String(value) : "absent");
+  return `accessory.get ${one(raw.get)}, characteristic.get ${one(raw.characteristic)}, accessory.list ${one(raw.list)}`;
+}
+
+// Whether find_devices notify=true lists this characteristic as notifying.
+async function notifyListed(hub, ref) {
+  let args = {
+    home_ref: hub.homeRef,
+    notify: true,
+    values: false,
+    limit: 100,
+    max_bytes: 32_768,
+  };
+  for (;;) {
+    const page = await hub.read("find_devices", args);
+    expectOk(page, "find_devices");
+    for (const room of page.rooms) {
+      for (const device of room.devices) {
+        for (const service of device.services) {
+          if (
+            (service.characteristics ?? []).some(
+              (item) => item.ref === ref && item.notify === true,
+            )
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+    if (!page.next) return false;
+    args = page.next.arguments;
+  }
+}
+
+// notify of every characteristic of the owner's devices, as accessory.list
+// reports it ("absent" when left out).
+function ownerNotifySettings(accessories, virtualAIds) {
+  const settings = new Map();
+  for (const accessory of accessories) {
+    if (virtualAIds.has(accessory.id)) continue;
+    for (const service of accessory.services ?? []) {
+      for (const characteristic of service.characteristics ?? []) {
+        settings.set(
+          `${accessory.id}.${service.sId}.${characteristic.cId}`,
+          Object.hasOwn(characteristic, "notify")
+            ? characteristic.notify
+            : "absent",
+        );
+      }
+    }
+  }
+  return settings;
 }
 
 // --- step 2: BLOCK storage conformance ---------------------------------------
