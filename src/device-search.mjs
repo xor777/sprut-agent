@@ -291,8 +291,16 @@ export class DeviceSearches {
         changed: fields.map((field) => PUBLIC_FIELD[field]),
       }));
     const active = search.ended === null && search.active === true;
+    // Once this watch has ended, a run the controller shows is a later
+    // search that this watch neither watches nor stops (#updateState).
+    const action = findAction(extension, search.spaceKey, search.actionId);
+    const later =
+      search.ended !== null && action?.state === true
+        ? { end: runningActionEnd(action) }
+        : null;
     const view = {
       active,
+      later,
       newDevices,
       newTotal: added.length,
       changedDevices,
@@ -305,6 +313,7 @@ export class DeviceSearches {
           active,
           search.endsAt,
           search.ended,
+          later,
           view.result,
           newDevices,
           changedDevices,
@@ -515,6 +524,16 @@ export class DeviceSearches {
         ? searchEnd(search.endsAt, search.timeZone)
         : {}),
       ...(ended ? { ended } : {}),
+      ...(view.later
+        ? {
+            later_search: {
+              active: true,
+              ...(view.later.end !== null
+                ? searchEnd(view.later.end, search.timeZone)
+                : {}),
+            },
+          }
+        : {}),
       ...(view.readError ? { read_error: view.readError } : {}),
       changed,
       new_devices: view.newDevices,
@@ -984,13 +1003,16 @@ function stopCall(search) {
 }
 
 // One hint for each outcome among the new devices, and for the search
-// itself when it ended with nothing new; next goes on reading while the
-// search runs or the hub may still change a device.
+// itself when it ended with nothing new or a later search runs; next goes
+// on reading while the search runs or the hub may still change a device.
 function reportGuidance(search, view) {
   const running = view.active !== false;
   const outcomes = deviceOutcomes(view);
   const hints = {};
-  if (outcomes.size === 0 && !running) {
+  if (view.later) {
+    hints.search =
+      "This search has ended, but the controller's network is open again by a later search, as one started in the SprutHub app, that this ref neither watches nor stops: any device in pairing mode within range can join. start_device_search returns that search with its own stop. Tell the owner the network is still open.";
+  } else if (outcomes.size === 0 && !running) {
     hints.search = `The search ended and no new device is listed${
       search.startedBeforeWatch
         ? ": the search was already running when the count of new devices began, and devices that joined before that are not counted"
@@ -1022,7 +1044,7 @@ function reportGuidance(search, view) {
     next:
       running || outcomes.has("pending") || outcomes.has("unreadable")
         ? getCall(search)
-        : outcomes.size === 0
+        : view.later || outcomes.size === 0
           ? {
               tool: "start_device_search",
               arguments: { extension_ref: search.extensionRef },
