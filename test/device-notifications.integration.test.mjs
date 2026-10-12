@@ -34,8 +34,10 @@ const kitchenLeakDetected = `${kitchenLeak}/service/13/characteristic/14`;
 // «Датчик двери», service «Входная дверь» in «Прихожая».
 const frontDoor = `${homeRef}/accessory/11/service/13/characteristic/14`;
 
-async function startHub(t) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+async function startHub(t, adjust = () => {}) {
+  const fixture = await loadHomeFixture("apartment");
+  adjust(fixture);
+  const hub = await startSimulatedHub(fixture);
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-notifications-"),
   );
@@ -531,6 +533,93 @@ test("«какие уведомления включены» after a rename in t
       room: "Кухня",
     },
   ]);
+});
+
+// Notification services as on the owner's hub: Telegram FAILED without
+// recipients (2026-09-24, telegram_1 still FAILED on 2026-10-12) and a web
+// service, LOADED, with one.
+function withOwnerNotificationServices(fixture) {
+  Object.assign(
+    fixture.extensions.find(
+      ({ extensionKey }) => extensionKey === "Notification:telegram",
+    ),
+    { enabled: true, state: "FAILED" },
+  );
+  fixture.extensions.push({
+    extensionKey: "Notification:web",
+    type: "web",
+    index: "web",
+    bundleType: "NOTIFICATION",
+    name: "Веб-уведомления",
+    optionsWindow: "Notification/web/",
+    enabled: true,
+    state: "LOADED",
+    children: [{ id: "2", name: "Браузер владельца" }],
+  });
+}
+
+// «Уведомляй, когда открывается входная дверь», asked once and again. An
+// owner told «включено» expects a message; a setting that is on does not
+// send one through a FAILED Telegram. Whether the change is prepared, made,
+// found already made or only looked up, the answer says what the setting
+// does not promise and shows the home's notification services as read then.
+test("every answer about a notification setting carries its limits and the notification services' state", async (t) => {
+  const home = await startHub(t, withOwnerNotificationServices);
+  const client = await startClient(t, home);
+  const telegram = `${homeRef}/extension/Notification%3Atelegram`;
+  const services = {
+    services: [
+      {
+        ref: telegram,
+        name: "Telegram",
+        enabled: true,
+        state: "FAILED",
+        recipient_count: 0,
+      },
+      {
+        ref: `${homeRef}/extension/Notification%3Aweb`,
+        name: "Веб-уведомления",
+        enabled: true,
+        state: "LOADED",
+        recipient_count: 1,
+      },
+    ],
+    warnings: [
+      { code: "service_not_ready", service_ref: telegram },
+      { code: "no_recipients", service_ref: telegram },
+    ],
+  };
+  const shown = ({ notification_services: state }) => ({
+    services: state.services,
+    warnings: state.warnings.map(({ code, service_ref }) => ({
+      code,
+      service_ref,
+    })),
+  });
+
+  const contract = await call(client, "get_native_change_contract", {
+    operation: "characteristic_notify",
+    target_ref: frontDoor,
+  });
+  assert.deepEqual(shown(contract), services);
+  assert(contract.limitations.length > 0);
+
+  const prepared = await prepareNotify(client, frontDoor, true);
+  assert.deepEqual(shown(prepared), services);
+  // The limits of the setting are those of every change of it.
+  for (const limitation of contract.limitations) {
+    assert(prepared.limitations.includes(limitation), limitation);
+  }
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied");
+  assert.deepEqual(shown(applied), services);
+
+  const again = await prepareNotify(client, frontDoor, true);
+  assert.equal(again.status, "already_desired");
+  assert.deepEqual(shown(again), services);
+  assert.deepEqual(again.limitations, contract.limitations);
 });
 
 // A notification sends the characteristic's value: one that holds a secret
