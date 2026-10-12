@@ -11769,6 +11769,23 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
       );
       assert.match(problem.message, hint);
 
+      // The code keeps its blockId, the rules above it lose theirs: the
+      // rule still pairs away, and keeping the rules' blockIds would keep
+      // the code.
+      const mixed = withoutBlockIds(merge(read));
+      item.code(mixed).blockId = item.code(merge(read)).blockId;
+      const refusedMixed = await prepareBlockUpdate(
+        client,
+        mixed,
+        "Ночью при движении яркость 30",
+      );
+      assert.equal(refusedMixed.isError, true);
+      assert.deepEqual(
+        refusedMixed.structuredContent.problems.map(({ pointer }) => pointer),
+        [item.codePointer],
+      );
+      assert.match(refusedMixed.structuredContent.problems[0].message, hint);
+
       // Code moved with its blockId into the other rule is moved code, which
       // this contract refuses; keeping blockIds would not help.
       const movedCode = structuredClone(read);
