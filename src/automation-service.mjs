@@ -8164,11 +8164,16 @@ async function readNotificationServices(client) {
 }
 
 // The recipients of one notification service, read once per validation;
-// null when get_entity could not read them.
+// null when get_entity could not read them or the service.
 async function notificationServiceRecipients(client, service) {
   if (service.recipients === undefined) {
-    const read = await client.getEntity(service.ref, ["children"]);
-    const children = read.entity?.children;
+    let children;
+    try {
+      children = (await client.getEntity(service.ref, ["children"])).entity
+        ?.children;
+    } catch (error) {
+      if (!isHubReadFailure(error)) throw error;
+    }
     service.recipients = Array.isArray(children)
       ? children.map(({ ref, id, name }) => ({ ref, id, name }))
       : null;
@@ -8330,9 +8335,25 @@ function notificationServicesShown(services, to) {
 // The home's notification services as read now, for a characteristic's own
 // notification. Through which of them, and to whom, SprutHub sends it was
 // not observed, so each is shown with its state and recipient count and
-// the warnings a BLOCK notification to all of them would get.
+// the warnings a BLOCK notification to all of them would get. They do not
+// change the setting: when the hub does not give them, they are unknown.
 async function characteristicNotificationServices(client) {
-  const services = await readNotificationServices(client);
+  let services;
+  try {
+    services = await readNotificationServices(client);
+  } catch (error) {
+    if (!isHubReadFailure(error)) throw error;
+    return {
+      services: null,
+      warnings: [
+        {
+          code: "notification_services_unread",
+          message:
+            "The home's notification services could not be read: whether this notification reaches anyone is not known. Tell the owner before promising it; home_overview list=extensions reads them.",
+        },
+      ],
+    };
+  }
   for (const service of services) {
     await notificationServiceRecipients(client, service);
   }
@@ -10009,6 +10030,16 @@ const HUB_TRANSPORT_ERROR_CODES = new Set([
   "invalid_message",
   "timeout",
 ]);
+
+// A read the hub refused with an error reply, or that the connection did
+// not complete: what the hub holds is not known. Other errors, such as a
+// reply the client cannot understand, are not read failures.
+function isHubReadFailure(error) {
+  return (
+    error instanceof SprutHubError &&
+    (error.hubError !== undefined || HUB_TRANSPORT_ERROR_CODES.has(error.code))
+  );
+}
 
 function isDeviceCommandRejection(error) {
   return (
