@@ -622,6 +622,155 @@ test("every answer about a notification setting carries its limits and the notif
   assert.deepEqual(again.limitations, contract.limitations);
 });
 
+// «Выключи уведомление о сети у датчика в ванной». The bathroom leak
+// sensor's offline notification is on, and the owner's services are those
+// of the test above.
+const bathroomLeakOnline = `${homeRef}/accessory/37/service/1/characteristic/8`;
+
+function withBathroomNotifyingOffline(fixture) {
+  withOwnerNotificationServices(fixture);
+  fixture.accessories.find(({ id }) => id === 37).onlineNotify = true;
+}
+
+// notification_services as an answer shows it, its warnings by code and
+// service.
+function servicesShown({ notification_services: state }) {
+  return {
+    services: state.services,
+    warnings: (state.warnings ?? []).map(({ code, service_ref, message }) => {
+      assert.equal(typeof message, "string", code);
+      return { code, ...(service_ref ? { service_ref } : {}) };
+    }),
+  };
+}
+
+// The notification services only say through what a notification may go;
+// the owner asked about the setting. A hub that refuses or does not answer
+// their read leaves them unknown in the answer, and the setting is turned
+// off and back on as without them.
+for (const [failure, failRead] of [
+  [
+    "refuses",
+    (hub) =>
+      hub.refuseNext("extension.list", {
+        code: -32603,
+        message: "Internal error",
+      }),
+  ],
+  ["does not answer", (hub) => hub.delayReplies("extension.list", 1500)],
+]) {
+  test(`«выключи уведомление о сети у датчика в ванной» is made and undone when the hub ${failure} the read of the notification services`, async (t) => {
+    const home = await startHub(t, withBathroomNotifyingOffline);
+    const { hub } = home;
+    const client = await startClient(t, home, { timeoutMs: 1000 });
+    const unknown = {
+      services: null,
+      warnings: [{ code: "notification_services_unread" }],
+    };
+
+    failRead(hub);
+    const contract = await call(client, "get_native_change_contract", {
+      operation: "characteristic_notify",
+      target_ref: bathroomLeakOnline,
+    });
+    assert.deepEqual(servicesShown(contract), unknown);
+
+    failRead(hub);
+    const prepared = await prepareNotify(client, bathroomLeakOnline, false);
+    assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+    assert.deepEqual(prepared.diff, {
+      value: { from: true, to: false, kind: "boolValue" },
+    });
+    assert.deepEqual(servicesShown(prepared), unknown);
+    hub.delayReplies("extension.list", 0);
+    assert.equal(
+      hub.requests.filter(({ method }) => method === "extension.list").length,
+      2,
+    );
+
+    // Apply, its check and restore keep the services as prepared.
+    const applied = await call(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    assert.deepEqual(servicesShown(applied), unknown);
+    assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
+      { key: "characteristic/37.1.8/notify", before: true, after: false },
+    ]);
+    const checked = await call(client, "get_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(checked.status, "applied");
+    assert.deepEqual(servicesShown(checked), unknown);
+
+    const restored = await call(client, "restore_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+    assert.deepEqual(
+      notifyWrites(hub).map(([, params]) => params.characteristic.update),
+      [
+        { aId: 37, sId: 1, cId: 8, notify: false },
+        { aId: 37, sId: 1, cId: 8, notify: true },
+      ],
+    );
+    assert.deepEqual(
+      diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+      [],
+    );
+  });
+}
+
+// The recipients of one service only fill its recipient_count: a refused
+// read of that service leaves its count unknown and the others as read.
+test("a notification setting is prepared and made when the hub refuses the read of one notification service", async (t) => {
+  const home = await startHub(t, withBathroomNotifyingOffline);
+  const { hub } = home;
+  const client = await startClient(t, home);
+  const telegram = `${homeRef}/extension/Notification%3Atelegram`;
+
+  // The first service read, Telegram's, is refused.
+  hub.refuseNext("extension.get", { code: -32603, message: "Internal error" });
+  const prepared = await prepareNotify(client, bathroomLeakOnline, false);
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.deepEqual(servicesShown(prepared), {
+    services: [
+      {
+        ref: telegram,
+        name: "Telegram",
+        enabled: true,
+        state: "FAILED",
+        recipient_count: null,
+      },
+      {
+        ref: `${homeRef}/extension/Notification%3Aweb`,
+        name: "Веб-уведомления",
+        enabled: true,
+        state: "LOADED",
+        recipient_count: 1,
+      },
+    ],
+    warnings: [
+      { code: "service_not_ready", service_ref: telegram },
+      { code: "recipients_unread", service_ref: telegram },
+    ],
+  });
+  assert.deepEqual(
+    hub.requests
+      .filter(({ method }) => method === "extension.get")
+      .map(({ error }) => error?.code ?? null),
+    [-32603, null],
+  );
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
+    { key: "characteristic/37.1.8/notify", before: true, after: false },
+  ]);
+});
+
 // A notification sends the characteristic's value: one that holds a secret
 // is not offered, as get_entity does not show it.
 test("a characteristic that holds a secret gets no notification", async (t) => {

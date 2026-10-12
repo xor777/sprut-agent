@@ -516,67 +516,72 @@ test("a notification through a service without recipients is named in the previe
 
 // Recipients only fill the preview of a notification to all recipients of a
 // service; get_entity does not read them any better, so a failed read must
-// not stop the change.
-test("a notification to all recipients is prepared when a service's recipients cannot be read", async (t) => {
-  const { hub, client } = await setup(t, withNotificationServices);
-  const telegramRef = `${homeRef}/extension/Notification%3Atelegram`;
-  const telegram = {
-    ref: telegramRef,
-    name: "Telegram",
-    enabled: true,
-    state: "FAILED",
-    recipients: "all",
-    recipient_count: null,
-  };
-  const notify = (text, to) => ({ type: "notify", text, mode: "PUSH", to });
-  // The first recipients read, Telegram's, fails.
-  hub.refuseNext("extensionChild.list");
-  const prepared = await prepareCreate(client, {
-    targets: [
-      whenLeak([
-        notify("Протечка в ванной!", null),
-        notify("Протечка: закрой воду", [{ index: "telegram", clients: null }]),
-      ]),
-    ],
-  });
-  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
-  const unread = [
-    { code: "service_not_ready", service_ref: telegramRef },
-    { code: "recipients_unread", service_ref: telegramRef },
-  ];
-  assert.deepEqual(withWarningCodes(prepared.block_action_preview), [
-    {
-      configuration_pointer: "/targets/0/then/0",
-      mode: "PUSH",
-      text: "Протечка в ванной!",
-      delivery: "all_notification_services",
-      services: [
-        telegram,
-        {
-          ref: `${homeRef}/extension/Notification%3Aweb`,
-          name: "Веб-уведомления",
-          enabled: true,
-          state: "LOADED",
-          recipients: "all",
-          recipient_count: 1,
-        },
+// not stop the change, whether the hub refuses the service's recipients or
+// the service itself.
+for (const refused of ["extensionChild.list", "extension.get"]) {
+  test(`a notification to all recipients is prepared when a service's recipients cannot be read (${refused} refused)`, async (t) => {
+    const { hub, client } = await setup(t, withNotificationServices);
+    const telegramRef = `${homeRef}/extension/Notification%3Atelegram`;
+    const telegram = {
+      ref: telegramRef,
+      name: "Telegram",
+      enabled: true,
+      state: "FAILED",
+      recipients: "all",
+      recipient_count: null,
+    };
+    const notify = (text, to) => ({ type: "notify", text, mode: "PUSH", to });
+    // The first read of a service's recipients, Telegram's, fails.
+    hub.refuseNext(refused, { code: -32603, message: "Internal error" });
+    const prepared = await prepareCreate(client, {
+      targets: [
+        whenLeak([
+          notify("Протечка в ванной!", null),
+          notify("Протечка: закрой воду", [
+            { index: "telegram", clients: null },
+          ]),
+        ]),
       ],
-      warnings: unread,
-    },
-    {
-      configuration_pointer: "/targets/0/then/1",
-      mode: "PUSH",
-      text: "Протечка: закрой воду",
-      delivery: "listed_services",
-      services: [telegram],
-      warnings: unread,
-    },
-  ]);
-  const applied = await call(client, "apply_native_change", {
-    change_ref: prepared.change_ref,
+    });
+    assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+    const unread = [
+      { code: "service_not_ready", service_ref: telegramRef },
+      { code: "recipients_unread", service_ref: telegramRef },
+    ];
+    assert.deepEqual(withWarningCodes(prepared.block_action_preview), [
+      {
+        configuration_pointer: "/targets/0/then/0",
+        mode: "PUSH",
+        text: "Протечка в ванной!",
+        delivery: "all_notification_services",
+        services: [
+          telegram,
+          {
+            ref: `${homeRef}/extension/Notification%3Aweb`,
+            name: "Веб-уведомления",
+            enabled: true,
+            state: "LOADED",
+            recipients: "all",
+            recipient_count: 1,
+          },
+        ],
+        warnings: unread,
+      },
+      {
+        configuration_pointer: "/targets/0/then/1",
+        mode: "PUSH",
+        text: "Протечка: закрой воду",
+        delivery: "listed_services",
+        services: [telegram],
+        warnings: unread,
+      },
+    ]);
+    const applied = await call(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
   });
-  assert.equal(applied.status, "applied", JSON.stringify(applied));
-});
+}
 
 test("a scenario makes an HTTP request and answers name only its scheme and host", async (t) => {
   const { hub, client } = await setup(t);
