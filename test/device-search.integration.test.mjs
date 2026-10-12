@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { scaledHome } from "./fixtures/homes/scaled.mjs";
@@ -77,21 +77,30 @@ async function apartment({ pairing = [], discoveryTimeMs } = {}) {
 // A simulated hub and an MCP server for it with a temporary state
 // directory. connect() starts another server process on the same hub and
 // state directory, as a client that starts the server anew each turn.
-async function setup(t, fixture, hubOptions = {}) {
+// With shiftedClock the servers run with test/support/shifted-clock.mjs,
+// and shiftClock() moves the clock of the latest one 5 minutes forward.
+async function setup(t, fixture, { shiftedClock = false, ...hubOptions } = {}) {
   const hub = await startSimulatedHub(fixture, hubOptions);
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-device-search-"),
   );
   const clients = [];
+  let latest;
   t.after(async () => {
     for (const client of clients) await client.close();
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
+  const clockModule = pathToFileURL(
+    path.join(projectRoot, "test/support/shifted-clock.mjs"),
+  ).href;
   const connect = async () => {
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: ["src/server.mjs"],
+      args: [
+        ...(shiftedClock ? ["--import", clockModule] : []),
+        "src/server.mjs",
+      ],
       cwd: projectRoot,
       env: {
         PATH: process.env.PATH,
@@ -107,9 +116,29 @@ async function setup(t, fixture, hubOptions = {}) {
     });
     clients.push(client);
     await client.connect(transport);
+    latest = transport;
     return client;
   };
-  return { hub, client: await connect(), connect, stateDirectory };
+  const shiftClock = async () => {
+    const transport = latest;
+    const shifted = new Promise((resolve) => {
+      const onData = (chunk) => {
+        if (!String(chunk).includes("clock shifted")) return;
+        transport.stderr.off("data", onData);
+        resolve();
+      };
+      transport.stderr.on("data", onData);
+    });
+    process.kill(transport.pid, "SIGUSR2");
+    await shifted;
+  };
+  return {
+    hub,
+    client: await connect(),
+    connect,
+    shiftClock,
+    stateDirectory,
+  };
 }
 
 async function call(client, name, args) {
@@ -698,20 +727,19 @@ test("a search that ends with nothing new says what it did not count", async (t)
   ]);
   assert.deepEqual(ended.new_devices, []);
   assert.equal(ended.changed_devices.length, 1);
-  assert.match(ended.hint, /joined before/);
-  assert.match(ended.hint, /changed_devices/);
+  assert.match(ended.hints.search, /joined before/);
+  assert.match(ended.hints.search, /changed_devices/);
   assert.deepEqual(searchActions(hub), []);
 });
 
-// A device the hub cannot add joins and never gets an accessory. Right
-// after the end the hub may still finish it, so the report asks to read
-// again; once the hub has had its time, the report says the device was not
-// added, with its status and error, and stops asking to wait.
-test("a new device that gets no accessory is reported not added some time after the search ends", async (t) => {
+// A device the hub cannot add joins and gets an error instead of an
+// accessory. It is reported failed as soon as the hub shows the error,
+// with the hub's status and error, and the agent is told to say so.
+test("a new device the hub shows an error for is reported failed", async (t) => {
   const { client } = await setup(
     t,
     await apartment({
-      discoveryTimeMs: 1_500,
+      discoveryTimeMs: 2_500,
       pairing: [leakSensor({ error: "Модель не поддерживается" })],
     }),
   );
@@ -723,6 +751,97 @@ test("a new device that gets no accessory is reported not added some time after 
     arguments: { search_ref: started.search_ref },
   };
 
+  const failed = await waitForResult(
+    client,
+    started.search_ref,
+    ["failed"],
+    5,
+    6,
+  );
+  assert.equal(failed.status, "searching");
+  assert.deepEqual(
+    failed.new_devices.map(
+      ({ ref, status, progress, error, accessory_status, accessories }) => ({
+        ref,
+        status,
+        progress,
+        error,
+        accessory_status,
+        accessories,
+      }),
+    ),
+    [
+      {
+        ref: sensorChildRef,
+        status: "Ошибка подключения",
+        progress: null,
+        error: "Модель не поддерживается",
+        accessory_status: "failed",
+        accessories: [],
+      },
+    ],
+  );
+  assert.deepEqual(Object.keys(failed.hints), ["failed"]);
+  assert.deepEqual(failed.next, read);
+  assert.deepEqual(failed.stop, {
+    tool: "stop_device_search",
+    arguments: { search_ref: started.search_ref },
+  });
+
+  let ended = failed;
+  for (let attempt = 0; attempt < 4 && ended.status !== "ended"; attempt += 1) {
+    ended = await call(client, "get_device_search", {
+      search_ref: started.search_ref,
+      wait_seconds: 5,
+    });
+  }
+  assert.equal(ended.status, "ended");
+  assert.equal(ended.result, "failed");
+  assert.deepEqual(Object.keys(ended.hints), ["failed"]);
+  assert.equal(ended.next, null);
+  assert.equal(ended.stop, undefined);
+});
+
+// A device whose interview outlasts the search: the hub shows it joining
+// (status and progress, no error) after the network closed. The report
+// keeps it pending with no time limit of its own, here also after the
+// server's clock moves 5 minutes on, and keeps offering to read again.
+test("a device the hub is still adding after the search ended stays pending", async (t) => {
+  const { client, shiftClock } = await setup(
+    t,
+    await apartment({
+      discoveryTimeMs: 1_500,
+      pairing: [leakSensor({ interviewMs: 120_000 })],
+    }),
+    { shiftedClock: true },
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  const read = {
+    tool: "get_device_search",
+    arguments: { search_ref: started.search_ref },
+  };
+  const pending = (report) =>
+    report.new_devices.map(
+      ({ ref, status, progress, error, accessory_status }) => ({
+        ref,
+        status,
+        progress,
+        error,
+        accessory_status,
+      }),
+    );
+  const joining = [
+    {
+      ref: sensorChildRef,
+      status: "Подключение",
+      progress: 10,
+      error: null,
+      accessory_status: "pending",
+    },
+  ];
+
   let report;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     report = await call(client, "get_device_search", {
@@ -733,42 +852,82 @@ test("a new device that gets no accessory is reported not added some time after 
   }
   assert.equal(report.status, "ended");
   assert.equal(report.result, "joining");
+  assert.deepEqual(pending(report), joining);
   assert.deepEqual(report.next, read);
 
-  const begun = Date.now();
-  const notAdded = await waitForResult(
-    client,
-    started.search_ref,
-    ["not_added"],
-    20,
-    3,
+  await shiftClock();
+  const later = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  assert.equal(later.status, "ended");
+  assert.equal(later.result, "joining");
+  assert.deepEqual(pending(later), joining);
+  assert.deepEqual(Object.keys(later.hints), ["pending"]);
+  assert.deepEqual(later.next, read);
+  assert.equal(later.stop, undefined);
+});
+
+// Two devices join one search: the hub adds one and shows an error for the
+// other. The report says a device joined and tells the agent what to do
+// for each: place the one found, tell the owner about the one that failed.
+test("new devices with different outcomes are each reported with their own hint", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({
+      pairing: [
+        leakSensor(),
+        {
+          extensionKey: ZIGBEE,
+          joinAfterMs: 300,
+          interviewMs: 300,
+          childName: "TS0601",
+          error: "Модель не поддерживается",
+          accessory: { id: 201, name: "TS0601", deviceId: "a4c138d0deadbeef" },
+        },
+      ],
+    }),
   );
-  assert(Date.now() - begun < 30_000, "the outcome comes without the agent");
-  assert.equal(notAdded.status, "ended");
-  assert.equal(notAdded.ended, "expired");
-  assert.deepEqual(
-    notAdded.new_devices.map(
-      ({ ref, status, error, accessory_status, accessories }) => ({
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await accessoryCreated(hub, 200);
+  const outcomes = (report) =>
+    Object.fromEntries(
+      report.new_devices.map(({ ref, accessory_status }) => [
         ref,
-        status,
-        error,
         accessory_status,
-        accessories,
-      }),
-    ),
-    [
-      {
-        ref: sensorChildRef,
-        status: "Ошибка подключения",
-        error: "Модель не поддерживается",
-        accessory_status: "pending",
-        accessories: [],
-      },
-    ],
-  );
-  assert.equal(notAdded.next, null);
-  assert.equal(notAdded.stop, undefined);
-  assert.equal(typeof notAdded.hint, "string");
+      ]),
+    );
+  const expected = {
+    [sensorChildRef]: "found",
+    [`${zigbeeRef}/child/a4c138d0deadbeef`]: "failed",
+  };
+
+  let running;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    running = await call(client, "get_device_search", {
+      search_ref: started.search_ref,
+      wait_seconds: 2,
+    });
+    if (Object.values(outcomes(running)).includes("failed")) break;
+  }
+  assert.deepEqual(outcomes(running), expected);
+  assert.equal(running.result, "joined");
+  assert.deepEqual(Object.keys(running.hints).sort(), ["failed", "found"]);
+  assert.deepEqual(running.next, {
+    tool: "get_device_search",
+    arguments: { search_ref: started.search_ref },
+  });
+
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(stopped.ended, "stopped");
+  assert.deepEqual(outcomes(stopped), expected);
+  assert.equal(stopped.result, "joined");
+  assert.deepEqual(Object.keys(stopped.hints).sort(), ["failed", "found"]);
+  assert.equal(stopped.next, null);
 });
 
 // The hub may add a device just after it closes the network, when the
