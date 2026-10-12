@@ -1,0 +1,80 @@
+{
+  "source_commit": "e68d6b19db2bb715142b989e7c3a3f1a11965efd",
+  "captured_via": [
+    "prepare_native_change",
+    "apply_native_change",
+    "restore_native_change"
+  ],
+  "change": {
+    "id": "eff3083d98af4e62c092b72c",
+    "kind": "window_option",
+    "status": "restored",
+    "home_ref": "spruthub://hub/sim-apartment-01",
+    "reason": "Сменить код кодовой панели",
+    "target_ref": "spruthub://hub/sim-apartment-01/window/Controller%2Fzigbee%2FChild%2F00158d0001a2b3c4%2F",
+    "option_key": "Passcode",
+    "target": {
+      "kind": "window",
+      "windowKey": "Controller/zigbee/Child/00158d0001a2b3c4/"
+    },
+    "contract": {
+      "type": "GenericInteger",
+      "input_type": "NUMBER",
+      "kind": "intValue",
+      "min": 0,
+      "max": 999999,
+      "step": 1,
+      "confirmation": "separate_window_get_readback"
+    },
+    "baseline_value": {
+      "value": 731904,
+      "kind": "intValue"
+    },
+    "requested_value": {
+      "value": 582614,
+      "kind": "intValue"
+    },
+    "native_write_sent": true,
+    "native_acknowledged": true,
+    "last_verification": {
+      "fresh": true,
+      "checked_at": "2026-10-12T11:49:01.389Z",
+      "result": "baseline_value_observed"
+    },
+    "created_at": "2026-10-12T11:49:01.375Z",
+    "updated_at": "2026-10-12T11:49:01.389Z",
+    "history": [
+      {
+        "status": "prepared",
+        "at": "2026-10-12T11:49:01.375Z"
+      },
+      {
+        "status": "applying",
+        "at": "2026-10-12T11:49:01.382Z"
+      },
+      {
+        "status": "applied",
+        "at": "2026-10-12T11:49:01.384Z"
+      },
+      {
+        "status": "restoring",
+        "at": "2026-10-12T11:49:01.387Z"
+      },
+      {
+        "status": "restored",
+        "at": "2026-10-12T11:49:01.389Z"
+      }
+    ],
+    "write_intent": {
+      "direction": "restore",
+      "phase": "reconciled",
+      "acknowledged": true,
+      "at": "2026-10-12T11:49:01.387Z"
+    },
+    "applied_value_observed": true,
+    "observed_value": {
+      "value": 731904,
+      "kind": "intValue"
+    }
+  }
+}
