@@ -20,7 +20,8 @@
     "research:snapshot": "node research/extract-spruthub.mjs",
     "test": "node --test 'test/**/*.test.mjs' 'research/**/*.test.mjs'",
     "test:codex-install": "node --test 'test-codex-install/**/*.test.mjs'",
-    "test:mutations": "stryker run"
+    "test:mutations": "stryker run",
+    "conformance:sim": "node research/live-conformance-sim.mjs"
   },
   "engines": {
     "node": ">=24.11.0"
