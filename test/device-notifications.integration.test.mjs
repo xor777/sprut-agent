@@ -25,6 +25,7 @@ const projectRoot = path.resolve(
   "..",
 );
 const homeRef = "spruthub://hub/sim-apartment-01";
+const kitchen = `${homeRef}/room/4`;
 // «Датчик протечки под мойкой» in «Кухня».
 const kitchenLeak = `${homeRef}/accessory/23`;
 const kitchenLeakOnline = `${kitchenLeak}/service/1/characteristic/8`;
@@ -94,26 +95,34 @@ async function notifyOf(client, ref) {
   return (await call(client, "get_entity", { entity_ref: ref })).entity.notify;
 }
 
-// The services find_devices lists for notify=true in the whole home, as
-// service ref → refs of the characteristics it marks notify: true.
-async function notifyingServices(client) {
-  return notifyingOf(await call(client, "find_devices", { notify: true }));
+// «Какие уведомления включены?»: find_devices notify=true with the given
+// filters, as the refs it lists and its count of offline notifications by
+// room ref (null when it counts none).
+async function notificationsOn(client, args = {}) {
+  const page = await call(client, "find_devices", { notify: true, ...args });
+  assert.equal(page.next, null);
+  return {
+    listed: page.notifications.map(({ ref }) => ref),
+    offline: page.device_online
+      ? Object.fromEntries(
+          page.device_online.rooms.map(({ ref, notifying }) => [
+            ref,
+            notifying,
+          ]),
+        )
+      : null,
+  };
 }
 
-function notifyingOf(page) {
-  assert.equal(page.next, null);
-  return Object.fromEntries(
-    page.rooms.flatMap(({ devices }) =>
-      devices.flatMap(({ services }) =>
-        services.map((service) => [
-          service.ref,
-          [...(service.values ?? []), ...(service.characteristics ?? [])]
-            .filter(({ notify }) => notify === true)
-            .map(({ ref }) => ref),
-        ]),
-      ),
-    ),
-  );
+// The offline notifications that answer counts, as its next call lists
+// them.
+async function offlineListed(client, args = {}) {
+  const page = await call(client, "find_devices", { notify: true, ...args });
+  const { tool, arguments: next } = page.device_online.next;
+  const listing = await call(client, tool, next);
+  assert.equal(listing.next, null);
+  assert.equal(listing.device_online, undefined);
+  return listing.notifications;
 }
 
 function notifyWrites(hub, from = 0) {
@@ -141,7 +150,10 @@ test("«сообщай, если датчик протечки на кухне �
   assert.equal(notifyByRef[kitchenLeakOnline], false);
   assert.equal(notifyByRef[kitchenLeakDetected], false);
   assert.equal(notifyByRef[kitchenLeakName], undefined);
-  assert.deepEqual(await notifyingServices(first), {});
+  assert.deepEqual(await notificationsOn(first), {
+    listed: [],
+    offline: null,
+  });
 
   const contract = await call(first, "get_native_change_contract", {
     operation: "characteristic_notify",
@@ -173,10 +185,22 @@ test("«сообщай, если датчик протечки на кухне �
   ]);
   assert.equal(await notifyOf(first, kitchenLeakOnline), true);
   assert.equal(await notifyOf(first, kitchenLeakDetected), false);
-  // «Какие уведомления включены?»
-  assert.deepEqual(await notifyingServices(first), {
-    [`${kitchenLeak}/service/1`]: [kitchenLeakOnline],
+  // «Какие уведомления включены?»: an offline notification is counted in
+  // its room, and the answer's call lists it.
+  assert.deepEqual(await notificationsOn(first), {
+    listed: [],
+    offline: { [kitchen]: 1 },
   });
+  assert.deepEqual(await offlineListed(first), [
+    {
+      ref: kitchenLeakOnline,
+      type: "C_Online",
+      name: "В сети",
+      service: "Информация об аксессуаре",
+      device: "Датчик протечки под мойкой",
+      room: "Кухня",
+    },
+  ]);
 
   await first.close();
   const second = await startClient(t, home);
@@ -193,7 +217,10 @@ test("«сообщай, если датчик протечки на кухне �
     ],
   ]);
   assert.equal(await notifyOf(second, kitchenLeakOnline), false);
-  assert.deepEqual(await notifyingServices(second), {});
+  assert.deepEqual(await notificationsOn(second), {
+    listed: [],
+    offline: null,
+  });
   // The setting the sensor never had is now written off; nothing else.
   assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
     { key: "characteristic/23.1.8/notify", before: undefined, after: false },
@@ -219,20 +246,16 @@ test("«выключи уведомление о пропаже датчика �
     .characteristics.find(({ cId }) => cId === 8);
   online.notify = true;
   const client = await startClient(t, home);
-  const kitchen = `${homeRef}/room/4`;
   const kitchenNotifying = async () =>
-    Object.keys(
-      notifyingOf(
-        await call(client, "find_devices", { room_ref: kitchen, notify: true }),
-      ),
-    );
+    (await offlineListed(client, { room_ref: kitchen })).map(({ ref }) => ref);
 
   // «Какие уведомления включены?», for the home and for the kitchen.
   assert.equal(await notifyOf(client, kitchenLeakOnline), true);
-  assert.deepEqual(await notifyingServices(client), {
-    [`${kitchenLeak}/service/1`]: [kitchenLeakOnline],
+  assert.deepEqual(await notificationsOn(client), {
+    listed: [],
+    offline: { [kitchen]: 1 },
   });
-  assert.deepEqual(await kitchenNotifying(), [`${kitchenLeak}/service/1`]);
+  assert.deepEqual(await kitchenNotifying(), [kitchenLeakOnline]);
 
   const prepared = await prepareNotify(client, kitchenLeakOnline, false);
   assert.deepEqual(prepared.diff, {
@@ -244,7 +267,10 @@ test("«выключи уведомление о пропаже датчика �
   assert.equal(applied.status, "applied");
   assert.equal(online.notify, false);
   assert.equal(await notifyOf(client, kitchenLeakOnline), false);
-  assert.deepEqual(await notifyingServices(client), {});
+  assert.deepEqual(await notificationsOn(client), {
+    listed: [],
+    offline: null,
+  });
 
   const restored = await call(client, "restore_native_change", {
     change_ref: prepared.change_ref,
@@ -259,7 +285,7 @@ test("«выключи уведомление о пропаже датчика �
   );
   assert.equal(online.notify, true);
   assert.equal(await notifyOf(client, kitchenLeakOnline), true);
-  assert.deepEqual(await kitchenNotifying(), [`${kitchenLeak}/service/1`]);
+  assert.deepEqual(await kitchenNotifying(), [kitchenLeakOnline]);
 });
 
 test("«уведомляй, когда открывается входная дверь» turns on the door sensor's notification, and a second request finds it already on", async (t) => {
@@ -403,21 +429,65 @@ test("find_devices with a kind keeps the offline notification of a device of tha
     change_ref: prepared.change_ref,
   });
 
-  const sensors = await call(client, "find_devices", {
-    kind: "sensor",
-    notify: true,
+  assert.deepEqual(await notificationsOn(client, { kind: "sensor" }), {
+    listed: [],
+    offline: { [kitchen]: 1 },
   });
   assert.deepEqual(
-    sensors.rooms.flatMap(({ devices }) =>
-      devices.flatMap(({ services }) => services.map(({ ref }) => ref)),
-    ),
-    [`${kitchenLeak}/service/1`],
+    (await offlineListed(client, { kind: "sensor" })).map(({ ref }) => ref),
+    [kitchenLeakOnline],
   );
-  const lights = await call(client, "find_devices", {
-    kind: "light",
-    notify: true,
+  assert.deepEqual(await notificationsOn(client, { kind: "light" }), {
+    listed: [],
+    offline: null,
   });
-  assert.equal(lights.total, 0);
+});
+
+// «Какие уведомления включены у включённых розеток?», «…у кнопки?» A
+// notification answer lists the characteristic whose notification is on,
+// whatever else filters its service: a state filter, a characteristic that
+// cannot be read (a button's press) or a page too small for values.
+test("a notification answer lists the notifying characteristic under a state filter, unreadable or on a small page", async (t) => {
+  const home = await startHub(t);
+  const { hub } = home;
+  const characteristic = (aId, sId, cId) =>
+    hub.state.accessories
+      .find(({ id }) => id === aId)
+      .services.find((service) => service.sId === sId)
+      .characteristics.find((item) => item.cId === cId);
+  // Load notifications of the TV socket (on) and the kettle socket (off).
+  const tvLoad = `${homeRef}/accessory/20/service/13/characteristic/15`;
+  const kettleLoad = `${homeRef}/accessory/24/service/13/characteristic/15`;
+  characteristic(20, 13, 15).notify = true;
+  characteristic(24, 13, 15).notify = true;
+  // The bedside button's press, which cannot be read.
+  const press = characteristic(39, 13, 14);
+  press.control.read = false;
+  press.notify = true;
+  const pressRef = `${homeRef}/accessory/39/service/13/characteristic/14`;
+  const client = await startClient(t, home);
+
+  const on = await call(client, "find_devices", { notify: true, state: "on" });
+  assert.deepEqual(on.notifications, [
+    {
+      ref: tvLoad,
+      type: "OutletInUse",
+      service: "Розетка",
+      device: "Розетка телевизора",
+      room: "Гостиная",
+    },
+  ]);
+
+  const listed = [];
+  let args = { notify: true, limit: 1, max_bytes: 2048 };
+  for (let pages = 0; args; pages++) {
+    assert(pages < 10, "the pages never end");
+    const page = await call(client, "find_devices", args);
+    assert.equal(page.max_bytes_exceeded, undefined);
+    listed.push(...page.notifications.map(({ ref }) => ref));
+    args = page.next?.arguments;
+  }
+  assert.deepEqual(listed.sort(), [kettleLoad, tvLoad, pressRef].sort());
 });
 
 // The owner renamed the kitchen leak sensor in the SprutHub app after this
@@ -452,15 +522,15 @@ test("«какие уведомления включены» after a rename in t
   const [answer, other] = await Promise.all([question, meanwhile]);
   assert.equal(answer.isError, undefined, answer.content[0]?.text);
   assert.equal(other.isError, undefined, other.content[0]?.text);
-  assert.deepEqual(
-    answer.structuredContent.rooms.flatMap(({ name, devices }) =>
-      devices.map((device) => [name, device.name, device.ref]),
-    ),
-    [["Кухня", "Протечка у мойки", kitchenLeak]],
-  );
-  assert.deepEqual(notifyingOf(answer.structuredContent), {
-    [`${kitchenLeak}/service/13`]: [kitchenLeakDetected],
-  });
+  assert.deepEqual(answer.structuredContent.notifications, [
+    {
+      ref: kitchenLeakDetected,
+      type: "LeakDetected",
+      service: "Протечка",
+      device: "Протечка у мойки",
+      room: "Кухня",
+    },
+  ]);
 });
 
 // A notification sends the characteristic's value: one that holds a secret

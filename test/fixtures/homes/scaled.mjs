@@ -5,7 +5,10 @@
 // with devices that are off and online, about three services per accessory
 // as in the owner's home. The fill stays out of the living room and both
 // bedrooms and away from their names, so a question about them has the same
-// answer at every size. The default export is the owner's size.
+// answer at every size. Every device's offline notification (C_Online) is
+// on, as on a new virtual accessory and, likely, on most of the owner's
+// devices: 90 of their 1395 characteristics notify on 81 accessories
+// (2026-10-12-notifications-live). The default export is the owner's size.
 
 const EXTRA_ROOMS = [
   [40, "Холл"],
@@ -112,7 +115,10 @@ export function scaledHome(apartment, accessoryCount) {
       ...fixture.rooms,
       ...EXTRA_ROOMS.map(([id, name]) => ({ id, name })),
     ],
-    accessories: [...fixture.accessories, ...fill],
+    accessories: [...fixture.accessories, ...fill].map((accessory) => ({
+      ...accessory,
+      onlineNotify: true,
+    })),
   };
 }
 

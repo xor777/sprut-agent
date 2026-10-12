@@ -274,23 +274,25 @@ test("what lights are on fits one page at the owner's lamp count and at twice it
 
 // «Какие уведомления включены?» Only accessory.get reports a
 // characteristic's notification (owner hub, 2026-10-12-notifications-live),
-// so the whole-home answer reads each accessory once. It lists only the
-// notifications that are on: the same answer at the owner's size and at
-// twice it.
-test("which notifications are on lists the same ones at the owner's size and at twice it, reading each accessory once", async (t) => {
+// so the whole-home answer reads each accessory once. Every device's
+// offline notification is on, as likely in the owner's home; the answer
+// lists the notifications the owner chose, with nothing else about their
+// devices, and counts the offline ones by room with the call that lists
+// them: one small page at the owner's size and at twice it.
+test("which notifications are on stays one small page at the owner's size and at twice it, with every device's offline notification on", async (t) => {
   const apartment = await loadHomeFixture("apartment");
   const runs = [];
   for (const size of [80, 160]) {
     const { hub, client } = await connect(t, scaledHome(apartment, size));
-    // Turned on in the SprutHub app: the kitchen leak sensor going offline
-    // and the front door opening.
+    // Turned on in the SprutHub app: the front door opening and the kitchen
+    // leak sensor detecting a leak.
     const characteristic = (aId, sId, cId) =>
       hub.state.accessories
         .find(({ id }) => id === aId)
         .services.find((service) => service.sId === sId)
         .characteristics.find((item) => item.cId === cId);
-    characteristic(23, 1, 8).notify = true;
     characteristic(11, 13, 14).notify = true;
+    characteristic(23, 13, 14).notify = true;
     const before = hub.requests.length;
     const started = performance.now();
     const result = await client.callTool({
@@ -308,6 +310,71 @@ test("which notifications are on lists the same ones at the owner's size and at 
         .sort(byId),
       hub.state.accessories.map(({ id }) => id).sort(byId),
     );
+    const body = result.structuredContent;
+    assert.equal(body.next, null);
+    assert.deepEqual(body.notifications, [
+      {
+        ref: `${home}/accessory/11/service/13/characteristic/14`,
+        type: "ContactSensorState",
+        service: "Входная дверь",
+        device: "Датчик двери",
+        room: "Прихожая",
+      },
+      {
+        ref: `${home}/accessory/23/service/13/characteristic/14`,
+        type: "LeakDetected",
+        service: "Протечка",
+        device: "Датчик протечки под мойкой",
+        room: "Кухня",
+      },
+    ]);
+
+    // Independent of the product: the offline notifications the simulator
+    // holds as on, by room.
+    const onlineRefs = [];
+    const onlineByRoom = new Map();
+    for (const accessory of hub.state.accessories) {
+      for (const service of accessory.services) {
+        for (const item of service.characteristics) {
+          if (item.control.type !== "C_Online" || item.notify !== true) {
+            continue;
+          }
+          onlineRefs.push(
+            `${home}/accessory/${accessory.id}/service/${service.sId}/characteristic/${item.cId}`,
+          );
+          const room = `${home}/room/${accessory.roomId}`;
+          onlineByRoom.set(room, (onlineByRoom.get(room) ?? 0) + 1);
+        }
+      }
+    }
+    assert.equal(onlineRefs.length, size);
+    const { rooms, next, ...counted } = body.device_online;
+    assert.deepEqual(counted, { notifying: size });
+    assert.deepEqual(
+      new Map(rooms.map(({ ref, notifying }) => [ref, notifying])),
+      onlineByRoom,
+    );
+    assert.deepEqual(next, {
+      tool: "find_devices",
+      arguments: { home_ref: home, notify: true, include_technical: true },
+    });
+    // The call lists every offline notification, page by page.
+    const listedOnline = [];
+    let args = next.arguments;
+    for (let pages = 0; args; pages++) {
+      assert(pages < 20, "the offline notifications never end");
+      const page = await client.callTool({ name: next.tool, arguments: args });
+      assert.equal(page.isError, undefined, page.content[0]?.text);
+      assert(Buffer.byteLength(page.content[0].text) <= 16_000);
+      listedOnline.push(
+        ...page.structuredContent.notifications
+          .filter(({ type }) => type === "C_Online")
+          .map(({ ref }) => ref),
+      );
+      args = page.structuredContent.next?.arguments;
+    }
+    assert.deepEqual(listedOnline.sort(), onlineRefs.sort());
+
     runs.push({
       size,
       ms,
@@ -317,31 +384,13 @@ test("which notifications are on lists the same ones at the owner's size and at 
         0,
       ),
       bytes: Buffer.byteLength(result.content[0].text),
-      body: result.structuredContent,
     });
   }
-  for (const { body } of runs) {
-    assert.equal(body.next, null);
-    assert.deepEqual(
-      listed(body).map(({ service }) => [
-        service.ref,
-        [...(service.values ?? []), ...(service.characteristics ?? [])]
-          .filter(({ notify }) => notify === true)
-          .map(({ ref }) => ref),
-      ]),
-      [
-        [
-          `${home}/accessory/11/service/13`,
-          [`${home}/accessory/11/service/13/characteristic/14`],
-        ],
-        [
-          `${home}/accessory/23/service/1`,
-          [`${home}/accessory/23/service/1/characteristic/8`],
-        ],
-      ],
-    );
-  }
-  assert.equal(runs[0].bytes, runs[1].bytes);
+  // Only the counts of offline notifications grow with the home.
+  assert(
+    runs[1].bytes <= runs[0].bytes * 1.1,
+    `the answer grows with the home: ${runs.map(({ bytes }) => bytes).join(", ")}`,
+  );
   t.diagnostic(
     `find_devices {notify: true}: ${runs
       .map(

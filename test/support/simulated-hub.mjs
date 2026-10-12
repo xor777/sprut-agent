@@ -1936,22 +1936,27 @@ function buildState(fixture, hubTime) {
 function buildAccessory(state, input) {
   const services = [];
   if (input.manufacturer || input.model) {
+    const characteristics = [
+      ["Identify", false],
+      ["Manufacturer", input.manufacturer ?? ""],
+      ["Model", input.model ?? ""],
+      ["Name", input.name],
+      ["SerialNumber", input.deviceId ?? `SN-${input.id}`],
+      ["FirmwareRevision", input.firmware ?? "1.0"],
+      ["C_Online", input.online !== false],
+    ].map(([type, value], index) =>
+      buildCharacteristic(input.id, 1, { cId: index + 2, type, value }),
+    );
+    // onlineNotify: the device's offline notification is on, as on a new
+    // virtual accessory and, likely, on most of the owner's devices (90 of
+    // their 1395 characteristics notify, 2026-10-12-notifications-live).
+    if (input.onlineNotify === true) characteristics.at(-1).notify = true;
     services.push({
       aId: input.id,
       sId: 1,
       name: "Информация об аксессуаре",
       type: "AccessoryInformation",
-      characteristics: [
-        ["Identify", false],
-        ["Manufacturer", input.manufacturer ?? ""],
-        ["Model", input.model ?? ""],
-        ["Name", input.name],
-        ["SerialNumber", input.deviceId ?? `SN-${input.id}`],
-        ["FirmwareRevision", input.firmware ?? "1.0"],
-        ["C_Online", input.online !== false],
-      ].map(([type, value], index) =>
-        buildCharacteristic(input.id, 1, { cId: index + 2, type, value }),
-      ),
+      characteristics,
     });
   }
   for (const service of input.services) {
