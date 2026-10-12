@@ -4554,16 +4554,65 @@ const SECRET_INPUT_TYPES = new Set(["PASSWORD", "PINCODE", "QR_CODE"]);
 export function isSensitiveNativeNode(value, key = "") {
   if (isSensitiveContainerKey(key)) return true;
   if (!value || typeof value !== "object") return false;
+  if (
+    SECRET_INPUT_TYPES.has(value.inputType) ||
+    SECRET_INPUT_TYPES.has(value.input_type) ||
+    value.sensitive === true ||
+    Object.entries(value).some(
+      ([name, child]) => isSensitiveKey(name) && !isFlagOrSize(name, child),
+    )
+  ) {
+    return true;
+  }
+  // The option's own key decides for its label too: a CHECKBOX
+  // InstallCodeEnabled labelled «Install code» is a flag.
+  if (
+    typeof value.key === "string" &&
+    isFlagOrSize(value.key, value.value ?? value.configured_value)
+  ) {
+    return false;
+  }
   return (
-    SECRET_INPUT_TYPES.has(value?.inputType) ||
-    SECRET_INPUT_TYPES.has(value?.input_type) ||
-    value?.sensitive === true ||
-    Object.keys(value ?? {}).some(isSensitiveKey) ||
-    [value?.key, value?.name, value?.type, value?.ref].some(
+    [value.key, value.name, value.type, value.ref].some(
       (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
     ) ||
     namesOptionSecret(value) ||
     holdsKeyMaterial(value)
+  );
+}
+
+// A name after key material with a part that makes it a flag, a size or a
+// kind holds no key when its value is a boolean or a number:
+// InstallCodeEnabled, UseInstallCode, PinCodeLength, MaxPINCodeLength,
+// PasswordType. A key or code in a string, such as InstallCode or a
+// NUMBER Passcode without such a part, stays a secret.
+const FLAG_OR_SIZE_PARTS = new Set([
+  "count",
+  "disabled",
+  "enable",
+  "enabled",
+  "len",
+  "length",
+  "max",
+  "min",
+  "mode",
+  "size",
+  "type",
+  "use",
+]);
+
+function isFlagOrSize(name, value) {
+  const scalar =
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    (value !== null &&
+      typeof value === "object" &&
+      ["boolValue", "intValue", "longValue", "doubleValue"].some((kind) =>
+        Object.hasOwn(value, kind),
+      ));
+  return (
+    scalar &&
+    credentialKeyParts(name).some((part) => FLAG_OR_SIZE_PARTS.has(part))
   );
 }
 
@@ -4595,7 +4644,66 @@ function holdsKeyMaterial(node) {
 // material. The same rule decides for an option and for a label in hub
 // text (containsLabelledKeyMaterial).
 function isKeyMaterialUnder(name, text) {
-  return /key|code|ключ|код/iu.test(name) && looksLikeKeyMaterial(text.trim());
+  const value = text.trim();
+  if (!/key|code|ключ|код/iu.test(name) || !looksLikeKeyMaterial(value)) {
+    return false;
+  }
+  const parts = credentialKeyParts(name);
+  return (
+    !namesPublicIdentifier(parts) &&
+    !isProntoCode(value) &&
+    !isBroadlinkIrCode(parts, value)
+  );
+}
+
+// A Tuya productKey names a device model and is the same on every device
+// of it, a product code is a model or GTIN number, a scene code numbers a
+// scene or a button: none of them opens anything.
+function namesPublicIdentifier(parts) {
+  const [qualifier, last] = parts.slice(-2);
+  return (
+    (qualifier === "product" && (last === "key" || last === "code")) ||
+    (qualifier === "scene" && last === "code")
+  );
+}
+
+// A learned Pronto IR code: groups of four hex digits, 0000 first, then
+// the carrier and the burst pair counts of its two sequences, which give
+// the number of groups. A remote sends it to anyone in the room; a key
+// written in groups of four does not fit these counts.
+function isProntoCode(text) {
+  const words = text.split(/\s+/);
+  if (!words.every((word) => /^[\dA-Fa-f]{4}$/.test(word))) return false;
+  const [format, carrier, once, repeat] = words.map((word) =>
+    Number.parseInt(word, 16),
+  );
+  return (
+    format === 0 &&
+    carrier > 0 &&
+    once + repeat > 0 &&
+    words.length === 4 + 2 * (once + repeat)
+  );
+}
+
+// A Broadlink IR code under a name for an IR, learned or remote code:
+// base64 of a packet that starts with 0x26 (infrared), a repeat count and
+// the length of its pulse data. An RF packet (0xb2, 0xd7) can open a gate
+// or a garage and stays hidden.
+const IR_CODE_PARTS = new Set(["ir", "learn", "learned", "learning", "remote"]);
+
+function isBroadlinkIrCode(parts, text) {
+  if (
+    !parts.some((part) => IR_CODE_PARTS.has(part)) ||
+    !/^[A-Za-z\d+/]+={0,2}$/.test(text)
+  ) {
+    return false;
+  }
+  const packet = Buffer.from(text, "base64");
+  return (
+    packet.length >= 4 &&
+    packet[0] === 0x26 &&
+    4 + packet.readUInt16LE(2) <= packet.length
+  );
 }
 
 function optionStringValue(node) {
