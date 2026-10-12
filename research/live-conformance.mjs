@@ -2310,11 +2310,16 @@ async function stepVirtualDuplicate(ctx) {
 // --- step N: a characteristic's notification on the virtual lamp ----------
 
 // characteristic_notify was written from the web client's code and the
-// schema (2026-09-24-web-client-action-map B8). The notification of the
-// run's virtual lamp is turned on, read back and restored; nobody switches
-// that lamp, so nothing is sent. The same is done for its C_Online when the
-// virtual accessory has one. Raw reads record where the hub reports notify;
-// the notify settings of the owner's devices are compared before and after.
+// schema (2026-09-24-web-client-action-map B8) and confirmed live on the
+// On of a virtual lamp (2026-10-12-notifications-live): only accessory.get
+// reports notify, and the virtual accessory's C_Online has it on from the
+// start. A whole-home find_devices notify=true records what the owner's
+// question costs. The notification of the run's virtual lamp is turned on,
+// read back and restored off; its C_Online is turned off and restored on.
+// Nobody switches that lamp and the accessory stays online, so nothing is
+// sent. Raw reads record where the hub reports notify; the notify settings
+// of the owner's devices are read with accessory.get before and after and
+// must be unchanged.
 async function stepNotifications(ctx) {
   const { hub, probe, virtual } = ctx;
   if (!virtual) {
@@ -2328,11 +2333,7 @@ async function stepNotifications(ctx) {
     return;
   }
   const { aId } = virtual.on.ids;
-  const ownersBefore = ownerNotifySettings(
-    await probe.listAccessories(),
-    hub.virtualAIds,
-  );
-  const onDone = await probeNotify(ctx, "N On", virtual.on.ids);
+  const ownersBefore = await ownerNotifySettings(probe, hub.virtualAIds);
   const accessory = await probe.getAccessoryOrNull(aId);
   const info = accessory?.services?.find(
     ({ type }) => type === "AccessoryInformation",
@@ -2340,7 +2341,24 @@ async function stepNotifications(ctx) {
   const online = info?.characteristics?.find(
     ({ control }) => control?.type === "C_Online",
   );
-  if (!online) {
+  const onlineIds = online ? { aId, sId: info.sId, cId: online.cId } : null;
+
+  const started = Date.now();
+  const home = await notifyingIn(hub, {});
+  const homeMs = Date.now() - started;
+  const onlineListed =
+    onlineIds !== null && home.marked.has(refOf(hub, onlineIds));
+  row(
+    "N find_devices home",
+    "find_devices{notify:true}: accessory.get{id} for each accessory",
+    "the whole home's notifications that are on, the virtual C_Online among them",
+    `${home.services} service(s) listed in ${homeMs} ms; virtual C_Online ${onlineListed ? "listed" : "not listed"}`,
+    onlineIds === null ? "observed" : onlineListed ? "match" : "mismatch",
+    { services: home.services, ms: homeMs },
+  );
+
+  const onDone = await probeNotify(ctx, "N On", virtual.on.ids, false);
+  if (!onlineIds) {
     row(
       "N C_Online",
       "accessory.get{id}",
@@ -2349,37 +2367,35 @@ async function stepNotifications(ctx) {
       "skipped",
     );
   } else if (onDone) {
-    await probeNotify(ctx, "N C_Online", {
-      aId,
-      sId: info.sId,
-      cId: online.cId,
-    });
+    await probeNotify(ctx, "N C_Online", onlineIds, true);
   }
-  const ownersAfter = ownerNotifySettings(
-    await probe.listAccessories(),
-    hub.virtualAIds,
-  );
-  const keys = new Set([...ownersBefore.keys(), ...ownersAfter.keys()]);
-  const changed = [...keys].filter(
-    (key) => ownersBefore.get(key) !== ownersAfter.get(key),
-  );
-  const on = [...ownersAfter.values()].filter((value) => value === true);
+  const ownersAfter = await ownerNotifySettings(probe, hub.virtualAIds);
+  const before = ownersBefore.settings;
+  const after = ownersAfter.settings;
+  const keys = new Set([...before.keys(), ...after.keys()]);
+  const changed = [...keys].filter((key) => before.get(key) !== after.get(key));
+  const on = [...after.values()].filter((value) => value === true);
+  // Whether a physical device's accessory.get has notify on every
+  // characteristic was not seen before this step.
+  const absent = [...after.values()].filter((value) => value === "absent");
   row(
     "N owner notifications",
-    "accessory.list{expand}",
+    "accessory.get{id} for each owner accessory",
     "every notify of the owner's devices as before",
-    `${changed.length} changed; ${on.length} of ${ownersAfter.size} characteristic(s) with notify on`,
+    `${changed.length} changed; ${on.length} of ${after.size} characteristic(s) with notify on, ${absent.length} without notify; ${ownersAfter.accessories} accessories read in ${ownersBefore.ms} ms before, ${ownersAfter.ms} ms after`,
     changed.length === 0 ? "match" : "mismatch",
     changed.length > 0 ? { changed } : undefined,
   );
   if (changed.length > 0) abort("an owner notification setting changed");
 }
 
-// Turns one notification of the virtual accessory on, reads it back and
-// restores it. Returns whether it ended restored.
-async function probeNotify(ctx, label, ids) {
-  const { hub, probe } = ctx;
-  const ref = `${hub.homeRef}/accessory/${ids.aId}/service/${ids.sId}/characteristic/${ids.cId}`;
+// Sets one notification of the virtual accessory from its initial value to
+// the other, reads it back and restores it. Returns whether it ended
+// restored.
+async function probeNotify(ctx, label, ids, initial) {
+  const { hub, probe, virtual } = ctx;
+  const ref = refOf(hub, ids);
+  const target = !initial;
   const shown = async () =>
     (await hub.read("get_entity", { entity_ref: ref })).entity?.notify;
   const rawBefore = await rawNotify(probe, ids);
@@ -2387,69 +2403,78 @@ async function probeNotify(ctx, label, ids) {
   row(
     `${label} before`,
     "accessory.get, characteristic.get, accessory.list",
-    "notify off on a new virtual characteristic",
+    `notify ${initial} in accessory.get and get_entity (${initial ? "on from the start" : "off on a new virtual characteristic"})`,
     `${describeRawNotify(rawBefore)}; get_entity notify ${before}`,
-    before === false ? "match" : "mismatch",
+    rawBefore.get.value === initial && before === initial
+      ? "match"
+      : "mismatch",
     { raw: rawBefore },
   );
-  if (before !== false) return false;
+  if (rawBefore.get.value !== initial || before !== initial) return false;
 
-  const turnedOn = await prepareAndApply(hub, {
+  const changed = await prepareAndApply(hub, {
     operation: "characteristic_notify",
     target_ref: ref,
-    value: true,
+    value: target,
   });
-  if (!turnedOn.applied) {
+  const step = `${label} ${target ? "on" : "off"}`;
+  if (!changed.applied) {
     row(
-      `${label} on`,
+      step,
       "characteristic.update{aId,sId,cId,notify}",
       "applied",
-      describe(turnedOn),
+      describe(changed),
       "rejected",
     );
     return false;
   }
   const entry = pushCleanup(ctx, {
     label: `${label} notification`,
-    changeRef: turnedOn.changeRef,
-    verify: async () => (await rawNotify(probe, ids)).get.value !== true,
+    changeRef: changed.changeRef,
+    verify: async () => (await rawNotify(probe, ids)).get.value === initial,
   });
-  const rawOn = await rawNotify(probe, ids);
-  const afterOn = await shown();
+  const rawChanged = await rawNotify(probe, ids);
+  const afterChange = await shown();
   row(
-    `${label} on`,
-    "characteristic.update{aId,sId,cId,notify:true}",
-    "applied; notify true in accessory.get and get_entity",
-    `${turnedOn.applied.status}; ${describeRawNotify(rawOn)}; get_entity notify ${afterOn}`,
-    turnedOn.applied.status === "applied" &&
-      rawOn.get.value === true &&
-      afterOn === true
+    step,
+    `characteristic.update{aId,sId,cId,notify:${target}}`,
+    `applied; notify ${target} in accessory.get and get_entity`,
+    `${changed.applied.status}; ${describeRawNotify(rawChanged)}; get_entity notify ${afterChange}`,
+    changed.applied.status === "applied" &&
+      rawChanged.get.value === target &&
+      afterChange === target
       ? "match"
       : "mismatch",
-    { raw: rawOn },
+    { raw: rawChanged },
   );
-  const listed = await notifyListed(hub, ref);
+  const listed = (
+    await notifyingIn(hub, { room_ref: virtual.roomRef })
+  ).marked.has(ref);
   row(
     `${label} find_devices`,
-    "accessory.list{expand}",
-    "find_devices notify=true lists it with notify: true",
+    "find_devices{room_ref,notify:true}: accessory.get{id}",
+    `find_devices notify=true in the probe room ${target ? "lists" : "does not list"} it`,
     listed ? "listed" : "not listed",
-    listed ? "match" : "mismatch",
+    listed === target ? "match" : "mismatch",
   );
 
   const restored = await runRestore(hub, entry);
-  const rawOff = await rawNotify(probe, ids);
-  const afterOff = await shown();
+  const rawRestored = await rawNotify(probe, ids);
+  const afterRestore = await shown();
   row(
     `${label} restore`,
-    "characteristic.update{aId,sId,cId,notify:false}",
-    "restored; notify off in accessory.get and get_entity",
-    `${restored.observed}; ${describeRawNotify(rawOff)}; get_entity notify ${afterOff}`,
-    restored.verified && afterOff === false ? "match" : "mismatch",
-    { raw: rawOff },
+    `characteristic.update{aId,sId,cId,notify:${initial}}`,
+    `restored; notify ${initial} in accessory.get and get_entity`,
+    `${restored.observed}; ${describeRawNotify(rawRestored)}; get_entity notify ${afterRestore}`,
+    restored.verified && afterRestore === initial ? "match" : "mismatch",
+    { raw: rawRestored },
   );
   if (!restored.verified) abort(`${label} notification was not restored`);
   return restored.verified;
+}
+
+function refOf(hub, { aId, sId, cId }) {
+  return `${hub.homeRef}/accessory/${aId}/service/${sId}/characteristic/${cId}`;
 }
 
 // notify of one characteristic as accessory.get, characteristic.get and
@@ -2480,43 +2505,65 @@ function describeRawNotify(raw) {
   return `accessory.get ${one(raw.get)}, characteristic.get ${one(raw.characteristic)}, accessory.list ${one(raw.list)}`;
 }
 
-// Whether find_devices notify=true lists this characteristic as notifying.
-async function notifyListed(hub, ref) {
+// find_devices notify=true with the given filters, every page: how many
+// services it lists and the refs of the characteristics it marks notify.
+async function notifyingIn(hub, filters) {
   let args = {
     home_ref: hub.homeRef,
+    ...filters,
     notify: true,
     values: false,
     limit: 100,
     max_bytes: 32_768,
   };
+  let services = 0;
+  const marked = new Set();
   for (;;) {
     const page = await hub.read("find_devices", args);
     expectOk(page, "find_devices");
     for (const room of page.rooms) {
       for (const device of room.devices) {
         for (const service of device.services) {
-          if (
-            (service.characteristics ?? []).some(
-              (item) => item.ref === ref && item.notify === true,
-            )
-          ) {
-            return true;
+          services += 1;
+          for (const item of service.characteristics ?? []) {
+            if (item.notify === true) marked.add(item.ref);
           }
         }
       }
     }
-    if (!page.next) return false;
+    if (!page.next) return { services, marked };
     args = page.next.arguments;
   }
 }
 
-// notify of every characteristic of the owner's devices, as accessory.list
-// reports it ("absent" when left out).
-function ownerNotifySettings(accessories, virtualAIds) {
+// notify of every characteristic of the owner's devices, as accessory.get
+// reports it ("absent" when left out; the lists never carry it), read
+// OWNER_READ_CONCURRENCY accessories at a time, with the time the reads
+// took.
+const OWNER_READ_CONCURRENCY = 8;
+
+async function ownerNotifySettings(probe, virtualAIds) {
+  const started = Date.now();
+  const ids = (await probe.listAccessories())
+    .map(({ id }) => id)
+    .filter((id) => !virtualAIds.has(id));
+  const accessories = new Array(ids.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const index = next++;
+      accessories[index] = await probe.getAccessoryOrNull(ids[index]);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(OWNER_READ_CONCURRENCY, ids.length) },
+      worker,
+    ),
+  );
   const settings = new Map();
   for (const accessory of accessories) {
-    if (virtualAIds.has(accessory.id)) continue;
-    for (const service of accessory.services ?? []) {
+    for (const service of accessory?.services ?? []) {
       for (const characteristic of service.characteristics ?? []) {
         settings.set(
           `${accessory.id}.${service.sId}.${characteristic.cId}`,
@@ -2527,7 +2574,7 @@ function ownerNotifySettings(accessories, virtualAIds) {
       }
     }
   }
-  return settings;
+  return { settings, accessories: ids.length, ms: Date.now() - started };
 }
 
 // --- step 2: BLOCK storage conformance ---------------------------------------
