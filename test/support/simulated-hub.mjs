@@ -182,8 +182,28 @@ export const METHOD_EVIDENCE = {
   // scenario other than a BLOCK. The web client edits a scenario's flags
   // through its window (2026-09-24-web-client-evidence, 4), but none of these
   // writes was sent to a live hub, and the simulator refuses them.
-  "extension.list": [OBSERVED, "2026-09-16-extension-child-read"],
+  "extension.list": [
+    OBSERVED,
+    "2026-09-16-extension-child-read; spaces with their actions, state and endTimestamp of a running search (2026-10-12-device-pairing, P1)",
+  ],
   "extension.get": [OBSERVED, "2026-09-16-extension-child-read"],
+  // The start, restart and stop of ZigBee's main ACTION_DISCOVERY with no
+  // device in pairing mode. The end by its timer and the action of another
+  // space are the simulator's guess.
+  "extension.action": [
+    OBSERVED,
+    "2026-10-12-device-pairing, check 1 (P1-P5): empty answer, state and endTimestamp on DiscoveryTime, a repeat restarts the timer, state false clears it, an extension EVENT_UPDATE pushed to every connection; the end by timer not observed",
+  ],
+  // A start while a fixture's device is in pairing mode: the device joins
+  // as the web client's code suggests (child EVENT_ADD with status and
+  // progressBar, then an accessory with extensionKey, deviceId and
+  // deviceWindow linked from the child window's AccessoriesList). No
+  // pairing was observed on a hub; the room and name of the new accessory
+  // are the fixture's assumption.
+  "extension.action {pairing}": [
+    SCHEMA_ONLY,
+    "2026-10-12-device-pairing K7-K9, H6, H9: inferred from the web client's code and reads of devices already paired",
+  ],
   "extensionChild.list": [OBSERVED, "2026-09-17-extension-child-empty-list"],
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
 };
@@ -265,6 +285,13 @@ function editorBlockForm(input) {
 // scenario's options window that the simulator refuses as unmodelled is
 // keyed by that option, with no entry, so a run reports it as unsupported.
 function evidenceKey(state, method, params) {
+  if (
+    method === "extension.action" &&
+    params?.extension?.action?.state === true &&
+    pairingDevicesFor(state, params.extension.action).length > 0
+  ) {
+    return "extension.action {pairing}";
+  }
   if (
     method === "characteristic.update" &&
     isRecord(params?.characteristic?.update) &&
@@ -1026,6 +1053,10 @@ export async function startSimulatedHub(
   };
   state.faultEvents = [];
   state.pending = new Set();
+  // Timers of the hub's own later steps (a search ending, a device joining);
+  // close() clears them.
+  state.timers = new Set();
+  state.timerHandles = new Map();
   const requests = [];
   // Queued explicit JSON-RPC error replies by method, for tests of a hub that
   // receives a request and refuses it without changing the home.
@@ -1041,6 +1072,15 @@ export async function startSimulatedHub(
       protocols.has("json-rpc") ? "json-rpc" : false,
   });
   await once(server, "listening");
+  // The hub pushes event frames to every connection without a subscription
+  // (owner's hub: characteristic and room events, and the extension event
+  // after a search action, 2026-10-12-device-pairing H12 and P5).
+  state.emit = (event) => {
+    const text = JSON.stringify({ event });
+    for (const client of server.clients) {
+      if (client.readyState === client.OPEN) client.send(text);
+    }
+  };
   // Every WebSocket connection with the time of its first request and its
   // close, so a grader can tell the MCP server's connection from another.
   const connections = [];
@@ -1171,7 +1211,14 @@ export async function startSimulatedHub(
     }),
     snapshot: () => homeSnapshot(state),
     exportState: () => {
-      const { pending: _pending, currentRequest: _request, ...rest } = state;
+      const {
+        pending: _pending,
+        currentRequest: _request,
+        timers: _timers,
+        timerHandles: _timerHandles,
+        emit: _emit,
+        ...rest
+      } = state;
       return {
         ...structuredClone(rest),
         faults: {
@@ -1185,6 +1232,9 @@ export async function startSimulatedHub(
     close: async () => {
       for (const pending of state.pending) clearTimeout(pending.timer);
       state.pending.clear();
+      for (const timer of state.timers) clearTimeout(timer);
+      state.timers.clear();
+      state.timerHandles.clear();
       for (const client of server.clients) client.terminate();
       await new Promise((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -1828,13 +1878,13 @@ const HANDLERS = {
     return {};
   },
 
+  // The list carries each extension's spaces with their actions, as
+  // extension.get does (owner's hub, 2026-10-12-device-pairing P1).
   "extension.list": (state) => ({
-    extensions: state.extensions.map(
-      ({ spaces: _spaces, children: _children, ...summary }) => ({
-        ...summary,
-        childCount: extensionChildren(state, summary.extensionKey).length,
-      }),
-    ),
+    extensions: state.extensions.map(({ children: _children, ...summary }) => ({
+      ...summary,
+      childCount: extensionChildren(state, summary.extensionKey).length,
+    })),
   }),
   "extension.get": (state, { extensionKey }) => {
     const extension = state.extensions.find(
@@ -1847,15 +1897,242 @@ const HANDLERS = {
       childCount: extensionChildren(state, extensionKey).length,
     };
   },
+  // A device still joining keeps its status and progressBar in the list, as
+  // the web client draws them from the list and its events (K7, K8); a
+  // paired device's list entry has neither (owner's hub, H3).
   "extensionChild.list": (state, { extensionKey }) => ({
-    children: extensionChildren(state, extensionKey).map(
-      ({ description: _d, status: _s, ...summary }) => summary,
-    ),
+    children: extensionChildren(state, extensionKey).map((child) => {
+      if (isJoining(state, child)) return child;
+      const { description: _d, status: _s, ...summary } = child;
+      return summary;
+    }),
   }),
   "extensionChild.get": (state, { extensionKey, id }) =>
     extensionChildren(state, extensionKey).find((child) => child.id === id) ??
     null,
+  // Observed for ZigBee's main ACTION_DISCOVERY only (P1-P5). A missing
+  // extension or action, an extension that does not run and other action
+  // types were not sent to a hub: the simulator refuses them.
+  "extension.action": (
+    state,
+    { extensionKey, spaceKey, actionId, state: on },
+  ) => {
+    const extension = state.extensions.find(
+      (candidate) => candidate.extensionKey === extensionKey,
+    );
+    if (!extension) throw notFound(`Extension ${extensionKey}`);
+    const space = extension.spaces?.find(({ key }) => key === spaceKey);
+    const action = space?.actions?.find(({ id }) => id === actionId);
+    if (!action) throw notFound(`Action ${spaceKey}/${actionId}`);
+    if (extension.state !== "LOADED" || extension.enabled !== true) {
+      throw new SimulatorError(-32603, "Extension is not loaded");
+    }
+    if (action.type !== "ACTION_DISCOVERY" || typeof on !== "boolean") {
+      throw new SimulatorError(
+        -32601,
+        `unsupported by simulator: extension.action ${action.type} state ${on}`,
+      );
+    }
+    if (on) startDiscovery(state, extension, space, action);
+    else endDiscovery(state, extension);
+    return {};
+  },
 };
+
+// ---- device search and pairing ---------------------------------------------
+
+// A fixture may set hub.discoveryTimeMs, the hub's DiscoveryTime (60 s on
+// the owner's hub, H8), and list devices in pairing mode:
+//   pairing: [{extensionKey, spaceKey = "main", joinAfterMs, interviewMs,
+//              childName, accessory: {id, name, roomId, deviceId, ...}}]
+// Such a device joins joinAfterMs after a search of that space starts and,
+// interviewMs later, becomes an accessory in the fixture's form. Both
+// stages are inferred from the web client (K7-K9); the room and name the
+// hub gives a new accessory were not observed, so they come from the
+// fixture (by default the first room).
+const SEARCH_EVENT_DELAY_MS = 10;
+
+function startDiscovery(state, extension, space, action) {
+  // endTimestamp is on the machine's clock, not the simulated hub clock:
+  // the owner's hub put it DiscoveryTime after the request on the clock of
+  // the machine that sent it (P1), and a client counts what is left from
+  // its own clock.
+  const endTimestamp = Date.now() + state.discoveryTimeMs;
+  action.state = true;
+  // Every action of the extension shows the end; only the started one has
+  // state true (P2). A repeat restarts the timer (P3).
+  for (const other of extensionActions(extension)) {
+    other.endTimestamp = endTimestamp;
+  }
+  // The end by timer is inferred: as a stop, with an event.
+  setNamedTimer(
+    state,
+    `search:${extension.extensionKey}`,
+    state.discoveryTimeMs,
+    () => endDiscovery(state, extension),
+  );
+  pushExtension(state, extension);
+  for (const device of pairingDevicesFor(state, {
+    extensionKey: extension.extensionKey,
+    spaceKey: space.key,
+  })) {
+    const name = `join:${state.pairing.indexOf(device)}`;
+    if (state.timerHandles.has(name)) continue;
+    setNamedTimer(state, name, device.joinAfterMs ?? 0, () =>
+      announceJoining(state, extension, device),
+    );
+  }
+}
+
+// A stop clears endTimestamp on every action and sets state false (P4);
+// with several running actions the simulator ends them all (a guess). A
+// device in pairing mode that has not joined yet waits for the next search.
+function endDiscovery(state, extension) {
+  clearNamedTimer(state, `search:${extension.extensionKey}`);
+  for (const action of extensionActions(extension)) {
+    if (action.type === "ACTION_DISCOVERY") action.state = false;
+    delete action.endTimestamp;
+  }
+  state.pairing.forEach((device, index) => {
+    if (device.extensionKey === extension.extensionKey) {
+      clearNamedTimer(state, `join:${index}`);
+    }
+  });
+  pushExtension(state, extension);
+}
+
+function extensionActions(extension) {
+  return (extension.spaces ?? []).flatMap(({ actions }) => actions ?? []);
+}
+
+// Devices in pairing mode that a start of this space would let in.
+function pairingDevicesFor(state, { extensionKey, spaceKey }) {
+  return state.pairing.filter(
+    (device) =>
+      device.joined !== true &&
+      device.extensionKey === extensionKey &&
+      (device.spaceKey ?? "main") === spaceKey,
+  );
+}
+
+function isJoining(state, child) {
+  return state.joining.some(
+    (joining) =>
+      joining.extensionKey === child.extensionKey && joining.id === child.id,
+  );
+}
+
+function announceJoining(state, extension, device) {
+  const child = {
+    extensionKey: extension.extensionKey,
+    id: device.accessory.deviceId,
+    spaceKey: device.spaceKey ?? "main",
+    name: device.childName ?? device.accessory.model ?? device.accessory.name,
+    online: true,
+    status: "Подключение",
+    progressBar: 10,
+    optionsWindow: "",
+  };
+  state.joining.push(child);
+  later(state, SEARCH_EVENT_DELAY_MS, () =>
+    state.emit({
+      extensionChild: {
+        event: "EVENT_ADD",
+        children: [structuredClone(child)],
+      },
+    }),
+  );
+  later(state, device.interviewMs ?? 0, () =>
+    completeJoin(state, extension, device, child),
+  );
+}
+
+function completeJoin(state, extension, device, child) {
+  state.joining = state.joining.filter((joining) => joining !== child);
+  const input = device.accessory;
+  const accessory = buildAccessory(state, {
+    ...input,
+    roomId: input.roomId ?? state.rooms[0].id,
+    extensionKey: extension.extensionKey,
+    // The child window links the new accessory read-only, as on the
+    // owner's hub (H6, 2026-09-16-extension-child-read).
+    deviceWindow: [
+      {
+        key: "AccessoriesList",
+        name: "Аксессуары",
+        type: "GenericInteger",
+        inputType: "ACCESSORY_LIST",
+        read: true,
+        write: false,
+        events: false,
+        value: { intValue: 0 },
+        validValues: [{ value: { intValue: input.id }, name: input.name }],
+      },
+      ...(input.deviceWindow ?? []),
+    ],
+  });
+  state.accessories.push(accessory);
+  device.joined = true;
+  const {
+    description: _description,
+    status: _status,
+    ...paired
+  } = extensionChildren(state, extension.extensionKey).find(
+    ({ id }) => id === accessory.deviceId,
+  );
+  later(state, SEARCH_EVENT_DELAY_MS, () => {
+    state.emit({
+      accessory: {
+        event: "EVENT_ADD",
+        accessories: [projectAccessory(accessory, "services,characteristics")],
+      },
+    });
+    state.emit({
+      extensionChild: { event: "EVENT_UPDATE", children: [paired] },
+    });
+  });
+}
+
+function pushExtension(state, extension) {
+  const { children: _children, ...detail } = extension;
+  const event = {
+    extension: {
+      event: "EVENT_UPDATE",
+      extensions: [structuredClone(detail)],
+    },
+  };
+  later(state, SEARCH_EVENT_DELAY_MS, () => state.emit(event));
+}
+
+function later(state, ms, run) {
+  const timer = setTimeout(() => {
+    state.timers.delete(timer);
+    run();
+  }, ms);
+  state.timers.add(timer);
+  return timer;
+}
+
+// One pending step per name (a search's end, a device's join): setting it
+// again replaces it.
+function setNamedTimer(state, name, ms, run) {
+  clearNamedTimer(state, name);
+  state.timerHandles.set(
+    name,
+    later(state, ms, () => {
+      state.timerHandles.delete(name);
+      run();
+    }),
+  );
+}
+
+function clearNamedTimer(state, name) {
+  const timer = state.timerHandles.get(name);
+  if (!timer) return;
+  clearTimeout(timer);
+  state.timers.delete(timer);
+  state.timerHandles.delete(name);
+}
 
 function buildState(fixture, hubTime) {
   const utcOffsetMinutes = fixture.log?.utcOffsetMinutes ?? 180;
@@ -1899,6 +2176,17 @@ function buildState(fixture, hubTime) {
       ...bridgeWindows(fixture.extensions ?? []),
     },
     extensions: structuredClone(fixture.extensions ?? []),
+    // The hub's DiscoveryTime and the devices in pairing mode (see
+    // startDiscovery); joining holds devices announced and not yet paired.
+    discoveryTimeMs: fixture.hub.discoveryTimeMs ?? 60_000,
+    pairing: structuredClone(fixture.pairing ?? []).map((device) => ({
+      ...device,
+      accessory: {
+        ...device.accessory,
+        deviceId: device.accessory.deviceId ?? `device-${device.accessory.id}`,
+      },
+    })),
+    joining: [],
     logicCatalog: structuredClone(fixture.logicTypes ?? {}),
     logics: [],
     logicOptionValues: {},

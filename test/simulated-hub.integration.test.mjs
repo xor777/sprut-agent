@@ -1271,3 +1271,133 @@ test("the simulator reports BLOCK writes of the web client's forms with their li
     }
   }
 });
+
+// The ZigBee search as the owner's hub ran it (2026-10-12-device-pairing,
+// check 1): an empty answer, state and endTimestamp read back, a repeat
+// restarting the timer, a stop clearing it, and an extension event pushed
+// to a connection that sent nothing.
+test("the simulator runs a ZigBee search as the live hub did and lets a pairing device join", async (t) => {
+  const fixture = await loadHomeFixture("apartment");
+  fixture.pairing = [
+    {
+      extensionKey: "Controller:zigbee",
+      joinAfterMs: 50,
+      interviewMs: 50,
+      accessory: {
+        id: 200,
+        name: "Новый датчик",
+        deviceId: "00158d0007c0ffee",
+        services: [
+          {
+            sId: 13,
+            type: "LeakSensor",
+            name: "Протечка",
+            characteristics: [{ cId: 14, type: "LeakDetected", value: 0 }],
+          },
+        ],
+      },
+    },
+  ];
+  const { hub, send } = await rawSession(t, {}, fixture);
+  const listener = new WebSocket(hub.url, "json-rpc");
+  t.after(() => listener.close());
+  await once(listener, "open");
+  const events = [];
+  listener.on("message", (data) => events.push(JSON.parse(data.toString())));
+  const action = (state, spaceKey = "main") => ({
+    extension: {
+      action: {
+        extensionKey: "Controller:zigbee",
+        spaceKey,
+        actionId: 1,
+        state,
+      },
+    },
+  });
+  const actions = async () =>
+    (
+      await send({ extension: { get: { extensionKey: "Controller:zigbee" } } })
+    ).result.extension.get.spaces.map(({ key, actions: [first] }) => ({
+      key,
+      state: first.state,
+      endTimestamp: first.endTimestamp,
+    }));
+
+  const before = Date.now();
+  assert.deepEqual((await send(action(true))).result, {
+    extension: { action: {} },
+  });
+  const [main, zll] = await actions();
+  assert.equal(main.state, true);
+  assert.equal(zll.state, false);
+  assert.equal(zll.endTimestamp, main.endTimestamp);
+  assert(main.endTimestamp >= before + 60_000);
+  const listed = (await send({ extension: { list: {} } })).result.extension.list
+    .extensions;
+  assert.equal(
+    listed.find(({ extensionKey }) => extensionKey === "Controller:zigbee")
+      .spaces[0].actions[0].state,
+    true,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await send(action(true));
+  const [restarted] = await actions();
+  assert(restarted.endTimestamp > main.endTimestamp);
+
+  // The device joins as a child with progress, then as an accessory the
+  // child window links.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const children = (
+    await send({
+      extensionChild: { list: { extensionKey: "Controller:zigbee" } },
+    })
+  ).result.extensionChild.list.children;
+  const child = children.find(({ id }) => id === "00158d0007c0ffee");
+  assert.equal(
+    child.optionsWindow,
+    "Controller/zigbee/Child/00158d0007c0ffee/",
+  );
+  const window = (
+    await send({ window: { get: { windowKey: child.optionsWindow } } })
+  ).result.window.get;
+  assert.deepEqual(
+    window.options.find(({ inputType }) => inputType === "ACCESSORY_LIST")
+      .validValues,
+    [{ value: { intValue: 200 }, name: "Новый датчик" }],
+  );
+  const accessory = (await send({ accessory: { get: { id: 200 } } })).result
+    .accessory.get;
+  assert.equal(accessory.extensionKey, "Controller:zigbee");
+  assert.equal(accessory.deviceId, "00158d0007c0ffee");
+  assert.equal(accessory.deviceWindow, child.optionsWindow);
+
+  await send(action(false));
+  assert.deepEqual(await actions(), [
+    { key: "main", state: false, endTimestamp: undefined },
+    { key: "discovery", state: false, endTimestamp: undefined },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const kinds = events.map(({ event }) =>
+    event?.extension
+      ? `extension ${event.extension.event}`
+      : event?.extensionChild
+        ? `extensionChild ${event.extensionChild.event}`
+        : event?.accessory
+          ? `accessory ${event.accessory.event}`
+          : "other",
+  );
+  assert.deepEqual(kinds, [
+    "extension EVENT_UPDATE",
+    "extension EVENT_UPDATE",
+    "extensionChild EVENT_ADD",
+    "accessory EVENT_ADD",
+    "extensionChild EVENT_UPDATE",
+    "extension EVENT_UPDATE",
+  ]);
+  const touched = Object.fromEntries(
+    hub.touchedMethods().map(({ method, level }) => [method, level]),
+  );
+  assert.equal(touched["extension.action {pairing}"], "schema_only");
+  assert.equal(touched["extension.action"], "observed");
+});

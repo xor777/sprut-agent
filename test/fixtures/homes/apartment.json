@@ -25,7 +25,38 @@
         {
           "key": "main",
           "type": "SPACE_CHILDREN",
-          "label": { "header": "ZigBee", "text": "Подключённые устройства" }
+          "label": {
+            "header": "ZigBee",
+            "text": "Подключённые устройства",
+            "button": "Подключенные"
+          },
+          "actions": [
+            {
+              "id": 1,
+              "icon": "search",
+              "button": "Поиск",
+              "type": "ACTION_DISCOVERY",
+              "state": false
+            }
+          ]
+        },
+        {
+          "key": "discovery",
+          "type": "SPACE_CHILDREN",
+          "label": {
+            "header": "ZigBee",
+            "text": "Устройства рядом",
+            "button": "Устройства рядом"
+          },
+          "actions": [
+            {
+              "id": 1,
+              "icon": "search",
+              "button": "ZLL поиск",
+              "type": "ACTION_DISCOVERY",
+              "state": false
+            }
+          ]
         }
       ]
     },
