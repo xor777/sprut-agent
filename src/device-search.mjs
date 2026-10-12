@@ -1024,7 +1024,7 @@ function reportGuidance(search, view) {
     } Tell the owner and offer to start the search again once the device is in pairing mode near the hub.`;
   }
   if (outcomes.has("found")) {
-    hints.found = `A new device joined. Set each new accessory's room and name with prepare_native_change operation accessory_placement (target_ref, room_ref, name, reason).${running ? " Stop the search once no other device is to be added." : ""}`;
+    hints.found = `A new device joined. Set each new accessory's room and name with prepare_native_change operation accessory_placement (target_ref, room_ref, name, reason). The hub names it by its model; give it a name the owner recognises: what it is, with the room only if needed to tell it apart.${running ? " Stop the search once no other device is to be added." : ""}`;
   }
   if (outcomes.has("pending")) {
     hints.pending = running
