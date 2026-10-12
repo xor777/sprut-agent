@@ -22,7 +22,7 @@ const projectRoot = path.resolve(
 const homeRef = "spruthub://hub/sim-apartment-01";
 const scenarioRef = (index) => `${homeRef}/scenario/${index}`;
 
-async function setup(t, patch = () => {}) {
+async function setup(t, patch = () => {}, { timeoutMs = 5000 } = {}) {
   const fixture = await loadHomeFixture("apartment");
   patch(fixture);
   const hub = await startSimulatedHub(fixture);
@@ -36,7 +36,7 @@ async function setup(t, patch = () => {}) {
     env: {
       PATH: process.env.PATH,
       ...hub.connectionEnv(),
-      SPRUTHUB_TIMEOUT_MS: "5000",
+      SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
       SPRUT_AGENT_STATE_DIR: stateDirectory,
     },
     stderr: "pipe",
@@ -580,6 +580,71 @@ for (const refused of ["extensionChild.list", "extension.get"]) {
       change_ref: prepared.change_ref,
     });
     assert.equal(applied.status, "applied", JSON.stringify(applied));
+  });
+}
+
+// Recipients named by id are checked against the service's recipients.
+// When the hub refuses or does not answer the read of the service, they
+// cannot be: the prepare must neither write them unchecked nor call them
+// wrong, but name the read to repeat, and prepare once that read succeeds.
+for (const [failure, fail] of [
+  [
+    "refused",
+    (hub) =>
+      hub.refuseNext("extension.get", {
+        code: -32603,
+        message: "Internal error",
+      }),
+  ],
+  ["not answered", (hub) => hub.delayReplies("extension.get", 1500)],
+]) {
+  test(`a notification to named recipients is not prepared while their service cannot be read (extension.get ${failure})`, async (t) => {
+    const { hub, client } = await setup(t, withNotificationServices, {
+      timeoutMs: 1000,
+    });
+    const webRef = `${homeRef}/extension/Notification%3Aweb`;
+    const scenarios = structuredClone(hub.state.scenarios);
+    const data = {
+      targets: [
+        whenLeak([
+          {
+            type: "notify",
+            text: "Протечка: закрой воду",
+            mode: "PUSH",
+            to: [{ index: "web", clients: ["2"] }],
+          },
+        ]),
+      ],
+    };
+    fail(hub);
+    const refused = await prepareCreate(client, data);
+    hub.delayReplies("extension.get", 0);
+    assert.equal(
+      refused.error?.code,
+      "notification_recipients_unread",
+      JSON.stringify(refused),
+    );
+    assert.equal(refused.change_ref, undefined);
+    assert.deepEqual(refused.next, {
+      tool: "get_entity",
+      arguments: { entity_ref: webRef, include: ["children"] },
+    });
+    assert.deepEqual(hub.state.scenarios, scenarios);
+
+    // The read it names now gives the owner's browser, and the same
+    // notification is prepared.
+    const service = await call(
+      client,
+      refused.next.tool,
+      refused.next.arguments,
+    );
+    assert.deepEqual(
+      service.entity.children.map(({ id }) => id),
+      ["2"],
+      JSON.stringify(service),
+    );
+    const prepared = await prepareCreate(client, data);
+    assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
   });
 }
 
