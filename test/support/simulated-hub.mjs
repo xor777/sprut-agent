@@ -105,6 +105,10 @@ export const METHOD_EVIDENCE = {
   "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
   "characteristic.setOptions": [SCHEMA_ONLY],
   "characteristic.update": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "characteristic.update {notify}": [
+    SCHEMA_ONLY,
+    "CharacteristicUpdateRequest.notify in 63189-Characteristic.proto; the web client's NotificationsScreen sends {aId, sId, cId, notify} (2026-09-24-web-client-action-map B8); not sent live",
+  ],
   "link.list": [OBSERVED, "2026-09-11-virtual-light-group"],
   "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
   "link.remove": [OBSERVED, "2026-09-11-virtual-light-group"],
@@ -261,6 +265,13 @@ function editorBlockForm(input) {
 // scenario's options window that the simulator refuses as unmodelled is
 // keyed by that option, with no entry, so a run reports it as unsupported.
 function evidenceKey(state, method, params) {
+  if (
+    method === "characteristic.update" &&
+    isRecord(params?.characteristic?.update) &&
+    Object.hasOwn(params.characteristic.update, "notify")
+  ) {
+    return "characteristic.update {notify}";
+  }
   if (method === "scenario.update") {
     const input = params?.scenario?.update;
     if (isRecord(input) && Object.hasOwn(input, "active")) {
@@ -347,6 +358,9 @@ const CHARACTERISTIC_TYPES = {
     format: "string",
     events: false,
   },
+  // A physical device's online state in its information service (Aqara
+  // motion sensor, 2026-09-09-motion-reading): read-only, with events.
+  C_Online: { name: "В сети", format: "bool" },
   On: { name: "Включено", format: "bool", write: true },
   Brightness: {
     name: "Яркость",
@@ -1401,6 +1415,15 @@ const HANDLERS = {
     if (Object.hasOwn(input, "linkProcessing")) {
       characteristic.linkProcessing = input.linkProcessing;
     }
+    // CharacteristicUpdateRequest.notify, as the web client's Notifications
+    // screen sends it. A characteristic that never had it set leaves it out
+    // here; whether a live hub reports false instead is not known.
+    if (Object.hasOwn(input, "notify")) {
+      if (typeof input.notify !== "boolean") {
+        throw invalidParams("Characteristic notify must be a boolean");
+      }
+      characteristic.notify = input.notify;
+    }
     if (input.control && Object.hasOwn(input.control, "value")) {
       const value = checkedValue(characteristic.control, input.control.value);
       if (state.faults?.stuckActuators.has(characteristic.aId)) {
@@ -1900,6 +1923,7 @@ function buildAccessory(state, input) {
         ["Name", input.name],
         ["SerialNumber", input.deviceId ?? `SN-${input.id}`],
         ["FirmwareRevision", input.firmware ?? "1.0"],
+        ["C_Online", input.online !== false],
       ].map(([type, value], index) =>
         buildCharacteristic(input.id, 1, { cId: index + 2, type, value }),
       ),
@@ -3207,7 +3231,7 @@ function isRecord(value) {
 }
 
 // Characteristic fields other than the value that a native write can set.
-const CHARACTERISTIC_SETTINGS = ["hasLinks", "linkProcessing"];
+const CHARACTERISTIC_SETTINGS = ["hasLinks", "linkProcessing", "notify"];
 
 // Flat, comparable view of the configurable home: room, accessory and service
 // identity and visibility, every characteristic value (the information
