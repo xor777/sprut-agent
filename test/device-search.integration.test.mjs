@@ -459,6 +459,35 @@ test("a search that ends with nothing new says so and offers a new start", async
   assert.equal(searchActions(hub).length, 1);
 });
 
+// A watch of a search that already ran does not count devices that joined
+// before it, and a device paired again keeps its entry and shows only
+// among changed devices: the end with nothing new must not say that no
+// device joined.
+test("a search that ends with nothing new says what it did not count", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 1_500 }),
+  );
+  startNatively(hub);
+  const watched = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(watched.status, "already_running");
+  const lamp = hub.state.accessories.find(
+    ({ extensionKey, online }) => extensionKey === ZIGBEE && online !== false,
+  );
+  lamp.online = false;
+
+  const ended = await waitForResult(client, watched.search_ref, [
+    "no_new_device",
+  ]);
+  assert.deepEqual(ended.new_devices, []);
+  assert.equal(ended.changed_devices.length, 1);
+  assert.match(ended.hint, /joined before/);
+  assert.match(ended.hint, /changed_devices/);
+  assert.deepEqual(searchActions(hub), []);
+});
+
 // A device the hub cannot add joins and never gets an accessory. Right
 // after the end the hub may still finish it, so the report asks to read
 // again; once the hub has had its time, the report says the device was not
