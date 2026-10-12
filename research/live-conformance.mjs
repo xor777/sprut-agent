@@ -2343,18 +2343,26 @@ async function stepNotifications(ctx) {
   );
   const onlineIds = online ? { aId, sId: info.sId, cId: online.cId } : null;
 
+  // The whole home's answer lists the notifications that are on and counts
+  // the offline ones by room; the probe room holds only the virtual
+  // accessory.
   const started = Date.now();
   const home = await notifyingIn(hub, {});
   const homeMs = Date.now() - started;
-  const onlineListed =
-    onlineIds !== null && home.marked.has(refOf(hub, onlineIds));
+  const onlineCounted =
+    onlineIds !== null && (home.offline.get(virtual.roomRef) ?? 0) === 1;
   row(
     "N find_devices home",
     "find_devices{notify:true}: accessory.get{id} for each accessory",
-    "the whole home's notifications that are on, the virtual C_Online among them",
-    `${home.services} service(s) listed in ${homeMs} ms; virtual C_Online ${onlineListed ? "listed" : "not listed"}`,
-    onlineIds === null ? "observed" : onlineListed ? "match" : "mismatch",
-    { services: home.services, ms: homeMs },
+    "the whole home's notifications that are on, the virtual C_Online counted in the probe room",
+    `${home.marked.size} notification(s) listed, ${home.counted} offline counted in ${home.offline.size} room(s), ${home.bytes} B first page, in ${homeMs} ms; virtual C_Online ${onlineCounted ? "counted" : "not counted"}`,
+    onlineIds === null ? "observed" : onlineCounted ? "match" : "mismatch",
+    {
+      listed: home.marked.size,
+      offline: home.counted,
+      bytes: home.bytes,
+      ms: homeMs,
+    },
   );
 
   const onDone = await probeNotify(ctx, "N On", virtual.on.ids, false);
@@ -2448,11 +2456,14 @@ async function probeNotify(ctx, label, ids, initial) {
     { raw: rawChanged },
   );
   const listed = (
-    await notifyingIn(hub, { room_ref: virtual.roomRef })
+    await notifyingIn(hub, {
+      room_ref: virtual.roomRef,
+      include_technical: true,
+    })
   ).marked.has(ref);
   row(
     `${label} find_devices`,
-    "find_devices{room_ref,notify:true}: accessory.get{id}",
+    "find_devices{room_ref,notify:true,include_technical:true}: accessory.get{id}",
     `find_devices notify=true in the probe room ${target ? "lists" : "does not list"} it`,
     listed ? "listed" : "not listed",
     listed === target ? "match" : "mismatch",
@@ -2505,33 +2516,37 @@ function describeRawNotify(raw) {
   return `accessory.get ${one(raw.get)}, characteristic.get ${one(raw.characteristic)}, accessory.list ${one(raw.list)}`;
 }
 
-// find_devices notify=true with the given filters, every page: how many
-// services it lists and the refs of the characteristics it marks notify.
+// find_devices notify=true with the given filters, every page: the refs of
+// the notifications it lists, the offline notifications it counts by room
+// ref (device_online) and the bytes of its first page.
 async function notifyingIn(hub, filters) {
   let args = {
     home_ref: hub.homeRef,
     ...filters,
     notify: true,
-    values: false,
     limit: 100,
     max_bytes: 32_768,
   };
-  let services = 0;
   const marked = new Set();
+  let offline = null;
+  let bytes = null;
   for (;;) {
     const page = await hub.read("find_devices", args);
     expectOk(page, "find_devices");
-    for (const room of page.rooms) {
-      for (const device of room.devices) {
-        for (const service of device.services) {
-          services += 1;
-          for (const item of service.characteristics ?? []) {
-            if (item.notify === true) marked.add(item.ref);
-          }
-        }
-      }
+    bytes ??= Buffer.byteLength(JSON.stringify(page));
+    offline ??= new Map(
+      (page.device_online?.rooms ?? []).map(({ ref, notifying }) => [
+        ref,
+        notifying,
+      ]),
+    );
+    for (const item of page.notifications) {
+      if (item.ref) marked.add(item.ref);
     }
-    if (!page.next) return { services, marked };
+    if (!page.next) {
+      const counted = [...offline.values()].reduce((sum, n) => sum + n, 0);
+      return { marked, offline, counted, bytes };
+    }
     args = page.next.arguments;
   }
 }

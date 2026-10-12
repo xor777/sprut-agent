@@ -216,7 +216,11 @@ export class HomeReads {
         : parseHomeArgument(input.homeRef);
     const selection = findSelection(input, serial);
     if (input.cursor !== undefined) {
-      return this.#continuePage(selection, input.cursor, buildPage);
+      return this.#continuePage(
+        selection,
+        input.cursor,
+        selection.notify ? buildListPage : buildPage,
+      );
     }
     const deadline = Date.now() + client.timeoutMs;
     if (serial !== client.serial) {
@@ -360,6 +364,15 @@ export class HomeReads {
       evaluateCandidate(candidate, values),
     );
     if (summary) return { ...base, ...roomSummary(serial, catalog, evaluated) };
+    if (selection.notify) {
+      return this.#firstNotificationPage(
+        base,
+        serial,
+        catalog,
+        evaluated,
+        selection,
+      );
+    }
     const switches = switchCandidates(catalog, selection, candidates)
       .map((candidate) => evaluateCandidate(candidate, values))
       .filter((item) => keepsSwitch(item, selection.state));
@@ -377,48 +390,12 @@ export class HomeReads {
 
   #firstPage(base, serial, catalog, evaluated, selection, hints) {
     const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
-    const stateFilter = selection.state;
-    const listed = [];
-    const notEvaluated = [];
-    const notApplicable = {};
-    let deviceFunctions = 0;
-    for (const item of evaluated) {
-      if (selection.notify && !notifies(item)) continue;
-      // An appliance's own setting is not a device that is on, off or
-      // unavailable of its own.
-      if (stateFilter !== null && item.appliance !== null) {
-        deviceFunctions += 1;
-        continue;
-      }
-      if (stateFilter === "on" || stateFilter === "off") {
-        if (!item.onState.applicable) {
-          notApplicable[item.kind] = (notApplicable[item.kind] ?? 0) + 1;
-          continue;
-        }
-        if (item.onState.on === null) {
-          notEvaluated.push({
-            ref: serviceRef(serial, item.accessory.id, item.service.sId),
-            name: item.service.name,
-            device: item.accessory.name,
-            type: item.service.type,
-            reason: item.onState.reason,
-          });
-          continue;
-        }
-        if (item.onState.on !== (stateFilter === "on")) continue;
-      } else if (stateFilter === "unavailable") {
-        if (item.available !== false) continue;
-      }
-      listed.push(item);
-    }
-    // Grouped by room in the home's room order: the hub may list devices of
-    // one room apart. Rooms missing from the room list come last.
-    const roomOrder = new Map(
-      catalog.rooms.map(({ id }, index) => [id, index]),
+    const { listed, extras } = listedServices(
+      serial,
+      catalog,
+      evaluated,
+      selection,
     );
-    const orderOf = ({ accessory }) =>
-      roomOrder.get(accessory.roomId) ?? catalog.rooms.length;
-    listed.sort((left, right) => orderOf(left) - orderOf(right));
     const slots = listed.map((item) => {
       const room = roomsById.get(item.accessory.roomId);
       return {
@@ -441,14 +418,7 @@ export class HomeReads {
       roomMatches: countBy(slots, ({ room }) => room.ref),
       extras: {
         ...hints,
-        ...(stateFilter === "on" || stateFilter === "off"
-          ? {
-              not_evaluated: notEvaluated.slice(0, NOT_EVALUATED_LIMIT),
-              not_evaluated_total: notEvaluated.length,
-              not_applicable: notApplicable,
-            }
-          : {}),
-        ...(deviceFunctions > 0 ? { device_functions: deviceFunctions } : {}),
+        ...extras,
         ...(selection.values === "on_off" && listed.length > 0
           ? {
               values_shown: "on_off_and_brightness",
@@ -458,12 +428,79 @@ export class HomeReads {
               },
             }
           : {}),
-        ...(listed.length === 0 && selection.words.length > 1
-          ? { query_words: queryWordMatches(catalog, selection, evaluated) }
-          : {}),
       },
     };
     const page = buildPage(snapshot, 0, selection);
+    if (page.next) this.#remember(snapshot);
+    return page;
+  }
+
+  // «Какие уведомления включены?»: the characteristics whose notification
+  // is on, each with its names and nothing else of its device. A device's
+  // offline notification (C_Online) is on from the start on a new virtual
+  // accessory and, likely, on most of the owner's devices (90 of 1395
+  // characteristics on 81 accessories, 2026-10-12-notifications-live):
+  // listed one by one they would make the answer grow with the home, so
+  // they are counted by room, with the call that lists them.
+  #firstNotificationPage(base, serial, catalog, evaluated, selection) {
+    const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
+    const { listed, extras } = listedServices(
+      serial,
+      catalog,
+      evaluated,
+      selection,
+    );
+    const entries = [];
+    const offline = new Map();
+    for (const item of listed) {
+      for (const characteristic of item.service.characteristics ?? []) {
+        if (!notifyOn(item.service, characteristic)) continue;
+        // The information service offers only C_Online a notification.
+        if (
+          !selection.listOffline &&
+          item.service.type === "AccessoryInformation"
+        ) {
+          const ref = roomRef(serial, item.accessory.roomId);
+          const room = offline.get(ref) ?? {
+            ref,
+            name: roomsById.get(item.accessory.roomId)?.name ?? null,
+            notifying: 0,
+          };
+          room.notifying += 1;
+          offline.set(ref, room);
+          continue;
+        }
+        entries.push(
+          notificationEntry(serial, roomsById, item, characteristic),
+        );
+      }
+    }
+    const rooms = [...offline.values()];
+    const snapshot = {
+      id: randomBytes(8).toString("hex"),
+      scope: selection.scope,
+      expiresAt: Date.now() + SNAPSHOT_TTL_MS,
+      size: entries.length,
+      base,
+      key: "notifications",
+      entries,
+      extras: {
+        ...(rooms.length > 0
+          ? {
+              device_online: {
+                notifying: rooms.reduce((sum, room) => sum + room.notifying, 0),
+                rooms,
+                next: {
+                  tool: "find_devices",
+                  arguments: { ...selection.args, include_technical: true },
+                },
+              },
+            }
+          : {}),
+        ...extras,
+      },
+    };
+    const page = buildListPage(snapshot, 0, selection);
     if (page.next) this.#remember(snapshot);
     return page;
   }
@@ -591,6 +628,9 @@ function findSelection(input, serial) {
     // A device's offline notification sits in its information service.
     notify: input.notify === true,
     includeTechnical: input.includeTechnical === true || input.notify === true,
+    // A notification answer lists offline notifications one by one only on
+    // request; otherwise it counts them by room.
+    listOffline: input.notify === true && input.includeTechnical === true,
     limit,
     maxBytes,
     filtered:
@@ -766,23 +806,110 @@ function keepsSwitch(item, state) {
   return true;
 }
 
+// The services an answer lists after the notify and state filters, grouped
+// by room in the home's room order (the hub may list devices of one room
+// apart; rooms missing from the room list come last), with what the state
+// filter set aside.
+function listedServices(serial, catalog, evaluated, selection) {
+  const stateFilter = selection.state;
+  const listed = [];
+  const notEvaluated = [];
+  const notApplicable = {};
+  let deviceFunctions = 0;
+  for (const item of evaluated) {
+    if (selection.notify && !notifies(item)) continue;
+    // An appliance's own setting is not a device that is on, off or
+    // unavailable of its own.
+    if (stateFilter !== null && item.appliance !== null) {
+      deviceFunctions += 1;
+      continue;
+    }
+    if (stateFilter === "on" || stateFilter === "off") {
+      if (!item.onState.applicable) {
+        notApplicable[item.kind] = (notApplicable[item.kind] ?? 0) + 1;
+        continue;
+      }
+      if (item.onState.on === null) {
+        notEvaluated.push({
+          ref: serviceRef(serial, item.accessory.id, item.service.sId),
+          name: item.service.name,
+          device: item.accessory.name,
+          type: item.service.type,
+          reason: item.onState.reason,
+        });
+        continue;
+      }
+      if (item.onState.on !== (stateFilter === "on")) continue;
+    } else if (stateFilter === "unavailable") {
+      if (item.available !== false) continue;
+    }
+    listed.push(item);
+  }
+  const roomOrder = new Map(catalog.rooms.map(({ id }, index) => [id, index]));
+  const orderOf = ({ accessory }) =>
+    roomOrder.get(accessory.roomId) ?? catalog.rooms.length;
+  listed.sort((left, right) => orderOf(left) - orderOf(right));
+  return {
+    listed,
+    extras: {
+      ...(stateFilter === "on" || stateFilter === "off"
+        ? {
+            not_evaluated: notEvaluated.slice(0, NOT_EVALUATED_LIMIT),
+            not_evaluated_total: notEvaluated.length,
+            not_applicable: notApplicable,
+          }
+        : {}),
+      ...(deviceFunctions > 0 ? { device_functions: deviceFunctions } : {}),
+      ...(listed.length === 0 && selection.words.length > 1
+        ? { query_words: queryWordMatches(catalog, selection, evaluated) }
+        : {}),
+    },
+  };
+}
+
+// One notification of a notification answer: the characteristic's ref and
+// type (a C_* type with its name, which the type does not explain), and the
+// names of its service, device and room. Its value is one get_entity away.
+function notificationEntry(serial, roomsById, item, characteristic) {
+  const { accessory, service } = item;
+  const control = characteristic.control;
+  const names = {
+    service: service.name,
+    device: accessory.name,
+    room: roomsById.get(accessory.roomId)?.name ?? null,
+  };
+  if (isSensitiveNativeNode(control)) {
+    return { redacted: true, reason: "sensitive_native_data", ...names };
+  }
+  const type = control.type ?? control.key;
+  return {
+    ref: characteristicRef(
+      serial,
+      accessory.id,
+      service.sId,
+      characteristic.cId,
+    ),
+    type,
+    ...(type.startsWith("C_") ? { name: control.name } : {}),
+    ...names,
+  };
+}
+
 // Whether a service has a characteristic whose SprutHub notification is on.
 function notifies({ service }) {
-  return (service.characteristics ?? []).some(
-    (characteristic) => notifyMark(service, characteristic).notify === true,
+  return (service.characteristics ?? []).some((characteristic) =>
+    notifyOn(service, characteristic),
   );
 }
 
-// notify: true on a characteristic whose SprutHub notification is on, in a
-// notification answer (shown), whose values come from accessory.get; off is
-// the usual case and is left out. Other answers read accessory lists, which
-// never report it, and mark nothing.
-function notifyMark(service, characteristic, shown = true) {
-  return shown &&
+// Whether a characteristic's SprutHub notification is on, for a
+// notification answer, whose values come from accessory.get. Other answers
+// read accessory lists, which never report it, and show none.
+function notifyOn(service, characteristic) {
+  return (
     characteristicNotifyOffered(service, characteristic) &&
     characteristicNotifyOn(characteristic) === true
-    ? { notify: true }
-    : {};
+  );
 }
 
 function onUnknown({ onState }) {
@@ -1029,7 +1156,6 @@ function serviceEntry(serial, item, selection) {
           selection.values === "on_off"
             ? [on?.basis, ...VALUES_OF_STATE]
             : null,
-          selection.notify,
         )
       : [];
   return {
@@ -1057,14 +1183,7 @@ function serviceEntry(serial, item, selection) {
     // show; its refs stay so the agent can still read it.
     ...(values.length > 0
       ? { values }
-      : {
-          characteristics: characteristicRefs(
-            serial,
-            accessory,
-            service,
-            selection.notify,
-          ),
-        }),
+      : { characteristics: characteristicRefs(serial, accessory, service) }),
   };
 }
 
@@ -1074,15 +1193,8 @@ function serviceEntry(serial, item, selection) {
 // with every value were 13-15 KB on 2026-09-24, most of it color.
 const VALUES_OF_STATE = ["Brightness"];
 
-// Readable values of a service; with types, only those types. notify marks
-// the notifications that are on (notifyMark).
-function characteristicValues(
-  serial,
-  accessory,
-  service,
-  types = null,
-  notify = false,
-) {
+// Readable values of a service; with types, only those types.
+function characteristicValues(serial, accessory, service, types = null) {
   return (service.characteristics ?? [])
     .filter(
       ({ control }) =>
@@ -1108,7 +1220,6 @@ function characteristicValues(
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
         ...(control.write === true ? { writable: true } : {}),
-        ...notifyMark(service, characteristic, notify),
         ref: characteristicRef(
           serial,
           accessory.id,
@@ -1119,7 +1230,7 @@ function characteristicValues(
     });
 }
 
-function characteristicRefs(serial, accessory, service, notify = false) {
+function characteristicRefs(serial, accessory, service) {
   return (service.characteristics ?? [])
     .filter(
       ({ control }) =>
@@ -1134,7 +1245,6 @@ function characteristicRefs(serial, accessory, service, notify = false) {
             ...(characteristic.control.write === true
               ? { writable: true }
               : {}),
-            ...notifyMark(service, characteristic, notify),
             ref: characteristicRef(
               serial,
               accessory.id,
@@ -1549,9 +1659,11 @@ function deviceMatchesHint(serial, query, rooms, accessories) {
 }
 
 // One page of a list snapshot: up to limit entries from offset within
-// LIST_PAGE_BYTES, at least one.
+// max_bytes (find_devices) or LIST_PAGE_BYTES, at least one; a page of one
+// entry over max_bytes says so.
 function buildListPage(snapshot, offset, selection) {
   const { entries } = snapshot;
+  const maxBytes = selection.maxBytes ?? LIST_PAGE_BYTES;
   const page = (end) => ({
     ...snapshot.base,
     total: entries.length,
@@ -1573,11 +1685,14 @@ function buildListPage(snapshot, offset, selection) {
   while (
     end < entries.length &&
     end - offset < selection.limit &&
-    bytes(page(end + 1)) <= LIST_PAGE_BYTES
+    bytes(page(end + 1)) <= maxBytes
   ) {
     end += 1;
   }
-  return page(end);
+  const result = page(end);
+  return selection.maxBytes !== undefined && bytes(result) > maxBytes
+    ? { ...result, max_bytes_exceeded: true }
+    : result;
 }
 
 // FAILED is always a problem; any other state than LOADED of an enabled

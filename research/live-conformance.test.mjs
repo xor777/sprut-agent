@@ -1147,12 +1147,12 @@ test("step N turns a notification on and off only on the run's virtual accessory
       "N owner notifications",
     ],
   );
-  // The whole-home answer lists the owner's notification and the virtual
-  // accessory's C_Online.
-  assert.equal(
-    steps.find(({ step }) => step === "N find_devices home").details.services,
-    2,
-  );
+  // The whole-home answer counts two offline notifications, the owner's and
+  // the virtual accessory's, and lists none other.
+  const { listed, offline } = steps.find(
+    ({ step }) => step === "N find_devices home",
+  ).details;
+  assert.deepEqual({ listed, offline }, { listed: 0, offline: 2 });
   // The comparison sees the owner's notification that is on.
   assert.match(
     steps.find(({ step }) => step === "N owner notifications").observed,
