@@ -187,8 +187,10 @@ export class DeviceSearches {
         search.extensionKey,
         Date.now() + client.timeoutMs,
       );
-      const action = findAction(extension, search.spaceKey, search.actionId);
-      if (action?.state === true) {
+      // Only this watch's search is stopped: by now it may have ended, or
+      // a later run of the controller may be another's (#updateState).
+      this.#updateState(search, extension);
+      if (search.ended === null && search.active === true) {
         search.stopSent = true;
         try {
           await client.extensionAction(
@@ -315,6 +317,21 @@ export class DeviceSearches {
     const action = findAction(extension, search.spaceKey, search.actionId);
     const end = runningActionEnd(action);
     if (action?.state === true) {
+      // Once the watched end has passed, a run that ends later is another
+      // run, as one started again in the SprutHub app: this watch's search
+      // expired unseen, and the new run is not this watch's to stop. A run
+      // restarted before the watched end shows the same way if no read
+      // came between; it is then left to a new watch too.
+      if (
+        search.endsAt !== null &&
+        end !== null &&
+        end > search.endsAt &&
+        Date.now() >= search.endsAt
+      ) {
+        search.active = false;
+        endWatch(search, "expired");
+        return;
+      }
       search.active = true;
       search.seenRunning = true;
       if (end !== null) search.endsAt = end;
