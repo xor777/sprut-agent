@@ -725,9 +725,12 @@ function publicChild(search, child) {
   };
 }
 
+// The action of a space by its id; an entry the client cannot read is
+// not it.
 function findAction(extension, spaceKey, actionId) {
   const space = (extension.spaces ?? []).find(({ key }) => key === spaceKey);
-  return (space?.actions ?? []).find(({ id }) => id === actionId) ?? null;
+  const actions = Array.isArray(space?.actions) ? space.actions : [];
+  return actions.find((action) => action?.id === actionId) ?? null;
 }
 
 // The controller's ordinary search, or the error that says why there is

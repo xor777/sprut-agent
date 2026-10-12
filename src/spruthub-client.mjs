@@ -4099,18 +4099,22 @@ function normalizeExtensionSpaces(serial, spaces, timeZone) {
     if (typeof space?.key !== "string" || space.key.length === 0) {
       throw incompatibleExtensionIdentity();
     }
-    if (space.actions !== undefined && !Array.isArray(space.actions)) {
-      throw incompatibleExtensionIdentity();
-    }
-    const actions = (space.actions ?? []).map((action) =>
-      normalizeExtensionAction(serial, action, timeZone, now),
-    );
+    // An action the client cannot read is left out and its space flagged:
+    // the extension and its other actions stay usable.
+    const listed = Array.isArray(space.actions) ? space.actions : [];
+    const actions = listed
+      .filter(isReadableAction)
+      .map((action) => normalizeExtensionAction(serial, action, timeZone, now));
+    const unreadable =
+      (space.actions !== undefined && !Array.isArray(space.actions)) ||
+      actions.length < listed.length;
     return {
       key: redactSensitiveText(space.key),
       type:
         typeof space.type === "string" ? redactSensitiveText(space.type) : null,
       label: normalizeFormLabel(space.label),
       ...(actions.length > 0 ? { actions } : {}),
+      ...(unreadable ? { actions_unreadable: true } : {}),
     };
   });
 }
@@ -4159,10 +4163,11 @@ function hasRunningAction(extension) {
 
 // An action of an extension space: its button text as label, active from
 // its state, and for a running one when it ends on the hub's clock.
+function isReadableAction(action) {
+  return isPlainObject(action) && Number.isSafeInteger(action.id);
+}
+
 function normalizeExtensionAction(serial, action, timeZone, now) {
-  if (!isPlainObject(action) || !Number.isSafeInteger(action.id)) {
-    throw incompatibleExtensionIdentity();
-  }
   const end = runningActionEnd(action);
   const windowRef =
     typeof action.windowKey === "string"
