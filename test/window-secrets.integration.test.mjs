@@ -266,15 +266,29 @@ async function setup(t) {
     assert.equal(result.isError, undefined, result.content[0]?.text);
     return result.structuredContent;
   };
-  // The error code of a refused call, or "answered" when the call was not
+  // The error of a refused call, or "answered" when the call was not
   // refused; checked after every answer was collected.
-  const refused = async (name, args) => {
+  const refusal = async (name, args) => {
     const result = await call(name, args);
     return result.isError === true
-      ? result.structuredContent.error.code
+      ? result.structuredContent.error
       : "answered";
   };
-  return { hub, stateDirectory, answers, ok, refused };
+  const refused = async (name, args) => {
+    const error = await refusal(name, args);
+    return error === "answered" ? error : error.code;
+  };
+  return { hub, stateDirectory, answers, ok, refused, refusal };
+}
+
+function changeStorePath(hub, stateDirectory) {
+  const fingerprint = createHash("sha256")
+    .update(`${hub.url}\0${hub.serial}`)
+    .digest("hex");
+  return path.join(
+    stateDirectory,
+    `automation-changes-${fingerprint.slice(0, 24)}.json`,
+  );
 }
 
 function leakedSecrets(answers, secrets = SECRETS) {
@@ -417,10 +431,7 @@ test("a passcode saved before it was hidden stays hidden in points and changes, 
     .update(`${hub.url}\0${hub.serial}`)
     .digest("hex");
   await writeFile(
-    path.join(
-      stateDirectory,
-      `automation-changes-${fingerprint.slice(0, 24)}.json`,
-    ),
+    changeStorePath(hub, stateDirectory),
     `${JSON.stringify(
       {
         version: 1,
@@ -522,4 +533,210 @@ test("a passcode saved before it was hidden stays hidden in points and changes, 
     ),
     JSON.stringify(comparison.not_compared),
   );
+});
+
+// get_entity shows the owner's text that carries a credential as
+// [REDACTED]: here a scenario description with a camera's snapshot link and
+// its key. An agent that edits the description from that read sends the
+// mark back, and written, it would replace the owner's text on the hub for
+// good. Every text an agent writes to the hub is refused with the mark in
+// it, and so is a change prepared with it by an earlier version.
+test("text carrying [REDACTED] from an answer is never written over the owner's text", async (t) => {
+  const { hub, stateDirectory, answers, ok, refusal } = await setup(t);
+  const cameraKey = "cam-snapshot-7Hq2";
+  const ownerDesc = `Камера: http://192.168.1.20/snapshot?key=${cameraKey}`;
+  const scenario = (index) =>
+    hub.state.scenarios.find((candidate) => candidate.index === index);
+  scenario("3").desc = ownerDesc;
+  const blockRef = `${homeRef}/scenario/3`;
+  const logicSource = scenario("9").data;
+  const scenarioCount = hub.state.scenarios.length;
+  const accessoryCount = hub.state.accessories.length;
+  const mark = "[REDACTED]";
+
+  const shown = (await ok("get_entity", { entity_ref: blockRef })).entity;
+  const attempts = {
+    desc: await refusal("prepare_native_change", {
+      operation: "window_option",
+      target_ref: blockRef,
+      option_key: "Desc",
+      value: `${mark}\nЛетний режим`,
+      reason: "Дописать летний режим",
+    }),
+    name: await refusal("prepare_native_change", {
+      operation: "window_option",
+      target_ref: blockRef,
+      option_key: "Name",
+      value: `${mark} (лето)`,
+      reason: "Пометить летний сценарий",
+    }),
+    room: await refusal("prepare_native_change", {
+      operation: "room_name",
+      target_ref: `${homeRef}/room/2`,
+      value: mark,
+      reason: "Вернуть имя комнаты",
+    }),
+    placement: await refusal("prepare_native_change", {
+      operation: "accessory_placement",
+      target_ref: `${homeRef}/accessory/14`,
+      room_ref: `${homeRef}/room/2`,
+      name: mark,
+      reason: "Вернуть имя светильника",
+    }),
+    logic: await refusal("prepare_native_change", {
+      operation: "logic_source_update",
+      target_ref: `${homeRef}/scenario/9`,
+      source: mark,
+      reason: "Вернуть код",
+    }),
+    block: await refusal("prepare_native_change", {
+      operation: "block_create",
+      target_ref: homeRef,
+      name: "Протечка в ванной",
+      description: mark,
+      active: true,
+      on_start: false,
+      sync: false,
+      reason: "Скопировать сценарий",
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [
+                {
+                  type: "characteristic",
+                  aId: 37,
+                  sId: 13,
+                  cId: 14,
+                  hs: "LeakSensor",
+                  hc: "LeakDetected",
+                  trigger: true,
+                  cond: "=",
+                  value: "1",
+                  timeCond: "",
+                  time: 0,
+                },
+              ],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK scenarios use this native key.
+            then: [
+              {
+                type: "service",
+                aId: 36,
+                sId: 13,
+                hs: "Fan",
+                characteristics: [
+                  { type: "set", cId: 14, hc: "On", value: "true" },
+                ],
+              },
+            ],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    }),
+    automation: await refusal("preview_boolean_automation", {
+      name: `${mark} (копия)`,
+      reason: "Скопировать сценарий",
+      source_room_ref: `${homeRef}/room/2`,
+      source_characteristic_ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
+      source_value: true,
+      target_room_ref: `${homeRef}/room/2`,
+      target_characteristic_ref: `${homeRef}/accessory/14/service/13/characteristic/14`,
+      target_value: true,
+    }),
+  };
+
+  // Changes an earlier version prepared with the mark: a Desc, an
+  // accessory's name and a virtual light group's name.
+  const olderDesc = await ok("prepare_native_change", {
+    operation: "window_option",
+    target_ref: blockRef,
+    option_key: "Desc",
+    value: "Летний режим",
+    reason: "Дописать летний режим",
+  });
+  const olderPlacement = await ok("prepare_native_change", {
+    operation: "accessory_placement",
+    target_ref: `${homeRef}/accessory/14`,
+    room_ref: `${homeRef}/room/2`,
+    name: "Свет в коридоре у двери",
+    reason: "Уточнить имя светильника",
+  });
+  const olderGroup = await ok("prepare_native_change", {
+    operation: "virtual_light_group",
+    target_ref: homeRef,
+    room_ref: `${homeRef}/room/3`,
+    name: "Свет гостиной",
+    member_service_refs: [
+      `${homeRef}/accessory/15/service/13`,
+      `${homeRef}/accessory/16/service/13`,
+    ],
+    characteristic_types: ["On", "Brightness"],
+    reason: "Один свет для гостиной",
+  });
+  const storePath = changeStorePath(hub, stateDirectory);
+  const store = JSON.parse(await readFile(storePath, "utf8"));
+  const stored = (prepared) =>
+    store.changes[prepared.change_ref.split("/").at(-1)];
+  stored(olderDesc).requested_value.value = `${mark}\nЛетний режим`;
+  stored(olderPlacement).requested_snapshot.name = mark;
+  stored(olderGroup).requested_name = mark;
+  stored(olderGroup).create_request.name = mark;
+  stored(olderGroup).create_request.services[0].name = mark;
+  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`);
+  const olderApplies = {};
+  for (const [kind, prepared] of Object.entries({
+    olderDesc,
+    olderPlacement,
+    olderGroup,
+  })) {
+    olderApplies[kind] = await refusal("apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+  }
+  const writesBefore = windowWrites(hub).length;
+  const descAfterRefusals = scenario("3").desc;
+
+  // The owner's full new text is written as usual.
+  const written = await ok("prepare_native_change", {
+    operation: "window_option",
+    target_ref: blockRef,
+    option_key: "Desc",
+    value: "Летний режим",
+    reason: "Владелец продиктовал описание",
+  });
+  const applied = await ok("apply_native_change", {
+    change_ref: written.change_ref,
+  });
+
+  assert.equal(shown.description, mark);
+  for (const [path, error] of Object.entries({
+    ...attempts,
+    ...olderApplies,
+  })) {
+    assert.notEqual(error, "answered", path);
+    assert.equal(error.code, "invalid_native_value", path);
+    assert.ok(error.message.includes(mark), `${path}: ${error.message}`);
+    assert.match(error.message, /ask the owner/i, path);
+  }
+  assert.equal(writesBefore, 0);
+  assert.equal(descAfterRefusals, ownerDesc);
+  assert.equal(hub.state.rooms.find(({ id }) => id === 2)?.name, "Коридор");
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 14)?.name,
+    "Свет в коридоре",
+  );
+  assert.equal(scenario("9").data, logicSource);
+  assert.equal(hub.state.scenarios.length, scenarioCount);
+  assert.equal(hub.state.accessories.length, accessoryCount);
+  assert.equal(applied.status, "applied");
+  assert.equal(scenario("3").desc, "Летний режим");
+  assert.deepEqual(leakedSecrets(answers, { cameraKey }), []);
 });
