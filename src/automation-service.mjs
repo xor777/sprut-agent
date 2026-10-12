@@ -6379,6 +6379,13 @@ function keptBlockSubtrees(data, stored) {
   const keptAs = new Map();
   const counterparts = new WeakMap();
   const removed = [];
+  // Every edited rule is scored against every stored rule of its array, so
+  // the content of each is built once per call.
+  const ruleContents = new WeakMap();
+  const contentOf = (node) => {
+    if (!ruleContents.has(node)) ruleContents.set(node, ruleContent(node));
+    return ruleContents.get(node);
+  };
   const keep = (value) => {
     if (value === null || typeof value !== "object") return;
     kept.add(value);
@@ -6435,7 +6442,7 @@ function keptBlockSubtrees(data, stored) {
         if (pairs.has(child)) continue;
         for (const candidate of candidates) {
           if (!available(candidate, child)) continue;
-          const score = Number(matches(child, candidate.child));
+          const score = Number(matches(child, candidate.child, contentOf));
           if (score > 0) scored.push({ child, candidate, score });
         }
       }
@@ -6544,7 +6551,8 @@ function withKeptSubtreesAsStored(data, stored) {
 
 // Whether a stored node is an edited node's original besides its position,
 // tried in order over all edited nodes of an array. Each gives true or, for
-// shared content, the share the two nodes have in common; the best pair is
+// shared content, the share the two nodes have in common (contentOf gives a
+// node's ruleContent); the best pair is
 // taken first, equal ones in order. The blockId the hub gave a node comes
 // back from get_entity and stays in an edit made from that read; it is the
 // only name of an if, a condition group, an interval, a cron or code.
@@ -6575,10 +6583,10 @@ const BLOCK_NODE_MATCHES = [
   // group. The deleted rule may test every condition of the grown one, as
   // «motion and at night: brightness 30» beside «motion: light on»; the
   // actions and the mode tell them apart. A mode alone pairs nothing.
-  (node, stored) => {
+  (node, stored, contentOf) => {
     if (node.type !== "if" && node.type !== "condition") return 0;
-    const content = ruleContent(node);
-    const storedContent = ruleContent(stored);
+    const content = contentOf(node);
+    const storedContent = contentOf(stored);
     const shared = [...content].filter((part) =>
       storedContent.has(part),
     ).length;
