@@ -1945,12 +1945,16 @@ const HANDLERS = {
 // A fixture may set hub.discoveryTimeMs, the hub's DiscoveryTime (60 s on
 // the owner's hub, H8), and list devices in pairing mode:
 //   pairing: [{extensionKey, spaceKey = "main", joinAfterMs, interviewMs,
-//              childName, accessory: {id, name, roomId, deviceId, ...}}]
+//              childName, error, accessory: {id, name, roomId, deviceId,
+//              ...}}]
 // Such a device joins joinAfterMs after a search of that space starts and,
 // interviewMs later, becomes an accessory in the fixture's form. Both
 // stages are inferred from the web client (K7-K9); the room and name the
 // hub gives a new accessory were not observed, so they come from the
-// fixture (by default the first room).
+// fixture (by default the first room). A device with error is one the hub
+// cannot add (an unsupported model, a failed interview): after interviewMs
+// it stays a child with that error and no accessory, a guess at a form not
+// observed (2026-10-12-device-pairing, unsupported device).
 const SEARCH_EVENT_DELAY_MS = 10;
 
 function startDiscovery(state, extension, space, action) {
@@ -2049,6 +2053,21 @@ function announceJoining(state, extension, device) {
 }
 
 function completeJoin(state, extension, device, child) {
+  device.joined = true;
+  if (device.error) {
+    child.status = "Ошибка подключения";
+    delete child.progressBar;
+    child.error = device.error;
+    later(state, SEARCH_EVENT_DELAY_MS, () =>
+      state.emit({
+        extensionChild: {
+          event: "EVENT_UPDATE",
+          children: [structuredClone(child)],
+        },
+      }),
+    );
+    return;
+  }
   state.joining = state.joining.filter((joining) => joining !== child);
   const input = device.accessory;
   const accessory = buildAccessory(state, {
@@ -2073,7 +2092,6 @@ function completeJoin(state, extension, device, child) {
     ],
   });
   state.accessories.push(accessory);
-  device.joined = true;
   const {
     description: _description,
     status: _status,

@@ -140,8 +140,14 @@ function zigbeeChildren(hub) {
 }
 
 // Calls get_device_search until its result is one of results.
-async function waitForResult(client, searchRef, results, waitSeconds = 10) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+async function waitForResult(
+  client,
+  searchRef,
+  results,
+  waitSeconds = 10,
+  attempts = 8,
+) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const report = await call(client, "get_device_search", {
       search_ref: searchRef,
       wait_seconds: waitSeconds,
@@ -451,6 +457,74 @@ test("a search that ends with nothing new says so and offers a new start", async
   });
   assert.equal(stop.stop_sent, false);
   assert.equal(searchActions(hub).length, 1);
+});
+
+// A device the hub cannot add joins and never gets an accessory. Right
+// after the end the hub may still finish it, so the report asks to read
+// again; once the hub has had its time, the report says the device was not
+// added, with its status and error, and stops asking to wait.
+test("a new device that gets no accessory is reported not added some time after the search ends", async (t) => {
+  const { client } = await setup(
+    t,
+    await apartment({
+      discoveryTimeMs: 1_500,
+      pairing: [leakSensor({ error: "Модель не поддерживается" })],
+    }),
+  );
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  const read = {
+    tool: "get_device_search",
+    arguments: { search_ref: started.search_ref },
+  };
+
+  let report;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    report = await call(client, "get_device_search", {
+      search_ref: started.search_ref,
+      wait_seconds: 5,
+    });
+    if (report.status === "ended") break;
+  }
+  assert.equal(report.status, "ended");
+  assert.equal(report.result, "joining");
+  assert.deepEqual(report.next, read);
+
+  const begun = Date.now();
+  const notAdded = await waitForResult(
+    client,
+    started.search_ref,
+    ["not_added"],
+    20,
+    3,
+  );
+  assert(Date.now() - begun < 30_000, "the outcome comes without the agent");
+  assert.equal(notAdded.status, "ended");
+  assert.equal(notAdded.ended, "expired");
+  assert.deepEqual(
+    notAdded.new_devices.map(
+      ({ ref, status, error, accessory_status, accessories }) => ({
+        ref,
+        status,
+        error,
+        accessory_status,
+        accessories,
+      }),
+    ),
+    [
+      {
+        ref: sensorChildRef,
+        status: "Ошибка подключения",
+        error: "Модель не поддерживается",
+        accessory_status: "pending",
+        accessories: [],
+      },
+    ],
+  );
+  assert.equal(notAdded.next, null);
+  assert.equal(notAdded.stop, undefined);
+  assert.equal(typeof notAdded.hint, "string");
 });
 
 test("a search is refused for a controller that cannot search, a stopped one and the ZLL search", async (t) => {
