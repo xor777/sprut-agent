@@ -131,6 +131,8 @@ export class SprutHubClient {
   #nextRequestId = 1;
   #observation;
   #observationClient;
+  // Listeners of the events the hub pushes (onNativeEvent).
+  #nativeEventListeners = new Set();
   #pending = new Map();
   #socket;
   #startingObservationClient;
@@ -378,12 +380,123 @@ export class SprutHubClient {
       deadline,
       { serial },
     );
+    const extensions = extractNativeList(response, [
+      "extension",
+      "list",
+      "extensions",
+    ]);
+    // ends_at of a running search is on the hub's clock; the zone is read
+    // only while a search runs.
+    const timeZone = extensions.some(hasRunningAction)
+      ? await this.#hubTimeZone(serial, deadline)
+      : null;
     return {
-      extensions: normalizeExtensions(
-        serial,
-        extractNativeList(response, ["extension", "list", "extensions"]),
-      ),
+      extensions: normalizeExtensions(serial, extensions, timeZone),
       observedAt: response.responseReceivedAt,
+    };
+  }
+
+  // One extension as extension.get returns it, its spaces with their
+  // actions included: a search's state is read here (state and
+  // endTimestamp, 2026-10-12-device-pairing P1, P2).
+  async nativeExtension(serial, key, deadline) {
+    const response = await this.#request(
+      { extension: { get: { extensionKey: key } } },
+      deadline,
+      { serial },
+    );
+    const extension = extractEntity(
+      response,
+      ["extension", "get"],
+      "extension",
+    );
+    if (extensionKey(extension) !== key) throw incompatibleExtensionIdentity();
+    normalizeExtensionDetail(serial, extension, null);
+    return { extension, observedAt: response.responseReceivedAt };
+  }
+
+  // The controller's devices as extensionChild.list returns them, each
+  // checked to belong to this controller.
+  async nativeExtensionChildren(serial, key, deadline) {
+    const response = await this.#request(
+      { extensionChild: { list: { extensionKey: key } } },
+      deadline,
+      { serial },
+    );
+    const children = extractNativeList(response, [
+      "extensionChild",
+      "list",
+      "children",
+    ]);
+    normalizeExtensionChildren(serial, children, key);
+    return { children, observedAt: response.responseReceivedAt };
+  }
+
+  // Sends an action of an extension space: state true starts a search,
+  // false stops it. The hub answers with an empty result; what it did shows
+  // only in a later extension.get (2026-10-12-device-pairing P1).
+  async extensionAction(
+    serial,
+    { extensionKey: key, spaceKey, actionId, state },
+    deadline,
+  ) {
+    const response = await this.#request(
+      {
+        extension: {
+          action: { extensionKey: key, spaceKey, actionId, state },
+        },
+      },
+      deadline,
+      { serial },
+    );
+    const container = response.result?.extension;
+    if (!container || !Object.hasOwn(container, "action")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the extension action.",
+        undefined,
+        { requestSent: true },
+      );
+    }
+    return { observedAt: response.responseReceivedAt };
+  }
+
+  // A window as window.get returns it; null when the hub has none.
+  async nativeWindow(serial, windowKey, deadline) {
+    const response = await this.#request(
+      { window: { get: { windowKey } } },
+      deadline,
+      { serial },
+    );
+    const window = response.result?.window?.get;
+    if (window === null) return null;
+    if (
+      !window ||
+      window.windowKey !== windowKey ||
+      !Array.isArray(window.options)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible device-window response.",
+      );
+    }
+    return window;
+  }
+
+  // The hub's time zone for times shown on its clock; null keeps UTC.
+  hubTimeZone(serial, deadline) {
+    return this.#hubTimeZone(serial, deadline);
+  }
+
+  // Calls listener with the event part of each frame the hub pushes on this
+  // client's connection, until the returned function is called. The hub
+  // sends events to every connection without a subscription
+  // (2026-10-12-device-pairing H12, P5); they are hub data, a reason to
+  // read again, never the state itself.
+  onNativeEvent(listener) {
+    this.#nativeEventListeners.add(listener);
+    return () => {
+      this.#nativeEventListeners.delete(listener);
     };
   }
 
@@ -2606,37 +2719,57 @@ export class SprutHubClient {
   }
 
   async #readExtensionEntity(parsed, requested, deadline) {
-    const response = await this.#request(
-      { extension: { get: { extensionKey: parsed.extensionKey } } },
+    const { extension } = await this.nativeExtension(
+      parsed.serial,
+      parsed.extensionKey,
       deadline,
-      { serial: parsed.serial },
     );
-    const extension = extractEntity(
-      response,
-      ["extension", "get"],
-      "extension",
-    );
-    if (extensionKey(extension) !== parsed.extensionKey) {
-      throw incompatibleExtensionIdentity();
-    }
+    const timeZone = hasRunningAction(extension)
+      ? await this.#hubTimeZone(parsed.serial, deadline)
+      : null;
     const entity = {
       kind: "extension",
-      ...normalizeExtensionDetail(parsed.serial, extension),
+      ...normalizeExtensionDetail(parsed.serial, extension, timeZone),
     };
-    if (requested.has("children")) {
+    // A running extension's spaces show how many devices each holds, from
+    // one read of its children; an unread list leaves the counts out.
+    const countSpaces =
+      entity.spaces?.length > 0 &&
+      extension.state === "LOADED" &&
+      extension.enabled === true;
+    let children;
+    let childrenError;
+    if (countSpaces || requested.has("children")) {
       try {
-        entity.children = await this.#readExtensionChildren(
+        children = await this.#readExtensionChildren(
           parsed.serial,
           parsed.extensionKey,
           deadline,
         );
       } catch (error) {
         if (!(error instanceof SprutHubError)) throw error;
+        childrenError = error;
+      }
+    }
+    if (children && entity.spaces) {
+      for (const space of entity.spaces) {
+        space.child_count = children.filter(
+          ({ space_key: key }) => key === space.key,
+        ).length;
+      }
+    }
+    if (requested.has("children")) {
+      if (children) {
+        entity.children = children;
+      } else {
         // Optional children must not discard a successful extension.get.
         Object.defineProperty(entity, INCLUDE_READ_ERROR, {
           value: {
             ...(entity[INCLUDE_READ_ERROR] ?? {}),
-            children: { code: error.code, message: error.message },
+            children: {
+              code: childrenError.code,
+              message: childrenError.message,
+            },
           },
           enumerable: false,
         });
@@ -2646,16 +2779,11 @@ export class SprutHubClient {
   }
 
   async #readExtensionChildren(serial, selectedExtensionKey, deadline) {
-    const response = await this.#request(
-      { extensionChild: { list: { extensionKey: selectedExtensionKey } } },
+    const { children } = await this.nativeExtensionChildren(
+      serial,
+      selectedExtensionKey,
       deadline,
-      { serial },
     );
-    const children = extractNativeList(response, [
-      "extensionChild",
-      "list",
-      "children",
-    ]);
     return normalizeExtensionChildren(serial, children, selectedExtensionKey);
   }
 
@@ -3050,6 +3178,11 @@ export class SprutHubClient {
   }
 
   #handleNativeEvent(message) {
+    if (this.#nativeEventListeners.size > 0 && isPlainObject(message.event)) {
+      for (const listener of this.#nativeEventListeners) {
+        listener(message.event);
+      }
+    }
     const observation = this.#observation;
     if (observation?.status !== "observing") return;
     const receivedAt = zonedTimestamp(Date.now(), observation.timeZone);
@@ -3340,7 +3473,7 @@ export const UTC_TIMES_LIMITATION =
 // An instant as ISO 8601 on the wall clock of timeZone with that zone's
 // offset at the instant (2026-09-25T09:42:00.118+03:00); UTC with Z when
 // timeZone is null or its offset there is not whole minutes.
-function zonedTimestamp(time, timeZone) {
+export function zonedTimestamp(time, timeZone) {
   const utc = nativeLogTimestamp(time);
   const offset =
     utc === null || timeZone === null
@@ -3642,11 +3775,11 @@ function scenarioRef(serial, index) {
   return `${homeRef(serial)}/scenario/${encodeURIComponent(index)}`;
 }
 
-function extensionRef(serial, key) {
+export function extensionRef(serial, key) {
   return `${homeRef(serial)}/extension/${encodeURIComponent(key)}`;
 }
 
-function extensionChildRef(serial, key, id) {
+export function extensionChildRef(serial, key, id) {
   return `${extensionRef(serial, key)}/child/${encodeURIComponent(id)}`;
 }
 
@@ -3872,9 +4005,9 @@ function extensionKey(extension) {
     : null;
 }
 
-function normalizeExtensions(serial, extensions) {
+function normalizeExtensions(serial, extensions, timeZone = null) {
   const normalized = extensions.map((extension) =>
-    normalizeExtension(serial, extension),
+    normalizeExtension(serial, extension, timeZone),
   );
   if (new Set(normalized.map(({ key }) => key)).size !== normalized.length) {
     throw incompatibleExtensionIdentity();
@@ -3890,7 +4023,7 @@ function incompatibleExtensionIdentity() {
   );
 }
 
-function normalizeExtension(serial, extension) {
+function normalizeExtension(serial, extension, timeZone = null) {
   const key = extensionKey(extension);
   if (
     typeof key !== "string" ||
@@ -3906,6 +4039,7 @@ function normalizeExtension(serial, extension) {
     throw incompatibleExtensionIdentity();
   }
   const mainWindowRef = ownerWindowRef(serial, extension.mainWindow);
+  const deviceSearch = deviceSearchSummary(extension, timeZone);
   return {
     ref: extensionRef(serial, key),
     key,
@@ -3923,33 +4057,136 @@ function normalizeExtension(serial, extension) {
     bundle_type: extension.bundleType ?? null,
     enabled: extension.enabled === true,
     state: extension.state ?? null,
+    ...(deviceSearch ? { device_search: deviceSearch } : {}),
   };
 }
 
-function normalizeExtensionDetail(serial, extension) {
-  const spaces = normalizeExtensionSpaces(extension.spaces);
+function normalizeExtensionDetail(serial, extension, timeZone = null) {
+  const spaces = normalizeExtensionSpaces(serial, extension.spaces, timeZone);
   return {
-    ...normalizeExtension(serial, extension),
+    ...normalizeExtension(serial, extension, timeZone),
     ...(spaces ? { spaces } : {}),
   };
 }
 
-function normalizeExtensionSpaces(spaces) {
+function normalizeExtensionSpaces(serial, spaces, timeZone) {
   if (spaces === undefined) return undefined;
   if (!Array.isArray(spaces)) {
     throw incompatibleExtensionIdentity();
   }
+  const now = Date.now();
   return spaces.map((space) => {
     if (typeof space?.key !== "string" || space.key.length === 0) {
       throw incompatibleExtensionIdentity();
     }
+    if (space.actions !== undefined && !Array.isArray(space.actions)) {
+      throw incompatibleExtensionIdentity();
+    }
+    const actions = (space.actions ?? []).map((action) =>
+      normalizeExtensionAction(serial, action, timeZone, now),
+    );
     return {
       key: redactSensitiveText(space.key),
       type:
         typeof space.type === "string" ? redactSensitiveText(space.type) : null,
       label: normalizeFormLabel(space.label),
+      ...(actions.length > 0 ? { actions } : {}),
     };
   });
+}
+
+// The space where a controller lists its connected devices; its
+// ACTION_DISCOVERY is the controller's ordinary device search (ZigBee
+// «Поиск»). Another space's search, as ZigBee's «ZLL поиск» in
+// «Устройства рядом», acts on devices nearby (2026-10-12-device-pairing H2).
+export const DEVICE_SEARCH_SPACE = "main";
+
+// The one ACTION_DISCOVERY of a space, or null when it has none or several.
+export function extensionSearchAction(
+  extension,
+  spaceKey = DEVICE_SEARCH_SPACE,
+) {
+  const space = Array.isArray(extension?.spaces)
+    ? extension.spaces.find((candidate) => candidate?.key === spaceKey)
+    : undefined;
+  const actions = (Array.isArray(space?.actions) ? space.actions : []).filter(
+    (action) =>
+      action?.type === "ACTION_DISCOVERY" && Number.isSafeInteger(action.id),
+  );
+  return actions.length === 1 ? actions[0] : null;
+}
+
+// The epoch milliseconds a running action ends at, or null. endTimestamp
+// shows on every action of the extension while one runs; only state tells
+// which (P2).
+export function runningActionEnd(action) {
+  if (action?.state !== true) return null;
+  const end =
+    typeof action.endTimestamp === "string" &&
+    /^\d{1,16}$/.test(action.endTimestamp)
+      ? Number(action.endTimestamp)
+      : action.endTimestamp;
+  return Number.isSafeInteger(end) && end > 0 ? end : null;
+}
+
+function hasRunningAction(extension) {
+  return (Array.isArray(extension?.spaces) ? extension.spaces : []).some(
+    (space) =>
+      Array.isArray(space?.actions) &&
+      space.actions.some((action) => runningActionEnd(action) !== null),
+  );
+}
+
+// An action of an extension space: its button text as label, active from
+// its state, and for a running one when it ends on the hub's clock.
+function normalizeExtensionAction(serial, action, timeZone, now) {
+  if (!isPlainObject(action) || !Number.isSafeInteger(action.id)) {
+    throw incompatibleExtensionIdentity();
+  }
+  const end = runningActionEnd(action);
+  const windowRef =
+    typeof action.windowKey === "string"
+      ? ownerWindowRef(serial, action.windowKey)
+      : null;
+  return {
+    id: action.id,
+    label:
+      typeof action.button === "string"
+        ? redactSensitiveText(action.button)
+        : null,
+    type: typeof action.type === "string" ? action.type : null,
+    active: action.state === true,
+    ...(end === null ? {} : searchEnd(end, timeZone, now)),
+    ...(windowRef ? { window_ref: windowRef } : {}),
+  };
+}
+
+// When a running search ends on the hub's clock and how many seconds are
+// left on this process's clock.
+export function searchEnd(end, timeZone, now = Date.now()) {
+  return {
+    ends_at: zonedTimestamp(end, timeZone),
+    seconds_left: Math.max(0, Math.round((end - now) / 1_000)),
+  };
+}
+
+// A running controller's ordinary device search for lists of extensions:
+// active, and when it ends while it runs.
+function deviceSearchSummary(extension, timeZone) {
+  if (
+    extension.bundleType !== "CONTROLLER" ||
+    extension.state !== "LOADED" ||
+    extension.enabled !== true
+  ) {
+    return null;
+  }
+  const action = extensionSearchAction(extension);
+  if (!action) return null;
+  const end = runningActionEnd(action);
+  return {
+    active: action.state === true,
+    ...(end === null ? {} : searchEnd(end, timeZone)),
+  };
 }
 
 function normalizeFormLabel(label) {
@@ -4559,7 +4796,19 @@ function propertyFromNativeOptionKey(key) {
 }
 
 function linkedAccessoriesFromOption(serial, option) {
-  if (option.inputType !== "ACCESSORY_LIST") return undefined;
+  const linked = linkedAccessoryIds(option);
+  if (linked?.status !== "confirmed") return linked;
+  return {
+    status: "confirmed",
+    accessories: linked.accessories.map(({ id, name }) => ({
+      ref: accessoryRef(serial, id),
+      ...(name === undefined ? {} : { name }),
+    })),
+  };
+}
+
+function linkedAccessoryIds(option) {
+  if (option?.inputType !== "ACCESSORY_LIST") return undefined;
   // Writable picker validValues are candidates, not existing links.
   if (option.read !== true || option.write === true) return undefined;
   // Current value 0 is a placeholder, not an accessory id. Only a fully
@@ -4581,13 +4830,34 @@ function linkedAccessoriesFromOption(serial, option) {
       return { status: "unreliable_form" };
     }
     accessories.push({
-      ref: accessoryRef(serial, typed.value),
+      id: typed.value,
       ...(typeof candidate.name === "string"
         ? { name: redactSensitiveText(candidate.name) }
         : {}),
     });
   }
   return { status: "confirmed", accessories };
+}
+
+// The accessories a device window links read-only (a controller child's
+// AccessoriesList, 2026-10-12-device-pairing H6): confirmed ids, none when
+// the window has no such list, or unreliable_form.
+export function windowLinkedAccessoryIds(window) {
+  const lists = (window?.options ?? [])
+    .map(linkedAccessoryIds)
+    .filter((linked) => linked !== undefined);
+  if (lists.length === 0) return { status: "none", ids: [] };
+  if (lists.some(({ status }) => status !== "confirmed")) {
+    return { status: "unreliable_form", ids: [] };
+  }
+  return {
+    status: "confirmed",
+    ids: [
+      ...new Set(
+        lists.flatMap(({ accessories }) => accessories.map(({ id }) => id)),
+      ),
+    ],
+  };
 }
 
 function normalizeWindowControl(option) {

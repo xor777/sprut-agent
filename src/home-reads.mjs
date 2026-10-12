@@ -1509,8 +1509,24 @@ function scenarioCounts(scenarios) {
   return { total: scenarios.length, by_type: byType };
 }
 
-function extensionSummary({ ref, name, type, state, enabled }) {
-  return { ref, name, type, state, enabled };
+// device_search marks a running controller that can search for new
+// devices (start_device_search).
+function extensionSummary({
+  ref,
+  name,
+  type,
+  state,
+  enabled,
+  device_search: deviceSearch,
+}) {
+  return {
+    ref,
+    name,
+    type,
+    state,
+    enabled,
+    ...(deviceSearch ? { device_search: deviceSearch } : {}),
+  };
 }
 
 function scenarioEntry({ summary, native }) {

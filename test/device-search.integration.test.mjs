@@ -243,7 +243,7 @@ test("an extension shows its search actions and the overview marks the controlle
 test("a new leak sensor joins during the search, is placed in the bathroom and read", async (t) => {
   const { hub, client } = await setup(
     t,
-    await apartment({ pairing: [leakSensor()] }),
+    await apartment({ pairing: [leakSensor({ interviewMs: 1_500 })] }),
   );
   const childrenBefore = zigbeeChildren(hub);
 
@@ -263,6 +263,39 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
   assert.deepEqual(searchActions(hub), [
     { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
   ]);
+
+  // The device shows while it joins, before the hub has made its accessory;
+  // the wait returns at that change rather than at the end of wait_seconds.
+  const begun = Date.now();
+  const joining = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 15,
+  });
+  assert(Date.now() - begun < 5_000, "the wait returns when a device joins");
+  assert.equal(joining.result, "joining");
+  assert.equal(joining.changed, true);
+  assert.deepEqual(
+    joining.new_devices.map(
+      ({ ref, online, status, progress, error, accessory_status }) => ({
+        ref,
+        online,
+        status,
+        progress,
+        error,
+        accessory_status,
+      }),
+    ),
+    [
+      {
+        ref: sensorChildRef,
+        online: true,
+        status: "Подключение",
+        progress: 10,
+        error: null,
+        accessory_status: "pending",
+      },
+    ],
+  );
 
   const joined = await waitForResult(client, started.search_ref, ["joined"]);
   assert.equal(joined.status, "searching");
@@ -291,7 +324,7 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
           ref: `${sensorRef}/service/90`,
           name: "Батарея",
           type: "BatteryService",
-          kind: "other",
+          kind: "technical",
         },
       ],
     },
@@ -315,12 +348,11 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
     room_ref: `${home}/room/${BATHROOM}`,
     query: "протечки у ванны",
   });
-  assert.equal(read.devices.length, 1);
-  assert.equal(read.devices[0].ref, sensorRef);
+  const sensor = read.rooms
+    .flatMap((room) => room.devices)
+    .find(({ ref }) => ref === sensorRef);
   assert.equal(
-    read.devices[0].services[0].values.find(
-      ({ type }) => type === "LeakDetected",
-    ).value,
+    sensor.services[0].values.find(({ type }) => type === "LeakDetected").value,
     0,
   );
 

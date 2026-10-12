@@ -517,6 +517,9 @@ test("MCP discovers every room before reading the selected stable reference", as
       "start_native_observation",
       "get_native_observation",
       "stop_native_observation",
+      "start_device_search",
+      "get_device_search",
+      "stop_device_search",
       "read_hub_log",
     ],
   );

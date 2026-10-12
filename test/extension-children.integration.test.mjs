@@ -891,7 +891,16 @@ test("controller children outside rooms are found with settings and a linked acc
     hub.requests.some((request) => paramsOf(request).extension?.get),
     true,
   );
-  assert.deepEqual(extensionChildListKeys(hub.requests), []);
+  // A running controller's spaces count their devices from one list read;
+  // the devices themselves are not listed without include.
+  assert.deepEqual(
+    extensionEntity.spaces.map(({ key, child_count }) => [key, child_count]),
+    [
+      ["main", 1],
+      ["discovery", 2],
+    ],
+  );
+  assert.deepEqual(extensionChildListKeys(hub.requests), [xiaomiKey]);
   assert.equal(
     hub.requests.some((request) => paramsOf(request).window?.get),
     false,
@@ -921,7 +930,10 @@ test("controller children outside rooms are found with settings and a linked acc
     listedEntity.children.some((child) => Object.hasOwn(child, "options")),
     false,
   );
-  assert.deepEqual(extensionChildListKeys(hub.requests), [xiaomiKey]);
+  assert.deepEqual(extensionChildListKeys(hub.requests), [
+    xiaomiKey,
+    xiaomiKey,
+  ]);
   assert.equal(
     hub.requests.some((request) => paramsOf(request).extensionChild?.get),
     false,
@@ -1036,7 +1048,10 @@ test("controller children outside rooms are found with settings and a linked acc
     hub.requests.some((request) => isMutation(paramsOf(request))),
     false,
   );
-  assert.deepEqual(extensionChildListKeys(hub.requests), [xiaomiKey]);
+  assert.deepEqual(extensionChildListKeys(hub.requests), [
+    xiaomiKey,
+    xiaomiKey,
+  ]);
   assert.equal(
     JSON.stringify(listedEntity.children.map(({ ref }) => ref)).includes(
       decoyAccessoryRef,

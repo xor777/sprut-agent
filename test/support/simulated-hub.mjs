@@ -3316,7 +3316,8 @@ function logicOptions(state, { aId, sId, type }) {
 
 // Children of an extension: the recipients a fixture declares on a
 // notification service (the owner's web service lists one, id "2", on
-// 2026-09-24), then the devices of a controller.
+// 2026-09-24), then the devices of a controller, then the devices still
+// joining it.
 function extensionChildren(state, extensionKey) {
   const declared = (
     state.extensions.find(
@@ -3345,7 +3346,10 @@ function extensionChildren(state, extensionKey) {
       description: `Устройство ${accessory.deviceId}`,
       status: accessory.online ? "В сети" : "Не в сети",
     }));
-  return [...declared, ...devices];
+  const joining = state.joining
+    .filter((child) => child.extensionKey === extensionKey)
+    .map((child) => structuredClone(child));
+  return [...declared, ...devices, ...joining];
 }
 
 // accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual
