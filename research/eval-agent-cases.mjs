@@ -32,6 +32,11 @@ const BATHROOM_MOTION = { aId: 38, sId: 13, cId: 14 };
 // The notify setting of C_Online of the kitchen leak sensor («Датчик
 // протечки под мойкой»).
 const KITCHEN_LEAK_ONLINE_NOTIFY = "characteristic/23.1.8/notify";
+const BATHROOM = 8;
+// The new leak sensor of add-leak-sensor, and when it joins after a search
+// starts.
+const NEW_LEAK_SENSOR = 900;
+const NEW_LEAK_SENSOR_JOIN_MS = 3_000;
 
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
@@ -552,6 +557,56 @@ export const CASES = {
       onlyChanges(({ key }) => key === KITCHEN_LEAK_ONLINE_NOTIFY),
     ],
   },
+  // The owner holds a new ZigBee leak sensor in pairing mode: it joins
+  // seconds after a search of ZigBee's devices starts (the simulator's
+  // inferred join) and lands in the hallway under its model name (the
+  // simulator's assumption). The agent must start that search, not ZLL,
+  // and place and name the sensor in the bathroom.
+  "add-leak-sensor": {
+    prompt: "Добавь новый датчик протечки в ванную",
+    patch: withNewLeakSensor,
+    graders: [
+      {
+        name: "zigbee_search_started",
+        grade: ({ requests }) => {
+          const sent = requests
+            .filter(({ method }) => method === "extension.action")
+            .map(({ params }) => params.extension.action);
+          const started = sent.some(
+            ({ extensionKey, spaceKey, actionId, state }) =>
+              extensionKey === "Controller:zigbee" &&
+              spaceKey === "main" &&
+              actionId === 1 &&
+              state === true,
+          );
+          const other = sent.filter(
+            ({ extensionKey, spaceKey }) =>
+              extensionKey !== "Controller:zigbee" || spaceKey !== "main",
+          );
+          return result(
+            started && other.length === 0,
+            `sent: ${JSON.stringify(sent)}`,
+          );
+        },
+      },
+      {
+        name: "new_sensor_in_bathroom_named",
+        grade: ({ after }) => {
+          const room = after[`accessory/${NEW_LEAK_SENSOR}/roomId`];
+          const name = after[`accessory/${NEW_LEAK_SENSOR}/name`];
+          return result(
+            room === BATHROOM && /протечк/i.test(name ?? ""),
+            `roomId=${room} name=${name}`,
+          );
+        },
+      },
+      onlyChanges(({ key }) =>
+        new RegExp(
+          `^(?:accessory|service|characteristic)/${NEW_LEAK_SENSOR}[/.]`,
+        ).test(key),
+      ),
+    ],
+  },
   "run-scenario": {
     prompt: "Запусти «Всё выключить»",
     graders: [
@@ -1066,6 +1121,38 @@ function withValues(fixture, values) {
     }
     characteristic.value = value;
   }
+  return fixture;
+}
+
+// A ZigBee leak sensor in pairing mode that joins NEW_LEAK_SENSOR_JOIN_MS
+// after the search starts and becomes an accessory 1.5 s later, in the
+// hallway under its model name. Its id is free in both homes.
+function withNewLeakSensor(fixture) {
+  fixture.pairing = [
+    {
+      extensionKey: "Controller:zigbee",
+      joinAfterMs: NEW_LEAK_SENSOR_JOIN_MS,
+      interviewMs: 1_500,
+      childName: "lumi.sensor_wleak.aq1",
+      accessory: {
+        id: NEW_LEAK_SENSOR,
+        roomId: 1,
+        name: "lumi.sensor_wleak.aq1",
+        deviceId: "00158d0007c0ffee",
+        manufacturer: "Aqara",
+        model: "SJCGQ11LM",
+        battery: 100,
+        services: [
+          {
+            sId: 13,
+            type: "LeakSensor",
+            name: "Протечка",
+            characteristics: [{ cId: 14, type: "LeakDetected", value: 0 }],
+          },
+        ],
+      },
+    },
+  ];
   return fixture;
 }
 

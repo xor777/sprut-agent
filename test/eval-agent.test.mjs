@@ -2343,6 +2343,61 @@ test("notify-offline grades the kitchen leak sensor's offline notification and n
   }
 });
 
+test("add-leak-sensor needs the ZigBee search and the joined sensor placed in the bathroom", async (t) => {
+  const search = (spaceKey, state = true) => ({
+    extension: {
+      action: {
+        extensionKey: "Controller:zigbee",
+        spaceKey,
+        actionId: 1,
+        state,
+      },
+    },
+  });
+  const joined = async (hub) => {
+    for (let waited = 0; waited < 8_000; waited += 100) {
+      if (hub.state.accessories.some(({ id }) => id === 900)) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.fail("the sensor in pairing mode did not join");
+  };
+  const place = {
+    accessory: {
+      update: { id: 900, roomId: 8, name: "Датчик протечки у ванны" },
+    },
+  };
+
+  for (const fixture of ["apartment", "house"]) {
+    const right = await caseSession(t, "add-leak-sensor", fixture);
+    await right.send(search("main"));
+    await joined(right.hub);
+    await right.send(place);
+    await right.send(search("main", false));
+    assert.deepEqual(right.grade("Датчик добавлен в ванную."), {
+      zigbee_search_started: true,
+      new_sensor_in_bathroom_named: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    });
+  }
+
+  // The ZLL search lets nothing join; and a sensor left in the hallway
+  // under its model name is not added to the bathroom.
+  const zll = await caseSession(t, "add-leak-sensor");
+  await zll.send(search("discovery"));
+  assert.equal(zll.grade("Готово.").zigbee_search_started, false);
+  assert.equal(zll.grade("Готово.").new_sensor_in_bathroom_named, false);
+  const unplaced = await caseSession(t, "add-leak-sensor");
+  await unplaced.send(search("main"));
+  await joined(unplaced.hub);
+  assert.deepEqual(unplaced.grade("Датчик подключён."), {
+    zigbee_search_started: true,
+    new_sensor_in_bathroom_named: false,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+});
+
 test("weekday-schedule grades the cron by day and waits for weekday triggers", async (t) => {
   assert.match(CASES["weekday-schedule"].pending, /wave2\/block-nodes/);
   const rule = (cron) =>
