@@ -564,6 +564,9 @@ export const CASES = {
   // and place and name the sensor in the bathroom.
   "add-leak-sensor": {
     prompt: "Добавь новый датчик протечки в ванную",
+    // An agent may wait for the sensor in its turn or end the turn with the
+    // owner's step and check when the owner replies; both are right.
+    followUps: ["Перевёл, индикатор мигает"],
     patch: withNewLeakSensor,
     graders: [
       {
@@ -572,13 +575,15 @@ export const CASES = {
           const sent = requests
             .filter(({ method }) => method === "extension.action")
             .map(({ params }) => params.extension.action);
-          const started = sent.some(
+          // A second start reopens the network for another full window.
+          const starts = sent.filter(
             ({ extensionKey, spaceKey, actionId, state }) =>
               extensionKey === "Controller:zigbee" &&
               spaceKey === "main" &&
               actionId === 1 &&
               state === true,
           );
+          const started = starts.length === 1;
           const other = sent.filter(
             ({ extensionKey, spaceKey }) =>
               extensionKey !== "Controller:zigbee" || spaceKey !== "main",
