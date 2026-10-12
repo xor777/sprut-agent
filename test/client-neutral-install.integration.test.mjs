@@ -68,6 +68,12 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
       .map(({ name, description }) => `${name}: ${description.length}`),
     [],
   );
+  // Claude Code up to 2.1.295 cuts server instructions after 2048 characters.
+  const instructions = client.getInstructions();
+  assert.ok(
+    instructions.length <= 2_048,
+    `instructions: ${instructions.length} characters`,
+  );
 
   const homes = await client.callTool({
     name: "home_overview",
