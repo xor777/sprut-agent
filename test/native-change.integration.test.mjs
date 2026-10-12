@@ -11687,11 +11687,16 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
       codeRule: () => webClientCodeBlock().targets[0],
       codePointer: "/targets/0/then/1",
       code: (data) => data.targets[0].then[1],
+      storedCode: (rule) => rule.then[0],
       merge(rule, night) {
         rule.if.mode = "AND";
         rule.if.conditions.push(night.if.conditions[1]);
         rule.then.unshift(night.then[0]);
       },
+      move(night, rule) {
+        night.then.push(rule.then[0]);
+      },
+      movedPointer: "/targets/0/then/1",
     },
     {
       name: "code condition",
@@ -11710,10 +11715,15 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
         }),
       codePointer: "/targets/0/if/conditions/1",
       code: (data) => data.targets[0].if.conditions[1],
+      storedCode: (rule) => rule.if.conditions[1],
       merge(rule, night) {
         rule.if.conditions.push(night.if.conditions[1]);
-        rule.then = night.then;
+        rule.then.splice(0, rule.then.length, ...night.then);
       },
+      move(night, rule) {
+        night.if.conditions.push(rule.if.conditions[1]);
+      },
+      movedPointer: "/targets/0/if/conditions/2",
     },
   ];
   const withoutBlockIds = (value) =>
@@ -11731,9 +11741,9 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
       hub.state.scenarios[0].data = JSON.stringify(
         withRuntimeBlockFields({ targets: [nightDim(), item.codeRule()] }),
       );
-      const storedCode = item.code({
-        targets: [scenarioData(hub, "existing-block").targets[1]],
-      });
+      const storedCode = item.storedCode(
+        scenarioData(hub, "existing-block").targets[1],
+      );
       // The night rule is deleted; the code rule takes its condition and
       // action.
       const merge = (read) => {
@@ -11759,20 +11769,22 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
       );
       assert.match(problem.message, hint);
 
-      // Code the agent changed keeps its blockId; its refusal has no hint.
-      const changedCode = merge(read);
-      item.code(changedCode).code = "log.info('night');";
-      const changed = await prepareBlockUpdate(
+      // Code moved with its blockId into the other rule is moved code, which
+      // this contract refuses; keeping blockIds would not help.
+      const movedCode = structuredClone(read);
+      const [codeRule] = movedCode.targets.splice(1, 1);
+      item.move(movedCode.targets[0], codeRule);
+      const moved = await prepareBlockUpdate(
         client,
-        changedCode,
+        movedCode,
         "Ночью при движении яркость 30",
       );
-      assert.equal(changed.isError, true);
+      assert.equal(moved.isError, true);
       assert.deepEqual(
-        changed.structuredContent.problems.map(({ pointer }) => pointer),
-        [item.codePointer],
+        moved.structuredContent.problems.map(({ pointer }) => pointer),
+        [item.movedPointer],
       );
-      assert.doesNotMatch(changed.structuredContent.problems[0].message, hint);
+      assert.doesNotMatch(moved.structuredContent.problems[0].message, hint);
 
       const kept = await prepareBlockUpdate(
         client,

@@ -5998,7 +5998,7 @@ function blockContract() {
       "BLOCK data uses native IDs inside one configured home; preparation verifies each referenced characteristic.",
       "block_create needs at least one trigger: a characteristic or daily interval with trigger=true, or a time_trigger cron; its action-only form accepts only literal Lightbulb On=false service/set targets. block_data_update refuses an edit that removes the last trigger. A stored BLOCK without a trigger runs only when started manually or by another scenario; it stays editable, and block_action_preview.triggers says so.",
       "block_data_update checks only what the edit adds or changes. A subtree that means the same as a stored one under the same parent fields and node types is written exactly as the hub stores it, with its blockIds, if.state and if fields, wherever it sits in its array and whatever form the edit gave it; diff.data.to shows what is written, and each stored subtree matches once. Here, as in readback, restore and existing_rules, BLOCK data is compared without blockId and if.state, with a null field as left out (the hub drops null fields), an if's left-out mode as EVERY, left-out then_delay and else_delay as 0, else null or left out as [], a from action's value \"\" as left out, and a condition group of one condition with mode OR as AND; any other difference is an edit. Stored code and other nodes outside this contract therefore stay, but cannot be added, changed or moved under another parent, and a node with a changed descendant is checked itself. An edited node is compared with the stored node it was edited from: the one with the same blockId (keep the blockId get_entity returned), else the one with the same aId/sId/cId or index, else for a device action one of the same device, first one that sets a characteristic it sets, else for an if or a condition group the one that shares the most of its conditions, an if's branch actions and the group's mode (a mode alone pairs nothing), else the next one of its type in order. Delay indexes, clear_delay references, pause controllers, scenario runs and whether every aId/sId/cId still names a characteristic of its hs/hc are checked over the whole data. Kept actions whose rights or value this contract would refuse are listed in block_action_preview.unchecked_actions instead of actions. block_action_preview.removed_nodes lists the stored nodes the edit removes, with pointers into diff.data.from; a limitation names removed code, other nodes this contract cannot write and requests whose URL answers hide, which only restore or the SprutHub interface bring back. block_action_preview.warnings (or_group_grown) names a condition group the edit grows from one condition to several while its mode stays OR, as the web client makes every group: any one condition then runs the branch; tell the owner or set AND.",
-      "Without blockIds, removed_nodes and or_group_grown are matched by content and can be approximate; keep the blockIds from the read for exact matching.",
+      "Without blockIds, an edited node is matched to the stored node it came from by content, which can be approximate. That match names removed_nodes and or_group_grown, and it also decides which stored nodes the edit keeps as stored, such as code and unchecked_actions: a merge of rules may then be refused at stored code, or check a kept action as new. Keep the blockIds from the read for exact matching.",
       "Restore of block_data_update writes the stored original back; it checks again the pause controllers, actions moved out of an ended pause, scenario runs and that every aId/sId/cId still names a characteristic of its hs/hc.",
       "A refusal lists every failing rule in problems, each with one reason and an RFC 6901 pointer into data.",
       "A supported characteristic directly in if.if is written as condition/AND with that one leaf, or as the stored group with that leaf when an update keeps it; existing AND/OR groups are not rewrapped.",
@@ -6154,6 +6154,7 @@ async function validateBlockData(
   const kept = (value) => edit?.kept.has(value) === true;
   const context = {
     kept,
+    lostStoredNodes: edit === null ? new Set() : removedNodeForms(edit),
     removedNodes: edit === null ? null : removedBlockNodes(edit),
     grownOrGroups: edit === null ? [] : grownOrGroups(data, edit),
     problems: [],
@@ -6194,7 +6195,9 @@ async function validateBlockData(
     },
     (path, message, value, parent) => {
       // A node outside this contract that the edit keeps is written as stored.
-      if (!kept(value) && !kept(parent)) report(path, message);
+      if (!kept(value) && !kept(parent)) {
+        report(path, `${message}${storedNodeHint(value, context)}`);
+      }
     },
   );
 
@@ -6799,6 +6802,39 @@ function reportUnknownFieldChanges(data, storedData, report) {
 
 // Unknown fields of an edited node must be those of the stored node it was
 // edited from, with the same values; a new node has none.
+// An edit keeps stored code or another node this contract cannot write only
+// under the stored node it pairs with. Without blockIds that pair is found
+// by content and may be another rule: the node is then refused as new while
+// the same stored node is removed with the rule it sits in. The agent is
+// told how to keep it.
+function storedNodeHint(node, context) {
+  return isRecord(node) &&
+    typeof node.type === "string" &&
+    !Number.isSafeInteger(node.blockId) &&
+    context.lostStoredNodes.has(stableJson(canonicalBlockNode(node)))
+    ? "; the stored BLOCK has the same node in a part this edit removes: keep the blockIds get_entity returned, on it and on the nodes above it, so that the edit is matched to the stored nodes it came from and the node stays as stored"
+    : "";
+}
+
+// Every typed node of the stored subtrees an edit removes, in canonicalBlock
+// form.
+function removedNodeForms(edit) {
+  const forms = new Set();
+  const collect = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (typeof value.type === "string") {
+      forms.add(stableJson(canonicalBlockNode(value)));
+    }
+    for (const child of Object.values(value)) collect(child);
+  };
+  for (const { node } of edit.removed) collect(node);
+  return forms;
+}
+
 function reportUnknownNodeFields(node, kind, path, counterpart, report) {
   const allowed = BLOCK_ALLOWED_KEYS[kind];
   if (!allowed) return;
@@ -7574,7 +7610,7 @@ function validateBlockNode(node, kind, path, context) {
     ) {
       report(
         path,
-        "node type code is not supported by this contract; only sprut-agent's own action pause uses it",
+        `node type code is not supported by this contract; only sprut-agent's own action pause uses it${storedNodeHint(node, context)}`,
       );
     }
     return;
