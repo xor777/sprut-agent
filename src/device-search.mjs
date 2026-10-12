@@ -97,7 +97,9 @@ export class DeviceSearches {
     );
     const action = searchActionOrRefuse(extension, spaceKey, target.ref);
     const timeZone = await client.hubTimeZone(target.serial, deadline);
+    // The controller's latest watch goes on or has ended by now.
     const current = this.#latest(target.extensionKey);
+    if (current) this.#updateState(current, extension);
     if (action.state === true) {
       // A resend would restart the hub's timer and keep the network open
       // longer (P3), so a running search is only watched.
@@ -109,23 +111,19 @@ export class DeviceSearches {
               extension,
               action,
               timeZone,
-              await this.#children(target, deadline),
-              { startedBeforeWatch: true },
+              await this.#baseline(target, current, deadline, true),
             );
       const view = await this.#read(search);
       search.lastFingerprint = view.fingerprint;
       return this.#startResult(search, view, "already_running");
     }
 
-    // A search of this controller watched before has ended now.
-    if (current) this.#updateState(current, extension);
-    const baseline = await this.#children(target, deadline);
     const search = this.#remember(
       target,
       extension,
       action,
       timeZone,
-      baseline,
+      await this.#baseline(target, current, deadline, false),
     );
     let replyLost = false;
     try {
@@ -259,6 +257,9 @@ export class DeviceSearches {
         if (fields.length > 0) changed.push({ child, fields });
       }
     }
+    // A restart counts from this watch's start only while it has listed
+    // no new device (#baseline).
+    if (added.length > 0) search.newSeen = true;
     const newDevices = [];
     for (const child of added.slice(0, DEVICE_LIMIT)) {
       newDevices.push(await this.#newDevice(search, child, deadline));
@@ -487,6 +488,26 @@ export class DeviceSearches {
     };
   }
 
+  // The devices a new watch counts from, and whether they were read while
+  // a search already ran. After a watch of this controller that ended
+  // without listing a new device, the new watch keeps that watch's
+  // devices: one the hub added just after the network closed is then
+  // reported by the restart rather than taken for one that was there.
+  async #baseline(target, previous, deadline, running) {
+    if (previous && previous.ended !== null && !previous.newSeen) {
+      return {
+        devices: [...previous.baseline.values()],
+        startedBeforeWatch: previous.startedBeforeWatch,
+        running,
+      };
+    }
+    return {
+      devices: await this.#children(target, deadline),
+      startedBeforeWatch: running,
+      running,
+    };
+  }
+
   async #children(target, deadline) {
     const { children } = await this.#client.nativeExtensionChildren(
       target.serial,
@@ -553,7 +574,7 @@ export class DeviceSearches {
     };
   }
 
-  #remember(target, extension, action, timeZone, baseline, options = {}) {
+  #remember(target, extension, action, timeZone, baseline) {
     const search = {
       ref: `${target.ref}${SEARCH_REF_PART}${randomUUID()}`,
       serial: target.serial,
@@ -564,11 +585,12 @@ export class DeviceSearches {
       actionId: action.id,
       actionLabel: typeof action.button === "string" ? action.button : null,
       timeZone,
-      baseline: new Map(baseline.map((child) => [child.id, child])),
-      startedBeforeWatch: options.startedBeforeWatch === true,
+      baseline: new Map(baseline.devices.map((child) => [child.id, child])),
+      startedBeforeWatch: baseline.startedBeforeWatch,
+      newSeen: false,
       active: null,
       seenRunning: false,
-      startRead: options.startedBeforeWatch === true,
+      startRead: baseline.running,
       endsAt: null,
       ended: null,
       endedAt: null,
