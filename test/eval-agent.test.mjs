@@ -2381,12 +2381,17 @@ test("add-leak-sensor needs the ZigBee search and the joined sensor placed in th
     });
   }
 
-  // The ZLL search lets nothing join; and a sensor left in the hallway
-  // under its model name is not added to the bathroom.
+  // The ZLL search lets nothing join; a second start reopens the network;
+  // and a sensor left in the hallway under its model name is not added to
+  // the bathroom.
   const zll = await caseSession(t, "add-leak-sensor");
   await zll.send(search("discovery"));
   assert.equal(zll.grade("Готово.").zigbee_search_started, false);
   assert.equal(zll.grade("Готово.").new_sensor_in_bathroom_named, false);
+  const twice = await caseSession(t, "add-leak-sensor");
+  await twice.send(search("main"));
+  await twice.send(search("main"));
+  assert.equal(twice.grade("Готово.").zigbee_search_started, false);
   const unplaced = await caseSession(t, "add-leak-sensor");
   await unplaced.send(search("main"));
   await joined(unplaced.hub);
