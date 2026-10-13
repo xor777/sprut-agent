@@ -2599,7 +2599,9 @@ export class SprutHubClient {
       });
     });
     // The rest are counted, not listed, so the answer does not grow with
-    // the home; home_overview lists them by type, a page at a time.
+    // the home. home_overview lists every scenario of their types, the
+    // searched and built-in LOGIC too, so it does not show which were not
+    // searched: accepted while the owner's hub has far fewer than the limit.
     const rest = code.slice(searched.length);
     if (rest.length > 0) {
       unchecked.push({
@@ -4242,7 +4244,7 @@ function relationFailure(area, read) {
 }
 
 const RELATIONS_LIMITATION =
-  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue) or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue) or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Past the search limit, the home_overview lists named for the rest also show the searched and built-in scenarios, so which were not searched is unknown. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&
