@@ -771,10 +771,55 @@ test("a LOGIC's Sync, which its code does not set, and a code edit are prepared 
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 });
 
-test("undo of a created BLOCK or LOGIC names the agent's later rename, and both together are undone", async (t) => {
-  const { hub, client } = await setup(t);
-  const initial = hub.snapshot();
-  const createdBlock = await call(client, "prepare_native_change", {
+// A BLOCK the agent creates in the tests below: the bathroom light on
+// motion.
+function bathroomLightRule() {
+  return {
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            {
+              type: "characteristic",
+              aId: 38,
+              sId: 13,
+              cId: 14,
+              hs: "MotionSensor",
+              hc: "MotionDetected",
+              cond: "=",
+              value: "true",
+              trigger: true,
+              time: 0,
+              timeCond: "",
+            },
+          ],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [
+          {
+            type: "service",
+            aId: 35,
+            sId: 13,
+            hs: "Lightbulb",
+            characteristics: [
+              { type: "set", cId: 14, hc: "On", value: "true" },
+            ],
+          },
+        ],
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  };
+}
+
+function createBathroomRule(client) {
+  return call(client, "prepare_native_change", {
     operation: "block_create",
     target_ref: homeRef,
     name: "Свет в ванной по движению",
@@ -782,50 +827,15 @@ test("undo of a created BLOCK or LOGIC names the agent's later rename, and both 
     active: false,
     on_start: false,
     sync: false,
-    data: {
-      targets: [
-        {
-          type: "if",
-          mode: "EVERY",
-          if: {
-            type: "condition",
-            mode: "AND",
-            conditions: [
-              {
-                type: "characteristic",
-                aId: 38,
-                sId: 13,
-                cId: 14,
-                hs: "MotionSensor",
-                hc: "MotionDetected",
-                cond: "=",
-                value: "true",
-                trigger: true,
-                time: 0,
-                timeCond: "",
-              },
-            ],
-          },
-          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
-          then: [
-            {
-              type: "service",
-              aId: 35,
-              sId: 13,
-              hs: "Lightbulb",
-              characteristics: [
-                { type: "set", cId: 14, hc: "On", value: "true" },
-              ],
-            },
-          ],
-          else: [],
-          then_delay: 0,
-          else_delay: 0,
-        },
-      ],
-    },
+    data: bathroomLightRule(),
     reason: "Включать свет в ванной при движении",
   });
+}
+
+test("undo of a created BLOCK or LOGIC names the agent's later rename, and both together are undone", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const createdBlock = await createBathroomRule(client);
   const createdLogic = await call(client, "prepare_native_change", {
     operation: "logic_source_create",
     target_ref: `${homeRef}/accessory/34/service/13`,
@@ -879,4 +889,83 @@ test("undo of a created BLOCK or LOGIC names the agent's later rename, and both 
   });
   assert.equal(undone.status, "ok", JSON.stringify(undone.results));
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// The chain does not hide a change by hand: once the owner changed the
+// scenario after the agent's later change, both are left as they are.
+test("an owner's edit after the agent's later change of a LOGIC stays a change by hand for both changes", async (t) => {
+  const { hub, client } = await setup(t);
+  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const described = await change(client, LOGIC, "Desc", "Новое описание");
+  ownerWritesWindow(hub, LOGIC, "Desc", { stringValue: "Описание владельца" });
+
+  const sentBefore = hub.requests.length;
+  for (const prepared of [renamed, described]) {
+    const refused = await call(client, "restore_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(refused.status, "conflict", JSON.stringify(refused));
+    assert.notEqual(refused.conflict_reason, "later_owned_change");
+    assert.equal(refused.manual_change_observed, true);
+  }
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.equal(scenarioOf(hub, LOGIC).desc, "Описание владельца");
+  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+});
+
+test("a created BLOCK whose data the owner edited after the agent's rename is named as changed by hand", async (t) => {
+  const { hub, client } = await setup(t);
+  const created = await createBathroomRule(client);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: created.change_ref,
+  });
+  const index = applied.scenario_ref.split("/").at(-1);
+  const renamed = await change(client, index, "Name", "Новое имя");
+  const data = JSON.parse(scenarioOf(hub, index).data);
+  data.targets[0].then_delay = 5_000;
+  hub.request({
+    scenario: { update: { index, data: JSON.stringify(data) } },
+  });
+
+  const sentBefore = hub.requests.length;
+  const refused = await call(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+  assert.equal(refused.status, "conflict", JSON.stringify(refused));
+  assert.equal(refused.conflict_reason, "manual_change");
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+
+  // Together: the rename goes back, the edited BLOCK stays.
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [created.change_ref, renamed.change_ref],
+  });
+  assert.deepEqual(
+    undone.results.map(({ change_ref: ref, status, reason }) => [
+      ref,
+      status,
+      reason,
+    ]),
+    [
+      [renamed.change_ref, "restored", undefined],
+      [created.change_ref, "skipped", "changed_since"],
+    ],
+  );
+  assert.equal(scenarioOf(hub, index).name, "Свет в ванной по движению");
+});
+
+test("the owner's rename back to the agent's earlier name is a change by hand of the later rename", async (t) => {
+  const { hub, client } = await setup(t);
+  const first = await change(client, BLOCK, "Name", "Ночь");
+  ownerWritesWindow(hub, BLOCK, "Name", { stringValue: "Ночной свет" });
+  const second = await change(client, BLOCK, "Name", "Ночь, свет");
+  ownerWritesWindow(hub, BLOCK, "Name", { stringValue: "Ночь" });
+
+  const sentBefore = hub.requests.length;
+  const refused = await call(client, "restore_native_change", {
+    change_ref: second.change_ref,
+  });
+  assert.equal(refused.status, "conflict", JSON.stringify(refused));
+  assert.notEqual(refused.restore_first_change_ref, first.change_ref);
+  assert.equal(refused.manual_change_observed, true);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
 });
