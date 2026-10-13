@@ -1351,7 +1351,9 @@ test("a read and a stop whose search cannot be saved say what reached the hub", 
   assert.equal(read.active, true);
   assert.equal(read.ends_at, started.ends_at);
   assert.equal(read.stop_sent, undefined);
+  assert.match(read.error.message, /sent nothing/);
   assert.equal(stopped.stop_sent, true);
+  assert.doesNotMatch(stopped.error.message, /sent nothing/);
   assert.equal(stopped.active, false);
   assert.equal(stopped.ends_at, undefined);
   assert.equal(after.active, false);
