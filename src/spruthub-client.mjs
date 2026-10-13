@@ -2249,6 +2249,15 @@ export class SprutHubClient {
             if (!(error instanceof SprutHubError)) throw error;
             return { ...entry, exported: null, error_code: error.code };
           }
+          // A list with no children shows nothing about this accessory.
+          if (children.length === 0) {
+            return {
+              ...entry,
+              exported: null,
+              exportable: null,
+              reason: BRIDGE_LISTS_NOTHING,
+            };
+          }
           const child = children.find(({ id }) => id === childId);
           if (!child) return { ...entry, exported: false, exportable: false };
           const exported = bridgeChildExported(child);
@@ -4707,6 +4716,8 @@ function bridgeRunning({ state, enabled }) {
 
 const BRIDGE_NOT_RUNNING =
   "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.";
+const BRIDGE_LISTS_NOTHING =
+  "The bridge lists no accessories, so whether it exports or can export this one is unknown; the owner can check the bridge in the SprutHub app.";
 
 const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
 const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
