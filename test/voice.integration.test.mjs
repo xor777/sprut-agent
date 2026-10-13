@@ -17,8 +17,10 @@ import {
 // server asked for; the hub is the offline simulator.
 const ACCESS_TOKEN = "voice-test-token";
 
-async function setup(t) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+async function setup(t, { faults } = {}) {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
+    faults,
+  });
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-voice-"));
   const openai = await startFakeOpenAI();
   const homeTools = new HomeTools({
@@ -328,5 +330,25 @@ test("a read by kind answers about air conditioners without the rest of the home
   assert.deepEqual(
     output.devices.map(({ device }) => device),
     [airConditioner],
+  );
+});
+
+test("a level the hub shows only a moment later is reported as done", async (t) => {
+  // Colour bulbs on the owner's hub report a new value after the MCP's
+  // immediate readback, which then calls the command unconfirmed.
+  const { tool, listedId } = await setup(t, {
+    faults: { delayedReadback: [{ aId: 16, sId: 13, cId: 15, ms: 400 }] },
+  });
+  const floorLamp = await listedId("Торшер");
+
+  const output = await tool("control_devices", {
+    commands: [{ device: floorLamp, control: "brightness", value: "30" }],
+    reason: "торшер на тридцать процентов",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  assert.deepEqual(
+    output.results.map(({ control, status, now }) => [control, status, now]),
+    [["brightness", "applied", 30]],
   );
 });
