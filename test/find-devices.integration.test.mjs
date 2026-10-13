@@ -65,6 +65,9 @@ async function setup(t, fixture) {
   return { hub, client, call, callError, home: homeRefOf(hub) };
 }
 
+// Long enough for a pushed frame to reach the MCP process over loopback.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
+
 function homeRefOf(hub) {
   return `spruthub://hub/${encodeURIComponent(hub.serial)}`;
 }
@@ -1227,7 +1230,7 @@ test("a page that cannot fit max_bytes says so instead of passing silently", asy
   assert.equal(Object.hasOwn(roomy.body, "max_bytes_exceeded"), false);
 });
 
-test("the session catalog is reused, dropped by this process's writes and refreshed for unknown names", async (t) => {
+test("the home is read once, follows the hub's events for edits in the SprutHub app and is read again for a name it does not know", async (t) => {
   const { hub, call, home } = await setup(
     t,
     await loadHomeFixture("apartment"),
@@ -1239,22 +1242,19 @@ test("the session catalog is reused, dropped by this process's writes and refres
     "room.list",
   ]);
   const floorLamp = hub.state.accessories.find(({ id }) => id === 16);
-  floorLamp.services
-    .find(({ type }) => type === "Lightbulb")
-    .characteristics.find(
-      ({ control }) => control.type === "Brightness",
-    ).control.value = { intValue: 30 };
+  hub.changeByHand({ aId: 16, sId: 13, cId: 15, value: { intValue: 30 } });
+  await settle();
 
   const warm = await call("find_devices", { query: "торшер" });
-  assert.deepEqual(methods(warm.native), ["accessory.get"]);
+  assert.deepEqual(warm.native, []);
   assert.equal(
     readingOf(listed(warm.body)[0].service, "Brightness").value,
     30,
-    "values are read fresh even when names come from the catalog",
+    "the value the hub pushed",
   );
 
-  // A rename made in the SprutHub app: the cached catalog does not know the
-  // new name, so the read refreshes it once instead of answering "nothing".
+  // A rename the hub did not announce: the home is read again once for a
+  // name it does not know instead of answering "nothing".
   hub.state.accessories
     .find(({ id }) => id === 26)
     .services.find(({ type }) => type === "Lightbulb").name =
@@ -1266,37 +1266,61 @@ test("the session catalog is reused, dropped by this process's writes and refres
     ["Ночник у кровати"],
   );
 
-  // A device renamed in the app is caught by the targeted read that
-  // disagrees with the catalog.
+  // A device renamed in the app: its event has the device read again.
   floorLamp.name = "Торшер у окна";
+  hub.emit({
+    accessory: {
+      event: "EVENT_UPDATE",
+      accessories: [{ id: 16, name: floorLamp.name }],
+    },
+  });
+  await settle();
   const renamedDevice = await call("find_devices", { query: "торшер" });
   assert.deepEqual(
     listed(renamedDevice.body).map(({ device }) => device.name),
     ["Торшер у окна"],
   );
+  assert.deepEqual(methods(renamedDevice.native), ["accessory.get"]);
 
-  // Moved in the app to a room made after the catalog: the read names the
-  // room too.
-  hub.state.rooms.push({ id: 50, name: "Веранда", order: 10, visible: true });
+  // Moved in the app to a room made after the home was read: the room list
+  // and the device are read again.
+  const veranda = { id: 50, name: "Веранда", order: 10, visible: true };
+  hub.state.rooms.push(veranda);
+  hub.emit({ room: { event: "EVENT_ADD", rooms: [veranda] } });
   floorLamp.roomId = 50;
+  hub.emit({
+    accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16, roomId: 50 }] },
+  });
+  await settle();
   const moved = await call("find_devices", { query: "торшер" });
   assert.deepEqual(
     listed(moved.body).map(({ room, device }) => [room.name, device.name]),
     [["Веранда", "Торшер у окна"]],
   );
+  assert.deepEqual(methods(moved.native).sort(), [
+    "accessory.get",
+    "room.list",
+  ]);
 
   // Paired again in the app: the floor lamp is gone and its name is on a
-  // device under a new id. The read finds the old one gone and looks the
-  // name up in the home again.
+  // device under a new id.
   hub.state.accessories.splice(hub.state.accessories.indexOf(floorLamp), 1);
-  addLampInHub(hub, 62, 3, "Торшер у окна");
+  hub.emit({ accessory: { event: "EVENT_REMOVE", accessories: [{ id: 16 }] } });
+  const repairedLamp = addLampInHub(hub, 62, 3, "Торшер у окна");
+  hub.emit({
+    accessory: {
+      event: "EVENT_ADD",
+      accessories: [structuredClone(repairedLamp)],
+    },
+  });
+  await settle();
   const repaired = await call("find_devices", { query: "торшер" });
   assert.deepEqual(
     listed(repaired.body).map(({ device }) => [device.ref, device.name]),
     [[`${home}/accessory/62`, "Торшер у окна"]],
   );
 
-  // A write by this process drops the catalog at once.
+  // A configuration write by this process has the home read again.
   const prepared = await call("prepare_native_change", {
     operation: "service_name",
     target_ref: `${home}/accessory/17/service/13`,
@@ -1330,9 +1354,10 @@ function addLampInHub(hub, id, roomId, name) {
     }
   }
   hub.state.accessories.push(lamp);
+  return lamp;
 }
 
-test("a room read sees devices moved or added in the SprutHub app after the catalog", async (t) => {
+test("a room read sees devices moved or added in the SprutHub app by the hub's events", async (t) => {
   const { hub, call, home } = await setup(
     t,
     await loadHomeFixture("apartment"),
@@ -1341,8 +1366,18 @@ test("a room read sees devices moved or added in the SprutHub app after the cata
   // In the SprutHub app: the floor lamp (on) moves to the bedroom, a lamp
   // is added there and another on the empty balcony.
   hub.state.accessories.find(({ id }) => id === 16).roomId = 5;
-  addLampInHub(hub, 60, 5, "Лампа у кровати");
-  addLampInHub(hub, 61, 30, "Фонарь на балконе");
+  hub.emit({
+    accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16, roomId: 5 }] },
+  });
+  for (const lamp of [
+    addLampInHub(hub, 60, 5, "Лампа у кровати"),
+    addLampInHub(hub, 61, 30, "Фонарь на балконе"),
+  ]) {
+    hub.emit({
+      accessory: { event: "EVENT_ADD", accessories: [structuredClone(lamp)] },
+    });
+  }
+  await settle();
 
   const bedroom = await call("find_devices", {
     room_ref: `${home}/room/5`,
@@ -1355,7 +1390,11 @@ test("a room read sees devices moved or added in the SprutHub app after the cata
       .sort(),
     ["Лампа у кровати", "Торшер"],
   );
-  assert.equal(methods(bedroom.native)[0], "accessory.list{roomId}");
+  assert.deepEqual(methods(bedroom.native), [
+    "accessory.get",
+    "accessory.get",
+    "accessory.get",
+  ]);
 
   const balcony = await call("find_devices", {
     room_ref: `${home}/room/30`,
@@ -1373,18 +1412,29 @@ test("a room deleted in the SprutHub app is not found on the first call", async 
     await loadHomeFixture("apartment"),
   );
   await call("home_overview", {});
-  // In the SprutHub app, after the catalog: the empty balcony is deleted,
-  // the study's devices move to the living room and the study is deleted.
-  const deleteRoom = (id) =>
+  // In the SprutHub app, after the home was read: the empty balcony is
+  // deleted, the study's devices move to the living room and the study is
+  // deleted.
+  const deleteRoom = (id) => {
     hub.state.rooms.splice(
       hub.state.rooms.findIndex((room) => room.id === id),
       1,
     );
+    hub.emit({ room: { event: "EVENT_REMOVE", rooms: [{ id }] } });
+  };
   deleteRoom(30);
   for (const accessory of hub.state.accessories) {
-    if (accessory.roomId === 7) accessory.roomId = 3;
+    if (accessory.roomId !== 7) continue;
+    accessory.roomId = 3;
+    hub.emit({
+      accessory: {
+        event: "EVENT_UPDATE",
+        accessories: [{ id: accessory.id, roomId: 3 }],
+      },
+    });
   }
   deleteRoom(7);
+  await settle();
 
   const balcony = await callError("find_devices", {
     room_ref: `${home}/room/30`,
@@ -1428,14 +1478,14 @@ test("refresh re-reads names changed in the SprutHub app that a query cannot not
   assert(refreshed.body.catalog_observed_at > first.body.catalog_observed_at);
 });
 
-test("a broad match reads values with one whole-home request", async (t) => {
+test("a broad match after the overview reads nothing from the hub", async (t) => {
   const { call } = await setup(t, await loadHomeFixture("house"));
   await call("home_overview", {});
 
   const { body, native } = await call("find_devices", { kind: "light" });
 
   assert(body.total > 50);
-  assert.deepEqual(methods(native), ["accessory.list"]);
+  assert.deepEqual(methods(native), []);
 });
 
 test("find_devices refuses a foreign or unknown room with a way back", async (t) => {

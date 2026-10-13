@@ -1367,6 +1367,15 @@ export async function startSimulatedHub(
     },
     faultEvents: () => structuredClone(state.faultEvents),
     connections: () => structuredClone(connections),
+    // Cuts every open connection, as a network drop or a relay restart
+    // does; resolves once they have closed.
+    dropConnections: async () => {
+      const closing = [...server.clients].map((client) =>
+        client.readyState === client.CLOSED ? null : once(client, "close"),
+      );
+      for (const client of server.clients) client.terminate();
+      await Promise.all(closing);
+    },
     // Applies delayed writes now, as the hub would have by the time a
     // grader looks at the home.
     settle: () => {
