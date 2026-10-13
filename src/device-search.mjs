@@ -787,7 +787,12 @@ export class DeviceSearches {
     if (controller !== null) {
       const serial = this.#client.selectedSerial();
       const watch = await this.#store(serial).get(searchId(searchRef));
-      if (watch?.ref === searchRef) return loadedWatch(serial, watch);
+      if (watch?.ref === searchRef) {
+        // A ref is given out only after its start was read back, also the
+        // ref of a watch whose state after the start could not be saved
+        // (startedNotKept): a search not shown running has ended.
+        return { ...loadedWatch(serial, watch), startRead: true };
+      }
     }
     throw new SprutHubError(
       "device_search_not_found",
