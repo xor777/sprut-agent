@@ -20,6 +20,7 @@ import {
   extensionChildRef,
   extensionRef,
   extensionSearchAction,
+  extractTypedValue,
   homeRef,
   isHubReadFailure,
   parseEntityRef,
@@ -44,6 +45,16 @@ const EVENT_DOMAINS = ["extension", "extensionChild", "accessory"];
 const START_CONFIRM_MS = 1_000;
 // A search seen ended within this long of its end counts as expired.
 const EXPIRY_TOLERANCE_MS = 3_000;
+// The hub's «Время поиска устройств» (DiscoveryTime in its settings window,
+// H8) is a choice of 1 to 60 minutes, 60 s on the owner's hub; its value is
+// in seconds, as the search started there ended 60 s later (P1). Unread,
+// the largest choice stands for it.
+const MAX_DISCOVERY_TIME_MS = 60 * 60_000;
+// The hub's clock, on which a search's end is shown, may be this much
+// ahead of this machine's.
+const CLOCK_SLACK_MS = 5_000;
+const DISCOVERY_TIME_LIMITATION =
+  "The hub's device search time (DiscoveryTime) could not be read, so this search is taken to end at most an hour after its start: within that hour, a search the owner starts in the SprutHub app after this one ended is taken for this one, and stop_device_search would stop it.";
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
 const SEARCH_REF_PART = "/device_search/";
@@ -152,6 +163,7 @@ export class DeviceSearches {
     );
     const action = searchActionOrRefuse(extension, spaceKey, target.ref);
     const timeZone = await client.hubTimeZone(target.serial, deadline);
+    const discoveryTime = await this.#discoveryTime(target.serial, deadline);
     if (current) {
       this.#updateState(current, extension);
       const running = action.state === true;
@@ -181,6 +193,7 @@ export class DeviceSearches {
               timeZone,
               await this.#children(target, deadline),
               true,
+              latestEnd(Date.now(), discoveryTime, runningActionEnd(action)),
             );
       const view = await this.#read(search);
       search.lastFingerprint = view.fingerprint;
@@ -190,13 +203,17 @@ export class DeviceSearches {
       };
     }
 
+    const devices = await this.#children(target, deadline);
+    // The hub takes the start before its answer is due.
+    const startDeadline = Date.now() + client.timeoutMs;
     const search = await this.#remember(
       target,
       extension,
       action,
       timeZone,
-      await this.#children(target, deadline),
+      devices,
       false,
+      latestEnd(startDeadline, discoveryTime),
     );
     let replyLost = false;
     try {
@@ -208,7 +225,7 @@ export class DeviceSearches {
           actionId: search.actionId,
           state: true,
         },
-        Date.now() + client.timeoutMs,
+        startDeadline,
       );
     } catch (error) {
       if (!(error instanceof SprutHubError) || !error.requestSent) {
@@ -402,22 +419,9 @@ export class DeviceSearches {
     if (search.ended !== null) return;
     const action = findAction(extension, search.spaceKey, search.actionId);
     const end = runningActionEnd(action);
-    if (action?.state === true) {
-      // Once the watched end has passed, a run that ends later is another
-      // run, as one started again in the SprutHub app: this watch's search
-      // expired unseen, and the new run is not this watch's to stop. A run
-      // restarted before the watched end shows the same way if no read
-      // came between; it is then left to a new watch too.
-      if (
-        search.endsAt !== null &&
-        end !== null &&
-        end > search.endsAt &&
-        Date.now() >= search.endsAt
-      ) {
-        search.active = false;
-        search.ended = "expired";
-        return;
-      }
+    // A later run (isLaterRun) means this watch's run is over: the later
+    // one is reported as later_search and is not this watch's to stop.
+    if (action?.state === true && !isLaterRun(search, end)) {
       search.active = true;
       search.seenRunning = true;
       if (end !== null) search.endsAt = end;
@@ -425,7 +429,14 @@ export class DeviceSearches {
     }
     search.active = false;
     // A start not shown yet is not an end while #start reads it back.
-    if (!search.seenRunning && !search.stopSent && !search.startRead) return;
+    if (
+      action?.state !== true &&
+      !search.seenRunning &&
+      !search.stopSent &&
+      !search.startRead
+    ) {
+      return;
+    }
     // Once the search is seen ended it stays so: a later run is watched by
     // another search (start_device_search).
     search.ended = search.stopSent
@@ -597,11 +608,29 @@ export class DeviceSearches {
         ? { changed_devices_total: view.changedTotal }
         : {}),
       time_zone: search.timeZone,
-      ...(search.timeZone === null
-        ? { limitations: [UTC_TIMES_LIMITATION] }
-        : {}),
+      ...limitationsOf(search),
       ...reportGuidance(search, view),
     };
+  }
+
+  // DiscoveryTime in milliseconds, or null when the hub's settings window
+  // cannot be read or shows no single whole number of seconds for it.
+  async #discoveryTime(serial, deadline) {
+    let window;
+    try {
+      window = await this.#client.nativeWindow(serial, "", deadline);
+    } catch (error) {
+      if (error instanceof SprutHubError) return null;
+      throw error;
+    }
+    const options = (window?.options ?? []).filter(
+      (option) => option?.key === "DiscoveryTime",
+    );
+    const seconds =
+      options.length === 1 ? extractTypedValue(options[0].value).value : null;
+    return Number.isSafeInteger(seconds) && seconds > 0
+      ? seconds * 1_000
+      : null;
   }
 
   async #children(target, deadline) {
@@ -671,8 +700,8 @@ export class DeviceSearches {
   }
 
   // A new watch counting from the controller's devices now; running when
-  // its search already runs.
-  async #remember(target, extension, action, timeZone, devices, running) {
+  // its search already runs. end: latestEnd of its run.
+  async #remember(target, extension, action, timeZone, devices, running, end) {
     const search = {
       ref: `${target.ref}${SEARCH_REF_PART}${randomUUID()}`,
       serial: target.serial,
@@ -690,6 +719,8 @@ export class DeviceSearches {
       seenRunning: false,
       startRead: running,
       endsAt: null,
+      endsBy: end.at,
+      endsByAssumed: end.assumed,
       ended: null,
       stopSent: false,
       linked: new Map(),
@@ -892,6 +923,8 @@ function storedWatch(search) {
     seen_running: search.seenRunning,
     start_read: search.startRead,
     ends_at: search.endsAt,
+    ends_by: search.endsBy,
+    ends_by_assumed: search.endsByAssumed,
     ended: search.ended,
     stop_sent: search.stopSent,
     last_fingerprint: search.lastFingerprint,
@@ -928,6 +961,9 @@ function loadedWatch(serial, watch) {
     seenRunning: watch.seen_running,
     startRead: watch.start_read,
     endsAt: watch.ends_at,
+    // A watch kept before ends_by was kept has no bound but the end it saw.
+    endsBy: watch.ends_by ?? null,
+    endsByAssumed: watch.ends_by_assumed === true,
     ended: watch.ended,
     stopSent: watch.stop_sent,
     linked: new Map(),
@@ -949,6 +985,32 @@ function publicChild(search, child) {
     status: child.status,
     progress: child.progress,
     error: child.error,
+  };
+}
+
+// Whether a run that ends at end is a later run than this watch's, as one
+// started or restarted in the SprutHub app: it ends after the latest end
+// this watch's run can have (endsBy, kept before the watch's start), or,
+// once the end this watch saw has passed, after that end.
+function isLaterRun(search, end) {
+  return (
+    end !== null &&
+    ((search.endsBy !== null && end > search.endsBy) ||
+      (search.endsAt !== null &&
+        end > search.endsAt &&
+        Date.now() >= search.endsAt))
+  );
+}
+
+// The latest end the run of a new watch can have, kept before its start:
+// DiscoveryTime after from, the latest moment the hub takes the start,
+// plus CLOCK_SLACK_MS; a search already running that shows its end ends
+// then. assumed: DiscoveryTime was not read, its largest choice stood in.
+function latestEnd(from, discoveryTime, shownEnd = null) {
+  if (shownEnd !== null) return { at: shownEnd, assumed: false };
+  return {
+    at: from + (discoveryTime ?? MAX_DISCOVERY_TIME_MS) + CLOCK_SLACK_MS,
+    assumed: discoveryTime === null,
   };
 }
 
@@ -1161,6 +1223,14 @@ function deviceOutcomes(view) {
 function worthReturning(search, view) {
   if (view.fingerprint !== search.lastFingerprint) return true;
   return view.active === false && !deviceOutcomes(view).has("pending");
+}
+
+function limitationsOf(search) {
+  const limitations = [
+    ...(search.timeZone === null ? [UTC_TIMES_LIMITATION] : []),
+    ...(search.endsByAssumed ? [DISCOVERY_TIME_LIMITATION] : []),
+  ];
+  return limitations.length > 0 ? { limitations } : {};
 }
 
 function getCall(search) {
