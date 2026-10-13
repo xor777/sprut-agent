@@ -2213,6 +2213,23 @@ test("why-lamp-not-on keeps the study lamp off on motion only for the light leve
       ),
       fixture,
     );
+    // «Выключить свет в кабинете» has no trigger and, whatever its
+    // description says, switches off the computer socket only.
+    const study = state.scenarios.find(
+      ({ name }) => name === "Выключить свет в кабинете",
+    );
+    assert.equal(study.active, true, fixture);
+    assert.equal(study.desc, "Гасит свет в кабинете перед сном", fixture);
+    const names = new Map(state.accessories.map(({ id, name }) => [id, name]));
+    assert.deepEqual(
+      JSON.parse(study.data).targets.map(({ type, aId, characteristics }) => [
+        type,
+        names.get(aId),
+        characteristics.map(({ type: set, hc, value }) => [set, hc, value]),
+      ]),
+      [["service", "Розетка компьютера", [["set", "On", "false"]]]],
+      fixture,
+    );
     const lampAfterMotion = (preset) =>
       evaluateRulesOnChange(state, {
         preset: [{ ...motion, value: false }, ...preset],
