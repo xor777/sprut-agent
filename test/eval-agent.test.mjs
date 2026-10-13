@@ -2155,13 +2155,17 @@ test("why-lamp-not-on keeps the study lamp off on motion only for the light leve
     const sensor = state.accessories.find(({ id }) => id === 13);
     const rooms = new Map(state.rooms.map(({ id, name }) => [id, name]));
     assert.equal(rooms.get(sensor.roomId), "Коридор", fixture);
-    assert.equal(
-      state.accessories.some(
-        ({ roomId, services }) =>
-          rooms.get(roomId) === "Кабинет" &&
-          services.some(({ type }) => type === "MotionSensor"),
-      ),
-      false,
+    // The study holds the lamp, the computer socket and an offline window
+    // sensor, and no motion sensor.
+    assert.deepEqual(
+      state.accessories
+        .filter(({ roomId }) => rooms.get(roomId) === "Кабинет")
+        .map(({ name, online }) => [name, online]),
+      [
+        ["Настольная лампа", true],
+        ["Розетка компьютера", true],
+        ["Датчик окна в кабинете", false],
+      ],
       fixture,
     );
     const lampAfterMotion = (preset) =>

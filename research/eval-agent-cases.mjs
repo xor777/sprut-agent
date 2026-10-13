@@ -273,6 +273,7 @@ export const CASES = {
         "«Свет в кабинете по движению» is an enabled scenario: when «Датчик движения в коридоре», the motion sensor in «Коридор» (the corridor), detects motion, it switches «Настольная лампа» in «Кабинет» (the study) on, but only while the same sensor's light level («Освещенность») is below 20 lux; 3 minutes later it switches the lamp off.",
         "That sensor's light level reads 24 lux now, so the light condition is not met and motion does not switch the lamp on. «Кабинет» has no motion sensor of its own: motion in the study itself is not seen by this rule.",
         "«Настольная лампа» is off now and available. No other scenario or logic switches it on by motion.",
+        "«Кабинет» also has «Розетка компьютера» and «Датчик окна в кабинете», a window contact sensor that is offline (unavailable); neither takes part in the rule. No motion is detected in the corridor now.",
         changesFact(evidence),
       ],
       criteria: [
