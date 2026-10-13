@@ -5146,30 +5146,26 @@ export function isSensitiveNativeNode(value, key = "") {
   ) {
     return true;
   }
-  // A flag or size key decides for its label, type and ref where the value
-  // cannot be what they name. A boolean holds no secret: a CHECKBOX
-  // InstallCodeEnabled labelled «Install code» is a flag. A number is a
-  // size or a kind unless they name a secret without such a part: Mode
-  // labelled «Password» may hold the password, PinCodeLength labelled «PIN
-  // code length» does not.
+  // A key that says flag or size decides for its label, type and ref: a
+  // yes/no or a number under InstallCodeEnabled or PinCodeLength holds no
+  // code, whatever its label says. A kind (Mode, PasswordType) does not
+  // say what its number is: under Mode labelled «Пароль» it may be the
+  // password, so the label decides there.
   const configured = value.value ?? value.configured_value;
-  if (typeof value.key === "string" && isFlagOrSize(value.key, configured)) {
-    return (
-      !isBooleanValue(configured) &&
-      ([value.name, value.type, value.ref].some(
-        (candidate) =>
-          typeof candidate === "string" &&
-          isSensitiveKey(candidate) &&
-          !isFlagOrSize(candidate, configured),
-      ) ||
-        labelNamesSecret(value.name, configured))
-    );
+  if (
+    typeof value.key === "string" &&
+    isFlagOrSize(value.key, configured, { kinds: false })
+  ) {
+    return false;
   }
   return (
-    [value.key, value.name, value.type, value.ref].some(
-      (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
+    [value.key, value.type, value.ref].some(
+      (candidate) =>
+        typeof candidate === "string" &&
+        isSensitiveKey(candidate) &&
+        !isFlagOrSize(candidate, configured),
     ) ||
-    labelNamesSecret(value.name, configured) ||
+    labelHidesValue(value, configured) ||
     namesOptionSecret(value) ||
     holdsKeyMaterial(value) ||
     holdsConfirmationCode(value)
@@ -5179,59 +5175,104 @@ export function isSensitiveNativeNode(value, key = "") {
 // A field for the one-time code of a cloud login, as the Xiaomi
 // controller's Ticket labelled «Код подтверждения»: filled, it holds the
 // code sent to the owner; empty, it only shows that a login waits for it.
-// Only a field the code is typed into holds it: a choice among listed
-// values, as how the code is sent, does not.
+// The input type says whether the code is typed in (a select of how the
+// code is sent holds none); a field without one is a choice when it lists
+// values.
 const TYPED_INPUT_TYPES = new Set(["TEXT", "TEXT_MULTILINE", "PASSWORD"]);
 
 function holdsConfirmationCode(node) {
   const text = optionStringValue(node);
   if (text === null || text.trim() === "") return false;
   const inputType = node.inputType ?? node.input_type ?? null;
+  const typed =
+    inputType === null
+      ? node.validValues === undefined && node.valid_values === undefined
+      : TYPED_INPUT_TYPES.has(inputType);
+  return (
+    typed &&
+    ((typeof node.key === "string" &&
+      credentialKeyParts(node.key).includes("ticket")) ||
+      (typeof node.name === "string" &&
+        /код\s+подтверждения/iu.test(node.name)))
+  );
+}
+
+// A label that names a secret hides the value under it, whatever its other
+// words: no word of a way, a type, a time or a size makes it something
+// else, so «Пароль в режиме точки доступа», «Временный пароль» and also
+// «Длина PIN-кода» are hidden; a wrongly hidden setting is safer than a
+// shown secret. A yes/no shows, and so does a choice among listed words:
+// neither can be the secret the label names.
+function labelHidesValue(node, configured) {
+  return (
+    typeof node.name === "string" &&
+    !isBooleanValue(configured) &&
+    !isChoiceOfWords(node, configured) &&
+    labelNamesSecret(node.name)
+  );
+}
+
+// A select shows the choice it holds among those it lists to anyone who
+// opens it. A list of codes is not a choice of words: a choice with four
+// digits in a row or key material, or a value not among the choices,
+// keeps the label's rule.
+function isChoiceOfWords(node, configured) {
+  const choices = node.validValues ?? node.valid_values;
   if (
-    (inputType !== null && !TYPED_INPUT_TYPES.has(inputType)) ||
-    node.validValues !== undefined ||
-    node.valid_values !== undefined
+    (node.inputType ?? node.input_type) !== "LIST" ||
+    !Array.isArray(choices) ||
+    choices.length === 0
   ) {
     return false;
   }
+  const plain = (value) =>
+    value !== null && typeof value === "object"
+      ? extractTypedValue(value).value
+      : value;
+  const current = plain(configured);
   return (
-    (typeof node.key === "string" &&
-      credentialKeyParts(node.key).includes("ticket")) ||
-    (typeof node.name === "string" && /код\s+подтверждения/iu.test(node.name))
+    choices.some((choice) => plain(choice?.value) === current) &&
+    choices.every((choice) =>
+      [choice?.name, plain(choice?.value)].every((part) => {
+        const text = String(part ?? "").trim();
+        return !/\d{4}/.test(text) && !looksLikeKeyMaterial(text);
+      }),
+    )
   );
 }
 
 // The hub labels its settings in Russian, which isSensitiveKey does not
-// read. A label names a secret when it says password, token or secret, PIN
-// (also «PIN-код»), a code with what it opens (доступа, сопряжения, …) or
-// a key with what it locks (сети, шифрования, …), by whole words:
-// «Выключатель», «Код ошибки», «Ключ продукта» and «Пин светодиода» stay
-// ordinary. A label of a kind or way («Способ…», «Тип…», «Режим…») names
-// no value, a yes/no holds no secret, and a number whose label says
-// length, count, limit or time is a size («Длина PIN-кода», «PIN code
-// length»). A confirmation code is holdsConfirmationCode's, which shows
-// the empty field.
-const RU_KIND_WORD = /^(?:способ|тип|режим|формат)/u;
-const RU_SIZE_WORD =
-  /^(?:длин|количеств|числ[оа]$|макс|мин|размер|включ|выключ|отключ|использ|разреш|попыт|врем|срок|таймаут|интервал|сложност)/u;
-const RU_CODE = /^код(?:а|у|ом|е|ы|ов)?$/u;
-const RU_CODE_OF = new Set([
+// read. A label names a secret when a word of it says password, token or
+// secret, PIN (also «PIN-код»), a code with whose it is or what it opens
+// (доступа, пользователя, гостя, снятия с охраны, мастер-, одноразовый)
+// or a key with what it locks (сети, устройства, закрытый, API), in
+// Russian or English. Words are whole: «Выключатель», «Код ошибки»,
+// «Ключ продукта» and «Пин светодиода» name no secret.
+const SECRET_WORD = /^(?:парол|токен|секрет|пинкод)/u;
+const CODE_WORD = /^(?:код(?:а|у|ом|е|ы|ов|ами|ах)?|codes?)$/u;
+const CODE_OF = new Set([
   "доступа",
+  "пользователя",
+  "гостя",
+  "снятия",
+  "охраны",
   "сопряжения",
+  "привязки",
   "безопасности",
   "разблокировки",
   "активации",
   "входа",
   "авторизации",
   "аутентификации",
-  "охраны",
   "администратора",
   "установки",
 ]);
-const RU_CODE_KIND = /^(?:секретн|мастер|гостев)/u;
-const RU_KEY = /^ключ(?:а|у|ом|е|и|ей)?$/u;
-const RU_KEY_OF = new Set([
+const CODE_KIND = /^(?:пин|pin|disarm)$|^(?:секретн|мастер|гостев|одноразов)/u;
+const KEY_WORD = /^(?:ключ(?:а|у|ом|е|и|ей|ами|ах)?|keys?)$/u;
+const KEY_OF = new Set([
   "сети",
+  "устройства",
+  "привязки",
   "шифрования",
   "безопасности",
   "доступа",
@@ -5246,46 +5287,40 @@ const RU_KEY_OF = new Set([
   "wpa",
   "wep",
 ]);
-const RU_KEY_KIND =
-  /^(?:сетев|секретн|закрыт|приватн|локальн|мастер|api|wpa|wep)/u;
+const KEY_KIND =
+  /^(?:api|wpa|wep|wifi|fi|device|access|cloud)$|^(?:сетев|секретн|закрыт|приватн|локальн|мастер|облачн)/u;
 
-function labelNamesSecret(label, value) {
-  if (typeof label !== "string" || isBooleanValue(value)) return false;
+function labelNamesSecret(label) {
+  if (
+    isSensitiveKey(label) ||
+    /(?<![\p{L}\d])(?:PIN|ПИН)(?![\p{L}\d])/u.test(label)
+  ) {
+    return true;
+  }
   const words = label
     .toLowerCase()
     .split(/[^\p{L}\d]+/u)
     .filter(Boolean);
-  if (
-    words.some((word) => RU_KIND_WORD.test(word)) ||
-    (isNumberValue(value) &&
-      (words.some((word) => RU_SIZE_WORD.test(word)) ||
-        isFlagOrSize(label, value)))
-  ) {
-    return false;
-  }
-  return (
-    /(?<![\p{L}\d])(?:PIN|ПИН)(?![\p{L}\d])/u.test(label) ||
-    words.some((word, index) => {
-      const before = words[index - 1] ?? "";
-      const after = words[index + 1] ?? "";
-      return (
-        /^(?:парол|токен|пинкод)/u.test(word) ||
-        /^секрет[аеуы]?$/u.test(word) ||
-        (/^(?:пин|pin)$/u.test(word) && RU_CODE.test(after)) ||
-        (RU_CODE.test(word) &&
-          (RU_CODE_OF.has(after) || RU_CODE_KIND.test(before))) ||
-        (RU_KEY.test(word) &&
-          (RU_KEY_OF.has(after) || RU_KEY_KIND.test(before)))
-      );
-    })
-  );
+  return words.some((word, index) => {
+    const before = words[index - 1] ?? "";
+    const after = words[index + 1] ?? "";
+    return (
+      SECRET_WORD.test(word) ||
+      (CODE_WORD.test(word) &&
+        (CODE_OF.has(after) ||
+          CODE_KIND.test(before) ||
+          (before === "time" && words[index - 2] === "one"))) ||
+      (KEY_WORD.test(word) && (KEY_OF.has(after) || KEY_KIND.test(before)))
+    );
+  });
 }
 
 // A name after key material with a part that makes it a flag, a size or a
 // kind holds no key when its value is a boolean or a number:
 // InstallCodeEnabled, UseInstallCode, PinCodeLength, MaxPINCodeLength,
 // PasswordType. A key or code in a string, such as InstallCode or a
-// NUMBER Passcode without such a part, stays a secret.
+// NUMBER Passcode without such a part, stays a secret. With kinds: false
+// only a flag or a size counts.
 const FLAG_OR_SIZE_PARTS = new Set([
   "count",
   "disabled",
@@ -5295,16 +5330,17 @@ const FLAG_OR_SIZE_PARTS = new Set([
   "length",
   "max",
   "min",
-  "mode",
   "size",
-  "type",
   "use",
 ]);
+const KIND_PARTS = new Set(["mode", "type"]);
 
-function isFlagOrSize(name, value) {
+function isFlagOrSize(name, value, { kinds = true } = {}) {
   return (
     (isBooleanValue(value) || isNumberValue(value)) &&
-    credentialKeyParts(name).some((part) => FLAG_OR_SIZE_PARTS.has(part))
+    credentialKeyParts(name).some(
+      (part) => FLAG_OR_SIZE_PARTS.has(part) || (kinds && KIND_PARTS.has(part)),
+    )
   );
 }
 
@@ -5341,14 +5377,19 @@ function namesOptionSecret(node) {
   return parts.includes("session") && optionStringValue(node) !== null;
 }
 
-// An option named after a key or code whose string value looks like key
-// material, for names no rule knows (a device, bind or cloud key).
+// An option named or labelled after a key or code whose string value looks
+// like key material, for names no rule knows (a device, bind or cloud
+// key), also under an opaque key labelled «Ключ» or «Device key». A key
+// that says key or code decides with its own exceptions (a product or
+// scene identifier, an IR code); otherwise its label does.
 function holdsKeyMaterial(node) {
   const text = optionStringValue(node);
+  const name =
+    typeof node.key === "string" && /key|code/i.test(node.key)
+      ? node.key
+      : node.name;
   return (
-    typeof node.key === "string" &&
-    text !== null &&
-    isKeyMaterialUnder(node.key, text)
+    typeof name === "string" && text !== null && isKeyMaterialUnder(name, text)
   );
 }
 
