@@ -90,7 +90,7 @@ export async function startVoiceServer({
     );
   };
 
-  const mintSession = async () => {
+  const mintSession = async ({ voice } = {}) => {
     // A key added to voice.env while the server runs is picked up here, so
     // the tunnel address and the invite link stay the same.
     if (!env.OPENAI_API_KEY && reloadEnv) {
@@ -104,7 +104,7 @@ export async function startVoiceServer({
       ];
     }
     const catalog = await homeTools.catalog();
-    const session = sessionConfig(catalog, env);
+    const session = sessionConfig(catalog, env, { voice });
     const response = await fetch(`${openaiBase}/realtime/client_secrets`, {
       method: "POST",
       headers: {
@@ -127,7 +127,7 @@ export async function startVoiceServer({
       ];
     }
     log(
-      `[voice] session opened: ${session.model}, ${catalog.devices.size} devices`,
+      `[voice] session opened: ${session.model}, voice ${session.audio.output.voice}, ${catalog.devices.size} devices`,
     );
     return [
       200,
@@ -184,7 +184,7 @@ export async function startVoiceServer({
     }
     const body = await readJson(request);
     if (url.pathname === "/api/session") {
-      return send(response, ...(await mintSession()));
+      return send(response, ...(await mintSession(body)));
     }
     if (url.pathname === "/api/tool") {
       return send(response, 200, { output: await runTool(body) });

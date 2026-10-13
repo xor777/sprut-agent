@@ -30,22 +30,29 @@
       body {
         margin: 0;
         height: 100%;
+        overflow: hidden;
         background: var(--bg);
         color: var(--text);
         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         -webkit-tap-highlight-color: transparent;
         user-select: none;
       }
+      /* One screen without scrolling: the newest lines of the conversation
+         stay at the bottom and older ones fade out at the top. */
       main {
-        min-height: 100%;
+        height: 100dvh;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 28px;
+        gap: 20px;
         padding: max(24px, env(safe-area-inset-top)) 16px
           max(24px, env(safe-area-inset-bottom));
         text-align: center;
+      }
+      .status,
+      .hint {
+        flex: none;
       }
       .status {
         margin: 0;
@@ -62,7 +69,8 @@
       .talk {
         --color: var(--idle);
         position: relative;
-        width: min(72vw, 320px);
+        width: min(72vw, 40dvh, 320px);
+        flex: none;
         aspect-ratio: 1;
         border: none;
         border-radius: 50%;
@@ -132,9 +140,14 @@
       }
       .log {
         width: min(100%, 560px);
+        flex: 0 1 auto;
+        min-height: 0;
+        overflow: hidden;
         display: flex;
         flex-direction: column;
+        justify-content: flex-end;
         gap: 6px;
+        mask-image: linear-gradient(to bottom, transparent 0, #000 32px);
         font-size: 16px;
         color: var(--muted);
         text-align: left;

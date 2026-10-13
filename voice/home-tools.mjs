@@ -50,10 +50,49 @@ const CONTROLS = {
   TargetHeaterCoolerState: { control: "mode", kind: "enum", details: true },
   TargetAirPurifierState: { control: "mode", kind: "enum", details: true },
   C_FanSpeed: { control: "fan_speed", kind: "enum", details: true },
+  SwingMode: { control: "swing", kind: "enum", details: true },
+  Hue: { control: "color", kind: "color" },
+  ColorTemperature: {
+    control: "color_temperature",
+    kind: "kelvin",
+    details: true,
+  },
 };
 export const CONTROL_NAMES = [
   ...new Set(Object.values(CONTROLS).map(({ control }) => control)),
 ];
+
+// Colours a person names: hue in degrees and saturation in percent.
+const COLORS = [
+  ["красный", 0, 100],
+  ["оранжевый", 30, 100],
+  ["жёлтый", 55, 100],
+  ["салатовый", 90, 100],
+  ["зелёный", 120, 100],
+  ["бирюзовый", 170, 100],
+  ["голубой", 195, 100],
+  ["синий", 235, 100],
+  ["фиолетовый", 275, 100],
+  ["розовый", 320, 60],
+  ["белый", 0, 0],
+];
+const ENGLISH_COLORS = {
+  red: "красный",
+  orange: "оранжевый",
+  yellow: "жёлтый",
+  green: "зелёный",
+  cyan: "голубой",
+  blue: "синий",
+  purple: "фиолетовый",
+  violet: "фиолетовый",
+  pink: "розовый",
+  white: "белый",
+};
+const WHITE_KELVIN = { теплый: 2700, нейтральный: 4000, холодный: 6000 };
+// HomeKit's usual ColorTemperature range in mireds when a lamp reports none.
+const DEFAULT_MIREDS = { min: 140, max: 500 };
+// A lamp lights up when a person sets how it looks.
+const LIGHTING_CONTROLS = new Set(["brightness", "color", "color_temperature"]);
 
 const KIND_LABELS = {
   light: "свет",
@@ -80,6 +119,7 @@ const READINGS = {
   CurrentHeatingCoolingState: "сейчас",
   C_FanSpeed: "вентилятор",
   RotationSpeed: "скорость вентилятора",
+  SwingMode: "качание",
   ContactSensorState: "контакт",
   MotionDetected: "движение",
   OccupancyDetected: "присутствие",
@@ -107,8 +147,7 @@ const SENSOR_READINGS = new Set([
 const COMMAND_MEANINGS = {
   applied: "выполнено",
   already_desired: "уже было так, ничего не менялось",
-  uncertain:
-    "команда ушла, но подтверждения нет: не говори, что получилось, скажи, что не уверена",
+  uncertain: "команда ушла, но нет подтверждения: не говори, что получилось",
   conflict: "значение тем временем изменил кто-то другой",
   rejected: "устройство или хаб отказали",
   not_sent: "не отправлено",
@@ -226,6 +265,12 @@ export class HomeTools {
             ? { reason: result.error.message }
             : {}),
           ...(result.warning ? { warning: result.warning.message } : {}),
+          ...(result.previous_value !== undefined
+            ? { before: result.previous_value }
+            : {}),
+          ...(result.observed_value !== undefined
+            ? { now: result.observed_value }
+            : {}),
         };
       }),
     };
@@ -400,12 +445,26 @@ export class HomeTools {
 
 // The catalog as the voice model reads it: rooms, devices with short ids and
 // what each one can do. Ids stay out of speech; the instructions say so.
+// Lamps hidden in the SprutHub app are usually the bulbs behind a group such
+// as a chandelier; they are listed apart, for requests about single bulbs.
 export function describeCatalog(catalog) {
   const lines = [];
   for (const room of catalog.rooms.values()) {
     lines.push(`Комната «${room.name}» [${room.id}]:`);
+    const hidden = new Map();
     for (const device of catalog.devices.values()) {
       if (device.roomId !== room.id) continue;
+      const controls = Object.entries(device.controls)
+        .map(([name, control]) => describeControl(name, control))
+        .join("; ");
+      if (device.hidden) {
+        const names = hidden.get(controls) ?? [];
+        names.push(
+          `[${device.id}] «${device.name}»${device.available ? "" : " (не на связи)"}`,
+        );
+        hidden.set(controls, names);
+        continue;
+      }
       const parts = [`- [${device.id}] «${device.name}»`];
       if (device.deviceName && device.deviceName !== device.name) {
         parts.push(` (прибор «${device.deviceName}»)`);
@@ -413,15 +472,17 @@ export function describeCatalog(catalog) {
       if (device.functionOf)
         parts.push(`, функция прибора «${device.functionOf}»`);
       parts.push(`, ${KIND_LABELS[device.kind]}`);
-      const controls = Object.entries(device.controls).map(([name, control]) =>
-        describeControl(name, control),
-      );
-      if (controls.length > 0) parts.push(`; можно: ${controls.join("; ")}`);
+      if (controls) parts.push(`; можно: ${controls}`);
       if (device.readings.length > 0) {
         parts.push(`; показывает: ${device.readings.join(", ")}`);
       }
       if (!device.available) parts.push("; сейчас не на связи");
       lines.push(parts.join(""));
+    }
+    for (const [controls, names] of hidden) {
+      lines.push(
+        `- отдельные лампочки, скрытые в приложении: ${names.join(", ")}; у каждой можно: ${controls}`,
+      );
     }
   }
   return lines.join("\n");
@@ -430,9 +491,8 @@ export function describeCatalog(catalog) {
 function catalogEntry({ room, device, service }) {
   const id = serviceId(service.ref);
   const roomId = roomIdOf(room.ref);
-  if (!id || !roomId || service.hidden || !(service.kind in KIND_LABELS)) {
-    return null;
-  }
+  if (!id || !roomId || !(service.kind in KIND_LABELS)) return null;
+  if (service.hidden && service.kind !== "light") return null;
   const values = service.values ?? service.characteristics ?? [];
   const controls = {};
   for (const value of values) {
@@ -440,6 +500,11 @@ function catalogEntry({ room, device, service }) {
     if (!spec || value.writable !== true || controls[spec.control]) continue;
     controls[spec.control] = { ...spec, type: value.type, ref: value.ref };
   }
+  const saturation = values.find(
+    ({ type, writable }) => type === "Saturation" && writable === true,
+  );
+  if (controls.color && saturation)
+    controls.color.saturationRef = saturation.ref;
   const readings = [
     ...new Set(
       values
@@ -456,6 +521,7 @@ function catalogEntry({ room, device, service }) {
     functionOf: service.function_of?.name ?? null,
     roomId,
     kind: service.kind,
+    hidden: service.hidden === true,
     available: device.available !== false,
     controls,
     readings,
@@ -463,6 +529,13 @@ function catalogEntry({ room, device, service }) {
 }
 
 function describeControl(name, control) {
+  if (control.kind === "color") {
+    return `${name} (${COLORS.map(([color]) => color).join(", ")})`;
+  }
+  if (control.kind === "kelvin") {
+    const { min, max } = kelvinRange(control);
+    return `${name} (тёплый, нейтральный, холодный или ${min}–${max} K)`;
+  }
   if (control.values?.length) {
     return `${name} (${control.values.map(({ key, name: label }) => `${key} — ${label}`).join(", ")})`;
   }
@@ -505,17 +578,39 @@ function resolveCommand(device, control, raw) {
           : "Это устройство только показывает значения.",
     };
   }
+  if (spec.kind === "color") {
+    const color = parseColor(value);
+    if (!color) {
+      return {
+        problem: "Не знаю такого цвета.",
+        options: COLORS.map(([name]) => name),
+      };
+    }
+    const items = [{ ref: spec.ref, value: color.hue, control }];
+    if (spec.saturationRef) {
+      items.push({ ref: spec.saturationRef, value: color.saturation, control });
+    }
+    return { items };
+  }
+  if (spec.kind === "kelvin") {
+    const kelvin = WHITE_KELVIN[normalize(value)] ?? parseNumber(value);
+    if (!Number.isFinite(kelvin) || kelvin < 1000) {
+      return {
+        problem:
+          "Оттенок белого: тёплый, нейтральный, холодный или число кельвинов.",
+        ...kelvinRange(spec),
+      };
+    }
+    const { min, max } = miredRange(spec);
+    return single(spec, Math.min(max, Math.max(min, Math.round(1e6 / kelvin))));
+  }
   if (spec.kind === "enum") {
-    const found = matchOption(spec, value);
+    const found = matchOption(spec, value) ?? matchSwitch(spec, value);
     if (!found)
       return { problem: "Нет такого варианта.", options: optionsOf(spec) };
     return single(spec, found.value);
   }
-  const number = Number(
-    String(value)
-      .replace(",", ".")
-      .replace(/[^\d.+-]/g, ""),
-  );
+  const number = parseNumber(value);
   if (value === "" || !Number.isFinite(number)) {
     return { problem: `${control} — это число.` };
   }
@@ -531,31 +626,118 @@ function resolveCommand(device, control, raw) {
   return single(spec, number);
 }
 
-// «Свет в спальне на тридцать процентов» means a lit lamp: a level sent to a
-// lamp that is off is only stored by the hub. So a level above zero without
-// its own power command also turns the lamp on, after the level is set.
+// «Свет в спальне на тридцать процентов» or «сделай ленту красной» means a
+// lit lamp: a level or colour sent to a lamp that is off is only stored by
+// the hub. So such a command without its own power command also turns the
+// lamp on, after everything else for that lamp is set.
 function withImpliedPower(planned) {
-  const ordered = [];
-  for (const item of planned) {
-    ordered.push(item);
-    const power = item.device.controls.power;
+  const explicit = new Set(
+    planned
+      .filter(({ control }) => control === "power")
+      .map(({ device }) => device),
+  );
+  const lastLighting = new Map();
+  planned.forEach((item, index) => {
+    const lightsUp =
+      LIGHTING_CONTROLS.has(item.control) &&
+      !(item.control === "brightness" && item.value <= 0);
     if (
-      item.control === "brightness" &&
-      item.value > 0 &&
-      power?.kind === "bool" &&
-      !planned.some(
-        (other) => other.device === item.device && other.control === "power",
-      )
+      lightsUp &&
+      item.device.controls.power?.kind === "bool" &&
+      !explicit.has(item.device)
     ) {
-      ordered.push({
-        ref: power.ref,
-        value: true,
-        control: "power",
-        device: item.device,
-      });
+      lastLighting.set(item.device, index);
     }
+  });
+  return planned.flatMap((item, index) =>
+    lastLighting.get(item.device) === index
+      ? [
+          item,
+          {
+            ref: item.device.controls.power.ref,
+            value: true,
+            control: "power",
+            device: item.device,
+          },
+        ]
+      : [item],
+  );
+}
+
+function parseColor(value) {
+  const text = normalize(value);
+  const name = ENGLISH_COLORS[text] ?? text;
+  const named = COLORS.find(([color]) => normalize(color) === normalize(name));
+  if (named) return { hue: named[1], saturation: named[2] };
+  const hue = parseNumber(value);
+  if (Number.isFinite(hue) && hue >= 0 && hue <= 360) {
+    return { hue: Math.round(hue), saturation: 100 };
   }
-  return ordered;
+  return null;
+}
+
+function colorName(hue, saturation) {
+  if (
+    !Number.isFinite(hue) ||
+    (Number.isFinite(saturation) && saturation < 15)
+  ) {
+    return "белый";
+  }
+  let best = null;
+  for (const [name, colorHue, colorSaturation] of COLORS) {
+    if (colorSaturation === 0) continue;
+    const distance = Math.min(
+      Math.abs(hue - colorHue),
+      360 - Math.abs(hue - colorHue),
+    );
+    if (!best || distance < best.distance) best = { name, distance };
+  }
+  return best.name;
+}
+
+function whiteName(mireds) {
+  const kelvin = Math.round(1e6 / mireds / 100) * 100;
+  const label =
+    kelvin < 3300 ? "тёплый" : kelvin < 5000 ? "нейтральный" : "холодный";
+  return `${label} (${kelvin} K)`;
+}
+
+function miredRange(spec) {
+  return {
+    min: Number.isFinite(spec.min) ? spec.min : DEFAULT_MIREDS.min,
+    max: Number.isFinite(spec.max) ? spec.max : DEFAULT_MIREDS.max,
+  };
+}
+
+// Lamps may report a cold end far beyond daylight (20 000 K on the owner's
+// bulbs); a person never asks for more than about 6500 K.
+function kelvinRange(spec) {
+  const { min, max } = miredRange(spec);
+  return {
+    min: Math.round(1e6 / max / 100) * 100,
+    max: Math.min(6500, Math.round(1e6 / min / 100) * 100),
+  };
+}
+
+// A switch-like setting such as SwingMode takes on and off as well as its keys.
+function matchSwitch(spec, value) {
+  const on = parseOnOff(value);
+  if (on === null) return undefined;
+  return spec.values?.find(({ key }) =>
+    on ? /(^|_)ENABLED$/.test(key) : /(^|_)DISABLED$/.test(key),
+  );
+}
+
+function parseNumber(value) {
+  if (typeof value === "number") return value;
+  const text = String(value)
+    .replace(",", ".")
+    .replace(/[^\d.+-]/g, "");
+  return text === "" ? Number.NaN : Number(text);
+}
+
+function normalize(value) {
+  return String(value).toLowerCase().replaceAll("ё", "е").trim();
 }
 
 function single(spec, value) {
@@ -615,10 +797,21 @@ function notSent(problems) {
 
 function readingsOf(service) {
   const readings = {};
+  const byType = new Map();
   for (const value of service.values ?? []) {
+    byType.set(value.type, value);
     const label = READINGS[value.type];
     if (!label || label in readings) continue;
     readings[label] = formatValue(value);
+  }
+  // A colour lamp shows either a colour or a white; its colour mode says which.
+  const mode = byType.get("C_ColorMode")?.enum?.key;
+  const hue = byType.get("Hue")?.value;
+  const mireds = byType.get("ColorTemperature")?.value;
+  if (Number.isFinite(hue) && mode !== "TEMPERATURE") {
+    readings.цвет = colorName(hue, byType.get("Saturation")?.value);
+  } else if (Number.isFinite(mireds) && mireds > 0) {
+    readings["оттенок белого"] = whiteName(mireds);
   }
   return readings;
 }

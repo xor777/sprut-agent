@@ -7,6 +7,7 @@ const button = document.getElementById("talk");
 const logElement = document.getElementById("log");
 
 const TOKEN_KEY = "sprut-voice-token";
+const VOICE_KEY = "sprut-voice-voice";
 const IDLE_HANGUP_MS = 45_000;
 const ENDING_GRACE_MS = 8_000;
 const STATES = {
@@ -25,6 +26,7 @@ const STATES = {
 };
 
 let token = readToken();
+const voice = readVoice();
 let session = null;
 
 setState(token ? "idle" : "no_token");
@@ -53,7 +55,7 @@ async function start() {
           autoGainControl: true,
         },
       }),
-      api("/api/session"),
+      api("/api/session", voice ? { voice } : {}),
     ]);
     current.stream = stream;
     if (session !== current) return release(current);
@@ -320,7 +322,7 @@ function readToken() {
   const match = /(?:^#|&)k=([^&]+)/.exec(location.hash);
   if (match) {
     const value = decodeURIComponent(match[1]);
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(null, "", location.pathname + location.search);
     try {
       localStorage.setItem(TOKEN_KEY, value);
     } catch {}
@@ -330,5 +332,24 @@ function readToken() {
     return localStorage.getItem(TOKEN_KEY);
   } catch {
     return token ?? null;
+  }
+}
+
+// «/?voice=cedar» picks a built-in voice for this phone and keeps it; the
+// server accepts only its own list and otherwise uses the default.
+function readVoice() {
+  const requested = new URLSearchParams(location.search).get("voice");
+  if (requested !== null) {
+    history.replaceState(null, "", location.pathname + location.hash);
+    try {
+      if (requested) localStorage.setItem(VOICE_KEY, requested);
+      else localStorage.removeItem(VOICE_KEY);
+    } catch {}
+    return requested || null;
+  }
+  try {
+    return localStorage.getItem(VOICE_KEY);
+  } catch {
+    return null;
   }
 }
