@@ -1230,7 +1230,7 @@ test("a page that cannot fit max_bytes says so instead of passing silently", asy
   assert.equal(Object.hasOwn(roomy.body, "max_bytes_exceeded"), false);
 });
 
-test("the home is read once, follows the hub's events for edits in the SprutHub app and is read again for a name it does not know", async (t) => {
+test("the home is read once, follows the hub's events for edits in the SprutHub app and answers a name it does not have from memory", async (t) => {
   const { hub, call, home } = await setup(
     t,
     await loadHomeFixture("apartment"),
@@ -1253,18 +1253,30 @@ test("the home is read once, follows the hub's events for edits in the SprutHub 
     "the value the hub pushed",
   );
 
-  // A rename the hub did not announce: the home is read again once for a
-  // name it does not know instead of answering "nothing".
-  hub.state.accessories
+  // A service renamed in the app: the hub announces it
+  // (2026-10-13-structure-events) and the device is read again.
+  const nightLight = hub.state.accessories
     .find(({ id }) => id === 26)
-    .services.find(({ type }) => type === "Lightbulb").name =
-    "Ночник у кровати";
+    .services.find(({ type }) => type === "Lightbulb");
+  nightLight.name = "Ночник у кровати";
+  hub.emit({
+    service: {
+      event: "EVENT_UPDATE",
+      services: [{ aId: 26, sId: nightLight.sId, name: nightLight.name }],
+    },
+  });
+  await settle();
   const renamed = await call("find_devices", { query: "ночник у кровати" });
-  assert(methods(renamed.native).includes("room.list"));
+  assert.deepEqual(methods(renamed.native), ["accessory.get"]);
   assert.deepEqual(
     listed(renamed.body).map(({ service }) => service.name),
     ["Ночник у кровати"],
   );
+  // The hub announces renames and new rooms, so a name the home does not
+  // have is answered from memory.
+  const missing = await call("find_devices", { query: "гирлянда" });
+  assert.deepEqual(missing.native, []);
+  assert.deepEqual(listed(missing.body), []);
 
   // A device renamed in the app: its event has the device read again.
   floorLamp.name = "Торшер у окна";

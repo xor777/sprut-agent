@@ -1017,3 +1017,175 @@ test("a device moved to a room created without an event, and a room moved in the
   assert(methods(overview.native).includes("room.list"));
   assert.equal(overview.body.rooms[0].ref, `${home}/room/5`);
 });
+
+// One event as the owner's hub pushes at rest, a room with its own fields
+// (about 6 a minute, 2026-10-13-voice-latency-baseline, section 5): it
+// shows that the connection pushes events.
+async function restEvent(hub) {
+  const { id, name, order, visible } = hub.state.rooms[0];
+  hub.emit({
+    room: { event: "EVENT_UPDATE", rooms: [{ id, name, order, visible }] },
+  });
+  await settle();
+}
+
+const balcony = 30;
+
+// The owner deletes the empty balcony in the SprutHub app after the hub
+// has answered room.list of a whole read and before it answers
+// accessory.list; the hub pushes room EVENT_REMOVE
+// (2026-10-13-structure-events).
+test("a room deleted while the home is read is not answered from that read, also by a call that joins it", async (t) => {
+  const { hub, call, callError, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  hub.delayReplies("accessory.list", 400);
+  const overview = call("home_overview", {});
+  await handled(hub, "accessory.list", 0);
+  hub.delayReplies("accessory.list", 0);
+  hub.request({ room: { delete: { id: balcony } } });
+  await settle();
+
+  const found = await callError("find_devices", {
+    room_ref: `${home}/room/${balcony}`,
+  });
+  assert.equal(found.error.code, "room_not_found");
+  const rooms = (await overview).body.rooms.map(({ ref }) => ref);
+  assert(!rooms.includes(`${home}/room/${balcony}`), rooms.join());
+});
+
+test("two calls in flight with a whole read both see a room deleted during it", async (t) => {
+  const { hub, callError, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  hub.delayReplies("accessory.list", 400);
+  const room = { room_ref: `${home}/room/${balcony}` };
+  const first = callError("find_devices", room);
+  const second = callError("find_devices", room);
+  await handled(hub, "accessory.list", 0);
+  hub.delayReplies("accessory.list", 0);
+  hub.request({ room: { delete: { id: balcony } } });
+
+  for (const answer of await Promise.all([first, second])) {
+    assert.equal(answer.error.code, "room_not_found");
+  }
+});
+
+// A read the hub answered before the agent's own rename, landing after a
+// whole read made since: its old service name must not come back, even
+// when the rename's own events are lost on the way.
+test("a device read answered before the agent's own rename does not bring the old name back", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  const prepared = await call("prepare_native_change", {
+    operation: "service_name",
+    target_ref: `${home}/accessory/17/service/13`,
+    value: "Лента над диваном",
+    reason: "Переименовать ленту",
+  });
+  // The owner renames the strip's device in the SprutHub app: the next
+  // answer reads it again.
+  hub.request({ accessory: { update: { id: 17, name: "Лента у дивана" } } });
+  await settle();
+  hub.delayReplies("accessory.get", 1500);
+  const from = hub.requests.length;
+  const early = call("find_devices", { query: "лента" });
+  await handled(hub, "accessory.get", from);
+  hub.delayReplies("accessory.get", 0);
+  hub.dropEvents((event) =>
+    [
+      ...(event.service?.services ?? []),
+      ...(event.characteristic?.characteristics ?? []),
+    ].some(({ aId }) => aId === 17),
+  );
+  await call("apply_native_change", { change_ref: prepared.body.change_ref });
+  hub.dropEvents(null);
+  const overview = await call("home_overview", {});
+  assert(methods(overview.native).includes("accessory.list"));
+
+  const names = (body) => listed(body).map(({ service }) => service.name);
+  const earlyAnswer = await early;
+  assert.deepEqual(
+    names((await call("find_devices", { query: "лента" })).body),
+    ["Лента над диваном"],
+  );
+  assert.deepEqual(names(earlyAnswer.body), ["Лента над диваном"]);
+});
+
+test("a clock moved back has the next answer read the whole home", async (t) => {
+  const { hub, call, shiftClock } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+    { clockStepMs: -10 * 60_000 },
+  );
+  await call("home_overview", {});
+  await restEvent(hub);
+  assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
+
+  await shiftClock();
+  const after = await call("find_devices", { state: "on" });
+  assert(methods(after.native).includes("accessory.list"));
+  await restEvent(hub);
+  assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
+});
+
+// A whole read does not show that the hub pushes events down its
+// connection; only a pushed event does.
+test("a connection that has pushed no event is not trusted to keep the home warm", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  await call("home_overview", {});
+
+  const silent = await call("find_devices", { state: "on" });
+  assert(methods(silent.native).includes("accessory.list"));
+  await restEvent(hub);
+  assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
+});
+
+// The event of a device command reached the writing socket of the owner's
+// hub up to 556 ms after its reply (2026-10-13-structure-events): a later
+// command to the same characteristic may be answered first.
+test("an earlier device command's event coming after a later command's reply does not confirm the later one", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  await restEvent(hub);
+  const lampEvent = (event) =>
+    event.characteristic?.characteristics?.some(
+      ({ aId, sId, cId }) =>
+        aId === floorLampOn.aId &&
+        sId === floorLampOn.sId &&
+        cId === floorLampOn.cId,
+    );
+  const command = async (value) =>
+    (
+      await call("send_device_commands", {
+        home_ref: home,
+        commands: [
+          {
+            target_ref: `${home}/accessory/16/service/13/characteristic/14`,
+            value,
+          },
+        ],
+        reason: value ? "Включить торшер" : "Выключить торшер",
+      })
+    ).body.results[0].status;
+
+  // The off's event is held past the on's reply, and the on's is lost.
+  hub.delayEvents(lampEvent, 800);
+  assert.equal(await command(false), "applied");
+  hub.delayEvents(null);
+  hub.dropEvents(lampEvent);
+  assert.equal(await command(true), "applied");
+  hub.dropEvents(null);
+  await sleep(900);
+
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert.equal(onValue(listed(lamp.body)[0].service), true);
+});
