@@ -3668,18 +3668,22 @@ function recordFault(state, fault, entry) {
 }
 
 function writeValue(state, characteristic, value) {
-  const changed = !sameValue(characteristic.control.value, value);
+  const previous = characteristic.control.value;
   characteristic.control.value = value;
-  if (changed) {
+  if (!sameValue(previous, value)) {
     propagateVirtualLinks(state, characteristic, value);
-    applyLampLogic(state, characteristic);
   }
+  applyLampLogic(state, characteristic, previous);
 }
 
-// LightbulbControl ("Связь включения и уровня") as the simulator guesses it:
-// Brightness 0 turns the lamp off, Brightness above 0 turns it on, and
-// turning it on at Brightness 0 sets Brightness 100.
-function applyLampLogic(state, characteristic) {
+// LightbulbControl ("Связь включения и уровня") as observed on the owner's
+// hub, 3.0.0, on virtual lamps (2026-10-13-lamp-logic-undo): it acts on
+// every Brightness write, even of the level already stored. Brightness
+// above 0 turns the lamp on at that level; Brightness 0 turns it off and is
+// not stored, the previous level stays (on an off lamp it changes nothing).
+// An On write leaves the level alone: the lamp comes on at its stored
+// level, even 0.
+function applyLampLogic(state, characteristic, previous) {
   const { aId, sId } = characteristic;
   const active = state.logics.some(
     (logic) =>
@@ -3694,23 +3698,18 @@ function applyLampLogic(state, characteristic) {
     service.characteristics.find(({ control }) => control.type === type);
   const on = find("On");
   const brightness = find("Brightness");
-  if (!on || !brightness) return;
-  let target = null;
-  let value = null;
-  if (characteristic === brightness) {
-    target = on;
-    value = { boolValue: brightness.control.value.intValue > 0 };
-  } else if (
-    characteristic === on &&
-    on.control.value.boolValue === true &&
-    brightness.control.value.intValue === 0
-  ) {
-    target = brightness;
-    value = { intValue: 100 };
+  if (!on || !brightness || characteristic !== brightness) return;
+  const lit = brightness.control.value.intValue > 0;
+  let changed = false;
+  if (!lit && !sameValue(brightness.control.value, previous)) {
+    brightness.control.value = previous;
+    changed = true;
   }
-  if (!target || sameValue(target.control.value, value)) return;
-  target.control.value = value;
-  recordFault(state, "lamp_logic", state.currentRequest);
+  if (on.control.value.boolValue !== lit) {
+    on.control.value = { boolValue: lit };
+    changed = true;
+  }
+  if (changed) recordFault(state, "lamp_logic", state.currentRequest);
 }
 
 function propagateVirtualLinks(state, source, value) {

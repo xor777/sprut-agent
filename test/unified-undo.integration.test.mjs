@@ -538,6 +538,40 @@ test("a level alone that switched an off lamp on is undone to off", async (t) =>
   assert.deepEqual(homeChanges(hub), []);
 });
 
+test("a new lamp brought up from level 0 is undone to off, its 0 left unwritten", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 17, sId: 13 }] },
+  });
+  // A new virtual lamp starts off at 0, and the lamp logic keeps no 0
+  // written later (2026-10-13-lamp-logic-undo, 1.5 and 4).
+  hub.state.accessories
+    .find(({ id }) => id === 17)
+    .services.find(({ sId }) => sId === 13)
+    .characteristics.find(({ cId }) => cId === 15).control.value = {
+    intValue: 0,
+  };
+  const sent = await command(
+    client,
+    [[STRIP_LEVEL, 40]],
+    "Включить новую ленту на 40%",
+  );
+  assert.equal(currentValue(hub, STRIP_ON), true);
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  const level = itemFor(restored, sent.results[0].change_ref);
+  assert.equal(level.status, "skipped");
+  assert.equal(level.reason, "not_restorable");
+  assert.equal(level.sent, false);
+  const on = restored.results.find(({ type }) => type === "On");
+  assert.equal(on.status, "restored");
+  assert.equal(on.sent, true);
+  assert.deepEqual(valueWritesSince(hub, before), [["17.14", false]]);
+  assert.equal(currentValue(hub, STRIP_ON), false);
+});
+
 test("a level put back alone is not written while the agent's own command keeps the lamp off", async (t) => {
   const { hub, client } = await setup(t, {
     faults: { lampLogic: [{ aId: 16, sId: 13 }] },

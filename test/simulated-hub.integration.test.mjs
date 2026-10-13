@@ -778,6 +778,8 @@ test("an offline actuator acknowledges a write and keeps its value", async (t) =
   );
 });
 
+// Owner's hub, 3.0.0, virtual lamps (2026-10-13-lamp-logic-undo, steps 1,
+// 4, F9, 2, 3).
 test("an active lamp logic switches the lamp with its brightness", async (t) => {
   const { hub, send, value } = await rawSession(t, {
     faults: { lampLogic: [{ aId: 26, sId: 13 }] },
@@ -790,13 +792,26 @@ test("an active lamp logic switches the lamp with its brightness", async (t) => 
       active: true,
     },
   ]);
+  const lamp = async () => [
+    (await value(26, 14)).boolValue,
+    (await value(26, 15)).intValue,
+  ];
   await send(setValue(26, 15, { intValue: 30 }));
-  assert.deepEqual(await value(26, 14), { boolValue: true });
+  assert.deepEqual(await lamp(), [true, 30]);
+  // 0 switches it off and is not stored.
   await send(setValue(26, 15, { intValue: 0 }));
-  assert.deepEqual(await value(26, 14), { boolValue: false });
+  assert.deepEqual(await lamp(), [false, 30]);
+  // The level already stored switches it on as well.
+  await send(setValue(26, 15, { intValue: 30 }));
+  assert.deepEqual(await lamp(), [true, 30]);
+  // On leaves the level as it is.
+  await send(setValue(26, 14, { boolValue: false }));
+  assert.deepEqual(await lamp(), [false, 30]);
+  await send(setValue(26, 14, { boolValue: true }));
+  assert.deepEqual(await lamp(), [true, 30]);
   assert.deepEqual(
     hub.faultEvents().map(({ fault }) => fault),
-    ["lamp_logic", "lamp_logic"],
+    ["lamp_logic", "lamp_logic", "lamp_logic"],
   );
 });
 
