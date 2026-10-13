@@ -396,6 +396,77 @@ for (const reached of [false, true]) {
   });
 }
 
+test("a BLOCK the agent created whose undo request was lost is deleted by restoring again", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const created = await applied(client, {
+    operation: "block_create",
+    target_ref: homeRef,
+    name: "Выключить люстру",
+    description: "Выключает люстру в гостиной",
+    active: true,
+    on_start: false,
+    sync: false,
+    data: {
+      targets: [
+        {
+          type: "service",
+          aId: 15,
+          sId: 13,
+          hs: "Lightbulb",
+          characteristics: [{ type: "set", cId: 14, hc: "On", value: "false" }],
+        },
+      ],
+    },
+    reason: "Кнопка «выключить люстру»",
+  });
+  hub.loseNext("scenario.delete");
+  const lost = await call(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+  assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+  assert.notDeepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  assert.equal(lost.next.tool, "restore_native_change");
+
+  const sentBefore = hub.requests.length;
+  const finished = await call(client, lost.next.tool, lost.next.arguments);
+  assert.equal(finished.status, "restored", JSON.stringify(finished));
+  assert.deepEqual(
+    writesSince(hub, sentBefore).map(({ method }) => method),
+    ["scenario.delete"],
+  );
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// The apply never reached the hub: the scenario is as it was, and the undo
+// writes nothing. That apply stays unconfirmed, as a setting's does: a
+// write without an answer is never taken for one that cannot arrive.
+test("«верни как было» after a BLOCK data change whose apply never reached the hub writes nothing and says the apply is unconfirmed", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    blockDataInput(hub, "20"),
+  );
+  hub.loseNext("scenario.update");
+  const lost = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+
+  const sentBefore = hub.requests.length;
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [prepared.change_ref],
+  });
+  const item = itemOf(undone, prepared);
+  assert.equal(item.status, "uncertain", JSON.stringify(item));
+  assert.equal(item.reason, "apply_unconfirmed");
+  assert.equal(item.sent, false);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
 test("a BLOCK data change whose apply reached the hub before the MCP server stopped is undone in one call after restart", async (t) => {
   const { hub, client, connect, stopOnNext } = await setup(t);
   const initial = hub.snapshot();
