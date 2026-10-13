@@ -1139,6 +1139,42 @@ test("a device read answered before the agent's own rename does not bring the ol
   assert.deepEqual(names(earlyAnswer.body), ["Лента над диваном"]);
 });
 
+// The same for the room list read again after a room added in the
+// SprutHub app.
+test("a room list answered before the agent's own room rename does not bring the old name back", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  const bedroom = `${home}/room/5`;
+  const prepared = await call("prepare_native_change", {
+    operation: "room_name",
+    target_ref: bedroom,
+    value: "Спальня родителей",
+    reason: "Переименовать спальню",
+  });
+  hub.request({ room: { create: { name: "Веранда" } } });
+  await settle();
+  hub.delayReplies("room.list", 1500);
+  const from = hub.requests.length;
+  const early = call("find_devices", { state: "on" });
+  await handled(hub, "room.list", from);
+  hub.delayReplies("room.list", 0);
+  hub.dropEvents((event) => event.room?.rooms?.some(({ id }) => id === 5));
+  await call("apply_native_change", { change_ref: prepared.body.change_ref });
+  hub.dropEvents(null);
+  const overview = await call("home_overview", {});
+  assert(methods(overview.native).includes("accessory.list"));
+
+  await early;
+  const after = await call("home_overview", {});
+  assert.equal(
+    after.body.rooms.find(({ ref }) => ref === bedroom).name,
+    "Спальня родителей",
+  );
+});
+
 test("a clock moved back has the next answer read the whole home", async (t) => {
   const { hub, call, shiftClock } = await setup(
     t,
