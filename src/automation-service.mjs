@@ -1101,13 +1101,15 @@ export class AutomationService {
       const devices = await this.#readCommandDevices([
         ...new Set(targets.map(({ aId }) => aId)),
       ]);
+      const changes = await this.store.list();
       const items = await this.#validateDeviceCommands(
         commands,
         targets,
         devices,
+        changes,
       );
       const run = {
-        changes: await this.store.list(),
+        changes,
         homeRef,
         reason,
         groupId: this.store.newId(),
@@ -1150,7 +1152,7 @@ export class AutomationService {
     }
   }
 
-  async #validateDeviceCommands(commands, targets, devices) {
+  async #validateDeviceCommands(commands, targets, devices, changes) {
     const items = [];
     const invalid = [];
     for (const [index, command] of commands.entries()) {
@@ -1164,7 +1166,12 @@ export class AutomationService {
       try {
         const accessory = commandDevice(devices.get(target.aId));
         inspected = inspectedCommandValue(accessory, target);
-        const draft = await characteristicValueDraft(this, input, inspected);
+        const draft = await characteristicValueDraft(
+          this,
+          input,
+          inspected,
+          changes,
+        );
         const name = deviceCommandName(accessory, target);
         const onTarget = lightLevelOnTarget(
           accessory,
@@ -1194,6 +1201,7 @@ export class AutomationService {
               this,
               off,
               inspectedCommandValue(accessory, onTarget),
+              changes,
             ),
             name,
             onTarget: null,
@@ -10959,14 +10967,16 @@ async function prepareCharacteristicValue(service, input) {
   );
 }
 
+// changes: the journal already read by the caller, else it is read here.
 async function characteristicValueDraft(
   service,
   input,
   { fields, contract, value },
+  changes = undefined,
 ) {
   const requested = validateCharacteristicValue(input.value, contract);
-  const virtualGroup = await ownedVirtualGroupContext(
-    service.store,
+  const virtualGroup = ownedVirtualGroupContext(
+    changes ?? (await service.store.list()),
     fields.target,
   );
   return {
@@ -10987,9 +10997,9 @@ async function characteristicValueDraft(
   };
 }
 
-async function ownedVirtualGroupContext(store, target) {
+function ownedVirtualGroupContext(changes, target) {
   const matches = [];
-  for (const change of await store.list()) {
+  for (const change of changes) {
     if (
       change.kind !== "virtual_light_group" ||
       change.status !== "applied" ||
