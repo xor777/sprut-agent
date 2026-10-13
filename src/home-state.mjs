@@ -67,11 +67,8 @@ export class HomeState {
   #staleAccessories = new Map();
   // Value writes of this process awaiting their event: key -> {aId, ackAt}.
   #pending = new Map();
-  // Accessory id -> when it was read; when its latest event came.
-  #readAt = new Map();
+  // Accessory id -> when it was read or its latest event came.
   #observedAt = new Map();
-  // Characteristic key -> when an event set its value.
-  #valueEventAt = new Map();
   // While reads are in flight: what happened meanwhile, applied again over
   // each read's result.
   #log = null;
@@ -101,29 +98,6 @@ export class HomeState {
       byId: this.#byId,
       observedAt: this.#catalogObservedAt,
       accessoryObservedAt: new Map(this.#observedAt),
-    };
-  }
-
-  // One characteristic's value without a request, or why it cannot be
-  // trusted: not_read, a reason the whole home or the accessory is to be
-  // read again, max_age, write_unconfirmed or not_found.
-  value({ aId, sId, cId }, now = Date.now()) {
-    const whole = this.#wholeReason(now);
-    if (whole !== null) return untrusted(whole);
-    const stale = this.#staleAccessories.get(aId);
-    if (stale) return untrusted(stale);
-    const key = valueKey({ aId, sId, cId });
-    if (this.#pending.has(key)) return untrusted("write_unconfirmed");
-    const accessory = this.#byId.get(aId);
-    const characteristic = locate(accessory, sId, cId)?.characteristic;
-    if (!characteristic) return untrusted("not_found");
-    const eventAt = this.#valueEventAt.get(key);
-    return {
-      trusted: true,
-      value: structuredClone(characteristic.control?.value ?? null),
-      observed_at: eventAt ?? this.#readAt.get(aId),
-      source: eventAt ? "event" : "read",
-      available: accessory.online,
     };
   }
 
@@ -162,9 +136,7 @@ export class HomeState {
     this.#roomsAskedFor.clear();
     this.#absentRooms = missingRooms(rooms, accessories);
     this.#staleAccessories.clear();
-    this.#readAt = new Map(accessories.map(({ id }) => [id, observedAt]));
-    this.#observedAt = new Map(this.#readAt);
-    this.#valueEventAt.clear();
+    this.#observedAt = new Map(accessories.map(({ id }) => [id, observedAt]));
     this.#confirmWrites(token, null);
     this.#replay(token, { all: true });
   }
@@ -187,11 +159,7 @@ export class HomeState {
     this.#staleAccessories.delete(id);
     if (accessory) {
       this.#put(accessory);
-      this.#readAt.set(id, observedAt);
       this.#observedAt.set(id, observedAt);
-      for (const key of this.#valueEventAt.keys()) {
-        if (key.startsWith(`${id}:`)) this.#valueEventAt.delete(key);
-      }
       this.#askForRoom(accessory.roomId);
     } else {
       this.#remove(id);
@@ -368,7 +336,6 @@ export class HomeState {
         ),
       });
     }
-    this.#valueEventAt.set(key, receivedAt);
     this.#observedAt.set(item.aId, receivedAt);
     // A device's name and availability are its accessory's fields, which
     // only a read gives.
@@ -483,13 +450,9 @@ export class HomeState {
       this.#byId.delete(id);
     }
     this.#staleAccessories.delete(id);
-    this.#readAt.delete(id);
     this.#observedAt.delete(id);
     for (const [key, write] of this.#pending) {
       if (write.aId === id) this.#pending.delete(key);
-    }
-    for (const key of this.#valueEventAt.keys()) {
-      if (key.startsWith(`${id}:`)) this.#valueEventAt.delete(key);
     }
   }
 }
@@ -505,10 +468,6 @@ function missingRooms(rooms, accessories) {
   return new Set(
     accessories.map(({ roomId }) => roomId).filter((id) => !known.has(id)),
   );
-}
-
-function untrusted(reason) {
-  return { trusted: false, reason };
 }
 
 function locate(accessory, sId, cId) {

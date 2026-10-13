@@ -297,18 +297,6 @@ export class SprutHubClient {
     return { catalog: state.catalog(), fresh };
   }
 
-  // One characteristic's value from the warm home state, without a hub
-  // request: {trusted: true, value (native typed value), observed_at,
-  // source: "event" or "read", available} or {trusted: false, reason}. Not
-  // trusted until the home was read, while it must be read again (a gap in
-  // the events, the accessory changed), MAX_AGE_MS after the last whole
-  // read, and while a value write of this process awaits its event.
-  liveValue({ aId, sId, cId }, { serial = this.serial } = {}) {
-    const state = this.#homeStates.get(serial);
-    if (!state) return { trusted: false, reason: "not_read" };
-    return state.value({ aId, sId, cId });
-  }
-
   #homeState(serial) {
     let state = this.#homeStates.get(serial);
     if (!state) {

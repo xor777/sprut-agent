@@ -6,7 +6,6 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { SprutHubClient } from "../src/spruthub-client.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -440,61 +439,4 @@ test("a room the room list lacks is not asked for again on each event", async (t
   hub.emit({ room: { event: "EVENT_UPDATE", rooms: [{ id: 99 }] } });
   await settle();
   assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
-});
-
-// What other modules read without a request, such as a device command
-// taking the value before it writes: the value, when the hub reported it,
-// and whether the warm home can be trusted for it.
-test("the warm home gives a characteristic's value and says when it cannot be trusted", async (t) => {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
-  t.after(() => hub.close());
-  const env = hub.connectionEnv();
-  const client = new SprutHubClient({
-    url: env.SPRUTHUB_URL,
-    token: env.SPRUTHUB_TOKEN,
-    serial: env.SPRUTHUB_SERIAL,
-    cid: env.SPRUTHUB_CID,
-    timeoutMs: 3000,
-  });
-  t.after(() => client.close());
-
-  assert.deepEqual(client.liveValue(floorLampOn), {
-    trusted: false,
-    reason: "not_read",
-  });
-  await client.homeCatalog(hub.serial, Date.now() + 3000);
-  const read = client.liveValue(floorLampOn);
-  assert.equal(read.trusted, true);
-  assert.deepEqual(read.value, { boolValue: true });
-  assert.equal(read.source, "read");
-  assert.match(read.observed_at, /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(read.available, true);
-
-  hub.changeByHand({ ...floorLampOn, value: { boolValue: false } });
-  await settle();
-  const pushed = client.liveValue(floorLampOn);
-  assert.equal(pushed.trusted, true);
-  assert.deepEqual(pushed.value, { boolValue: false });
-  assert.equal(pushed.source, "event");
-  assert(pushed.observed_at >= read.observed_at);
-
-  await client.updateCharacteristic({
-    ...floorLampOn,
-    value: { boolValue: true },
-  });
-  await settle();
-  const written = client.liveValue(floorLampOn);
-  assert.equal(written.trusted, true);
-  assert.deepEqual(written.value, { boolValue: true });
-  assert.equal(written.source, "event");
-
-  assert.deepEqual(client.liveValue({ aId: 16, sId: 13, cId: 99 }), {
-    trusted: false,
-    reason: "not_found",
-  });
-  await hub.dropConnections();
-  await sleep(300);
-  const lost = client.liveValue(floorLampOn);
-  assert.equal(lost.trusted, false);
-  assert.equal(lost.reason, "connection_lost");
 });
