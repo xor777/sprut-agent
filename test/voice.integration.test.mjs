@@ -17,10 +17,11 @@ import {
 // server asked for; the hub is the offline simulator.
 const ACCESS_TOKEN = "voice-test-token";
 
-async function setup(t, { faults, editHome } = {}) {
+async function setup(t, { faults, editHome, afterStart } = {}) {
   const home = await loadHomeFixture("apartment");
   editHome?.(home);
   const hub = await startSimulatedHub(home, { faults });
+  await afterStart?.(hub);
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-voice-"));
   const openai = await startFakeOpenAI();
   const homeTools = new HomeTools({
@@ -394,9 +395,10 @@ test("warm white on a lamp with colour only is made from its colour", async (t) 
   const written = Object.fromEntries(
     updates().map(({ cId, control }) => [cId, Object.values(control.value)[0]]),
   );
-  // Hue (16) and Saturation (17) in the region of a 2700 K white, then On (14).
+  // Hue (16) and Saturation (17) of a soft 2700 K white, then On (14): RGB
+  // LEDs at the full black-body saturation look orange to the owner.
   assert(written[16] >= 25 && written[16] <= 35, JSON.stringify(written));
-  assert(written[17] >= 55 && written[17] <= 75, JSON.stringify(written));
+  assert(written[17] >= 30 && written[17] <= 50, JSON.stringify(written));
   assert.equal(written[14], true);
 });
 
@@ -416,4 +418,149 @@ test("white on a lamp that has a white temperature uses it, not a bare colour", 
       .map(({ cId, control }) => [cId, Object.values(control.value)[0]]),
     [[18, 250]],
   );
+});
+
+// A sconce group like the owner's chandelier: a virtual lamp in the living
+// room whose On, Brightness, Hue and Saturation are linked to two bulbs the
+// app hides. The bulbs have a white temperature, the group has none, and
+// both bulbs are violet in colour mode with their stored white already warm.
+function addSconceGroup(home) {
+  const bulb = (id, name) => ({
+    id,
+    roomId: 3,
+    name: "Цветная лампа",
+    extensionKey: "Controller:zigbee",
+    deviceId: `bulb-${id}`,
+    services: [
+      {
+        sId: 13,
+        type: "Lightbulb",
+        name,
+        visible: false,
+        characteristics: [
+          { cId: 14, type: "On", value: true },
+          { cId: 15, type: "Brightness", value: 80 },
+          { cId: 16, type: "Hue", value: 275 },
+          { cId: 17, type: "Saturation", value: 100 },
+          { cId: 18, type: "ColorTemperature", value: 370 },
+          { cId: 19, type: "C_ColorMode", value: 1 },
+        ],
+      },
+    ],
+  });
+  home.accessories.push(
+    {
+      id: 60,
+      roomId: 3,
+      name: "Группа бра",
+      virtual: true,
+      services: [
+        {
+          sId: 13,
+          type: "Lightbulb",
+          name: "Бра",
+          characteristics: [
+            { cId: 14, type: "On", value: true },
+            { cId: 15, type: "Brightness", value: 80 },
+            { cId: 16, type: "Hue", value: 275 },
+            { cId: 17, type: "Saturation", value: 100 },
+          ],
+        },
+      ],
+    },
+    bulb(61, "Лампочка бра 1"),
+    bulb(62, "Лампочка бра 2"),
+  );
+}
+
+async function linkSconceGroup(hub) {
+  for (const member of [61, 62]) {
+    for (const cId of [14, 15, 16, 17]) {
+      await hubRequest(hub, {
+        link: {
+          addVirtual: {
+            aId: 60,
+            sId: 13,
+            cId,
+            tAId: member,
+            tSId: 13,
+            tCId: cId,
+          },
+        },
+      });
+    }
+  }
+}
+
+async function hubRequest(hub, params) {
+  const env = hub.connectionEnv();
+  const socket = new WebSocket(env.SPRUTHUB_URL);
+  await new Promise((resolve, reject) => {
+    socket.addEventListener("open", resolve, { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+  const id = 4242;
+  const reply = new Promise((resolve) => {
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id === id) resolve(message);
+    });
+  });
+  socket.send(
+    JSON.stringify({
+      id,
+      token: env.SPRUTHUB_TOKEN,
+      serial: env.SPRUTHUB_SERIAL,
+      cid: env.SPRUTHUB_CID,
+      params,
+    }),
+  );
+  const message = await reply;
+  socket.close();
+  assert.equal(message.error, undefined, JSON.stringify(message.error));
+  return message.result;
+}
+
+test("warm white on a group goes to its bulbs and takes them out of colour mode", async (t) => {
+  const { tool, listedId, updates } = await setup(t, {
+    editHome: addSconceGroup,
+    afterStart: linkSconceGroup,
+  });
+  const group = await listedId("Группа бра");
+
+  const output = await tool("control_devices", {
+    commands: [
+      { device: group, control: "color_temperature", value: "тёплый" },
+    ],
+    reason: "сделай бра тёплым",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  const written = updates().map(({ aId, cId }) => [aId, cId]);
+  // Each bulb gets its white temperature written although 370 is stored;
+  // the group gets no colour that it would pass on to them.
+  assert.deepEqual(
+    written
+      .filter(([, cId]) => cId === 18)
+      .map(([aId]) => aId)
+      .sort(),
+    [61, 62],
+  );
+  assert.deepEqual(
+    written.filter(([aId]) => aId === 60),
+    [],
+  );
+});
+
+test("a group reads as the colours its bulbs show", async (t) => {
+  const { tool, listedId } = await setup(t, {
+    editHome: addSconceGroup,
+    afterStart: linkSconceGroup,
+  });
+  const group = await listedId("Группа бра");
+
+  const [sconce] = (await tool("read_devices", { devices: [group] })).devices;
+
+  assert.match(sconce.values.лампочки, /фиолетовый — 2/);
+  assert.equal(sconce.values.цвет, undefined);
 });
