@@ -979,11 +979,12 @@ test("the simulator switches a BLOCK only through the Active option of its optio
   assert.equal((await scenario("9")).active, true);
 });
 
-// Owner's hub, 3.0.0, 2026-09-24: scenario.list carried optionsWindow for
-// every BLOCK, LOGIC, predefined LOGIC and GLOBAL, and their options windows
-// had the same keys and input types, with a writable GenericBoolean Active
-// (live-conformance-2 and live-conformance-3-read-only). Writes of the other
-// flags and of Remove were never sent live.
+// Owner's hub, 3.0.0: scenario.list carried optionsWindow for every BLOCK,
+// LOGIC, predefined LOGIC and GLOBAL, and their options windows had the same
+// keys and input types, with a writable GenericBoolean Active (2026-09-24
+// live-conformance-2 and live-conformance-3-read-only). A built-in LOGIC's
+// window shows placeholders for Name, Desc and OnStart (2026-10-13-wave4-
+// contracts 1.11); its writes, and Remove, were never sent live.
 test("the simulator gives every scenario type the live options window and refuses its unobserved writes", async (t) => {
   const fixture = await loadHomeFixture("apartment");
   fixture.scenarios.push(
@@ -1056,15 +1057,18 @@ test("the simulator gives every scenario type the live options window and refuse
       ["GenericBoolean", true, true, false],
       kind,
     );
-    // The flags show the scenario's own.
+    // A user scenario's window shows its name, description and flags.
+    if (kind === "predefined") continue;
     const stored = await scenario(index);
     assert.deepEqual(
-      Object.fromEntries(
-        options
-          .filter(({ key }) => ["Active", "OnStart", "Sync"].includes(key))
-          .map(({ key, value }) => [key, value.boolValue]),
-      ),
-      { Active: stored.active, OnStart: stored.onStart, Sync: stored.sync },
+      metadataOptions(options),
+      {
+        Name: stored.name,
+        Active: stored.active,
+        OnStart: stored.onStart,
+        Sync: stored.sync,
+        Desc: stored.desc,
+      },
       kind,
     );
   }
@@ -1077,6 +1081,14 @@ test("the simulator gives every scenario type the live options window and refuse
       [false, false, true],
     ],
   );
+  // The built-in one shows placeholders; Active and Sync are its own.
+  assert.deepEqual(metadataOptions(await windowOf("21")), {
+    Name: "name",
+    Active: false,
+    OnStart: true,
+    Sync: true,
+    Desc: "desc",
+  });
 
   // Active switches a LOGIC and a GLOBAL as it does a BLOCK.
   const before = hub.snapshot();
@@ -1093,11 +1105,10 @@ test("the simulator gives every scenario type the live options window and refuse
 
   // Unobserved writes are refused whole, before anything is stored.
   for (const [index, options] of [
-    ["5", [{ key: "OnStart", value: { boolValue: true } }]],
-    ["20", [{ key: "Sync", value: { boolValue: true } }]],
     ["9", [{ key: "Remove", value: { boolValue: true } }]],
-    ["9", [{ key: "Name", value: { stringValue: "Протечка" } }]],
+    ["21", [{ key: "Name", value: { stringValue: "Своё имя" } }]],
     ["21", [{ key: "Desc", value: { stringValue: "Своё описание" } }]],
+    ["21", [{ key: "Sync", value: { boolValue: false } }]],
     [
       "21",
       [
@@ -1113,16 +1124,13 @@ test("the simulator gives every scenario type the live options window and refuse
     { key: "scenario/20/active", before: true, after: false },
     { key: "scenario/9/active", before: true, after: false },
   ]);
-  assert.deepEqual(
-    (await windowOf("21"))
-      .filter(({ key }) => ["Active", "OnStart", "Desc"].includes(key))
-      .map(({ key, value }) => [key, value]),
-    [
-      ["Active", { boolValue: false }],
-      ["OnStart", { boolValue: false }],
-      ["Desc", { stringValue: "" }],
-    ],
-  );
+  assert.deepEqual(metadataOptions(await windowOf("21")), {
+    Name: "name",
+    Active: false,
+    OnStart: true,
+    Sync: true,
+    Desc: "desc",
+  });
   // A run reports the refused writes as unsupported, not as observed.
   const levels = Object.fromEntries(
     hub
@@ -1130,11 +1138,226 @@ test("the simulator gives every scenario type the live options window and refuse
       .map(({ method, level, errors }) => [method, [level, errors]]),
   );
   assert.deepEqual(levels["window.update {Active}"], ["observed", 0]);
-  assert.deepEqual(levels["window.update {OnStart}"], ["unsupported", 2]);
+  assert.deepEqual(levels["window.update {OnStart}"], ["unsupported", 1]);
   for (const key of ["Sync", "Remove", "Name", "Desc"]) {
     assert.deepEqual(levels[`window.update {${key}}`], ["unsupported", 1]);
   }
 });
+
+// Owner's hub, 3.0.0, 2026-10-13 (research/protocol/2026-10-13-wave4-
+// contracts.md, 1.3-1.10): scenario.update {name, desc, onStart, sync} is
+// acknowledged and changes nothing; the options window changes them at once
+// for a BLOCK, a LOGIC and a GLOBAL. A LOGIC takes name, desc and onStart
+// from info in its code at create and on every code write, sync stays, and
+// its window keeps what was written to it; the code of a GLOBAL and the
+// data of a BLOCK keep name and flags.
+test("the simulator changes scenario names and flags only through the options window and lets a LOGIC's code set them again", async (t) => {
+  const fixture = await loadHomeFixture("apartment");
+  fixture.scenarios.push({
+    index: "20",
+    name: "Переменные дома",
+    type: "GLOBAL",
+    active: true,
+    onStart: true,
+    data: "let away = false;",
+  });
+  const { hub, send } = await rawSession(t, {}, fixture);
+  const scenario = async (index) =>
+    (await send({ scenario: { get: { index, expand: "data" } } })).result
+      .scenario.get;
+  const fields = async (index) => {
+    const { name, desc, onStart, sync } = await scenario(index);
+    return { name, desc, onStart, sync };
+  };
+  const windowFields = async (index) => {
+    const { Active: _active, ...shown } = metadataOptions(
+      (
+        await send({
+          window: { get: { windowKey: (await scenario(index)).optionsWindow } },
+        })
+      ).result.window.get.options,
+    );
+    return shown;
+  };
+  const writeWindow = async (index, key, value) => {
+    const reply = await send({
+      window: {
+        update: {
+          windowKey: (await scenario(index)).optionsWindow,
+          options: [{ key, value }],
+        },
+      },
+    });
+    assert.equal(reply.error, undefined, JSON.stringify(reply.error));
+  };
+  const logicSource = (await scenario("9")).data;
+
+  // scenario.update is acknowledged for every type and changes no metadata.
+  const before = hub.snapshot();
+  for (const index of ["5", "9", "20"]) {
+    const reply = await send({
+      scenario: {
+        update: {
+          index,
+          name: "Новое имя",
+          desc: "Новое описание",
+          onStart: true,
+          sync: true,
+        },
+      },
+    });
+    assert.deepEqual(reply.result, { scenario: { update: {} } });
+  }
+  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
+
+  // The window renames and switches the flags of each type at once.
+  for (const index of ["5", "9", "20"]) {
+    await writeWindow(index, "Name", { stringValue: `Имя ${index}` });
+    await writeWindow(index, "Desc", { stringValue: `Описание ${index}` });
+    await writeWindow(index, "OnStart", { boolValue: true });
+    await writeWindow(index, "Sync", { boolValue: true });
+    const renamed = {
+      name: `Имя ${index}`,
+      desc: `Описание ${index}`,
+      onStart: true,
+      sync: true,
+    };
+    assert.deepEqual(await fields(index), renamed, index);
+    assert.equal(
+      (
+        await send({ scenario: { list: {} } })
+      ).result.scenario.list.scenarios.find((item) => item.index === index)
+        .name,
+      renamed.name,
+    );
+  }
+  assert.equal((await scenario("9")).data, logicSource);
+
+  // A BLOCK's data write and a GLOBAL's code write keep name and flags.
+  await send({
+    scenario: { update: { index: "5", data: (await scenario("5")).data } },
+  });
+  await send({
+    scenario: { update: { index: "20", data: "let away = true;" } },
+  });
+  for (const index of ["5", "20"]) {
+    assert.deepEqual(
+      await fields(index),
+      {
+        name: `Имя ${index}`,
+        desc: `Описание ${index}`,
+        onStart: true,
+        sync: true,
+      },
+      index,
+    );
+  }
+
+  // A LOGIC's code write, even of the same code, sets name, desc and
+  // onStart from info again; sync stays and the window keeps its values.
+  await send({ scenario: { update: { index: "9", data: logicSource } } });
+  assert.deepEqual(await fields("9"), {
+    name: "Защита от протечки",
+    desc: "Отключает розетку чайника при протечке под мойкой",
+    onStart: false,
+    sync: true,
+  });
+  assert.deepEqual(await windowFields("9"), {
+    Name: "Имя 9",
+    OnStart: true,
+    Sync: true,
+    Desc: "Описание 9",
+  });
+  const renamedSource = logicSource
+    .replace('name: "Защита от протечки"', 'name: "Протечка"')
+    .replace("onStart: false", "onStart: true");
+  await send({ scenario: { update: { index: "9", data: renamedSource } } });
+  assert.deepEqual(await fields("9"), {
+    name: "Протечка",
+    desc: "Отключает розетку чайника при протечке под мойкой",
+    onStart: true,
+    sync: true,
+  });
+
+  // A created LOGIC takes name, desc and onStart from its info and sync as
+  // sent; its window shows what create sent. A GLOBAL is created as sent.
+  const createdLogic = (
+    await send({
+      scenario: {
+        create: {
+          type: "LOGIC",
+          name: "Другое имя",
+          desc: "Другое описание",
+          active: false,
+          onStart: true,
+          sync: true,
+          data: [
+            "info = {",
+            '  name: "Из кода",',
+            '  description: "Описание из кода",',
+            "  onStart: false,",
+            "  sourceServices: [HS.Lightbulb],",
+            "  sourceCharacteristics: [HC.On],",
+            "};",
+            "function trigger() {}",
+          ].join("\n"),
+        },
+      },
+    })
+  ).result.scenario.create;
+  assert.deepEqual(await fields(createdLogic.index), {
+    name: "Из кода",
+    desc: "Описание из кода",
+    onStart: false,
+    sync: true,
+  });
+  assert.deepEqual(await windowFields(createdLogic.index), {
+    Name: "Другое имя",
+    OnStart: true,
+    Sync: true,
+    Desc: "Другое описание",
+  });
+  const createdGlobal = await send({
+    scenario: {
+      create: {
+        type: "GLOBAL",
+        name: "Глобальный",
+        desc: "",
+        active: false,
+        onStart: false,
+        sync: false,
+        data: "// ничего",
+      },
+    },
+  });
+  assert.equal(createdGlobal.error, undefined);
+  assert.deepEqual(await fields(createdGlobal.result.scenario.create.index), {
+    name: "Глобальный",
+    desc: "",
+    onStart: false,
+    sync: false,
+  });
+
+  const levels = Object.fromEntries(
+    hub.touchedMethods().map(({ method, level }) => [method, level]),
+  );
+  assert.equal(levels["window.update {Name, Desc, OnStart, Sync}"], "observed");
+  assert.equal(
+    levels["scenario.update {name, desc, onStart, sync}"],
+    "observed",
+  );
+});
+
+// Name, Desc, Active, OnStart and Sync of a scenario's options window.
+function metadataOptions(options) {
+  return Object.fromEntries(
+    options
+      .filter(({ key }) =>
+        ["Name", "Active", "OnStart", "Sync", "Desc"].includes(key),
+      )
+      .map(({ key, value }) => [key, Object.values(value)[0]]),
+  );
+}
 
 // Owner's hub, 3.0.0, 2026-09-24: accessory.list had no virtual field while
 // accessory.get had it, true on the created virtual accessory, and a room

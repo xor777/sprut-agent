@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
 import { WebSocketServer } from "ws";
 
 export const SIMULATED_HUB_TOKEN = "simulated-hub-token";
@@ -139,16 +140,21 @@ export const METHOD_EVIDENCE = {
   ],
   "scenario.create": [
     OBSERVED,
-    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24)",
+    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9)",
   ],
   "scenario.update": [
     OBSERVED,
-    "{index, data}: 2026-09-13-native-daily-interval",
+    "{index, data}: 2026-09-13-native-daily-interval; a LOGIC takes name, desc and onStart from info in its code on every code write, sync untouched; a GLOBAL's and a BLOCK's flags and name kept (2026-10-13-wave4-contracts 1.5, 1.8, 1.10)",
   ],
   // The product no longer sends it; a run that does shows up here.
   "scenario.update {active}": [
     OBSERVED,
     "acknowledged and ignored for a BLOCK and a LOGIC (2026-09-24-live-conformance-2, steps 3a, 3e, 4)",
+  ],
+  // The product does not send them; a run that does shows up here.
+  "scenario.update {name, desc, onStart, sync}": [
+    OBSERVED,
+    "acknowledged and ignored for a BLOCK, a LOGIC and a GLOBAL; only data applies (2026-10-13-wave4-contracts 1.3)",
   ],
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
@@ -166,7 +172,7 @@ export const METHOD_EVIDENCE = {
   "log.unsubscribe": [SCHEMA_ONLY],
   "window.get": [
     OBSERVED,
-    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove: a BLOCK's, Active showing its flag (2026-09-24-live-conformance-2), and a LOGIC's, a GLOBAL's and a predefined one's, keys and input types only (2026-09-24-live-conformance-3-read-only); OnStart and Sync showing the scenario's flags is assumed; a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3)",
+    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove for every type (2026-09-24-live-conformance-3-read-only); a BLOCK's and a GLOBAL's show the scenario's fields, a user LOGIC's Name, Desc and OnStart the last values written to the window or sent at create, a built-in LOGIC's placeholders (2026-10-13-wave4-contracts 1.2, 1.7, 1.8, 1.11); a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3)",
   ],
   "window.update": [
     OBSERVED,
@@ -177,11 +183,14 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "a BLOCK and a LOGIC switched on and off, scenario.get and the window agreeing on the first read (2026-09-24-live-conformance-3); a GLOBAL's and a predefined scenario's window read only, same keys (2026-09-24-live-conformance-3-read-only)",
   ],
-  // No entry, so a run reports them as unsupported: window.update {OnStart},
-  // {Sync} and {Remove} of a scenario window, and {Name} or {Desc} of a
-  // scenario other than a BLOCK. The web client edits a scenario's flags
-  // through its window (2026-09-24-web-client-evidence, 4), but none of these
-  // writes was sent to a live hub, and the simulator refuses them.
+  "window.update {Name, Desc, OnStart, Sync}": [
+    OBSERVED,
+    "applied to scenario.get and scenario.list at once for a user BLOCK, LOGIC and GLOBAL (2026-10-13-wave4-contracts 1.4, 1.8, 1.10)",
+  ],
+  // No entry, so a run reports them as unsupported: window.update {Remove}
+  // of a scenario window, and its Name, Desc, OnStart or Sync of a built-in
+  // scenario. None of these writes was sent to a live hub, and the
+  // simulator refuses them.
   "extension.list": [
     OBSERVED,
     "2026-09-16-extension-child-read; spaces with their actions, state and endTimestamp of a running search (2026-10-12-device-pairing, P1)",
@@ -307,6 +316,12 @@ function evidenceKey(state, method, params) {
     if (isRecord(input) && Object.hasOwn(input, "active")) {
       return "scenario.update {active}";
     }
+    if (
+      isRecord(input) &&
+      SCENARIO_METADATA_FIELDS.some((field) => Object.hasOwn(input, field))
+    ) {
+      return "scenario.update {name, desc, onStart, sync}";
+    }
   }
   if (method === "scenario.create" || method === "scenario.update") {
     const form = editorBlockForm(params?.scenario?.[method.split(".")[1]]);
@@ -321,6 +336,9 @@ function evidenceKey(state, method, params) {
         unmodelledScenarioWrite(scenario, key),
       );
       if (unmodelled !== undefined) return `window.update {${unmodelled}}`;
+      if (keys.some((key) => SCENARIO_METADATA_OPTIONS.has(key))) {
+        return "window.update {Name, Desc, OnStart, Sync}";
+      }
       if (keys.includes("Active")) return "window.update {Active}";
     }
   }
@@ -1857,6 +1875,13 @@ const HANDLERS = {
       sync: input.sync === true,
       error: false,
     };
+    // The options window of a LOGIC keeps what create sent, even where its
+    // code sets other values (2026-10-13-wave4-contracts 1.6, 1.7).
+    const sent = {
+      name: scenario.name,
+      desc: scenario.desc,
+      onStart: scenario.onStart,
+    };
     if (scenario.type === "BLOCK") {
       scenario.data = normalizeBlockData(input.data);
       scenario.rooms = blockRooms(state, scenario.data);
@@ -1865,40 +1890,40 @@ const HANDLERS = {
         throw invalidParams("LOGIC scenario requires source text");
       }
       scenario.data = input.data;
-      scenario.name = logicSourceName(input.data) ?? scenario.name;
-      scenario.desc = logicSourceDescription(input.data) ?? scenario.desc;
+      applyLogicInfo(scenario);
+    } else if (scenario.type === "GLOBAL") {
+      // Accepted with code and flags as sent (2026-10-13-wave4-contracts
+      // 1.9); that a GLOBAL keeps the name and desc sent is assumed.
+      if (typeof input.data !== "string") {
+        throw invalidParams("GLOBAL scenario requires source text");
+      }
+      scenario.data = input.data;
     } else {
       throw invalidParams(`Scenario type ${input.type} is not supported`);
     }
-    addScenarioWindow(state, scenario);
+    addScenarioWindow(state, scenario, sent);
     state.scenarios.push(scenario);
     return scenario;
   },
   "scenario.update": (state, input) => {
     const scenario = requireScenario(state, input.index);
-    // The owner's hub acknowledged active here and kept the flag, for a BLOCK
-    // and a LOGIC (2026-09-24); a scenario is switched through its options
-    // window. onStart and sync were not sent live.
-    for (const key of ["onStart", "sync"]) {
-      if (typeof input[key] === "boolean") scenario[key] = input[key];
-    }
-    // BLOCK name/desc are edited through the scenario options window; the
-    // live hub did not apply them through scenario.update.
-    if (scenario.type !== "BLOCK") {
-      if (typeof input.name === "string") scenario.name = input.name;
-      if (typeof input.desc === "string") scenario.desc = input.desc;
-    }
+    // name, desc, onStart and sync, like active, are acknowledged and
+    // ignored for every type; only data applies (owner hub, 2026-09-24 for
+    // active; 2026-10-13-wave4-contracts 1.3 for the rest). They change
+    // through the scenario's options window.
     if (Object.hasOwn(input, "data")) {
       if (scenario.type === "BLOCK") {
         scenario.data = normalizeBlockData(input.data);
         scenario.rooms = blockRooms(state, scenario.data);
       } else {
         if (typeof input.data !== "string") {
-          throw invalidParams("LOGIC scenario requires source text");
+          throw invalidParams(`${scenario.type} scenario requires source text`);
         }
         scenario.data = input.data;
-        scenario.name = logicSourceName(input.data) ?? scenario.name;
-        scenario.desc = logicSourceDescription(input.data) ?? scenario.desc;
+        // Every code write of a LOGIC sets its name, desc and onStart from
+        // info again, even unchanged; sync is untouched, and a GLOBAL's
+        // code leaves its name alone (2026-10-13-wave4-contracts 1.5, 1.8).
+        if (scenario.type === "LOGIC") applyLogicInfo(scenario);
       }
     }
     return {};
@@ -1954,12 +1979,15 @@ const HANDLERS = {
     if (windowKey === "") return withDiscoveryTime(state, window);
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
-    // The scenario-backed options show the scenario's fields; Active showed
-    // the flag on the owner's hub (live-conformance-2).
+    // The scenario-backed options show the scenario's fields (live-
+    // conformance-2; 2026-10-13-wave4-contracts 1.2, 1.8), except those a
+    // LOGIC's window keeps itself (windowKeepsOwnValue).
     const view = structuredClone(window);
     for (const option of view.options) {
       const field = SCENARIO_WINDOW_FIELDS[option.key];
-      if (field) option.value = { [field.kind]: scenario[field.name] };
+      if (field && !windowKeepsOwnValue(scenario, option.key)) {
+        option.value = { [field.kind]: scenario[field.name] };
+      }
     }
     return view;
   },
@@ -1969,12 +1997,12 @@ const HANDLERS = {
     const scenario = scenarioOfWindow(state, windowKey);
     if (scenario) checkScenarioWindowUpdate(scenario, options);
     applyOptions(window.options, options);
-    // Only the options this update carries reach the scenario. That Active
-    // switches it is the web client's path, not read back on a live hub.
+    // Only the options this update carries reach the scenario, at once, for
+    // a BLOCK, a LOGIC and a GLOBAL (2026-10-13-wave4-contracts 1.4, 1.8,
+    // 1.10; Active: 2026-09-24-live-conformance-3).
     for (const { key, value } of scenario ? options : []) {
-      if (key === "Name") scenario.name = value.stringValue;
-      if (key === "Desc") scenario.desc = value.stringValue;
-      if (key === "Active") scenario.active = value.boolValue;
+      const field = SCENARIO_WINDOW_FIELDS[key];
+      if (field) scenario[field.name] = value[field.kind];
     }
     return {};
   },
@@ -2346,10 +2374,12 @@ function buildState(fixture, hubTime) {
       scenario.data = Array.isArray(input.data)
         ? input.data.join("\n")
         : input.data;
-      scenario.desc =
-        input.desc ?? logicSourceDescription(scenario.data) ?? scenario.desc;
+      if (input.type === "LOGIC" && input.desc === undefined) {
+        scenario.desc = logicInfo(scenario.data)?.description ?? scenario.desc;
+      }
     }
-    addScenarioWindow(state, scenario);
+    // A fixture's scenario is at rest: its window shows what it stores.
+    addScenarioWindow(state, scenario, scenario);
     state.scenarios.push(scenario);
   }
   state.nextScenarioIndex =
@@ -2711,12 +2741,13 @@ function appendLog(state, entry) {
 // (live-conformance-2) and of a LOGIC, a GLOBAL and a predefined scenario
 // (live-conformance-3-read-only) had the same options: main, primary, footer
 // (GROUP), Name (TEXT), Active, OnStart, Sync (CHECKBOX), Desc
-// (TEXT_MULTILINE) and Remove (BUTTON_DANGER). Active was GenericBoolean,
-// read, write, not disabled. The runs recorded no values and only keys and
-// input types of the other options, so their order, labels, types and access
-// here are the simulator's own. The window stores no values of the
-// scenario-backed options: window.get shows the scenario's fields in them.
-function addScenarioWindow(state, scenario) {
+// (TEXT_MULTILINE) and Remove (BUTTON_DANGER), all writable and not disabled,
+// labelled as below (2026-10-13-wave4-contracts 1.1); the order here is the
+// simulator's own. A BLOCK's and a GLOBAL's window stores no values of the
+// scenario-backed options: window.get shows the scenario's fields in them. A
+// LOGIC's window keeps its own Name, Desc and OnStart (windowKeepsOwnValue):
+// shown, the values the scenario opened with or create sent.
+function addScenarioWindow(state, scenario, shown) {
   scenario.optionsWindow = scenarioWindowKey(state);
   // The groups and the Remove button: no value, type or access recorded.
   const control = (key, name, inputType) => ({ key, name, inputType });
@@ -2729,21 +2760,44 @@ function addScenarioWindow(state, scenario) {
     write: true,
     disabled: false,
   });
-  state.windows[scenario.optionsWindow] = {
+  const window = {
     windowKey: scenario.optionsWindow,
     label: { text: "Настройки сценария" },
     options: [
       control("main", "Основное", "GROUP"),
       control("primary", "Сценарий", "GROUP"),
-      option("Name", "Имя", "GenericString", "TEXT"),
-      option("Active", "Активен", "GenericBoolean", "CHECKBOX"),
-      option("OnStart", "Запускать при старте", "GenericBoolean", "CHECKBOX"),
-      option("Sync", "Синхронно", "GenericBoolean", "CHECKBOX"),
+      option("Name", "Название", "GenericString", "TEXT"),
+      option("Active", "Активный", "GenericBoolean", "CHECKBOX"),
+      option(
+        "OnStart",
+        "Выполнить на старте хаба",
+        "GenericBoolean",
+        "CHECKBOX",
+      ),
+      option(
+        "Sync",
+        "Последовательное выполнение",
+        "GenericBoolean",
+        "CHECKBOX",
+      ),
       option("Desc", "Описание", "GenericString", "TEXT_MULTILINE"),
       control("footer", "", "GROUP"),
       control("Remove", "Удалить", "BUTTON_DANGER"),
     ],
   };
+  // A built-in LOGIC's window shows placeholders, OnStart on whatever the
+  // scenario's flag (2026-10-13-wave4-contracts 1.11).
+  const kept =
+    scenario.predefined === true
+      ? { name: "name", desc: "desc", onStart: true }
+      : shown;
+  for (const item of window.options) {
+    const field = SCENARIO_WINDOW_FIELDS[item.key];
+    if (field && windowKeepsOwnValue(scenario, item.key)) {
+      item.value = { [field.kind]: kept[field.name] };
+    }
+  }
+  state.windows[scenario.optionsWindow] = window;
 }
 
 // The scenario field each scenario-backed option of the window shows.
@@ -2754,16 +2808,30 @@ const SCENARIO_WINDOW_FIELDS = {
   Sync: { name: "sync", kind: "boolValue" },
   Desc: { name: "desc", kind: "stringValue" },
 };
+const SCENARIO_METADATA_OPTIONS = new Set(["Name", "Desc", "OnStart", "Sync"]);
+const SCENARIO_METADATA_FIELDS = ["name", "desc", "onStart", "sync"];
 
-// Writes to a scenario's options window that the simulator applies: Name
-// and Desc of a BLOCK (observed, live-conformance-2) and Active of any
-// scenario (the web client's path, schema_only). A write of OnStart, Sync or
-// Remove, or of Name or Desc of another type, was never sent to a live hub;
-// rather than invent its effect the simulator refuses the whole update as
-// unsupported (-32601) before anything is stored.
+// A LOGIC's window keeps the Name, Desc and OnStart last written to it or
+// sent at create and does not follow what its code sets; a built-in LOGIC's
+// shows placeholders there. Active and Sync agree with scenario.get
+// (2026-10-13-wave4-contracts 1.7, 1.11).
+function windowKeepsOwnValue(scenario, key) {
+  return (
+    scenario.type === "LOGIC" &&
+    (key === "Name" || key === "Desc" || key === "OnStart")
+  );
+}
+
+// Writes to a scenario's options window that the simulator applies: Name,
+// Desc, OnStart and Sync of a user BLOCK, LOGIC or GLOBAL (2026-10-13-
+// wave4-contracts 1.4, 1.8, 1.10) and Active of any scenario. Remove, and
+// these options of a built-in scenario (its window was only read, 1.11),
+// were never sent to a live hub; rather than invent their effect the
+// simulator refuses the whole update as unsupported (-32601) before
+// anything is stored.
 function unmodelledScenarioWrite(scenario, key) {
-  if (key === "OnStart" || key === "Sync" || key === "Remove") return true;
-  return (key === "Name" || key === "Desc") && scenario.type !== "BLOCK";
+  if (key === "Remove") return true;
+  return SCENARIO_METADATA_OPTIONS.has(key) && scenario.predefined === true;
 }
 
 function checkScenarioWindowUpdate(scenario, options) {
@@ -2772,14 +2840,13 @@ function checkScenarioWindowUpdate(scenario, options) {
     if (unmodelledScenarioWrite(scenario, option?.key)) {
       throw new SimulatorError(
         -32601,
-        `unsupported by simulator: window.update {${option.key}} of a ${scenario.type} scenario`,
+        `unsupported by simulator: window.update {${option.key}} of a ${scenario.predefined === true ? "built-in " : ""}${scenario.type} scenario`,
       );
     }
-    if (
-      option?.key === "Active" &&
-      typeof option.value?.boolValue !== "boolean"
-    ) {
-      throw invalidParams("Active must be a boolValue");
+    const field = SCENARIO_WINDOW_FIELDS[option?.key];
+    const type = field?.kind === "boolValue" ? "boolean" : "string";
+    if (field && typeof option.value?.[field.kind] !== type) {
+      throw invalidParams(`${option.key} must be a ${field.kind}`);
     }
   }
 }
@@ -3421,15 +3488,39 @@ function logicTypeForScenario(index) {
   return String(index);
 }
 
-// The hub takes a LOGIC's name and description from info in its source: a
-// create kept info.name (2026-09-24-live-conformance-2) and a source update
-// of info.name renamed the scenario (2026-09-24-live-conformance-3).
-function logicSourceName(source) {
-  return /\bname\s*:\s*"([^"]*)"/.exec(source)?.[1];
+// The hub takes a LOGIC's name, description and onStart from info in its
+// code: a create kept info.name (2026-09-24-live-conformance-2), a source
+// update of info.name renamed the scenario (2026-09-24-live-conformance-3),
+// and every code write and create sets all three again, unchanged or not
+// (2026-10-13-wave4-contracts 1.5, 1.6). The hub runs the code; so does the
+// simulator, its top level in an empty context where HS and HC name types,
+// so info is read as code, not by matching its text. A field info lacks,
+// or code that does not run here, leaves the scenario's value as it is
+// (not observed). The context holds no object of this process (an agent
+// under evaluation writes the code); node:vm is still no security boundary.
+function logicInfo(source) {
+  try {
+    const context = vm.createContext(Object.create(null));
+    vm.runInContext(
+      'HS = new Proxy({}, { get: (_, key) => typeof key === "string" ? key : undefined }); HC = HS;',
+      context,
+    );
+    const info = vm.runInContext(
+      `${source}\n;typeof info === "undefined" ? undefined : info`,
+      context,
+      { timeout: 100 },
+    );
+    return isRecord(info) ? info : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-function logicSourceDescription(source) {
-  return /description\s*:\s*"([^"]*)"/.exec(source)?.[1];
+function applyLogicInfo(scenario) {
+  const info = logicInfo(scenario.data);
+  if (typeof info?.name === "string") scenario.name = info.name;
+  if (typeof info?.description === "string") scenario.desc = info.description;
+  if (typeof info?.onStart === "boolean") scenario.onStart = info.onStart;
 }
 
 function logicSourceServices(source) {
