@@ -5156,18 +5156,20 @@ export function isSensitiveNativeNode(value, key = "") {
   if (typeof value.key === "string" && isFlagOrSize(value.key, configured)) {
     return (
       !isBooleanValue(configured) &&
-      [value.name, value.type, value.ref].some(
+      ([value.name, value.type, value.ref].some(
         (candidate) =>
           typeof candidate === "string" &&
           isSensitiveKey(candidate) &&
           !isFlagOrSize(candidate, configured),
-      )
+      ) ||
+        labelNamesSecret(value.name, configured))
     );
   }
   return (
     [value.key, value.name, value.type, value.ref].some(
       (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
     ) ||
+    labelNamesSecret(value.name, configured) ||
     namesOptionSecret(value) ||
     holdsKeyMaterial(value) ||
     holdsConfirmationCode(value)
@@ -5177,13 +5179,105 @@ export function isSensitiveNativeNode(value, key = "") {
 // A field for the one-time code of a cloud login, as the Xiaomi
 // controller's Ticket labelled «Код подтверждения»: filled, it holds the
 // code sent to the owner; empty, it only shows that a login waits for it.
+// Only a field the code is typed into holds it: a choice among listed
+// values, as how the code is sent, does not.
+const TYPED_INPUT_TYPES = new Set(["TEXT", "TEXT_MULTILINE", "PASSWORD"]);
+
 function holdsConfirmationCode(node) {
   const text = optionStringValue(node);
   if (text === null || text.trim() === "") return false;
+  const inputType = node.inputType ?? node.input_type ?? null;
+  if (
+    (inputType !== null && !TYPED_INPUT_TYPES.has(inputType)) ||
+    node.validValues !== undefined ||
+    node.valid_values !== undefined
+  ) {
+    return false;
+  }
   return (
     (typeof node.key === "string" &&
       credentialKeyParts(node.key).includes("ticket")) ||
     (typeof node.name === "string" && /код\s+подтверждения/iu.test(node.name))
+  );
+}
+
+// The hub labels its settings in Russian, which isSensitiveKey does not
+// read. A label names a secret when it says password, token or secret, PIN
+// (also «PIN-код»), a code with what it opens (доступа, сопряжения, …) or
+// a key with what it locks (сети, шифрования, …), by whole words:
+// «Выключатель», «Код ошибки», «Ключ продукта» and «Пин светодиода» stay
+// ordinary. A label of a kind or way («Способ…», «Тип…», «Режим…») names
+// no value, a yes/no holds no secret, and a number whose label says
+// length, count, limit or time is a size («Длина PIN-кода», «PIN code
+// length»). A confirmation code is holdsConfirmationCode's, which shows
+// the empty field.
+const RU_KIND_WORD = /^(?:способ|тип|режим|формат)/u;
+const RU_SIZE_WORD =
+  /^(?:длин|количеств|числ[оа]$|макс|мин|размер|включ|выключ|отключ|использ|разреш|попыт|врем|срок|таймаут|интервал|сложност)/u;
+const RU_CODE = /^код(?:а|у|ом|е|ы|ов)?$/u;
+const RU_CODE_OF = new Set([
+  "доступа",
+  "сопряжения",
+  "безопасности",
+  "разблокировки",
+  "активации",
+  "входа",
+  "авторизации",
+  "аутентификации",
+  "охраны",
+  "администратора",
+  "установки",
+]);
+const RU_CODE_KIND = /^(?:секретн|мастер|гостев)/u;
+const RU_KEY = /^ключ(?:а|у|ом|е|и|ей)?$/u;
+const RU_KEY_OF = new Set([
+  "сети",
+  "шифрования",
+  "безопасности",
+  "доступа",
+  "связи",
+  "api",
+  "подписи",
+  "авторизации",
+  "аутентификации",
+  "сопряжения",
+  "wifi",
+  "wi",
+  "wpa",
+  "wep",
+]);
+const RU_KEY_KIND =
+  /^(?:сетев|секретн|закрыт|приватн|локальн|мастер|api|wpa|wep)/u;
+
+function labelNamesSecret(label, value) {
+  if (typeof label !== "string" || isBooleanValue(value)) return false;
+  const words = label
+    .toLowerCase()
+    .split(/[^\p{L}\d]+/u)
+    .filter(Boolean);
+  if (
+    words.some((word) => RU_KIND_WORD.test(word)) ||
+    (isNumberValue(value) &&
+      (words.some((word) => RU_SIZE_WORD.test(word)) ||
+        isFlagOrSize(label, value)))
+  ) {
+    return false;
+  }
+  return (
+    /(?<![\p{L}\d])(?:PIN|ПИН)(?![\p{L}\d])/u.test(label) ||
+    words.some((word, index) => {
+      const before = words[index - 1] ?? "";
+      const after = words[index + 1] ?? "";
+      return (
+        /^(?:парол|токен|пинкод)/u.test(word) ||
+        /^секрет[аеуы]?$/u.test(word) ||
+        (/^(?:пин|pin)$/u.test(word) && RU_CODE.test(after)) ||
+        (RU_CODE.test(word) &&
+          (RU_CODE_OF.has(after) || RU_CODE_KIND.test(before))) ||
+        (RU_KEY.test(word) &&
+          (RU_KEY_OF.has(after) || RU_KEY_KIND.test(before)))
+      );
+    })
   );
 }
 
@@ -5208,17 +5302,20 @@ const FLAG_OR_SIZE_PARTS = new Set([
 ]);
 
 function isFlagOrSize(name, value) {
-  const scalar =
-    isBooleanValue(value) ||
+  return (
+    (isBooleanValue(value) || isNumberValue(value)) &&
+    credentialKeyParts(name).some((part) => FLAG_OR_SIZE_PARTS.has(part))
+  );
+}
+
+function isNumberValue(value) {
+  return (
     typeof value === "number" ||
     (value !== null &&
       typeof value === "object" &&
       ["intValue", "longValue", "doubleValue"].some((kind) =>
         Object.hasOwn(value, kind),
-      ));
-  return (
-    scalar &&
-    credentialKeyParts(name).some((part) => FLAG_OR_SIZE_PARTS.has(part))
+      ))
   );
 }
 
