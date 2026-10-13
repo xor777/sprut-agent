@@ -628,6 +628,50 @@ test("a level stored on an off lamp is not written back while the lamp is off", 
   assert.equal(currentValue(hub, STRIP_ON), false);
 });
 
+test("an undo write that never reached the lamp is finished by the resend its item offers", async (t) => {
+  const { hub, client } = await setup(t);
+  const sent = await command(client, [[FLOOR_ON, false]], "Выключить торшер");
+  // The lamp ignores the undo write and the hub never answers it.
+  hub.state.faults.stuckActuators.add(16);
+  hub.state.faults.droppedReply.push({
+    method: "characteristic.update",
+    aId: 16,
+    cId: 14,
+    remaining: 1,
+  });
+  const first = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  const lost = itemFor(first, sent.results[0].change_ref);
+  assert.equal(lost.status, "uncertain");
+  assert.equal(lost.reason, "restore_unconfirmed");
+  assert.equal(lost.sent, true);
+  hub.state.faults.stuckActuators.delete(16);
+
+  // A repeated undo does not resend by itself and offers the resend.
+  const before = hub.requests.length;
+  const repeated = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  const held = itemFor(repeated, sent.results[0].change_ref);
+  assert.equal(held.status, "uncertain");
+  assert.equal(held.sent, false);
+  assert.deepEqual(valueWritesSince(hub, before), []);
+  assert.equal(held.next.tool, "send_device_commands");
+  assert.deepEqual(held.next.arguments.commands, [
+    { target_ref: refOf(FLOOR_ON), value: true, resend_unconfirmed: true },
+  ]);
+
+  const resent = await call(client, held.next.tool, held.next.arguments);
+  assert.equal(resent.results[0].status, "applied");
+  assert.equal(currentValue(hub, FLOOR_ON), true);
+  const finished = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(finished.status, "ok", JSON.stringify(finished.results));
+  assert.deepEqual(homeChanges(hub), []);
+});
+
 test("an offline lamp is reported, not guessed, and restored once it is back", async (t) => {
   const { hub, client } = await setup(t);
   const sent = await command(client, [[FLOOR_ON, false]], "Выключить торшер");
