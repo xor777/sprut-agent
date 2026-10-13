@@ -68,7 +68,17 @@ export class DeviceSearches {
     return this.#exclusive(target.extensionKey, async () => {
       const begin = async (current) => {
         const { search, result } = await this.#start(target, spaceKey, current);
-        await this.#save(search);
+        await keepState(
+          () => this.#save(search),
+          () =>
+            result.status === "already_running"
+              ? startNotSent(
+                  result.active === true,
+                  search.endsAt,
+                  search.timeZone,
+                )
+              : startedNotKept(search, result),
+        );
         return result;
       };
       // Watches not written for days go first, so none of them is taken
@@ -1004,6 +1014,32 @@ function startNotSent(running, end = null, timeZone = null) {
     `The device search could not be saved in the local state directory, so this call sent nothing to the hub. The controller's search was already running and stays open until it ends by itself${end === null ? "" : " at ends_at"}: any device in pairing mode within range can join until then. ${FIX_STATE_DIRECTORY}; then start the search again: it returns the running search with its stop, without restarting it.`,
     "restore_state_storage_then_retry",
     { active: true, ...(end === null ? {} : searchEnd(end, timeZone)) },
+  );
+}
+
+// A start that was sent, whose search as read back after it could not be
+// kept: get_device_search and stop_device_search cannot follow it until
+// the directory is fixed and a start returns it again.
+function startedNotKept(search, result) {
+  const running = result.active === true;
+  return new SprutHubError(
+    "state_storage_unavailable",
+    `${
+      running
+        ? `The search was started: the controller's network is open, and any device in pairing mode within range can join until it closes by itself${result.ends_at ? " at ends_at" : ""}. Tell the owner the network is open.`
+        : `The start was sent to the hub, but the search ${result.active === false ? "does not show as running" : "could not be read back"}; get_entity of the controller shows whether it runs.`
+    } The search could not be saved in the local state directory, so get_device_search and stop_device_search cannot follow it yet. ${FIX_STATE_DIRECTORY}; then start the search again: a running search is returned with its stop, without restarting it.`,
+    "restore_state_storage_then_retry",
+    {
+      active: result.active,
+      ...(result.ends_at
+        ? { ends_at: result.ends_at, seconds_left: result.seconds_left }
+        : {}),
+      next: {
+        tool: "start_device_search",
+        arguments: { extension_ref: search.extensionRef },
+      },
+    },
   );
 }
 
