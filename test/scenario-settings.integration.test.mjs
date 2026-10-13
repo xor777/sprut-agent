@@ -969,3 +969,67 @@ test("the owner's rename back to the agent's earlier name is a change by hand of
   assert.equal(refused.manual_change_observed, true);
   assert.deepEqual(writesSince(hub, sentBefore), []);
 });
+
+test("get_entity offers a LOGIC's Name, Desc and OnStart only while its info can be rewritten, and points to its code otherwise", async (t) => {
+  const { hub, client } = await setup(t);
+  hub.request({
+    scenario: {
+      update: {
+        index: LOGIC,
+        data: scenarioOf(hub, LOGIC).data.replace(
+          `name: "${LOGIC_NAME}"`,
+          'name: "Защита " + "от протечки"',
+        ),
+      },
+    },
+  });
+  const entity = await call(client, "get_entity", {
+    entity_ref: scenarioRef(LOGIC),
+  });
+  const offers = Object.fromEntries(
+    entity.entity.metadata_options.map(({ key, native_change: offer }) => [
+      key,
+      offer,
+    ]),
+  );
+  for (const key of ["Name", "Desc", "OnStart"]) {
+    assert.equal(offers[key].supported, false, key);
+    assert.equal(offers[key].reason, "logic_info_not_editable", key);
+    assert.deepEqual(offers[key].next, {
+      tool: "get_native_change_contract",
+      arguments: {
+        operation: "logic_source_update",
+        target_ref: scenarioRef(LOGIC),
+      },
+    });
+  }
+  assert.equal(offers.Sync.supported, true);
+});
+
+test("a LOGIC whose code changes or passes on info after assigning it is refused before anything is sent", async (t) => {
+  const { hub, client } = await setup(t);
+  const source = scenarioOf(hub, LOGIC).data;
+  for (const line of [
+    'Object.assign(info, { name: "Другое" });',
+    '({ name: info.name } = { name: "Другое" });',
+    '[info.description] = ["Другое"];',
+    "const meta = info;",
+    "for (info.name in { Другое: 1 }) {}",
+    'Object.defineProperty(info, "name", { value: "Другое" });',
+    "delete info.description;",
+  ]) {
+    hub.request({
+      scenario: { update: { index: LOGIC, data: `${source}\n${line}` } },
+    });
+    const sentBefore = hub.requests.length;
+    const refused = await refusal(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: scenarioRef(LOGIC),
+      option_key: "Name",
+      value: "Протечка",
+      reason: "Короче",
+    });
+    assert.equal(refused.error.code, "logic_info_not_editable", line);
+    assert.deepEqual(writesSince(hub, sentBefore), [], line);
+  }
+});
