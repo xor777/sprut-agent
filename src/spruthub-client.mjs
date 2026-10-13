@@ -3612,7 +3612,7 @@ export class SprutHubClient {
         this.#socket = socket;
         this.#connections.set(socket, {
           serials: new Set(),
-          lastFrameAt: Date.now(),
+          lastEventAt: Date.now(),
         });
         socket.on("error", () => {
           this.#handleConnectionLoss(socket);
@@ -3672,7 +3672,6 @@ export class SprutHubClient {
     }
 
     const record = this.#connections.get(socket);
-    if (record) record.lastFrameAt = Date.now();
     this.#handleNativeEvent(message, socket);
     const pending = this.#pending.get(message.id);
     if (!pending) return;
@@ -3730,6 +3729,8 @@ export class SprutHubClient {
   #routeHomeEvent(event, socket) {
     const record = this.#connections.get(socket);
     if (!record) return;
+    // Only a pushed event shows that the hub still pushes them here.
+    record.lastEventAt = Date.now();
     const receivedAt = new Date().toISOString();
     for (const serial of record.serials) {
       const state = this.#homeStates.get(serial);

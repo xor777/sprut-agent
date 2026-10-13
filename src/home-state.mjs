@@ -11,17 +11,23 @@
 // EVENT_UPDATE renames a room. Of the other events only the ids are taken,
 // since their content was not observed: an added, changed or moved
 // accessory, a service event, a changed value of a device's information
-// service (its name or availability) and a value of a characteristic the
-// state lacks have that accessory read again by accessory.get before the
-// next answer; a removed accessory leaves at once. The whole home is read
-// again before the next answer when the state cannot follow the hub: a room
-// added or removed, another event type, a frame it cannot read, the
-// connection that feeds it retired, lost or quiet for QUIET_MS, events of
-// two homes on one connection, more events during a read than it keeps,
-// this process's own writes other than device values, and MAX_AGE_MS after
-// the last whole read. A value this process writes is unconfirmed until its event comes
-// (the hub pushes one for every write, after its reply,
-// 2026-10-13-lamp-logic-undo 4.2, 4.5) or a read sent after the reply.
+// service (its name or availability), a value of a characteristic the
+// state lacks and a characteristic event of another shape have that
+// accessory read again by accessory.get before the next answer; a removed
+// accessory leaves at once. A room added, moved in the order or unknown to
+// the state, and an accessory read in a room the state lacks, have the
+// room list read again. The whole home is read again before the next
+// answer when the state cannot follow the hub: a room removed, an event
+// part it cannot read (no item list, an item without an id, an unknown
+// accessory or room event type), a hub event, a frame it cannot read, the
+// connection that feeds it retired or lost, no event over that connection
+// for QUIET_MS, an event over a connection that carried two homes'
+// serials, more events during a read than it keeps, a configuration write
+// of this process (not a device value, a scenario, a device search or a
+// notification setting), and MAX_AGE_MS after the last whole read. A value
+// this process writes is unconfirmed until an event of it received after
+// the write's reply (the hub pushes one for every write, after its reply,
+// 2026-10-13-lamp-logic-undo 4.2, 4.5) or a read begun after the reply.
 import { extractTypedValue } from "./spruthub-client.mjs";
 
 // The longest the state answers without a whole read: a safety net for an
@@ -29,13 +35,14 @@ import { extractTypedValue } from "./spruthub-client.mjs";
 // the cost of one whole read (245 ms on the owner's hub) per 5 minutes of
 // use. It is the age the session catalog of names had before.
 export const MAX_AGE_MS = 5 * 60_000;
-// A connection that carried no frame this long may be gone without a close
-// (a network drop, a sleeping laptop), its events lost: the next answer
-// reads the whole home, which also tells whether the connection still
-// answers. The owner's hub pushes about 25 frames a minute at rest
-// (2026-10-13-voice-latency-baseline, section 5); in a home that pushes
-// fewer, an answer after a quiet minute costs the whole read it cost before
-// this state.
+// A connection that pushed no event this long since the last whole read
+// may be gone without a close (a network drop, a sleeping laptop) or have
+// stopped pushing while it still answers requests: its events may be
+// lost, and replies to this process's requests do not count. The next
+// answer reads the whole home. The owner's hub pushes about 25 events a
+// minute at rest (2026-10-13-voice-latency-baseline, section 5); in a home
+// that pushes fewer, an answer after a quiet minute costs the whole read
+// it cost before this state.
 const QUIET_MS = 60_000;
 // Accessories read again one by one before an answer; past that one whole
 // read is cheaper (accessory.get about 90 ms each on the owner's hub, the
@@ -53,7 +60,7 @@ export class HomeState {
   #catalogObservedAt = null;
   #builtAt = 0;
   // The record of the connection whose events the state follows; the
-  // client keeps lastFrameAt on it, the time its last frame came.
+  // client keeps lastEventAt on it, the time its last pushed event came.
   #feed = null;
   // Why the whole home must be read again before the next answer, or null.
   #stale = "not_read";
@@ -108,7 +115,8 @@ export class HomeState {
   #wholeReason(now) {
     if (this.#stale !== null) return this.#stale;
     if (now - this.#builtAt >= MAX_AGE_MS) return "max_age";
-    if (now - this.#feed.lastFrameAt >= QUIET_MS) return "quiet_connection";
+    const heard = Math.max(this.#feed.lastEventAt, this.#builtAt);
+    if (now - heard >= QUIET_MS) return "quiet_connection";
     return null;
   }
 
