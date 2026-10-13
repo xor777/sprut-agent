@@ -1208,6 +1208,63 @@ test("a start beside a running search whose watch cannot be saved sends nothing 
   assert.deepEqual(searchActions(hub), []);
 });
 
+// Resolves once check() is true.
+async function until(check, what) {
+  for (let waited = 0; waited < 5_000; waited += 20) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`${what} did not happen`);
+}
+
+// The watch is kept before the start is sent, and its state after the hub
+// answers. If the directory turns read-only in between, the network is
+// open although the call cannot keep what it read back: the agent must
+// learn that the search runs and when it closes, not an internal error.
+test("a start whose watch cannot be saved after the start was sent says the network is open until ends_at", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  hub.delayReplies("extension.action", 1_000);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await chmod(watches, 0o700);
+  const again = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: again.search_ref,
+  });
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  assert.equal(refused.error.action, "restore_state_storage_then_retry");
+  assert.doesNotMatch(refused.error.message, /did not open the network/);
+  assert.equal(refused.active, true);
+  assert.match(refused.ends_at, /\+03:00$/);
+  assert.equal(typeof refused.seconds_left, "number");
+  assert.deepEqual(refused.next, {
+    tool: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  assert(!JSON.stringify(refused).includes(stateDirectory), refused);
+  // The start that follows the error watches the same run, not a new one.
+  assert.equal(again.status, "already_running");
+  assert.equal(again.ends_at, refused.ends_at);
+  assert.equal(stopped.stop_sent, true);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
+});
+
 test("a start whose reply is lost is unknown with the search state read back", async (t) => {
   const { hub, client } = await setup(
     t,
