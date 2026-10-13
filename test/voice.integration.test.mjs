@@ -286,3 +286,47 @@ test("the phone can pick one of the offered voices and nothing else", async (t) 
     ["cedar", "marin"],
   );
 });
+
+test("a level for a lamp that is already on sends only the level", async (t) => {
+  const { tool, listedId, updates } = await setup(t);
+  const chandelier = await listedId("Люстра");
+
+  const output = await tool("control_devices", {
+    commands: [{ device: chandelier, control: "brightness", value: "100" }],
+    reason: "люстру на полную",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  assert.deepEqual(
+    updates().map(({ aId, cId }) => [aId, cId]),
+    [[15, 15]],
+  );
+});
+
+test("turning off a lamp that is already off sends nothing and says so", async (t) => {
+  const { tool, listedId, updates } = await setup(t);
+  const nightLight = await listedId("Ночник");
+
+  const output = await tool("control_devices", {
+    commands: [{ device: nightLight, control: "power", value: "off" }],
+    reason: "выключи ночник",
+  });
+
+  assert.deepEqual(
+    output.results.map(({ device, status }) => [device, status]),
+    [[nightLight, "already_desired"]],
+  );
+  assert.deepEqual(updates(), []);
+});
+
+test("a read by kind answers about air conditioners without the rest of the home", async (t) => {
+  const { tool, listedId } = await setup(t);
+  const airConditioner = await listedId("Кондиционер");
+
+  const output = await tool("read_devices", { kind: "climate" });
+
+  assert.deepEqual(
+    output.devices.map(({ device }) => device),
+    [airConditioner],
+  );
+});
