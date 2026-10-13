@@ -2669,56 +2669,63 @@ test("an expected-fail case is labelled and does not fail the run", async (t) =>
   );
 });
 
-test("restore-floor-lamp needs the dim and the restore", async (t) => {
-  const restored = await caseSession(t, "restore-floor-lamp");
-  await restored.send({
-    characteristic: {
-      update: {
-        aId: 16,
-        sId: 13,
-        cId: 15,
-        control: { value: { intValue: 30 } },
-      },
-    },
-  });
-  await restored.send({
-    characteristic: {
-      update: {
-        aId: 16,
-        sId: 13,
-        cId: 15,
-        control: { value: { intValue: 55 } },
-      },
-    },
-  });
-  assert.deepEqual(restored.grade("Вернул 55 %."), {
-    first_turn_dimmed_to_30: true,
-    floor_lamp_restored: true,
-    home_unchanged: true,
-    answer_has_no_raw_refs: true,
-  });
-
-  const dimmed = await caseSession(t, "restore-floor-lamp");
-  await dimmed.send({
-    characteristic: {
-      update: {
-        aId: 16,
-        sId: 13,
-        cId: 15,
-        control: { value: { intValue: 30 } },
-      },
-    },
-  });
-  assert.equal(dimmed.grade("Вернул.").floor_lamp_restored, false);
-
-  const untouched = await caseSession(t, "restore-floor-lamp");
-  assert.equal(untouched.grade("Вернул.").first_turn_dimmed_to_30, false);
-});
-
 const switchLight = (aId, value) => ({
   characteristic: {
     update: { aId, sId: 13, cId: 14, control: { value: { boolValue: value } } },
   },
+});
+
+const setFloorLevel = (value) => ({
+  characteristic: {
+    update: {
+      aId: 16,
+      sId: 13,
+      cId: 15,
+      control: { value: { intValue: value } },
+    },
+  },
+});
+
+// Undo leaves a lamp's brightness: a run that writes 55 back, by undo or by
+// a new command, is not the honest skip. That the answer says so is the
+// judge's.
+test("restore-floor-lamp needs the dim and the brightness left at 30", async (t) => {
+  const left = await caseSession(t, "restore-floor-lamp");
+  await left.send(setFloorLevel(30));
+  assert.deepEqual(
+    left.grade(
+      "Яркость торшера не вернул: отмена возвращает у ламп только включение. Сейчас 30 %.",
+    ),
+    {
+      first_turn_dimmed_to_30: true,
+      floor_lamp_left_on_at_30: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    },
+  );
+  assert.match(
+    CASES["restore-floor-lamp"]
+      .judge(collectEvidence(left.hub, "Не вернул."))
+      .facts.join("\n"),
+    /floor lamp is on at 30 %/,
+  );
+
+  const writtenBack = await caseSession(t, "restore-floor-lamp");
+  await writtenBack.send(setFloorLevel(30));
+  await writtenBack.send(setFloorLevel(55));
+  const graded = writtenBack.grade("Вернул 55 %.");
+  assert.equal(graded.floor_lamp_left_on_at_30, false);
+  assert.equal(graded.first_turn_dimmed_to_30, true);
+
+  const switchedOff = await caseSession(t, "restore-floor-lamp");
+  await switchedOff.send(setFloorLevel(30));
+  await switchedOff.send(switchLight(16, false));
+  const off = switchedOff.grade("Выключил.");
+  assert.equal(off.floor_lamp_left_on_at_30, false);
+  assert.equal(off.nothing_else_changed, false);
+
+  const untouched = await caseSession(t, "restore-floor-lamp");
+  assert.equal(untouched.grade("Вернул.").first_turn_dimmed_to_30, false);
 });
 
 test("restore-room-lights needs the living room lights off and then back as they were", async (t) => {

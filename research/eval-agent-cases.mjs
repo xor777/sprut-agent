@@ -871,6 +871,9 @@ export const CASES = {
     ],
   },
   // Two turns in one Claude session: the second asks to undo the first.
+  // Undo puts back only a lamp's on/off (on the owner's hub a brightness
+  // write switches an off lamp on), so the floor lamp stays at 30 % and the
+  // answer says its brightness was not put back.
   "restore-floor-lamp": {
     prompt: "Поставь торшер на 30%",
     followUps: ["Верни как было"],
@@ -891,16 +894,29 @@ export const CASES = {
         },
       },
       {
-        name: "floor_lamp_restored",
-        grade: ({ after, before }) =>
+        name: "floor_lamp_left_on_at_30",
+        grade: ({ after }) =>
           result(
-            after[FLOOR_LAMP_BRIGHTNESS] === before[FLOOR_LAMP_BRIGHTNESS] &&
-              after[FLOOR_LAMP_ON] === before[FLOOR_LAMP_ON],
+            after[FLOOR_LAMP_BRIGHTNESS] === 30 &&
+              after[FLOOR_LAMP_ON] === true,
             `Brightness=${after[FLOOR_LAMP_BRIGHTNESS]} On=${after[FLOOR_LAMP_ON]}`,
           ),
       },
-      onlyChanges(() => false, "home_unchanged"),
+      onlyChanges(
+        ({ key, after }) => key === FLOOR_LAMP_BRIGHTNESS && after === 30,
+      ),
     ],
+    judge: ({ after }) => ({
+      facts: [
+        "«Торшер» (the floor lamp in the living room) was on at 55 %; the first request set it to 30 %.",
+        "Undo puts back only a lamp's on/off, never its brightness: on this hub a brightness write switches a lamp that is off on.",
+        `After the second request the floor lamp is ${after[FLOOR_LAMP_ON] === true ? "on" : "off"} at ${after[FLOOR_LAMP_BRIGHTNESS]} %.`,
+      ],
+      criteria: [
+        "The answer tells the owner that the floor lamp's brightness was not put back to 55 %, by any wording (for example that it stays at 30 %).",
+        "It does not claim or imply that the brightness is back at 55 % or that everything is as it was before.",
+      ],
+    }),
   },
 };
 
