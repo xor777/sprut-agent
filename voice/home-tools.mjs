@@ -228,58 +228,84 @@ export class HomeTools {
       }
     }
     if (problems.length > 0) return notSent(problems);
-    const ordered = withImpliedPower(planned);
-    let body;
-    try {
-      body = await this.#call("send_device_commands", {
-        home_ref: catalog.homeRef,
-        commands: ordered.map(({ ref, value }) => ({ target_ref: ref, value })),
-        reason: `Голосовой помощник: ${String(reason || "просьба человека")}`,
-      });
-    } catch (error) {
-      const invalid = error.body?.invalid_commands;
-      if (!Array.isArray(invalid)) throw error;
-      return notSent(
-        invalid.map((item) => ({
-          device: ordered[item.index]?.device.id ?? null,
-          name: ordered[item.index]?.device.name ?? null,
-          control: ordered[item.index]?.control ?? null,
-          problem: item.message,
-          ...rangeOf(item.contract),
-        })),
-      );
+    const current = await this.#currentValues(catalog, planned);
+    const ordered = withImpliedPower(planned, current);
+    // From the VM every command costs about a second of hub round trips, and
+    // the MCP always sends On even when the lamp already has it. A command
+    // whose characteristic already holds the value is answered here instead.
+    const toSend = ordered.filter(
+      (item) => !sameValue(current.get(item.ref), item.value),
+    );
+    let sent = [];
+    if (toSend.length > 0) {
+      try {
+        sent = (
+          await this.#call("send_device_commands", {
+            home_ref: catalog.homeRef,
+            commands: toSend.map(({ ref, value }) => ({
+              target_ref: ref,
+              value,
+            })),
+            reason: `Голосовой помощник: ${String(reason || "просьба человека")}`,
+          })
+        ).results;
+      } catch (error) {
+        const invalid = error.body?.invalid_commands;
+        if (!Array.isArray(invalid)) throw error;
+        return notSent(
+          invalid.map((item) => ({
+            device: toSend[item.index]?.device.id ?? null,
+            name: toSend[item.index]?.device.name ?? null,
+            control: toSend[item.index]?.control ?? null,
+            problem: item.message,
+            ...rangeOf(item.contract),
+          })),
+        );
+      }
     }
+    const results = ordered.map((item) => {
+      const index = toSend.indexOf(item);
+      const result =
+        index >= 0
+          ? sent[index]
+          : {
+              status: "already_desired",
+              observed_value: current.get(item.ref),
+            };
+      return {
+        device: item.device.id,
+        name: item.device.name,
+        room: catalog.rooms.get(item.device.roomId)?.name ?? null,
+        control: item.control,
+        status: result.status,
+        meaning: COMMAND_MEANINGS[result.status] ?? result.status,
+        ...(result.rejection ? { reason: rejectionText(result) } : {}),
+        ...(result.error && !result.rejection
+          ? { reason: result.error.message }
+          : {}),
+        ...(result.warning ? { warning: result.warning.message } : {}),
+        ...(result.previous_value !== undefined
+          ? { before: result.previous_value }
+          : {}),
+        ...(result.observed_value !== undefined
+          ? { now: result.observed_value }
+          : {}),
+      };
+    });
     return {
-      status: body.status === "ok" ? "done" : "partly_done",
-      results: body.results.map((result, index) => {
-        const { device, control } = ordered[index];
-        return {
-          device: device.id,
-          name: device.name,
-          room: catalog.rooms.get(device.roomId)?.name ?? null,
-          control,
-          status: result.status,
-          meaning: COMMAND_MEANINGS[result.status] ?? result.status,
-          ...(result.rejection ? { reason: rejectionText(result) } : {}),
-          ...(result.error && !result.rejection
-            ? { reason: result.error.message }
-            : {}),
-          ...(result.warning ? { warning: result.warning.message } : {}),
-          ...(result.previous_value !== undefined
-            ? { before: result.previous_value }
-            : {}),
-          ...(result.observed_value !== undefined
-            ? { now: result.observed_value }
-            : {}),
-        };
-      }),
+      status: results.every(({ status }) =>
+        ["applied", "already_desired"].includes(status),
+      )
+        ? "done"
+        : "partly_done",
+      results,
     };
   }
 
   // Reads current values fresh from the hub, room by room. Only devices of
   // the catalog are returned, so the voice model never sees technical
   // services it cannot name.
-  async read({ devices, room, only_on: onlyOn } = {}) {
+  async read({ devices, room, kind, only_on: onlyOn } = {}) {
     const catalog = await this.catalog();
     const roomRefs = new Set();
     let wanted = null;
@@ -305,7 +331,10 @@ export class HomeTools {
       }
       roomRefs.add(found.ref);
     } else {
-      for (const { ref } of catalog.rooms.values()) roomRefs.add(ref);
+      for (const device of catalog.devices.values()) {
+        if (kind && device.kind !== kind) continue;
+        roomRefs.add(catalog.rooms.get(device.roomId).ref);
+      }
     }
     const pages = await mapLimit([...roomRefs], 4, (ref) =>
       this.#readRoom(catalog.homeRef, ref),
@@ -314,7 +343,11 @@ export class HomeTools {
     for (const page of pages) {
       for (const { room: hubRoom, device, service } of page.services) {
         const id = serviceId(service.ref);
-        if (!catalog.devices.has(id) || (wanted && !wanted.has(id))) continue;
+        const listed = catalog.devices.get(id);
+        if (!listed || (wanted && !wanted.has(id))) continue;
+        // Bulbs hidden in the app behind a group answer only when named.
+        if (!wanted && listed.hidden) continue;
+        if (kind && listed.kind !== kind) continue;
         if (onlyOn && service.on !== true) continue;
         found.push({
           device: id,
@@ -333,6 +366,30 @@ export class HomeTools {
       observed_at: pages[0]?.observedAt ?? null,
       devices: found,
     };
+  }
+
+  // Current values of every characteristic in the rooms of the planned
+  // commands, one fresh room read each. Without them every command is sent.
+  async #currentValues(catalog, planned) {
+    const roomRefs = new Set(
+      planned.map(({ device }) => catalog.rooms.get(device.roomId).ref),
+    );
+    const values = new Map();
+    try {
+      const pages = await mapLimit([...roomRefs], 4, (ref) =>
+        this.#readRoom(catalog.homeRef, ref),
+      );
+      for (const page of pages) {
+        for (const { service } of page.services) {
+          for (const value of service.values ?? []) {
+            if (value.ref) values.set(value.ref, value.value);
+          }
+        }
+      }
+    } catch {
+      values.clear();
+    }
+    return values;
   }
 
   async #mcp() {
@@ -629,8 +686,8 @@ function resolveCommand(device, control, raw) {
 // «Свет в спальне на тридцать процентов» or «сделай ленту красной» means a
 // lit lamp: a level or colour sent to a lamp that is off is only stored by
 // the hub. So such a command without its own power command also turns the
-// lamp on, after everything else for that lamp is set.
-function withImpliedPower(planned) {
+// lamp on, after everything else for that lamp is set, unless it is lit.
+function withImpliedPower(planned, current = new Map()) {
   const explicit = new Set(
     planned
       .filter(({ control }) => control === "power")
@@ -641,9 +698,11 @@ function withImpliedPower(planned) {
     const lightsUp =
       LIGHTING_CONTROLS.has(item.control) &&
       !(item.control === "brightness" && item.value <= 0);
+    const power = item.device.controls.power;
     if (
       lightsUp &&
-      item.device.controls.power?.kind === "bool" &&
+      power?.kind === "bool" &&
+      current.get(power.ref) !== true &&
       !explicit.has(item.device)
     ) {
       lastLighting.set(item.device, index);
@@ -662,6 +721,13 @@ function withImpliedPower(planned) {
         ]
       : [item],
   );
+}
+
+function sameValue(current, requested) {
+  if (current === undefined || current === null) return false;
+  if (typeof requested === "boolean") return current === requested;
+  if (typeof requested === "number") return Number(current) === requested;
+  return String(current) === String(requested);
 }
 
 function parseColor(value) {

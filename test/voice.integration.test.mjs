@@ -248,15 +248,15 @@ test("a colour by name lights the strip in that colour", async (t) => {
   assert.equal(lamp.values.цвет, "красный");
 });
 
-test("warm white sets the strip's white to about 2700 K and lights it", async (t) => {
+test("a cold white sets the strip's white to about 6000 K and lights it", async (t) => {
   const { tool, listedId, updates } = await setup(t);
   const strip = await listedId("Светодиодная лента");
 
   const output = await tool("control_devices", {
     commands: [
-      { device: strip, control: "color_temperature", value: "тёплый" },
+      { device: strip, control: "color_temperature", value: "холодный" },
     ],
-    reason: "сделай ленту тёплым белым",
+    reason: "сделай ленту холодным белым",
   });
 
   assert.equal(output.status, "done", JSON.stringify(output));
@@ -265,9 +265,9 @@ test("warm white sets the strip's white to about 2700 K and lights it", async (t
     cId,
     Object.values(control.value)[0],
   ]);
-  // ColorTemperature (cId 18) in mireds: 1e6 / 2700 K; then On (cId 14).
+  // ColorTemperature (cId 18) in mireds: 1e6 / 6000 K; then On (cId 14).
   assert.deepEqual(written, [
-    [17, 18, 370],
+    [17, 18, 167],
     [17, 14, true],
   ]);
 });
