@@ -419,9 +419,15 @@ function conditionNow(read, target, node, held) {
     };
   }
   const holds = compareNow(node.cond, node.value, value);
-  // A hold time needs how long the value has stood; only a value that
-  // does not match decides it.
-  return { current, holds_now: held && holds !== false ? null : holds };
+  if (!held) return { current, holds_now: holds };
+  // A hold needs how long the value has stood. Only «unchanged for more
+  // than» is decided by a value that does not match; «changed back within»
+  // is true just after the value stops matching, and an unknown hold is
+  // not decided.
+  return {
+    current,
+    holds_now: held.op === ">" && holds === false ? false : null,
+  };
 }
 
 // The comparison as the hub's characteristic condition makes it: on the
