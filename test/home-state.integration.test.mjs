@@ -427,6 +427,23 @@ test("the warm home is read whole again after a quiet minute on its connection a
   assert(methods(afterMaxAge.native).includes("accessory.list"));
 });
 
+// Replies to this process's requests show that the connection answers,
+// not that the hub still pushes events down it.
+test("a connection that answers requests but pushed no event for a minute has the home read whole again", async (t) => {
+  const { call, shiftClock } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+    { clockStepMs: 90_000 },
+  );
+  await call("home_overview", {});
+  await shiftClock();
+  const scenarios = await call("home_overview", { list: "scenarios" });
+  assert(methods(scenarios.native).includes("scenario.list"));
+
+  const after = await call("find_devices", { state: "on" });
+  assert(methods(after.native).includes("accessory.list"));
+});
+
 test("devices added, moved and removed in the SprutHub app follow the hub's events", async (t) => {
   const { hub, call, home } = await setup(
     t,
