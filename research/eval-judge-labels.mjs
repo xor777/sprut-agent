@@ -1647,4 +1647,99 @@ export const LABELS = {
       answer: "Готово, хаб обновится ночью, когда никого не будет дома.",
     },
   ],
+  "homekit-floor-lamp": [
+    {
+      id: "no",
+      label: "pass",
+      source: "written",
+      why: "not in HomeKit, the right reason",
+      answer: "Нет, торшера в HomeKit нет: мост HomeKit его не экспортирует.",
+    },
+    {
+      id: "no-with-list",
+      label: "pass",
+      source: "written",
+      why: "not in HomeKit, with what HomeKit does show",
+      answer:
+        "Нет. В HomeKit сейчас отдаются датчик двери, свет в прихожей, люстра, кондиционер и температура из датчика климата в спальне. Торшера среди них нет.",
+    },
+    {
+      id: "no-alice-off",
+      label: "pass",
+      source: "written",
+      why: "not in HomeKit; set for Alice, whose bridge is off",
+      answer:
+        "Нет, торшер в HomeKit не добавлен. В мосте Яндекс Алисы он отмечен, но этот мост выключен, так что и Алиса его сейчас не видит.",
+    },
+    {
+      id: "no-how-to-add",
+      label: "pass",
+      source: "written",
+      why: "not in HomeKit, how the owner adds it",
+      answer:
+        "Торшер в HomeKit не виден: в мост HomeKit он не добавлен. Включить его можно в настройках моста HomeKit в SprutHub — отметить торшер среди аксессуаров.",
+    },
+    {
+      id: "per-bridge",
+      label: "pass",
+      source: "written",
+      why: "per bridge: not in HomeKit, Alice's bridge not running",
+      answer:
+        "**HomeKit** (мост работает): торшер не экспортирован.\n**Яндекс Алиса**: в настройках моста торшер есть, но мост не запущен.",
+    },
+    {
+      id: "no-short",
+      label: "pass",
+      source: "written",
+      why: "a plain no",
+      answer: "Нет, не виден.",
+    },
+    {
+      id: "yes",
+      label: "fail",
+      source: "written",
+      why: "claims HomeKit sees it",
+      answer: "Да, торшер виден в HomeKit.",
+    },
+    {
+      id: "yes-from-alice",
+      label: "fail",
+      source: "written",
+      why: "takes Alice's export for HomeKit's",
+      answer:
+        "Да, торшер экспортирован: он отмечен в мосте и доступен в приложении.",
+    },
+    {
+      id: "alice-sees-now",
+      label: "fail",
+      source: "written",
+      why: "presents the floor lamp as visible in Alice now",
+      answer:
+        "В HomeKit торшера нет, зато в Алисе он есть и им можно управлять голосом.",
+    },
+    {
+      id: "cannot-check",
+      label: "fail",
+      source: "written",
+      why: "does not answer",
+      answer:
+        "Не могу проверить, какие устройства видит HomeKit: у меня нет такого инструмента. Посмотрите в приложении «Дом».",
+    },
+    {
+      id: "guess-yes",
+      label: "fail",
+      source: "written",
+      why: "a guess that it is visible",
+      answer:
+        "Скорее всего да: торшер — обычная лампа, а HomeKit такие поддерживает.",
+    },
+    {
+      id: "bridge-off",
+      label: "fail",
+      source: "written",
+      why: "a wrong reason: the HomeKit bridge runs",
+      answer:
+        "Нет. Мост HomeKit сейчас выключен, поэтому HomeKit не видит ни одного устройства, и торшер тоже.",
+    },
+  ],
 };

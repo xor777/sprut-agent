@@ -870,6 +870,25 @@ export const CASES = {
       ),
     ],
   },
+  // A question about a bridge's export, so no write. HomeKit runs and does
+  // not export the floor lamp; «Яндекс Алиса» keeps it but does not run, so
+  // a bridge mixed up with another one gives the wrong answer. The answer
+  // must rest on HomeKit's own export, not on a guess.
+  "homekit-floor-lamp": {
+    prompt: "Торшер виден в HomeKit?",
+    graders: [noWrites(), readBridgeExport("Bridge:homekit", 16)],
+    judge: () => ({
+      facts: [
+        "The home has two bridges that show devices to other apps. «HomeKit» runs and exports «Датчик двери», «Свет в прихожей», «Люстра», «Кондиционер» and the temperature of «Датчик климата в спальне». It does not export «Торшер» (the floor lamp in «Гостиная»): HomeKit does not see it.",
+        "«Яндекс Алиса» (Alice's bridge) keeps «Торшер» in its export, but this bridge is not running (NOT_LOADED, off): Alice does not see the floor lamp now either.",
+      ],
+      criteria: [
+        "The answer tells the owner that «Торшер» is not visible in HomeKit (not added to, not exported to or not shared with it).",
+        "It does not claim or imply that HomeKit sees «Торшер». If it mentions Alice, it does not present «Торшер» as visible in Alice now; saying that it is set up for Alice's bridge, which is off, is fine.",
+        "A reason, if given, agrees with the facts: the HomeKit bridge runs and simply does not export «Торшер»; it is not off, broken or unable to export lamps.",
+      ],
+    }),
+  },
   // Two turns in one Claude session: the second asks to undo the first.
   // Undo puts back only a lamp's on/off (on the owner's hub a brightness
   // write switches an off lamp on), so the floor lamp stays at 30 % and the
@@ -1080,6 +1099,29 @@ function onlyChanges(allowed, name = "nothing_else_changed") {
               )
               .join("; "),
       );
+    },
+  };
+}
+
+// The run read this bridge's export of the accessory: its child list, the
+// child itself or the child's window, without an error.
+function readBridgeExport(extensionKey, aId) {
+  const windowKey = `${extensionKey.replaceAll(":", "/")}/Child/${aId}/`;
+  return {
+    name: "read_bridge_export",
+    grade: ({ requests }) => {
+      const read = requests.some(
+        ({ method, params, error }) =>
+          !error &&
+          ((method === "extensionChild.list" &&
+            params?.extensionChild?.list?.extensionKey === extensionKey) ||
+            (method === "extensionChild.get" &&
+              params?.extensionChild?.get?.extensionKey === extensionKey &&
+              params.extensionChild.get.id === String(aId)) ||
+            (method === "window.get" &&
+              params?.window?.get?.windowKey === windowKey)),
+      );
+      return result(read, `${extensionKey} export of ${aId} read=${read}`);
     },
   };
 }

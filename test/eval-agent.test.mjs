@@ -954,6 +954,48 @@ test("disable-scenario needs the flag of the named scenario and nothing else", a
   );
 });
 
+// «Торшер виден в HomeKit?» is answered from HomeKit's own export: a "no"
+// without reading it, or from Alice's bridge, is a guess.
+test("homekit-floor-lamp needs HomeKit's export of the floor lamp read", async (t) => {
+  const answer = "Нет, торшер в HomeKit не добавлен.";
+  const guess = await nativeSession(t);
+  assert.deepEqual(guess.grade("homekit-floor-lamp", answer), {
+    no_writes: true,
+    read_bridge_export: false,
+    answer_has_no_raw_refs: true,
+  });
+
+  const alice = await nativeSession(t);
+  await alice.send({
+    extensionChild: { list: { extensionKey: "Bridge:yandex" } },
+  });
+  await alice.send({
+    window: { get: { windowKey: "Bridge/yandex/Child/16/" } },
+  });
+  assert.equal(
+    alice.grade("homekit-floor-lamp", answer).read_bridge_export,
+    false,
+  );
+
+  const list = await nativeSession(t);
+  await list.send({
+    extensionChild: { list: { extensionKey: "Bridge:homekit" } },
+  });
+  assert.equal(
+    list.grade("homekit-floor-lamp", answer).read_bridge_export,
+    true,
+  );
+
+  const window = await nativeSession(t);
+  await window.send({
+    window: { get: { windowKey: "Bridge/homekit/Child/16/" } },
+  });
+  assert.equal(
+    window.grade("homekit-floor-lamp", answer).read_bridge_export,
+    true,
+  );
+});
+
 // Whether the answer asks which rule is meant is the judge's; a guess that
 // writes fails here.
 test("an ambiguous scenario request fails a guess that writes", async (t) => {
