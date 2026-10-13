@@ -1304,9 +1304,10 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
 
 // Hub labels are Russian. A setting labelled as a password, a PIN code, an
 // access code, a network key or a token holds that secret under any key,
-// also a number under a mode key. A length, a yes/no, a choice of how a
-// confirmation code is sent and words that only contain «ключ» or «код»
-// stay shown and writable, as before.
+// also a number under a mode key, and so does a number whose label names a
+// PIN code beside its length: other words of a label do not make it a size.
+// A yes/no, a choice of how a confirmation code is sent and words that only
+// contain «ключ» or «код» stay shown and writable, as before.
 const GATE_WINDOW = "Controller/zigbee/Child/00158d0001c0d1e2/";
 const RUSSIAN_SECRETS = {
   password: "dacha-pass-9137",
@@ -1317,7 +1318,7 @@ const RUSSIAN_SECRETS = {
   modePassword: 64_208_317,
 };
 
-test("settings whose Russian label names a password, PIN code, access code, network key or token stay hidden, while lengths, flags, a way of sending a code and ordinary words stay shown", async (t) => {
+test("settings whose Russian label names a password, PIN code, access code, network key or token stay hidden, also a length, while flags, a way of sending a code and ordinary words stay shown", async (t) => {
   const { hub, answers, ok, refused } = await setup(t);
   const number = (key, name, value) =>
     option(
@@ -1375,7 +1376,6 @@ test("settings whose Russian label names a password, PIN code, access code, netw
 
   assert.deepEqual(leakedSecrets(answers, RUSSIAN_SECRETS), []);
   assert.deepEqual(shownOptions(shown.options), {
-    Digits: 6,
     AskPin: true,
     TicketType: "sms",
     ProductKey: "keyjup78v54myhan",
@@ -1384,7 +1384,128 @@ test("settings whose Russian label names a password, PIN code, access code, netw
     ErrorCode: "E42",
     LedPin: 4,
   });
-  assert.equal(hiddenCount(shown.options), 6);
+  // Field1-Field5, Mode and Digits.
+  assert.equal(hiddenCount(shown.options), 7);
+  assert.equal(prepared, "sensitive_native_data");
+  assert.deepEqual(windowWrites(hub), []);
+});
+
+// Labels whose other words read as a way, a type, a time or a size still
+// name the secret (review of 6424cdf, 2026-10-13): a word of the label
+// that names a password, a PIN or access code, a user's, guest's,
+// one-time or disarm code, or a network or device key hides any text or
+// number under it, whatever else the label says. Key material under a
+// label that says key or code is hidden under an opaque key too. A yes/no
+// stays shown, and so does a choice among listed words; a list of codes
+// does not. A typed confirmation code is hidden also when its field lists
+// no values.
+const PANEL_WINDOW = "Controller/zigbee/Child/00158d0001d4e5f6/";
+const LABELLED_SECRETS = {
+  apPassword: "ap-secret-4417",
+  hexNetworkKey: "net-hex-key-91",
+  temporaryPassword: 51_739_204,
+  disarmPin: 640_271,
+  userCode: 381_920,
+  wpaPassword: "wpa2-pass-6620",
+  accessCode: 77_120_458,
+  temporaryAccessCode: 905_316,
+  guestCode: 246_810,
+  oneTimeCode: 135_792,
+  disarmCode: 864_209,
+  deviceKey: "4be1a9d07c3f52e8b6a1d9c0f7e3b5a2",
+  bindCode: "c7d2e9a4b1f6083e5d7a9c2b4e6f8a01",
+  englishDeviceKey: "e3b0c44298fc1c149afbf4c8996fb924",
+  bareKey: "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  listedCode: "4821937",
+  otherListedCode: "6093715",
+  ticket: "582014",
+};
+
+test("a label naming a secret hides any text or number under an opaque key, whatever its other words, while yes/no and a choice of words stay shown", async (t) => {
+  const { hub, answers, ok, refused } = await setup(t);
+  const secrets = LABELLED_SECRETS;
+  const number = (key, name, value) =>
+    option(
+      key,
+      name,
+      "GenericInteger",
+      "NUMBER",
+      { intValue: value },
+      { minValue: 0, maxValue: 99_999_999, minStep: 1 },
+    );
+  const checkbox = (key, name, value) =>
+    option(key, name, "GenericBoolean", "CHECKBOX", { boolValue: value });
+  const list = (key, name, value, choices) =>
+    option(
+      key,
+      name,
+      "GenericString",
+      "LIST",
+      { stringValue: value },
+      {
+        validValues: choices.map(([choiceName, choiceValue]) => ({
+          name: choiceName,
+          value: { stringValue: choiceValue },
+        })),
+      },
+    );
+  hub.state.windows[PANEL_WINDOW] = {
+    windowKey: PANEL_WINDOW,
+    label: { text: "Охранная панель" },
+    options: [
+      text("Field1", "Пароль в режиме точки доступа", secrets.apPassword),
+      text("Field2", "Ключ сети (формат HEX)", secrets.hexNetworkKey),
+      number("Field3", "Временный пароль", secrets.temporaryPassword),
+      number("Field4", "PIN-код для отключения охраны", secrets.disarmPin),
+      number("Field5", "Код пользователя", secrets.userCode),
+      text("Field6", "Пароль (тип WPA2)", secrets.wpaPassword),
+      number("Field7", "Код доступа (максимум 8 цифр)", secrets.accessCode),
+      number("Field8", "Временный код доступа", secrets.temporaryAccessCode),
+      number("Field9", "Код гостя", secrets.guestCode),
+      number("Field10", "Одноразовый код", secrets.oneTimeCode),
+      number("Field11", "Код снятия с охраны", secrets.disarmCode),
+      text("Field12", "Ключ устройства", secrets.deviceKey),
+      text("Field13", "Код привязки", secrets.bindCode),
+      text("Field14", "Device key", secrets.englishDeviceKey),
+      text("Field15", "Ключ", secrets.bareKey),
+      list("Field16", "Код пользователя", secrets.listedCode, [
+        ["Владелец", secrets.listedCode],
+        ["Гость", secrets.otherListedCode],
+      ]),
+      text("Field17", "Код подтверждения", secrets.ticket, {
+        validValues: [],
+      }),
+      checkbox("Field20", "Требовать PIN-код", true),
+      checkbox("Field21", "Пароль при входе", false),
+      list("Field22", "Способ получения кода подтверждения", "sms", [
+        ["SMS", "sms"],
+        ["Почта", "email"],
+      ]),
+      list("Field23", "Требовать PIN-код", "always", [
+        ["Всегда", "always"],
+        ["Никогда", "never"],
+      ]),
+    ],
+  };
+  const panelRef = windowRef(PANEL_WINDOW);
+
+  const shown = (await ok("get_entity", { entity_ref: panelRef })).entity;
+  const prepared = await refused("prepare_native_change", {
+    operation: "window_option",
+    target_ref: panelRef,
+    option_key: "Field5",
+    value: 111_111,
+    reason: "Владелец попросил",
+  });
+
+  assert.deepEqual(leakedSecrets(answers, secrets), []);
+  assert.deepEqual(shownOptions(shown.options), {
+    Field20: true,
+    Field21: false,
+    Field22: "sms",
+    Field23: "always",
+  });
+  assert.equal(hiddenCount(shown.options), 17);
   assert.equal(prepared, "sensitive_native_data");
   assert.deepEqual(windowWrites(hub), []);
 });
