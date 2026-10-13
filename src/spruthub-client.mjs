@@ -2762,9 +2762,14 @@ export class SprutHubClient {
     const summary = blockSummary(decodeBlock(data, context), context);
     if (conditionIds.length === 0 && !bindings.hasInterval) return summary;
     const notRead = conditionIds.length - valueIds.size;
+    // Devices that gave a value; a failed or not found read says so on
+    // its conditions.
+    const read = [...(context.values?.values() ?? [])].filter(
+      ({ accessory }) => accessory,
+    );
     summary.current_values = {
       observed_at: context.valuesObservedAt ?? null,
-      devices_read: valueIds.size,
+      devices_read: read.length,
       ...(notRead > 0
         ? { devices_not_read: notRead, read_limit: CONDITION_VALUE_READS }
         : {}),
