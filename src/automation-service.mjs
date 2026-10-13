@@ -1684,29 +1684,27 @@ export class AutomationService {
       return undefined;
     }
     const direction = nativeIntentDirection(change);
-    const ownerConflict = await this.#finishValueOwnerConflict(
-      change,
-      change.observed_value,
-    );
-    if (ownerConflict) {
-      return {
-        direction,
-        outcome: "owner_binding_lost",
-        result: ownerConflict,
-      };
-    }
+    let ownerConflict;
     let state;
     let groupMemberObservations;
     try {
-      state = read
-        ? await read()
-        : await this.#readNativeValueState(change, { requireWrite });
-      if (
-        direction === "apply" &&
-        change.group_member_targets &&
-        valuesEqual(state.value, change.requested_value)
-      ) {
-        groupMemberObservations = await this.#readVirtualGroupMembers(change);
+      // The owner check reads the hub too: after a write, its failure leaves
+      // the outcome unknown, as the value read's does.
+      ownerConflict = await this.#finishValueOwnerConflict(
+        change,
+        change.observed_value,
+      );
+      if (!ownerConflict) {
+        state = read
+          ? await read()
+          : await this.#readNativeValueState(change, { requireWrite });
+        if (
+          direction === "apply" &&
+          change.group_member_targets &&
+          valuesEqual(state.value, change.requested_value)
+        ) {
+          groupMemberObservations = await this.#readVirtualGroupMembers(change);
+        }
       }
     } catch (error) {
       if (
@@ -1722,6 +1720,13 @@ export class AutomationService {
           configuration_matches: undefined,
           last_verification: failedVerification(error),
         }),
+      };
+    }
+    if (ownerConflict) {
+      return {
+        direction,
+        outcome: "owner_binding_lost",
+        result: ownerConflict,
       };
     }
     const { value: current, contract } = state;
