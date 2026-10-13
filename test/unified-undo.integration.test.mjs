@@ -180,7 +180,7 @@ test("«верни как было» after «выключи свет в гост
   assert.deepEqual(homeChanges(hub), []);
 
   // A second «верни как было» writes nothing.
-  const again = before + (hub.requests.length - before);
+  const again = hub.requests.length;
   const repeated = await call(client, "restore_native_change", {
     change_ref: sent.group_ref,
   });
