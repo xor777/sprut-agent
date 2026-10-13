@@ -1193,10 +1193,13 @@ test("a number under a flag or size name labelled as a password stays hidden, wh
 // one-time code the cloud sent the owner. Empty, it shows that a login
 // waits for the code; filled, the code reaches no answer, also from a
 // configuration point saved while it was empty. A field labelled so under
-// another key is a code too.
+// another key is a code too, and so is a Ticket under another label, as a
+// second controller's label left untranslated.
 const XIAOMI_WINDOW = "Controller/xiaomi_1/";
+const SECOND_XIAOMI_WINDOW = "Controller/xiaomi_2/";
 const XIAOMI_TICKET = "731946";
 const SMS_CODE = "582017";
+const SECOND_TICKET = "604285";
 
 test("a confirmation code typed during a Xiaomi cloud login reaches no answer, while the empty field stays shown", async (t) => {
   const { hub, answers, ok } = await setup(t);
@@ -1218,9 +1221,17 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
       ),
     ],
   };
+  hub.state.windows[SECOND_XIAOMI_WINDOW] = {
+    windowKey: SECOND_XIAOMI_WINDOW,
+    label: { text: "Xiaomi 2" },
+    options: [text("Ticket", "Ticket", SECOND_TICKET)],
+  };
   const xiaomiRef = windowRef(XIAOMI_WINDOW);
 
   const waiting = (await ok("get_entity", { entity_ref: xiaomiRef })).entity;
+  const second = (
+    await ok("get_entity", { entity_ref: windowRef(SECOND_XIAOMI_WINDOW) })
+  ).entity;
   const point = await ok("save_configuration_point", {
     home_ref: homeRef,
     entity_refs: [xiaomiRef],
@@ -1248,10 +1259,14 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
     SmsCode: "",
     CloudDevices: true,
   });
-  assert.deepEqual(leakedSecrets(answers, { XIAOMI_TICKET, SMS_CODE }), []);
+  assert.deepEqual(
+    leakedSecrets(answers, { XIAOMI_TICKET, SMS_CODE, SECOND_TICKET }),
+    [],
+  );
   assert.deepEqual(shownOptions(filled.options), {
     Login: "owner@example.invalid",
     CloudDevices: true,
   });
   assert.equal(hiddenCount(filled.options), 2);
+  assert.equal(hiddenCount(second.options), 1);
 });
