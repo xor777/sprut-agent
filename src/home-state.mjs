@@ -65,7 +65,11 @@ export class HomeState {
   #roomsAskedFor = new Set();
   // Accessory id -> why it must be read again.
   #staleAccessories = new Map();
-  // Value writes of this process awaiting their event: key -> {aId, ackAt}.
+  // The order in which events and this process's write replies came: each
+  // takes the next number. The client counts a reply when it handles the
+  // reply's frame, before any frame after it.
+  #seq = 0;
+  // Value writes of this process awaiting their event: key -> {aId, ackSeq}.
   #pending = new Map();
   // Accessory id -> when it was read or its latest event came.
   #observedAt = new Map();
@@ -112,7 +116,12 @@ export class HomeState {
   beginRead() {
     this.#log ??= { entries: [], overflow: false, readers: 0 };
     this.#log.readers += 1;
-    return { log: this.#log, start: this.#log.entries.length, at: Date.now() };
+    return {
+      log: this.#log,
+      start: this.#log.entries.length,
+      at: Date.now(),
+      seq: this.#seq,
+    };
   }
 
   endRead(token) {
@@ -171,10 +180,9 @@ export class HomeState {
   // An event frame's event part, from the connection record.
   receive(event, record, receivedAt) {
     if (this.#accessories === null && !this.#log) return;
-    this.#append({ event, record, receivedAt });
-    if (this.#accessories !== null) {
-      this.#apply(event, record, receivedAt, { all: true });
-    }
+    const entry = { event, record, receivedAt, seq: ++this.#seq };
+    this.#append(entry);
+    if (this.#accessories !== null) this.#apply(entry, { all: true });
   }
 
   markStale(reason) {
@@ -190,12 +198,13 @@ export class HomeState {
   }
 
   writeSent(target) {
-    this.#pending.set(valueKey(target), { aId: target.aId, ackAt: null });
+    this.#pending.set(valueKey(target), { aId: target.aId, ackSeq: null });
   }
 
+  // Called as the reply's frame is handled, before any later frame.
   writeAnswered(target) {
     const write = this.#pending.get(valueKey(target));
-    if (write) write.ackAt = Date.now();
+    if (write) write.ackSeq = ++this.#seq;
   }
 
   // The client reads again what a failed write may have changed: a write
@@ -209,8 +218,8 @@ export class HomeState {
     for (const [key, write] of this.#pending) {
       if (
         (id === null || write.aId === id) &&
-        write.ackAt !== null &&
-        write.ackAt <= token.at
+        write.ackSeq !== null &&
+        write.ackSeq <= token.seq
       ) {
         this.#pending.delete(key);
       }
@@ -230,7 +239,7 @@ export class HomeState {
   #replay(token, scope) {
     for (const entry of token.log.entries.slice(token.start)) {
       if (entry.event) {
-        this.#apply(entry.event, entry.record, entry.receivedAt, scope);
+        this.#apply(entry, scope);
       } else if (scope.all && entry.stale) {
         this.#stale ??= entry.stale;
       } else if (scope.all && entry.gone) {
@@ -240,12 +249,13 @@ export class HomeState {
     if (token.log.overflow) this.#stale ??= "event_burst";
   }
 
-  // scope: all, the rooms, or one accessory (what a read just replaced).
-  #apply(event, record, receivedAt, scope) {
-    const fromFeed = record === this.#feed;
-    for (const [domain, part] of Object.entries(event)) {
+  // An event as received; scope: all, the rooms, or one accessory (what a
+  // read just replaced).
+  #apply(entry, scope) {
+    const fromFeed = entry.record === this.#feed;
+    for (const [domain, part] of Object.entries(entry.event)) {
       if (domain === "characteristic") {
-        this.#characteristicEvent(part, receivedAt, scope, fromFeed);
+        this.#characteristicEvent(part, entry, scope, fromFeed);
       } else if (domain === "accessory") {
         this.#accessoryEvent(part, scope, fromFeed);
       } else if (domain === "service") {
@@ -274,7 +284,7 @@ export class HomeState {
     });
   }
 
-  #characteristicEvent(part, receivedAt, scope, fromFeed) {
+  #characteristicEvent(part, entry, scope, fromFeed) {
     if (!Array.isArray(part?.characteristics)) {
       this.#unknownEvent(scope);
       return;
@@ -290,14 +300,19 @@ export class HomeState {
       ) {
         this.#staleAccessories.set(item.aId, "unknown_event");
       } else {
-        this.#setValue(item, receivedAt);
+        this.#setValue(item, entry);
       }
     }
   }
 
-  #setValue(item, receivedAt) {
+  #setValue(item, { receivedAt, seq }) {
     const key = valueKey(item);
-    this.#pending.delete(key);
+    // The hub pushes a write's event after its reply
+    // (2026-10-13-lamp-logic-undo 4.2): an earlier one is another change.
+    const write = this.#pending.get(key);
+    if (write && write.ackSeq !== null && seq > write.ackSeq) {
+      this.#pending.delete(key);
+    }
     const accessory = this.#byId.get(item.aId);
     const located = locate(accessory, item.sId, item.cId);
     if (!located) {

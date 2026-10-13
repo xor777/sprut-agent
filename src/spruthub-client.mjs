@@ -3496,10 +3496,16 @@ export class SprutHubClient {
         : [this.#homeStates.get(serial)].filter(Boolean);
     this.#writeGeneration += 1;
     if (target) for (const state of states) state.writeSent(target);
+    // The reply is counted as its frame is handled: the write's event may
+    // come in the next frame of the same read from the socket, before this
+    // call resumes.
+    const onReply = target
+      ? () => {
+          for (const state of states) state.writeAnswered(target);
+        }
+      : undefined;
     try {
-      const response = await this.#send(params, deadline, serial);
-      if (target) for (const state of states) state.writeAnswered(target);
-      return response;
+      return await this.#send(params, deadline, serial, onReply);
     } catch (error) {
       if (target) for (const state of states) state.writeFailed(target);
       throw error;
@@ -3509,7 +3515,7 @@ export class SprutHubClient {
     }
   }
 
-  async #send(params, deadline, serial) {
+  async #send(params, deadline, serial, onReply) {
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -3524,7 +3530,7 @@ export class SprutHubClient {
         reject(timeoutError());
         this.#retire(socket);
       }, remainingMs);
-      this.#pending.set(id, { resolve, reject, timer, socket });
+      this.#pending.set(id, { resolve, reject, timer, socket, onReply });
     });
 
     socket.send(
@@ -3706,6 +3712,7 @@ export class SprutHubClient {
     }
     message.responseReceivedAt = new Date().toISOString();
     if (record) this.#replyConnections.set(message, record);
+    pending.onReply?.();
     pending.resolve(message);
   }
 
