@@ -11618,6 +11618,8 @@ async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
     (scenario) => scenario.optionsWindow === windowKey,
   );
   if (matches.length !== 1) return;
+  // Answered as on its scenario ref (readScenarioMetadataOption).
+  if (matches[0].predefined === true) throw predefinedScenarioReadOnly();
   const scenarioRef = `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
   if (matches[0].type === "LOGIC" && option.key !== "Sync") {
     // The list carries no code; the scenario read does.
@@ -12923,7 +12925,7 @@ function logicCodeInfoEffects(baseline, source) {
     } else {
       snapshot[field] = null;
       codeSets.push({ field: shown, from: before, unknown: true });
-      unknown.written.push(label);
+      unknown.written.push({ info, label });
     }
     if (Object.hasOwn(restored.values, info)) {
       const to = restored.values[info];
@@ -12939,10 +12941,10 @@ function logicCodeInfoEffects(baseline, source) {
         before_change: before,
         unknown: true,
       });
-      unknown.restored.push(label);
+      unknown.restored.push({ info, label });
     }
   }
-  for (const [labels, info, after] of [
+  for (const [fields, info, after] of [
     [unknown.written, written, "after this write"],
     [
       unknown.restored,
@@ -12950,9 +12952,13 @@ function logicCodeInfoEffects(baseline, source) {
       "after restore, which writes back the code from before this change,",
     ],
   ]) {
-    if (labels.length === 0) continue;
+    if (fields.length === 0) continue;
+    // Why: info itself unreadable, or each field's own reason.
+    const why =
+      info.problem ??
+      fields.map(({ info: key }) => info.problems[key]).join(", and ");
     warnings.push(
-      `SprutHub sets the scenario's ${labels.join(", ")} from info in the code on every code write, and ${info.problem ?? "info does not hold them all as plain values"}, so ${after} ${labels.length === 1 ? "it is" : "they are"} not known.`,
+      `SprutHub sets the scenario's ${fields.map(({ label }) => label).join(", ")} from info in the code on every code write, and ${why}, so ${after} ${fields.length === 1 ? "it is" : "they are"} not known.`,
     );
   }
   return { snapshot, codeSets, restoreCodeSets, warnings };
