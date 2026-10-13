@@ -2686,10 +2686,10 @@ const setFloorLevel = (value) => ({
   },
 });
 
-// Undo leaves a lamp's brightness: a run that writes 55 back, by undo or by
-// a new command, is not the honest skip. That the answer says so is the
-// judge's.
-test("restore-floor-lamp needs the dim and the brightness left at 30", async (t) => {
+// Undo leaves a lamp's brightness; a new command that sets 55 % again on the
+// lit lamp is also what the owner asked for. Switching the lamp off is not.
+// That the answer matches the final brightness is the judge's.
+test("restore-floor-lamp needs the dim and the lamp left on at 30 or 55", async (t) => {
   const left = await caseSession(t, "restore-floor-lamp");
   await left.send(setFloorLevel(30));
   assert.deepEqual(
@@ -2698,7 +2698,7 @@ test("restore-floor-lamp needs the dim and the brightness left at 30", async (t)
     ),
     {
       first_turn_dimmed_to_30: true,
-      floor_lamp_left_on_at_30: true,
+      floor_lamp_on_at_30_or_55: true,
       nothing_else_changed: true,
       answer_has_no_raw_refs: true,
     },
@@ -2714,14 +2714,29 @@ test("restore-floor-lamp needs the dim and the brightness left at 30", async (t)
   await writtenBack.send(setFloorLevel(30));
   await writtenBack.send(setFloorLevel(55));
   const graded = writtenBack.grade("Вернул 55 %.");
-  assert.equal(graded.floor_lamp_left_on_at_30, false);
+  assert.equal(graded.floor_lamp_on_at_30_or_55, true);
+  assert.equal(graded.nothing_else_changed, true);
   assert.equal(graded.first_turn_dimmed_to_30, true);
+  assert.match(
+    CASES["restore-floor-lamp"]
+      .judge(collectEvidence(writtenBack.hub, "Вернул 55 %."))
+      .facts.join("\n"),
+    /floor lamp is on at 55 %/,
+  );
+
+  const otherLevel = await caseSession(t, "restore-floor-lamp");
+  await otherLevel.send(setFloorLevel(30));
+  await otherLevel.send(setFloorLevel(70));
+  assert.equal(
+    otherLevel.grade("Поставил 70 %.").floor_lamp_on_at_30_or_55,
+    false,
+  );
 
   const switchedOff = await caseSession(t, "restore-floor-lamp");
   await switchedOff.send(setFloorLevel(30));
   await switchedOff.send(switchLight(16, false));
   const off = switchedOff.grade("Выключил.");
-  assert.equal(off.floor_lamp_left_on_at_30, false);
+  assert.equal(off.floor_lamp_on_at_30_or_55, false);
   assert.equal(off.nothing_else_changed, false);
 
   const untouched = await caseSession(t, "restore-floor-lamp");

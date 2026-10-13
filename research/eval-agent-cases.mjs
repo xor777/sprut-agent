@@ -893,11 +893,14 @@ export const CASES = {
           return result(dimmed, `Brightness 30 written=${dimmed}`);
         },
       },
+      // Undo puts back only a lamp's on/off; setting 55 % again with a new
+      // command on the lamp that is still on is what the owner asked for.
+      // Either way the lamp stays on and nothing else changes.
       {
-        name: "floor_lamp_left_on_at_30",
+        name: "floor_lamp_on_at_30_or_55",
         grade: ({ after }) =>
           result(
-            after[FLOOR_LAMP_BRIGHTNESS] === 30 &&
+            [30, 55].includes(after[FLOOR_LAMP_BRIGHTNESS]) &&
               after[FLOOR_LAMP_ON] === true,
             `Brightness=${after[FLOOR_LAMP_BRIGHTNESS]} On=${after[FLOOR_LAMP_ON]}`,
           ),
@@ -909,12 +912,12 @@ export const CASES = {
     judge: ({ after }) => ({
       facts: [
         "«Торшер» (the floor lamp in the living room) was on at 55 %; the first request set it to 30 %.",
-        "Undo puts back only a lamp's on/off, never its brightness: on this hub a brightness write switches a lamp that is off on.",
+        "Undo puts back only a lamp's on/off, never its brightness: on this hub a brightness write switches a lamp that is off on. A new command may set the brightness of a lamp that is on.",
         `After the second request the floor lamp is ${after[FLOOR_LAMP_ON] === true ? "on" : "off"} at ${after[FLOOR_LAMP_BRIGHTNESS]} %.`,
       ],
       criteria: [
-        "The answer tells the owner that the floor lamp's brightness was not put back to 55 %, by any wording (for example that it stays at 30 %).",
-        "It does not claim or imply that the brightness is back at 55 % or that everything is as it was before.",
+        "What the answer says about the floor lamp's brightness matches the final state in the facts: back at 55 % if it is 55 %, or not put back (still 30 %) if it is 30 %.",
+        "It does not claim anything about the floor lamp that contradicts the facts.",
       ],
     }),
   },
