@@ -16,9 +16,9 @@ import {
 // the hub starts or run its actions one after another, for a BLOCK, a LOGIC
 // and a GLOBAL, through the public MCP tools. The simulator changes these
 // as the owner's 3.0.0 hub did on 2026-10-13 (research/protocol/
-// 2026-10-13-wave4-contracts.md): only the scenario's options window
-// changes them, and a LOGIC's code sets its name, description and onStart
-// again on every code write.
+// 2026-10-13-wave4-contracts.md): the scenario's options window changes
+// them, and a LOGIC's code sets its name, description and onStart again
+// on every code write, so for a LOGIC those three are changed in its code.
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -176,13 +176,11 @@ function changedKeys(before, after) {
   return diffHomeSnapshots(before, after).map(({ key }) => key);
 }
 
-test("window_option renames a BLOCK, a LOGIC and a GLOBAL, and restore puts each back", async (t) => {
+test("window_option renames a BLOCK and a GLOBAL, and restore puts each back", async (t) => {
   const { hub, client } = await setup(t);
   const initial = hub.snapshot();
-  const logicSource = scenarioOf(hub, LOGIC).data;
   const renames = [
     [BLOCK, "Ночь"],
-    [LOGIC, "Протечка под мойкой"],
     [GLOBAL, "Флаги дома"],
   ];
   const prepared = [];
@@ -198,204 +196,287 @@ test("window_option renames a BLOCK, a LOGIC and a GLOBAL, and restore puts each
     assert.deepEqual(ignoredMetadataUpdates(hub, sentBefore), []);
     prepared.push(renamed);
   }
-
-  // The LOGIC's code changes only in info.name, shown before apply, so its
-  // next code write keeps the new name; its window shows the name too.
-  const logicRename = prepared[1];
-  assert.deepEqual(logicRename.logic_source.edits, [
-    {
-      field: "info.name",
-      line: 2,
-      from: LOGIC_NAME,
-      to: "Протечка под мойкой",
-    },
-  ]);
-  const renamedSource = logicSource.replace(
-    `name: "${LOGIC_NAME}"`,
-    'name: "Протечка под мойкой"',
-  );
-  assert.notEqual(renamedSource, logicSource);
-  assert.equal(scenarioOf(hub, LOGIC).data, renamedSource);
-  assert.equal(storedWindowValue(hub, LOGIC, "Name"), "Протечка под мойкой");
-  assert.equal(prepared[0].logic_source, undefined);
-  assert.equal(prepared[2].logic_source, undefined);
   assert.deepEqual(
     changedKeys(initial, hub.snapshot()),
-    [
-      `scenario/${BLOCK}/name`,
-      `scenario/${LOGIC}/data`,
-      `scenario/${LOGIC}/name`,
-      `scenario/${GLOBAL}/name`,
-    ].sort(),
+    [`scenario/${BLOCK}/name`, `scenario/${GLOBAL}/name`].sort(),
   );
 
   for (const renamed of prepared.reverse()) await restore(client, renamed);
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, logicSource);
-  assert.equal(storedWindowValue(hub, LOGIC, "Name"), LOGIC_NAME);
 });
 
-test("a LOGIC renamed with window_option keeps its name through a later code edit that its restore does not drop, and a code edit that sets a name back says so", async (t) => {
+// SprutHub sets a LOGIC's name, description and start on boot from info in
+// its code on every code write (research/protocol/2026-10-13-wave4-
+// contracts.md 1.5), so they are changed there; its options window would
+// hold them only until the next code write.
+test("a LOGIC's Name, Desc and OnStart in its options window are refused before anything is sent and point to its code, while its Sync changes", async (t) => {
   const { hub, client } = await setup(t);
-  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const initial = hub.snapshot();
+  const readCode = {
+    tool: "get_entity",
+    arguments: { entity_ref: scenarioRef(LOGIC), include: ["configuration"] },
+  };
+  for (const [optionKey, value] of [
+    ["Name", "Протечка под мойкой"],
+    ["Desc", "Новое описание"],
+    ["OnStart", true],
+  ]) {
+    const refused = await refusal(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: scenarioRef(LOGIC),
+      option_key: optionKey,
+      value,
+      reason: "Владелец попросил",
+    });
+    assert.equal(refused.error.code, "logic_info_in_code", optionKey);
+    assert.deepEqual(refused.next, readCode, optionKey);
+    const contract = await refusal(client, "get_native_change_contract", {
+      operation: "window_option",
+      target_ref: scenarioRef(LOGIC),
+      option_key: optionKey,
+    });
+    assert.equal(contract.error.code, "logic_info_in_code", optionKey);
+    // Its options window written by the window ref is refused the same way.
+    const direct = await refusal(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: windowRef(hub, LOGIC),
+      option_key: optionKey,
+      value,
+      reason: "Владелец попросил",
+    });
+    assert.equal(direct.error.code, "logic_info_in_code", optionKey);
+    assert.deepEqual(direct.next, readCode, optionKey);
+  }
+  assert.deepEqual(hub.writes(), []);
 
-  // A later edit of the code as the hub now holds it keeps the name.
   const entity = await call(client, "get_entity", {
     entity_ref: scenarioRef(LOGIC),
-    include: ["configuration"],
   });
-  const edited = entity.entity.configuration.value.replace(
-    'log("Протечка: розетка чайника отключена")',
-    'log("Протечка под мойкой: розетка отключена")',
+  const offers = Object.fromEntries(
+    entity.entity.metadata_options.map(({ key, native_change: offer }) => [
+      key,
+      offer,
+    ]),
   );
-  assert.notEqual(edited, entity.entity.configuration.value);
-  const update = await call(client, "prepare_native_change", {
-    operation: "logic_source_update",
-    target_ref: scenarioRef(LOGIC),
-    source: edited,
-    reason: "Поменять запись в журнале",
-  });
-  assert.equal(update.code_sets_back, undefined);
-  assert.equal(update.diff.editable_flags.to.name, "Протечка под мойкой");
-  const applied = await call(client, "apply_native_change", {
-    change_ref: update.change_ref,
-  });
-  assert.equal(applied.status, "applied");
-  assert.equal(scenarioOf(hub, LOGIC).data, edited);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+  for (const key of ["Name", "Desc", "OnStart"]) {
+    assert.equal(offers[key].supported, false, key);
+    assert.equal(offers[key].reason, "logic_info_in_code", key);
+    assert.deepEqual(offers[key].next, readCode, key);
+  }
+  assert.equal(offers.Sync.supported, true);
 
-  // The rename's restore would put back the code from before it and drop
-  // the later edit, so it refuses while that edit stands.
-  const writesBefore = hub.writes().length;
-  const refused = await call(client, "restore_native_change", {
-    change_ref: renamed.change_ref,
-  });
-  assert.equal(refused.status, "conflict");
-  assert.equal(hub.writes().length, writesBefore);
-  assert.equal(scenarioOf(hub, LOGIC).data, edited);
-
-  // The owner renames it in the app: only the window, the code keeps its
-  // info.name. A code edit that keeps that info.name would set the name
-  // back, and its preview says so before anything is sent.
-  ownerWritesWindow(hub, LOGIC, "Name", { stringValue: "Имя из приложения" });
-  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
-  const sentBefore = hub.requests.length;
-  const reverting = await call(client, "prepare_native_change", {
-    operation: "logic_source_update",
-    target_ref: scenarioRef(LOGIC),
-    source: edited.replace("setValue(false);", "setValue(false); // чайник"),
-    reason: "Пояснить код",
-  });
-  assert.equal(reverting.status, "prepared");
-  assert.deepEqual(reverting.code_sets_back, [
-    {
-      field: "name",
-      from: "Имя из приложения",
-      to: "Протечка под мойкой",
-    },
-  ]);
-  assert.equal(reverting.warnings.length, 1);
+  const sync = await change(client, LOGIC, "Sync", true);
+  assert.equal(scenarioOf(hub, LOGIC).sync, true);
   assert.deepEqual(
-    hub.requests.slice(sentBefore).filter(({ write }) => write),
-    [],
+    hub.writes().map(({ method }) => method),
+    ["window.update"],
   );
+  await restore(client, sync);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 });
 
-test("OnStart and Sync of a BLOCK, a LOGIC and a GLOBAL change through window_option and restore", async (t) => {
+test("«переименуй сценарий» of a LOGIC follows the refusal to its code: info.name changes, the prepare says the name it sets, and restore puts the old name back", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const source = scenarioOf(hub, LOGIC).data;
+  const newName = "Протечка под мойкой";
+  const refused = await refusal(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: scenarioRef(LOGIC),
+    option_key: "Name",
+    value: newName,
+    reason: "Переименовать",
+  });
+  const entity = await call(client, refused.next.tool, refused.next.arguments);
+  const renamedSource = entity.entity.configuration.value.replace(
+    `name: "${LOGIC_NAME}"`,
+    `name: "${newName}"`,
+  );
+  assert.notEqual(renamedSource, source);
+
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: renamedSource,
+    reason: "Переименовать",
+  });
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(prepared.code_sets, [
+    { field: "name", from: LOGIC_NAME, to: newName },
+  ]);
+  assert.equal(prepared.restore_code_sets, undefined);
+  assert.equal(prepared.warnings, undefined);
+  assert.equal(prepared.diff.editable_flags.to.name, newName);
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(scenarioOf(hub, LOGIC).name, newName);
+  assert.deepEqual(
+    changedKeys(initial, hub.snapshot()),
+    [`scenario/${LOGIC}/data`, `scenario/${LOGIC}/name`].sort(),
+  );
+
+  await restore(client, prepared);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// The owner renamed the LOGIC in the app: only its options window, its code
+// keeps the old info.name. Any code write, the agent's or its undo, takes
+// the name from info again; prepare says so before anything is sent.
+test("a code edit of a LOGIC renamed in the app says it sets the old name back and that its restore does not bring the app's name back", async (t) => {
+  const { hub, client } = await setup(t);
+  const source = scenarioOf(hub, LOGIC).data;
+  ownerWritesWindow(hub, LOGIC, "Name", { stringValue: "Имя из приложения" });
+  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
+
+  const sentBefore = hub.requests.length;
+  const edit = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: source.replace(
+      'log("Протечка: розетка чайника отключена")',
+      'log("Протечка: розетка отключена")',
+    ),
+    reason: "Короче запись в журнале",
+  });
+  assert.equal(edit.status, "prepared");
+  assert.deepEqual(edit.code_sets, [
+    { field: "name", from: "Имя из приложения", to: LOGIC_NAME },
+  ]);
+  assert.deepEqual(edit.restore_code_sets, [
+    { field: "name", before_change: "Имя из приложения", to: LOGIC_NAME },
+  ]);
+  assert.equal(edit.warnings.length, 2);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+
+  // Renamed in the code as well: the new name is what the code sets; its
+  // restore still sets the code's old info.name, not the app's name.
+  const renamed = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: source.replace(`name: "${LOGIC_NAME}"`, 'name: "Мойка"'),
+    reason: "Переименовать",
+  });
+  assert.deepEqual(renamed.code_sets, [
+    { field: "name", from: "Имя из приложения", to: "Мойка" },
+  ]);
+  assert.deepEqual(renamed.restore_code_sets, [
+    { field: "name", before_change: "Имя из приложения", to: LOGIC_NAME },
+  ]);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(scenarioOf(hub, LOGIC).name, "Мойка");
+  const read = await call(client, "get_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assert.deepEqual(read.restore_code_sets, renamed.restore_code_sets);
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.deepEqual(restored.restore_code_sets, renamed.restore_code_sets);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+  assert.equal(scenarioOf(hub, LOGIC).name, LOGIC_NAME);
+});
+
+// The final review of the earlier candidate crashed here: the current code
+// passes info on, so what it sets cannot be read without running it.
+test("a code edit of a LOGIC whose current code passes info on is prepared, applied and restored to that exact code, and says the values after restore are unknown", async (t) => {
+  const { hub, client } = await setup(t);
+  const clean = scenarioOf(hub, LOGIC).data;
+  const passing = `${clean}\nfunction helper(meta){meta.onStart=false} helper(info);`;
+  hub.request({ scenario: { update: { index: LOGIC, data: passing } } });
+  const before = hub.snapshot();
+
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: clean,
+    reason: "Убрать лишнюю функцию",
+  });
+  assert.equal(prepared.status, "prepared");
+  assert.equal(prepared.code_sets, undefined);
+  assert.deepEqual(prepared.restore_code_sets, [
+    { field: "name", before_change: LOGIC_NAME, unknown: true },
+    { field: "description", before_change: LOGIC_DESC, unknown: true },
+    { field: "on_start", before_change: false, unknown: true },
+  ]);
+  assert.equal(prepared.warnings.length, 1);
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(scenarioOf(hub, LOGIC).data, clean);
+
+  await restore(client, prepared);
+  assert.equal(scenarioOf(hub, LOGIC).data, passing);
+  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
+});
+
+test("a new code whose info is not plain values says the name, description and start on boot after its write are unknown", async (t) => {
+  const { hub, client } = await setup(t);
+  const source = scenarioOf(hub, LOGIC).data;
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: source.replace(
+      `name: "${LOGIC_NAME}"`,
+      'name: "Защита " + "от протечки"',
+    ),
+    reason: "Собрать имя из частей",
+  });
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(prepared.code_sets, [
+    { field: "name", from: LOGIC_NAME, unknown: true },
+  ]);
+  assert.equal(prepared.diff.editable_flags.to.name, null);
+  assert.equal(prepared.warnings.length, 1);
+  assert.deepEqual(hub.writes(), []);
+});
+
+test("OnStart and Sync of a BLOCK and a GLOBAL, and Sync of a LOGIC, change through window_option and restore", async (t) => {
   const { hub, client } = await setup(t);
   const initial = hub.snapshot();
   const logicSource = scenarioOf(hub, LOGIC).data;
+  const settings = [
+    [BLOCK, "OnStart", "onStart"],
+    [BLOCK, "Sync", "sync"],
+    [GLOBAL, "OnStart", "onStart"],
+    [GLOBAL, "Sync", "sync"],
+    [LOGIC, "Sync", "sync"],
+  ];
   const prepared = [];
-  for (const index of [BLOCK, LOGIC, GLOBAL]) {
-    for (const [key, field] of [
-      ["OnStart", "onStart"],
-      ["Sync", "sync"],
-    ]) {
-      const from = initial[`scenario/${index}/${field}`];
-      assert.equal(typeof from, "boolean");
-      const sentBefore = hub.requests.length;
-      const switched = await change(client, index, key, !from);
-      assert.deepEqual(switched.diff.value, {
-        from,
-        to: !from,
-        kind: "boolValue",
-      });
-      assert.equal(scenarioOf(hub, index)[field], !from, `${index} ${key}`);
-      assert.deepEqual(ignoredMetadataUpdates(hub, sentBefore), []);
-      prepared.push(switched);
-    }
+  for (const [index, key, field] of settings) {
+    const from = initial[`scenario/${index}/${field}`];
+    assert.equal(typeof from, "boolean");
+    const sentBefore = hub.requests.length;
+    const switched = await change(client, index, key, !from);
+    assert.deepEqual(switched.diff.value, {
+      from,
+      to: !from,
+      kind: "boolValue",
+    });
+    assert.equal(scenarioOf(hub, index)[field], !from, `${index} ${key}`);
+    assert.deepEqual(ignoredMetadataUpdates(hub, sentBefore), []);
+    prepared.push(switched);
   }
-
-  // The LOGIC's onStart is also its info.onStart, so a code write keeps
-  // it; sync is not in its code.
-  const [logicOnStart, logicSync] = prepared.slice(2, 4);
-  assert.deepEqual(logicOnStart.logic_source.edits, [
-    { field: "info.onStart", line: 6, from: false, to: true },
-  ]);
-  assert.equal(logicSync.logic_source, undefined);
-  const onStartSource = logicSource.replace("onStart: false", "onStart: true");
-  assert.notEqual(onStartSource, logicSource);
-  assert.equal(scenarioOf(hub, LOGIC).data, onStartSource);
-  hub.request({ scenario: { update: { index: LOGIC, data: onStartSource } } });
-  assert.equal(scenarioOf(hub, LOGIC).onStart, true);
+  // A LOGIC's code does not set its sync: a code write keeps it.
+  hub.request({ scenario: { update: { index: LOGIC, data: logicSource } } });
+  assert.equal(scenarioOf(hub, LOGIC).sync, true);
   assert.deepEqual(
     changedKeys(initial, hub.snapshot()),
-    [BLOCK, LOGIC, GLOBAL]
-      .flatMap((index) => [
-        `scenario/${index}/onStart`,
-        `scenario/${index}/sync`,
-      ])
-      .concat(`scenario/${LOGIC}/data`)
-      .sort(),
+    settings.map(([index, , field]) => `scenario/${index}/${field}`).sort(),
   );
 
   for (const switched of prepared.reverse()) await restore(client, switched);
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, logicSource);
-});
-
-test("a description change of a LOGIC renamed in the app keeps that name, and restore puts back code, name and description", async (t) => {
-  const { hub, client } = await setup(t);
-  const source = scenarioOf(hub, LOGIC).data;
-  // Renamed in the app: the code still says the old info.name, so any
-  // code write would bring the old name back.
-  ownerWritesWindow(hub, LOGIC, "Name", { stringValue: "Имя из приложения" });
-  const before = hub.snapshot();
-
-  const described = await change(client, LOGIC, "Desc", "Новое описание");
-  assert.deepEqual(described.diff.value, {
-    from: LOGIC_DESC,
-    to: "Новое описание",
-    kind: "stringValue",
-  });
-  assert.deepEqual(described.logic_source.edits, [
-    {
-      field: "info.name",
-      line: 2,
-      from: LOGIC_NAME,
-      to: "Имя из приложения",
-    },
-    {
-      field: "info.description",
-      line: 3,
-      from: LOGIC_DESC,
-      to: "Новое описание",
-    },
-  ]);
-  assert.equal(described.warnings.length, 1);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
-  assert.equal(scenarioOf(hub, LOGIC).desc, "Новое описание");
-  assert.equal(
-    scenarioOf(hub, LOGIC).data,
-    source
-      .replace(`name: "${LOGIC_NAME}"`, 'name: "Имя из приложения"')
-      .replace(`description: "${LOGIC_DESC}"`, 'description: "Новое описание"'),
-  );
-
-  await restore(client, described);
-  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
 });
 
 test("current name and flags come from the scenario, not from a LOGIC's window that kept older ones", async (t) => {
@@ -427,29 +508,9 @@ test("current name and flags come from the scenario, not from a LOGIC's window t
     OnStart: false,
     Sync: false,
   });
-  const nameOption = entity.entity.metadata_options.find(
-    ({ key }) => key === "Name",
-  );
-  assert.deepEqual(nameOption.native_change.next, {
-    tool: "get_native_change_contract",
-    arguments: {
-      operation: "window_option",
-      target_ref: scenarioRef(LOGIC),
-      option_key: "Name",
-    },
-  });
-
-  const renamed = await call(client, "prepare_native_change", {
-    operation: "window_option",
-    target_ref: scenarioRef(LOGIC),
-    option_key: "Name",
-    value: "Протечка",
-    reason: "Короче",
-  });
-  assert.equal(renamed.diff.value.from, LOGIC_NAME);
 });
 
-test("built-in scenarios and a LOGIC whose info cannot be edited are refused before anything is sent", async (t) => {
+test("built-in scenarios are refused before anything is sent", async (t) => {
   const { hub, client } = await setup(t);
   for (const [optionKey, value] of [
     ["Name", "Своё имя"],
@@ -472,65 +533,31 @@ test("built-in scenarios and a LOGIC whose info cannot be edited are refused bef
     option_key: "Name",
   });
   assert.equal(contract.error.code, "predefined_scenario_read_only");
-
-  // info.name built from parts cannot be rewritten as a plain value.
-  hub.request({
-    scenario: {
-      update: {
-        index: LOGIC,
-        data: scenarioOf(hub, LOGIC).data.replace(
-          `name: "${LOGIC_NAME}"`,
-          'name: "Защита " + "от протечки"',
-        ),
-      },
-    },
-  });
-  const sentBefore = hub.requests.length;
-  const unparsed = await refusal(client, "prepare_native_change", {
-    operation: "window_option",
-    target_ref: scenarioRef(LOGIC),
-    option_key: "Name",
-    value: "Протечка",
-    reason: "Короче",
-  });
-  assert.equal(unparsed.error.code, "logic_info_not_editable");
-  assert.deepEqual(
-    hub.requests.slice(sentBefore).filter(({ write }) => write),
-    [],
-  );
-  // Sync is not in the code, so it still changes, by the window alone.
-  await change(client, LOGIC, "Sync", true);
-  assert.equal(scenarioOf(hub, LOGIC).sync, true);
-  assert.deepEqual(
-    hub.requests
-      .slice(sentBefore)
-      .filter(({ write }) => write)
-      .map(({ method }) => method),
-    ["window.update"],
-  );
+  assert.deepEqual(hub.writes(), []);
 });
 
 test("a scenario's options window written by its window ref points to the scenario ref", async (t) => {
   const { hub, client } = await setup(t);
-  for (const index of [BLOCK, LOGIC, GLOBAL]) {
-    for (const [optionKey, value] of [
-      ["Name", "Другое имя"],
-      ["OnStart", true],
-    ]) {
-      const refused = await refusal(client, "prepare_native_change", {
-        operation: "window_option",
-        target_ref: windowRef(hub, index),
-        option_key: optionKey,
-        value,
-        reason: "Владелец попросил",
-      });
-      assert.equal(refused.error.code, "scenario_owner_required");
-      assert.deepEqual(refused.next.arguments, {
-        operation: "window_option",
-        target_ref: scenarioRef(index),
-        option_key: optionKey,
-      });
-    }
+  for (const [index, optionKey, value] of [
+    [BLOCK, "Name", "Другое имя"],
+    [BLOCK, "OnStart", true],
+    [GLOBAL, "Name", "Другое имя"],
+    [GLOBAL, "OnStart", true],
+    [LOGIC, "Sync", true],
+  ]) {
+    const refused = await refusal(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: windowRef(hub, index),
+      option_key: optionKey,
+      value,
+      reason: "Владелец попросил",
+    });
+    assert.equal(refused.error.code, "scenario_owner_required");
+    assert.deepEqual(refused.next.arguments, {
+      operation: "window_option",
+      target_ref: scenarioRef(index),
+      option_key: optionKey,
+    });
   }
   assert.deepEqual(hub.writes(), []);
 });
@@ -538,7 +565,7 @@ test("a scenario's options window written by its window ref points to the scenar
 // The agent's own changes of one scenario form one chain: a later one in
 // effect makes an earlier one name it (later_owned_change) instead of
 // counting as a change by hand, and undoing them newest first puts the
-// scenario back. A LOGIC's Name, Desc and OnStart all write its code.
+// scenario back.
 
 async function codeUpdate(client, source, reason) {
   const prepared = await call(client, "prepare_native_change", {
@@ -565,23 +592,36 @@ function assertNamesLater(result, later) {
   assert.equal(result.manual_change_observed, undefined);
 }
 
-test("a LOGIC renamed and then described names the description change while it stands, and «верни как было» puts both back", async (t) => {
+test("a LOGIC renamed in its code and then described in its code: the rename names the later edit, and «верни как было» puts both back", async (t) => {
   const { hub, client } = await setup(t);
   const initial = hub.snapshot();
   const source = scenarioOf(hub, LOGIC).data;
-  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
-  const described = await change(client, LOGIC, "Desc", "Новое описание");
+  const renamed = await codeUpdate(
+    client,
+    source.replace(`name: "${LOGIC_NAME}"`, 'name: "Протечка под мойкой"'),
+    "Переименовать",
+  );
+  const described = await codeUpdate(
+    client,
+    scenarioOf(hub, LOGIC).data.replace(
+      `description: "${LOGIC_DESC}"`,
+      'description: "Новое описание"',
+    ),
+    "Новое описание",
+  );
   assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
   assert.equal(scenarioOf(hub, LOGIC).desc, "Новое описание");
 
-  // The agent's own description change wrote the code after the rename:
-  // that is no change by hand.
-  const read = await call(client, "get_native_change", {
-    change_ref: renamed.change_ref,
-  });
-  assertNamesLater(read, described);
+  let sentBefore = hub.requests.length;
+  assertNamesLater(
+    await call(client, "restore_native_change", {
+      change_ref: renamed.change_ref,
+    }),
+    described,
+  );
+  assert.deepEqual(writesSince(hub, sentBefore), []);
 
-  const sentBefore = hub.requests.length;
+  sentBefore = hub.requests.length;
   const undone = await call(client, "restore_native_change", {
     change_refs: [renamed.change_ref, described.change_ref],
   });
@@ -595,107 +635,6 @@ test("a LOGIC renamed and then described names the description change while it s
   );
   assert.notDeepEqual(writesSince(hub, sentBefore), []);
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-});
-
-test("restoring a LOGIC's rename before the later description change names that change, writes nothing, and works once it is undone", async (t) => {
-  const { hub, client } = await setup(t);
-  const initial = hub.snapshot();
-  const source = scenarioOf(hub, LOGIC).data;
-  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
-  const described = await change(client, LOGIC, "Desc", "Новое описание");
-
-  const sentBefore = hub.requests.length;
-  const early = await call(client, "restore_native_change", {
-    change_ref: renamed.change_ref,
-  });
-  assertNamesLater(early, described);
-  assert.deepEqual(writesSince(hub, sentBefore), []);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
-
-  await restore(client, described);
-  assert.equal(scenarioOf(hub, LOGIC).desc, LOGIC_DESC);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
-  await restore(client, renamed);
-  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-});
-
-test("a LOGIC's rename and the agent's later code edit name each other's order in both directions and come back newest first", async (t) => {
-  const { hub, client } = await setup(t);
-  const initial = hub.snapshot();
-  const source = scenarioOf(hub, LOGIC).data;
-
-  // Rename, then a code edit of the code as it now is.
-  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
-  const edited = await codeUpdate(
-    client,
-    scenarioOf(hub, LOGIC).data.replace(
-      'log("Протечка: розетка чайника отключена")',
-      'log("Протечка: розетка отключена")',
-    ),
-    "Короче запись в журнале",
-  );
-  let sentBefore = hub.requests.length;
-  assertNamesLater(
-    await call(client, "restore_native_change", {
-      change_ref: renamed.change_ref,
-    }),
-    edited,
-  );
-  assert.deepEqual(writesSince(hub, sentBefore), []);
-  await restore(client, edited);
-  await restore(client, renamed);
-  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-
-  // A code edit, then a rename that writes the code again.
-  const recoded = await codeUpdate(
-    client,
-    source.replace(
-      'log("Протечка: розетка чайника отключена")',
-      'log("Протечка: чайник отключён")',
-    ),
-    "Понятнее запись в журнале",
-  );
-  const renamedAfter = await change(client, LOGIC, "Name", "Мойка");
-  sentBefore = hub.requests.length;
-  const early = await call(client, "restore_native_change", {
-    change_ref: recoded.change_ref,
-  });
-  assert.equal(early.status, "conflict", JSON.stringify(early));
-  assert.equal(early.conflict_reason, "later_owned_change");
-  assert.equal(early.restore_first_change_ref, renamedAfter.change_ref);
-  assert.deepEqual(writesSince(hub, sentBefore), []);
-  const undone = await call(client, "restore_native_change", {
-    change_refs: [recoded.change_ref, renamedAfter.change_ref],
-  });
-  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
-  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-});
-
-test("a restore of a LOGIC's description that stops after its code write is retried and brings back the name given in the app", async (t) => {
-  const { hub, client } = await setup(t);
-  const source = scenarioOf(hub, LOGIC).data;
-  ownerWritesWindow(hub, LOGIC, "Name", { stringValue: "Имя из приложения" });
-  const before = hub.snapshot();
-  const described = await change(client, LOGIC, "Desc", "Новое описание");
-
-  // The hub refuses the first window write after the code went back: the
-  // code set the name from its info, the app's name is not back yet.
-  hub.refuseNext("window.update", { code: -32000, message: "Busy" });
-  const stopped = await call(client, "restore_native_change", {
-    change_ref: described.change_ref,
-  });
-  assert.notEqual(stopped.status, "restored");
-  assert.equal(stopped.manual_change_observed, undefined);
-  assert.equal(scenarioOf(hub, LOGIC).data, source);
-  assert.equal(scenarioOf(hub, LOGIC).name, LOGIC_NAME);
-
-  await restore(client, described);
-  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
-  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
   assert.equal(scenarioOf(hub, LOGIC).data, source);
 });
 
@@ -856,15 +795,31 @@ test("undo of a created BLOCK or LOGIC names the agent's later rename, and both 
     ].join("\n"),
     reason: "Журнал света",
   });
-  const renames = [];
+  const indexes = [];
   for (const created of [createdBlock, createdLogic]) {
     const applied = await call(client, "apply_native_change", {
       change_ref: created.change_ref,
     });
     assert.equal(applied.status, "applied", JSON.stringify(applied));
-    const index = applied.scenario_ref.split("/").at(-1);
-    renames.push(await change(client, index, "Name", "Новое имя"));
+    indexes.push(applied.scenario_ref.split("/").at(-1));
   }
+  // The BLOCK is renamed in its options window, the LOGIC in its code.
+  const renames = [await change(client, indexes[0], "Name", "Новое имя")];
+  const logicRename = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(indexes[1]),
+    source: scenarioOf(hub, indexes[1]).data.replace(
+      'name: "Журнал"',
+      'name: "Новое имя"',
+    ),
+    reason: "Переименовать",
+  });
+  const applied = await call(client, "apply_native_change", {
+    change_ref: logicRename.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(scenarioOf(hub, indexes[1]).name, "Новое имя");
+  renames.push(logicRename);
 
   for (const [created, renamed] of [
     [createdBlock, renames[0]],
@@ -895,8 +850,20 @@ test("undo of a created BLOCK or LOGIC names the agent's later rename, and both 
 // scenario after the agent's later change, both are left as they are.
 test("an owner's edit after the agent's later change of a LOGIC stays a change by hand for both changes", async (t) => {
   const { hub, client } = await setup(t);
-  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
-  const described = await change(client, LOGIC, "Desc", "Новое описание");
+  const source = scenarioOf(hub, LOGIC).data;
+  const renamed = await codeUpdate(
+    client,
+    source.replace(`name: "${LOGIC_NAME}"`, 'name: "Протечка под мойкой"'),
+    "Переименовать",
+  );
+  const described = await codeUpdate(
+    client,
+    scenarioOf(hub, LOGIC).data.replace(
+      `description: "${LOGIC_DESC}"`,
+      'description: "Новое описание"',
+    ),
+    "Новое описание",
+  );
   ownerWritesWindow(hub, LOGIC, "Desc", { stringValue: "Описание владельца" });
 
   const sentBefore = hub.requests.length;
@@ -905,8 +872,7 @@ test("an owner's edit after the agent's later change of a LOGIC stays a change b
       change_ref: prepared.change_ref,
     });
     assert.equal(refused.status, "conflict", JSON.stringify(refused));
-    assert.notEqual(refused.conflict_reason, "later_owned_change");
-    assert.equal(refused.manual_change_observed, true);
+    assert.equal(refused.conflict_reason, "manual_change");
   }
   assert.deepEqual(writesSince(hub, sentBefore), []);
   assert.equal(scenarioOf(hub, LOGIC).desc, "Описание владельца");
@@ -968,68 +934,4 @@ test("the owner's rename back to the agent's earlier name is a change by hand of
   assert.notEqual(refused.restore_first_change_ref, first.change_ref);
   assert.equal(refused.manual_change_observed, true);
   assert.deepEqual(writesSince(hub, sentBefore), []);
-});
-
-test("get_entity offers a LOGIC's Name, Desc and OnStart only while its info can be rewritten, and points to its code otherwise", async (t) => {
-  const { hub, client } = await setup(t);
-  hub.request({
-    scenario: {
-      update: {
-        index: LOGIC,
-        data: scenarioOf(hub, LOGIC).data.replace(
-          `name: "${LOGIC_NAME}"`,
-          'name: "Защита " + "от протечки"',
-        ),
-      },
-    },
-  });
-  const entity = await call(client, "get_entity", {
-    entity_ref: scenarioRef(LOGIC),
-  });
-  const offers = Object.fromEntries(
-    entity.entity.metadata_options.map(({ key, native_change: offer }) => [
-      key,
-      offer,
-    ]),
-  );
-  for (const key of ["Name", "Desc", "OnStart"]) {
-    assert.equal(offers[key].supported, false, key);
-    assert.equal(offers[key].reason, "logic_info_not_editable", key);
-    assert.deepEqual(offers[key].next, {
-      tool: "get_native_change_contract",
-      arguments: {
-        operation: "logic_source_update",
-        target_ref: scenarioRef(LOGIC),
-      },
-    });
-  }
-  assert.equal(offers.Sync.supported, true);
-});
-
-test("a LOGIC whose code changes or passes on info after assigning it is refused before anything is sent", async (t) => {
-  const { hub, client } = await setup(t);
-  const source = scenarioOf(hub, LOGIC).data;
-  for (const line of [
-    'Object.assign(info, { name: "Другое" });',
-    '({ name: info.name } = { name: "Другое" });',
-    '[info.description] = ["Другое"];',
-    "const meta = info;",
-    "for (info.name in { Другое: 1 }) {}",
-    'Object.defineProperty(info, "name", { value: "Другое" });',
-    "delete info.description;",
-  ]) {
-    hub.request({
-      scenario: { update: { index: LOGIC, data: `${source}\n${line}` } },
-    });
-    const sentBefore = hub.requests.length;
-    const refused = await refusal(client, "prepare_native_change", {
-      operation: "window_option",
-      target_ref: scenarioRef(LOGIC),
-      option_key: "Name",
-      value: "Протечка",
-      reason: "Короче",
-    });
-    assert.equal(refused.error.code, "logic_info_not_editable", line);
-    assert.deepEqual(writesSince(hub, sentBefore), [], line);
-  }
 });

@@ -16987,11 +16987,10 @@ test("a restored BLOCK create marker does not claim a later scenario at the same
   ]);
 });
 
-// A LOGIC's Name and Desc are changed on its scenario ref, and the code's
-// info gets the new name and the description the scenario has, since
-// SprutHub sets both from info on every code write
-// (research/protocol/2026-10-13-wave4-contracts.md 1.5).
-test("get_entity offers a LOGIC scenario's Name and Desc on its scenario ref with the code's info rewritten", async (t) => {
+// SprutHub sets a LOGIC's name and description from info in its code on
+// every code write (research/protocol/2026-10-13-wave4-contracts.md 1.5),
+// so they are changed in its code, not in its options window.
+test("get_entity points a LOGIC scenario's Name and Desc to its code, and window_option refuses them before anything is sent", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const logicWindowKey = "opaque-logic-window";
   hub.state.scenarios.push({
@@ -17023,21 +17022,26 @@ test("get_entity offers a LOGIC scenario's Name and Desc on its scenario ref wit
     logicEntity.structuredContent.entity.options_window_ref,
     undefined,
   );
+  const readCode = {
+    tool: "get_entity",
+    arguments: { entity_ref: logicRef, include: ["configuration"] },
+  };
   assert.deepEqual(
     logicEntity.structuredContent.entity.metadata_options.map(
       ({ key, configured_value: value, native_change: change }) => [
         key,
         value,
         change.supported,
-        change.next?.arguments.target_ref,
+        change.reason,
+        change.next,
       ],
     ),
     [
-      ["Name", "LOGIC сценарий", true, logicRef],
-      ["Desc", "Не BLOCK", true, logicRef],
+      ["Name", "LOGIC сценарий", false, "logic_info_in_code", readCode],
+      ["Desc", "Не BLOCK", false, "logic_info_in_code", readCode],
     ],
   );
-  const prepared = await client.callTool({
+  const rejected = await client.callTool({
     name: "prepare_native_change",
     arguments: {
       operation: "window_option",
@@ -17047,27 +17051,9 @@ test("get_entity offers a LOGIC scenario's Name and Desc on its scenario ref wit
       reason: "Переименовать LOGIC",
     },
   });
-  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
-  assert.deepEqual(prepared.structuredContent.diff.value, {
-    from: "LOGIC сценарий",
-    to: "Новое имя LOGIC",
-    kind: "stringValue",
-  });
-  assert.deepEqual(prepared.structuredContent.logic_source.edits, [
-    {
-      field: "info.name",
-      line: 2,
-      from: "Bedside start level",
-      to: "Новое имя LOGIC",
-    },
-    {
-      field: "info.description",
-      line: 3,
-      from: "Set the initial brightness once",
-      to: "Не BLOCK",
-    },
-  ]);
-  assert.equal(prepared.structuredContent.warnings.length, 1);
+  assert.equal(rejected.isError, true);
+  assert.equal(rejected.structuredContent.error.code, "logic_info_in_code");
+  assert.deepEqual(rejected.structuredContent.next, readCode);
   assert.equal(windowUpdates(hub).length, 0);
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.update),
