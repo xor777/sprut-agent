@@ -765,3 +765,42 @@ for (const when of ["the resent delete", "the read before it"]) {
     assert.equal(read.status, "restored", JSON.stringify(read));
   });
 }
+
+// The undo of a rename takes effect but its answer is lost, and the check
+// of the scenario after it fails too: the undo was sent and its outcome
+// is unknown, not refused by the hub.
+for (const batch of [true, false]) {
+  test(`an undo of a scenario rename whose answer and the read after it are lost is ${batch ? "an item" : "a change"} reported sent and unconfirmed, and later found done`, async (t) => {
+    const { hub, client, onNext } = await setup(t);
+    const initial = hub.snapshot();
+    const renamed = await applied(client, renameInput("Ночь"));
+    hub.state.faults.droppedReply.push({
+      method: "window.update",
+      remaining: 1,
+    });
+    const armed = onNext("window.update", () => hub.refuseNext("scenario.get"));
+    if (batch) {
+      const undone = await call(client, "restore_native_change", {
+        change_refs: [renamed.change_ref],
+      });
+      const item = itemOf(undone, renamed);
+      assert.equal(item.status, "uncertain", JSON.stringify(item));
+      assert.equal(item.reason, "restore_unconfirmed");
+      assert.equal(item.sent, true);
+    } else {
+      const undone = await call(client, "restore_native_change", {
+        change_ref: renamed.change_ref,
+      });
+      assert.equal(undone.status, "uncertain", JSON.stringify(undone));
+      assert.equal(undone.write_intent.direction, "restore");
+      assert.equal(undone.verification.fresh, false);
+    }
+    await armed;
+    assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+
+    const read = await call(client, "get_native_change", {
+      change_ref: renamed.change_ref,
+    });
+    assert.equal(read.status, "restored", JSON.stringify(read));
+  });
+}
