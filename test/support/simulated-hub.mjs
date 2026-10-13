@@ -166,7 +166,7 @@ export const METHOD_EVIDENCE = {
   "log.unsubscribe": [SCHEMA_ONLY],
   "window.get": [
     OBSERVED,
-    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove: a BLOCK's, Active showing its flag (2026-09-24-live-conformance-2), and a LOGIC's, a GLOBAL's and a predefined one's, keys and input types only (2026-09-24-live-conformance-3-read-only); OnStart and Sync showing the scenario's flags is assumed",
+    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove: a BLOCK's, Active showing its flag (2026-09-24-live-conformance-2), and a LOGIC's, a GLOBAL's and a predefined one's, keys and input types only (2026-09-24-live-conformance-3-read-only); OnStart and Sync showing the scenario's flags is assumed; a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3)",
   ],
   "window.update": [
     OBSERVED,
@@ -204,7 +204,10 @@ export const METHOD_EVIDENCE = {
     SCHEMA_ONLY,
     "2026-10-12-device-pairing K7-K9, H6, H9: inferred from the web client's code and reads of devices already paired",
   ],
-  "extensionChild.list": [OBSERVED, "2026-09-17-extension-child-empty-list"],
+  "extensionChild.list": [
+    OBSERVED,
+    "2026-09-17-extension-child-empty-list; a bridge's children, one per exportable accessory with its id, main or notConnected, also of a bridge that does not run (2026-10-13-wave4-contracts 3.2)",
+  ],
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
 };
 
@@ -1892,7 +1895,7 @@ const HANDLERS = {
 
   "window.get": (state, { windowKey }) => {
     const window = state.windows[windowKey];
-    if (!window) return null;
+    if (!window) return bridgeChildWindow(state, windowKey);
     if (windowKey === "") return withDiscoveryTime(state, window);
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
@@ -1924,9 +1927,9 @@ const HANDLERS = {
   // The list carries each extension's spaces with their actions, as
   // extension.get does (owner's hub, 2026-10-12-device-pairing P1).
   "extension.list": (state) => ({
-    extensions: state.extensions.map(({ children: _children, ...summary }) => ({
-      ...summary,
-      childCount: extensionChildren(state, summary.extensionKey).length,
+    extensions: state.extensions.map((extension) => ({
+      ...extensionView(extension),
+      childCount: extensionChildren(state, extension.extensionKey).length,
     })),
   }),
   "extension.get": (state, { extensionKey }) => {
@@ -1934,9 +1937,8 @@ const HANDLERS = {
       (candidate) => candidate.extensionKey === extensionKey,
     );
     if (!extension) return null;
-    const { children: _children, ...detail } = extension;
     return {
-      ...detail,
+      ...extensionView(extension),
       childCount: extensionChildren(state, extensionKey).length,
     };
   },
@@ -2165,11 +2167,10 @@ function completeJoin(state, extension, device, child) {
 }
 
 function pushExtension(state, extension) {
-  const { children: _children, ...detail } = extension;
   const event = {
     extension: {
       event: "EVENT_UPDATE",
-      extensions: [structuredClone(detail)],
+      extensions: [structuredClone(extensionView(extension))],
     },
   };
   later(state, SEARCH_EVENT_DELAY_MS, () => state.emit(event));
@@ -3414,13 +3415,15 @@ function logicOptions(state, { aId, sId, type }) {
 // Children of an extension: the recipients a fixture declares on a
 // notification service (the owner's web service lists one, id "2", on
 // 2026-09-24), then the devices of a controller, then the devices still
-// joining it.
+// joining it. A bridge lists the accessories it can export instead.
 function extensionChildren(state, extensionKey) {
-  const declared = (
-    state.extensions.find(
-      (extension) => extension.extensionKey === extensionKey,
-    )?.children ?? []
-  ).map((child) => ({
+  const extension = state.extensions.find(
+    (candidate) => candidate.extensionKey === extensionKey,
+  );
+  if (extension?.bundleType === "BRIDGE") {
+    return bridgeChildren(state, extension);
+  }
+  const declared = (extension?.children ?? []).map((child) => ({
     extensionKey,
     id: child.id,
     spaceKey: "main",
@@ -3447,6 +3450,118 @@ function extensionChildren(state, extensionKey) {
     .filter((child) => child.extensionKey === extensionKey)
     .map((child) => structuredClone(child));
   return [...declared, ...devices, ...joining];
+}
+
+// A bridge (HomeKit, Yandex, Google) lists one child per accessory it can
+// export, the accessory id as its id, in main when exported and in
+// notConnected when not, and the child's window under
+// <extensionKey with / for :>/Child/<aId>/; a new accessory shows in every
+// bridge as notConnected (owner's hub, 2026-10-13-wave4-contracts 3.2, 3.4).
+// A fixture bridge names its exported services by accessory id (exported:
+// {"16": [13]}) and the accessories it cannot export (unexportable: [39]):
+// which ones a bridge leaves out was not observed (70 to 80 of 81 there).
+// The child's name and online are the accessory's (assumed).
+function bridgeChildren(state, extension) {
+  const unexportable = new Set(extension.unexportable ?? []);
+  return state.accessories
+    .filter(({ id }) => !unexportable.has(id))
+    .map((accessory) => ({
+      extensionKey: extension.extensionKey,
+      id: String(accessory.id),
+      spaceKey:
+        bridgeExportedServices(extension, accessory).size > 0
+          ? "main"
+          : "notConnected",
+      name: accessory.name,
+      online: accessory.online,
+      optionsWindow: bridgeChildWindowKey(extension, accessory.id),
+    }));
+}
+
+function bridgeExportedServices(extension, accessory) {
+  return new Set(extension.exported?.[accessory.id] ?? []);
+}
+
+function bridgeChildWindowKey(extension, aId) {
+  return `${extension.extensionKey.replaceAll(":", "/")}/Child/${aId}/`;
+}
+
+// A bridge child's window: groups main and AccessoryGroup, the accessory as
+// a read-only ACCESSORY_LIST and a CHECKBOX s:<sId> per exportable service,
+// labelled with the service name, true when the bridge exports it; it reads
+// for a bridge that does not run too (2026-10-13-wave4-contracts 3.3). That
+// every service but the accessory information is exportable, and the
+// options' parents, are assumed.
+function bridgeChildWindow(state, windowKey) {
+  for (const extension of state.extensions) {
+    if (extension.bundleType !== "BRIDGE") continue;
+    const child = bridgeChildren(state, extension).find(
+      ({ optionsWindow }) => optionsWindow === windowKey,
+    );
+    if (!child) continue;
+    const accessory = state.accessories.find(
+      ({ id }) => String(id) === child.id,
+    );
+    const exported = bridgeExportedServices(extension, accessory);
+    const group = (key, name) => ({
+      key,
+      name,
+      type: "GenericInteger",
+      inputType: "GROUP",
+      parent: "",
+      read: true,
+      write: false,
+      value: { intValue: 0 },
+    });
+    return {
+      windowKey,
+      label: { text: accessory.name },
+      options: [
+        group("main", "Сервисы"),
+        group("AccessoryGroup", "Аксессуар"),
+        {
+          key: "Accessory",
+          name: "Аксессуар",
+          type: "GenericInteger",
+          inputType: "ACCESSORY_LIST",
+          parent: "AccessoryGroup",
+          read: true,
+          write: false,
+          events: false,
+          value: { intValue: 0 },
+          validValues: [
+            { value: { intValue: accessory.id }, name: accessory.name },
+          ],
+        },
+        ...accessory.services
+          .filter(({ type }) => type !== "AccessoryInformation")
+          .map((service) => ({
+            key: `s:${service.sId}`,
+            name: service.name,
+            type: "GenericBoolean",
+            inputType: "CHECKBOX",
+            parent: "main",
+            read: true,
+            write: true,
+            events: false,
+            value: { boolValue: exported.has(service.sId) },
+          })),
+      ],
+    };
+  }
+  return null;
+}
+
+// An extension as the hub shows it: without what a fixture declares for
+// its children (children, a bridge's exported and unexportable).
+function extensionView(extension) {
+  const {
+    children: _children,
+    exported: _exported,
+    unexportable: _unexportable,
+    ...view
+  } = extension;
+  return view;
 }
 
 // accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual

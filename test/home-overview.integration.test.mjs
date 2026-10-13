@@ -141,7 +141,7 @@ test("home_overview names the home, its rooms, scenario counts, extensions and p
       enabled: false,
     },
   );
-  assert.equal(body.extensions.length, 5);
+  assert.equal(body.extensions.length, 6);
   // A disabled, stopped provider is the owner's choice, not a problem.
   assert.deepEqual(body.problems, [
     {

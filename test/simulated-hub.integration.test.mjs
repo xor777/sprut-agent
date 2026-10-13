@@ -883,7 +883,7 @@ test("the simulator omits empty native lists and stores BLOCK values as the hub 
   );
   assert.deepEqual(
     await list({
-      extensionChild: { list: { extensionKey: "Bridge:homekit" } },
+      extensionChild: { list: { extensionKey: "Notification:telegram" } },
     }),
     {},
   );
