@@ -1790,9 +1790,15 @@ export class AutomationService {
       direction === "restore"
         ? "baseline_value_missing"
         : "requested_value_missing";
+    // expected_missing: the read still shows what the write would replace
+    // (restoreGoesOn); anything else is left unexplained.
+    const unchanged =
+      direction === "restore" ? change.requested_value : change.baseline_value;
     return {
       direction,
-      outcome: "expected_missing",
+      outcome: valuesEqual(current, unchanged)
+        ? "expected_missing"
+        : "unexplained",
       current,
       contract,
       result: await this.#finishNative(change, "uncertain", current, {
@@ -2311,17 +2317,10 @@ export class AutomationService {
         direction === "restore"
           ? await this.#reconcileAccessoryRestore(change, false)
           : await this.#reconcileAccessoryApply(change, false);
-      if (pending.result.status === "restored") return pending.result;
-      if (direction === "apply" && pending.result.status === "applied") {
-        current = pending.current;
-      } else {
-        const retryableRestore =
-          direction === "restore" &&
-          pending.outcome === "expected_missing" &&
-          accessoryPlacementMatches(pending.current, change.applied_snapshot);
-        if (!retryableRestore) return pending.result;
-        current = pending.current;
+      if (!restoreGoesOn({ direction, outcome: pending.outcome })) {
+        return pending.result;
       }
+      current = pending.current;
     }
     if (change.applied_snapshot === undefined) {
       return this.#finishNative(change, "not_owned", undefined, {
@@ -4225,17 +4224,14 @@ export class AutomationService {
       const pending = await this.#reconcilePendingValueChange(change, {
         requireWrite: true,
       });
+      // A device command's restore is not resent by itself: its first
+      // write may still be on its way (restoreResendNext offers it).
       if (pending) {
-        const completedApply =
-          pending.direction === "apply" &&
-          pending.outcome === "expected_observed";
-        const unconfirmedRestore =
-          pending.direction === "restore" &&
-          pending.outcome === "expected_missing" &&
-          valuesEqual(pending.current, change.requested_value);
-        const retryableRestore =
-          unconfirmedRestore && isRetryableNativeValueChange(change);
-        if (!completedApply && !retryableRestore) return pending.result;
+        const goesOn =
+          restoreGoesOn(pending) &&
+          (pending.direction === "apply" ||
+            isRetryableNativeValueChange(change));
+        if (!goesOn) return pending.result;
         currentState = { value: pending.current, contract: pending.contract };
       }
     }
@@ -12037,6 +12033,19 @@ function nativeIntentDirection(change) {
     change.write_intent?.direction ??
     (change.status === "restoring" ? "restore" : "apply")
   );
+}
+
+// A restore after a write whose outcome was unknown (its answer lost, the
+// server stopped before the journal held it, or the hub acknowledged it
+// without the result) is decided by the fresh read that settled that
+// write: it goes on to send only while the read shows the change in place,
+// an apply that took effect after all (expected_observed) or a restore
+// that did not (expected_missing). Back as before, changed since or not
+// read, the settled answer stands.
+function restoreGoesOn({ direction, outcome }) {
+  return direction === "apply"
+    ? outcome === "expected_observed"
+    : outcome === "expected_missing";
 }
 
 function nativeValueIntentEvidence(change) {
