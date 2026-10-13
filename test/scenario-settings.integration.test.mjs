@@ -28,6 +28,9 @@ const BLOCK = "5";
 const LOGIC = "9";
 const GLOBAL = "20";
 const BUILT_IN = "21";
+// A LOGIC whose code holds a camera link with a key: every answer shows
+// that code as [REDACTED].
+const KEYED_LOGIC = "22";
 const LOGIC_NAME = "Защита от протечки";
 const LOGIC_DESC = "Отключает розетку чайника при протечке под мойкой";
 
@@ -62,6 +65,27 @@ async function setup(t) {
         "  sourceCharacteristics: [HC.On],",
         "};",
         "function trigger() {}",
+      ].join("\n"),
+    },
+    {
+      index: KEYED_LOGIC,
+      name: "Снимок с камеры",
+      desc: "Сохраняет снимок при звонке",
+      type: "LOGIC",
+      active: true,
+      onStart: false,
+      sync: false,
+      data: [
+        "info = {",
+        '  name: "Снимок с камеры",',
+        '  description: "Сохраняет снимок при звонке",',
+        "  onStart: false,",
+        "  sourceServices: [HS.Doorbell],",
+        "  sourceCharacteristics: [HC.ProgrammableSwitchEvent],",
+        "};",
+        "function trigger() {",
+        '  Hub.http("http://camera.local/snapshot?token=f81d4fae7dec").get();',
+        "}",
       ].join("\n"),
     },
   );
@@ -273,6 +297,74 @@ test("a LOGIC's Name, Desc and OnStart in its options window are refused before 
   );
   await restore(client, sync);
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// Code with credential-shaped text reads back as [REDACTED], so the agent
+// cannot change info in it, and writing [REDACTED] back is refused: the
+// refusal and the offer send the owner to the SprutHub app instead of to
+// a code the agent cannot read.
+test("a LOGIC whose code the agent cannot read is not renamed through it: the refusal and get_entity say the owner changes it in the SprutHub app", async (t) => {
+  const { hub, client } = await setup(t);
+  const entity = await call(client, "get_entity", {
+    entity_ref: scenarioRef(KEYED_LOGIC),
+    include: ["configuration"],
+  });
+  assert.equal(entity.entity.configuration.value, "[REDACTED]");
+  const offers = Object.fromEntries(
+    entity.entity.metadata_options.map(({ key, native_change: offer }) => [
+      key,
+      offer,
+    ]),
+  );
+  const refusals = [];
+  for (const [optionKey, value] of [
+    ["Name", "Камера у двери"],
+    ["Desc", "Новое описание"],
+    ["OnStart", true],
+  ]) {
+    assert.equal(offers[optionKey].supported, false, optionKey);
+    assert.equal(offers[optionKey].reason, "logic_info_in_code", optionKey);
+    refusals.push(
+      ["offer", offers[optionKey]],
+      [
+        "scenario ref",
+        await refusal(client, "prepare_native_change", {
+          operation: "window_option",
+          target_ref: scenarioRef(KEYED_LOGIC),
+          option_key: optionKey,
+          value,
+          reason: "Владелец попросил",
+        }),
+      ],
+      [
+        "window ref",
+        await refusal(client, "prepare_native_change", {
+          operation: "window_option",
+          target_ref: windowRef(hub, KEYED_LOGIC),
+          option_key: optionKey,
+          value,
+          reason: "Владелец попросил",
+        }),
+      ],
+      [
+        "contract",
+        await refusal(client, "get_native_change_contract", {
+          operation: "window_option",
+          target_ref: scenarioRef(KEYED_LOGIC),
+          option_key: optionKey,
+        }),
+      ],
+    );
+  }
+  for (const [where, answer] of refusals) {
+    const message = answer.message ?? answer.error?.message;
+    assert.equal(answer.error?.code ?? answer.reason, "logic_info_in_code");
+    // No way into a code read that shows only [REDACTED].
+    assert.equal(answer.next, undefined, where);
+    assert.match(message, /SprutHub app/, where);
+  }
+  assert.equal(offers.Sync.supported, true);
+  assert.deepEqual(hub.writes(), []);
 });
 
 test("«переименуй сценарий» of a LOGIC follows the refusal to its code: info.name changes, the prepare says the name it sets, and restore puts the old name back", async (t) => {
