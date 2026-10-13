@@ -1098,7 +1098,6 @@ export class AutomationService {
       const results = [];
       for (const [index, item] of items.entries()) {
         const service = serviceKey(item.draft.fields.target);
-        const lampOn = item.onTarget ? lampsOn.get(service) : undefined;
         // An earlier command of this call to the same device may already
         // have changed this value (a level above 0 switches a lamp with
         // «Связь включения и уровня» on): its value before the call, read
@@ -1116,13 +1115,7 @@ export class AutomationService {
             changes,
             homeRef,
             reason,
-            {
-              group_id: groupId,
-              group_index: index,
-              ...(typeof lampOn?.value === "boolean"
-                ? { lamp_on_before: lampOn.value }
-                : {}),
-            },
+            { group_id: groupId, group_index: index },
             touchedEarlier ? item.draft.value : undefined,
           ),
         );
@@ -1778,13 +1771,14 @@ export class AutomationService {
 
   // «Верни как было»: the agent's own changes of one request, undone
   // newest first so a later change of the same target goes before the one
-  // it built on; a lamp's On and level in the order restoreOrder gives.
-  // Each item is decided by the home right before its own write and
-  // answers for itself; nothing is undone as all-or-nothing.
+  // it built on. Each item is decided by the home right before its own
+  // write and answers for itself; nothing is undone as all-or-nothing.
   async restoreChanges(references) {
     const parsed = references.map(parseRestoreRef);
     return this.#exclusiveWrite(async () => {
-      const ordered = restoreOrder(await this.#restoreEntries(parsed));
+      const ordered = (await this.#restoreEntries(parsed)).sort((left, right) =>
+        compareApplication(right.change, left.change),
+      );
       const results = [];
       for (const entry of ordered) {
         results.push(await this.#restoreEntry(entry));
@@ -4081,15 +4075,7 @@ export class AutomationService {
           valuesEqual(pending.current, change.requested_value);
         const retryableRestore =
           unconfirmedRestore && isRetryableNativeValueChange(change);
-        if (!completedApply && !retryableRestore) {
-          // The device still shows the agent's value, so the item offers
-          // the resend of this undo write (restoreResendNext): a level
-          // passes the same lamp check as the write itself.
-          const lampOff =
-            unconfirmedRestore &&
-            (await this.#lampOffLevelSkip(change, pending.current));
-          return lampOff || pending.result;
-        }
+        if (!completedApply && !retryableRestore) return pending.result;
         currentState = { value: pending.current, contract: pending.contract };
       }
     }
@@ -4106,6 +4092,25 @@ export class AutomationService {
           "This native value cannot be restored automatically.",
         "get_native_change",
       );
+    }
+    const accessory = nativeValueKind(change.kind).command
+      ? await this.client.getAccessory(change.target.aId)
+      : undefined;
+    // With «Связь включения и уровня», which the owner's hub assigns to
+    // every dimmable lamp, a brightness write switches a lamp that is off
+    // on (2026-10-13-lamp-logic-undo). Undo never writes a level of a lamp
+    // (a service with On), whether or not the logic is assigned to it, nor
+    // offers to: it puts back only the lamp's On.
+    if (lightLevelOnTarget(accessory, change.target, change.contract?.type)) {
+      return {
+        ...publicNativeChange(change, current),
+        restore_outcome: {
+          status: "skipped",
+          reason: "lamp_level_not_restored",
+          message:
+            "Nothing was written: on the hub's lamps a brightness write switches an off lamp on, so undo puts back only a lamp's on/off, not its brightness or color. Tell the owner, who can set it again.",
+        },
+      };
     }
     const ownershipLoss = await this.#finishObservedValueOwnershipLoss(
       change,
@@ -4125,9 +4130,6 @@ export class AutomationService {
     }
     // An offline device shows its last known values, which say nothing of
     // its state now: nothing is decided or written for it.
-    const accessory = nativeValueKind(change.kind).command
-      ? await this.client.getAccessory(change.target.aId)
-      : undefined;
     if (accessory?.online === false) {
       return {
         ...publicNativeChange(change, current),
@@ -4158,8 +4160,6 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
-    const lampOff = await this.#lampOffLevelSkip(change, current, accessory);
-    if (lampOff) return lampOff;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -4172,76 +4172,6 @@ export class AutomationService {
       return this.#reconcileValueAfterWrite(change, "restore");
     }
     return this.#reconcileValueAfterWrite(change, "restore", true);
-  }
-
-  // With «Связь включения и уровня» (LightbulbControl), which the owner's
-  // hub assigns to every dimmable lamp, a Brightness write above 0 switches
-  // a lamp that is off on, and 0 switches it off without being stored: the
-  // level stays (2026-10-13-lamp-logic-undo). Every level write of undo,
-  // and every resend of one that undo offers, passes here: a level of 0 is
-  // never written, and a level above 0 only to a lamp whose On, read right
-  // now, is on. A restore that switches the lamp back on writes its On
-  // first (restoreOrder), so this read sees it on. Whether the logic is
-  // assigned is not checked: every lamp with On and Brightness is treated
-  // as having it. Hue, Saturation and ColorTemperature are not checked.
-  async #lampOffLevelSkip(change, current, accessory) {
-    if (
-      change.kind !== "characteristic_value" ||
-      change.contract?.type !== "Brightness"
-    ) {
-      return undefined;
-    }
-    const onTarget = lightLevelOnTarget(
-      accessory ?? (await this.client.getAccessory(change.target.aId)),
-      change.target,
-      "Brightness",
-    );
-    if (!onTarget) return undefined;
-    const skipped = (outcome) => ({
-      ...publicNativeChange(change, current),
-      restore_outcome: { status: "skipped", ...outcome },
-    });
-    if (Number(change.baseline_value?.value) === 0) {
-      return skipped({
-        reason: "not_restorable",
-        message:
-          "A lamp keeps no level of 0: writing 0 switches it off and leaves the level as it is, so nothing was written. Its On is put back on its own.",
-      });
-    }
-    const on = typedNativeValue(
-      (await this.client.getCharacteristic(onTarget)).control.value,
-    );
-    if (on.value !== false) return undefined;
-    // The agent's own later command that switched the lamp off, named only
-    // when undoing it would switch the lamp back on.
-    const later = await this.#laterOwnedValueChange(
-      { ...change, target: onTarget },
-      on,
-    );
-    if (
-      later?.baseline_value?.value === true &&
-      nativeValueLifecycle(later).phase !== "right_lost"
-    ) {
-      return skipped({
-        reason: "later_change",
-        later_change_ref: `spruthub-change://native/${later.id}`,
-        message:
-          "The agent's later command switched this lamp off, and writing its level back would switch it on, so nothing was written. Undo later_change_ref together with this change.",
-      });
-    }
-    if (change.lamp_on_before === true) {
-      return skipped({
-        reason: "changed_since",
-        already_previous: false,
-        message:
-          "The lamp was switched off after the agent's change, and writing its level back would switch it on, so nothing was written.",
-      });
-    }
-    return skipped({
-      reason: "lamp_off",
-      message:
-        "The lamp is off, and writing a level above 0 can switch it on, so nothing was written; the level stays as the agent set it.",
-    });
   }
 
   async #observeProvenNativeValue(change, current) {
@@ -12583,61 +12513,6 @@ function parseRestoreRef(ref) {
   return { type: match[1], id: match[2] };
 }
 
-// Newest first, so each change is undone before the ones it built on. A
-// lamp with both On and level changes here has them undone together, at
-// the place of its newest one, each kind newest first. A level is written
-// only to a lamp that is on (#lampOffLevelSkip), so the levels go right
-// after the last On change that this restore switches back on: the lamp
-// comes on at its stored level, then takes the level back. With no such
-// On change they go before the On changes, while the lamp is still on:
-// switching it off first would let the level switch it on again
-// (2026-10-13-lamp-logic-undo, U1–U4).
-function restoreOrder(entries) {
-  const ordered = [...entries].sort((left, right) =>
-    compareApplication(right.change, left.change),
-  );
-  const lamp = ({ change }) => lampKey(change);
-  const isLevel = (entry) =>
-    lamp(entry) !== null && LIGHT_LEVEL_TYPES.has(entry.change.contract?.type);
-  const isOn = (entry) =>
-    lamp(entry) !== null && entry.change.contract?.type === "On";
-  const isLampPart = (entry) => isOn(entry) || isLevel(entry);
-  const lamps = new Map();
-  for (const entry of ordered.filter(isLampPart)) {
-    const parts = lamps.get(lamp(entry)) ?? { on: [], levels: [] };
-    (isOn(entry) ? parts.on : parts.levels).push(entry);
-    lamps.set(lamp(entry), parts);
-  }
-  const result = [];
-  const placed = new Set();
-  for (const entry of ordered) {
-    const parts = isLampPart(entry) ? lamps.get(lamp(entry)) : undefined;
-    if (!parts || parts.on.length === 0 || parts.levels.length === 0) {
-      result.push(entry);
-      continue;
-    }
-    if (placed.has(lamp(entry))) continue;
-    placed.add(lamp(entry));
-    const split =
-      parts.on.findLastIndex(
-        ({ change }) => change.baseline_value?.value === true,
-      ) + 1;
-    result.push(
-      ...parts.on.slice(0, split),
-      ...parts.levels,
-      ...parts.on.slice(split),
-    );
-  }
-  return result;
-}
-
-// The service a characteristic command belongs to, such as one lamp.
-function lampKey(change) {
-  return change.kind === "characteristic_value" && change.target
-    ? serviceKey(change.target)
-    : null;
-}
-
 function serviceKey({ aId, sId }) {
   return `${aId}.${sId}`;
 }
@@ -12939,8 +12814,8 @@ function restoreChangesResult(homeRef, results) {
     summary,
     results,
     limitations: [
-      "Results are in the order the changes were undone: newest first; a lamp switched back on gets its On before its brightness, one switched off its brightness first. Each item was checked against the home right before its own write.",
-      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_off: brightness is not written, nor offered for resend, to a lamp that is off, as it can switch the lamp on; this holds for every lamp with On and Brightness, as whether its lamp logic is assigned is not checked. Hue, saturation and color temperature are written without this check.",
+      "Results are in the order the changes were undone: newest first. Each item was checked against the home right before its own write.",
+      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_level_not_restored: undo puts back only a lamp's on/off, never its brightness, hue, saturation or color temperature, as on the hub's lamps a brightness write switches an off lamp on; a lamp is any service with On and such a level.",
       "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, sent notifications and HTTP requests cannot be undone.",
     ],
   };
