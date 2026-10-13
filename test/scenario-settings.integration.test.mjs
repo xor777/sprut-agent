@@ -533,6 +533,30 @@ test("a new code whose info is not plain values says the name, description and s
   assert.deepEqual(hub.writes(), []);
 });
 
+// The warning says what is wrong with each value, so the agent can fix
+// that one: a name built from parts, an info without onStart.
+test("a new code whose info lacks onStart and builds its name from parts says why each is unknown", async (t) => {
+  const { hub, client } = await setup(t);
+  const source = scenarioOf(hub, LOGIC).data;
+  assert.ok(source.includes("  onStart: false,\n"));
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: source
+      .replace(`name: "${LOGIC_NAME}"`, 'name: "Защита " + "от протечки"')
+      .replace("  onStart: false,\n", ""),
+    reason: "Собрать имя из частей",
+  });
+  assert.deepEqual(prepared.code_sets, [
+    { field: "name", from: LOGIC_NAME, unknown: true },
+    { field: "on_start", from: false, unknown: true },
+  ]);
+  assert.equal(prepared.warnings.length, 1);
+  assert.match(prepared.warnings[0], /info has no onStart/);
+  assert.match(prepared.warnings[0], /info\.name is not a plain string/);
+  assert.deepEqual(hub.writes(), []);
+});
+
 test("OnStart and Sync of a BLOCK and a GLOBAL, and Sync of a LOGIC, change through window_option and restore", async (t) => {
   const { hub, client } = await setup(t);
   const initial = hub.snapshot();
@@ -610,14 +634,20 @@ test("built-in scenarios are refused before anything is sent", async (t) => {
     ["OnStart", false],
     ["Sync", true],
   ]) {
-    const refused = await refusal(client, "prepare_native_change", {
-      operation: "window_option",
-      target_ref: scenarioRef(BUILT_IN),
-      option_key: optionKey,
-      value,
-      reason: "Владелец попросил",
-    });
-    assert.equal(refused.error.code, "predefined_scenario_read_only");
+    for (const targetRef of [scenarioRef(BUILT_IN), windowRef(hub, BUILT_IN)]) {
+      const refused = await refusal(client, "prepare_native_change", {
+        operation: "window_option",
+        target_ref: targetRef,
+        option_key: optionKey,
+        value,
+        reason: "Владелец попросил",
+      });
+      assert.equal(
+        refused.error.code,
+        "predefined_scenario_read_only",
+        `${optionKey} ${targetRef}`,
+      );
+    }
   }
   const contract = await refusal(client, "get_native_change_contract", {
     operation: "window_option",
