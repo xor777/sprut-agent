@@ -335,7 +335,7 @@ export class AutomationService {
       updated_at: now,
       history: [{ status: "prepared", at: now }],
     };
-    await this.store.save(change);
+    await this.#saveBeforeWrite(change);
     return change;
   }
 
@@ -1101,7 +1101,7 @@ export class AutomationService {
       const devices = await this.#readCommandDevices([
         ...new Set(targets.map(({ aId }) => aId)),
       ]);
-      const changes = await this.store.list();
+      const changes = await this.#readJournalBeforeWrite();
       const items = await this.#validateDeviceCommands(
         commands,
         targets,
@@ -6035,6 +6035,18 @@ export class AutomationService {
       throw new SprutHubError(
         "state_storage_unavailable",
         "Could not save the recovery state required before writing to SprutHub.",
+        "restore_state_storage_then_retry",
+      );
+    }
+  }
+
+  async #readJournalBeforeWrite() {
+    try {
+      return await this.store.list();
+    } catch {
+      throw new SprutHubError(
+        "state_storage_unavailable",
+        "Could not read the recovery state required before writing to SprutHub, so nothing was sent.",
         "restore_state_storage_then_retry",
       );
     }
