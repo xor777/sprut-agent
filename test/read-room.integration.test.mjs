@@ -459,15 +459,33 @@ async function startMcpClient(t, hub, environment = {}) {
   return client;
 }
 
-function readRoomServices(client, roomRef) {
+// refresh has the room read from the hub rather than from the home the MCP
+// process keeps warm.
+function readRoomServices(client, roomRef, { refresh = false } = {}) {
   return client.callTool({
     name: "find_devices",
     arguments: {
       home_ref: roomRef.replace(/\/room\/\d+$/, ""),
       room_ref: roomRef,
       max_bytes: 32_768,
+      ...(refresh ? { refresh: true } : {}),
     },
   });
+}
+
+// Pushes a characteristic's new value to every connection, as the hub does
+// when a value changes, and waits for it to reach the MCP process.
+async function pushValue(hub, { aId, sId, cId }, value) {
+  const frame = JSON.stringify({
+    event: {
+      characteristic: {
+        event: "EVENT_UPDATE",
+        characteristics: [{ aId, sId, cId, control: { value } }],
+      },
+    },
+  });
+  for (const socket of hub.server.clients) socket.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 150));
 }
 
 function servicesOf(body) {
@@ -616,8 +634,8 @@ test("MCP discovers every room before reading the selected stable reference", as
   );
   assert.match(reading.observed_at, /^\d{4}-\d{2}-\d{2}T/);
 
-  // The overview left the home's names in the session catalog; the room
-  // read asks the hub for that room's devices only, in one request.
+  // The overview read the home whole; the room answers from the home the
+  // MCP process keeps warm, without a request.
   assert.deepEqual(
     hub.requests.slice(0, overviewRequests).map(({ params }) => params),
     [
@@ -628,22 +646,7 @@ test("MCP discovers every room before reading the selected stable reference", as
       { extension: { list: {} } },
     ],
   );
-  assert.deepEqual(
-    hub.requests.slice(overviewRequests).map(({ serial, params }) => ({
-      serial,
-      params,
-    })),
-    [
-      {
-        serial: "test-hub",
-        params: {
-          accessory: {
-            list: { roomId: 10, expand: "services,characteristics" },
-          },
-        },
-      },
-    ],
-  );
+  assert.deepEqual(hub.requests.slice(overviewRequests), []);
 });
 
 test("find_devices returns one complete mixed-room view without per-service reads", async (t) => {
@@ -1367,6 +1370,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
     accessories: [observedAccessory],
   });
   const client = await startMcpClient(t, hub);
+  // Each read takes the hub's current device, edited between reads.
   const read = async () => {
     const result = await client.callTool({
       name: "find_devices",
@@ -1375,6 +1379,7 @@ test("observed multisensor projection keeps readable native enum meaning", async
         room_ref: "spruthub://hub/test-hub/room/20",
         include_technical: true,
         max_bytes: 32_768,
+        refresh: true,
       },
     });
     assert.equal(result.isError, undefined, result.content[0]?.text);
@@ -1585,6 +1590,7 @@ test("repeated MCP reads return the latest hub values without losing false, zero
   hub.state.accessories[1].services[0].characteristics[0].control.value = {
     doubleValue: 24.75,
   };
+  await pushValue(hub, { aId: 101, sId: 1, cId: 1 }, { doubleValue: 24.75 });
 
   const secondResult = await readRoomServices(
     client,
@@ -1623,9 +1629,9 @@ test("repeated MCP reads return the latest hub values without losing false, zero
     },
   );
   assert.match(secondRoom.observed_at, /^\d{4}-\d{2}-\d{2}T/);
-  // The first read takes names and values in two whole reads; the second
-  // reads only the room.
-  assert.equal(hub.requests.length, 3);
+  // The first read takes the home in two whole reads; the second answers
+  // from it, with the value the hub pushed.
+  assert.equal(hub.requests.length, 2);
 });
 
 test("room catalog keeps duplicate and prefixed names for agent-side selection", async (t) => {
@@ -2017,6 +2023,7 @@ test("connection failures stay bounded and recover with a fresh reading in the s
   const interrupted = await readRoomServices(
     recoveringClient,
     "spruthub://hub/test-hub/room/10",
+    { refresh: true },
   );
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",
@@ -2118,6 +2125,7 @@ test("a post-open WebSocket error is retryable in the same MCP session", async (
   const interrupted = await readRoomServices(
     client,
     "spruthub://hub/test-hub/room/10",
+    { refresh: true },
   );
   assert.deepEqual(interrupted.structuredContent, {
     status: "error",

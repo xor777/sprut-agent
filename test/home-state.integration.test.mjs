@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SprutHubClient } from "../src/spruthub-client.mjs";
@@ -23,20 +23,30 @@ const projectRoot = path.resolve(
   "..",
 );
 
-async function setup(t, fixture, { eventEveryMs, timeoutMs = 3000 } = {}) {
+// With clockStepMs the server runs with test/support/shifted-clock.mjs and
+// shiftClock moves its clock that far forward.
+async function setup(
+  t,
+  fixture,
+  { eventEveryMs, timeoutMs = 3000, clockStepMs } = {},
+) {
   const hub = await startSimulatedHub(fixture, { eventEveryMs });
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-home-state-"),
   );
+  const clockModule = pathToFileURL(
+    path.join(projectRoot, "test/support/shifted-clock.mjs"),
+  ).href;
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/server.mjs"],
+    args: [...(clockStepMs ? ["--import", clockModule] : []), "src/server.mjs"],
     cwd: projectRoot,
     env: {
       PATH: process.env.PATH,
       ...hub.connectionEnv(),
       SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
       SPRUT_AGENT_STATE_DIR: stateDirectory,
+      ...(clockStepMs ? { SPRUT_TEST_CLOCK_STEP_MS: String(clockStepMs) } : {}),
     },
     stderr: "pipe",
   });
@@ -61,8 +71,20 @@ async function setup(t, fixture, { eventEveryMs, timeoutMs = 3000 } = {}) {
     assert.equal(result.isError, true, result.content[0]?.text);
     return result.structuredContent;
   };
+  const shiftClock = async () => {
+    const shifted = new Promise((resolve) => {
+      const onData = (chunk) => {
+        if (!String(chunk).includes("clock shifted")) return;
+        transport.stderr.off("data", onData);
+        resolve();
+      };
+      transport.stderr.on("data", onData);
+    });
+    process.kill(transport.pid, "SIGUSR2");
+    await shifted;
+  };
   const home = `spruthub://hub/${encodeURIComponent(hub.serial)}`;
-  return { hub, call, callError, home };
+  return { hub, call, callError, home, shiftClock };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -256,6 +278,8 @@ test("a gap in the hub's events makes the next answer read the home again", asyn
   // The connection is cut; the lamp is switched off before the MCP process
   // reconnects, so no event of it can arrive.
   await hub.dropConnections();
+  // The MCP process sees the close.
+  await sleep(300);
   hub.changeByHand({ ...floorLampOn, value: { boolValue: false } });
   const afterLoss = await call("find_devices", { state: "on" });
   assert(methods(afterLoss.native).includes("accessory.list"));
@@ -279,6 +303,45 @@ test("a gap in the hub's events makes the next answer read the home again", asyn
     servicesOnInState(hub.state, home),
   );
   assert(onRefs(afterTimeout.body).includes(`${home}/accessory/16/service/13`));
+});
+
+// A connection gone without a close (a network drop, a sleeping laptop)
+// carries no frames; nor would the events of an edit this state cannot
+// follow announce themselves. The clock is moved instead of waited for.
+test("the warm home is read whole again after a quiet minute on its connection and five minutes after the last whole read", async (t) => {
+  const quiet = await setup(t, await loadHomeFixture("apartment"), {
+    clockStepMs: 90_000,
+  });
+  await quiet.call("home_overview", {});
+  assert.deepEqual(
+    (await quiet.call("find_devices", { state: "on" })).native,
+    [],
+  );
+  await quiet.shiftClock();
+  const afterQuiet = await quiet.call("find_devices", { state: "on" });
+  assert(methods(afterQuiet.native).includes("accessory.list"));
+  assert.deepEqual(
+    (await quiet.call("find_devices", { state: "on" })).native,
+    [],
+  );
+
+  // The hub's events keep the connection busy, yet five minutes after the
+  // last whole read the home is read whole again.
+  const busy = await setup(t, await loadHomeFixture("apartment"), {
+    clockStepMs: 90_000,
+    eventEveryMs: 20,
+  });
+  await busy.call("home_overview", {});
+  await busy.shiftClock();
+  await settle();
+  assert.deepEqual(
+    (await busy.call("find_devices", { state: "on" })).native,
+    [],
+  );
+  for (let step = 0; step < 3; step += 1) await busy.shiftClock();
+  await settle();
+  const afterMaxAge = await busy.call("find_devices", { state: "on" });
+  assert(methods(afterMaxAge.native).includes("accessory.list"));
 });
 
 test("devices added, moved and removed in the SprutHub app follow the hub's events", async (t) => {
@@ -409,7 +472,7 @@ test("the warm home gives a characteristic's value and says when it cannot be tr
     reason: "not_found",
   });
   await hub.dropConnections();
-  await settle();
+  await sleep(300);
   const lost = client.liveValue(floorLampOn);
   assert.equal(lost.trusted, false);
   assert.equal(lost.reason, "connection_lost");
