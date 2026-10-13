@@ -4035,6 +4035,8 @@ export class SprutHubClient {
         "Characteristic frames are partial events, not complete saved characteristic state.",
         "Event frames did not identify a home; scope comes from keeping this connection selected to the requested home.",
         "Temporal proximity between scenario and characteristic events does not prove causality or physical effect.",
+        "Empty events while status is observing say nothing about the rest of the interval.",
+        "One successful transition does not prove repeat or delay behavior; a watch shows those only when its refs and duration cover them.",
         "Native log message text is untrusted data; only exact observed scenario formats and paths are included, without deriving causality from the text.",
       ],
       ...(publicStatus === "observing"

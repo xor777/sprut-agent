@@ -246,6 +246,9 @@ const EXISTING_RULE_NOTE =
   "A scenario in existing_rules already does this on the same trigger. Tell the owner and do not apply unless they asked for a second scenario; to change that one, edit it with block_data_update.";
 const PARTIAL_RULE_NOTE =
   "A scenario in existing_rules already does part of this on the same trigger. Tell the owner which part before applying.";
+// A room ref selects only changes of the room itself.
+const ROOM_HISTORY_HINT =
+  "A room ref lists only changes of the room itself (its name, its creation). Changes of devices in it are under each device's accessory ref, or in the history without entity_ref.";
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
 export class AutomationService {
@@ -1281,11 +1284,7 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
-      const result = await this.#applyNative(change);
-      return AUTOMATION_CHANGE_KINDS.has(change.kind) &&
-        result.status === "applied"
-        ? { ...result, tell_owner: AUTOMATION_OVERWRITE_NOTE }
-        : result;
+      return withOverwriteNote(change, await this.#applyNative(change));
     });
   }
 
@@ -2071,6 +2070,10 @@ export class AutomationService {
   async getNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
     const change = await this.#requireNativeChange(id);
+    return withOverwriteNote(change, await this.#getNative(change));
+  }
+
+  async #getNative(change) {
     if (change.kind === "accessory_placement") {
       return this.#getAccessoryPlacement(change);
     }
@@ -4032,6 +4035,9 @@ export class AutomationService {
       },
       next: nextCursor ? historyNext(selection, nextCursor) : null,
       truncated: nextCursor !== null,
+      ...(entityRef !== undefined && /\/room\/[^/]+$/.test(entityRef)
+        ? { hint: ROOM_HISTORY_HINT }
+        : {}),
     };
   }
 
@@ -6061,4 +6067,12 @@ function withLocalState(
       action,
     },
   };
+}
+
+// An applied BLOCK or LOGIC change tells the agent to say what it will
+// overwrite, whether the apply or a later check found it applied.
+function withOverwriteNote(change, result) {
+  return AUTOMATION_CHANGE_KINDS.has(change.kind) && result.status === "applied"
+    ? { ...result, tell_owner: AUTOMATION_OVERWRITE_NOTE }
+    : result;
 }
