@@ -1045,6 +1045,9 @@ async function loadFixtureFile(file) {
 // another order than sent, as the owner's hub handled several writes on one
 // socket (2026-10-13-parallel-writes, 1.2, 2 and 3). Each request record
 // gets received_ms and answered_ms on one monotonic clock.
+// onRequest({method, params}) is called as each request arrives, before
+// it waits or is handled: a test can see what the client had saved by the
+// time the request left it.
 export async function startSimulatedHub(
   fixture,
   {
@@ -1056,6 +1059,7 @@ export async function startSimulatedHub(
     hubTime,
     eventEveryMs,
     latencyMs,
+    onRequest,
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
@@ -1177,6 +1181,10 @@ export async function startSimulatedHub(
       connection.first_request_at ??= Date.now();
       arrivals += 1;
       const receivedAt = performance.now();
+      if (onRequest) {
+        const params = paramsOfRaw(raw);
+        if (params) onRequest({ method: methodOf(params), params });
+      }
       const latency =
         typeof latencyMs === "function"
           ? latencyMs({ method: methodOfRaw(raw), arrival: arrivals })
@@ -1410,8 +1418,12 @@ function withoutEmptyLists(value) {
 }
 
 function methodOfRaw(raw) {
+  return methodOf(paramsOfRaw(raw));
+}
+
+function paramsOfRaw(raw) {
   try {
-    return methodOf(JSON.parse(raw.toString())?.params);
+    return JSON.parse(raw.toString())?.params ?? null;
   } catch {
     return null;
   }

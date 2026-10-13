@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -81,7 +82,8 @@ async function houseWithSpots() {
   };
 }
 
-async function setup(t, { faults = {}, timeoutMs } = {}) {
+// onRequest(request, stateDirectory): see startSimulatedHub.
+async function setup(t, { faults = {}, timeoutMs, onRequest } = {}) {
   const fixture = await houseWithSpots();
   const lamps = fixture.accessories
     .filter(({ roomId }) => roomId === LIVING_ROOM)
@@ -90,13 +92,14 @@ async function setup(t, { faults = {}, timeoutMs } = {}) {
         .filter(({ type }) => type === "Lightbulb")
         .map(({ sId }) => ({ aId: id, sId })),
     );
-  const hub = await startSimulatedHub(fixture, {
-    latencyMs,
-    faults: { ...faults, lampLogic: lamps },
-  });
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-parallel-commands-"),
   );
+  const hub = await startSimulatedHub(fixture, {
+    latencyMs,
+    faults: { ...faults, lampLogic: lamps },
+    onRequest: onRequest && ((request) => onRequest(request, stateDirectory)),
+  });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -119,7 +122,7 @@ async function setup(t, { faults = {}, timeoutMs } = {}) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  return { hub, client, stateDirectory };
 }
 
 async function call(client, name, args) {
@@ -344,6 +347,81 @@ test("«верни как было» after the 20 lamps puts back every lamp the
     [],
   );
 });
+
+// A write whose answer is lost, or whose process stops before the answer,
+// is known only from the journal: get_native_change reconciles it and a
+// repeat is held by it. So each write is saved there as an intent before
+// it leaves for the hub, also when 20 go out at once.
+test("each write of 20 lamps and of their undo leaves only after the journal holds its intent", async (t) => {
+  const arrivals = [];
+  const { client } = await setup(t, {
+    onRequest: ({ method, params }, stateDirectory) => {
+      const update = params.characteristic?.update;
+      if (method !== "characteristic.update" || !update?.control) return;
+      arrivals.push({
+        write: `${update.aId}.${update.cId}=${Object.values(update.control.value)[0]}`,
+        intent: journalIntent(stateDirectory, update),
+      });
+    },
+  });
+  const refs = await livingRoomLampRefs(client);
+  const sent = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: refs.map((ref) => ({ target_ref: ref, value: false })),
+    reason: "Выключи свет в гостиной",
+  });
+  assert.equal(sent.status, "ok");
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+
+  // 20 offs, then the lamps that were on turned back on.
+  const switchedOff = sent.results.filter(
+    ({ previous_value: was }) => was === true,
+  ).length;
+  assert.ok(switchedOff > 0);
+  assert.equal(arrivals.length, 20 + switchedOff);
+  assert.deepEqual(
+    arrivals.filter(({ intent }) => !intent).map(({ write }) => write),
+    [],
+  );
+  assert.deepEqual(
+    arrivals.map(({ intent }) => intent?.direction).slice(20),
+    Array(switchedOff).fill("restore"),
+  );
+});
+
+// The intent the journal held, as the hub received the write update: a
+// change of that characteristic whose intent is to send that value.
+function journalIntent(stateDirectory, { aId, sId, cId, control }) {
+  const file = readdirSync(stateDirectory).find((name) =>
+    name.startsWith("automation-changes-"),
+  );
+  if (!file) return undefined;
+  const { changes } = JSON.parse(
+    readFileSync(path.join(stateDirectory, file), "utf8"),
+  );
+  const value = Object.values(control.value)[0];
+  for (const change of Object.values(changes)) {
+    const intent = change.write_intent;
+    const sending =
+      intent?.direction === "restore"
+        ? change.baseline_value
+        : change.requested_value;
+    if (
+      change.target?.aId === aId &&
+      change.target.sId === sId &&
+      change.target.cId === cId &&
+      change.native_write_sent === true &&
+      intent?.phase === "sending" &&
+      sending?.value === value
+    ) {
+      return intent;
+    }
+  }
+  return undefined;
+}
 
 test("lamps, curtains and two thermostats in one call end as asked, a device's own commands one after another", async (t) => {
   const { hub, client } = await setup(t);
