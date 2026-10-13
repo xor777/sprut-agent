@@ -5193,9 +5193,13 @@ export class AutomationService {
       )
     )
       return publicStoredNativeChange(change);
+    // As in restoreScenarioChange: when an undo is sent again, the pause
+    // found gone may be the first undo arriving late.
+    let resending = false;
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       const pending = await this.#reconcileScenarioWrite(change);
       if (!restoreGoesOn(pending)) return pending.result;
+      resending = pending.direction === "restore";
     }
     if (pauseHasNoProvenHubEffect(change)) {
       // Proven non-send: there is no controller to remove. Missing wrapper is
@@ -5225,6 +5229,9 @@ export class AutomationService {
     const pauseChanges = await this.#knownBlockPauses(change.target_ref);
     const ownership = inspectPauseOwnership(currentSnapshot.data, pauseChanges);
     const owned = ownership.get(change.id);
+    if (owned?.state !== "owned" && resending) {
+      return (await this.#reconcileScenarioRestore(change, false)).result;
+    }
     if (owned?.state !== "owned") {
       const disposition = await this.#knownPauseDisposition(
         change,
@@ -5269,11 +5276,23 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        throw await this.#finishRefusedWrite(change, "applied", error);
+        return this.#finishRefusedUndo(change, error, resending);
       }
       return (await this.#reconcileScenarioRestore(change, false)).result;
     }
     return (await this.#reconcileScenarioRestore(change, true)).result;
+  }
+
+  // An undo the hub refused leaves the change applied. When it was sent
+  // again after its first send got no answer, the refusal may meet what
+  // that first undo already did (a delete of a scenario it deleted): the
+  // read settles it, restored when the hub is back as before.
+  async #finishRefusedUndo(change, error, resending) {
+    if (resending) {
+      const settled = await this.#reconcileScenarioRestore(change, false);
+      if (settled.outcome === "expected_observed") return settled.result;
+    }
+    throw await this.#finishRefusedWrite(change, "applied", error);
   }
 
   async #markReplacedPauseSuperseded(change) {
@@ -5400,10 +5419,19 @@ export class AutomationService {
 
   async #restoreScenarioChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
+    let resending = false;
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       const pending = await this.#reconcileScenarioWrite(change);
       if (!restoreGoesOn(pending)) return pending.result;
+      resending = pending.direction === "restore";
     }
+    // On the way to sending an undo again, a read that no longer shows the
+    // change in place may be the first undo arriving late: it is settled
+    // as that undo's outcome, restored when the hub is back as before.
+    const notInPlace = async (read) =>
+      resending
+        ? (await this.#reconcileScenarioRestore(change, false)).result
+        : this.#observeProvenScenarioChange(change, read);
     const current = await this.#observeScenarioChange(change);
     this.#adoptRequestedLogicSource(
       change,
@@ -5415,7 +5443,7 @@ export class AutomationService {
       change.applied_snapshot !== undefined &&
       (change.owned_target_absent_observed === true || !applied.matches)
     ) {
-      return this.#observeProvenScenarioChange(change, current);
+      return notInPlace(current);
     }
     if (
       change.applied_snapshot === undefined &&
@@ -5519,7 +5547,7 @@ export class AutomationService {
       // another scenario at the index, stops it.
       const fresh = await this.#observeScenarioChange(change);
       if (!scenarioChangeObservation(change, fresh, "applied").matches) {
-        return this.#observeProvenScenarioChange(change, fresh);
+        return notInPlace(fresh);
       }
       if (change.kind === "logic_source_create") {
         // The fresh read checked the type again.
@@ -5552,7 +5580,7 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        throw await this.#finishRefusedWrite(change, "applied", error);
+        return this.#finishRefusedUndo(change, error, resending);
       }
       return (await this.#reconcileScenarioRestore(change, false)).result;
     }

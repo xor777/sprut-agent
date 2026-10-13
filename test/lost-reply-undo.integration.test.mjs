@@ -729,32 +729,39 @@ for (const { name, write, read, inputs } of CHAINS) {
 }
 
 // The first delete of a created BLOCK got no answer and arrives at the hub
-// late, right before the delete the next restore sends: that one finds
-// nothing to delete. The BLOCK is gone as the undo wanted.
-test("a resent undo of a created BLOCK that meets its late first delete is settled as done", async (t) => {
-  const { hub, client, onNext } = await setup(t);
-  const initial = hub.snapshot();
-  const created = await applied(client, createdBlockInput);
-  const index = hub.state.scenarios.find(
-    ({ name }) => name === CREATED_BLOCK_NAME,
-  ).index;
-  hub.loseNext("scenario.delete");
-  const lost = await call(client, "restore_native_change", {
-    change_ref: created.change_ref,
-  });
-  assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+// late: right before the delete the next restore sends, which then finds
+// nothing to delete, or between the read that finds the BLOCK still there
+// and the one the restore checks again before deleting. The BLOCK is gone
+// as the undo wanted.
+for (const when of ["the resent delete", "the read before it"]) {
+  test(`a resent undo of a created BLOCK whose late first delete arrives before ${when} is settled as done`, async (t) => {
+    const { hub, client, onNext } = await setup(t);
+    const initial = hub.snapshot();
+    const created = await applied(client, createdBlockInput);
+    const index = hub.state.scenarios.find(
+      ({ name }) => name === CREATED_BLOCK_NAME,
+    ).index;
+    hub.loseNext("scenario.delete");
+    const lost = await call(client, "restore_native_change", {
+      change_ref: created.change_ref,
+    });
+    assert.equal(lost.status, "uncertain", JSON.stringify(lost));
 
-  const late = onNext("scenario.delete", () =>
-    hub.request({ scenario: { delete: { index } } }),
-  );
-  const finished = await call(client, "restore_native_change", {
-    change_ref: created.change_ref,
+    const firstDelete = () => hub.request({ scenario: { delete: { index } } });
+    // The read that settles the lost delete passes; the next one meets it.
+    const late =
+      when === "the resent delete"
+        ? onNext("scenario.delete", firstDelete)
+        : onNext("scenario.get", () => onNext("scenario.get", firstDelete));
+    const finished = await call(client, "restore_native_change", {
+      change_ref: created.change_ref,
+    });
+    await late;
+    assert.equal(finished.status, "restored", JSON.stringify(finished));
+    assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+    const read = await call(client, "get_native_change", {
+      change_ref: created.change_ref,
+    });
+    assert.equal(read.status, "restored", JSON.stringify(read));
   });
-  await late;
-  assert.equal(finished.status, "restored", JSON.stringify(finished));
-  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
-  const read = await call(client, "get_native_change", {
-    change_ref: created.change_ref,
-  });
-  assert.equal(read.status, "restored", JSON.stringify(read));
-});
+}
