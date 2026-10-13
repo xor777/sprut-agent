@@ -993,6 +993,37 @@ test("a long hub text of Wi-Fi QR beginnings is answered at once, and a password
   assert.equal(ap?.message, "[REDACTED]");
 });
 
+// A network name that ends in WIFI:, glued to a word as in Home_WIFI: or
+// HomeWIFI:, does not begin another payload: the password after it is
+// still the payload's.
+test("a Wi-Fi QR whose network name ends in WIFI: keeps its password hidden", async (t) => {
+  const { hub, answers, ok } = await setup(t);
+  const lines = {
+    "Test.ApUnderscore": `WIFI:S:Home_WIFI:5G;T:WPA;P:${WIFI_PASSWORD};;`,
+    "Test.ApLetter": `AP ready: WIFI:S:HomeWIFI:5G;T:WPA;P:${WIFI_PASSWORD};;`,
+  };
+  for (const [logPath, message] of Object.entries(lines)) {
+    hub.state.log.push({
+      time: Date.now(),
+      level: "LOG_LEVEL_INFO",
+      path: logPath,
+      message,
+    });
+  }
+
+  const log = await ok("read_hub_log", { home_ref: homeRef, limit: 50 });
+
+  assert.deepEqual(leakedSecrets(answers, { WIFI_PASSWORD }), []);
+  assert.deepEqual(
+    Object.fromEntries(
+      log.entries
+        .filter(({ path: logPath }) => logPath.startsWith("Test."))
+        .map(({ path: logPath, message }) => [logPath, message]),
+    ),
+    { "Test.ApUnderscore": "[REDACTED]", "Test.ApLetter": "[REDACTED]" },
+  );
+});
+
 // Settings named after key material that hold no key: a flag that turns
 // install codes on, a PIN length, and codes that are not secrets: a Pronto
 // IR code, a Broadlink IR code and product and scene identifiers. Hidden,
