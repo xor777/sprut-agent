@@ -1187,3 +1187,71 @@ test("a number under a flag or size name labelled as a password stays hidden, wh
   assert.equal(prepared, "sensitive_native_data");
   assert.deepEqual(windowWrites(hub), []);
 });
+
+// The Xiaomi controller's window has a writable TEXT Ticket labelled as a
+// confirmation code: during a login to the Xiaomi cloud it holds the
+// one-time code the cloud sent the owner. Empty, it shows that a login
+// waits for the code; filled, the code reaches no answer, also from a
+// configuration point saved while it was empty. A field labelled so under
+// another key is a code too.
+const XIAOMI_WINDOW = "Controller/xiaomi_1/";
+const XIAOMI_TICKET = "731946";
+const SMS_CODE = "582017";
+
+test("a confirmation code typed during a Xiaomi cloud login reaches no answer, while the empty field stays shown", async (t) => {
+  const { hub, answers, ok } = await setup(t);
+  hub.state.windows[XIAOMI_WINDOW] = {
+    windowKey: XIAOMI_WINDOW,
+    label: { text: "Xiaomi" },
+    options: [
+      text("Login", "Логин", "owner@example.invalid"),
+      text("Ticket", "Код подтверждения", ""),
+      text("SmsCode", "Код подтверждения из SMS", ""),
+      option(
+        "CloudDevices",
+        "Облачные устройства",
+        "GenericBoolean",
+        "CHECKBOX",
+        {
+          boolValue: true,
+        },
+      ),
+    ],
+  };
+  const xiaomiRef = windowRef(XIAOMI_WINDOW);
+
+  const waiting = (await ok("get_entity", { entity_ref: xiaomiRef })).entity;
+  const point = await ok("save_configuration_point", {
+    home_ref: homeRef,
+    entity_refs: [xiaomiRef],
+  });
+  const fill = (key, value) => {
+    hub.state.windows[XIAOMI_WINDOW].options.find(
+      (candidate) => candidate.key === key,
+    ).value = { stringValue: value };
+  };
+  fill("Ticket", XIAOMI_TICKET);
+  fill("SmsCode", SMS_CODE);
+  const filled = (await ok("get_entity", { entity_ref: xiaomiRef })).entity;
+  await ok("get_configuration_point", {
+    point_ref: point.point_ref,
+    compare: true,
+  });
+  await ok("save_configuration_point", {
+    home_ref: homeRef,
+    entity_refs: [xiaomiRef],
+  });
+
+  assert.deepEqual(shownOptions(waiting.options), {
+    Login: "owner@example.invalid",
+    Ticket: "",
+    SmsCode: "",
+    CloudDevices: true,
+  });
+  assert.deepEqual(leakedSecrets(answers, { XIAOMI_TICKET, SMS_CODE }), []);
+  assert.deepEqual(shownOptions(filled.options), {
+    Login: "owner@example.invalid",
+    CloudDevices: true,
+  });
+  assert.equal(hiddenCount(filled.options), 2);
+});
