@@ -1,6 +1,6 @@
 // Keeps the page shell available so the installed app opens without network
 // and shows that it cannot connect; API calls always go to the network.
-const CACHE = "sprut-voice-v3";
+const CACHE = "sprut-voice-v4";
 const SHELL = ["/", "/app.js", "/manifest.webmanifest", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {
