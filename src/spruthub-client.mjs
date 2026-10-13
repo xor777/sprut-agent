@@ -10,6 +10,7 @@ import {
   relationRole,
   withShownHttpUrls,
 } from "./block-summary.mjs";
+import { logicInfoNotEditable, readLogicInfo } from "./logic-info.mjs";
 import {
   inspectNativeOption,
   isSelectableNativeValidValue,
@@ -5943,8 +5944,36 @@ function scenarioMetadataOption(scenario, option, entity) {
             reason: "predefined_scenario_read_only",
           },
         }
-      : {}),
+      : logicInfoBlocksOption(scenario, option.key) &&
+          normalized.native_change?.supported === true
+        ? {
+            native_change: {
+              native_write: option.write === true,
+              supported: false,
+              reason: "logic_info_not_editable",
+              next: {
+                tool: "get_native_change_contract",
+                arguments: {
+                  operation: "logic_source_update",
+                  target_ref: entity.ref,
+                },
+              },
+            },
+          }
+        : {}),
   };
+}
+
+// A LOGIC's Name, Desc and OnStart change writes all three into info in its
+// code, which window_option refuses when info cannot be rewritten in place;
+// its Sync is not in the code.
+function logicInfoBlocksOption(scenario, optionKey) {
+  return (
+    scenario.type === "LOGIC" &&
+    optionKey !== "Sync" &&
+    typeof scenario.data === "string" &&
+    logicInfoNotEditable(readLogicInfo(scenario.data)) !== undefined
+  );
 }
 
 function codeScenarioSummary(scenario) {

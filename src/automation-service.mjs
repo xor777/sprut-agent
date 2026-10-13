@@ -32,6 +32,7 @@ import {
 } from "./block-model.mjs";
 import {
   LOGIC_INFO_FIELDS,
+  logicInfoNotEditable,
   readLogicInfo,
   rewriteLogicInfo,
 } from "./logic-info.mjs";
@@ -11420,11 +11421,7 @@ function logicCodeState(source, scenario, optionKey) {
 // says the requested value) only the window is written.
 function logicInfoRewrite(scenario, optionKey, requestedValue, scenarioRef) {
   const info = readLogicInfo(scenario.data);
-  const unreadable =
-    info.problem ??
-    LOGIC_INFO_FIELDS.map((field) => info.problems[field])
-      .filter(Boolean)
-      .join("; ");
+  const unreadable = logicInfoNotEditable(info);
   if (unreadable) {
     throw new SprutHubError(
       "logic_info_not_editable",
