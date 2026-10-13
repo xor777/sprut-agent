@@ -1164,6 +1164,49 @@ async function watchDirectory(stateDirectory) {
   return path.join(stateDirectory, name);
 }
 
+// Before a start is sent, watches not written for days are removed and
+// the controller's latest watch is saved with what the controller shows.
+// When the directory of kept searches cannot be written, either step
+// fails, and the start sends nothing.
+test("a start whose kept searches cannot be written sends nothing", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  const earlier = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await call(client, "stop_device_search", {
+    search_ref: earlier.search_ref,
+  });
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+
+  // The stopped search is the controller's latest, saved first.
+  const latest = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  // Not written for 4 days, it is removed first.
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60_000);
+  for (const name of await readdir(watches)) {
+    await utimes(path.join(watches, name), fourDaysAgo, fourDaysAgo);
+  }
+  const aged = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await chmod(watches, 0o700);
+
+  for (const refused of [latest, aged]) {
+    assert.equal(refused.error.code, "state_storage_unavailable");
+    assert.equal(refused.error.action, "restore_state_storage_then_retry");
+    assert.equal(refused.active, undefined);
+    assert(!JSON.stringify(refused).includes(stateDirectory), refused);
+  }
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
+  assert.equal((await readdir(watches)).length, 1);
+});
+
 // A start beside a search that already runs sends nothing either way, but
 // the network is open: an answer that it was not opened would have the
 // agent tell the owner the network is closed while any device can join.
