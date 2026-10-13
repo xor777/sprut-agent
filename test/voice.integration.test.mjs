@@ -232,3 +232,57 @@ test("without the invite key neither the home nor OpenAI is reached", async (t) 
   assert.equal(openai.sessions.length, sessionsBefore);
   assert.deepEqual(hub.writes(), []);
 });
+
+test("a colour by name lights the strip in that colour", async (t) => {
+  const { tool, listedId } = await setup(t);
+  const strip = await listedId("Светодиодная лента");
+
+  const output = await tool("control_devices", {
+    commands: [{ device: strip, control: "color", value: "красный" }],
+    reason: "сделай ленту красной",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  const [lamp] = (await tool("read_devices", { devices: [strip] })).devices;
+  assert.equal(lamp.values.включено, "да");
+  assert.equal(lamp.values.цвет, "красный");
+});
+
+test("warm white sets the strip's white to about 2700 K and lights it", async (t) => {
+  const { tool, listedId, updates } = await setup(t);
+  const strip = await listedId("Светодиодная лента");
+
+  const output = await tool("control_devices", {
+    commands: [
+      { device: strip, control: "color_temperature", value: "тёплый" },
+    ],
+    reason: "сделай ленту тёплым белым",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  const written = updates().map(({ aId, cId, control }) => [
+    aId,
+    cId,
+    Object.values(control.value)[0],
+  ]);
+  // ColorTemperature (cId 18) in mireds: 1e6 / 2700 K; then On (cId 14).
+  assert.deepEqual(written, [
+    [17, 18, 370],
+    [17, 14, true],
+  ]);
+});
+
+test("the phone can pick one of the offered voices and nothing else", async (t) => {
+  const { openai, post } = await setup(t);
+
+  assert.equal((await post("/api/session", { voice: "cedar" })).status, 200);
+  assert.equal(
+    (await post("/api/session", { voice: "../../evil" })).status,
+    200,
+  );
+
+  assert.deepEqual(
+    openai.sessions.map(({ audio }) => audio.output.voice),
+    ["cedar", "marin"],
+  );
+});
