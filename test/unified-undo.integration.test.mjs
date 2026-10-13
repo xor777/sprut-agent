@@ -429,6 +429,171 @@ test("a lamp switched back on by hand stays reported when its level is put back 
   assert.equal(currentValue(hub, FLOOR_LEVEL), 55);
 });
 
+// With «Связь включения и уровня» a level above 0 switches the lamp on, so
+// a level written back to a lamp that is off would switch it on.
+test("a lamp the owner switched off after a dim stays off on «верни как было»", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 16, sId: 13 }] },
+  });
+  const sent = await command(client, [[FLOOR_LEVEL, 20]], "Приглушить торшер");
+  hub.changeByHand({ ...FLOOR_ON, value: { boolValue: false } });
+
+  const before = hub.requests.length;
+  const single = await call(client, "restore_native_change", {
+    change_ref: sent.results[0].change_ref,
+  });
+  assert.equal(
+    single.restore_outcome?.status,
+    "skipped",
+    JSON.stringify(single),
+  );
+  assert.equal(single.restore_outcome.reason, "changed_since");
+  const grouped = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(grouped.status, "incomplete");
+  const item = itemFor(grouped, sent.results[0].change_ref);
+  assert.equal(item.status, "skipped");
+  assert.equal(item.reason, "changed_since");
+  assert.equal(item.already_previous, false);
+  assert.equal(item.sent, false);
+  assert.match(item.message, /switched off/);
+  assert.deepEqual(valueWritesSince(hub, before), []);
+  assert.equal(currentValue(hub, FLOOR_ON), false);
+  assert.equal(currentValue(hub, FLOOR_LEVEL), 20);
+});
+
+test("«включи ленту на 40%» on a lamp with level logic is undone to off at its old level", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 17, sId: 13 }] },
+  });
+  const sent = await command(
+    client,
+    [
+      [STRIP_LEVEL, 40],
+      [STRIP_ON, true],
+    ],
+    "Включить ленту на 40%",
+  );
+  // The level already switched the strip on before its On command.
+  assert.equal(sent.results[1].previous_value, false);
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+  const on = itemFor(restored, sent.results[1].change_ref);
+  assert.equal(on.status, "restored");
+  assert.equal(on.sent, true);
+  assert.deepEqual(valueWritesSince(hub, before), [
+    ["17.15", 100],
+    ["17.14", false],
+  ]);
+  assert.deepEqual(homeChanges(hub), []);
+});
+
+test("a level alone that switched an off lamp on is undone to off", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 17, sId: 13 }] },
+  });
+  const sent = await command(
+    client,
+    [[STRIP_LEVEL, 40]],
+    "Поставить ленту на 40%",
+  );
+  assert.equal(currentValue(hub, STRIP_ON), true);
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+  assert.deepEqual(
+    restored.results.map(({ type, status, sent: written, value }) => ({
+      type,
+      status,
+      sent: written,
+      value,
+    })),
+    [
+      {
+        type: "Brightness",
+        status: "restored",
+        sent: true,
+        value: { from: 40, to: 100 },
+      },
+      {
+        type: "On",
+        status: "restored",
+        sent: true,
+        value: { from: true, to: false },
+      },
+    ],
+  );
+  assert.deepEqual(valueWritesSince(hub, before), [
+    ["17.15", 100],
+    ["17.14", false],
+  ]);
+  assert.deepEqual(homeChanges(hub), []);
+});
+
+test("a level put back alone is not written while the agent's own command keeps the lamp off", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 16, sId: 13 }] },
+  });
+  const sent = await command(
+    client,
+    [
+      [FLOOR_LEVEL, 20],
+      [FLOOR_ON, false],
+    ],
+    "Приглушить и выключить торшер",
+  );
+  const [level, on] = sent.results;
+
+  const before = hub.requests.length;
+  const single = await call(client, "restore_native_change", {
+    change_ref: level.change_ref,
+  });
+  assert.equal(
+    single.restore_outcome?.status,
+    "skipped",
+    JSON.stringify(single),
+  );
+  assert.equal(single.restore_outcome.reason, "later_change");
+  assert.equal(single.restore_outcome.later_change_ref, on.change_ref);
+  const batch = await call(client, "restore_native_change", {
+    change_refs: [level.change_ref],
+  });
+  const item = itemFor(batch, level.change_ref);
+  assert.equal(item.reason, "later_change");
+  assert.equal(item.later_change_ref, on.change_ref);
+  assert.deepEqual(valueWritesSince(hub, before), []);
+  assert.equal(currentValue(hub, FLOOR_ON), false);
+});
+
+test("a level stored on an off lamp is not written back while the lamp is off", async (t) => {
+  const { hub, client } = await setup(t);
+  const sent = await command(
+    client,
+    [[STRIP_LEVEL, 40]],
+    "Поставить ленту на 40%",
+  );
+  assert.equal(sent.results[0].warning?.code, "device_off_level_stored");
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  const item = itemFor(restored, sent.results[0].change_ref);
+  assert.equal(item.status, "skipped");
+  assert.equal(item.reason, "lamp_off");
+  assert.equal(item.sent, false);
+  assert.deepEqual(valueWritesSince(hub, before), []);
+  assert.equal(currentValue(hub, STRIP_ON), false);
+});
+
 test("an offline lamp is reported, not guessed, and restored once it is back", async (t) => {
   const { hub, client } = await setup(t);
   const sent = await command(client, [[FLOOR_ON, false]], "Выключить торшер");
