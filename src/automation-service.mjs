@@ -1242,6 +1242,21 @@ export class AutomationService {
         invalid.sort((left, right) => left.index - right.index),
       );
     }
+    // A level write switches an off lamp on, so a level sent before this
+    // call's off of a lamp that is already off would light it for a moment
+    // (2026-10-13-lamp-logic-undo, 1 and F9): that level is not sent.
+    for (const item of items) {
+      if (!item.onTarget) continue;
+      const off = items.find(
+        ({ draft }) =>
+          nativeTargetKey(draft.fields.target) ===
+          nativeTargetKey(item.onTarget),
+      );
+      item.lampKeptOff =
+        off?.draft.requested.value === false &&
+        lampOnState(devices.get(item.onTarget.aId), item.onTarget)?.value
+          .value === false;
+    }
     return items;
   }
 
@@ -1307,7 +1322,7 @@ export class AutomationService {
         result.warning = {
           code: "device_off_level_stored",
           message:
-            "The lamp is off, so this level is only stored and shows when the lamp is turned on; it was not turned on.",
+            "The lamp is off after this call, so this level shows once the lamp is turned on.",
         };
       }
       const before = lampOnState(devices.get(onTarget.aId), onTarget)?.value;
@@ -1371,6 +1386,28 @@ export class AutomationService {
     const { command, input, draft, name, onTarget, index } = item;
     const shown = { ...item.shown, ...(item.note ? { note: item.note } : {}) };
     item.earlierContext = {};
+    if (item.lampKeptOff) {
+      return {
+        sent: false,
+        result: valuesEqual(draft.value, draft.requested)
+          ? {
+              ...shown,
+              status: "already_desired",
+              sent: false,
+              observed_value: draft.value.value,
+              change_ref: null,
+              restore_supported: false,
+            }
+          : {
+              ...shown,
+              status: "not_sent",
+              sent: false,
+              change_ref: null,
+              restore_supported: false,
+              note: LAMP_KEPT_OFF_NOTE,
+            },
+      };
+    }
     let change;
     let previous = {};
     try {
@@ -10717,6 +10754,12 @@ const LAMP_LEVEL_ZERO_NOTE = {
     "On the hub's lamps brightness 0 switches the lamp off and is not stored, so this command was sent as the lamp's off (sent_as): previous_value and observed_value are its on/off, and its brightness stays as it was.",
 };
 
+const LAMP_KEPT_OFF_NOTE = {
+  code: "lamp_level_not_sent",
+  message:
+    "Not sent: the lamp was off and this call keeps it off, and on the hub's lamps a brightness write switches an off lamp on (a color write is held back the same way). The lamp stays off; this can be set once it is on, or sent with its On=true.",
+};
+
 const LAMP_SWITCHED_ON_NOTE = {
   code: "lamp_switched_on",
   message:
@@ -10744,7 +10787,8 @@ async function mapWithConcurrency(items, limit, operation) {
 // sent. A lamp's off goes after the level and color commands of the same
 // lamp: a level write switches a lamp with «Связь включения и уровня» on,
 // so [On=false, Brightness=70] sent in that order ends on at 70
-// (2026-10-13-lamp-logic-undo, U2 and U4). Other commands keep the call's
+// (2026-10-13-lamp-logic-undo, U2 and U4). A lamp already off gets no level
+// at all beside its off (lampKeptOff). Other commands keep the call's
 // order.
 function deviceCommandRuns(items) {
   const lampLevels = new Set(

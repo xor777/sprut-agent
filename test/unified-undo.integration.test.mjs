@@ -640,28 +640,30 @@ test("a lamp the owner switched on and off again after the agent's dim and off s
   assertLevelLeft(itemFor(restored, level.change_ref));
 });
 
-test("a level set to a strip kept off is not written back, and the strip stays off", async (t) => {
+test("a level for a strip kept off is not sent, and undo leaves the strip off at its level", async (t) => {
   const { hub, client } = await setup(t, LAMP_LOGIC);
-  // Off at 100: the level switches it on at 40, then the call switches it
-  // off again.
-  const sent = await command(
-    client,
-    [
-      [STRIP_LEVEL, 40],
-      [STRIP_ON, false],
+  // Off at 100: the level would switch it on before the call's off.
+  const sent = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: [
+      { target_ref: refOf(STRIP_LEVEL), value: 40 },
+      { target_ref: refOf(STRIP_ON), value: false },
     ],
-    "Поставить ленте 40%, не включая",
-  );
+    reason: "Поставить ленте 40%, не включая",
+  });
+  assert.equal(sent.results[0].status, "not_sent", JSON.stringify(sent));
+  assert.equal(sent.results[1].status, "applied", JSON.stringify(sent));
   assert.equal(currentValue(hub, STRIP_ON), false);
+  assert.equal(currentValue(hub, STRIP_LEVEL), 100);
 
   const before = hub.requests.length;
   const restored = await call(client, "restore_native_change", {
     change_ref: sent.group_ref,
   });
-  assertLevelLeft(itemFor(restored, sent.results[0].change_ref));
+  assert.equal(restored.summary.total, 1, JSON.stringify(restored));
   assert.deepEqual(valueWritesSince(hub, before), []);
   assert.equal(currentValue(hub, STRIP_ON), false);
-  assert.equal(currentValue(hub, STRIP_LEVEL), 40);
+  assert.equal(currentValue(hub, STRIP_LEVEL), 100);
 });
 
 test("«включи ленту на 40%» on a lamp with level logic is undone to off, its level left", async (t) => {
