@@ -1770,21 +1770,34 @@ export class AutomationService {
       };
     }
     if (
-      hasKnownSettingSemantics(change) &&
       !valuesEqual(current, change.baseline_value) &&
       !valuesEqual(current, change.requested_value)
     ) {
-      return {
-        direction,
-        outcome: "conflict",
-        current,
-        contract,
-        result: await this.#finishNative(change, "conflict", current, {
-          conflict_reason: "manual_change",
-          manual_change_observed: true,
-          last_verification: freshVerification("conflict"),
-        }),
-      };
+      // A value the agent's own later change of this setting set is no
+      // change by hand, as for a settled change (laterOwnedValueChange).
+      const later = await this.#laterOwnedValueChange(change, current);
+      if (later) {
+        return {
+          direction,
+          outcome: "later_owned_change",
+          current,
+          contract,
+          result: await this.#finishHiddenByLaterChange(change, later, current),
+        };
+      }
+      if (hasKnownSettingSemantics(change)) {
+        return {
+          direction,
+          outcome: "conflict",
+          current,
+          contract,
+          result: await this.#finishNative(change, "conflict", current, {
+            conflict_reason: "manual_change",
+            manual_change_observed: true,
+            last_verification: freshVerification("conflict"),
+          }),
+        };
+      }
     }
     const verificationResult =
       direction === "restore"
@@ -1805,6 +1818,7 @@ export class AutomationService {
           }
         : {}),
       last_verification: freshVerification(verificationResult),
+      ...withoutLaterChange(change),
       ...(groupDeliveryConfirmed === false
         ? { conflict_reason: "group_members_not_converged" }
         : acknowledged
