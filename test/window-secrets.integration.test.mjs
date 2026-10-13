@@ -1301,3 +1301,90 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
   assert.equal(hiddenCount(filled.options), 2);
   assert.equal(hiddenCount(second.options), 1);
 });
+
+// Hub labels are Russian. A setting labelled as a password, a PIN code, an
+// access code, a network key or a token holds that secret under any key,
+// also a number under a mode key. A length, a yes/no, a choice of how a
+// confirmation code is sent and words that only contain «ключ» or «код»
+// stay shown and writable, as before.
+const GATE_WINDOW = "Controller/zigbee/Child/00158d0001c0d1e2/";
+const RUSSIAN_SECRETS = {
+  password: "dacha-pass-9137",
+  pin: "48263917",
+  accessCode: 582_913,
+  networkKey: "dacha-net-key-77",
+  token: "tk-91ab-77cd",
+  modePassword: 64_208_317,
+};
+
+test("settings whose Russian label names a password, PIN code, access code, network key or token stay hidden, while lengths, flags, a way of sending a code and ordinary words stay shown", async (t) => {
+  const { hub, answers, ok, refused } = await setup(t);
+  const number = (key, name, value) =>
+    option(
+      key,
+      name,
+      "GenericInteger",
+      "NUMBER",
+      { intValue: value },
+      { minValue: 0, maxValue: 99_999_999, minStep: 1 },
+    );
+  hub.state.windows[GATE_WINDOW] = {
+    windowKey: GATE_WINDOW,
+    label: { text: "Ворота" },
+    options: [
+      text("Field1", "Пароль", RUSSIAN_SECRETS.password),
+      text("Field2", "PIN-код", RUSSIAN_SECRETS.pin),
+      number("Field3", "Код доступа", RUSSIAN_SECRETS.accessCode),
+      text("Field4", "Ключ сети", RUSSIAN_SECRETS.networkKey),
+      text("Field5", "Токен облака", RUSSIAN_SECRETS.token),
+      number("Mode", "Пароль", RUSSIAN_SECRETS.modePassword),
+      number("Digits", "Длина PIN-кода", 6),
+      option("AskPin", "Запрашивать PIN-код", "GenericBoolean", "CHECKBOX", {
+        boolValue: true,
+      }),
+      option(
+        "TicketType",
+        "Способ получения кода подтверждения",
+        "GenericString",
+        "LIST",
+        { stringValue: "sms" },
+        {
+          validValues: [
+            { name: "SMS", value: { stringValue: "sms" } },
+            { name: "Почта", value: { stringValue: "email" } },
+          ],
+        },
+      ),
+      status("ProductKey", "Ключ продукта", "keyjup78v54myhan"),
+      text("SceneKey", "Ключ сцены", "evening"),
+      text("Switch", "Выключатель", "Свет в коридоре"),
+      status("ErrorCode", "Код ошибки", "E42"),
+      number("LedPin", "Пин светодиода", 4),
+    ],
+  };
+  const gateRef = windowRef(GATE_WINDOW);
+
+  const shown = (await ok("get_entity", { entity_ref: gateRef })).entity;
+  const prepared = await refused("prepare_native_change", {
+    operation: "window_option",
+    target_ref: gateRef,
+    option_key: "Field1",
+    value: "new-pass",
+    reason: "Владелец попросил",
+  });
+
+  assert.deepEqual(leakedSecrets(answers, RUSSIAN_SECRETS), []);
+  assert.deepEqual(shownOptions(shown.options), {
+    Digits: 6,
+    AskPin: true,
+    TicketType: "sms",
+    ProductKey: "keyjup78v54myhan",
+    SceneKey: "evening",
+    Switch: "Свет в коридоре",
+    ErrorCode: "E42",
+    LedPin: 4,
+  });
+  assert.equal(hiddenCount(shown.options), 6);
+  assert.equal(prepared, "sensitive_native_data");
+  assert.deepEqual(windowWrites(hub), []);
+});
