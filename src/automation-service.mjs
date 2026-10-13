@@ -1115,7 +1115,11 @@ export class AutomationService {
             changes,
             homeRef,
             reason,
-            { group_id: groupId, group_index: index },
+            {
+              group_id: groupId,
+              group_index: index,
+              ...(item.onTarget ? { lamp_level: true } : {}),
+            },
             touchedEarlier ? item.draft.value : undefined,
           ),
         );
@@ -4096,19 +4100,19 @@ export class AutomationService {
     const accessory = nativeValueKind(change.kind).command
       ? await this.client.getAccessory(change.target.aId)
       : undefined;
-    // With «Связь включения и уровня», which the owner's hub assigns to
-    // every dimmable lamp, a brightness write switches a lamp that is off
-    // on (2026-10-13-lamp-logic-undo). Undo never writes a level of a lamp
-    // (a service with On), whether or not the logic is assigned to it, nor
-    // offers to: it puts back only the lamp's On.
-    if (lightLevelOnTarget(accessory, change.target, change.contract?.type)) {
+    // A lamp's level is never written back, nor offered for resend
+    // (LAMP_LEVEL_LIMITATION); a record from before lamp_level is judged by
+    // the accessory now.
+    if (
+      change.lamp_level === true ||
+      lightLevelOnTarget(accessory, change.target, change.contract?.type)
+    ) {
       return {
         ...publicNativeChange(change, current),
         restore_outcome: {
           status: "skipped",
-          reason: "lamp_level_not_restored",
-          message:
-            "Nothing was written: on the hub's lamps a brightness write switches an off lamp on, so undo puts back only a lamp's on/off, not its brightness or color. Tell the owner, who can set it again.",
+          reason: LAMP_LEVEL_LIMITATION.code,
+          message: `Nothing was written. ${LAMP_LEVEL_LIMITATION.message} Tell the owner, who can set it again.`,
         },
       };
     }
@@ -10558,6 +10562,17 @@ const LIGHT_LEVEL_TYPES = new Set([
   "Saturation",
 ]);
 
+// With «Связь включения и уровня», which the owner's hub assigns to every
+// dimmable lamp, a brightness write switches a lamp that is off on
+// (2026-10-13-lamp-logic-undo). So undo never writes a level of a lamp (a
+// service with On, lightLevelOnTarget), whether or not the logic is
+// assigned to it, and a command's record says so (lamp_level).
+const LAMP_LEVEL_LIMITATION = {
+  code: "lamp_level_not_restored",
+  message:
+    "On the hub's lamps a brightness write switches an off lamp on, so undo puts back only a lamp's on/off, not its brightness or color.",
+};
+
 function lightLevelOnTarget(accessory, { aId, sId }, type) {
   if (!LIGHT_LEVEL_TYPES.has(type)) return null;
   const on = accessory?.services
@@ -10604,6 +10619,9 @@ function deviceCommandOutcome(result) {
       : {}),
     change_ref: result.change_ref,
     restore_supported: result.restore_supported === true,
+    ...(result.restore_limitation
+      ? { restore_limitation: result.restore_limitation }
+      : {}),
     ...(result.conflict_reason
       ? { conflict_reason: result.conflict_reason }
       : {}),
@@ -13531,7 +13549,12 @@ function publicNativeChange(
           },
         }
       : undefined;
-  const restoration = nativeValueRestoration(change);
+  // A record from before lamp_level keeps the answer of its type and
+  // baseline: telling a lamp needs the accessory, which is not read here.
+  const restoration =
+    change.lamp_level === true
+      ? { supported: false, limitation: LAMP_LEVEL_LIMITATION }
+      : nativeValueRestoration(change);
   return {
     status: change.status,
     change_ref: `spruthub-change://native/${change.id}`,
