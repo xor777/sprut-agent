@@ -468,6 +468,11 @@ test("a condition on a device that cannot be read now holds neither way", async 
     { current: missing.current, holds_now: missing.holds_now },
     { current: { status: "not_found" }, holds_now: null },
   );
+  // Of the three devices only the offline window sensor gave a value.
+  const { observed_at: observedAt, ...counts } =
+    value.entity.summary.current_values;
+  assert.equal(typeof observedAt, "string");
+  assert.deepEqual(counts, { devices_read: 1 });
   assertReadOnly(hub, baseline);
 });
 
