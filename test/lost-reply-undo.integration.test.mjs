@@ -457,3 +457,114 @@ test("a BLOCK data change whose apply reached the hub before the MCP server stop
   assertOnlyWrites(hub, sentBefore, BLOCK);
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 });
+
+// A scenario's setting in its options window: the agent renames it, its
+// undo is lost, and it renames it again.
+test("after a lost undo of a scenario rename, the agent's next rename is its own and «верни как было» puts the first name back", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const first = await applied(client, renameInput("Ночь"));
+  hub.loseNext("window.update");
+  const lost = await call(client, "restore_native_change", {
+    change_ref: first.change_ref,
+  });
+  assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+  assert.equal(scenarioOf(hub, BLOCK).name, "Ночь");
+  const second = await applied(client, renameInput("Ночь, свет"));
+
+  const sentBefore = hub.requests.length;
+  const read = await call(client, "get_native_change", {
+    change_ref: first.change_ref,
+  });
+  assert.equal(
+    read.conflict_reason,
+    "later_owned_change",
+    JSON.stringify(read),
+  );
+  assert.equal(read.restore_first_change_ref, second.change_ref);
+  assert.equal(read.manual_change_observed, undefined);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, second.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+  assert.equal(writesSince(hub, sentBefore).length, 2);
+  assertOnlyWrites(hub, sentBefore, BLOCK);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("after a lost undo of a scenario rename and the agent's next rename, the owner's own rename is kept", async (t) => {
+  const { hub, client } = await setup(t);
+  const first = await applied(client, renameInput("Ночь"));
+  hub.loseNext("window.update");
+  await call(client, "restore_native_change", {
+    change_ref: first.change_ref,
+  });
+  const second = await applied(client, renameInput("Ночь, свет"));
+  hub.request({
+    window: {
+      update: {
+        windowKey: scenarioOf(hub, BLOCK).optionsWindow,
+        options: [{ key: "Name", value: { stringValue: "Сон" } }],
+      },
+    },
+  });
+
+  const sentBefore = hub.requests.length;
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, second.change_ref],
+  });
+  assert.deepEqual(
+    undone.results.map(({ change_ref: ref, status, reason }) => [
+      ref,
+      status,
+      reason,
+    ]),
+    [
+      [second.change_ref, "skipped", "changed_since"],
+      [first.change_ref, "skipped", "changed_since"],
+    ],
+  );
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.equal(scenarioOf(hub, BLOCK).name, "Сон");
+});
+
+for (const direction of ["undo", "apply"]) {
+  test(`a scenario rename whose ${direction} reached the hub before the MCP server stopped, then renamed again by the agent, is put back by «верни как было»`, async (t) => {
+    const { hub, client, connect, stopOnNext } = await setup(t);
+    const initial = hub.snapshot();
+    const first =
+      direction === "undo"
+        ? await applied(client, renameInput("Ночь"))
+        : await call(client, "prepare_native_change", renameInput("Ночь"));
+    const stopped = stopOnNext("window.update");
+    callUnanswered(
+      client,
+      direction === "undo" ? "restore_native_change" : "apply_native_change",
+      { change_ref: first.change_ref },
+    );
+    await stopped;
+    const restarted = await connect();
+    const second = await applied(restarted, renameInput("Ночь, свет"));
+
+    const sentBefore = hub.requests.length;
+    const read = await call(restarted, "get_native_change", {
+      change_ref: first.change_ref,
+    });
+    assert.equal(
+      read.conflict_reason,
+      "later_owned_change",
+      JSON.stringify(read),
+    );
+    assert.equal(read.restore_first_change_ref, second.change_ref);
+    assert.deepEqual(writesSince(hub, sentBefore), []);
+
+    const undone = await call(restarted, "restore_native_change", {
+      change_refs: [first.change_ref, second.change_ref],
+    });
+    assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+    assertOnlyWrites(hub, sentBefore, BLOCK);
+    assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  });
+}
