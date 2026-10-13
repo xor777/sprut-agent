@@ -586,16 +586,10 @@ test("native history keeps legacy automation changes discoverable by target", as
   assert.deepEqual(history.structuredContent.changes[0], {
     change_ref: prepared.structuredContent.change_ref,
     operation: "legacy_boolean_automation",
+    name: previewArguments.name,
+    reason: previewArguments.reason,
+    target_ref: "spruthub://hub/automation-test-hub/scenario/23",
     recorded_status: "prepared",
-    target_refs: [
-      previewArguments.source_characteristic_ref,
-      previewArguments.target_characteristic_ref,
-      "spruthub://hub/automation-test-hub/accessory/32",
-      "spruthub://hub/automation-test-hub/accessory/32/service/13",
-      "spruthub://hub/automation-test-hub/accessory/34",
-      "spruthub://hub/automation-test-hub/accessory/34/service/13",
-      "spruthub://hub/automation-test-hub/scenario/23",
-    ],
     created_at: history.structuredContent.changes[0].created_at,
     updated_at: history.structuredContent.changes[0].updated_at,
     next: {
@@ -603,6 +597,28 @@ test("native history keeps legacy automation changes discoverable by target", as
       arguments: { change_ref: prepared.structuredContent.change_ref },
     },
   });
+  // Its devices, written by refs of an earlier version, find it as well.
+  for (const ref of [
+    previewArguments.source_characteristic_ref,
+    previewArguments.target_characteristic_ref,
+    "spruthub://hub/automation-test-hub/accessory/32",
+    "spruthub://hub/automation-test-hub/accessory/32/service/13",
+    "spruthub://hub/automation-test-hub/accessory/34",
+    "spruthub://hub/automation-test-hub/accessory/34/service/13",
+  ]) {
+    const found = await client.callTool({
+      name: "list_native_changes",
+      arguments: {
+        home_ref: "spruthub://hub/automation-test-hub",
+        entity_ref: ref,
+      },
+    });
+    assert.deepEqual(
+      found.structuredContent.changes.map(({ change_ref: change }) => change),
+      [prepared.structuredContent.change_ref],
+      ref,
+    );
+  }
 });
 
 test("apply creates one exact native rule and repeated apply does not duplicate it", async (t) => {

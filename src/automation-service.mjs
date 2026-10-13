@@ -46,6 +46,9 @@ import {
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
 
+// Characteristics whose value is a setting rather than a momentary command:
+// an equal value is not resent, and a third value seen after a write is a
+// manual change. Any characteristic command is restorable (restoreValueChange).
 const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
   "TargetTemperature",
   "TargetHeatingCoolingState",
@@ -53,6 +56,9 @@ const STATEFUL_CHARACTERISTIC_SETTING_TYPES = new Set([
 ]);
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
+// Changes one restore_native_change call undoes: two full device-command
+// groups.
+const RESTORE_BATCH_LIMIT = 100;
 // SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
 // Latin alike (characters, not bytes); the room.create answer already
 // carries the kept name, and the one emoji tried (🙂, outside the Basic
@@ -280,7 +286,7 @@ export class AutomationService {
     return publicNativeChange(await this.#recordValueChange(input, draft));
   }
 
-  async #recordValueChange(input, draft) {
+  async #recordValueChange(input, draft, journal = {}) {
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -295,6 +301,7 @@ export class AutomationService {
       baseline_value: draft.value,
       requested_value: draft.requested,
       ...draft.extra,
+      ...journal,
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -329,6 +336,9 @@ export class AutomationService {
       target_ref: input.target_ref,
       target,
       native_type: { type: type.type },
+      ...(typeof type.name === "string"
+        ? { target_name: sanitizeNativeData(type.name) }
+        : {}),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline_absent"),
@@ -1050,20 +1060,32 @@ export class AutomationService {
   // Several characteristic_value changes in one call: every command's
   // contract is validated before any is recorded or sent, then each one goes
   // through the same journal record and apply lifecycle as prepare → apply.
+  // The call is one group: its changes share group_id, so one restore puts
+  // back the whole request.
   async sendDeviceCommands({ home_ref: homeRef, commands, reason }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     const targets = parseDeviceCommandTargets(commands, this.hubSerial);
     return this.#exclusiveWrite(async () => {
       const items = await this.#validateDeviceCommands(commands, targets);
       const changes = await this.store.list();
+      const groupId = this.store.newId();
       const results = [];
-      for (const item of items) {
+      for (const [index, item] of items.entries()) {
         results.push(
-          await this.#sendDeviceCommand(item, changes, homeRef, reason),
+          await this.#sendDeviceCommand(item, changes, homeRef, reason, {
+            group_id: groupId,
+            group_index: index,
+          }),
         );
       }
       await this.#warnLevelsStoredWhileOff(items, results);
-      return deviceCommandsResult(homeRef, results);
+      return deviceCommandsResult(
+        homeRef,
+        results,
+        results.some(({ change_ref: ref }) => typeof ref === "string")
+          ? groupRef(groupId)
+          : null,
+      );
     });
   }
 
@@ -1156,6 +1178,7 @@ export class AutomationService {
     changes,
     homeRef,
     reason,
+    group,
   ) {
     const item = {
       target_ref: command.target_ref,
@@ -1213,7 +1236,10 @@ export class AutomationService {
         };
       }
       previous = { previous_value: current.value.value };
-      change = await this.#recordValueChange({ ...input, reason }, current);
+      change = await this.#recordValueChange({ ...input, reason }, current, {
+        ...group,
+        ...(name ? { target_name: name } : {}),
+      });
       return {
         ...item,
         ...previous,
@@ -1429,7 +1455,10 @@ export class AutomationService {
           groupValuesEqual(value, change.requested_value),
         )
       : undefined;
-    if (valuesEqual(current, expected) && groupDeliveryConfirmed !== false) {
+    if (
+      sameSettingValue(change, current, expected, contract) &&
+      groupDeliveryConfirmed !== false
+    ) {
       const completedStatus = direction === "restore" ? "restored" : "applied";
       const verificationResult =
         direction === "restore"
@@ -1455,8 +1484,8 @@ export class AutomationService {
     }
     if (
       hasKnownSettingSemantics(change) &&
-      !valuesEqual(current, change.baseline_value) &&
-      !valuesEqual(current, change.requested_value)
+      !sameSettingValue(change, current, change.baseline_value, contract) &&
+      !sameSettingValue(change, current, change.requested_value, contract)
     ) {
       return {
         direction,
@@ -1596,51 +1625,143 @@ export class AutomationService {
     );
   }
 
+  // One native change keeps its full record as the answer; a group ref is
+  // undone as a group; an apply_automation_change ref is rolled back.
   async restoreNativeChange(changeReference) {
-    const id = parseNativeChangeRef(changeReference);
+    const { type, id } = parseRestoreRef(changeReference);
+    if (type === "automation") return this.rollback(changeReference);
+    if (type === "group") return this.restoreChanges([changeReference]);
+    return this.#exclusiveWrite(async () =>
+      this.#restoreNative(await this.#requireNativeChange(id)),
+    );
+  }
+
+  // «Верни как было»: the agent's own changes of one request, undone
+  // newest first so a later change of the same target goes before the one
+  // it built on, and a lamp's level before its On. Each item is decided by
+  // the home right before its own write and answers for itself; nothing is
+  // undone as all-or-nothing.
+  async restoreChanges(references) {
+    const parsed = references.map(parseRestoreRef);
     return this.#exclusiveWrite(async () => {
-      const change = await this.#requireNativeChange(id);
-      if (change.kind === "accessory_placement") {
-        return this.#restoreAccessoryPlacement(change);
+      const entries = await this.#restoreEntries(parsed);
+      const results = [];
+      for (const entry of restoreOrder(entries)) {
+        results.push(await this.#restoreEntry(entry));
       }
-      if (change.kind === "room_create") {
-        return this.#restoreRoomCreate(change);
-      }
-      if (change.kind === "virtual_light_group") {
-        return this.#restoreVirtualLightGroup(change);
-      }
-      const valueKind = nativeValueKind(change.kind);
-      if (valueKind) {
-        // A command's restorability follows only its saved type and baseline.
-        const restoration = nativeValueRestoration(change);
-        if (valueKind.command && !restoration.supported) {
+      return restoreChangesResult(configuredHomeRef(this.hubSerial), results);
+    });
+  }
+
+  async #restoreEntries(parsed) {
+    const entries = new Map();
+    let stored;
+    for (const { type, id } of parsed) {
+      if (type === "group") {
+        stored ??= await this.store.list();
+        const members = stored.filter(
+          (change) => change.group_id === id && isNativeChange(change),
+        );
+        if (members.length === 0) {
           throw new SprutHubError(
-            "restore_unsupported",
-            restoration.limitation?.message ??
-              "This characteristic is not a supported restorable setting.",
-            "get_native_change",
+            "change_not_found",
+            "No change of this group was found for this configured hub.",
+            "list_native_changes",
           );
         }
-        return this.#restoreValueChange(change);
+        for (const member of members) {
+          if (member.home_ref !== configuredHomeRef(this.hubSerial)) {
+            throw unsupportedHomeWrite();
+          }
+          entries.set(member.id, { change: member, automation: false });
+        }
+      } else if (type === "automation") {
+        entries.set(id, {
+          change: await this.#requireAutomationChange(id),
+          automation: true,
+        });
+      } else {
+        entries.set(id, {
+          change: await this.#requireNativeChange(id),
+          automation: false,
+        });
       }
-      if (change.kind === "logic_assignment") {
-        return this.#restoreLogicAssignment(change);
-      }
-      if (change.kind === "scenario_run") {
+    }
+    if (entries.size > RESTORE_BATCH_LIMIT) {
+      throw new SprutHubError(
+        "too_many_changes",
+        `One restore takes at most ${RESTORE_BATCH_LIMIT} changes. Restore the newest ones first, then the rest in another call.`,
+        "list_native_changes",
+      );
+    }
+    return [...entries.values()];
+  }
+
+  async #restoreEntry({ change: listed, automation }) {
+    let change;
+    try {
+      // Read again: restoring an earlier item may have updated this record.
+      change = automation
+        ? await this.#requireAutomationChange(listed.id)
+        : await this.#requireNativeChange(listed.id);
+    } catch (error) {
+      return restoreFailureItem(listed, automation, error);
+    }
+    const before = {
+      status: change.status,
+      restoreIntentAt: restoreIntentTime(change),
+    };
+    try {
+      const result = automation
+        ? await this.#rollbackAutomation(change)
+        : await this.#restoreNative(change);
+      return restoreItem(change, automation, result, before);
+    } catch (error) {
+      return restoreFailureItem(change, automation, error);
+    }
+  }
+
+  async #restoreNative(change) {
+    if (change.kind === "accessory_placement") {
+      return this.#restoreAccessoryPlacement(change);
+    }
+    if (change.kind === "room_create") {
+      return this.#restoreRoomCreate(change);
+    }
+    if (change.kind === "virtual_light_group") {
+      return this.#restoreVirtualLightGroup(change);
+    }
+    const valueKind = nativeValueKind(change.kind);
+    if (valueKind) {
+      // A command's restorability follows only its saved type and baseline.
+      const restoration = nativeValueRestoration(change);
+      if (valueKind.command && !restoration.supported) {
         throw new SprutHubError(
           "restore_unsupported",
-          "A scenario run is a physical command; restoring its journal entry cannot undo that effect.",
+          restoration.limitation?.message ??
+            "This characteristic is not a supported restorable setting.",
           "get_native_change",
         );
       }
-      if (isLogicSourceChange(change)) {
-        return this.#restoreScenarioChange(change);
-      }
-      if (change.kind === "block_action_pause") {
-        return this.#restoreBlockActionPause(change);
-      }
+      return this.#restoreValueChange(change);
+    }
+    if (change.kind === "logic_assignment") {
+      return this.#restoreLogicAssignment(change);
+    }
+    if (change.kind === "scenario_run") {
+      throw new SprutHubError(
+        "restore_unsupported",
+        "A scenario run is a physical command; restoring its journal entry cannot undo that effect.",
+        "get_native_change",
+      );
+    }
+    if (isLogicSourceChange(change)) {
       return this.#restoreScenarioChange(change);
-    });
+    }
+    if (change.kind === "block_action_pause") {
+      return this.#restoreBlockActionPause(change);
+    }
+    return this.#restoreScenarioChange(change);
   }
 
   async #applyAccessoryPlacement(change) {
@@ -1658,18 +1779,8 @@ export class AutomationService {
       current = pending.current;
     }
     current ??= await this.#observeAccessoryPlacement(change);
-    if (change.status === "applied") {
-      if (accessoryPlacementMatches(current, change.applied_snapshot)) {
-        return this.#finishNative(change, "applied", undefined, {
-          observed_snapshot: current,
-          last_verification: freshVerification("applied_snapshot_observed"),
-        });
-      }
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+    if (placementOwnedSinceApply(change)) {
+      return this.#observeAppliedPlacement(change, current);
     }
     if (!accessoryPlacementMatches(current, change.baseline_snapshot)) {
       return this.#finishNative(change, "conflict", undefined, {
@@ -1842,19 +1953,64 @@ export class AutomationService {
         verification: failedVerification(error),
       });
     }
-    if (
-      change.status === "applied" &&
-      !accessoryPlacementMatches(current, change.applied_snapshot)
-    ) {
-      return this.#finishNative(change, "conflict", undefined, {
-        observed_snapshot: current,
-        conflict_reason: "manual_change",
-        last_verification: freshVerification("conflict"),
-      });
+    if (placementOwnedSinceApply(change)) {
+      return this.#observeAppliedPlacement(change, current);
     }
     return this.#finishNative(change, change.status, undefined, {
       observed_snapshot: current,
       last_verification: freshVerification("current_configuration_observed"),
+    });
+  }
+
+  // An applied placement, or one held by the agent's own later move: the
+  // applied snapshot seen again makes it applied, a later move of the
+  // agent names that move, anything else is a manual change.
+  async #observeAppliedPlacement(change, current) {
+    if (accessoryPlacementMatches(current, change.applied_snapshot)) {
+      return this.#finishNative(change, "applied", undefined, {
+        observed_snapshot: current,
+        last_verification: freshVerification("applied_snapshot_observed"),
+      });
+    }
+    const later = await this.#laterOwnedPlacement(change, current);
+    if (later) return this.#finishLaterOwnedPlacement(change, later, current);
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_snapshot: current,
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  // The agent's own later move or rename of the same accessory that left
+  // it as it is now.
+  async #laterOwnedPlacement(change, current) {
+    let latest;
+    for (const candidate of await this.store.list()) {
+      if (
+        candidate.id === change.id ||
+        candidate.kind !== "accessory_placement" ||
+        candidate.home_ref !== change.home_ref ||
+        candidate.target?.id !== change.target.id ||
+        !changeStillInEffect(candidate) ||
+        candidate.applied_snapshot === undefined ||
+        compareApplication(candidate, change) <= 0 ||
+        !accessoryPlacementMatches(current, candidate.applied_snapshot)
+      ) {
+        continue;
+      }
+      if (!latest || compareApplication(candidate, latest) > 0) {
+        latest = candidate;
+      }
+    }
+    return latest;
+  }
+
+  async #finishLaterOwnedPlacement(change, later, current) {
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_snapshot: current,
+      conflict_reason: "later_owned_change",
+      restore_first_change_id: later.id,
+      last_verification: freshVerification("conflict"),
     });
   }
 
@@ -1886,6 +2042,8 @@ export class AutomationService {
       });
     }
     current ??= await this.#observeAccessoryPlacement(change);
+    const later = await this.#laterOwnedPlacement(change, current);
+    if (later) return this.#finishLaterOwnedPlacement(change, later, current);
     if (accessoryPlacementMatches(current, change.baseline_snapshot)) {
       return this.#finishNative(change, "restored", undefined, {
         observed_snapshot: current,
@@ -2197,12 +2355,29 @@ export class AutomationService {
       change.created_room_id,
     );
     if (contents.length > 0) {
+      // An accessory the agent itself moved here names that move, which is
+      // undone first.
+      const placements = (await this.store.list()).filter(
+        (candidate) =>
+          candidate.kind === "accessory_placement" &&
+          candidate.home_ref === change.home_ref &&
+          candidate.requested_snapshot?.room_id === change.created_room_id &&
+          changeStillInEffect(candidate),
+      );
       return this.#finishNative(change, "conflict", undefined, {
         observed_room: snapshot,
-        room_contents: contents.map(({ id, name }) => ({
-          ref: `${change.home_ref}/accessory/${id}`,
-          name,
-        })),
+        room_contents: contents.map(({ id, name }) => {
+          const moved = placements.find(
+            (candidate) => candidate.target?.id === id,
+          );
+          return {
+            ref: `${change.home_ref}/accessory/${id}`,
+            name,
+            ...(moved
+              ? { change_ref: `spruthub-change://native/${moved.id}` }
+              : {}),
+          };
+        }),
         conflict_reason: "room_not_empty",
         last_verification: freshVerification("room_not_empty"),
       });
@@ -3285,13 +3460,11 @@ export class AutomationService {
     const all = storedChanges
       .filter(
         (change) =>
-          change.home_ref === undefined || change.home_ref === homeRef,
+          (change.home_ref === undefined || change.home_ref === homeRef) &&
+          (entityRef === undefined ||
+            changeAffectedRefs(change, homeRef).includes(entityRef)),
       )
       .map((change) => changeSummary(change, homeRef))
-      .filter(
-        (change) =>
-          entityRef === undefined || change.target_refs.includes(entityRef),
-      )
       .sort(compareChangeSummaries);
     const remaining =
       selection.after === null
@@ -3803,7 +3976,27 @@ export class AutomationService {
         last_verification: freshVerification("current_value_observed"),
       });
     }
-    if (valuesEqual(current, change.baseline_value)) {
+    // An offline device shows its last known values, which say nothing of
+    // its state now: nothing is decided or written for it.
+    if (nativeValueKind(change.kind).command) {
+      const accessory = await this.client.getAccessory(change.target.aId);
+      if (accessory?.online === false) {
+        return {
+          ...publicNativeChange(change, current),
+          restore_outcome: {
+            status: "skipped",
+            reason: "device_unavailable",
+            message:
+              "The hub shows this device offline, so its values are the last known ones; nothing was written. Restore it again once the device is back online.",
+          },
+        };
+      }
+    }
+    const matches = (left, right) =>
+      sameSettingValue(change, left, right, contract);
+    const later = await this.#laterOwnedValueChange(change, current, matches);
+    if (later) return this.#finishLaterOwnedValueChange(change, later, current);
+    if (matches(current, change.baseline_value)) {
       return this.#finishNative(change, "restored", current, {
         last_verification: freshVerification("baseline_value_observed"),
         ...(nativeIntentDirection(change) === "restore"
@@ -3811,7 +4004,7 @@ export class AutomationService {
           : {}),
       });
     }
-    if (!valuesEqual(current, change.requested_value)) {
+    if (!matches(current, change.requested_value)) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "manual_change",
         manual_change_observed: true,
@@ -3835,7 +4028,11 @@ export class AutomationService {
   }
 
   async #observeProvenNativeValue(change, current) {
-    if (!valuesEqual(current, change.requested_value)) {
+    if (!sameSettingValue(change, current, change.requested_value)) {
+      const later = await this.#laterOwnedValueChange(change, current);
+      if (later) {
+        return this.#finishLaterOwnedValueChange(change, later, current);
+      }
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "value_changed_after_apply",
         manual_change_observed: true,
@@ -3853,6 +4050,39 @@ export class AutomationService {
     }
     return this.#finishNative(change, "applied", current, {
       last_verification: freshVerification("requested_value_observed"),
+    });
+  }
+
+  // The agent's own later change of the same setting that set the value
+  // seen now: this change is governed by it, which is no manual change and
+  // costs this change no restore right. The newest such change is named.
+  async #laterOwnedValueChange(change, current, matches = valuesEqual) {
+    const key = valueTargetKey(change);
+    let latest;
+    for (const candidate of await this.store.list()) {
+      if (
+        candidate.id === change.id ||
+        candidate.home_ref !== change.home_ref ||
+        !isNativeValueChange(candidate) ||
+        valueTargetKey(candidate) !== key ||
+        !changeStillInEffect(candidate) ||
+        compareApplication(candidate, change) <= 0 ||
+        !matches(current, candidate.requested_value)
+      ) {
+        continue;
+      }
+      if (!latest || compareApplication(candidate, latest) > 0) {
+        latest = candidate;
+      }
+    }
+    return latest;
+  }
+
+  async #finishLaterOwnedValueChange(change, later, current) {
+    return this.#finishNative(change, "conflict", current, {
+      conflict_reason: "later_owned_change",
+      restore_first_change_id: later.id,
+      last_verification: freshVerification("conflict"),
     });
   }
 
@@ -4232,12 +4462,45 @@ export class AutomationService {
       ["block_create", "logic_source_create"].includes(change.kind) &&
       current.scenario === null &&
       change.applied_snapshot !== undefined;
+    const later = ownedTargetAbsent
+      ? undefined
+      : await this.#laterOwnedScenarioChange(change, current);
     return this.#finishNative(change, "conflict", undefined, {
       ...observation.fields,
-      conflict_reason: "manual_change",
+      conflict_reason: later ? "later_owned_change" : "manual_change",
+      restore_first_change_id: later?.id,
       logic_assignments: undefined,
       ...(ownedTargetAbsent ? { owned_target_absent_observed: true } : {}),
     });
+  }
+
+  // The agent's own later edit of the same scenario (BLOCK data, LOGIC code
+  // or a pause) that left it as it is now: undo that edit first.
+  async #laterOwnedScenarioChange(change, current) {
+    const index = change.scenario_index ?? change.target?.index;
+    if (index === undefined) return undefined;
+    let latest;
+    for (const candidate of await this.store.list()) {
+      if (
+        candidate.id === change.id ||
+        candidate.home_ref !== change.home_ref ||
+        ![
+          "block_data_update",
+          "block_action_pause",
+          "logic_source_update",
+        ].includes(candidate.kind) ||
+        candidate.target?.index !== index ||
+        !changeStillInEffect(candidate) ||
+        compareApplication(candidate, change) <= 0 ||
+        !scenarioChangeObservation(candidate, current, "applied").matches
+      ) {
+        continue;
+      }
+      if (!latest || compareApplication(candidate, latest) > 0) {
+        latest = candidate;
+      }
+    }
+    return latest;
   }
 
   async #applyScenarioChange(change) {
@@ -5127,6 +5390,7 @@ export class AutomationService {
 
       change.status = "creating";
       change.updated_at = new Date().toISOString();
+      change.apply_started_at ??= change.updated_at;
       await this.#saveBeforeWrite(change);
       try {
         const created = await this.client.createScenario(
@@ -5206,60 +5470,54 @@ export class AutomationService {
 
   async rollback(changeReference) {
     const id = parseChangeRef(changeReference);
-    return this.#exclusiveWrite(async () => {
-      const change = await this.#requireChange(id);
-      if (
-        change.status === "prepared" ||
-        (change.status === "already_present" && change.owned === false)
-      ) {
-        return {
-          ...publicChange(change),
-          status: "not_owned",
-          action: "leave_existing_scenario_unchanged",
-        };
+    return this.#exclusiveWrite(async () =>
+      this.#rollbackAutomation(await this.#requireAutomationChange(id)),
+    );
+  }
+
+  async #rollbackAutomation(change) {
+    const changeReference = changeRef(change.id);
+    if (
+      change.status === "prepared" ||
+      (change.status === "already_present" && change.owned === false)
+    ) {
+      return {
+        ...publicChange(change),
+        status: "not_owned",
+        action: "leave_existing_scenario_unchanged",
+      };
+    }
+    const reconciliation = await this.#reconcile(change);
+    const observation = observeReconciliation(change, reconciliation);
+    if (observation.kind === "absent") {
+      if (["creating", "uncertain"].includes(change.status)) {
+        return this.#finish(change, { status: "uncertain" }, uncertainResult);
       }
-      const reconciliation = await this.#reconcile(change);
-      const observation = observeReconciliation(change, reconciliation);
-      if (observation.kind === "absent") {
-        if (["creating", "uncertain"].includes(change.status)) {
-          return this.#finish(change, { status: "uncertain" }, uncertainResult);
-        }
-        return this.#finish(change, { status: "rolled_back" }, (current) =>
-          rolledBackResult(current, false),
+      return this.#finish(change, { status: "rolled_back" }, (current) =>
+        rolledBackResult(current, false),
+      );
+    }
+    if (observation.kind !== "owned_match") {
+      return this.#finishObservation(change, observation);
+    }
+    change.status = "deleting";
+    change.updated_at = new Date().toISOString();
+    await this.#saveBeforeWrite(change);
+    try {
+      await this.client.deleteScenario(observation.scenario.index);
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        error.details = await this.#finishKnownNoEffect(
+          change,
+          changeReference,
+          "applied",
+          error,
         );
+        throw error;
       }
-      if (observation.kind !== "owned_match") {
-        return this.#finishObservation(change, observation);
-      }
-      change.status = "deleting";
-      change.updated_at = new Date().toISOString();
-      await this.#saveBeforeWrite(change);
       try {
-        await this.client.deleteScenario(observation.scenario.index);
-      } catch (error) {
-        if (!isUncertainWriteError(error)) {
-          error.details = await this.#finishKnownNoEffect(
-            change,
-            changeReference,
-            "applied",
-            error,
-          );
-          throw error;
-        }
-        try {
-          const afterUncertainDelete = await this.#reconcile(change);
-          return this.#finishDeleteReadback(change, afterUncertainDelete, true);
-        } catch {
-          return this.#finish(
-            change,
-            { status: "rollback_uncertain" },
-            uncertainResult,
-          );
-        }
-      }
-      let afterDelete;
-      try {
-        afterDelete = await this.#reconcile(change);
+        const afterUncertainDelete = await this.#reconcile(change);
+        return this.#finishDeleteReadback(change, afterUncertainDelete, true);
       } catch {
         return this.#finish(
           change,
@@ -5267,8 +5525,32 @@ export class AutomationService {
           uncertainResult,
         );
       }
-      return this.#finishDeleteReadback(change, afterDelete, false);
-    });
+    }
+    let afterDelete;
+    try {
+      afterDelete = await this.#reconcile(change);
+    } catch {
+      return this.#finish(
+        change,
+        { status: "rollback_uncertain" },
+        uncertainResult,
+      );
+    }
+    return this.#finishDeleteReadback(change, afterDelete, false);
+  }
+
+  // An apply_automation_change ref names only a preview_boolean_automation
+  // record, never a native change of the same journal.
+  async #requireAutomationChange(id) {
+    const change = await this.#requireChange(id);
+    if (isNativeChange(change)) {
+      throw new SprutHubError(
+        "change_not_found",
+        "The automation change was not found for this configured hub.",
+        "preview_boolean_automation",
+      );
+    }
+    return change;
   }
 
   async #requireChange(id) {
@@ -9698,13 +9980,14 @@ function publicAccessoryPlacement(snapshot, serial) {
 // - restoration(contract, baseline) decides restore; knownSetting(change)
 //   decides whether a third readback value is a manual change.
 // Optional: optionKey (input option_key selects the setting), command (a
-// runtime command that is never resent automatically and whose physical
-// effect restore does not reverse), contract and prepare overrides,
-// ownerConflict, and extra limitations.
+// runtime command that is never resent automatically, whose restore writes
+// the previous value back only while the device still shows the sent one
+// and does not reverse past physical effects), contract and prepare
+// overrides, ownerConflict, and extra limitations.
 const NATIVE_VALUE_KINDS = {
   characteristic_value: {
     command: true,
-    restoration: characteristicSettingRestoration,
+    restoration: scalarValueRestoration,
     knownSetting: (change) =>
       isKnownCharacteristicSetting(change.contract?.type),
     inspect: inspectCharacteristicValue,
@@ -9848,21 +10131,31 @@ const NATIVE_VALUE_KINDS = {
     knownSetting: () => false,
     async inspect(service, input) {
       const target = parseScenarioRef(input.target_ref, service.hubSerial);
-      const { windowKey: _windowKey, ...state } = await readScenarioActive(
-        service.client,
-        target,
-        { beforeChangeRef: input.target_ref },
-      );
-      return { fields: { target }, ...state };
+      const {
+        windowKey: _windowKey,
+        name,
+        ...state
+      } = await readScenarioActive(service.client, target, {
+        beforeChangeRef: input.target_ref,
+      });
+      return {
+        fields: {
+          target,
+          ...(typeof name === "string" ? { target_name: name } : {}),
+        },
+        ...state,
+      };
     },
     // The write goes to the options window this read found, so a change
     // journaled before the window path gets it on its first read too.
     async read(service, change, { requireWrite = false } = {}) {
-      const { windowKey, ...state } = await readScenarioActive(
-        service.client,
-        change.target,
-        { requireWrite },
-      );
+      const {
+        windowKey,
+        name: _name,
+        ...state
+      } = await readScenarioActive(service.client, change.target, {
+        requireWrite,
+      });
       change.options_window_key = windowKey;
       return state;
     },
@@ -10208,7 +10501,7 @@ function deviceCommandFailure(change, error) {
   };
 }
 
-function deviceCommandsResult(homeRef, results) {
+function deviceCommandsResult(homeRef, results, groupReference) {
   const summary = {
     total: results.length,
     applied: 0,
@@ -10225,11 +10518,12 @@ function deviceCommandsResult(homeRef, results) {
         ? "ok"
         : "incomplete",
     home_ref: homeRef,
+    ...(groupReference ? { group_ref: groupReference } : {}),
     summary,
     results,
     limitations: [
       "observed_value is a readback after the command; it cannot prove the command caused it.",
-      "Commands are physical actions and are not undone; only items with restore_supported=true can be put back with restore_native_change.",
+      "restore_native_change with group_ref puts back the previous values of this call's commands, each only while its device still shows the value sent; past physical effects are not undone.",
     ],
   };
 }
@@ -10691,6 +10985,7 @@ async function readScenarioActive(
       confirmation: "separate_scenario_get_and_window_get_readback",
     },
     windowKey: scenario.optionsWindow,
+    name: scenario.name,
   };
 }
 
@@ -10939,6 +11234,67 @@ function nativeValueLifecycle(change) {
   return { phase: "apply_unproven" };
 }
 
+// One setting a value change writes: the same kind on the same target (and
+// option key).
+function valueTargetKey(change) {
+  return `${change.kind}|${stableJson(change.target ?? null)}|${change.option_key ?? ""}`;
+}
+
+// A sent change that may still hold its target: not undone, refused,
+// replaced or found not applied.
+function changeStillInEffect(change) {
+  return (
+    change.native_write_sent === true &&
+    ![
+      "prepared",
+      "not_applied",
+      "not_owned",
+      "restored",
+      "superseded",
+      "completed",
+    ].includes(change.status)
+  );
+}
+
+// When a change was first applied: its first apply intent, else (a legacy
+// automation or a draft) when it was recorded.
+function applicationTime(change) {
+  return changeAppliedAt(change) ?? change.created_at;
+}
+
+function compareApplication(left, right) {
+  return (
+    applicationTime(left).localeCompare(applicationTime(right)) ||
+    (left.group_id !== undefined && left.group_id === right.group_id
+      ? left.group_index - right.group_index
+      : 0) ||
+    left.created_at.localeCompare(right.created_at) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+// A device may store a level one step off what was sent (rounding to its
+// own scale), so a command's readback within one native step counts as the
+// value sent; other settings compare exactly.
+function sameSettingValue(change, left, right, contract = change.contract) {
+  if (valuesEqual(left, right)) return true;
+  if (!nativeValueKind(change.kind)?.command) return false;
+  const numeric = ["intValue", "longValue", "doubleValue"];
+  if (!numeric.includes(left?.kind) || !numeric.includes(right?.kind)) {
+    return false;
+  }
+  const a = Number(left.value);
+  const b = Number(right.value);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  const step =
+    typeof contract?.step === "number" && contract.step > 0 ? contract.step : 0;
+  return Math.abs(a - b) <= step + 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+function groupRef(id) {
+  return `spruthub-change://group/${id}`;
+}
+
 function isKnownCharacteristicSetting(type) {
   return STATEFUL_CHARACTERISTIC_SETTING_TYPES.has(type);
 }
@@ -10956,13 +11312,6 @@ function nativeValueRestoration(change) {
   const kind = nativeValueKind(change?.kind);
   if (!kind) return { supported: false };
   return kind.restoration(change.contract, change.baseline_value);
-}
-
-function characteristicSettingRestoration(contract, baseline) {
-  if (!isKnownCharacteristicSetting(contract?.type)) {
-    return { supported: false };
-  }
-  return scalarValueRestoration(contract, baseline);
 }
 
 function scalarValueRestoration(contract, baseline) {
@@ -12018,6 +12367,360 @@ function parseNativeChangeRef(ref) {
   return match[1];
 }
 
+function parseRestoreRef(ref) {
+  const match =
+    /^spruthub-change:\/\/(native|automation|group)\/([a-f0-9]{24})$/.exec(
+      typeof ref === "string" ? ref : "",
+    );
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_change_ref",
+      "Use a change_ref or group_ref from list_native_changes, send_device_commands, apply_native_change or apply_automation_change.",
+      "list_native_changes",
+    );
+  }
+  return { type: match[1], id: match[2] };
+}
+
+// Newest first, so each change is undone before the ones it built on. A
+// lamp's On is moved after its level changes in the same call: a lamp
+// coming back on shows its previous level at once, and one going off is
+// switched off last.
+function restoreOrder(entries) {
+  const ordered = [...entries].sort((left, right) =>
+    compareApplication(right.change, left.change),
+  );
+  const lamp = ({ change }) =>
+    change.kind === "characteristic_value" && change.target
+      ? `${change.target.aId}.${change.target.sId}`
+      : null;
+  const isLevel = (entry) =>
+    lamp(entry) !== null && LIGHT_LEVEL_TYPES.has(entry.change.contract?.type);
+  const isOn = (entry) =>
+    lamp(entry) !== null && entry.change.contract?.type === "On";
+  const lastLevel = new Map();
+  ordered.forEach((entry, index) => {
+    if (isLevel(entry)) lastLevel.set(lamp(entry), index);
+  });
+  const result = [];
+  const held = new Map();
+  ordered.forEach((entry, index) => {
+    const key = lamp(entry);
+    if (isOn(entry) && (lastLevel.get(key) ?? -1) > index) {
+      held.set(key, [...(held.get(key) ?? []), entry]);
+      return;
+    }
+    result.push(entry);
+    if (isLevel(entry) && lastLevel.get(key) === index) {
+      result.push(...(held.get(key) ?? []));
+    }
+  });
+  return result;
+}
+
+function restoreIntentTime(change) {
+  return change.write_intent?.direction === "restore"
+    ? change.write_intent.at
+    : undefined;
+}
+
+function restoreItemBase(change, automation) {
+  const name = changeName(change);
+  const value = isNativeValueChange(change) ? summaryValue(change) : undefined;
+  return {
+    change_ref: automation
+      ? changeRef(change.id)
+      : `spruthub-change://native/${change.id}`,
+    operation: automation ? "legacy_boolean_automation" : change.kind,
+    ...(name ? { name } : {}),
+    ...(typeof change.target_ref === "string"
+      ? { target_ref: change.target_ref }
+      : {}),
+    ...(change.kind === "characteristic_value" && change.contract?.type
+      ? { type: change.contract.type }
+      : {}),
+    // From what the agent set back to what it was.
+    ...(value ? { value: { from: value.to, to: value.from } } : {}),
+  };
+}
+
+function restoreItem(change, automation, result, before) {
+  const base = restoreItemBase(change, automation);
+  if (automation) return automationRestoreItem(base, result, before);
+  const observed =
+    result.observed_value !== undefined &&
+    result.observed_value !== null &&
+    Object.hasOwn(result.observed_value, "value")
+      ? { observed_value: result.observed_value.value }
+      : {};
+  if (result.restore_outcome) {
+    return {
+      ...base,
+      status: result.restore_outcome.status,
+      sent: false,
+      reason: result.restore_outcome.reason,
+      message: result.restore_outcome.message,
+      ...observed,
+    };
+  }
+  const intentAt = restoreIntentTime(change);
+  const sent = intentAt !== undefined && intentAt !== before.restoreIntentAt;
+  switch (result.status) {
+    case "restored":
+      if (before.status === "restored") {
+        return {
+          ...base,
+          status: "restored",
+          sent: false,
+          note: "already_restored",
+        };
+      }
+      if (intentAt !== undefined) {
+        return { ...base, status: "restored", sent, ...observed };
+      }
+      if (
+        isNativeValueChange(change) &&
+        valuesEqual(change.baseline_value, change.requested_value)
+      ) {
+        return {
+          ...base,
+          status: "restored",
+          sent: false,
+          note: "nothing_to_restore",
+          ...observed,
+        };
+      }
+      // Back as it was without this restore: someone else undid it.
+      return {
+        ...base,
+        status: "skipped",
+        reason: "changed_since",
+        sent: false,
+        already_previous: true,
+        ...observed,
+      };
+    case "conflict":
+      if (result.conflict_reason === "later_owned_change") {
+        return {
+          ...base,
+          status: "skipped",
+          reason: "later_change",
+          sent: false,
+          later_change_ref: result.restore_first_change_ref,
+          ...observed,
+        };
+      }
+      if (
+        ["manual_change", "value_changed_after_apply"].includes(
+          result.conflict_reason,
+        )
+      ) {
+        return {
+          ...base,
+          status: "skipped",
+          reason: "changed_since",
+          sent: false,
+          already_previous: false,
+          ...observed,
+        };
+      }
+      return {
+        ...base,
+        status: "skipped",
+        reason: result.conflict_reason ?? "conflict",
+        sent: false,
+        ...(result.room_contents
+          ? { room_contents: result.room_contents }
+          : {}),
+        ...(result.referencing_scenario_targets
+          ? {
+              referencing_scenario_targets: result.referencing_scenario_targets,
+            }
+          : {}),
+        ...(result.logic_assignments
+          ? { logic_assignments: result.logic_assignments }
+          : {}),
+        ...observed,
+      };
+    case "not_owned":
+      return {
+        ...base,
+        status: "skipped",
+        reason: [
+          "change_was_not_applied",
+          "room_creation_not_confirmed",
+        ].includes(result.conflict_reason)
+          ? "not_applied"
+          : "not_owned",
+        sent: false,
+        ...observed,
+      };
+    case "uncertain":
+    case "applying":
+    case "restoring":
+      return {
+        ...base,
+        status: "uncertain",
+        reason:
+          change.write_intent?.direction === "restore"
+            ? "restore_unconfirmed"
+            : "apply_unconfirmed",
+        sent,
+        ...observed,
+        next: nativeChangeNext(base.change_ref),
+      };
+    case "applied":
+      // An interrupted apply confirmed only now; the restore itself is
+      // the next call.
+      return {
+        ...base,
+        status: "skipped",
+        reason: "apply_confirmed_now",
+        sent: false,
+        ...observed,
+        next: {
+          tool: "restore_native_change",
+          arguments: { change_ref: base.change_ref },
+        },
+      };
+    default:
+      return {
+        ...base,
+        status: "skipped",
+        reason: result.status,
+        sent: false,
+        ...observed,
+      };
+  }
+}
+
+function automationRestoreItem(base, result, before) {
+  switch (result.status) {
+    case "rolled_back":
+      if (before.status === "rolled_back") {
+        return {
+          ...base,
+          status: "restored",
+          sent: false,
+          note: "already_restored",
+        };
+      }
+      return result.removed === true
+        ? { ...base, status: "restored", sent: true }
+        : {
+            ...base,
+            status: "skipped",
+            reason: "changed_since",
+            sent: false,
+            already_previous: true,
+          };
+    case "conflict":
+      return {
+        ...base,
+        status: "skipped",
+        reason: "changed_since",
+        sent: false,
+      };
+    case "uncertain":
+    case "rollback_uncertain":
+      return {
+        ...base,
+        status: "uncertain",
+        reason: "restore_unconfirmed",
+        sent: true,
+        next: {
+          tool: "get_automation_change",
+          arguments: { change_ref: base.change_ref },
+        },
+      };
+    default:
+      return {
+        ...base,
+        status: "skipped",
+        reason: result.status,
+        sent: false,
+      };
+  }
+}
+
+function restoreFailureItem(change, automation, error) {
+  const base = restoreItemBase(change, automation);
+  if (error instanceof SprutHubError && error.code === "restore_unsupported") {
+    return {
+      ...base,
+      status: "skipped",
+      reason: "not_restorable",
+      sent: false,
+      message: error.message,
+    };
+  }
+  const details = error instanceof SprutHubError ? (error.details ?? {}) : {};
+  return {
+    ...base,
+    status: "failed",
+    sent: details.rejection !== undefined || details.hub_effect === "partial",
+    error: {
+      code: error instanceof SprutHubError ? error.code : "internal_error",
+      message:
+        error instanceof SprutHubError
+          ? error.message
+          : "The restore failed inside sprut-agent.",
+      ...(error instanceof SprutHubError && error.action
+        ? { action: error.action }
+        : {}),
+    },
+    ...(details.hub_effect ? { hub_effect: details.hub_effect } : {}),
+    ...(details.rejection ? { rejection: details.rejection } : {}),
+    next:
+      details.next ??
+      (automation
+        ? {
+            tool: "get_automation_change",
+            arguments: { change_ref: base.change_ref },
+          }
+        : nativeChangeNext(base.change_ref)),
+  };
+}
+
+function restoreChangesResult(homeRef, results) {
+  const summary = {
+    total: results.length,
+    restored: 0,
+    skipped: 0,
+    failed: 0,
+    uncertain: 0,
+  };
+  for (const { status } of results) summary[status] += 1;
+  return {
+    status: summary.restored === summary.total ? "ok" : "incomplete",
+    home_ref: homeRef,
+    summary,
+    results,
+    limitations: [
+      "Results are in the order the changes were undone: newest first, a lamp's level before its On. Each item was checked against the home right before its own write.",
+      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back.",
+      "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, sent notifications and HTTP requests cannot be undone.",
+    ],
+  };
+}
+
+function placementOwnedSinceApply(change) {
+  return (
+    change.status === "applied" ||
+    (change.status === "conflict" &&
+      change.conflict_reason === "later_owned_change")
+  );
+}
+
+function laterChangeRef(change) {
+  return change.conflict_reason === "later_owned_change" &&
+    typeof change.restore_first_change_id === "string"
+    ? {
+        restore_first_change_ref: `spruthub-change://native/${change.restore_first_change_id}`,
+      }
+    : {};
+}
+
 function publicStoredNativeChange(change) {
   return publicNativeChange(change, undefined, {
     verification: savedVerification(change.last_verification),
@@ -12142,6 +12845,7 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
+      ...laterChangeRef(change),
       restore_supported: true,
       limitations: [
         "Only the selected accessory name and room are written; services and sibling accessories are not updated.",
@@ -12438,6 +13142,7 @@ function publicNativeChange(
       ...(change.logic_assignments
         ? { logic_assignments: structuredClone(change.logic_assignments) }
         : {}),
+      ...laterChangeRef(change),
       ...publicScenarioTargetReferences(change),
       restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
@@ -12643,6 +13348,7 @@ function publicNativeChange(
       ...(change.conflict_reason
         ? { conflict_reason: change.conflict_reason }
         : {}),
+      ...laterChangeRef(change),
       ...publicScenarioTargetReferences(change),
       restore_supported: scenarioRestoreSupported(change),
       ...(scenarioConflictAsksForNewPrepare(change)
@@ -12696,6 +13402,7 @@ function publicNativeChange(
   const conflictResolution =
     optionChange &&
     change.status === "conflict" &&
+    change.conflict_reason !== "later_owned_change" &&
     nativeValueProvenApply(change) &&
     observedValue
       ? {
@@ -12739,6 +13446,7 @@ function publicNativeChange(
     ...(change.conflict_reason
       ? { conflict_reason: change.conflict_reason }
       : {}),
+    ...laterChangeRef(change),
     ...(manualValueChangeObserved(change)
       ? { manual_change_observed: true }
       : {}),
@@ -12773,7 +13481,7 @@ function publicNativeChange(
       "SprutHub exposes no native compare-and-set for this operation.",
       restoration.supported
         ? kind.command
-          ? "The saved setting can be restored only while its current value still matches this change; past physical effects are not reversed."
+          ? "Restore writes the previous value back only while the device still shows the value this change set (within one native step) and is online; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
@@ -12863,12 +13571,26 @@ function publicPauseEffect(change, now = Date.now()) {
   };
 }
 
+// What an owner recognises in a history line: what changed (name, value),
+// why (the agent's reason), when, its status and the call it belongs to.
+// Affected refs only select (entity_ref); they are not listed, so a line
+// stays short however many devices a scenario touches.
 function changeSummary(change, homeRef) {
+  const name = changeName(change);
+  const appliedAt = changeAppliedAt(change);
+  const described = {
+    ...(name ? { name } : {}),
+    ...(typeof change.reason === "string" ? { reason: change.reason } : {}),
+  };
   if (isNativeChange(change)) {
     const reference = `spruthub-change://native/${change.id}`;
+    const value = summaryValue(change);
     return {
       change_ref: reference,
       operation: change.kind,
+      ...described,
+      target_ref: canonicalEntityRef(change.target_ref, homeRef),
+      ...(value ? { value } : {}),
       recorded_status: change.status,
       ...(change.kind === "block_action_pause"
         ? {
@@ -12889,7 +13611,8 @@ function changeSummary(change, homeRef) {
               : {}),
           }
         : {}),
-      target_refs: nativeAffectedRefs(change, homeRef),
+      ...(change.group_id ? { group_ref: groupRef(change.group_id) } : {}),
+      ...(appliedAt ? { applied_at: appliedAt } : {}),
       created_at: change.created_at,
       updated_at: change.updated_at,
       next: {
@@ -12899,6 +13622,28 @@ function changeSummary(change, homeRef) {
     };
   }
   const reference = changeRef(change.id);
+  return {
+    change_ref: reference,
+    operation: "legacy_boolean_automation",
+    ...described,
+    ...(change.scenario_index
+      ? {
+          target_ref: `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
+        }
+      : {}),
+    recorded_status: change.status,
+    ...(appliedAt ? { applied_at: appliedAt } : {}),
+    created_at: change.created_at,
+    updated_at: change.updated_at,
+    next: {
+      tool: "get_automation_change",
+      arguments: { change_ref: reference },
+    },
+  };
+}
+
+function changeAffectedRefs(change, homeRef) {
+  if (isNativeChange(change)) return nativeAffectedRefs(change, homeRef);
   const characteristicRefs = [
     change.condition?.characteristic?.ref,
     change.action?.characteristic?.ref,
@@ -12908,24 +13653,79 @@ function changeSummary(change, homeRef) {
   const ancestorRefs = characteristicRefs.flatMap((ref) =>
     canonicalAncestors(ref),
   );
+  return uniqueRefs([
+    ...characteristicRefs,
+    ...ancestorRefs,
+    ...(change.scenario_index
+      ? [`${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`]
+      : []),
+  ]);
+}
+
+// The name the owner knows the target by, as saved with the change: the
+// device and channel of a command, the room, the scenario.
+function changeName(change) {
+  if (typeof change.target_name === "string" && change.target_name !== "") {
+    return change.target_name;
+  }
+  if (!isNativeChange(change)) {
+    return typeof change.name === "string" ? change.name : undefined;
+  }
+  switch (change.kind) {
+    case "accessory_placement":
+      return change.baseline_snapshot?.name;
+    case "room_create":
+      return change.applied_snapshot?.name ?? change.requested_name;
+    case "room_name":
+    case "service_name":
+      return change.baseline_value?.value;
+    case "virtual_light_group":
+      return change.created_accessory_snapshot?.name ?? change.requested_name;
+    case "block_create":
+    case "logic_source_create":
+      return change.requested_snapshot?.name;
+    case "block_data_update":
+    case "block_action_pause":
+    case "scenario_run":
+    case "logic_source_update":
+      return change.baseline_snapshot?.name;
+    default:
+      return undefined;
+  }
+}
+
+// Settings whose values are short and safe to show in a history line;
+// options (which may hold codes) and long texts are read with
+// get_native_change.
+const SUMMARY_VALUE_KINDS = new Set([
+  "characteristic_value",
+  "characteristic_notify",
+  "logic_active",
+  "scenario_active",
+  "service_visible",
+  "room_name",
+  "service_name",
+]);
+
+function summaryValue(change) {
+  if (
+    !SUMMARY_VALUE_KINDS.has(change.kind) ||
+    !change.baseline_value ||
+    !change.requested_value
+  ) {
+    return undefined;
+  }
   return {
-    change_ref: reference,
-    operation: "legacy_boolean_automation",
-    recorded_status: change.status,
-    target_refs: uniqueRefs([
-      ...characteristicRefs,
-      ...ancestorRefs,
-      ...(change.scenario_index
-        ? [`${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`]
-        : []),
-    ]),
-    created_at: change.created_at,
-    updated_at: change.updated_at,
-    next: {
-      tool: "get_automation_change",
-      arguments: { change_ref: reference },
-    },
+    from: change.baseline_value.value,
+    to: change.requested_value.value,
   };
+}
+
+function changeAppliedAt(change) {
+  return (
+    change.history?.find(({ status }) => status === "applying")?.at ??
+    change.apply_started_at
+  );
 }
 
 function compareChangeSummaries(left, right) {

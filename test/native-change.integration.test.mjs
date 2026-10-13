@@ -5517,7 +5517,7 @@ test("a characteristic value uses one recoverable native change path", async (t)
     value: { from: false, to: true, kind: "boolValue" },
   });
   assert.equal(prepared.structuredContent.native_write_sent, false);
-  assert.equal(prepared.structuredContent.restore_supported, false);
+  assert.equal(prepared.structuredContent.restore_supported, true);
 
   const applied = await firstClient.callTool({
     name: "apply_native_change",
@@ -5989,7 +5989,7 @@ test("an unchanged command is still delivered to resynchronize external state", 
   });
   assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   assert.equal(prepared.structuredContent.status, "prepared");
-  assert.equal(prepared.structuredContent.restore_supported, false);
+  assert.equal(prepared.structuredContent.restore_supported, true);
 
   const applied = await client.callTool({
     name: "apply_native_change",
@@ -6076,17 +6076,6 @@ test("an invalid climate baseline is reported as non-restorable before apply", a
 
 test("unsupported native values do not report a manually observed baseline as restored", async (t) => {
   const cases = [
-    {
-      name: "runtime command",
-      install() {},
-      ref: characteristicRef,
-      baseline: false,
-      requested: true,
-      setBaseline(hub) {
-        currentCharacteristicValue(hub, characteristicRef).boolValue = false;
-      },
-      limitation: undefined,
-    },
     {
       name: "climate setting with an invalid baseline",
       install: installClimateFixture,
@@ -6899,7 +6888,7 @@ test("a published sent option without manual evidence remains not-owned", async 
   }
 });
 
-test("a readable command stays non-restorable and is not retried after an unknown apply", async (t) => {
+test("a command with an unknown apply is neither resent nor restored blindly", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const firstClient = await startClient(t, hub, stateDirectory);
   const contract = await firstClient.callTool({
@@ -6910,7 +6899,7 @@ test("a readable command stays non-restorable and is not retried after an unknow
     },
   });
   assert.equal(contract.structuredContent.contract.type, "On");
-  assert.equal(contract.structuredContent.restore_supported, false);
+  assert.equal(contract.structuredContent.restore_supported, true);
   assert.equal(contract.structuredContent.physical_effect_reversible, false);
   const prepared = await firstClient.callTool({
     name: "prepare_native_change",
@@ -6939,12 +6928,18 @@ test("a readable command stays non-restorable and is not retried after an unknow
     hub.requests.filter(({ characteristic }) => characteristic?.update).length,
     1,
   );
+  // The command never showed on the device: restore has nothing proven to
+  // put back and sends nothing.
   const restore = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(restore.isError, true);
-  assert.equal(restore.structuredContent.error.code, "restore_unsupported");
+  assert.equal(restore.isError, undefined, restore.content[0]?.text);
+  assert.equal(restore.structuredContent.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ characteristic }) => characteristic?.update).length,
+    1,
+  );
 });
 
 test("a climate setting is not resent after an unknown apply", async (t) => {
@@ -7215,7 +7210,7 @@ test("device commands turn off several lamps in one call and journal each comman
       status: "applied",
       sent: true,
       observed_value: false,
-      restore_supported: false,
+      restore_supported: true,
     })),
   );
   for (const { change_ref: changeRef } of results) {
@@ -9002,11 +8997,16 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
     found.structuredContent.changes[0].change_ref,
     preparedCreate.structuredContent.change_ref,
   );
-  assert.equal(
-    found.structuredContent.changes[0].target_refs.includes(
-      created.structuredContent.scenario_ref,
-    ),
-    true,
+  const byScenario = await secondClient.callTool({
+    name: "list_native_changes",
+    arguments: {
+      home_ref: homeRef,
+      entity_ref: created.structuredContent.scenario_ref,
+    },
+  });
+  assert.deepEqual(
+    byScenario.structuredContent.changes.map(({ change_ref: ref }) => ref),
+    [preparedCreate.structuredContent.change_ref],
   );
 
   const observed = await secondClient.callTool({
@@ -17486,16 +17486,10 @@ test("history discovers changes by home and entity after restart", async (t) => 
     {
       change_ref: prepared.structuredContent.change_ref,
       operation: "block_data_update",
+      name: "Существующий BLOCK",
+      reason: "Изменить RESET delay",
+      target_ref: scenarioRef,
       recorded_status: "prepared",
-      target_refs: [
-        scenarioRef,
-        `${homeRef}/accessory/32`,
-        `${homeRef}/accessory/32/service/13`,
-        `${homeRef}/accessory/32/service/13/characteristic/15`,
-        `${homeRef}/accessory/34`,
-        `${homeRef}/accessory/34/service/13`,
-        characteristicRef,
-      ],
       created_at: history.structuredContent.changes[0].created_at,
       updated_at: history.structuredContent.changes[0].updated_at,
       next: {
@@ -17505,6 +17499,25 @@ test("history discovers changes by home and entity after restart", async (t) => 
     },
   ]);
   assert.equal(history.structuredContent.truncated, false);
+  // Every device the BLOCK touches finds the change too.
+  for (const ref of [
+    `${homeRef}/accessory/32`,
+    `${homeRef}/accessory/32/service/13`,
+    `${homeRef}/accessory/32/service/13/characteristic/15`,
+    `${homeRef}/accessory/34`,
+    `${homeRef}/accessory/34/service/13`,
+    characteristicRef,
+  ]) {
+    const found = await secondClient.callTool({
+      name: "list_native_changes",
+      arguments: { home_ref: homeRef, entity_ref: ref },
+    });
+    assert.deepEqual(
+      found.structuredContent.changes.map(({ change_ref: change }) => change),
+      [prepared.structuredContent.change_ref],
+      ref,
+    );
+  }
 });
 
 test("history finds one entity and continues through older pages without changing scope", async (t) => {

@@ -21,7 +21,8 @@ description: Справка к MCP-серверу sprut-agent для дома н
   уставка) — один вызов `send_device_commands`.
 - Остальные изменения: `get_native_change_contract`, затем
   `prepare_native_change` и `apply_native_change`; проверка —
-  `get_native_change`, возврат — `restore_native_change`, история —
+  `get_native_change`, возврат — `restore_native_change` (и команд
+  устройствам, несколько изменений одним вызовом), история —
   `list_native_changes`.
 - Правило «когда A, то B» по двум логическим характеристикам:
   `preview_boolean_automation`, затем `apply_automation_change`.
