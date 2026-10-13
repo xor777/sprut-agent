@@ -660,17 +660,94 @@ test("brightness 0 on a lamp switches it off, keeps its level and is undone to o
   assert.equal(currentValue(hub, CHANDELIER_LEVEL), 80);
 });
 
-test("brightness 0 beside an On command to the same lamp is refused before any write", async (t) => {
+// Brightness 0 is sent as the lamp's off, so beside the same lamp's off
+// both commands ask for one thing.
+test("brightness 0 beside the same lamp's off is one off, reported for both commands", async (t) => {
+  const { hub, client } = await setup(t);
+  const from = hub.requests.length;
+  const sent = await send(
+    client,
+    [
+      [CHANDELIER_ON, false],
+      [CHANDELIER_LEVEL, 0],
+      [FLOOR_LEVEL, 0],
+      [FLOOR_ON, false],
+    ],
+    "Выключить люстру и торшер",
+  );
+
+  assert.equal(sent.status, "ok", JSON.stringify(sent.results));
+  assert.deepEqual(valueWrites(hub.requests.slice(from)).map(writeOf).sort(), [
+    ["15.14", false],
+    ["16.14", false],
+  ]);
+  assert.deepEqual(
+    sent.results.map(itemOutcome),
+    [
+      [CHANDELIER_ON, "On", false, "Люстра / Люстра"],
+      [CHANDELIER_LEVEL, "Brightness", 0, "Люстра / Люстра"],
+      [FLOOR_LEVEL, "Brightness", 0, "Торшер / Торшер"],
+      [FLOOR_ON, "On", false, "Торшер / Торшер"],
+    ].map(([target, type, requested, name]) => ({
+      target_ref: refOf(target),
+      name,
+      type,
+      requested,
+      status: "applied",
+      sent: true,
+      previous_value: true,
+      observed_value: false,
+      restore_supported: true,
+    })),
+  );
+  const [chandelierOff, chandelierZero, floorZero, floorOff] = sent.results;
+  assert.equal(chandelierZero.change_ref, chandelierOff.change_ref);
+  assert.equal(floorZero.change_ref, floorOff.change_ref);
+  assert.notEqual(chandelierOff.change_ref, floorOff.change_ref);
+  assert.deepEqual(chandelierZero.sent_as, {
+    target_ref: refOf(CHANDELIER_ON),
+    type: "On",
+    value: false,
+  });
+  assert.deepEqual(floorZero.sent_as, {
+    target_ref: refOf(FLOOR_ON),
+    type: "On",
+    value: false,
+  });
+  assert.equal(chandelierOff.sent_as, undefined);
+  assert.equal(floorOff.sent_as, undefined);
+  assert.equal(currentValue(hub, CHANDELIER_LEVEL), 80);
+  assert.equal(currentValue(hub, FLOOR_LEVEL), 55);
+
+  const restoredFrom = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+  assert.deepEqual(
+    valueWrites(hub.requests.slice(restoredFrom)).map(writeOf).sort(),
+    [
+      ["15.14", true],
+      ["16.14", true],
+    ],
+  );
+  assert.deepEqual(
+    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+    [],
+  );
+});
+
+test("brightness 0 beside the same lamp's On=true is refused before any write", async (t) => {
   const { hub, client } = await setup(t);
   const refused = await client.callTool({
     name: "send_device_commands",
     arguments: {
       home_ref: homeRef,
       commands: [
-        { target_ref: refOf(CHANDELIER_ON), value: false },
+        { target_ref: refOf(CHANDELIER_ON), value: true },
         { target_ref: refOf(CHANDELIER_LEVEL), value: 0 },
       ],
-      reason: "Выключить люстру",
+      reason: "Включить люстру на ноль",
     },
   });
   assert.equal(refused.isError, true);
