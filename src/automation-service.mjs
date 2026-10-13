@@ -1245,7 +1245,7 @@ export class AutomationService {
           index: item.index,
           target_ref: item.command.target_ref,
           code: "duplicate_target",
-          message: `Command ${other.index} sets this lamp's On to the other value, and brightness 0 is sent as the lamp's off; send one of them.`,
+          message: `Command ${other.index} and this one set this lamp's On to different values (brightness 0 is sent as the lamp's off, On=false); send one of them.`,
         });
         continue;
       }
@@ -10785,7 +10785,7 @@ const LAMP_LEVEL_ZERO_NOTE = {
 const LAMP_KEPT_OFF_NOTE = {
   code: "lamp_level_not_sent",
   message:
-    "Not sent: the lamp was off and this call keeps it off, and on the hub's lamps a brightness write switches an off lamp on (a color write is held back the same way). The lamp stays off; this can be set once it is on, or sent with its On=true.",
+    "Not sent: the lamp was off and this call keeps it off, and the on/level link the hub assigns to dimmable lamps switches an off lamp on at a brightness write (a color write is held back the same way). The lamp stays off; set this once it is on, or send it with the lamp's On=true.",
 };
 
 const LAMP_SWITCHED_ON_NOTE = {
