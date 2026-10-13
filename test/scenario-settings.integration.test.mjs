@@ -534,3 +534,349 @@ test("a scenario's options window written by its window ref points to the scenar
   }
   assert.deepEqual(hub.writes(), []);
 });
+
+// The agent's own changes of one scenario form one chain: a later one in
+// effect makes an earlier one name it (later_owned_change) instead of
+// counting as a change by hand, and undoing them newest first puts the
+// scenario back. A LOGIC's Name, Desc and OnStart all write its code.
+
+async function codeUpdate(client, source, reason) {
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source,
+    reason,
+  });
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  return prepared;
+}
+
+function writesSince(hub, from) {
+  return hub.requests.slice(from).filter(({ write }) => write);
+}
+
+function assertNamesLater(result, later) {
+  assert.equal(result.status, "conflict", JSON.stringify(result));
+  assert.equal(result.conflict_reason, "later_owned_change");
+  assert.equal(result.restore_first_change_ref, later.change_ref);
+  assert.equal(result.manual_change_observed, undefined);
+}
+
+test("a LOGIC renamed and then described names the description change while it stands, and «верни как было» puts both back", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const source = scenarioOf(hub, LOGIC).data;
+  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const described = await change(client, LOGIC, "Desc", "Новое описание");
+  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+  assert.equal(scenarioOf(hub, LOGIC).desc, "Новое описание");
+
+  // The agent's own description change wrote the code after the rename:
+  // that is no change by hand.
+  const read = await call(client, "get_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assertNamesLater(read, described);
+
+  const sentBefore = hub.requests.length;
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [renamed.change_ref, described.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+  assert.deepEqual(
+    undone.results.map(({ change_ref: ref, status }) => [ref, status]),
+    [
+      [described.change_ref, "restored"],
+      [renamed.change_ref, "restored"],
+    ],
+  );
+  assert.notDeepEqual(writesSince(hub, sentBefore), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+});
+
+test("restoring a LOGIC's rename before the later description change names that change, writes nothing, and works once it is undone", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const source = scenarioOf(hub, LOGIC).data;
+  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const described = await change(client, LOGIC, "Desc", "Новое описание");
+
+  const sentBefore = hub.requests.length;
+  const early = await call(client, "restore_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assertNamesLater(early, described);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+
+  await restore(client, described);
+  assert.equal(scenarioOf(hub, LOGIC).desc, LOGIC_DESC);
+  assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+  await restore(client, renamed);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+});
+
+test("a LOGIC's rename and the agent's later code edit name each other's order in both directions and come back newest first", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const source = scenarioOf(hub, LOGIC).data;
+
+  // Rename, then a code edit of the code as it now is.
+  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const edited = await codeUpdate(
+    client,
+    scenarioOf(hub, LOGIC).data.replace(
+      'log("Протечка: розетка чайника отключена")',
+      'log("Протечка: розетка отключена")',
+    ),
+    "Короче запись в журнале",
+  );
+  let sentBefore = hub.requests.length;
+  assertNamesLater(
+    await call(client, "restore_native_change", {
+      change_ref: renamed.change_ref,
+    }),
+    edited,
+  );
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  await restore(client, edited);
+  await restore(client, renamed);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+
+  // A code edit, then a rename that writes the code again.
+  const recoded = await codeUpdate(
+    client,
+    source.replace(
+      'log("Протечка: розетка чайника отключена")',
+      'log("Протечка: чайник отключён")',
+    ),
+    "Понятнее запись в журнале",
+  );
+  const renamedAfter = await change(client, LOGIC, "Name", "Мойка");
+  sentBefore = hub.requests.length;
+  const early = await call(client, "restore_native_change", {
+    change_ref: recoded.change_ref,
+  });
+  assert.equal(early.status, "conflict", JSON.stringify(early));
+  assert.equal(early.conflict_reason, "later_owned_change");
+  assert.equal(early.restore_first_change_ref, renamedAfter.change_ref);
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [recoded.change_ref, renamedAfter.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+});
+
+test("a restore of a LOGIC's description that stops after its code write is retried and brings back the name given in the app", async (t) => {
+  const { hub, client } = await setup(t);
+  const source = scenarioOf(hub, LOGIC).data;
+  ownerWritesWindow(hub, LOGIC, "Name", { stringValue: "Имя из приложения" });
+  const before = hub.snapshot();
+  const described = await change(client, LOGIC, "Desc", "Новое описание");
+
+  // The hub refuses the first window write after the code went back: the
+  // code set the name from its info, the app's name is not back yet.
+  hub.refuseNext("window.update", { code: -32000, message: "Busy" });
+  const stopped = await call(client, "restore_native_change", {
+    change_ref: described.change_ref,
+  });
+  assert.notEqual(stopped.status, "restored");
+  assert.equal(stopped.manual_change_observed, undefined);
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+  assert.equal(scenarioOf(hub, LOGIC).name, LOGIC_NAME);
+
+  await restore(client, described);
+  assert.deepEqual(diffHomeSnapshots(before, hub.snapshot()), []);
+  assert.equal(scenarioOf(hub, LOGIC).name, "Имя из приложения");
+  assert.equal(scenarioOf(hub, LOGIC).data, source);
+});
+
+test("a BLOCK's data change and its OnStart, Sync and Name changes are prepared on one baseline and undone in any order", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const data = JSON.parse(scenarioOf(hub, BLOCK).data);
+  data.targets[0].then[1].characteristics[1].value = "20";
+  const dataChange = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: scenarioRef(BLOCK),
+    data,
+    reason: "Ночник ярче",
+  });
+  const onStart = await change(client, BLOCK, "OnStart", true);
+  const sync = await change(client, BLOCK, "Sync", true);
+  const renamed = await change(client, BLOCK, "Name", "Ночь");
+
+  // Prepared before the flags and name changed, the data change still
+  // applies: it writes only data.
+  const applied = await call(client, "apply_native_change", {
+    change_ref: dataChange.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+
+  // Undone oldest first: each puts back only its own field.
+  for (const prepared of [onStart, sync, renamed]) {
+    await restore(client, prepared);
+  }
+  await restore(client, dataChange);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+
+  // Applied in the other order and undone flags first.
+  const later = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: scenarioRef(BLOCK),
+    data,
+    reason: "Ночник ярче",
+  });
+  const onStartAgain = await change(client, BLOCK, "OnStart", true);
+  assert.equal(
+    (
+      await call(client, "apply_native_change", {
+        change_ref: later.change_ref,
+      })
+    ).status,
+    "applied",
+  );
+  await restore(client, onStartAgain);
+  await restore(client, later);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("a LOGIC's Sync, which its code does not set, and a code edit are prepared on one baseline and undone in any order", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const code = await call(client, "prepare_native_change", {
+    operation: "logic_source_update",
+    target_ref: scenarioRef(LOGIC),
+    source: scenarioOf(hub, LOGIC).data.replace(
+      'log("Протечка: розетка чайника отключена")',
+      'log("Протечка: розетка отключена")',
+    ),
+    reason: "Короче запись в журнале",
+  });
+  const sync = await change(client, LOGIC, "Sync", true);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: code.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  await restore(client, sync);
+  await restore(client, code);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("undo of a created BLOCK or LOGIC names the agent's later rename, and both together are undone", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const createdBlock = await call(client, "prepare_native_change", {
+    operation: "block_create",
+    target_ref: homeRef,
+    name: "Свет в ванной по движению",
+    description: "Включает свет в ванной при движении",
+    active: false,
+    on_start: false,
+    sync: false,
+    data: {
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: 38,
+                sId: 13,
+                cId: 14,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                cond: "=",
+                value: "true",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+          then: [
+            {
+              type: "service",
+              aId: 35,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 14, hc: "On", value: "true" },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+        },
+      ],
+    },
+    reason: "Включать свет в ванной при движении",
+  });
+  const createdLogic = await call(client, "prepare_native_change", {
+    operation: "logic_source_create",
+    target_ref: `${homeRef}/accessory/34/service/13`,
+    name: "Журнал",
+    description: "Пишет в журнал",
+    active: false,
+    on_start: false,
+    sync: false,
+    source: [
+      "info = {",
+      '  name: "Журнал",',
+      '  description: "Пишет в журнал",',
+      "  onStart: false,",
+      "  sourceServices: [HS.Lightbulb],",
+      "  sourceCharacteristics: [HC.On],",
+      "};",
+      'function trigger() { log("свет"); }',
+    ].join("\n"),
+    reason: "Журнал света",
+  });
+  const renames = [];
+  for (const created of [createdBlock, createdLogic]) {
+    const applied = await call(client, "apply_native_change", {
+      change_ref: created.change_ref,
+    });
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const index = applied.scenario_ref.split("/").at(-1);
+    renames.push(await change(client, index, "Name", "Новое имя"));
+  }
+
+  for (const [created, renamed] of [
+    [createdBlock, renames[0]],
+    [createdLogic, renames[1]],
+  ]) {
+    const sentBefore = hub.requests.length;
+    const alone = await call(client, "restore_native_change", {
+      change_ref: created.change_ref,
+    });
+    assert.equal(alone.status, "conflict", JSON.stringify(alone));
+    assert.equal(alone.conflict_reason, "later_owned_change");
+    assert.equal(alone.restore_first_change_ref, renamed.change_ref);
+    assert.deepEqual(writesSince(hub, sentBefore), []);
+  }
+
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [
+      createdBlock.change_ref,
+      createdLogic.change_ref,
+      ...renames.map(({ change_ref: ref }) => ref),
+    ],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
