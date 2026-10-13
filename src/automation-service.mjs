@@ -4332,6 +4332,7 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
+    await this.#settleLaterUnknownWrites(change);
     await this.#beforeNativeValueWrite(change);
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
@@ -4404,6 +4405,36 @@ export class AutomationService {
       restore_first_change_id: later.id,
       last_verification: freshVerification("conflict"),
     });
+  }
+
+  // Right before an undo writes, the agent's later changes of the same
+  // setting or scenario whose own write is still unknown are settled, each
+  // by its own read (reconcilePendingValueChange, reconcileScenarioWrite).
+  // This undo goes on only while the hub shows its change in place, so a
+  // later change's undo that the read shows took effect is restored now:
+  // once this write lands, that later change's baseline is gone and no
+  // read of it could tell its own undo from a change by hand.
+  async #settleLaterUnknownWrites(change) {
+    for (const later of await this.store.list()) {
+      if (
+        later.id === change.id ||
+        later.home_ref !== change.home_ref ||
+        !sameWriteChain(change, later) ||
+        compareApplication(later, change) <= 0 ||
+        !writeOutcomeUnknown(later)
+      ) {
+        continue;
+      }
+      try {
+        if (isNativeValueChange(later)) {
+          await this.#reconcilePendingValueChange(later);
+        } else {
+          await this.#reconcileScenarioWrite(later);
+        }
+      } catch {
+        // Left as it was; its own next read settles it.
+      }
+    }
   }
 
   // A write whose outcome is unknown, read while the agent's own later
@@ -5227,6 +5258,7 @@ export class AutomationService {
       allowedPauses: pauseChanges.filter(({ id }) => id !== change.id),
     });
     change.restore_snapshot = restoreSnapshot;
+    await this.#settleLaterUnknownWrites(change);
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.client.updateScenarioData(
@@ -5479,6 +5511,7 @@ export class AutomationService {
         });
       }
     }
+    await this.#settleLaterUnknownWrites(change);
     if (["block_create", "logic_source_create"].includes(change.kind)) {
       // The scans above read every service or BLOCK one after another. The
       // delete goes by index, so the scenario is read again right before the
@@ -12196,6 +12229,25 @@ function withRestoreAgainNext(result, change) {
       arguments: { change_ref: `spruthub-change://native/${change.id}` },
     },
   };
+}
+
+// The agent's changes whose writes reach the same thing: one scenario's
+// chain (its data or code, pauses and options, scenarioChainIndex), or
+// else one setting (valueTargetKey).
+function sameWriteChain(change, other) {
+  const index = scenarioChainIndex(change);
+  if (index !== undefined) return scenarioChainIndex(other) === index;
+  return (
+    isNativeValueChange(other) &&
+    valueTargetKey(other) === valueTargetKey(change)
+  );
+}
+
+// A sent write of this change whose outcome its journal does not hold yet.
+function writeOutcomeUnknown(change) {
+  return isNativeValueChange(change)
+    ? nativeValueLifecycle(change).phase === "unresolved_intent"
+    : ["applying", "restoring", "uncertain"].includes(change.status);
 }
 
 // An unknown write no longer hidden by the agent's later change
