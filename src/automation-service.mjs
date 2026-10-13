@@ -12831,18 +12831,19 @@ function restoreItem(change, automation, result, before) {
       };
     case "uncertain":
     case "applying":
-    case "restoring":
+    case "restoring": {
+      const restoring = change.write_intent?.direction === "restore";
       return {
         ...base,
         status: "uncertain",
-        reason:
-          change.write_intent?.direction === "restore"
-            ? "restore_unconfirmed"
-            : "apply_unconfirmed",
+        reason: restoring ? "restore_unconfirmed" : "apply_unconfirmed",
         sent,
         ...observed,
-        next: nativeChangeNext(base.change_ref),
+        next:
+          (restoring && restoreResendNext(change, result)) ||
+          nativeChangeNext(base.change_ref),
       };
+    }
     case "applied":
       // An interrupted apply confirmed only now; the restore itself is
       // the next call.
@@ -12866,6 +12867,25 @@ function restoreItem(change, automation, result, before) {
         ...observed,
       };
   }
+}
+
+// A device command's undo write with no confirmation while the device still
+// shows the agent's value: undo does not resend a command by itself (the
+// first write may still be on its way), so the item offers the explicit
+// resend of the previous value, as a held send_device_commands item does.
+function restoreResendNext(change, result) {
+  if (
+    change.kind !== "characteristic_value" ||
+    !result.observed_value ||
+    !valuesEqual(result.observed_value, change.requested_value)
+  ) {
+    return undefined;
+  }
+  return resendDeviceCommandNext(
+    change.home_ref,
+    { target_ref: change.target_ref, value: change.baseline_value.value },
+    `Undo: ${change.reason}`,
+  );
 }
 
 function automationRestoreItem(base, result, before) {
