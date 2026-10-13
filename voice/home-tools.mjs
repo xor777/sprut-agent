@@ -13,6 +13,22 @@ const projectRoot = path.resolve(
   "..",
 );
 const CATALOG_MAX_AGE_MS = 5 * 60_000;
+// The hub shows a colour bulb's new value a moment after the write, later
+// than the MCP's immediate readback; an unconfirmed command is read again.
+const VERIFY_DELAY_MS = 1_500;
+// How far a read value may be from the requested one and still be it:
+// devices round levels, hues and white temperatures.
+const TOLERANCE = {
+  brightness: 2,
+  position: 3,
+  color: 5,
+  color_temperature: 10,
+  target_temperature: 0.5,
+  cooling_temperature: 0.5,
+  heating_temperature: 0.5,
+  target_humidity: 2,
+  fan_speed_percent: 3,
+};
 const ROOM_PAGE = { limit: 100, max_bytes: 32_768 };
 
 // Writable characteristic types the voice model may set, under its own names.
@@ -163,14 +179,20 @@ export class HomeToolError extends Error {
 export class HomeTools {
   #env;
   #stderr;
+  #verifyDelayMs;
   #client = null;
   #connecting = null;
   #catalog = null;
   #loading = null;
 
-  constructor({ env = process.env, stderr = "inherit" } = {}) {
+  constructor({
+    env = process.env,
+    stderr = "inherit",
+    verifyDelayMs = VERIFY_DELAY_MS,
+  } = {}) {
     this.#env = env;
     this.#stderr = stderr;
+    this.#verifyDelayMs = verifyDelayMs;
   }
 
   async close() {
@@ -178,10 +200,19 @@ export class HomeTools {
     this.#client = null;
   }
 
+  // An old catalog is answered at once and refreshed in the background: a
+  // rebuild takes seconds from the VM and must not stall a spoken command.
   async catalog({ refresh = false } = {}) {
-    const fresh =
-      this.#catalog && Date.now() - this.#catalog.loadedAt < CATALOG_MAX_AGE_MS;
-    if (fresh && !refresh) return this.#catalog;
+    if (this.#catalog && !refresh) {
+      if (Date.now() - this.#catalog.loadedAt >= CATALOG_MAX_AGE_MS) {
+        this.#reload().catch(() => {});
+      }
+      return this.#catalog;
+    }
+    return this.#reload();
+  }
+
+  #reload() {
     this.#loading ??= this.#loadCatalog()
       .then((catalog) => {
         this.#catalog = catalog;
@@ -263,15 +294,23 @@ export class HomeTools {
         );
       }
     }
+    const outcomes = new Map(
+      ordered.map((item) => {
+        const index = toSend.indexOf(item);
+        return [
+          item,
+          index >= 0
+            ? sent[index]
+            : {
+                status: "already_desired",
+                observed_value: current.get(item.ref),
+              },
+        ];
+      }),
+    );
+    await this.#confirmLate(catalog, outcomes);
     const results = ordered.map((item) => {
-      const index = toSend.indexOf(item);
-      const result =
-        index >= 0
-          ? sent[index]
-          : {
-              status: "already_desired",
-              observed_value: current.get(item.ref),
-            };
+      const result = outcomes.get(item);
       return {
         device: item.device.id,
         name: item.device.name,
@@ -366,6 +405,30 @@ export class HomeTools {
       observed_at: pages[0]?.observedAt ?? null,
       devices: found,
     };
+  }
+
+  // Reads unconfirmed commands again after a pause; a value that has arrived
+  // by then, within the device's rounding, makes the command applied.
+  async #confirmLate(catalog, outcomes) {
+    const unconfirmed = [...outcomes].filter(
+      ([, result]) => result.status === "uncertain" && result.sent !== false,
+    );
+    if (unconfirmed.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, this.#verifyDelayMs));
+    const later = await this.#currentValues(
+      catalog,
+      unconfirmed.map(([item]) => item),
+    );
+    for (const [item, result] of unconfirmed) {
+      if (!later.has(item.ref)) continue;
+      const now = later.get(item.ref);
+      outcomes.set(
+        item,
+        closeEnough(now, item.value, item.control)
+          ? { status: "applied", observed_value: now }
+          : { ...result, observed_value: now },
+      );
+    }
   }
 
   // Current values of every characteristic in the rooms of the planned
@@ -721,6 +784,16 @@ function withImpliedPower(planned, current = new Map()) {
         ]
       : [item],
   );
+}
+
+function closeEnough(current, requested, control) {
+  if (typeof requested !== "number" || !Number.isFinite(Number(current))) {
+    return sameValue(current, requested);
+  }
+  const difference = Math.abs(Number(current) - requested);
+  const distance =
+    control === "color" ? Math.min(difference, 360 - difference) : difference;
+  return distance <= (TOLERANCE[control] ?? 0);
 }
 
 function sameValue(current, requested) {
