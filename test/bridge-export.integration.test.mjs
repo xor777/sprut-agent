@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -60,7 +61,18 @@ async function setup(t, fixture) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  return { hub, client, stateDirectory };
+}
+
+// The journal of native changes, as the server keeps it for this hub.
+function journalFile(hub, stateDirectory) {
+  const fingerprint = createHash("sha256")
+    .update(`${hub.url}\0${hub.serial}`)
+    .digest("hex");
+  return path.join(
+    stateDirectory,
+    `automation-changes-${fingerprint.slice(0, 24)}.json`,
+  );
 }
 
 // One get_entity call with the native requests it cost.
@@ -525,4 +537,108 @@ test("a bridge's export is read but not changed until a hub confirms the write",
     include: ["bridges"],
   });
   assert.equal(after.entity.bridges[0].exported, false);
+});
+
+// A bridge's export journaled before prepare refused it, by an earlier
+// version: apply of a prepared tick and restore of an applied one refuse it
+// as prepare does, before anything is sent, and the records stay as they
+// were. The records are made on the floor lamp's device setting and recast
+// onto the bridge, as such a version would have saved them.
+test("a bridge export change journaled earlier is neither applied nor restored", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t);
+  const lampSetting = {
+    operation: "window_option",
+    target_ref: `${apartment}/window/${encodeURIComponent("Controller/zigbee/Child/000d6ffffe3c4a16/")}`,
+    option_key: "/11/0006_OnOff/4003_StartUpOnOff/255",
+    reason: "Set how the floor lamp starts after a power cut",
+  };
+  const changeTool = async (name, args) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return result.structuredContent;
+  };
+  const prepared = async (value) =>
+    (await changeTool("prepare_native_change", { ...lampSetting, value }))
+      .change_ref;
+  const applied = async (value) => {
+    const changeRef = await prepared(value);
+    const result = await changeTool("apply_native_change", {
+      change_ref: changeRef,
+    });
+    assert.equal(result.status, "applied");
+    return changeRef;
+  };
+  const tickLamp = await prepared(1);
+  const autoAddOn = await prepared(0);
+  const untickClimate = await applied(1);
+  const autoAddBack = await applied(0);
+
+  const file = journalFile(hub, stateDirectory);
+  const journal = JSON.parse(await readFile(file, "utf8"));
+  const recast = (changeRef, windowKey, optionKey, baseline, requested) => {
+    const change = journal.changes[changeRef.split("/").at(-1)];
+    Object.assign(change, {
+      target_ref: `${apartment}/window/${encodeURIComponent(windowKey)}`,
+      target: { kind: "window", windowKey },
+      option_key: optionKey,
+      contract: {
+        type: "GenericBoolean",
+        input_type: "CHECKBOX",
+        kind: "boolValue",
+        confirmation: "separate_window_get_readback",
+      },
+      baseline_value: { value: baseline, kind: "boolValue" },
+      requested_value: { value: requested, kind: "boolValue" },
+    });
+    if (change.observed_value) {
+      change.observed_value = { value: requested, kind: "boolValue" };
+    }
+  };
+  // HomeKit does not export the floor lamp and exports the climate sensor's
+  // temperature; its AutoAddNewAccessory is off.
+  recast(tickLamp, "Bridge/homekit/Child/16/", "s:13", false, true);
+  recast(autoAddOn, "Bridge/homekit/", "AutoAddNewAccessory", false, true);
+  recast(untickClimate, "Bridge/homekit/Child/25/", "s:13", false, true);
+  recast(autoAddBack, "Bridge/homekit/", "AutoAddNewAccessory", true, false);
+  await writeFile(file, `${JSON.stringify(journal, null, 2)}\n`);
+  const writesBefore = hub.writes().length;
+
+  const accessoryExport = (aId) => ({
+    tool: "get_entity",
+    arguments: {
+      entity_ref: `${apartment}/accessory/${aId}`,
+      include: ["bridges"],
+    },
+  });
+  const homekitExport = {
+    tool: "get_entity",
+    arguments: {
+      entity_ref: bridge(apartment, "homekit"),
+      include: ["children"],
+    },
+  };
+  for (const [name, changeRef, next] of [
+    ["apply_native_change", tickLamp, accessoryExport(16)],
+    ["apply_native_change", autoAddOn, homekitExport],
+    ["restore_native_change", untickClimate, accessoryExport(25)],
+    ["restore_native_change", autoAddBack, homekitExport],
+  ]) {
+    const result = await client.callTool({
+      name,
+      arguments: { change_ref: changeRef },
+    });
+    assert.equal(result.isError, true, result.content[0]?.text);
+    const { error } = result.structuredContent;
+    assert.equal(error.code, "bridge_export_unverified", name);
+    assert.match(error.message, /SprutHub app/);
+    assert.deepEqual(result.structuredContent.next, next, name);
+  }
+
+  assert.equal(hub.writes().length, writesBefore);
+  assert.deepEqual(JSON.parse(await readFile(file, "utf8")), journal);
+  const climate = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/25`,
+    include: ["bridges"],
+  });
+  assert.equal(climate.entity.bridges[0].services[0].exported, true);
 });
