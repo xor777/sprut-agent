@@ -2087,28 +2087,29 @@ export class AutomationService {
   // own leaves the change uncertain with the failure as its last
   // verification.
   async #undoOrUnknown(change, undo) {
-    let result;
     try {
-      result = await undo();
+      const result = await undo();
+      return result.status === "uncertain" &&
+        result.verification?.fresh === false
+        ? withRestoreAgainNext(result, change)
+        : result;
     } catch (error) {
       if (!isUnreadError(error)) throw error;
-      result = {
-        ...publicNativeChange(change, undefined, {
-          verification: failedVerification(error),
-        }),
-        restore_outcome: {
-          status: "uncertain",
-          reason: "read_failed",
-          message:
-            "A read this undo depends on failed, so nothing was written and nothing is concluded. Restore it again: it reads first.",
+      return withRestoreAgainNext(
+        {
+          ...publicNativeChange(change, undefined, {
+            verification: failedVerification(error),
+          }),
+          restore_outcome: {
+            status: "uncertain",
+            reason: "read_failed",
+            message:
+              "A read this undo depends on failed, so nothing was written and nothing is concluded. Restore it again: it reads first.",
+          },
         },
-      };
+        change,
+      );
     }
-    const unread =
-      result.verification?.fresh === false &&
-      (result.status === "uncertain" ||
-        result.restore_outcome?.status === "uncertain");
-    return unread ? withRestoreAgainNext(result, change) : result;
   }
 
   async #applyAccessoryPlacement(change) {
@@ -4469,9 +4470,12 @@ export class AutomationService {
         pending?.direction === "apply" &&
         pending.outcome === "expected_missing"
       ) {
+        // A pause is not applied, as one the hub refused
+        // (INACTIVE_PAUSE_STATUSES); another change is no longer the
+        // agent's, as a sent change's record reads.
         await this.#finishNative(
           later,
-          notAppliedStatus(later),
+          later.kind === "block_action_pause" ? "not_applied" : "not_owned",
           pending.current,
           {
             conflict_reason: "change_was_not_applied",
@@ -5250,13 +5254,9 @@ export class AutomationService {
       )
     )
       return publicStoredNativeChange(change);
-    // As in restoreScenarioChange: when an undo is sent again, the pause
-    // found gone may be the first undo arriving late.
-    let resending = false;
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
       const pending = await this.#reconcileScenarioWrite(change);
       if (!restoreGoesOn(pending)) return pending.result;
-      resending = pending.direction === "restore";
     }
     if (pauseHasNoProvenHubEffect(change)) {
       // Proven non-send: there is no controller to remove. Missing wrapper is
@@ -5286,9 +5286,6 @@ export class AutomationService {
     const pauseChanges = await this.#knownBlockPauses(change.target_ref);
     const ownership = inspectPauseOwnership(currentSnapshot.data, pauseChanges);
     const owned = ownership.get(change.id);
-    if (owned?.state !== "owned" && resending) {
-      return (await this.#reconcileScenarioRestore(change, false)).result;
-    }
     if (owned?.state !== "owned") {
       const disposition = await this.#knownPauseDisposition(
         change,
@@ -5333,24 +5330,11 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        return this.#finishRefusedUndo(change, error, resending);
+        throw await this.#finishRefusedWrite(change, "applied", error);
       }
       return (await this.#reconcileScenarioRestore(change, false)).result;
     }
     return (await this.#reconcileScenarioRestore(change, true)).result;
-  }
-
-  // An undo the hub refused leaves the change applied. When it was sent
-  // again after its first send got no answer, the refusal may meet what
-  // that first undo already did (a delete of a scenario it deleted): the
-  // read settles it, and the refusal stands only when that read shows the
-  // change still in place; a failed read leaves it unknown.
-  async #finishRefusedUndo(change, error, resending) {
-    if (resending) {
-      const settled = await this.#reconcileScenarioRestore(change, false);
-      if (settled.outcome !== "expected_missing") return settled.result;
-    }
-    throw await this.#finishRefusedWrite(change, "applied", error);
   }
 
   async #markReplacedPauseSuperseded(change) {
@@ -5638,7 +5622,14 @@ export class AutomationService {
       change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
-        return this.#finishRefusedUndo(change, error, resending);
+        // A refused resend may meet what its late first undo did (a delete
+        // of what it deleted): it stands only when the read shows the
+        // change still in place.
+        if (resending) {
+          const settled = await this.#reconcileScenarioRestore(change, false);
+          if (settled.outcome !== "expected_missing") return settled.result;
+        }
+        throw await this.#finishRefusedWrite(change, "applied", error);
       }
       return (await this.#reconcileScenarioRestore(change, false)).result;
     }
@@ -12326,13 +12317,6 @@ function undoRewrites(change, other) {
   return scenarioFieldsOwned(change).some((field) => owned.includes(field));
 }
 
-// A sent apply a read shows did not take effect: a pause is not applied, as
-// one the hub refused (INACTIVE_PAUSE_STATUSES); another change is no
-// longer the agent's, as a sent change's record reads.
-function notAppliedStatus(change) {
-  return change.kind === "block_action_pause" ? "not_applied" : "not_owned";
-}
-
 // A sent write of this change whose outcome its journal does not hold yet.
 function writeOutcomeUnknown(change) {
   return isNativeValueChange(change)
@@ -12634,14 +12618,9 @@ function scenarioChangeSnapshot(change, scenario) {
 // What a write of this change leaves on the hub, field by field as an
 // applied snapshot holds it: what an apply not yet seen would show.
 function scenarioRequestedSnapshot(change) {
-  if (isLogicSourceChange(change)) return logicSourceRequestedSnapshot(change);
-  if (change.kind === "block_create") {
-    return {
-      ...blockCreateRequest(change),
-      data: change.requested_snapshot.data,
-    };
-  }
-  return change.requested_snapshot;
+  return isLogicSourceChange(change)
+    ? logicSourceRequestedSnapshot(change)
+    : change.requested_snapshot;
 }
 
 function requiredLogicSource(value) {
