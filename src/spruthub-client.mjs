@@ -5245,7 +5245,7 @@ function isChoiceOfWords(node, configured) {
 // read. A label names a secret when a word of it says password, token or
 // secret, PIN (also «PIN-код»), a code with whose it is or what it opens
 // (доступа, пользователя, гостя, снятия с охраны, мастер-, одноразовый)
-// or a key with what it locks (сети, устройства, закрытый, API), in
+// or a key with what it locks (сети, устройства, закрытый, API, WPA2), in
 // Russian or English. Words are whole: «Выключатель», «Код ошибки»,
 // «Ключ продукта» and «Пин светодиода» name no secret.
 const SECRET_WORD = /^(?:парол|токен|секрет|пинкод)/u;
@@ -5285,10 +5285,12 @@ const KEY_OF = new Set([
   "wifi",
   "wi",
   "wpa",
+  "wpa2",
+  "wpa3",
   "wep",
 ]);
 const KEY_KIND =
-  /^(?:api|wpa|wep|wifi|fi|device|access|cloud)$|^(?:сетев|секретн|закрыт|приватн|локальн|мастер|облачн)/u;
+  /^(?:api|wpa\d?|wep|wifi|fi|device|access|cloud)$|^(?:сетев|секретн|закрыт|приватн|локальн|мастер|облачн)/u;
 
 function labelNamesSecret(label) {
   if (
