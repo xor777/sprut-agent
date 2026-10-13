@@ -105,6 +105,21 @@ const ENGLISH_COLORS = {
   white: "белый",
 };
 const WHITE_KELVIN = { теплый: 2700, нейтральный: 4000, холодный: 6000 };
+const NEUTRAL_KELVIN = 4000;
+// «Разными цветами» for a whole room: neighbours differ as much as possible.
+const CONTRAST_PALETTE = [
+  "красный",
+  "синий",
+  "зелёный",
+  "жёлтый",
+  "фиолетовый",
+  "оранжевый",
+  "бирюзовый",
+  "розовый",
+  "голубой",
+  "салатовый",
+];
+const PALETTE_WORDS = new Set(["разные", "разными", "разный", "different"]);
 // HomeKit's usual ColorTemperature range in mireds when a lamp reports none.
 const DEFAULT_MIREDS = { min: 140, max: 500 };
 // A lamp lights up when a person sets how it looks.
@@ -232,12 +247,16 @@ export class HomeTools {
       return notSent([{ problem: "Нет ни одной команды." }]);
     }
     let catalog = await this.catalog();
-    if (commands.some((command) => !catalog.devices.has(command?.device))) {
+    if (
+      commands.some(
+        (command) => !command?.room && !catalog.devices.has(command?.device),
+      )
+    ) {
       catalog = await this.catalog({ refresh: true });
     }
     const planned = [];
     const problems = [];
-    for (const command of commands) {
+    for (const command of expandRooms(catalog, commands, problems)) {
       const device = catalog.devices.get(command?.device);
       if (!device) {
         problems.push({
@@ -623,8 +642,16 @@ function catalogEntry({ room, device, service }) {
   const saturation = values.find(
     ({ type, writable }) => type === "Saturation" && writable === true,
   );
-  if (controls.color && saturation)
+  if (controls.color && saturation) {
     controls.color.saturationRef = saturation.ref;
+    // A colour-only lamp still gets warm or cold white, mixed from colour.
+    controls.color_temperature ??= {
+      control: "color_temperature",
+      kind: "kelvin-color",
+      hueRef: controls.color.ref,
+      saturationRef: saturation.ref,
+    };
+  }
   const readings = [
     ...new Set(
       values
@@ -655,6 +682,9 @@ function describeControl(name, control) {
   if (control.kind === "kelvin") {
     const { min, max } = kelvinRange(control);
     return `${name} (тёплый, нейтральный, холодный или ${min}–${max} K)`;
+  }
+  if (control.kind === "kelvin-color") {
+    return `${name} (тёплый, нейтральный, холодный)`;
   }
   if (control.values?.length) {
     return `${name} (${control.values.map(({ key, name: label }) => `${key} — ${label}`).join(", ")})`;
@@ -699,6 +729,10 @@ function resolveCommand(device, control, raw) {
     };
   }
   if (spec.kind === "color") {
+    // RGB LEDs at zero saturation look bluish; white is a neutral white.
+    if (["белый", "white"].includes(normalize(value))) {
+      return resolveCommand(device, "color_temperature", NEUTRAL_KELVIN);
+    }
     const color = parseColor(value);
     if (!color) {
       return {
@@ -711,6 +745,19 @@ function resolveCommand(device, control, raw) {
       items.push({ ref: spec.saturationRef, value: color.saturation, control });
     }
     return { items };
+  }
+  if (spec.kind === "kelvin-color") {
+    const kelvin = WHITE_KELVIN[normalize(value)] ?? parseNumber(value);
+    if (!Number.isFinite(kelvin) || kelvin < 1000) {
+      return { problem: "Оттенок белого: тёплый, нейтральный или холодный." };
+    }
+    const { hue, saturation } = kelvinColor(kelvin);
+    return {
+      items: [
+        { ref: spec.hueRef, value: hue, control },
+        { ref: spec.saturationRef, value: saturation, control },
+      ],
+    };
   }
   if (spec.kind === "kelvin") {
     const kelvin = WHITE_KELVIN[normalize(value)] ?? parseNumber(value);
@@ -803,6 +850,99 @@ function sameValue(current, requested) {
   return String(current) === String(requested);
 }
 
+// A whole-room command names the room and the kind; it becomes one command
+// per device of that kind there that can do it and is on the network.
+// Colour and white also reach the bulbs hidden behind groups, since a group
+// passes on only power and level; power and level go to what the app shows.
+function expandRooms(catalog, commands, problems) {
+  const expanded = [];
+  for (const command of commands) {
+    if (!command?.room) {
+      expanded.push(command);
+      continue;
+    }
+    const room = findRoom(catalog, command.room);
+    if (!room) {
+      problems.push({
+        room: command.room,
+        problem: "Такой комнаты нет.",
+        rooms: [...catalog.rooms.values()].map(({ id, name }) => ({
+          id,
+          name,
+        })),
+      });
+      continue;
+    }
+    const kind = command.kind ?? "light";
+    const withHidden = ["color", "color_temperature"].includes(command.control);
+    const targets = [...catalog.devices.values()].filter(
+      (device) =>
+        device.roomId === room.id &&
+        device.kind === kind &&
+        device.available &&
+        (withHidden || !device.hidden) &&
+        supports(device, command.control),
+    );
+    if (targets.length === 0) {
+      problems.push({
+        room: room.name,
+        control: command.control,
+        problem: "В этой комнате нет доступных устройств, которые это умеют.",
+      });
+      continue;
+    }
+    const palette = PALETTE_WORDS.has(normalize(command.value));
+    targets.forEach((device, index) => {
+      expanded.push({
+        device: device.id,
+        control: command.control,
+        value: palette
+          ? CONTRAST_PALETTE[index % CONTRAST_PALETTE.length]
+          : command.value,
+      });
+    });
+  }
+  return expanded;
+}
+
+function supports(device, control) {
+  if (control === "power") {
+    return Boolean(device.controls.power ?? device.controls.mode);
+  }
+  return Boolean(device.controls[control]);
+}
+
+// The colour of a white of the given temperature, by Tanner Helland's
+// approximation of black-body light, as hue degrees and saturation percent.
+function kelvinColor(kelvin) {
+  const t = Math.min(40_000, Math.max(1_000, kelvin)) / 100;
+  const clamp = (value) => Math.min(255, Math.max(0, value));
+  const red = t <= 66 ? 255 : clamp(329.698727446 * (t - 60) ** -0.1332047592);
+  const green = clamp(
+    t <= 66
+      ? 99.4708025861 * Math.log(t) - 161.1195681661
+      : 288.1221695283 * (t - 60) ** -0.0755148492,
+  );
+  const blue =
+    t >= 66
+      ? 255
+      : t <= 19
+        ? 0
+        : clamp(138.5177312231 * Math.log(t - 10) - 305.0447927307);
+  const max = Math.max(red, green, blue);
+  const delta = max - Math.min(red, green, blue);
+  let hue = 0;
+  if (delta > 0) {
+    if (max === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (max === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    hue: Math.round((hue + 360) % 360),
+    saturation: Math.round(max === 0 ? 0 : (delta / max) * 100),
+  };
+}
+
 function parseColor(value) {
   const text = normalize(value);
   const name = ENGLISH_COLORS[text] ?? text;
@@ -821,6 +961,15 @@ function colorName(hue, saturation) {
     (Number.isFinite(saturation) && saturation < 15)
   ) {
     return "белый";
+  }
+  // A white mixed from colour on a colour-only lamp.
+  if (
+    hue >= 15 &&
+    hue <= 45 &&
+    Number.isFinite(saturation) &&
+    saturation <= 70
+  ) {
+    return "тёплый белый";
   }
   let best = null;
   for (const [name, colorHue, colorSaturation] of COLORS) {
