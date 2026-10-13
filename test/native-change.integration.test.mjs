@@ -613,6 +613,14 @@ function blockData({ delay = 60_000, nested = false } = {}) {
   };
 }
 
+// The stored BLOCK data with its first rule's delay changed, as the owner
+// edits it in the app.
+function editedByHand(data) {
+  const edited = JSON.parse(data);
+  edited.targets[0].then_delay = 5_000;
+  return JSON.stringify(edited);
+}
+
 function dailyCron(hour, minute) {
   return {
     type: "cron",
@@ -14484,7 +14492,10 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
   assert.equal(afterRestart.structuredContent.status, "applied");
   assert.equal(afterRestart.structuredContent.configuration_matches, true);
 
-  hub.state.scenarios[0].onStart = true;
+  // An edit of the data by hand blocks restore; the change does not own
+  // the scenario's name or flags.
+  const appliedData = hub.state.scenarios[0].data;
+  hub.state.scenarios[0].data = editedByHand(appliedData);
   const manualConflict = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -14499,7 +14510,7 @@ test("BLOCK target move and restore accept rooms recalculated by SprutHub", asyn
     1,
   );
 
-  hub.state.scenarios[0].onStart = false;
+  hub.state.scenarios[0].data = appliedData;
   const restored = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -14618,7 +14629,8 @@ test("BLOCK target class change stays applied when SprutHub projects rooms, icon
   assert.equal(afterRestart.structuredContent.status, "applied");
   assert.equal(afterRestart.structuredContent.configuration_matches, true);
 
-  hub.state.scenarios[0].onStart = true;
+  const appliedData = hub.state.scenarios[0].data;
+  hub.state.scenarios[0].data = editedByHand(appliedData);
   const manualConflict = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -14648,7 +14660,7 @@ test("BLOCK target class change stays applied when SprutHub projects rooms, icon
     "a previous conflict must not restore without proven ownership",
   );
 
-  hub.state.scenarios[0].onStart = false;
+  hub.state.scenarios[0].data = appliedData;
   const restored = await secondClient.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
@@ -15214,9 +15226,14 @@ test("LOGIC conflict without an applied snapshot does not treat a requested matc
   );
 });
 
-test("BLOCK restore keeps a manual name change after apply without writing", async (t) => {
+// The data change writes only data; the name and flags change through the
+// options window (research/protocol/2026-10-13-wave4-contracts.md 1.3,
+// 1.10), so the owner's rename and start on boot are not an edit of it:
+// restore puts back the data and keeps them.
+test("BLOCK data restore keeps a manual name and flag change and writes only data", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
+  const originalData = hub.state.scenarios[0].data;
   const prepared = await client.callTool({
     name: "prepare_native_change",
     arguments: {
@@ -15235,27 +15252,33 @@ test("BLOCK restore keeps a manual name change after apply without writing", asy
     ({ scenario }) => scenario?.update,
   ).length;
   hub.state.scenarios[0].name = "Ручное имя после записи";
+  const onStart = !hub.state.scenarios[0].onStart;
+  hub.state.scenarios[0].onStart = onStart;
 
   const observed = await client.callTool({
     name: "get_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(observed.structuredContent.status, "conflict");
-  assert.equal(observed.structuredContent.conflict_reason, "manual_change");
-  assert.equal(observed.structuredContent.configuration_matches, false);
+  assert.equal(observed.structuredContent.status, "applied");
+  assert.equal(observed.structuredContent.configuration_matches, true);
 
-  const refused = await client.callTool({
+  const restored = await client.callTool({
     name: "restore_native_change",
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
-  assert.equal(refused.structuredContent.status, "conflict");
-  assert.equal(refused.structuredContent.conflict_reason, "manual_change");
-  assert.equal(refused.structuredContent.configuration_matches, false);
-  assert.equal(
-    hub.requests.filter(({ scenario }) => scenario?.update).length,
-    writesAfterApply,
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.deepEqual(
+    hub.requests
+      .filter(({ scenario }) => scenario?.update)
+      .slice(writesAfterApply)
+      .map(({ scenario }) => Object.keys(scenario.update).sort()),
+    [["data", "index"]],
   );
+  const delayOf = (data) => JSON.parse(data).targets[0].then[1].time;
+  assert.notEqual(delayOf(originalData), 45_000);
+  assert.equal(delayOf(hub.state.scenarios[0].data), delayOf(originalData));
   assert.equal(hub.state.scenarios[0].name, "Ручное имя после записи");
+  assert.equal(hub.state.scenarios[0].onStart, onStart);
 });
 
 test("window_option renames a BLOCK through its options window and restores after restart", async (t) => {
