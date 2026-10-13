@@ -176,19 +176,6 @@ function homekitOptions() {
 function settingsOptions() {
   const loginLink = `http://192.168.1.10/user/login?code=${LOGIN_CODE}`;
   return [
-    option(
-      "DiscoveryTime",
-      "Время поиска",
-      "GenericInteger",
-      "LIST",
-      { intValue: 60 },
-      {
-        validValues: [30, 60, 120].map((seconds) => ({
-          name: `${seconds} с`,
-          value: { intValue: seconds },
-        })),
-      },
-    ),
     status("user_0_email", "Почта", "owner@example.invalid"),
     option("user_0_qr", "QR-код входа", "GenericString", "QR_CODE", {
       stringValue: loginLink,

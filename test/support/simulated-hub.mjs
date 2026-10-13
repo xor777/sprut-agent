@@ -1871,6 +1871,7 @@ const HANDLERS = {
   "window.get": (state, { windowKey }) => {
     const window = state.windows[windowKey];
     if (!window) return null;
+    if (windowKey === "") return withDiscoveryTime(state, window);
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
     // The scenario-backed options show the scenario's fields; Active showed
@@ -2495,8 +2496,40 @@ function homeSettingsWindow(hub) {
       status("Time", "Время", hub.clock ?? "2026-09-24 - 12:00:00 (GMT+03:00)"),
       status("Sunrise", "Восход", hub.sunrise ?? "06:32"),
       status("Sunset", "Закат", hub.sunset ?? "18:41"),
+      // The search time of device searches, a choice of 1 to 60 minutes
+      // that showed 60 on the owner's hub (2026-10-12-device-pairing H8);
+      // its value is in seconds, as the search started there ended 60 s
+      // later (P1). Its parent and choice names were not recorded. window.get
+      // shows the simulator's discoveryTimeMs (withDiscoveryTime).
+      {
+        key: "DiscoveryTime",
+        name: "Время поиска устройств",
+        type: "GenericInteger",
+        inputType: "LIST",
+        parent: "main",
+        read: true,
+        write: true,
+        events: false,
+        value: { intValue: 60 },
+        validValues: [1, 3, 5, 10, 30, 60].map((minutes) => ({
+          name: `${minutes} мин`,
+          value: { intValue: minutes * 60 },
+        })),
+      },
     ],
   };
+}
+
+// The hub settings window as window.get shows it: DiscoveryTime is the
+// simulator's discoveryTimeMs, which a test may change at any moment, in
+// whole seconds (a test's sub-minute time rounds up).
+function withDiscoveryTime(state, window) {
+  const view = structuredClone(window);
+  const option = view.options.find(({ key }) => key === "DiscoveryTime");
+  if (option) {
+    option.value = { intValue: Math.ceil(state.discoveryTimeMs / 1_000) };
+  }
+  return view;
 }
 
 // The instant a hub-local wall clock ("12:00" or "12:00:00") falls on the

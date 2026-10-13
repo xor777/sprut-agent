@@ -1433,6 +1433,189 @@ test("a start whose watch cannot be saved after it was sent is followed by its r
   assert.equal(searchRuns(hub), true);
 });
 
+// The same failure, with the owner starting a search in the SprutHub app
+// after the network closed and before the agent's first read of the ref
+// (review of 6424cdf). The watch kept before the start never saw its run's
+// end; the latest end that run can have, kept before the start, tells the
+// owner's run apart: it is reported as a later search, and its stop is not
+// sent from this ref.
+test("a watch kept before its start does not take a search started in the app after its own ended for its own", async (t) => {
+  const { hub, client, stateDirectory } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 2_000 }),
+  );
+  hub.delayReplies("extension.action", 500);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await until(() => searchRuns(hub) === false, "the end of the search");
+  // The owner's run lasts the usual minute.
+  hub.state.discoveryTimeMs = 60_000;
+  startNatively(hub);
+  await until(() => searchRuns(hub) === true, "the owner's search");
+  await chmod(watches, 0o700);
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  const read = await call(client, refused.next.tool, refused.next.arguments);
+  const stale = await call(client, "stop_device_search", {
+    search_ref: refused.search_ref,
+  });
+
+  assert.equal(read.search_ref, refused.search_ref);
+  assert.equal(read.status, "ended");
+  assert.equal(read.active, false);
+  assert.equal(read.later_search?.active, true);
+  assert(read.later_search.seconds_left > 50, read);
+  assert.equal(read.stop, undefined);
+  assert.equal(stale.stop_sent, false);
+  assert.equal(stale.later_search?.active, true);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+  ]);
+  assert.equal(searchRuns(hub), true);
+});
+
+// Its own run, read through that watch while the network is open, stays
+// its own: the latest end kept before the start lies past the run's end.
+test("a watch kept before its start follows its own search while it runs and stops it", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  hub.delayReplies("extension.action", 500);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await chmod(watches, 0o700);
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  const read = await call(client, "get_device_search", {
+    search_ref: refused.search_ref,
+    wait_seconds: 0,
+  });
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: refused.search_ref,
+  });
+
+  assert.equal(read.status, "searching");
+  assert.equal(read.active, true);
+  assert.equal(read.ends_at, refused.ends_at);
+  assert.equal(read.later_search, undefined);
+  assert.equal(read.limitations, undefined);
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(stopped.ended, "stopped");
+  assert.equal(searchRuns(hub), false);
+});
+
+// A start beside a search the owner started in the app keeps its watch
+// before it reads the search. When the state after that read cannot be
+// kept, the kept watch has not seen the run's end either; the end the
+// running search showed before the watch was kept tells a later run of the
+// owner apart.
+test("a watch kept beside a running search does not take the owner's next search for it", async (t) => {
+  const { hub, client, stateDirectory } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 2_000 }),
+  );
+  startNatively(hub);
+  await until(() => searchRuns(hub) === true, "the owner's search");
+  // The read after the watch is kept waits, so the directory turns
+  // read-only between the two saves.
+  hub.delayReplies("extensionChild.list", 500);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(async () => {
+    const name = (await readdir(stateDirectory)).find((entry) =>
+      entry.startsWith("device-searches-"),
+    );
+    return (
+      name !== undefined &&
+      (await readdir(path.join(stateDirectory, name))).some((entry) =>
+        entry.endsWith(".json"),
+      )
+    );
+  }, "the watch kept before the read");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extensionChild.list", 0);
+  await until(() => searchRuns(hub) === false, "the end of the search");
+  hub.state.discoveryTimeMs = 60_000;
+  startNatively(hub);
+  await until(() => searchRuns(hub) === true, "the owner's next search");
+  await chmod(watches, 0o700);
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  assert.equal(typeof refused.search_ref, "string");
+  const read = await call(client, "get_device_search", {
+    search_ref: refused.search_ref,
+    wait_seconds: 0,
+  });
+  const stale = await call(client, "stop_device_search", {
+    search_ref: refused.search_ref,
+  });
+
+  assert.equal(read.active, false);
+  assert.equal(read.later_search?.active, true);
+  assert.equal(stale.stop_sent, false);
+  assert.deepEqual(searchActions(hub), []);
+  assert.equal(searchRuns(hub), true);
+});
+
+// Without the hub's DiscoveryTime the latest end of the agent's run is
+// taken an hour after its start, the largest choice: the agent's own
+// search stays its own, and the answers say that a search the owner starts
+// in the app within that hour may be taken for it.
+test("a start without the hub's search time watches its own search and says what it cannot tell apart", async (t) => {
+  const { hub, client } = await setup(t, await apartment());
+  const settings = hub.state.windows[""];
+  settings.options = settings.options.filter(
+    ({ key }) => key !== "DiscoveryTime",
+  );
+
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  const read = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  const stopped = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+
+  assert.equal(started.status, "started");
+  for (const answer of [started, read]) {
+    assert.equal(answer.active, true);
+    assert.equal(
+      answer.limitations?.some((text) => text.includes("DiscoveryTime")),
+      true,
+      JSON.stringify(answer.limitations),
+    );
+  }
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(searchRuns(hub), false);
+});
+
 // When the watch kept before the start is gone as well, no ref follows the
 // search: the error points at a start, which returns a running search
 // without restarting it.
