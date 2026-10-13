@@ -94,6 +94,21 @@ function methods(native) {
   return native.map(({ method }) => method);
 }
 
+// Resolves once the hub has handled a request of this method among those
+// after the first `from`: what it answers is fixed, even if the reply is
+// delayed.
+async function handled(hub, method, from) {
+  while (!hub.requests.slice(from).some((request) => request.method === method))
+    await sleep(5);
+}
+
+// The owner switches the floor lamp off, on and off again by hand.
+function flickerFloorLampOff(hub) {
+  for (const boolValue of [false, true, false]) {
+    hub.changeByHand({ ...floorLampOn, value: { boolValue } });
+  }
+}
+
 function listed(body) {
   return body.rooms.flatMap((room) =>
     room.devices.flatMap((device) =>
@@ -439,4 +454,188 @@ test("a room the room list lacks is not asked for again on each event", async (t
   hub.emit({ room: { event: "EVENT_UPDATE", rooms: [{ id: 99 }] } });
   await settle();
   assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
+});
+
+// A read answers with the home as the hub saw it when the request came,
+// while the events of changes made since may arrive before its reply
+// (accessory.list of the whole home took 245 ms on the owner's hub). The
+// events that came during a read are applied again over what it read.
+test("a value changed while the whole home is read shows in the answers after the read", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  hub.delayReplies("accessory.list", 400);
+  const overview = call("home_overview", {});
+  await handled(hub, "accessory.list", 0);
+  flickerFloorLampOff(hub);
+  await overview;
+  hub.delayReplies("accessory.list", 0);
+
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert.deepEqual(lamp.native, []);
+  assert.equal(onValue(listed(lamp.body)[0].service), false);
+});
+
+test("a value changed while one device is read again shows in the answer after the read", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  await call("home_overview", {});
+  // The floor lamp's accessory changed in the SprutHub app: the next
+  // answer reads it again.
+  hub.emit({ accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16 }] } });
+  await settle();
+  hub.delayReplies("accessory.get", 400);
+  const from = hub.requests.length;
+  const answer = call("find_devices", { query: "торшер" });
+  await handled(hub, "accessory.get", from);
+  flickerFloorLampOff(hub);
+
+  const lamp = await answer;
+  assert.deepEqual(methods(lamp.native), ["accessory.get"]);
+  assert.equal(onValue(listed(lamp.body)[0].service), false);
+});
+
+test("a room renamed while the room list is read again keeps its new name", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  // A room added in the SprutHub app has the room list read again.
+  const veranda = { id: 40, name: "Веранда", order: 40, visible: true };
+  hub.state.rooms.push(veranda);
+  hub.emit({ room: { event: "EVENT_ADD", rooms: [veranda] } });
+  await settle();
+  hub.delayReplies("room.list", 400);
+  const from = hub.requests.length;
+  const overview = call("home_overview", {});
+  await handled(hub, "room.list", from);
+  const bedroom = hub.state.rooms.find(({ id }) => id === 5);
+  bedroom.name = "Спальня родителей";
+  hub.emit({
+    room: {
+      event: "EVENT_UPDATE",
+      rooms: [{ id: 5, name: bedroom.name, order: bedroom.order }],
+    },
+  });
+
+  const answer = await overview;
+  assert.deepEqual(
+    methods(answer.native).filter((method) =>
+      ["room.list", "accessory.list"].includes(method),
+    ),
+    ["room.list"],
+  );
+  const names = new Map(answer.body.rooms.map(({ ref, name }) => [ref, name]));
+  assert.equal(names.get(`${home}/room/40`), "Веранда");
+  assert.equal(names.get(`${home}/room/5`), "Спальня родителей");
+});
+
+// The hub pushes an event for every value write, after its reply
+// (2026-10-13-lamp-logic-undo 4.2, 4.5). Until it comes, or a read sent
+// after the reply, the value written is not taken as the device's.
+test("a device command whose event never comes has its device read again before the next answer", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  hub.dropEvents((event) =>
+    event.characteristic?.characteristics?.some(({ aId }) => aId === 16),
+  );
+  const sent = await call("send_device_commands", {
+    home_ref: home,
+    commands: [
+      {
+        target_ref: `${home}/accessory/16/service/13/characteristic/14`,
+        value: false,
+      },
+    ],
+    reason: "Выключить торшер",
+  });
+  assert.equal(sent.body.results[0].status, "applied");
+  hub.dropEvents(null);
+
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert.deepEqual(methods(lamp.native), ["accessory.get"]);
+  assert.equal(onValue(listed(lamp.body)[0].service), false);
+  assert.deepEqual(
+    (await call("find_devices", { query: "торшер" })).native,
+    [],
+  );
+});
+
+test("a device command whose reply never comes has the home read again before the next answer", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+    { timeoutMs: 1500 },
+  );
+  await call("home_overview", {});
+  // The hub switches the lamp off at once; its reply and event come after
+  // the request has run out of time.
+  hub.delayReplies("characteristic.update", 3000);
+  await call("send_device_commands", {
+    home_ref: home,
+    commands: [
+      {
+        target_ref: `${home}/accessory/16/service/13/characteristic/14`,
+        value: false,
+      },
+    ],
+    reason: "Выключить торшер",
+  });
+  hub.delayReplies("characteristic.update", 0);
+
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert(methods(lamp.native).includes("accessory.list"));
+  assert.equal(onValue(listed(lamp.body)[0].service), false);
+  assert.deepEqual(
+    (await call("find_devices", { query: "торшер" })).native,
+    [],
+  );
+});
+
+// A device's availability is a field of its accessory, which only a read
+// gives; the hub pushes the value of its information service's C_Online.
+test("a device that drops off the network shows as unavailable after its availability event", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  const nightLight = `${home}/accessory/26`;
+  const unavailableIn = (body) =>
+    body.problems.some(
+      ({ kind, ref }) => kind === "device_unavailable" && ref === nightLight,
+    );
+  assert(!unavailableIn((await call("home_overview", {})).body));
+
+  const accessory = hub.state.accessories.find(({ id }) => id === 26);
+  accessory.online = false;
+  const online = { aId: 26, sId: 1, cId: 8 };
+  accessory.services
+    .find(({ sId }) => sId === online.sId)
+    .characteristics.find(({ cId }) => cId === online.cId).control.value = {
+    boolValue: false,
+  };
+  hub.emit({
+    characteristic: {
+      event: "EVENT_UPDATE",
+      characteristics: [
+        { ...online, control: { value: { boolValue: false } } },
+      ],
+    },
+  });
+  await settle();
+
+  const overview = await call("home_overview", {});
+  assert.deepEqual(
+    methods(overview.native).filter((method) =>
+      ["accessory.get", "accessory.list"].includes(method),
+    ),
+    ["accessory.get"],
+  );
+  assert(unavailableIn(overview.body), JSON.stringify(overview.body.problems));
+  const unavailable = await call("find_devices", { state: "unavailable" });
+  assert.deepEqual(unavailable.native, []);
+  assert(
+    listed(unavailable.body).some(({ device }) => device.ref === nightLight),
+  );
 });

@@ -1132,7 +1132,11 @@ export async function startSimulatedHub(
   // events, and the extension event after a search action,
   // 2026-10-12-device-pairing H12 and P5).
   const receivesEvents = new WeakSet();
+  // Events this matches are lost on the way to every connection
+  // (dropEvents).
+  let lostEvents = null;
   state.emit = (event) => {
+    if (lostEvents?.(event)) return;
     const text = JSON.stringify({ event });
     for (const client of server.clients) {
       if (client.readyState === client.OPEN && receivesEvents.has(client)) {
@@ -1306,6 +1310,12 @@ export async function startSimulatedHub(
     // Pushes an event frame to the connections that receive events, as the
     // hub does for an edit made in the SprutHub app.
     emit: (event) => state.emit(event),
+    // From now on the events of changes (emit, writes, changeByHand) that
+    // match(event) accepts reach no connection, as a frame lost between the
+    // hub and a client; null delivers them again.
+    dropEvents: (match) => {
+      lostEvents = match;
+    },
     refuseNext: (method, error) => {
       const queue = refusals.get(method) ?? [];
       queue.push(
