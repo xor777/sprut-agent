@@ -1020,8 +1020,9 @@ async function loadFixtureFile(file) {
 // the simulator's guess at what a live hub does in these situations:
 // - delayedReadback [{aId, sId, cId, ms}]: a value write is acknowledged at
 //   once and its value appears ms later (hub.settle() applies it at once);
-// - droppedReply [{method, aId?, sId?, cId?, times = 1}]: a matching request
-//   is applied and never answered, so the client times out;
+// - droppedReply [{method, aId?, sId?, cId?, times = 1, applied = true}]: a
+//   matching request is applied and never answered, so the client times
+//   out; with applied: false it is lost before the hub and changes nothing;
 // - stuckActuators [{aId}]: the accessory reads as offline and acknowledges
 //   value writes without changing anything;
 // - lampLogic [{aId, sId}]: an active LightbulbControl logic is assigned to
@@ -1036,6 +1037,14 @@ async function loadFixtureFile(file) {
 // characteristic and room events (35 in 120 s at rest,
 // 2026-10-12-device-pairing H12). Without it the simulator sends no events
 // at rest, only those its own changes cause.
+// latencyMs, a number or ({method, arrival}) => ms with arrival counting the
+// requests of a connection from 1, handles each request that long after it
+// arrives and answers it at once, as a hub about 90 ms away does
+// (2026-10-13-voice-latency-baseline). Requests in flight together then
+// overlap, and with different delays they are handled and answered in
+// another order than sent, as the owner's hub handled several writes on one
+// socket (2026-10-13-parallel-writes, 1.2, 2 and 3). Each request record
+// gets received_ms and answered_ms on one monotonic clock.
 export async function startSimulatedHub(
   fixture,
   {
@@ -1046,6 +1055,7 @@ export async function startSimulatedHub(
     faults = {},
     hubTime,
     eventEveryMs,
+    latencyMs,
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
@@ -1132,9 +1142,7 @@ export async function startSimulatedHub(
       connection.closed_at = Date.now();
       clearInterval(events);
     });
-    socket.on("message", (raw) => {
-      connection.requests += 1;
-      connection.first_request_at ??= Date.now();
+    const handle = (raw, receivedAt) => {
       const recorded = requests.length;
       const reply = handleMessage(
         state,
@@ -1145,22 +1153,43 @@ export async function startSimulatedHub(
         connection.id,
       );
       const text = reply ? JSON.stringify(reply) : null;
+      const entry = requests.length > recorded ? requests.at(-1) : undefined;
       // The hub-side cost of the request: bytes of the reply frame sent (0
       // for a dropped reply).
-      if (requests.length > recorded) {
-        requests.at(-1).responseBytes = text ? Buffer.byteLength(text) : 0;
+      if (entry) {
+        entry.responseBytes = text ? Buffer.byteLength(text) : 0;
+        entry.received_ms = receivedAt;
       }
-      const delay =
-        requests.length > recorded
-          ? replyDelays.get(requests.at(-1).method)
-          : undefined;
+      const delay = entry ? replyDelays.get(entry.method) : undefined;
+      const send = () => {
+        if (entry && text) entry.answered_ms = performance.now();
+        if (socket.readyState === socket.OPEN) socket.send(text);
+      };
       if (text && delay) {
-        setTimeout(() => {
-          if (socket.readyState === socket.OPEN) socket.send(text);
-        }, delay);
+        setTimeout(send, delay);
       } else if (text) {
-        socket.send(text);
+        send();
       }
+    };
+    let arrivals = 0;
+    socket.on("message", (raw) => {
+      connection.requests += 1;
+      connection.first_request_at ??= Date.now();
+      arrivals += 1;
+      const receivedAt = performance.now();
+      const latency =
+        typeof latencyMs === "function"
+          ? latencyMs({ method: methodOfRaw(raw), arrival: arrivals })
+          : (latencyMs ?? 0);
+      if (latency <= 0) {
+        handle(raw, receivedAt);
+        return;
+      }
+      const timer = setTimeout(() => {
+        state.timers.delete(timer);
+        if (socket.readyState === socket.OPEN) handle(raw, receivedAt);
+      }, latency);
+      state.timers.add(timer);
     });
   });
   const address = server.address();
@@ -1340,6 +1369,12 @@ function handleMessage(
   const [domain, operation] = method.split(".");
   try {
     const input = message.params[domain][operation] ?? {};
+    if (dropsReply(state, method, input, { applied: false })) {
+      recordFault(state, "lost_request", entry);
+      entry.replyDropped = true;
+      entry.lost = true;
+      return null;
+    }
     const value = handler(state, input);
     if (dropsReply(state, method, input)) {
       recordFault(state, "dropped_reply", entry);
@@ -1372,6 +1407,14 @@ function withoutEmptyLists(value) {
       ([, item]) => !(Array.isArray(item) && item.length === 0),
     ),
   );
+}
+
+function methodOfRaw(raw) {
+  try {
+    return methodOf(JSON.parse(raw.toString())?.params);
+  } catch {
+    return null;
+  }
 }
 
 function methodOf(params) {
@@ -3698,6 +3741,11 @@ function characteristicKey({ aId, sId, cId }) {
   return `${aId}.${sId}.${cId}`;
 }
 
+// Stricter than the owner's hub, which acknowledges a value out of range or
+// of another kind and coerces it (Brightness 150 → 100, −5 → 0 and off, a
+// string → on at 100) and refuses only an unknown characteristic
+// (2026-10-13-parallel-writes, 5). The product checks range and kind itself
+// before any write; a test of that checks that no write was sent.
 function checkedValue(control, value) {
   const fields = isRecord(value)
     ? VALUE_FIELDS.filter((field) => Object.hasOwn(value, field))
@@ -3761,11 +3809,12 @@ function sameCharacteristic(rule, { aId, sId, cId }) {
   );
 }
 
-function dropsReply(state, method, input) {
+function dropsReply(state, method, input, { applied = true } = {}) {
   const rule = state.faults?.droppedReply.find(
     (candidate) =>
       candidate.remaining > 0 &&
       candidate.method === method &&
+      (candidate.applied !== false) === applied &&
       ["aId", "sId", "cId"].every(
         (key) => candidate[key] === undefined || candidate[key] === input[key],
       ),
