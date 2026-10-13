@@ -392,6 +392,37 @@ test("«приглуши торшер и прикрой шторы», then «в�
   assert.equal(currentValue(hub, FLOOR_LEVEL), 20);
 });
 
+// An agent that reads restore_supported=true would promise the owner the
+// brightness can be put back.
+test("«приглуши торшер и прикрой шторы» reports the lamp's level as not restorable and the curtains as restorable", async (t) => {
+  const { client } = await setup(t, LAMP_LOGIC);
+  const sent = await command(
+    client,
+    [
+      [FLOOR_LEVEL, 20],
+      [CURTAIN_TARGET, 50],
+    ],
+    "Приглушить торшер до 20% и прикрыть шторы",
+  );
+  const [level, curtain] = sent.results;
+  for (const shown of [
+    level,
+    await call(client, "get_native_change", { change_ref: level.change_ref }),
+  ]) {
+    assert.equal(shown.restore_supported, false, JSON.stringify(shown));
+    assert.equal(shown.restore_limitation?.code, "lamp_level_not_restored");
+  }
+  for (const shown of [
+    curtain,
+    await call(client, "get_native_change", {
+      change_ref: curtain.change_ref,
+    }),
+  ]) {
+    assert.equal(shown.restore_supported, true, JSON.stringify(shown));
+    assert.equal(shown.restore_limitation, undefined);
+  }
+});
+
 for (const route of ["change_ref", "change_refs"]) {
   test(`«приглуши торшер до 20%» undone by its own ref writes nothing (${route})`, async (t) => {
     const { hub, client } = await setup(t, LAMP_LOGIC);
