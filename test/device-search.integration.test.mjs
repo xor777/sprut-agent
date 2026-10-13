@@ -1308,6 +1308,41 @@ test("a start whose watch cannot be saved after the start was sent says the netw
   ]);
 });
 
+// A start the hub refuses removes the watch kept for it. If the directory
+// turns read-only before the refusal comes, the watch stays, but the
+// agent must still learn that the hub refused and nothing started.
+test("a start the hub refuses stays a rejection when its watch cannot be removed", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  hub.refuseNext("extension.action", {
+    code: -32603,
+    message: "Controller is busy",
+  });
+  hub.delayReplies("extension.action", 1_000);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await chmod(watches, 0o700);
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "request_rejected");
+  assert.equal(refused.hub_effect, "not_applied");
+  assert.equal(refused.rejection.hub_message, "Controller is busy");
+  // The watch left behind does not stand for a search.
+  assert.equal(started.status, "started");
+  assert.equal(searchActions(hub).length, 2);
+});
+
 // A read and a stop keep what they learned in the directory too. When it
 // cannot be written, the answer says what reached the hub, nothing or the
 // stop, with the search as read in the call: an internal error would hide
