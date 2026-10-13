@@ -2156,16 +2156,61 @@ test("why-lamp-not-on keeps the study lamp off on motion only for the light leve
     const rooms = new Map(state.rooms.map(({ id, name }) => [id, name]));
     assert.equal(rooms.get(sensor.roomId), "Коридор", fixture);
     // The study holds the lamp, the computer socket and an offline window
-    // sensor, and no motion sensor.
+    // sensor, and no motion sensor; the judge is told their values.
+    const told = [
+      "On",
+      "Brightness",
+      "OutletInUse",
+      "ContactSensorState",
+      "BatteryLevel",
+      "StatusLowBattery",
+    ];
+    const values = ({ services }) =>
+      Object.fromEntries(
+        services
+          .flatMap(({ characteristics }) => characteristics)
+          .filter(({ control }) => told.includes(control.type))
+          .map(({ control }) => [
+            control.type,
+            Object.values(control.value)[0],
+          ]),
+      );
     assert.deepEqual(
       state.accessories
         .filter(({ roomId }) => rooms.get(roomId) === "Кабинет")
-        .map(({ name, online }) => [name, online]),
+        .map((accessory) => [
+          accessory.name,
+          accessory.online,
+          values(accessory),
+        ]),
       [
-        ["Настольная лампа", true],
-        ["Розетка компьютера", true],
-        ["Датчик окна в кабинете", false],
+        ["Настольная лампа", true, { On: false, Brightness: 70 }],
+        ["Розетка компьютера", true, { On: true, OutletInUse: true }],
+        [
+          "Датчик окна в кабинете",
+          false,
+          { ContactSensorState: 0, BatteryLevel: 4, StatusLowBattery: 1 },
+        ],
       ],
+      fixture,
+    );
+    // «Всё выключить» has no trigger and switches the lamp off with the
+    // other lights.
+    const allOff = state.scenarios.find(({ name }) => name === "Всё выключить");
+    const { targets } = JSON.parse(allOff.data);
+    assert.equal(allOff.active, true, fixture);
+    assert.ok(
+      targets.every(({ type }) => type === "service"),
+      fixture,
+    );
+    assert.ok(
+      targets.some(
+        ({ aId, characteristics }) =>
+          aId === 32 &&
+          characteristics.some(
+            ({ cId, value }) => cId === 14 && value === "false",
+          ),
+      ),
       fixture,
     );
     const lampAfterMotion = (preset) =>
