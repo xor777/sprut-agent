@@ -2598,12 +2598,21 @@ export class SprutHubClient {
         },
       });
     });
-    if (code.length > searched.length) {
+    // The rest are counted, not listed, so the answer does not grow with
+    // the home; home_overview lists them by type, a page at a time.
+    const rest = code.slice(searched.length);
+    if (rest.length > 0) {
       unchecked.push({
         area: "scenario_code",
         outcome: "not_read",
         limit: CODE_SOURCE_READS,
-        scenario_refs: code.slice(searched.length).map(({ ref }) => ref),
+        scenarios_not_read: rest.length,
+        next: {
+          tool: "home_overview",
+          candidates: [...new Set(rest.map(({ type }) => type))].map(
+            (type) => ({ home_ref: homeRef(serial), list: "scenarios", type }),
+          ),
+        },
       });
     }
     return {

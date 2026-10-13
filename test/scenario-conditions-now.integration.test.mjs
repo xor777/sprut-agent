@@ -677,7 +677,7 @@ test("relations name how many code scenarios were not searched and how to list t
       include: ["relations"],
     });
     assertReadOnly(hub, baseline);
-    return lamp;
+    return { ...lamp, client };
   };
   const notRead = (lamp) =>
     lamp.entity.relations.unchecked.filter(
@@ -702,6 +702,17 @@ test("relations name how many code scenarios were not searched and how to list t
       next,
     },
   ]);
+  // The listed LOGIC: the apartment's own, searched, and the four added
+  // last, not searched.
+  const logic = await few.client.callTool({
+    name: "home_overview",
+    arguments: next.candidates[1],
+  });
+  assert.equal(logic.isError, undefined, logic.content[0]?.text);
+  assert.deepEqual(
+    logic.structuredContent.scenarios.map(({ name }) => name),
+    ["Защита от протечки", "Код 27", "Код 28", "Код 29", "Код 30"],
+  );
 
   const many = await relationsOf(60);
   assert.equal(many.entity.relations.checked.code_scenarios_searched, 24);
