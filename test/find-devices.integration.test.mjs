@@ -1491,8 +1491,10 @@ test("refresh re-reads names changed in the SprutHub app that a query cannot not
 });
 
 test("a broad match after the overview reads nothing from the hub", async (t) => {
-  const { call } = await setup(t, await loadHomeFixture("house"));
+  const { hub, call } = await setup(t, await loadHomeFixture("house"));
   await call("home_overview", {});
+  hub.restEvent();
+  await settle();
 
   const { body, native } = await call("find_devices", { kind: "light" });
 

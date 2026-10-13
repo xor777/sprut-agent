@@ -213,22 +213,12 @@ export class HomeReads {
       }
     }
 
-    let read = await client.homeCatalog(serial, deadline, {
+    // The hub announces new rooms and renames (2026-10-13-structure-events):
+    // a room or a name the warm home does not have is not in the home.
+    const { catalog } = await client.homeCatalog(serial, deadline, {
       refresh: selection.refresh,
     });
-    let candidates = selectCandidates(read.catalog, selection);
-    // A room or a name the home does not know may come from an edit in the
-    // SprutHub app that the hub's events did not carry: the home is read
-    // again once rather than answer "nothing".
-    if (
-      !read.fresh &&
-      ((selection.roomId !== null && !hasRoom(read.catalog, selection)) ||
-        (candidates.length === 0 && selection.query !== null))
-    ) {
-      read = await client.homeCatalog(serial, deadline, { refresh: true });
-      candidates = selectCandidates(read.catalog, selection);
-    }
-    const catalog = read.catalog;
+    const candidates = selectCandidates(catalog, selection);
     if (selection.roomId !== null && !hasRoom(catalog, selection)) {
       throw roomNotFound(selection);
     }

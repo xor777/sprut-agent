@@ -83,12 +83,16 @@ async function read(client, args) {
   };
 }
 
-async function overview(client) {
+// The overview, then an event the hub pushes at rest: the home the
+// overview read stays warm in the MCP process.
+async function overview(client, hub) {
   const result = await client.callTool({
     name: "home_overview",
     arguments: {},
   });
   assert.equal(result.isError, undefined, result.content[0]?.text);
+  hub.restEvent();
+  await new Promise((resolve) => setTimeout(resolve, 150));
 }
 
 // Native requests a call sends the hub.
@@ -300,7 +304,7 @@ test("a scenario read says which condition is false now, with the value and the 
 
   // The values are read at the time of the question, not taken from the
   // home catalog that an earlier read of the whole home left behind.
-  await overview(client);
+  await overview(client, hub);
   setValue(hub, 13, 20, 21, { doubleValue: 15 });
   const baseline = hub.snapshot();
   const { value: warm, requests: warmRequests } = await requestsOf(hub, () =>
@@ -445,7 +449,7 @@ test("a condition on a device that cannot be read now holds neither way", async 
       ]),
     });
   });
-  await overview(client);
+  await overview(client, hub);
   hub.refuseNext("accessory.get", { code: -32000, message: "Busy" });
   const { value, requests } = await requestsOf(hub, () =>
     read(client, { entity_ref: `${homeRef}/scenario/48` }),
@@ -488,7 +492,7 @@ test("a scenario with conditions on more devices than are read at once says whic
       ),
     });
   });
-  await overview(client);
+  await overview(client, hub);
   const { value, requests } = await requestsOf(hub, () =>
     read(client, { entity_ref: `${homeRef}/scenario/60` }),
   );

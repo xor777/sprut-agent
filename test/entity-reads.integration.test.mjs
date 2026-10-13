@@ -272,6 +272,9 @@ test("a BLOCK summary names what the scenario does without its JSON", async (t) 
     arguments: {},
   });
   assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  // The hub pushes an event at rest: the home the overview read stays warm.
+  hub.restEvent();
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const warm = hub.requests.length;
   const named = await read(client, { entity_ref: `${homeRef}/scenario/11` });
   assert.deepEqual(named.entity.summary.steps, allOff.entity.summary.steps);

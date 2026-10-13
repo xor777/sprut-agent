@@ -100,6 +100,10 @@ async function measure(t, accessoryCount) {
     include: ["relations"],
   });
   const overview = await ask("overview", "home_overview", {});
+  // The hub pushes events at rest, which keeps the home the overview read
+  // warm.
+  hub.restEvent();
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const on = await ask("whats_on", "find_devices", { state: "on" });
   const temperature = await ask("bedroom_temperature", "find_devices", {
     query: "температура в спальне",

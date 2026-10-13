@@ -1330,6 +1330,16 @@ export async function startSimulatedHub(
     // Pushes an event frame to the connections that receive events, as the
     // hub does for an edit made in the SprutHub app.
     emit: (event) => state.emit(event),
+    // Pushes one event as the owner's hub does at rest, a room
+    // EVENT_UPDATE with the room's own fields (about 6 a minute,
+    // 2026-10-13-voice-latency-baseline, section 5): a client sees that
+    // the hub pushes events down its connection.
+    restEvent: () => {
+      const { id, name, order, visible } = state.rooms[0];
+      state.emit({
+        room: { event: "EVENT_UPDATE", rooms: [{ id, name, order, visible }] },
+      });
+    },
     // From now on the events of changes (emit, writes, changeByHand) that
     // match(event) accepts reach no connection, as a frame lost between the
     // hub and a client; null delivers them again.

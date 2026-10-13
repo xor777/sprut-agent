@@ -676,7 +676,7 @@ test(
 // gone without a close; the read's reply still comes over it, yet the home
 // must not then follow its events.
 test(
-  "a whole read answered over a connection retired meanwhile has the next answer read the home again",
+  "a whole read answered over a connection retired meanwhile is not taken and is made again",
   BOUNDED,
   async (t) => {
     const { hub, relay, call } = await setup(t);
@@ -714,12 +714,18 @@ test(
     assertTimedOut(await timedOut);
     slow.release();
 
-    // The whole read comes back over the retired connection, which then
-    // goes quiet without a close; the floor lamp is switched off.
+    // The whole read comes back over the retired connection: it is not
+    // taken, and the call reads the home again over a new connection.
     list.release();
-    await reread;
+    const during = await reread;
+    assert.deepEqual(
+      during.methods.filter((method) => method === "accessory.list"),
+      ["accessory.list", "accessory.list"],
+    );
     assert.equal(retired.closedAt, null);
-    relay.silence();
+    // The retired connection goes quiet without a close; the floor lamp is
+    // switched off.
+    retired.silent = true;
     hub.changeByHand({
       aId: 16,
       sId: 13,
@@ -729,7 +735,6 @@ test(
     await sleep(150);
 
     const after = await lampsOn();
-    assert(after.methods.includes("accessory.list"));
     assert(!after.refs.includes(floorLamp));
     beside.release();
     await waiting;

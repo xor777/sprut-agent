@@ -32,6 +32,10 @@ const ROOM_LISTING_SERVICE_LIMIT = 20;
 // How long the hub's time zone serves without a new read of the home
 // settings window, so that a change there shows up.
 const HUB_TIME_ZONE_TTL_MS = 5 * 60_000;
+// Reads an answer from the warm home makes before it gives up: the whole
+// home or its changed accessories, the room list an accessory read asks
+// for, and two more for reads the state did not take.
+const HOME_READ_PASSES = 4;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
@@ -267,24 +271,21 @@ export class SprutHubClient {
   }
 
   // The home from the warm state, read first where the state cannot
-  // answer: whole when it was never read, may have missed events or
+  // answer: whole when it was never read, may have missed something or
   // refresh is set, else the rooms and the accessories its events changed.
-  // fresh says whether this call read the whole home.
+  // A read the state does not take, because something it cannot follow
+  // happened while the read was in flight, is made again; an accessory read
+  // in a room the state does not know has the room list read after it.
   async homeCatalog(serial, deadline, { refresh = false } = {}) {
     const state = this.#homeState(serial);
-    let fresh = false;
-    if (refresh) {
-      await this.#readWholeHome(state, deadline, { join: false });
-      fresh = true;
-    }
-    // An accessory read in a room the state does not know has the room list
-    // read after it.
-    for (let pass = 0; pass < 2; pass += 1) {
-      const needs = state.needs();
-      if (needs === null || (needs.whole && fresh)) break;
+    if (refresh) state.invalidate("refresh");
+    const since = state.readMark();
+    for (let pass = 0; pass <= HOME_READ_PASSES; pass += 1) {
+      const needs = state.needs(Date.now(), since);
+      if (needs === null) return { catalog: state.catalog() };
+      if (pass === HOME_READ_PASSES) break;
       if (needs.whole) {
-        await this.#readWholeHome(state, deadline, { join: true });
-        fresh = true;
+        await this.#readWholeHome(state, deadline);
       } else {
         await Promise.all([
           needs.rooms ? this.#readRoomsInto(state, deadline) : null,
@@ -294,7 +295,11 @@ export class SprutHubClient {
         ]);
       }
     }
-    return { catalog: state.catalog(), fresh };
+    throw new SprutHubError(
+      "home_changing",
+      "The home kept changing in ways that need a new read while it was being read, so no answer could be given from a read that may have missed a change. Retry the call.",
+      "retry",
+    );
   }
 
   #homeState(serial) {
@@ -306,15 +311,18 @@ export class SprutHubClient {
     return state;
   }
 
-  // A whole read already running answers a call that does not force one:
-  // it started earlier, with an earlier deadline.
-  #readWholeHome(state, deadline, { join }) {
+  // A whole read already running answers too (it started earlier, with an
+  // earlier deadline), unless the state has since learnt of something it
+  // cannot follow: the state would not take that read.
+  #readWholeHome(state, deadline) {
     const running = this.#wholeReads.get(state.serial);
-    if (join && running) return running;
-    const read = this.#readWhole(state, deadline);
-    this.#wholeReads.set(state.serial, read);
+    if (running?.generation === state.generation) return running.read;
+    const token = state.beginRead();
+    const read = this.#readWhole(state, token, deadline);
+    const entry = { read, generation: token.generation };
+    this.#wholeReads.set(state.serial, entry);
     const forget = () => {
-      if (this.#wholeReads.get(state.serial) === read) {
+      if (this.#wholeReads.get(state.serial) === entry) {
         this.#wholeReads.delete(state.serial);
       }
     };
@@ -322,8 +330,7 @@ export class SprutHubClient {
     return read;
   }
 
-  async #readWhole(state, deadline) {
-    const token = state.beginRead();
+  async #readWhole(state, token, deadline) {
     try {
       const [rooms, accessories] = await Promise.all([
         this.#readRooms(state.serial, deadline),
@@ -3475,11 +3482,10 @@ export class SprutHubClient {
 
   // A write of a device value waits for its event in the warm home state;
   // another write that may change what the state holds has the home read
-  // again after it, also when a read was in flight across it (the state
-  // replays the mark over that read). A failed value write leaves the
-  // value to what comes next: a refusal or a write never sent changed
-  // nothing, and a write without a reply had its connection retired or
-  // lost, which has the whole home read again.
+  // again after it, and no read in flight across it is taken. A failed
+  // value write leaves the value to what comes next: a refusal or a write
+  // never sent changed nothing, and a write without a reply had its
+  // connection retired or lost, which has the whole home read again.
   async #request(params, deadline, { serial = this.serial } = {}) {
     const method = nativeMethod(params);
     if (READ_ONLY_METHODS.has(method)) {
@@ -3495,23 +3501,28 @@ export class SprutHubClient {
         ? [...this.#homeStates.values()]
         : [this.#homeStates.get(serial)].filter(Boolean);
     this.#writeGeneration += 1;
-    if (target) for (const state of states) state.writeSent(target);
+    const writes = target
+      ? states.map((state) => [
+          state,
+          state.writeSent(target, params.characteristic.update.control.value),
+        ])
+      : [];
     // The reply is counted as its frame is handled: the write's event may
     // come in the next frame of the same read from the socket, before this
     // call resumes.
     const onReply = target
       ? () => {
-          for (const state of states) state.writeAnswered(target);
+          for (const [state, write] of writes) state.writeAnswered(write);
         }
       : undefined;
     try {
       return await this.#send(params, deadline, serial, onReply);
     } catch (error) {
-      if (target) for (const state of states) state.writeFailed(target);
+      for (const [state, write] of writes) state.writeFailed(write);
       throw error;
     } finally {
       this.#writeGeneration += 1;
-      if (homeWrite) for (const state of states) state.markStale("own_write");
+      if (homeWrite) for (const state of states) state.invalidate("own_write");
     }
   }
 
@@ -3612,7 +3623,7 @@ export class SprutHubClient {
         this.#socket = socket;
         this.#connections.set(socket, {
           serials: new Set(),
-          lastEventAt: Date.now(),
+          lastEventAt: null,
         });
         socket.on("error", () => {
           this.#handleConnectionLoss(socket);
@@ -3735,7 +3746,7 @@ export class SprutHubClient {
     for (const serial of record.serials) {
       const state = this.#homeStates.get(serial);
       if (!state) continue;
-      if (record.serials.size > 1) state.markStale("mixed_homes");
+      if (record.serials.size > 1) state.invalidate("mixed_homes");
       else state.receive(event, record, receivedAt);
     }
   }

@@ -220,6 +220,13 @@ function onRefs(body) {
 
 const floorLampOn = { aId: 16, sId: 13, cId: 14 };
 
+// The hub pushes an event at rest, which shows that it pushes events down
+// the connection.
+async function restEvent(hub) {
+  hub.restEvent();
+  await settle();
+}
+
 // A lamp added in the SprutHub app: a copy of the desk lamp (on) under a
 // new id, name and room.
 function addLampInHub(hub, id, roomId, name) {
@@ -355,6 +362,7 @@ test("a gap in the hub's events makes the next answer read the home again", asyn
     { timeoutMs: 1500 },
   );
   await call("home_overview", {});
+  await restEvent(hub);
   const warm = await call("find_devices", { state: "on" });
   assert.deepEqual(warm.native, []);
 
@@ -367,6 +375,7 @@ test("a gap in the hub's events makes the next answer read the home again", asyn
   const afterLoss = await call("find_devices", { state: "on" });
   assert(methods(afterLoss.native).includes("accessory.list"));
   assert.deepEqual(onRefs(afterLoss.body), servicesOnInState(hub.state, home));
+  await restEvent(hub);
   const warmAgain = await call("find_devices", { state: "on" });
   assert.deepEqual(warmAgain.native, []);
 
@@ -396,6 +405,7 @@ test("the warm home is read whole again after a quiet minute on its connection a
     clockStepMs: 90_000,
   });
   await quiet.call("home_overview", {});
+  await restEvent(quiet.hub);
   assert.deepEqual(
     (await quiet.call("find_devices", { state: "on" })).native,
     [],
@@ -403,6 +413,13 @@ test("the warm home is read whole again after a quiet minute on its connection a
   await quiet.shiftClock();
   const afterQuiet = await quiet.call("find_devices", { state: "on" });
   assert(methods(afterQuiet.native).includes("accessory.list"));
+  // Until the connection pushes an event again, each answer reads whole.
+  assert(
+    methods(
+      (await quiet.call("find_devices", { state: "on" })).native,
+    ).includes("accessory.list"),
+  );
+  await restEvent(quiet.hub);
   assert.deepEqual(
     (await quiet.call("find_devices", { state: "on" })).native,
     [],
@@ -430,12 +447,13 @@ test("the warm home is read whole again after a quiet minute on its connection a
 // Replies to this process's requests show that the connection answers,
 // not that the hub still pushes events down it.
 test("a connection that answers requests but pushed no event for a minute has the home read whole again", async (t) => {
-  const { call, shiftClock } = await setup(
+  const { hub, call, shiftClock } = await setup(
     t,
     await loadHomeFixture("apartment"),
     { clockStepMs: 90_000 },
   );
   await call("home_overview", {});
+  await restEvent(hub);
   await shiftClock();
   const scenarios = await call("home_overview", { list: "scenarios" });
   assert(methods(scenarios.native).includes("scenario.list"));
@@ -631,6 +649,7 @@ test("a device command whose event never comes has its device read again before 
     await loadHomeFixture("apartment"),
   );
   await call("home_overview", {});
+  await restEvent(hub);
   hub.dropEvents((event) =>
     event.characteristic?.characteristics?.some(({ aId }) => aId === 16),
   );
@@ -726,6 +745,7 @@ test("a device command whose reply never comes has the home read again before th
   const lamp = await call("find_devices", { query: "торшер" });
   assert(methods(lamp.native).includes("accessory.list"));
   assert.equal(onValue(listed(lamp.body)[0].service), false);
+  await restEvent(hub);
   assert.deepEqual(
     (await call("find_devices", { query: "торшер" })).native,
     [],
@@ -886,7 +906,7 @@ test("an event of a device the warm home cannot apply has that device read again
 // While a read is in flight its log keeps what came meanwhile; past
 // EVENT_LOG_LIMIT entries it cannot say what it missed. Creating 4
 // accessories pushed about 360 frames in 2 s on the owner's hub.
-test("more events during a read than the home keeps have the next answer read it whole again", async (t) => {
+test("more events during a read than the home keeps have that read made again", async (t) => {
   const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
   await call("home_overview", {});
   hub.delayReplies("accessory.list", 400);
@@ -903,11 +923,16 @@ test("more events during a read than the home keeps have the next answer read it
     });
   }
   hub.changeByHand({ ...floorLampOn, value: { boolValue: false } });
-  await refreshed;
+  const during = await refreshed;
   hub.delayReplies("accessory.list", 0);
+  assert.deepEqual(
+    methods(during.native).filter((method) => method === "accessory.list"),
+    ["accessory.list", "accessory.list"],
+  );
+  assert.equal(onValue(listed(during.body)[0].service), false);
 
   const lamp = await call("find_devices", { query: "торшер" });
-  assert(methods(lamp.native).includes("accessory.list"));
+  assert.deepEqual(lamp.native, []);
   assert.equal(onValue(listed(lamp.body)[0].service), false);
 });
 
@@ -941,7 +966,7 @@ test("events of a second home on the same connection do not change the first hom
 
 // A read the hub answered before a configuration write of this process
 // may come back after it.
-test("a configuration write while the home is read has the next answer read it again", async (t) => {
+test("a configuration write while the home is read has that read made again", async (t) => {
   const { hub, call, home } = await setup(
     t,
     await loadHomeFixture("apartment"),
@@ -957,21 +982,29 @@ test("a configuration write while the home is read has the next answer read it a
   const from = hub.requests.length;
   let readDone = false;
   const reading = call("find_devices", { query: "лента", refresh: true }).then(
-    () => {
+    (answer) => {
       readDone = true;
+      return answer;
     },
   );
   await handled(hub, "accessory.list", from);
   await call("apply_native_change", { change_ref: prepared.body.change_ref });
   assert.equal(readDone, false, "the rename went in while the read waited");
-  await reading;
+  const during = await reading;
   hub.delayReplies("accessory.list", 0);
+  assert.deepEqual(
+    methods(during.native).filter((method) => method === "accessory.list"),
+    ["accessory.list", "accessory.list"],
+  );
+  assert.deepEqual(
+    listed(during.body).map(({ service }) => service.name),
+    ["Лента над диваном"],
+  );
 
   const lights = await call("find_devices", {
     room_ref: `${home}/room/3`,
     kind: "light",
   });
-  assert(methods(lights.native).includes("accessory.list"));
   assert(
     listed(lights.body).some(
       ({ service }) => service.name === "Лента над диваном",
@@ -1017,17 +1050,6 @@ test("a device moved to a room created without an event, and a room moved in the
   assert(methods(overview.native).includes("room.list"));
   assert.equal(overview.body.rooms[0].ref, `${home}/room/5`);
 });
-
-// One event as the owner's hub pushes at rest, a room with its own fields
-// (about 6 a minute, 2026-10-13-voice-latency-baseline, section 5): it
-// shows that the connection pushes events.
-async function restEvent(hub) {
-  const { id, name, order, visible } = hub.state.rooms[0];
-  hub.emit({
-    room: { event: "EVENT_UPDATE", rooms: [{ id, name, order, visible }] },
-  });
-  await settle();
-}
 
 const balcony = 30;
 

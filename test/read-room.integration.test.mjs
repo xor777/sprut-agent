@@ -488,6 +488,19 @@ async function pushValue(hub, { aId, sId, cId }, value) {
   await new Promise((resolve) => setTimeout(resolve, 150));
 }
 
+// Pushes an event as the hub does at rest, a room with its own fields: the
+// MCP process sees that the hub pushes events down its connection.
+async function pushRestEvent(hub) {
+  const { id, name, order, visible } = hub.state.rooms[0];
+  const frame = JSON.stringify({
+    event: {
+      room: { event: "EVENT_UPDATE", rooms: [{ id, name, order, visible }] },
+    },
+  });
+  for (const socket of hub.server.clients) socket.send(frame);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+}
+
 function servicesOf(body) {
   return body.rooms.flatMap(({ devices }) =>
     devices.flatMap(({ services }) => services),
@@ -574,6 +587,7 @@ test("MCP discovers every room before reading the selected stable reference", as
     ],
   );
   const overviewRequests = hub.requests.length;
+  await pushRestEvent(hub);
 
   const result = await client.callTool({
     name: "find_devices",
@@ -841,6 +855,7 @@ test("find_devices filters by household kind across the home and keeps empty roo
     climate.structuredContent.rooms.map(({ ref }) => ref),
     ["spruthub://hub/test-hub/room/20"],
   );
+  await pushRestEvent(hub);
   const sensors = await client.callTool({
     name: "find_devices",
     arguments: { home_ref: "spruthub://hub/test-hub", kind: "sensor" },
