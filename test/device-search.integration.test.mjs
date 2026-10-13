@@ -1380,6 +1380,23 @@ test("a start whose watch cannot be saved after it was sent is followed by its r
     })),
     [{ ref: sensorChildRef, accessories: [sensorRef] }],
   );
+
+  // Read ended, that watch is over: a search the owner starts later in
+  // the app is not its own, and its stop does not close the owner's
+  // network.
+  hub.state.discoveryTimeMs = 60_000;
+  startNatively(hub);
+  const later = await call(client, "get_device_search", {
+    search_ref: refused.search_ref,
+    wait_seconds: 0,
+  });
+  const stale = await call(client, "stop_device_search", {
+    search_ref: refused.search_ref,
+  });
+  assert.equal(later.active, false);
+  assert.equal(later.later_search?.active, true);
+  assert.equal(stale.stop_sent, false);
+  assert.equal(searchRuns(hub), true);
 });
 
 // When the watch kept before the start is gone as well, no ref follows the
