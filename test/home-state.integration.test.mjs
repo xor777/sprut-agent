@@ -1189,3 +1189,27 @@ test("an earlier device command's event coming after a later command's reply doe
   const lamp = await call("find_devices", { query: "торшер" });
   assert.equal(onValue(listed(lamp.body)[0].service), true);
 });
+
+// Every read the call makes is overlapped by an edit the warm home cannot
+// apply (a device renamed over and over in the SprutHub app): rather than
+// answer from a read that may have missed it, the call says so.
+test("a home that keeps changing during every read is not answered from those reads", async (t) => {
+  const { hub, callError } = await setup(t, await loadHomeFixture("apartment"));
+  hub.delayReplies("accessory.list", 100);
+  hub.delayReplies("accessory.get", 100);
+  const renames = setInterval(
+    () =>
+      hub.emit({
+        accessory: {
+          event: "EVENT_UPDATE",
+          accessories: [{ id: 16, name: "Торшер" }],
+        },
+      }),
+    20,
+  );
+  t.after(() => clearInterval(renames));
+
+  const answer = await callError("find_devices", { query: "торшер" });
+  assert.equal(answer.error.code, "home_changing");
+  assert.equal(answer.error.action, "retry");
+});
