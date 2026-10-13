@@ -1713,15 +1713,7 @@ export class AutomationService {
       ) {
         throw error;
       }
-      return {
-        direction,
-        outcome: "read_failed",
-        result: await this.#finishNative(change, "uncertain", undefined, {
-          configuration_matches: undefined,
-          ...withoutLaterChange(change),
-          last_verification: failedVerification(error),
-        }),
-      };
+      return this.#finishUnread(change, error);
     }
     if (ownerConflict) {
       return {
@@ -2064,7 +2056,9 @@ export class AutomationService {
           "get_native_change",
         );
       }
-      return this.#restoreValueChange(change);
+      return this.#undoOrUnknown(change, () =>
+        this.#restoreValueChange(change),
+      );
     }
     if (change.kind === "logic_assignment") {
       return this.#restoreLogicAssignment(change);
@@ -2076,13 +2070,45 @@ export class AutomationService {
         "get_native_change",
       );
     }
-    if (isLogicSourceChange(change)) {
-      return this.#restoreScenarioChange(change);
+    return this.#undoOrUnknown(change, () =>
+      change.kind === "block_action_pause"
+        ? this.#restoreBlockActionPause(change)
+        : this.#restoreScenarioChange(change),
+    );
+  }
+
+  // The one rule for a read that fails in an undo of a setting or a
+  // scenario change (PLAN.md, «Неудачное чтение не ведёт ни к записи, ни к
+  // окончательному выводу»): nothing is written and nothing concluded, the
+  // undo's outcome is unknown, and next is the undo again, which reads
+  // first. Every read the undo depends on ends here when it fails: a read
+  // before its write throws (the later changes it settles pass their
+  // failed check on as that error), and a check of an unknown write of its
+  // own leaves the change uncertain with the failure as its last
+  // verification.
+  async #undoOrUnknown(change, undo) {
+    let result;
+    try {
+      result = await undo();
+    } catch (error) {
+      if (!isUnreadError(error)) throw error;
+      result = {
+        ...publicNativeChange(change, undefined, {
+          verification: failedVerification(error),
+        }),
+        restore_outcome: {
+          status: "uncertain",
+          reason: "read_failed",
+          message:
+            "A read this undo depends on failed, so nothing was written and nothing is concluded. Restore it again: it reads first.",
+        },
+      };
     }
-    if (change.kind === "block_action_pause") {
-      return this.#restoreBlockActionPause(change);
-    }
-    return this.#restoreScenarioChange(change);
+    const unread =
+      result.verification?.fresh === false &&
+      (result.status === "uncertain" ||
+        result.restore_outcome?.status === "uncertain");
+    return unread ? withRestoreAgainNext(result, change) : result;
   }
 
   async #applyAccessoryPlacement(change) {
@@ -4413,46 +4439,65 @@ export class AutomationService {
     });
   }
 
-  // Right before an undo writes, the agent's later changes of the same
-  // setting or scenario whose own write is still unknown are settled, each
-  // by its own read (reconcilePendingValueChange, reconcileScenarioWrite).
-  // This undo goes on only while the hub shows its change in place, so a
-  // later change's undo that the read shows took effect is restored now.
-  // A later apply that the read shows did not take effect (its baseline is
-  // there) on what this undo rewrites is not applied: this is the last read
-  // that can tell. Once this write lands, that later change's baseline is
-  // gone and no read of it could tell this undo from a change by hand.
+  // Right before an undo writes, the agent's later changes whose own write
+  // is still unknown and which set what this undo rewrites (undoRewrites)
+  // are settled, each by its own read (reconcilePendingValueChange,
+  // reconcileScenarioWrite). This undo goes on only while the hub shows its
+  // change in place, so a later undo that the read shows took effect is
+  // restored now, and a later apply that it shows did not take effect (its
+  // baseline is there) is not applied: this is the last read that can tell.
+  // Once this write lands, that later change's baseline is gone and no read
+  // of it could tell this undo from a change by hand. So this undo depends
+  // on these reads: one that fails stops it before its write
+  // (undoOrUnknown).
   async #settleLaterUnknownWrites(change) {
     for (const later of await this.store.list()) {
       if (
         later.id === change.id ||
         later.home_ref !== change.home_ref ||
-        !sameWriteChain(change, later) ||
+        !undoRewrites(change, later) ||
         compareApplication(later, change) <= 0 ||
         !writeOutcomeUnknown(later)
       ) {
         continue;
       }
-      try {
-        const pending = isNativeValueChange(later)
-          ? await this.#reconcilePendingValueChange(later)
-          : await this.#reconcileScenarioWrite(later);
-        if (
-          pending?.direction === "apply" &&
-          pending.outcome === "expected_missing" &&
-          writesOverlap(change, later)
-        ) {
-          await this.#finishNative(later, "not_owned", pending.current, {
+      const pending = isNativeValueChange(later)
+        ? await this.#reconcilePendingValueChange(later)
+        : await this.#reconcileScenarioWrite(later);
+      if (pending?.outcome === "read_failed") throw pending.error;
+      if (
+        pending?.direction === "apply" &&
+        pending.outcome === "expected_missing"
+      ) {
+        await this.#finishNative(
+          later,
+          notAppliedStatus(later),
+          pending.current,
+          {
             conflict_reason: "change_was_not_applied",
             last_verification: freshVerification(
               "baseline_observed_before_earlier_undo",
             ),
-          });
-        }
-      } catch {
-        // Left as it was; its own next read settles it.
+          },
+        );
       }
     }
+  }
+
+  // The check of an unknown write whose read failed concludes nothing: the
+  // write stays unknown, with the failure as its last verification and the
+  // error passed on (undoOrUnknown).
+  async #finishUnread(change, error) {
+    return {
+      direction: nativeIntentDirection(change),
+      outcome: "read_failed",
+      error,
+      result: await this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        ...withoutLaterChange(change),
+        last_verification: failedVerification(error),
+      }),
+    };
   }
 
   // A write whose outcome is unknown, read while the agent's own later
@@ -5009,14 +5054,7 @@ export class AutomationService {
     try {
       current = await this.#observeScenarioChange(change);
     } catch (error) {
-      return settled(
-        "read_failed",
-        await this.#finishNative(change, "uncertain", undefined, {
-          configuration_matches: undefined,
-          ...withoutLaterChange(change),
-          last_verification: failedVerification(error),
-        }),
-      );
+      return this.#finishUnread(change, error);
     }
     const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
@@ -5305,11 +5343,12 @@ export class AutomationService {
   // An undo the hub refused leaves the change applied. When it was sent
   // again after its first send got no answer, the refusal may meet what
   // that first undo already did (a delete of a scenario it deleted): the
-  // read settles it, restored when the hub is back as before.
+  // read settles it, and the refusal stands only when that read shows the
+  // change still in place; a failed read leaves it unknown.
   async #finishRefusedUndo(change, error, resending) {
     if (resending) {
       const settled = await this.#reconcileScenarioRestore(change, false);
-      if (settled.outcome === "expected_observed") return settled.result;
+      if (settled.outcome !== "expected_missing") return settled.result;
     }
     throw await this.#finishRefusedWrite(change, "applied", error);
   }
@@ -5621,14 +5660,7 @@ export class AutomationService {
     try {
       current = await this.#observeScenarioChange(change);
     } catch (error) {
-      return settled(
-        "read_failed",
-        await this.#finishNative(change, "uncertain", undefined, {
-          configuration_matches: undefined,
-          ...withoutLaterChange(change),
-          last_verification: failedVerification(error),
-        }),
-      );
+      return this.#finishUnread(change, error);
     }
     const baseline = scenarioChangeObservation(change, current, "restored");
     if (baseline.matches) {
@@ -12279,29 +12311,26 @@ function withRestoreAgainNext(result, change) {
   };
 }
 
-// The agent's changes whose writes reach the same thing: one scenario's
-// chain (its data or code, pauses and options, scenarioChainIndex), or
-// else one setting (valueTargetKey).
-function sameWriteChain(change, other) {
-  const index = scenarioChainIndex(change);
-  if (index !== undefined) return scenarioChainIndex(other) === index;
-  return (
-    isNativeValueChange(other) &&
-    valueTargetKey(other) === valueTargetKey(change)
-  );
-}
-
 // An undo of change rewrites what other set: the same setting, or a field
-// of the scenario both own (scenarioFieldsOwned).
-function writesOverlap(change, other) {
-  if (scenarioChainIndex(change) === undefined) {
+// both own of the same scenario (scenarioChainIndex, scenarioFieldsOwned).
+function undoRewrites(change, other) {
+  const index = scenarioChainIndex(change);
+  if (index === undefined) {
     return (
       isNativeValueChange(other) &&
       valueTargetKey(other) === valueTargetKey(change)
     );
   }
+  if (scenarioChainIndex(other) !== index) return false;
   const owned = scenarioFieldsOwned(other);
   return scenarioFieldsOwned(change).some((field) => owned.includes(field));
+}
+
+// A sent apply a read shows did not take effect: a pause is not applied, as
+// one the hub refused (INACTIVE_PAUSE_STATUSES); another change is no
+// longer the agent's, as a sent change's record reads.
+function notAppliedStatus(change) {
+  return change.kind === "block_action_pause" ? "not_applied" : "not_owned";
 }
 
 // A sent write of this change whose outcome its journal does not hold yet.
@@ -13599,7 +13628,14 @@ function restoreItem(change, automation, result, before) {
       : {};
   if (result.restore_outcome) {
     const { status, ...outcome } = result.restore_outcome;
-    return { ...base, status, sent: false, ...outcome, ...observed };
+    return {
+      ...base,
+      status,
+      sent: false,
+      ...outcome,
+      ...observed,
+      ...(result.next ? { next: result.next } : {}),
+    };
   }
   const intentAt = restoreIntentTime(change);
   const sent = intentAt !== undefined && intentAt !== before.restoreIntentAt;
@@ -15882,6 +15918,12 @@ function roomCreationOutcomeUnknown(change) {
 // it, whatever the code. Only a transport-level unknown after sending (timeout,
 // closed connection, unreadable or unrecognized reply) may have changed the
 // home.
+// A read the hub did not answer or refused (undoOrUnknown). A write the hub
+// refused carries its rejection (finishRefusedWrite) and is not one.
+function isUnreadError(error) {
+  return isHubReadFailure(error) && error.details?.rejection === undefined;
+}
+
 function isUncertainWriteError(error) {
   return (
     error instanceof SprutHubError &&
