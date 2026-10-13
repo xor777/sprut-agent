@@ -945,6 +945,54 @@ test("setup payloads, Wi-Fi QR, relative login links, labelled keys and keys und
   });
 });
 
+// A hub text of many Wi-Fi QR beginnings and no password, as a log line of
+// «WIFI:;» repeated, took seconds to check for a password, growing with
+// the square of its length (8 s for 160 KB), and held up every other call
+// of the server meanwhile; the owner's hub texts take milliseconds. A
+// payload with a password after such a run is still hidden.
+test("a long hub text of Wi-Fi QR beginnings is answered at once, and a password after them stays hidden", async (t) => {
+  const { hub, ok } = await setup(t);
+  const beginnings = "WIFI:;".repeat(27_000);
+  hub.state.log.push(
+    {
+      time: Date.now() - 1_000,
+      level: "LOG_LEVEL_WARN",
+      path: "Test.ApAfterBeginnings",
+      message: `${beginnings}WIFI:S:dacha-ap;T:WPA;P:${WIFI_PASSWORD};;`,
+    },
+    {
+      time: Date.now(),
+      level: "LOG_LEVEL_INFO",
+      path: "Test.Beginnings",
+      message: beginnings,
+    },
+  );
+
+  const timed = async (args) => {
+    const started = performance.now();
+    const log = await ok("read_hub_log", { home_ref: homeRef, ...args });
+    return { log, ms: performance.now() - started };
+  };
+  const all = await timed({ max_bytes: 32_768 });
+  const warnings = await timed({ min_level: "warn" });
+
+  // Generous for a slow machine: each read checks both texts, which took
+  // over 8 s before.
+  assert.ok(all.ms < 2_000, `read_hub_log took ${Math.round(all.ms)} ms`);
+  assert.ok(
+    warnings.ms < 2_000,
+    `read_hub_log took ${Math.round(warnings.ms)} ms`,
+  );
+  const shown = all.log.entries[0];
+  assert.equal(shown.path, "Test.Beginnings");
+  assert.equal(shown.message_truncated, true);
+  assert.ok(shown.message.startsWith("WIFI:;WIFI:;"), shown.message);
+  const ap = warnings.log.entries.find(
+    ({ path: logPath }) => logPath === "Test.ApAfterBeginnings",
+  );
+  assert.equal(ap?.message, "[REDACTED]");
+});
+
 // Settings named after key material that hold no key: a flag that turns
 // install codes on, a PIN length, and codes that are not secrets: a Pronto
 // IR code, a Broadlink IR code and product and scene identifiers. Hidden,
