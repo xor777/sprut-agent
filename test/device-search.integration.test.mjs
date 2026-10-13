@@ -1155,6 +1155,59 @@ test("a start whose watch cannot be saved opens no network and says how to fix t
   assert.equal(searchActions(hub).length, 1);
 });
 
+// The directory of the kept searches of the test's hub.
+async function watchDirectory(stateDirectory) {
+  const name = (await readdir(stateDirectory)).find((entry) =>
+    entry.startsWith("device-searches-"),
+  );
+  assert.ok(name, "no device search was kept");
+  return path.join(stateDirectory, name);
+}
+
+// A start beside a search that already runs sends nothing either way, but
+// the network is open: an answer that it was not opened would have the
+// agent tell the owner the network is closed while any device can join.
+test("a start beside a running search whose watch cannot be saved sends nothing and says the network stays open", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
+
+  // Started in the SprutHub app; nothing is kept yet.
+  startNatively(hub);
+  await chmod(stateDirectory, 0o555);
+  const beside = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await chmod(stateDirectory, 0o700);
+  const watched = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+
+  // Watched by this product, its watch can no longer be written.
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const besideWatched = await toolError(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  await chmod(watches, 0o700);
+  const again = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+
+  for (const refused of [beside, besideWatched]) {
+    assert.equal(refused.error.code, "state_storage_unavailable");
+    assert.equal(refused.error.action, "restore_state_storage_then_retry");
+    assert.doesNotMatch(refused.error.message, /did not open the network/);
+    assert.equal(refused.active, true);
+    assert.equal(refused.ends_at, watched.ends_at);
+    assert(!JSON.stringify(refused).includes(stateDirectory), refused);
+  }
+  assert.equal(watched.status, "already_running");
+  assert.equal(again.status, "already_running");
+  assert.equal(again.search_ref, watched.search_ref);
+  assert.deepEqual(searchActions(hub), []);
+});
+
 test("a start whose reply is lost is unknown with the search state read back", async (t) => {
   const { hub, client } = await setup(
     t,
