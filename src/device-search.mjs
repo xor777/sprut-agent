@@ -70,25 +70,28 @@ export class DeviceSearches {
         const { search, result } = await this.#start(target, spaceKey, current);
         await keepState(
           () => this.#save(search),
-          async () =>
-            result.status === "already_running"
+          async () => {
+            const kept = await this.#isKept(search);
+            return result.status === "already_running"
               ? startNotSent(
                   result.active === true,
                   search.endsAt,
                   search.timeZone,
+                  kept ? search : null,
                 )
-              : startedNotKept(search, result, await this.#isKept(search)),
+              : startedNotKept(search, result, kept);
+          },
         );
         return result;
       };
       // Watches not written for days go first, so none of them is taken
-      // for the controller's latest.
+      // for the controller's latest. The hub is not read yet.
       const latest = await keepState(
         async () => {
           await this.#store(target.serial).prune();
           return this.#latest(target);
         },
-        () => startNotSent(false),
+        () => startNotSent(null),
       );
       return latest === null
         ? begin(null)
@@ -151,13 +154,17 @@ export class DeviceSearches {
     const timeZone = await client.hubTimeZone(target.serial, deadline);
     if (current) {
       this.#updateState(current, extension);
+      const running = action.state === true;
       await keepState(
         () => this.#save(current),
-        () =>
+        async () =>
           startNotSent(
-            action.state === true,
+            running,
             runningActionEnd(action),
             timeZone,
+            running && current.ended === null && (await this.#isKept(current))
+              ? current
+              : null,
           ),
       );
     }
@@ -1026,22 +1033,37 @@ async function keepState(step, notKept) {
 const FIX_STATE_DIRECTORY =
   "Make that directory writable, or set SPRUT_AGENT_STATE_DIR to a writable directory and restart the MCP server";
 
-// A start that sent nothing because its watch could not be kept. The
-// network is as it was: closed, or open by the controller's search that
-// already runs (running), which ends by itself at end.
-function startNotSent(running, end = null, timeZone = null) {
-  if (!running) {
+// A start that sent nothing because the state directory could not be
+// written. The network is as it was: running says whether the controller
+// showed its search running, or is null when the hub was not read yet. A
+// running search ends by itself at end. kept is its watch still in the
+// directory, whose ref get_device_search and stop_device_search follow:
+// both still reach the hub when only writes fail.
+function startNotSent(running, end = null, timeZone = null, kept = null) {
+  const notSent =
+    "The device search could not be saved in the local state directory, so this call sent nothing to the hub";
+  if (running !== true) {
     return new SprutHubError(
       "state_storage_unavailable",
-      `The device search could not be saved in the local state directory, so this call sent nothing to the hub and did not open the network. ${FIX_STATE_DIRECTORY}; then start the search again.`,
+      `${running === null ? notSent : `${notSent} and did not open the network`}. ${FIX_STATE_DIRECTORY}; then start the search again.`,
       "restore_state_storage_then_retry",
     );
   }
+  const until = end === null ? "until it ends by itself" : "until ends_at";
   return new SprutHubError(
     "state_storage_unavailable",
-    `The device search could not be saved in the local state directory, so this call sent nothing to the hub. The controller's search was already running and stays open until it ends by itself${end === null ? "" : " at ends_at"}: any device in pairing mode within range can join until then. ${FIX_STATE_DIRECTORY}; then start the search again: it returns the running search with its stop, without restarting it.`,
+    `${notSent}. The controller's search was already running: any device in pairing mode within range can join ${until}. ${
+      kept
+        ? `This product watches it under search_ref: stop_device_search closes the network now, and get_device_search reports the devices that join; both reach the hub while the directory cannot be written, and get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
+        : `No search ref of this product follows it, so it cannot be stopped from here before the directory is fixed; the owner can stop it in the SprutHub app. ${FIX_STATE_DIRECTORY}; then start the search again: it returns the running search with its stop, without restarting it.`
+    }`,
     "restore_state_storage_then_retry",
-    { active: true, ...(end === null ? {} : searchEnd(end, timeZone)) },
+    {
+      ...(kept ? { search_ref: kept.ref } : {}),
+      active: true,
+      ...(end === null ? {} : searchEnd(end, timeZone)),
+      ...(kept ? { next: getCall(kept), stop: stopCall(kept) } : {}),
+    },
   );
 }
 
