@@ -804,3 +804,26 @@ for (const batch of [true, false]) {
     assert.equal(read.status, "restored", JSON.stringify(read));
   });
 }
+
+test("an undo named as hidden by the agent's later rename stops naming it when its read fails", async (t) => {
+  const { hub, client } = await setup(t);
+  const first = await applied(client, renameInput("Ночь"));
+  hub.loseNext("window.update");
+  await call(client, "restore_native_change", {
+    change_ref: first.change_ref,
+  });
+  const second = await applied(client, renameInput("Ночь, свет"));
+  const hidden = await call(client, "get_native_change", {
+    change_ref: first.change_ref,
+  });
+  assert.equal(hidden.restore_first_change_ref, second.change_ref);
+
+  hub.refuseNext("window.get");
+  const unread = await call(client, "get_native_change", {
+    change_ref: first.change_ref,
+  });
+  assert.equal(unread.status, "uncertain", JSON.stringify(unread));
+  assert.equal(unread.verification.fresh, false);
+  assert.equal(unread.conflict_reason, undefined);
+  assert.equal(unread.restore_first_change_ref, undefined);
+});
