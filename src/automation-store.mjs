@@ -5,6 +5,10 @@ import path from "node:path";
 
 export class AutomationStore {
   #writes = Promise.resolve();
+  // Changes saved while a write is under way, written together by the next
+  // one: every write rewrites the whole file, and a command call to many
+  // devices saves its changes at once.
+  #batch = null;
 
   constructor({ directory, hubUrl, hubSerial }) {
     this.directory = stateDirectory(directory);
@@ -29,21 +33,31 @@ export class AutomationStore {
     return Object.values((await this.#readFile()).changes);
   }
 
+  // Resolves once a write that holds the change is done.
   async save(change) {
-    const write = this.#writes
-      .catch(() => {})
-      .then(async () => {
-        const state = await this.#readFile();
-        state.changes[change.id] = change;
-        await mkdir(this.directory, { recursive: true, mode: 0o700 });
-        const temporaryFile = `${this.file}.${process.pid}.tmp`;
-        await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
-          mode: 0o600,
+    if (!this.#batch) {
+      const batch = new Map();
+      this.#batch = batch;
+      this.#writes = this.#writes
+        .catch(() => {})
+        .then(() => {
+          this.#batch = null;
+          return this.#write(batch);
         });
-        await rename(temporaryFile, this.file);
-      });
-    this.#writes = write;
-    await write;
+    }
+    this.#batch.set(change.id, change);
+    await this.#writes;
+  }
+
+  async #write(batch) {
+    const state = await this.#readFile();
+    for (const [id, change] of batch) state.changes[id] = change;
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const temporaryFile = `${this.file}.${process.pid}.tmp`;
+    await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    await rename(temporaryFile, this.file);
   }
 
   async #readFile() {
