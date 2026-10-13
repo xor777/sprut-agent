@@ -1086,7 +1086,7 @@ export class AutomationService {
   // contract is validated before any is recorded or sent, then each one goes
   // through the same journal record and apply lifecycle as prepare → apply.
   // The call is one group: its changes share group_id, so one restore puts
-  // back the whole request.
+  // back the whole request, each value as it was before the call.
   async sendDeviceCommands({ home_ref: homeRef, commands, reason }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     const targets = parseDeviceCommandTargets(commands, this.hubSerial);
@@ -1094,16 +1094,44 @@ export class AutomationService {
       const items = await this.#validateDeviceCommands(commands, targets);
       const changes = await this.store.list();
       const groupId = this.store.newId();
+      const lampsOn = await this.#lampsOnBeforeCall(items);
       const results = [];
       for (const [index, item] of items.entries()) {
+        const service = serviceKey(item.draft.fields.target);
+        const lampOn = item.onTarget ? lampsOn.get(service) : undefined;
+        // An earlier command of this call to the same device may already
+        // have changed this value (a level above 0 switches a lamp with
+        // «Связь включения и уровня» on): its value before the call, read
+        // at validation, is what undo puts back.
+        const touchedEarlier = items
+          .slice(0, index)
+          .some(
+            (other, earlier) =>
+              serviceKey(other.draft.fields.target) === service &&
+              results[earlier].sent === true,
+          );
         results.push(
-          await this.#sendDeviceCommand(item, changes, homeRef, reason, {
-            group_id: groupId,
-            group_index: index,
-          }),
+          await this.#sendDeviceCommand(
+            item,
+            changes,
+            homeRef,
+            reason,
+            {
+              group_id: groupId,
+              group_index: index,
+              ...(typeof lampOn?.value === "boolean"
+                ? { lamp_on_before: lampOn.value }
+                : {}),
+            },
+            touchedEarlier ? item.draft.value : undefined,
+          ),
         );
       }
-      await this.#warnLevelsStoredWhileOff(items, results);
+      await this.#settleLamps(items, results, lampsOn, {
+        homeRef,
+        reason,
+        groupId,
+      });
       return deviceCommandsResult(
         homeRef,
         results,
@@ -1170,29 +1198,114 @@ export class AutomationService {
     return accessories.get(aId);
   }
 
-  // A light level applied to a lamp that is still off after the whole call
-  // is only stored, so an agent must not report the lamp as lit at that
-  // level. The results are already final: a failed On read leaves the item
-  // without a warning.
-  async #warnLevelsStoredWhileOff(items, results) {
+  // The On of each lamp a level command goes to, before the call's first
+  // write: from the call's own On command read at validation, else read
+  // now. Unknown when that read is refused; a transport failure stops the
+  // call before any write.
+  async #lampsOnBeforeCall(items) {
+    const values = new Map();
+    for (const { onTarget } of items) {
+      if (!onTarget || values.has(serviceKey(onTarget))) continue;
+      const commanded = items.find(
+        ({ draft }) =>
+          nativeTargetKey(draft.fields.target) === nativeTargetKey(onTarget),
+      );
+      let value = commanded?.draft.value;
+      if (!commanded) {
+        try {
+          const { control } = await this.client.getCharacteristic(onTarget);
+          value = typedNativeValue(control.value);
+        } catch (error) {
+          if (!isDeviceCommandRejection(error)) throw error;
+        }
+      }
+      values.set(serviceKey(onTarget), value);
+    }
+    return values;
+  }
+
+  // Each lamp a level command went to is read once after the whole call.
+  // A level applied to a lamp still off is only stored, so an agent must
+  // not report the lamp as lit at that level. A lamp the call switched
+  // without an On command (a level above 0 with «Связь включения и
+  // уровня») has that switch journaled in the call's group, so undo puts
+  // it back too. The results are already final: a failed On read leaves the
+  // item without a warning or that journal entry.
+  async #settleLamps(items, results, lampsOn, { homeRef, reason, groupId }) {
     const onValues = new Map();
-    for (const [index, { onTarget }] of items.entries()) {
-      if (!onTarget || results[index].status !== "applied") continue;
+    const readOn = (onTarget) => {
       const key = nativeTargetKey(onTarget);
       if (!onValues.has(key)) {
         onValues.set(
           key,
           this.client
             .getCharacteristic(onTarget)
-            .then(({ control }) => control?.value?.boolValue)
+            .then(({ control }) => ({
+              value: typedNativeValue(control.value),
+              contract: characteristicContract(control),
+            }))
             .catch(() => undefined),
         );
       }
-      if ((await onValues.get(key)) === false) {
-        results[index].warning = {
+      return onValues.get(key);
+    };
+    const switched = new Set();
+    for (const [index, { onTarget, name }] of items.entries()) {
+      const result = results[index];
+      const delivered = result.sent === true && result.status !== "rejected";
+      if (!onTarget || (result.status !== "applied" && !delivered)) continue;
+      const on = await readOn(onTarget);
+      if (result.status === "applied" && on?.value.value === false) {
+        result.warning = {
           code: "device_off_level_stored",
           message:
             "The lamp is off, so this level is only stored and shows when the lamp is turned on; it was not turned on.",
+        };
+      }
+      const before = lampsOn.get(serviceKey(onTarget));
+      if (
+        !delivered ||
+        on === undefined ||
+        before === undefined ||
+        valuesEqual(on.value, before) ||
+        switched.has(serviceKey(onTarget)) ||
+        items.some(
+          ({ draft }) =>
+            nativeTargetKey(draft.fields.target) === nativeTargetKey(onTarget),
+        )
+      ) {
+        continue;
+      }
+      switched.add(serviceKey(onTarget));
+      try {
+        const change = await this.#recordValueChange(
+          {
+            operation: "characteristic_value",
+            target_ref: `${homeRef}/accessory/${onTarget.aId}/service/${onTarget.sId}/characteristic/${onTarget.cId}`,
+            reason,
+          },
+          {
+            fields: { target: onTarget },
+            contract: on.contract,
+            value: before,
+            requested: on.value,
+            extra: {},
+          },
+          {
+            group_id: groupId,
+            group_index: items.length + switched.size - 1,
+            ...(name ? { target_name: name } : {}),
+            caused_by_change_id: parseNativeChangeRef(result.change_ref),
+          },
+        );
+        await this.#finishNative(change, "applied", on.value, {
+          applied_value_observed: true,
+          last_verification: freshVerification("requested_value_observed"),
+        });
+      } catch {
+        result.local_state = {
+          saved: false,
+          action: "restore_state_storage_then_get_native_change",
         };
       }
     }
@@ -1203,7 +1316,8 @@ export class AutomationService {
     changes,
     homeRef,
     reason,
-    group,
+    journal,
+    callBaseline,
   ) {
     const item = {
       target_ref: command.target_ref,
@@ -1248,21 +1362,25 @@ export class AutomationService {
       // is not a baseline to defend: a link or scenario that changed this
       // characteristic while earlier commands ran is not a conflict. The
       // command is decided by a read right before its own write, and that
-      // same read is the change's baseline.
-      const current = await prepareCharacteristicValue(this, input);
-      if (nativeValueAlreadyDesired(current)) {
+      // same read is the change's baseline, unless this call itself wrote
+      // to the same device before (callBaseline): what the call changed
+      // there is the agent's.
+      const read = await prepareCharacteristicValue(this, input);
+      if (nativeValueAlreadyDesired(read)) {
         return {
           ...item,
           status: "already_desired",
           sent: false,
-          observed_value: current.value.value,
+          observed_value: read.value.value,
           change_ref: null,
           restore_supported: false,
         };
       }
+      const current =
+        callBaseline === undefined ? read : { ...read, value: callBaseline };
       previous = { previous_value: current.value.value };
       change = await this.#recordValueChange({ ...input, reason }, current, {
-        ...group,
+        ...journal,
         ...(name ? { target_name: name } : {}),
       });
       return {
@@ -1668,6 +1786,7 @@ export class AutomationService {
     return this.#exclusiveWrite(async () => {
       const ordered = restoreOrder(await this.#restoreEntries(parsed));
       const onBefore = await this.#lampOnBeforeRestore(ordered);
+      const switchedOn = await this.#lampsSwitchedBackOn(ordered, onBefore);
       const results = [];
       // Lamps this call already wrote to: a lamp's level can bring its On
       // back with it (a level above 0 switches a lamp with lamp logic on).
@@ -1676,6 +1795,7 @@ export class AutomationService {
         const item = await this.#restoreEntry(entry, {
           lampWritten: lampsWritten.has(lampKey(entry.change)),
           valueBeforeCall: onBefore.get(entry.change.id),
+          lampSwitchedBackOn: switchedOn.has(lampKey(entry.change)),
         });
         if (item.sent && lampKey(entry.change) !== null) {
           lampsWritten.add(lampKey(entry.change));
@@ -1760,6 +1880,28 @@ export class AutomationService {
     return values;
   }
 
+  // Lamps this restore switches back on: the agent switched one off, it
+  // still shows off, and no later change of the agent switched it since.
+  // Only for these may a level above 0 be written while the lamp is off.
+  async #lampsSwitchedBackOn(entries, onBefore) {
+    const lamps = new Set();
+    for (const { change } of entries) {
+      const current = onBefore.get(change.id);
+      if (
+        current === undefined ||
+        change.baseline_value?.value !== true ||
+        !valuesEqual(current, change.requested_value) ||
+        !nativeValueProvenApply(change) ||
+        !changeStillInEffect(change) ||
+        (await this.#laterOwnedValueChange(change, current))
+      ) {
+        continue;
+      }
+      lamps.add(lampKey(change));
+    }
+    return lamps;
+  }
+
   async #restoreEntry({ change: listed, automation }, context) {
     let change;
     try {
@@ -1778,14 +1920,14 @@ export class AutomationService {
     try {
       const result = automation
         ? await this.#rollbackAutomation(change)
-        : await this.#restoreNative(change);
+        : await this.#restoreNative(change, context);
       return restoreItem(change, automation, result, before);
     } catch (error) {
       return restoreFailureItem(change, automation, error);
     }
   }
 
-  async #restoreNative(change) {
+  async #restoreNative(change, context = {}) {
     if (change.kind === "accessory_placement") {
       return this.#restoreAccessoryPlacement(change);
     }
@@ -1807,7 +1949,7 @@ export class AutomationService {
           "get_native_change",
         );
       }
-      return this.#restoreValueChange(change);
+      return this.#restoreValueChange(change, context);
     }
     if (change.kind === "logic_assignment") {
       return this.#restoreLogicAssignment(change);
@@ -3985,7 +4127,7 @@ export class AutomationService {
     return nativeValueKind(change.kind).write(this, change, value);
   }
 
-  async #restoreValueChange(change) {
+  async #restoreValueChange(change, context = {}) {
     const lifecycle = nativeValueLifecycle(change);
     if (lifecycle.phase === "restore_completed") {
       return publicStoredNativeChange(change);
@@ -4042,19 +4184,19 @@ export class AutomationService {
     }
     // An offline device shows its last known values, which say nothing of
     // its state now: nothing is decided or written for it.
-    if (nativeValueKind(change.kind).command) {
-      const accessory = await this.client.getAccessory(change.target.aId);
-      if (accessory?.online === false) {
-        return {
-          ...publicNativeChange(change, current),
-          restore_outcome: {
-            status: "skipped",
-            reason: "device_unavailable",
-            message:
-              "The hub shows this device offline, so its values are the last known ones; nothing was written. Restore it again once the device is back online.",
-          },
-        };
-      }
+    const accessory = nativeValueKind(change.kind).command
+      ? await this.client.getAccessory(change.target.aId)
+      : undefined;
+    if (accessory?.online === false) {
+      return {
+        ...publicNativeChange(change, current),
+        restore_outcome: {
+          status: "skipped",
+          reason: "device_unavailable",
+          message:
+            "The hub shows this device offline, so its values are the last known ones; nothing was written. Restore it again once the device is back online.",
+        },
+      };
     }
     const later = await this.#laterOwnedValueChange(change, current);
     if (later) return this.#finishLaterOwnedValueChange(change, later, current);
@@ -4075,6 +4217,13 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
+    const lampOff = await this.#levelOnLampOff(
+      change,
+      accessory,
+      current,
+      context,
+    );
+    if (lampOff) return lampOff;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -4087,6 +4236,59 @@ export class AutomationService {
       return this.#reconcileValueAfterWrite(change, "restore");
     }
     return this.#reconcileValueAfterWrite(change, "restore", true);
+  }
+
+  // With «Связь включения и уровня» (LightbulbControl) a Brightness above
+  // 0 switches the lamp on. So a level is not written back to a lamp that
+  // is off now unless this same restore switches it back on: the lamp
+  // stays as the owner, a scenario or the agent's own later command left
+  // it, and the item says which.
+  async #levelOnLampOff(change, accessory, current, context) {
+    if (
+      change.kind !== "characteristic_value" ||
+      change.contract?.type !== "Brightness" ||
+      !(Number(change.baseline_value?.value) > 0) ||
+      context.lampSwitchedBackOn === true
+    ) {
+      return undefined;
+    }
+    const onTarget = lightLevelOnTarget(accessory, change.target, "Brightness");
+    if (!onTarget) return undefined;
+    const on = typedNativeValue(
+      (await this.client.getCharacteristic(onTarget)).control.value,
+    );
+    if (on.value !== false) return undefined;
+    // The agent's own On command made after this level change.
+    const later = await this.#laterOwnedValueChange(
+      { ...change, target: onTarget },
+      on,
+    );
+    let outcome;
+    if (later) {
+      outcome = {
+        reason: "later_change",
+        later_change_ref: `spruthub-change://native/${later.id}`,
+        message:
+          "The agent's later command switched this lamp off, and writing its level back would switch it on, so nothing was written. Undo later_change_ref together with this change.",
+      };
+    } else if (change.lamp_on_before === true) {
+      outcome = {
+        reason: "changed_since",
+        already_previous: false,
+        message:
+          "The lamp was switched off after the agent's change, and writing its level back would switch it on, so nothing was written.",
+      };
+    } else {
+      outcome = {
+        reason: "lamp_off",
+        message:
+          "The lamp is off, and writing a level above 0 can switch it on, so nothing was written; the level stays as the agent set it.",
+      };
+    }
+    return {
+      ...publicNativeChange(change, current),
+      restore_outcome: { status: "skipped", ...outcome },
+    };
   }
 
   async #observeProvenNativeValue(change, current) {
@@ -11303,10 +11505,12 @@ function valueTargetKey(change) {
 }
 
 // A sent change that may still hold its target: not undone, refused,
-// replaced or found not applied.
+// replaced or found not applied. A lamp's On switched by the call's level
+// (caused_by_change_id) holds it as the call's commands do.
 function changeStillInEffect(change) {
   return (
-    change.native_write_sent === true &&
+    (change.native_write_sent === true ||
+      change.caused_by_change_id !== undefined) &&
     ![
       "prepared",
       "not_applied",
@@ -12462,8 +12666,12 @@ function restoreOrder(entries) {
 // The service a characteristic command belongs to, such as one lamp.
 function lampKey(change) {
   return change.kind === "characteristic_value" && change.target
-    ? `${change.target.aId}.${change.target.sId}`
+    ? serviceKey(change.target)
     : null;
+}
+
+function serviceKey({ aId, sId }) {
+  return `${aId}.${sId}`;
 }
 
 function restoreIntentTime(change) {
@@ -12502,14 +12710,8 @@ function restoreItem(change, automation, result, before) {
       ? { observed_value: result.observed_value.value }
       : {};
   if (result.restore_outcome) {
-    return {
-      ...base,
-      status: result.restore_outcome.status,
-      sent: false,
-      reason: result.restore_outcome.reason,
-      message: result.restore_outcome.message,
-      ...observed,
-    };
+    const { status, ...outcome } = result.restore_outcome;
+    return { ...base, status, sent: false, ...outcome, ...observed };
   }
   const intentAt = restoreIntentTime(change);
   const sent = intentAt !== undefined && intentAt !== before.restoreIntentAt;
@@ -12760,7 +12962,7 @@ function restoreChangesResult(homeRef, results) {
     results,
     limitations: [
       "Results are in the order the changes were undone: newest first, a lamp's level before its On. Each item was checked against the home right before its own write.",
-      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back.",
+      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_off: a level is not written to a lamp that is off, as it can switch the lamp on.",
       "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, sent notifications and HTTP requests cannot be undone.",
     ],
   };
@@ -13499,6 +13701,11 @@ function publicNativeChange(
       : {}),
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
+    ...(change.caused_by_change_id
+      ? {
+          caused_by_change_ref: `spruthub-change://native/${change.caused_by_change_id}`,
+        }
+      : {}),
     ...(change.write_intent
       ? { write_intent: structuredClone(change.write_intent) }
       : {}),
@@ -13552,6 +13759,11 @@ function publicNativeChange(
       ...(change.group_member_targets
         ? [
             "Delivery is checked against every journal-known group member; a same-valued native virtual command may be suppressed by SprutHub.",
+          ]
+        : []),
+      ...(change.caused_by_change_id
+        ? [
+            "No command was sent to this characteristic: the lamp switched itself when caused_by_change_ref set its level, and this change records that switch so undo puts it back.",
           ]
         : []),
     ],
