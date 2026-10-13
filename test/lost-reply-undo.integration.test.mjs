@@ -731,12 +731,14 @@ for (const { name, write, read, inputs } of CHAINS) {
 // The later of two changes of one scenario was sent, but its request never
 // reached the hub. The earlier one is then undone: the read before that
 // undo shows the later change's baseline, the last read that can, as the
-// undo removes it. The later change ends as not applied, never as a
-// change by hand.
+// undo removes it. The later change ends no longer the agent's, never as a
+// change by hand: a scenario change without an applied snapshot reads as
+// not applied, and a sent setting as not owned, as their records do.
 const LATER_APPLY_CHAINS = [
   {
     name: "BLOCK data change",
     write: "scenario.update",
+    settled: { conflict: "change_was_not_applied", item: "not_applied" },
     inputs: [
       (hub) => blockDataInput(hub, "20"),
       (hub) => blockDataInput(hub, "40"),
@@ -745,6 +747,7 @@ const LATER_APPLY_CHAINS = [
   {
     name: "LOGIC code change",
     write: "scenario.update",
+    settled: { conflict: "change_was_not_applied", item: "not_applied" },
     inputs: [
       (hub) =>
         logicCodeInput(
@@ -763,18 +766,23 @@ const LATER_APPLY_CHAINS = [
   {
     name: "scenario rename",
     write: "window.update",
+    settled: { conflict: undefined, item: "not_owned" },
     inputs: [() => renameInput("Ночь"), () => renameInput("Ночь, свет")],
   },
 ];
 
-async function assertLaterNotApplied(hub, client, initial, first, later) {
+async function assertLaterNotApplied(
+  hub,
+  client,
+  { initial, first, later, settled },
+) {
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
   const sentBefore = hub.requests.length;
   const read = await call(client, "get_native_change", {
     change_ref: later.change_ref,
   });
   assert.equal(read.status, "not_owned", JSON.stringify(read));
-  assert.equal(read.conflict_reason, "change_was_not_applied");
+  assert.equal(read.conflict_reason, settled.conflict);
   assert.equal(read.manual_change_observed, undefined);
   const again = await call(client, "restore_native_change", {
     change_refs: [first.change_ref, later.change_ref],
@@ -786,7 +794,7 @@ async function assertLaterNotApplied(hub, client, initial, first, later) {
       reason,
     ]),
     [
-      [later.change_ref, "skipped", "not_applied"],
+      [later.change_ref, "skipped", settled.item],
       [first.change_ref, "restored", undefined],
     ],
   );
@@ -794,7 +802,7 @@ async function assertLaterNotApplied(hub, client, initial, first, later) {
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 }
 
-for (const { name, write, inputs } of LATER_APPLY_CHAINS) {
+for (const { name, write, settled, inputs } of LATER_APPLY_CHAINS) {
   test(`«верни как было» after the agent's later ${name} that never reached the hub puts the scenario back and names that change not applied`, async (t) => {
     const { hub, client } = await setup(t);
     const initial = hub.snapshot();
@@ -810,7 +818,12 @@ for (const { name, write, inputs } of LATER_APPLY_CHAINS) {
       change_refs: [first.change_ref, later.change_ref],
     });
     assert.equal(itemOf(undone, first).status, "restored");
-    await assertLaterNotApplied(hub, client, initial, first, later);
+    await assertLaterNotApplied(hub, client, {
+      initial,
+      first,
+      later,
+      settled,
+    });
   });
 
   test(`after the MCP server stopped while sending the agent's later ${name} that never reached the hub, undoing the earlier change alone names the later one not applied`, async (t) => {
@@ -829,7 +842,12 @@ for (const { name, write, inputs } of LATER_APPLY_CHAINS) {
       change_ref: first.change_ref,
     });
     assert.equal(earlier.status, "restored", JSON.stringify(earlier));
-    await assertLaterNotApplied(hub, restarted, initial, first, later);
+    await assertLaterNotApplied(hub, restarted, {
+      initial,
+      first,
+      later,
+      settled,
+    });
   });
 }
 

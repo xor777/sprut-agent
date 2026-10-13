@@ -4498,11 +4498,7 @@ export class AutomationService {
       return undefined;
     }
     return this.#finishNative(change, "not_owned", current, {
-      // A sent change found not applied stays so named.
-      conflict_reason:
-        change.conflict_reason === "change_was_not_applied"
-          ? "change_was_not_applied"
-          : undefined,
+      conflict_reason: undefined,
       last_verification: freshVerification(
         valuesEqual(current, change.baseline_value)
           ? "baseline_value_observed"
