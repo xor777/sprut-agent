@@ -1657,6 +1657,49 @@ test("an unknown create outcome stays uncertain and a repeated apply does not re
   );
 });
 
+test("undo of an automation says whether this call sent the delete", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const restoreItem = async (changeRef) => {
+    const restored = await client.callTool({
+      name: "restore_native_change",
+      arguments: { change_refs: [changeRef] },
+    });
+    assert.equal(restored.isError, undefined, restored.content[0]?.text);
+    return restored.structuredContent.results[0];
+  };
+  const deletes = () =>
+    hub.requests.filter(({ scenario }) => scenario?.delete).length;
+
+  // Its creation is unknown: nothing is deleted.
+  const unknown = await preview(client);
+  hub.state.closeWithoutCreate = true;
+  await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: unknown.structuredContent.change_ref },
+  });
+  hub.state.closeWithoutCreate = false;
+  const notSent = await restoreItem(unknown.structuredContent.change_ref);
+  assert.equal(notSent.status, "uncertain");
+  assert.equal(notSent.sent, false);
+  assert.equal(notSent.reason, "apply_unconfirmed");
+  assert.equal(deletes(), 0);
+
+  // Its delete got no usable answer: the delete was sent.
+  const applied = await preview(client);
+  await client.callTool({
+    name: "apply_automation_change",
+    arguments: { change_ref: applied.structuredContent.change_ref },
+  });
+  hub.state.incompatibleDeleteResponse = true;
+  hub.state.closeReadbackAfterWrite = true;
+  const sent = await restoreItem(applied.structuredContent.change_ref);
+  assert.equal(sent.status, "uncertain");
+  assert.equal(sent.sent, true);
+  assert.equal(sent.reason, "restore_unconfirmed");
+  assert.equal(deletes(), 1);
+});
+
 test("rollback preserves a scenario whose ownership marker was manually removed", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
