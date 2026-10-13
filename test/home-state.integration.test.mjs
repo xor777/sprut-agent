@@ -631,6 +631,51 @@ test("a device command whose event never comes has its device read again before 
   );
 });
 
+// Only an event received after a write's reply is that write's own. An
+// event from before the write, applied again over a read that was in
+// flight, is another change and leaves the write unconfirmed.
+test("an event older than a device command does not confirm the command when applied again over a read", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  hub.delayReplies("accessory.list", 600);
+  const from = hub.requests.length;
+  let readDone = false;
+  const reading = call("find_devices", { query: "торшер", refresh: true });
+  reading.then(() => {
+    readDone = true;
+  });
+  await handled(hub, "accessory.list", from);
+  // The owner switches the floor lamp off; then this process switches it
+  // on, and the event of that write is lost.
+  hub.changeByHand({ ...floorLampOn, value: { boolValue: false } });
+  await settle();
+  hub.dropEvents((event) =>
+    event.characteristic?.characteristics?.some(({ aId }) => aId === 16),
+  );
+  const sent = await call("send_device_commands", {
+    home_ref: home,
+    commands: [
+      {
+        target_ref: `${home}/accessory/16/service/13/characteristic/14`,
+        value: true,
+      },
+    ],
+    reason: "Включить торшер",
+  });
+  assert.equal(sent.body.results[0].status, "applied");
+  hub.dropEvents(null);
+  assert.equal(readDone, false, "the command went in while the read waited");
+
+  const during = await reading;
+  assert.equal(onValue(listed(during.body)[0].service), true);
+  hub.delayReplies("accessory.list", 0);
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert.equal(onValue(listed(lamp.body)[0].service), true);
+});
+
 test("a device command whose reply never comes has the home read again before the next answer", async (t) => {
   const { hub, call, home } = await setup(
     t,
