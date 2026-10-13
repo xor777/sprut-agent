@@ -1,19 +1,14 @@
 import { blockAffectedRefs } from "./block-model.mjs";
 import { publicPauseEffect } from "./change-presentation.mjs";
-import {
-  changeRef,
-  groupRef,
-  nativeChangeNext,
-  stableNativeId,
-} from "./change-refs.mjs";
+import { groupRef, stableNativeId } from "./change-refs.mjs";
 import { changeName, summaryValue } from "./change-restore.mjs";
 import { createdLogicMapping } from "./logic-changes.mjs";
-import { isNativeChange, isNativeValueChange } from "./native-values.mjs";
+import { isNativeValueChange } from "./native-values.mjs";
 import { isLogicSourceChange } from "./scenario-changes.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
-// When a change was first applied: its first apply intent, else (a legacy
-// automation or a draft) when it was recorded.
+// When a change was first applied: its first apply intent, else (a draft)
+// when it was recorded.
 export function applicationTime(change) {
   return changeAppliedAt(change) ?? change.created_at;
 }
@@ -33,95 +28,54 @@ export function compareApplication(left, right) {
 // why (the agent's reason), when, its status and the call it belongs to.
 // Affected refs only select (entity_ref); they are not listed, so a line
 // stays short however many devices a scenario touches.
-export function changeSummary(change, homeRef) {
+export function changeSummary(change) {
   const name = changeName(change);
   const appliedAt = changeAppliedAt(change);
   const described = {
     ...(name ? { name } : {}),
     ...(typeof change.reason === "string" ? { reason: change.reason } : {}),
   };
-  if (isNativeChange(change)) {
-    const reference = `spruthub-change://native/${change.id}`;
-    const value = summaryValue(change);
-    return {
-      change_ref: reference,
-      operation: change.kind,
-      ...described,
-      target_ref: canonicalEntityRef(change.target_ref, homeRef),
-      ...(value ? { value } : {}),
-      recorded_status: change.status,
-      ...(change.kind === "block_action_pause"
-        ? {
-            effect_status: publicPauseEffect(change).status,
-            ...(change.replaces_pause_change_id
-              ? {
-                  replaces_change_ref: `spruthub-change://native/${change.replaces_pause_change_id}`,
-                }
-              : {}),
-            ...(change.superseded_by_change_ref
-              ? { superseded_by_change_ref: change.superseded_by_change_ref }
-              : {}),
-            ...(change.completed_by_change_ref
-              ? { completed_by_change_ref: change.completed_by_change_ref }
-              : {}),
-            ...(change.restored_by_change_ref
-              ? { restored_by_change_ref: change.restored_by_change_ref }
-              : {}),
-          }
-        : {}),
-      ...(change.group_id ? { group_ref: groupRef(change.group_id) } : {}),
-      ...(appliedAt ? { applied_at: appliedAt } : {}),
-      created_at: change.created_at,
-      updated_at: change.updated_at,
-      next: {
-        tool: "get_native_change",
-        arguments: { change_ref: reference },
-      },
-    };
-  }
-  const reference = changeRef(change.id);
+  const reference = `spruthub-change://native/${change.id}`;
+  const value = summaryValue(change);
   return {
     change_ref: reference,
-    operation: "legacy_boolean_automation",
+    operation: change.kind,
     ...described,
-    ...(change.scenario_index
+    target_ref: change.target_ref,
+    ...(value ? { value } : {}),
+    recorded_status: change.status,
+    ...(change.kind === "block_action_pause"
       ? {
-          target_ref: `${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`,
+          effect_status: publicPauseEffect(change).status,
+          ...(change.replaces_pause_change_id
+            ? {
+                replaces_change_ref: `spruthub-change://native/${change.replaces_pause_change_id}`,
+              }
+            : {}),
+          ...(change.superseded_by_change_ref
+            ? { superseded_by_change_ref: change.superseded_by_change_ref }
+            : {}),
+          ...(change.completed_by_change_ref
+            ? { completed_by_change_ref: change.completed_by_change_ref }
+            : {}),
+          ...(change.restored_by_change_ref
+            ? { restored_by_change_ref: change.restored_by_change_ref }
+            : {}),
         }
       : {}),
-    recorded_status: change.status,
+    ...(change.group_id ? { group_ref: groupRef(change.group_id) } : {}),
     ...(appliedAt ? { applied_at: appliedAt } : {}),
     created_at: change.created_at,
     updated_at: change.updated_at,
-    next: nativeChangeNext(reference),
+    next: {
+      tool: "get_native_change",
+      arguments: { change_ref: reference },
+    },
   };
 }
 
-export function changeAffectedRefs(change, homeRef) {
-  if (isNativeChange(change)) return nativeAffectedRefs(change, homeRef);
-  const characteristicRefs = [
-    change.condition?.characteristic?.ref,
-    change.action?.characteristic?.ref,
-  ]
-    .filter(Boolean)
-    .map((ref) => canonicalEntityRef(ref, homeRef));
-  const ancestorRefs = characteristicRefs.flatMap((ref) =>
-    canonicalAncestors(ref),
-  );
-  return uniqueRefs([
-    ...characteristicRefs,
-    ...ancestorRefs,
-    ...(change.scenario_index
-      ? [`${homeRef}/scenario/${encodeURIComponent(change.scenario_index)}`]
-      : []),
-  ]);
-}
-
 export function changeAppliedAt(change) {
-  return (
-    change.history?.find(({ status }) => status === "applying")?.at ??
-    change.apply_started_at
-  );
+  return change.history?.find(({ status }) => status === "applying")?.at;
 }
 
 export function compareChangeSummaries(left, right) {
@@ -199,7 +153,7 @@ export function invalidHistoryCursor(selection) {
 }
 
 export function nativeAffectedRefs(change, homeRef) {
-  const refs = [canonicalEntityRef(change.target_ref, homeRef)];
+  const refs = [change.target_ref];
   if (isNativeValueChange(change)) {
     if (typeof change.window_ref === "string") refs.push(change.window_ref);
     refs.push(...canonicalAncestors(refs[0]));
@@ -280,13 +234,6 @@ export function bindingRefs(homeRef, aId, sId, cId) {
   return stableNativeId(cId)
     ? [accessory, service, `${service}/characteristic/${cId}`]
     : [accessory, service];
-}
-
-export function canonicalEntityRef(ref, homeRef) {
-  if (typeof ref !== "string") return ref;
-  if (ref.startsWith(`${homeRef}/`) || ref === homeRef) return ref;
-  const legacy = /^spruthub:\/\/(room|accessory)\/(.+)$/.exec(ref);
-  return legacy ? `${homeRef}/${legacy[1]}/${legacy[2]}` : ref;
 }
 
 export function canonicalAncestors(ref) {

@@ -1,7 +1,7 @@
 import { valuesEqual } from "./change-contracts.mjs";
-import { changeRef, nativeChangeNext } from "./change-refs.mjs";
+import { nativeChangeNext } from "./change-refs.mjs";
 import { resendDeviceCommandNext } from "./device-commands.mjs";
-import { isNativeChange, isNativeValueChange } from "./native-values.mjs";
+import { isNativeValueChange } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 export function restoreIntentTime(change) {
@@ -10,14 +10,12 @@ export function restoreIntentTime(change) {
     : undefined;
 }
 
-export function restoreItemBase(change, automation) {
+export function restoreItemBase(change) {
   const name = changeName(change);
   const value = isNativeValueChange(change) ? summaryValue(change) : undefined;
   return {
-    change_ref: automation
-      ? changeRef(change.id)
-      : `spruthub-change://native/${change.id}`,
-    operation: automation ? "legacy_boolean_automation" : change.kind,
+    change_ref: `spruthub-change://native/${change.id}`,
+    operation: change.kind,
     ...(name ? { name } : {}),
     ...(typeof change.target_ref === "string"
       ? { target_ref: change.target_ref }
@@ -30,9 +28,8 @@ export function restoreItemBase(change, automation) {
   };
 }
 
-export function restoreItem(change, automation, result, before) {
-  const base = restoreItemBase(change, automation);
-  if (automation) return automationRestoreItem(change, base, result, before);
+export function restoreItem(change, result, before) {
+  const base = restoreItemBase(change);
   const observed =
     result.observed_value !== undefined &&
     result.observed_value !== null &&
@@ -204,58 +201,8 @@ export function restoreResendNext(change, result) {
   );
 }
 
-export function automationRestoreItem(change, base, result, before) {
-  switch (result.status) {
-    case "rolled_back":
-      if (before.status === "rolled_back") {
-        return {
-          ...base,
-          status: "restored",
-          sent: false,
-          note: "already_restored",
-        };
-      }
-      return result.removed === true
-        ? { ...base, status: "restored", sent: true }
-        : {
-            ...base,
-            status: "skipped",
-            reason: "changed_since",
-            sent: false,
-            already_previous: true,
-          };
-    case "conflict":
-      return {
-        ...base,
-        status: "skipped",
-        reason: "changed_since",
-        sent: false,
-      };
-    case "uncertain":
-    case "rollback_uncertain": {
-      // Only a delete of this call ends in rollback_uncertain; uncertain
-      // alone is a creation still unknown, and nothing was sent for it.
-      const deleteSent = change.status === "rollback_uncertain";
-      return {
-        ...base,
-        status: "uncertain",
-        reason: deleteSent ? "restore_unconfirmed" : "apply_unconfirmed",
-        sent: deleteSent,
-        next: nativeChangeNext(base.change_ref),
-      };
-    }
-    default:
-      return {
-        ...base,
-        status: "skipped",
-        reason: result.status,
-        sent: false,
-      };
-  }
-}
-
-export function restoreFailureItem(change, automation, error) {
-  const base = restoreItemBase(change, automation);
+export function restoreFailureItem(change, error) {
+  const base = restoreItemBase(change);
   if (error instanceof SprutHubError && error.code === "restore_unsupported") {
     return {
       ...base,
@@ -313,9 +260,6 @@ export function restoreChangesResult(homeRef, results) {
 export function changeName(change) {
   if (typeof change.target_name === "string" && change.target_name !== "") {
     return change.target_name;
-  }
-  if (!isNativeChange(change)) {
-    return typeof change.name === "string" ? change.name : undefined;
   }
   switch (change.kind) {
     case "accessory_placement":

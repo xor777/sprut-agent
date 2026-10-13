@@ -17609,6 +17609,31 @@ test("history discovers changes by home and entity after restart", async (t) => 
   }
 });
 
+// The boolean automation tools of 0.4.0 are gone with their records: a ref
+// they returned is no change ref of this version, and nothing is read or
+// sent for it.
+test("a change ref of the removed automation tools is refused without a hub request", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  const ref = "spruthub-change://automation/0123456789abcdef01234567";
+  const requests = hub.requests.length;
+
+  for (const [tool, args] of [
+    ["get_native_change", { change_ref: ref }],
+    ["restore_native_change", { change_ref: ref }],
+    ["restore_native_change", { change_refs: [ref] }],
+  ]) {
+    const result = await client.callTool({ name: tool, arguments: args });
+    assert.equal(result.isError, true, tool);
+    assert.equal(
+      result.structuredContent.error.code,
+      "invalid_change_ref",
+      tool,
+    );
+  }
+  assert.equal(hub.requests.length, requests);
+});
+
 test("history finds one entity and continues through older pages without changing scope", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

@@ -517,34 +517,17 @@ export function parseNativeChangeRef(ref) {
   if (!match) {
     throw new SprutHubError(
       "invalid_change_ref",
-      "Use a change reference returned by prepare_native_change.",
-      "prepare_native_change",
+      "Use a change_ref from prepare_native_change, send_device_commands or the history (get_native_change without change_ref).",
+      "get_native_change",
     );
   }
   return match[1];
 }
 
-// A change to inspect: a native change or an earlier boolean automation.
-export function parseInspectedChangeRef(ref) {
-  const match =
-    /^spruthub-change:\/\/(native|automation)\/([a-f0-9]{24})$/.exec(
-      typeof ref === "string" ? ref : "",
-    );
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_change_ref",
-      "Use a change_ref from prepare_native_change, send_device_commands or the history (get_native_change without change_ref).",
-      "get_native_change",
-    );
-  }
-  return { type: match[1], id: match[2] };
-}
-
 export function parseRestoreRef(ref) {
-  const match =
-    /^spruthub-change:\/\/(native|automation|group)\/([a-f0-9]{24})$/.exec(
-      typeof ref === "string" ? ref : "",
-    );
+  const match = /^spruthub-change:\/\/(native|group)\/([a-f0-9]{24})$/.exec(
+    typeof ref === "string" ? ref : "",
+  );
   if (!match) {
     throw new SprutHubError(
       "invalid_change_ref",
@@ -557,10 +540,6 @@ export function parseRestoreRef(ref) {
 
 export function serviceKey({ aId, sId }) {
   return `${aId}.${sId}`;
-}
-
-export function changeRef(id) {
-  return `spruthub-change://automation/${id}`;
 }
 
 // An error reply to the write request means the hub received it and refused

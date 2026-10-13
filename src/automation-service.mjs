@@ -37,13 +37,13 @@ import {
   virtualLightGroupContract,
 } from "./change-contracts.mjs";
 import {
-  changeAffectedRefs,
   changeSummary,
   compareApplication,
   compareChangeSummaries,
   encodeHistoryCursor,
   historyNext,
   historySelection,
+  nativeAffectedRefs,
 } from "./change-history.mjs";
 import {
   publicNativeChange,
@@ -51,7 +51,6 @@ import {
 } from "./change-presentation.mjs";
 import {
   activeInsteadOfValue,
-  changeRef,
   configuredHomeRef,
   groupRef,
   inactiveScenarioRun,
@@ -63,7 +62,6 @@ import {
   nativeTargetKey,
   parseAccessoryRef,
   parseConfiguredHomeRef,
-  parseInspectedChangeRef,
   parseLogicRef,
   parseNativeChangeRef,
   parseRestoreRef,
@@ -112,18 +110,6 @@ import {
   parseDeviceCommandTargets,
   resendDeviceCommandNext,
 } from "./device-commands.mjs";
-import {
-  matchesExpected,
-  matchesRequiredRuntime,
-  observationResult,
-  observationState,
-  observeReconciliation,
-  publicChange,
-  relatedRules,
-  rolledBackResult,
-  uncertainResult,
-  withLocalState,
-} from "./legacy-automation.mjs";
 import {
   createdLogicType,
   createdLogicUnmappedRefusal,
@@ -2027,8 +2013,7 @@ export class AutomationService {
   }
 
   async getNativeChange(changeReference) {
-    const { type, id } = parseInspectedChangeRef(changeReference);
-    if (type === "automation") return this.#getAutomationChange(id);
+    const id = parseNativeChangeRef(changeReference);
     const change = await this.#requireNativeChange(id);
     if (change.kind === "accessory_placement") {
       return this.#getAccessoryPlacement(change);
@@ -2108,14 +2093,9 @@ export class AutomationService {
   }
 
   // One native change keeps its full record as the answer; a group ref is
-  // undone as a group; an earlier boolean automation is rolled back.
+  // undone as a group.
   async restoreNativeChange(changeReference) {
     const { type, id } = parseRestoreRef(changeReference);
-    if (type === "automation") {
-      return this.#exclusiveWrite(async () =>
-        this.#rollbackAutomation(await this.#requireAutomationChange(id)),
-      );
-    }
     if (type === "group") return this.restoreChanges([changeReference]);
     return this.#exclusiveWrite(async () =>
       this.#restoreNative(await this.#requireNativeChange(id)),
@@ -2130,11 +2110,11 @@ export class AutomationService {
     const parsed = references.map(parseRestoreRef);
     return this.#exclusiveWrite(async () => {
       const ordered = (await this.#restoreEntries(parsed)).sort((left, right) =>
-        compareApplication(right.change, left.change),
+        compareApplication(right, left),
       );
       const results = [];
-      for (const entry of ordered) {
-        results.push(await this.#restoreEntry(entry));
+      for (const change of ordered) {
+        results.push(await this.#restoreEntry(change));
       }
       return restoreChangesResult(configuredHomeRef(this.hubSerial), results);
     });
@@ -2160,18 +2140,10 @@ export class AutomationService {
           if (member.home_ref !== configuredHomeRef(this.hubSerial)) {
             throw unsupportedHomeWrite();
           }
-          entries.set(member.id, { change: member, automation: false });
+          entries.set(member.id, member);
         }
-      } else if (type === "automation") {
-        entries.set(id, {
-          change: await this.#requireAutomationChange(id),
-          automation: true,
-        });
       } else {
-        entries.set(id, {
-          change: await this.#requireNativeChange(id),
-          automation: false,
-        });
+        entries.set(id, await this.#requireNativeChange(id));
       }
     }
     if (entries.size > RESTORE_BATCH_LIMIT) {
@@ -2184,27 +2156,23 @@ export class AutomationService {
     return [...entries.values()];
   }
 
-  async #restoreEntry({ change: listed, automation }) {
+  async #restoreEntry(listed) {
     let change;
     try {
       // Read again: restoring an earlier item may have updated this record.
-      change = automation
-        ? await this.#requireAutomationChange(listed.id)
-        : await this.#requireNativeChange(listed.id);
+      change = await this.#requireNativeChange(listed.id);
     } catch (error) {
-      return restoreFailureItem(listed, automation, error);
+      return restoreFailureItem(listed, error);
     }
     const before = {
       status: change.status,
       restoreIntentAt: restoreIntentTime(change),
     };
     try {
-      const result = automation
-        ? await this.#rollbackAutomation(change)
-        : await this.#restoreNative(change);
-      return restoreItem(change, automation, result, before);
+      const result = await this.#restoreNative(change);
+      return restoreItem(change, result, before);
     } catch (error) {
-      return restoreFailureItem(change, automation, error);
+      return restoreFailureItem(change, error);
     }
   }
 
@@ -3976,11 +3944,12 @@ export class AutomationService {
     const all = storedChanges
       .filter(
         (change) =>
-          (change.home_ref === undefined || change.home_ref === homeRef) &&
+          isNativeChange(change) &&
+          change.home_ref === homeRef &&
           (entityRef === undefined ||
-            changeAffectedRefs(change, homeRef).includes(entityRef)),
+            nativeAffectedRefs(change, homeRef).includes(entityRef)),
       )
-      .map((change) => changeSummary(change, homeRef))
+      .map(changeSummary)
       .sort(compareChangeSummaries);
     const remaining =
       selection.after === null
@@ -5966,190 +5935,6 @@ export class AutomationService {
     return matches[0] ?? null;
   }
 
-  // A spruthub-change://automation ref names a rule that the boolean
-  // automation tools of 0.4.0 and earlier created. They are gone; their
-  // records stay readable (get_native_change) and undoable
-  // (restore_native_change), and nothing new is written under such a ref.
-  async #getAutomationChange(id) {
-    const change = await this.#requireAutomationChange(id);
-    const reconciliation = await this.#reconcile(change);
-    const observation = observeReconciliation(change, reconciliation);
-    if (observation.kind !== "absent") {
-      return observationResult(change, observation);
-    }
-    if (["deleting", "rollback_uncertain"].includes(change.status)) {
-      return rolledBackResult(change, false);
-    }
-    if (["prepared", "rolled_back"].includes(change.status)) {
-      return publicChange(change);
-    }
-    return uncertainResult(change);
-  }
-
-  async #rollbackAutomation(change) {
-    const changeReference = changeRef(change.id);
-    if (
-      change.status === "prepared" ||
-      (change.status === "already_present" && change.owned === false)
-    ) {
-      return {
-        ...publicChange(change),
-        status: "not_owned",
-        action: "leave_existing_scenario_unchanged",
-      };
-    }
-    const reconciliation = await this.#reconcile(change);
-    const observation = observeReconciliation(change, reconciliation);
-    if (observation.kind === "absent") {
-      if (["creating", "uncertain"].includes(change.status)) {
-        return this.#finish(change, { status: "uncertain" }, uncertainResult);
-      }
-      return this.#finish(change, { status: "rolled_back" }, (current) =>
-        rolledBackResult(current, false),
-      );
-    }
-    if (observation.kind !== "owned_match") {
-      return this.#finishObservation(change, observation);
-    }
-    change.status = "deleting";
-    change.updated_at = new Date().toISOString();
-    await this.#saveBeforeWrite(change);
-    try {
-      await this.client.deleteScenario(observation.scenario.index);
-    } catch (error) {
-      if (!isUncertainWriteError(error)) {
-        error.details = await this.#finishKnownNoEffect(
-          change,
-          changeReference,
-          "applied",
-          error,
-        );
-        throw error;
-      }
-      try {
-        const afterUncertainDelete = await this.#reconcile(change);
-        return this.#finishDeleteReadback(change, afterUncertainDelete, true);
-      } catch {
-        return this.#finish(
-          change,
-          { status: "rollback_uncertain" },
-          uncertainResult,
-        );
-      }
-    }
-    let afterDelete;
-    try {
-      afterDelete = await this.#reconcile(change);
-    } catch {
-      return this.#finish(
-        change,
-        { status: "rollback_uncertain" },
-        uncertainResult,
-      );
-    }
-    return this.#finishDeleteReadback(change, afterDelete, false);
-  }
-
-  // An automation ref names only such an earlier record, never a native
-  // change of the same journal. A record without home_ref is from before
-  // home-qualified refs.
-  async #requireAutomationChange(id) {
-    const change = await this.store.get(id);
-    if (!change || isNativeChange(change)) {
-      throw new SprutHubError(
-        "change_not_found",
-        "The automation change was not found for this configured hub.",
-        "get_native_change",
-        { next: { tool: "get_native_change", arguments: {} } },
-      );
-    }
-    if (
-      change.home_ref !== undefined &&
-      change.home_ref !== configuredHomeRef(this.hubSerial)
-    ) {
-      throw unsupportedHomeWrite();
-    }
-    return change;
-  }
-
-  async #reconcile(change) {
-    const scenarios = await this.client.listScenarioDetails();
-    const ownedCandidates = scenarios.filter(
-      ({ desc }) =>
-        typeof desc === "string" && desc.includes(`[${change.marker}]`),
-    );
-    if (ownedCandidates.length > 1) {
-      throw new SprutHubError(
-        "ambiguous_owned_scenario",
-        "More than one scenario carries this change marker.",
-        "inspect_hub",
-      );
-    }
-    const scenario =
-      scenarios.find(({ index }) => index === change.scenario_index) ??
-      ownedCandidates[0];
-    const owned = scenario !== undefined && ownedCandidates.includes(scenario);
-    const related = relatedRules(
-      scenarios.filter((candidate) => !ownedCandidates.includes(candidate)),
-      change,
-      configuredHomeRef(this.hubSerial),
-    );
-    const equivalents = related
-      .filter(({ relation }) => relation === "equivalent")
-      .map((candidate) => candidate.scenario);
-    return {
-      scenario,
-      owned,
-      matches: owned && matchesExpected(scenario, change),
-      equivalent: equivalents.find(matchesRequiredRuntime),
-      runtimeConflict: equivalents.find(
-        (candidate) => !matchesRequiredRuntime(candidate),
-      ),
-      superset: related.find(({ relation }) => relation === "superset"),
-    };
-  }
-
-  async #finishDeleteReadback(change, reconciliation, recovered) {
-    const observation = observeReconciliation(change, reconciliation);
-    if (observation.kind === "absent") {
-      return this.#finish(change, { status: "rolled_back" }, (current) => ({
-        ...rolledBackResult(current, true),
-        ...(recovered ? { recovered_after_uncertain_write: true } : {}),
-      }));
-    }
-    if (observation.kind !== "owned_match") {
-      return this.#finishObservation(change, observation);
-    }
-    return this.#finish(
-      change,
-      { status: "rollback_uncertain" },
-      uncertainResult,
-    );
-  }
-
-  async #finishObservation(change, observation, extra = {}) {
-    return this.#finish(change, observationState(observation), (current) => ({
-      ...observationResult(current, observation),
-      ...extra,
-    }));
-  }
-
-  async #finishKnownNoEffect(change, changeReference, status, error) {
-    const rejection = writeRejection(error);
-    return this.#finish(change, { status }, () => ({
-      ...error.details,
-      change_ref: changeReference,
-      hub_effect: "not_applied",
-      ...(rejection ? { rejection } : {}),
-    }));
-  }
-
-  async #finish(change, state, makeResult) {
-    Object.assign(change, state, { updated_at: new Date().toISOString() });
-    const localStateSaved = await this.#trySave(change);
-    return withLocalState(makeResult(change), localStateSaved);
-  }
-
   async #trySave(change) {
     try {
       await this.store.save(change);
@@ -6203,4 +5988,21 @@ function undoRewrites(change, other) {
   if (scenarioChainIndex(other) !== index) return false;
   const owned = scenarioFieldsOwned(other);
   return scenarioFieldsOwned(change).some((field) => owned.includes(field));
+}
+
+// A result whose journal record could not be saved says so and how to
+// recover.
+function withLocalState(
+  result,
+  saved,
+  action = "restore_state_storage_then_get_native_change",
+) {
+  if (saved) return result;
+  return {
+    ...result,
+    local_state: {
+      saved: false,
+      action,
+    },
+  };
 }

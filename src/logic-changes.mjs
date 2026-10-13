@@ -626,7 +626,7 @@ export function blockUpdateFields(change) {
 
 // active is a runtime flag owned by scenario_active and the SprutHub UI.
 // Turning a scenario off or on is not an edit of the configuration that a
-// BLOCK, LOGIC, or automation change owns, so their ownership checks leave it
+// BLOCK or LOGIC change owns, so their ownership checks leave it
 // out on both sides; journals saved with active in their snapshots still match.
 // The name, description, onStart and sync are left out the same way where
 // the change does not set them (withoutUnownedOptions).
