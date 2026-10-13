@@ -288,27 +288,26 @@ export class AutomationService {
         input,
         draft,
         draft.fields.target_name === undefined
-          ? await this.#deviceName(draft.fields.target)
+          ? await this.#deviceJournal(kind, draft)
           : {},
       ),
     );
   }
 
   // The device and channel a setting belongs to, saved so that history
-  // names it as the owner knows it. A name is optional: only a transport
-  // failure stops the prepare.
-  async #deviceName(target) {
+  // names it as the owner knows it, and whether a command sets a lamp's
+  // level (lamp_level), as send_device_commands records it. Both are
+  // optional: only a transport failure stops the prepare.
+  async #deviceJournal(kind, { fields: { target }, contract }) {
     if (!Number.isInteger(target?.aId)) return {};
-    try {
-      const name = deviceCommandName(
-        await this.client.getAccessory(target.aId),
-        target,
-      );
-      return name ? { target_name: name } : {};
-    } catch (error) {
-      if (!isDeviceCommandRejection(error)) throw error;
-      return {};
-    }
+    const accessory = await readTargetAccessory(this, target.aId);
+    const name = deviceCommandName(accessory, target);
+    return {
+      ...(name ? { target_name: name } : {}),
+      ...(kind.command && lightLevelOnTarget(accessory, target, contract.type)
+        ? { lamp_level: true }
+        : {}),
+    };
   }
 
   async #recordValueChange(input, draft, journal = {}) {
@@ -4101,7 +4100,8 @@ export class AutomationService {
       ? await this.client.getAccessory(change.target.aId)
       : undefined;
     // A lamp's level is never written back, nor offered for resend
-    // (LAMP_LEVEL_LIMITATION); a record from before lamp_level is judged by
+    // (LAMP_LEVEL_LIMITATION); a record without lamp_level (from before it,
+    // or whose device read the hub refused when it was made) is judged by
     // the accessory now.
     if (
       change.lamp_level === true ||
@@ -10442,7 +10442,20 @@ function isNativeChange(change) {
 
 async function nativeValueContractFields(service, kind, input) {
   const state = await kind.inspect(service, input);
-  const restoration = kind.restoration(state.contract, state.value);
+  const { target } = state.fields;
+  // A lamp's level is told as prepare tells it; the accessory is read only
+  // for a level command.
+  const lampLevel =
+    kind.command &&
+    LIGHT_LEVEL_TYPES.has(state.contract.type) &&
+    lightLevelOnTarget(
+      await readTargetAccessory(service, target.aId),
+      target,
+      state.contract.type,
+    );
+  const restoration = lampLevel
+    ? LAMP_LEVEL_RESTORATION
+    : kind.restoration(state.contract, state.value);
   return {
     ...(kind.optionKey ? { option_key: input.option_key } : {}),
     contract: state.contract,
@@ -10471,6 +10484,17 @@ function isDeviceCommandRejection(error) {
   return (
     error instanceof SprutHubError && !HUB_TRANSPORT_ERROR_CODES.has(error.code)
   );
+}
+
+// The accessory of a setting or command, for its name and whether it is a
+// lamp; null when the hub refuses the read. A transport failure is thrown.
+async function readTargetAccessory(service, aId) {
+  try {
+    return await service.client.getAccessory(aId);
+  } catch (error) {
+    if (!isDeviceCommandRejection(error)) throw error;
+    return null;
+  }
 }
 
 function parseDeviceCommandTargets(commands, configuredSerial) {
@@ -10571,6 +10595,11 @@ const LAMP_LEVEL_LIMITATION = {
   code: "lamp_level_not_restored",
   message:
     "On the hub's lamps a brightness write switches an off lamp on, so undo puts back only a lamp's on/off, not its brightness or color.",
+};
+
+const LAMP_LEVEL_RESTORATION = {
+  supported: false,
+  limitation: LAMP_LEVEL_LIMITATION,
 };
 
 function lightLevelOnTarget(accessory, { aId, sId }, type) {
@@ -13549,11 +13578,12 @@ function publicNativeChange(
           },
         }
       : undefined;
-  // A record from before lamp_level keeps the answer of its type and
-  // baseline: telling a lamp needs the accessory, which is not read here.
+  // A record without lamp_level (from before it, or whose device read was
+  // refused) keeps the answer of its type and baseline: telling a lamp
+  // needs the accessory, which is not read here.
   const restoration =
     change.lamp_level === true
-      ? { supported: false, limitation: LAMP_LEVEL_LIMITATION }
+      ? LAMP_LEVEL_RESTORATION
       : nativeValueRestoration(change);
   return {
     status: change.status,
