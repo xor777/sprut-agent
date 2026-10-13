@@ -29,6 +29,9 @@ const FLOOR_ON = characteristic(16, 14); // Торшер, on at 55
 const FLOOR_LEVEL = characteristic(16, 15);
 const STRIP_ON = characteristic(17, 14); // Светодиодная лента, off at 100
 const STRIP_LEVEL = characteristic(17, 15);
+const AC_MODE = characteristic(19, 15); // Кондиционер, off (0)
+const AC_SETPOINT = characteristic(19, 17); // 23 °C, step 0.5
+const BREEZER_ACTIVE = characteristic(28, 14); // Бризер, running (1)
 
 function refOf({ aId, sId, cId }) {
   return `${homeRef}/accessory/${aId}/service/${sId}/characteristic/${cId}`;
@@ -251,6 +254,91 @@ test("a level the owner changed by hand after a dim is not overwritten", async (
   assert.equal(item.already_previous, false);
   assert.deepEqual(valueWritesSince(hub, before), []);
   assert.equal(currentValue(hub, FLOOR_LEVEL), 45);
+});
+
+test("«верни как было» puts back a value one step from the one the agent sent", async (t) => {
+  const { hub, client } = await setup(t);
+  const sent = await command(
+    client,
+    [
+      [BREEZER_ACTIVE, 0],
+      [AC_SETPOINT, 23.5],
+    ],
+    "Выключить бризер и сделать чуть теплее",
+  );
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+  for (const item of sent.results) {
+    const result = itemFor(restored, item.change_ref);
+    assert.equal(result.status, "restored");
+    assert.equal(result.sent, true);
+  }
+  assert.deepEqual(valueWritesSince(hub, before), [
+    ["19.17", 23],
+    ["28.14", 1],
+  ]);
+  assert.equal(currentValue(hub, BREEZER_ACTIVE), 1);
+  assert.equal(currentValue(hub, AC_SETPOINT), 23);
+});
+
+test("a value the owner set one step from the agent's is left as the owner set it", async (t) => {
+  const { hub, client } = await setup(t);
+  const sent = await command(
+    client,
+    [
+      // Heating.
+      [AC_MODE, 1],
+      [AC_SETPOINT, 24],
+      [FLOOR_LEVEL, 30],
+    ],
+    "Включить обогрев на 24 и приглушить торшер",
+  );
+  // Cooling, one press of «+», one step brighter.
+  hub.changeByHand({ ...AC_MODE, value: { intValue: 2 } });
+  hub.changeByHand({ ...AC_SETPOINT, value: { doubleValue: 24.5 } });
+  hub.changeByHand({ ...FLOOR_LEVEL, value: { intValue: 31 } });
+
+  const before = hub.requests.length;
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "incomplete");
+  for (const [item, observed] of [
+    [sent.results[0], 2],
+    [sent.results[1], 24.5],
+    [sent.results[2], 31],
+  ]) {
+    const result = itemFor(restored, item.change_ref);
+    assert.equal(result.status, "skipped", JSON.stringify(result));
+    assert.equal(result.reason, "changed_since");
+    assert.equal(result.already_previous, false);
+    assert.equal(result.observed_value, observed);
+  }
+  assert.deepEqual(valueWritesSince(hub, before), []);
+  assert.equal(currentValue(hub, AC_MODE), 2);
+  assert.equal(currentValue(hub, AC_SETPOINT), 24.5);
+  assert.equal(currentValue(hub, FLOOR_LEVEL), 31);
+});
+
+test("a breezer that acknowledges «выключи» but keeps running is not reported off", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { stuckActuators: [{ aId: 28 }] },
+  });
+  const sent = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: [{ target_ref: refOf(BREEZER_ACTIVE), value: 0 }],
+    reason: "Выключить бризер",
+  });
+  const [breezer] = sent.results;
+  assert.equal(breezer.status, "uncertain", JSON.stringify(breezer));
+  assert.equal(breezer.sent, true);
+  assert.equal(breezer.observed_value, 1);
+  assert.equal(breezer.conflict_reason, "ack_without_requested_result");
+  assert.equal(currentValue(hub, BREEZER_ACTIVE), 1);
 });
 
 test("a lamp's level is put back before the lamp is switched", async (t) => {
