@@ -10,6 +10,7 @@ import {
   relationRole,
   withShownHttpUrls,
 } from "./block-summary.mjs";
+import { HomeState } from "./home-state.mjs";
 import {
   inspectNativeOption,
   isSelectableNativeValidValue,
@@ -28,10 +29,9 @@ const INCLUDE_READ_ERROR = Symbol("includeReadError");
 // A room above this many services returns its size and a find_devices call
 // instead of listing every accessory and service.
 const ROOM_LISTING_SERVICE_LIMIT = 20;
-// How long a home catalog serves names without a new whole-home read, so
-// edits made in the SprutHub app show up; writes of this client drop it at
-// once.
-const HOME_CATALOG_TTL_MS = 5 * 60_000;
+// How long the hub's time zone serves without a new read of the home
+// settings window, so that a change there shows up.
+const HUB_TIME_ZONE_TTL_MS = 5 * 60_000;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
@@ -49,8 +49,10 @@ const CONDITION_VALUE_READS = 16;
 // scenario.get each, up to this many (one LOGIC and one GLOBAL besides 7
 // built-in LOGIC on the owner's hub, 2026-09-24-live-conformance-3).
 const CODE_SOURCE_READS = 24;
-// Native methods that only read. Any other method may change the home, so
-// sending one drops the cached home catalogs.
+// Native methods that only read. Any other method may change the home: a
+// device value write waits for its event in the warm home state, the
+// writes below leave the state to the hub's events, any other has the home
+// read again (home-state.mjs).
 const READ_ONLY_METHODS = new Set([
   "hub.list",
   "server.ping",
@@ -79,6 +81,15 @@ const READ_ONLY_METHODS = new Set([
   "extension.get",
   "extensionChild.list",
   "extensionChild.get",
+]);
+// Writes that change nothing the warm home state holds besides values,
+// which the hub's events carry: scenarios and a device search.
+const HOME_STATE_NEUTRAL_WRITES = new Set([
+  "scenario.create",
+  "scenario.update",
+  "scenario.delete",
+  "scenario.run",
+  "extension.action",
 ]);
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
@@ -152,7 +163,14 @@ export class SprutHubClient {
   #connectPromise;
   #configuredSerial;
   #connectingSocket;
-  #homeCatalogs = new Map();
+  // Each open connection's record: the home serials its requests carried,
+  // whose events it then receives.
+  #connections = new WeakMap();
+  #replyConnections = new WeakMap();
+  // The warm state of each home read (home-state.mjs) and its whole read
+  // in flight.
+  #homeStates = new Map();
+  #wholeReads = new Map();
   #hubTimeZones = new Map();
   #hubTimeZoneReads = new Map();
   #nextRequestId = 1;
@@ -240,71 +258,133 @@ export class SprutHubClient {
     throw homeSelectionRequired();
   }
 
-  // Counts the writes this client has sent; a catalog read before a write is
-  // not stored after it.
-  get writeGeneration() {
-    return this.#writeGeneration;
-  }
-
-  // A home's rooms and accessories as last read whole: names, rooms, types
-  // and refs for find_devices and BLOCK summaries. It is never the source of
-  // current values. A write of this client drops it, and it expires after
-  // HOME_CATALOG_TTL_MS.
+  // The home as the warm state holds it (home-state.mjs): names, rooms,
+  // types and current values. null while something must be read before it
+  // answers.
   cachedHomeCatalog(serial) {
-    const catalog = this.#homeCatalogs.get(serial);
-    if (
-      !catalog ||
-      catalog.generation !== this.#writeGeneration ||
-      Date.now() - catalog.builtAt >= HOME_CATALOG_TTL_MS
-    ) {
-      return null;
-    }
-    return catalog;
+    const state = this.#homeStates.get(serial);
+    return state && state.needs() === null ? state.catalog() : null;
   }
 
+  // The home from the warm state, read first where the state cannot
+  // answer: whole when it was never read, may have missed events or
+  // refresh is set, else the rooms and the accessories its events changed.
+  // fresh says whether this call read the whole home.
   async homeCatalog(serial, deadline, { refresh = false } = {}) {
-    const cached = refresh ? null : this.cachedHomeCatalog(serial);
-    if (cached) return { catalog: cached, fresh: false };
-    const generation = this.#writeGeneration;
-    const [rooms, accessories] = await Promise.all([
-      this.nativeRooms(serial, deadline),
-      this.nativeAccessories(serial, deadline),
-    ]);
-    const catalog = this.rememberHomeCatalog(serial, {
-      rooms: rooms.rooms,
-      accessories: accessories.accessories,
-      observedAt: latestObservedAt([rooms.observedAt, accessories.observedAt]),
-      generation,
-    });
-    return {
-      catalog,
-      fresh: true,
-      valuesObservedAt: accessories.observedAt,
-    };
+    const state = this.#homeState(serial);
+    let fresh = false;
+    if (refresh) {
+      await this.#readWholeHome(state, deadline, { join: false });
+      fresh = true;
+    }
+    // An accessory read in a room the state does not know has the room list
+    // read after it.
+    for (let pass = 0; pass < 2; pass += 1) {
+      const needs = state.needs();
+      if (needs === null || (needs.whole && fresh)) break;
+      if (needs.whole) {
+        await this.#readWholeHome(state, deadline, { join: true });
+        fresh = true;
+      } else {
+        await Promise.all([
+          needs.rooms ? this.#readRoomsInto(state, deadline) : null,
+          ...needs.accessories.map((id) =>
+            this.#readAccessoryInto(state, id, deadline),
+          ),
+        ]);
+      }
+    }
+    return { catalog: state.catalog(), fresh };
   }
 
-  // builtAt is kept from the catalog that a targeted read updated: the
-  // entries it did not read are as old as before.
-  rememberHomeCatalog(
-    serial,
-    { rooms, accessories, observedAt, generation, builtAt = Date.now() },
-  ) {
-    const catalog = {
-      serial,
-      generation,
-      builtAt,
-      observedAt,
-      rooms,
-      accessories,
-      byId: new Map(accessories.map((item) => [item.id, item])),
-      identities: new Map(
-        accessories.map((item) => [item.id, accessoryIdentity(item)]),
-      ),
-    };
-    if (generation === this.#writeGeneration) {
-      this.#homeCatalogs.set(serial, catalog);
+  // One characteristic's value from the warm home state, without a hub
+  // request: {trusted: true, value (native typed value), observed_at,
+  // source: "event" or "read", available} or {trusted: false, reason}. Not
+  // trusted until the home was read, while it must be read again (a gap in
+  // the events, the accessory changed), MAX_AGE_MS after the last whole
+  // read, and while a value write of this process awaits its event.
+  liveValue({ aId, sId, cId }, { serial = this.serial } = {}) {
+    const state = this.#homeStates.get(serial);
+    if (!state) return { trusted: false, reason: "not_read" };
+    return state.value({ aId, sId, cId });
+  }
+
+  #homeState(serial) {
+    let state = this.#homeStates.get(serial);
+    if (!state) {
+      state = new HomeState(serial);
+      this.#homeStates.set(serial, state);
     }
-    return catalog;
+    return state;
+  }
+
+  // A whole read already running answers a call that does not force one:
+  // it started earlier, with an earlier deadline.
+  #readWholeHome(state, deadline, { join }) {
+    const running = this.#wholeReads.get(state.serial);
+    if (join && running) return running;
+    const read = this.#readWhole(state, deadline);
+    this.#wholeReads.set(state.serial, read);
+    const forget = () => {
+      if (this.#wholeReads.get(state.serial) === read) {
+        this.#wholeReads.delete(state.serial);
+      }
+    };
+    read.then(forget, forget);
+    return read;
+  }
+
+  async #readWhole(state, deadline) {
+    const token = state.beginRead();
+    try {
+      const [rooms, accessories] = await Promise.all([
+        this.#readRooms(state.serial, deadline),
+        this.#readAccessories(state.serial, deadline),
+      ]);
+      const feed =
+        rooms.connection === accessories.connection
+          ? accessories.connection
+          : null;
+      state.replaceWhole(
+        {
+          rooms: rooms.rooms,
+          accessories: accessories.accessories,
+          observedAt: latestObservedAt([
+            rooms.observedAt,
+            accessories.observedAt,
+          ]),
+          feed,
+        },
+        token,
+      );
+      if (feed && feed.serials.size > 1) state.markStale("mixed_homes");
+    } finally {
+      state.endRead(token);
+    }
+  }
+
+  async #readRoomsInto(state, deadline) {
+    const token = state.beginRead();
+    try {
+      const { rooms } = await this.#readRooms(state.serial, deadline);
+      state.replaceRooms(rooms, token);
+    } finally {
+      state.endRead(token);
+    }
+  }
+
+  async #readAccessoryInto(state, id, deadline) {
+    const token = state.beginRead();
+    try {
+      const { accessory, observedAt } = await this.nativeAccessory(
+        state.serial,
+        id,
+        deadline,
+      );
+      state.replaceAccessory(id, accessory, observedAt, token);
+    } finally {
+      state.endRead(token);
+    }
   }
 
   // One accessory with its services and values; null when the hub says it
@@ -346,6 +426,21 @@ export class SprutHubClient {
   // home-reads.mjs; each validates what it returns and one caller deadline
   // covers them all.
   async nativeRooms(serial, deadline) {
+    const { rooms, observedAt } = await this.#readRooms(serial, deadline);
+    return { rooms, observedAt };
+  }
+
+  async nativeAccessories(serial, deadline, { roomId } = {}) {
+    const { accessories, observedAt } = await this.#readAccessories(
+      serial,
+      deadline,
+      { roomId },
+    );
+    return { accessories, observedAt };
+  }
+
+  // These two also name the connection the list came over.
+  async #readRooms(serial, deadline) {
     const response = await this.#request({ room: { list: {} } }, deadline, {
       serial,
     });
@@ -361,10 +456,14 @@ export class SprutHubClient {
     rooms.forEach((room) => {
       validateRoom(room);
     });
-    return { rooms, observedAt: response.responseReceivedAt };
+    return {
+      rooms,
+      observedAt: response.responseReceivedAt,
+      connection: this.#replyConnections.get(response),
+    };
   }
 
-  async nativeAccessories(serial, deadline, { roomId } = {}) {
+  async #readAccessories(serial, deadline, { roomId } = {}) {
     const response = await this.#request(
       {
         accessory: {
@@ -383,7 +482,11 @@ export class SprutHubClient {
       "accessories",
     ]);
     accessories.forEach(validateAccessory);
-    return { accessories, observedAt: response.responseReceivedAt };
+    return {
+      accessories,
+      observedAt: response.responseReceivedAt,
+      connection: this.#replyConnections.get(response),
+    };
   }
 
   async nativeScenarios(serial, deadline) {
@@ -925,8 +1028,8 @@ export class SprutHubClient {
     };
   }
 
-  // The hub's time zone, kept per home as the home catalog is: for
-  // HOME_CATALOG_TTL_MS and until a write of this client. A caller waits for
+  // The hub's time zone, kept per home for HUB_TIME_ZONE_TTL_MS and until a
+  // write of this client. A caller waits for
   // it at most HUB_TIME_ZONE_WAIT_MS within its own deadline and then keeps
   // UTC (null); the read goes on with its own request timeout, later callers
   // share it, and its answer is kept when it comes. A zone that is not read
@@ -936,7 +1039,7 @@ export class SprutHubClient {
     if (
       cached &&
       cached.generation === this.#writeGeneration &&
-      Date.now() - cached.readAt < HOME_CATALOG_TTL_MS
+      Date.now() - cached.readAt < HUB_TIME_ZONE_TTL_MS
     ) {
       return cached.zone;
     }
@@ -3383,25 +3486,51 @@ export class SprutHubClient {
     });
   }
 
+  // A write of a device value waits for its event in the warm home state;
+  // another write that may change what the state holds has the home read
+  // again, before and after it, so that a read in flight across the write
+  // does not answer for after it.
   async #request(params, deadline, { serial = this.serial } = {}) {
-    const writes = !READ_ONLY_METHODS.has(nativeMethod(params));
-    if (writes) this.#forgetHomeCatalogs();
-    try {
-      return await this.#send(params, deadline, serial);
-    } finally {
-      if (writes) this.#forgetHomeCatalogs();
+    const method = nativeMethod(params);
+    if (READ_ONLY_METHODS.has(method)) {
+      return this.#send(params, deadline, serial);
     }
-  }
-
-  #forgetHomeCatalogs() {
+    const target = valueWriteTarget(params);
+    const homeWrite =
+      target === null &&
+      !HOME_STATE_NEUTRAL_WRITES.has(method) &&
+      !isNotifyWrite(params);
+    const states =
+      serial === null
+        ? [...this.#homeStates.values()]
+        : [this.#homeStates.get(serial)].filter(Boolean);
     this.#writeGeneration += 1;
-    this.#homeCatalogs.clear();
+    for (const state of states) {
+      if (target) state.writeSent(target);
+      else if (homeWrite) state.markStale("own_write");
+    }
+    try {
+      const response = await this.#send(params, deadline, serial);
+      if (target) for (const state of states) state.writeAnswered(target);
+      return response;
+    } catch (error) {
+      const refused =
+        error instanceof SprutHubError && error.hubError !== undefined;
+      if (target) {
+        for (const state of states) state.writeFailed(target, { refused });
+      }
+      throw error;
+    } finally {
+      this.#writeGeneration += 1;
+      if (homeWrite) for (const state of states) state.markStale("own_write");
+    }
   }
 
   async #send(params, deadline, serial) {
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
+    this.#noteSerial(socket, serial);
     const id = this.#nextRequestId++;
     const response = new Promise((resolve, reject) => {
       // Only this request runs out of time: the others on the connection
@@ -3492,6 +3621,10 @@ export class SprutHubClient {
         socket.off("error", failBeforeOpen);
         this.#connectingSocket = undefined;
         this.#socket = socket;
+        this.#connections.set(socket, {
+          serials: new Set(),
+          lastFrameAt: Date.now(),
+        });
         socket.on("error", () => {
           this.#handleConnectionLoss(socket);
           socket.terminate();
@@ -3535,6 +3668,8 @@ export class SprutHubClient {
         );
         socket.terminate();
       }
+      // Nor to an event: the warm home may have missed one.
+      this.#connectionGone(socket, "invalid_frame");
       // The frame cannot be matched to a request, so each one on this
       // connection may have lost its reply.
       for (const [id, pending] of this.#pending) {
@@ -3547,7 +3682,9 @@ export class SprutHubClient {
       return;
     }
 
-    this.#handleNativeEvent(message);
+    const record = this.#connections.get(socket);
+    if (record) record.lastFrameAt = Date.now();
+    this.#handleNativeEvent(message, socket);
     const pending = this.#pending.get(message.id);
     if (!pending) return;
     clearTimeout(pending.timer);
@@ -3585,10 +3722,49 @@ export class SprutHubClient {
       return;
     }
     message.responseReceivedAt = new Date().toISOString();
+    if (record) this.#replyConnections.set(message, record);
     pending.resolve(message);
   }
 
+  // A request with a home's serial has the hub push that home's events to
+  // the connection (2026-10-13-voice-latency-baseline, section 5). Events
+  // do not name their home, so a connection that carried two homes' serials
+  // cannot feed either home's warm state.
+  #noteSerial(socket, serial) {
+    const record = this.#connections.get(socket);
+    if (!record || serial === null || record.serials.has(serial)) return;
+    record.serials.add(serial);
+    if (record.serials.size < 2) return;
+    for (const known of record.serials) {
+      this.#homeStates.get(known)?.markStale("mixed_homes");
+    }
+  }
+
+  // The events of a connection are applied to the home it carries.
+  #routeHomeEvent(event, socket) {
+    const record = this.#connections.get(socket);
+    if (!record) return;
+    const receivedAt = new Date().toISOString();
+    for (const serial of record.serials) {
+      const state = this.#homeStates.get(serial);
+      if (!state) continue;
+      if (record.serials.size > 1) state.markStale("mixed_homes");
+      else state.receive(event, record, receivedAt);
+    }
+  }
+
+  // A connection retired, lost or carrying an unreadable frame: a home
+  // state that follows its events may have missed some.
+  #connectionGone(socket, reason) {
+    const record = this.#connections.get(socket);
+    if (!record) return;
+    for (const state of this.#homeStates.values()) {
+      state.connectionGone(record, reason);
+    }
+  }
+
   #handleConnectionLoss(socket) {
+    this.#connectionGone(socket, "connection_lost");
     if (this.#socket === socket) {
       this.#socket = undefined;
       if (this.#observation?.status === "observing") {
@@ -3629,6 +3805,7 @@ export class SprutHubClient {
   // subscriptions of an observation stay on their connection, so for an
   // observation the connection is lost.
   #retire(socket) {
+    this.#connectionGone(socket, "connection_retired");
     if (this.#socket === socket) {
       if (this.#observation?.status === "observing") {
         this.#handleConnectionLoss(socket);
@@ -3648,8 +3825,9 @@ export class SprutHubClient {
     socket.terminate();
   }
 
-  #handleNativeEvent(message) {
-    if (this.#nativeEventListeners.size > 0 && isPlainObject(message.event)) {
+  #handleNativeEvent(message, socket) {
+    if (isPlainObject(message.event)) {
+      this.#routeHomeEvent(message.event, socket);
       for (const listener of this.#nativeEventListeners) {
         listener(message.event);
       }
@@ -6835,24 +7013,29 @@ function nativeMethod(params) {
   return `${domain}.${operation}`;
 }
 
-// What a home catalog knows of an accessory: its room, name and services'
-// names, types, visibility and characteristic types. A fresh read with
-// another identity means the catalog is stale.
-export function accessoryIdentity(accessory) {
-  return JSON.stringify([
-    accessory.roomId,
-    accessory.name,
-    (accessory.services ?? []).map((service) => [
-      service.sId,
-      service.name,
-      service.type,
-      service.visible !== false,
-      (service.characteristics ?? []).map(({ cId, control }) => [
-        cId,
-        control?.type ?? control?.key,
-      ]),
-    ]),
-  ]);
+// The characteristic of a write of its value alone (a device command), or
+// null.
+function valueWriteTarget(params) {
+  const update = params?.characteristic?.update;
+  if (
+    !isPlainObject(update) ||
+    Object.keys(update).sort().join() !== "aId,cId,control,sId" ||
+    !isPlainObject(update.control) ||
+    Object.keys(update.control).join() !== "value"
+  ) {
+    return null;
+  }
+  return { aId: update.aId, sId: update.sId, cId: update.cId };
+}
+
+// A characteristic's notification setting, which accessory lists do not
+// carry (2026-10-12-notifications-live).
+function isNotifyWrite(params) {
+  const update = params?.characteristic?.update;
+  return (
+    isPlainObject(update) &&
+    Object.keys(update).sort().join() === "aId,cId,notify,sId"
+  );
 }
 
 function nativeCharacteristicKey({ aId, sId, cId } = {}) {

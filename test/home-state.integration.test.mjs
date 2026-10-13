@@ -421,6 +421,27 @@ test("a room renamed in the SprutHub app is renamed by its event", async (t) => 
   );
 });
 
+// A device may sit in a room the room list lacks; its events and its room's
+// must not have the room list read before every answer.
+test("a room the room list lacks is not asked for again on each event", async (t) => {
+  const fixture = await loadHomeFixture("apartment");
+  fixture.accessories.find(({ id }) => id === 26).roomId = 99;
+  const { hub, call, home } = await setup(t, fixture);
+  const overview = await call("home_overview", {});
+  assert(overview.body.rooms.some(({ ref }) => ref === `${home}/room/99`));
+
+  hub.emit({
+    accessory: { event: "EVENT_UPDATE", accessories: [{ id: 26 }] },
+  });
+  hub.emit({ room: { event: "EVENT_UPDATE", rooms: [{ id: 99 }] } });
+  await settle();
+  const first = await call("find_devices", { state: "on" });
+  assert.deepEqual(methods(first.native), ["accessory.get"]);
+  hub.emit({ room: { event: "EVENT_UPDATE", rooms: [{ id: 99 }] } });
+  await settle();
+  assert.deepEqual((await call("find_devices", { state: "on" })).native, []);
+});
+
 // What other modules read without a request, such as a device command
 // taking the value before it writes: the value, when the hub reported it,
 // and whether the warm home can be trusted for it.

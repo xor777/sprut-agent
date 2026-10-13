@@ -1,11 +1,10 @@
 // Household reads of one SprutHub home: home_overview and find_devices. The
 // answer size follows the question, not the home: the overview counts
 // instead of listing every scenario and device, and find_devices matches
-// names, rooms and types in the client's session catalog and reads values
-// only for the matched devices.
+// names, rooms and types in the client's warm home and shows the matched
+// devices' values from it.
 import { randomBytes } from "node:crypto";
 import {
-  accessoryIdentity,
   accessoryRef,
   characteristicNotifyOffered,
   characteristicNotifyOn,
@@ -27,10 +26,6 @@ const LIST_LIMIT = 50;
 const LIST_PAGE_BYTES = 16_000;
 const DEFAULT_LIMIT = 30;
 const DEFAULT_MAX_BYTES = 16_000;
-// Value reads by accessory or by room while they stay this few; above that
-// one whole-home read is fewer native requests.
-const TARGETED_ACCESSORY_READS = 4;
-const TARGETED_ROOM_READS = 2;
 // A notification answer reads every matched accessory with accessory.get,
 // this many at a time.
 const NOTIFY_READ_CONCURRENCY = 8;
@@ -88,34 +83,25 @@ export class HomeReads {
     if (!home) throw homeNotFound();
 
     // A list reads only what it lists; the overview and a query read all.
+    // Rooms and devices come from the client's warm home.
     const list = input.list ?? null;
     const query = input.query ?? null;
     const needs = (part) => list === null || list === part;
-    const generation = client.writeGeneration;
-    const [rooms, accessories, scenarios, extensions] = await Promise.all([
-      needs("rooms") ? client.nativeRooms(serial, deadline) : null,
-      needs("rooms") ? client.nativeAccessories(serial, deadline) : null,
+    const [homeRead, scenarios, extensions] = await Promise.all([
+      needs("rooms") ? client.homeCatalog(serial, deadline) : null,
       needs("scenarios") ? client.nativeScenarios(serial, deadline) : null,
       needs("extensions") ? client.nativeExtensions(serial, deadline) : null,
     ]);
+    const catalog = homeRead?.catalog ?? null;
     const observedAt = latest([
       account.freshness.hubResponseReceivedAt,
-      rooms?.observedAt,
-      accessories?.observedAt,
+      catalog && latestObservation(catalog),
       scenarios?.observedAt,
       extensions?.observedAt,
     ]);
     const roomList =
-      rooms &&
-      roomsWithDeviceCounts(serial, rooms.rooms, accessories.accessories);
-    if (rooms) {
-      client.rememberHomeCatalog(serial, {
-        rooms: rooms.rooms,
-        accessories: accessories.accessories,
-        observedAt: latest([rooms.observedAt, accessories.observedAt]),
-        generation,
-      });
-    }
+      catalog &&
+      roomsWithDeviceCounts(serial, catalog.rooms, catalog.accessories);
     const selection =
       account.homes.length > 1 || account.selection.required === true
         ? listed
@@ -138,10 +124,7 @@ export class HomeReads {
           scenarios: scenarios?.scenarios,
           extensions: extensions?.extensions,
         }),
-        extras:
-          list === null
-            ? deviceMatchesHint(serial, query, rooms, accessories)
-            : {},
+        extras: list === null ? deviceMatchesHint(serial, query, catalog) : {},
       });
     }
 
@@ -162,14 +145,15 @@ export class HomeReads {
           ref: summary.ref,
           name: summary.name,
         })),
-      ...accessories.accessories
+      ...catalog.accessories
         .filter(({ online }) => online === false)
         .map((accessory) => ({
           kind: "device_unavailable",
           ref: accessoryRef(serial, accessory.id),
           name: accessory.name,
           room:
-            rooms.rooms.find(({ id }) => id === accessory.roomId)?.name ?? null,
+            catalog.rooms.find(({ id }) => id === accessory.roomId)?.name ??
+            null,
         })),
     ];
     return {
@@ -204,10 +188,9 @@ export class HomeReads {
     };
   }
 
-  // Devices of one home by name, room, kind or state. Names, rooms and types
-  // come from the session catalog; values are read fresh for the matched
-  // devices only, by accessory, by room or for the whole home, whichever
-  // needs the fewest native requests.
+  // Devices of one home by name, room, kind or state, with names, rooms,
+  // types and current values from the client's warm home, which reads from
+  // the hub only what it cannot answer (home-state.mjs).
   async findDevices(input) {
     const client = this.#client;
     const serial =
@@ -233,115 +216,39 @@ export class HomeReads {
     let read = await client.homeCatalog(serial, deadline, {
       refresh: selection.refresh,
     });
-    let refreshed = read.fresh;
     let candidates = selectCandidates(read.catalog, selection);
-    // A room or a name that a cached catalog does not know may be new: an
-    // edit in the SprutHub app since the catalog was read.
+    // A room or a name the home does not know may come from an edit in the
+    // SprutHub app that the hub's events did not carry: the home is read
+    // again once rather than answer "nothing".
     if (
-      !refreshed &&
+      !read.fresh &&
       ((selection.roomId !== null && !hasRoom(read.catalog, selection)) ||
         (candidates.length === 0 && selection.query !== null))
     ) {
       read = await client.homeCatalog(serial, deadline, { refresh: true });
-      refreshed = true;
       candidates = selectCandidates(read.catalog, selection);
     }
-    let catalog = read.catalog;
+    const catalog = read.catalog;
     if (selection.roomId !== null && !hasRoom(catalog, selection)) {
       throw roomNotFound(selection);
     }
 
     const summary = !selection.filtered;
-    // A room is always read fresh: devices moved or added there in the
-    // SprutHub app are not in the catalog yet.
     const needValues =
       summary ||
       selection.state !== null ||
       selection.notify ||
       selection.values !== "none" ||
       selection.roomId !== null;
-    let values = null;
-    let observedAt = catalog.observedAt;
+    let values = needValues ? catalog.byId : null;
+    let observedAt = latestObservation(catalog, [
+      ...candidates,
+      ...switchCandidates(catalog, selection, candidates),
+    ]);
     // Only accessory.get reports a characteristic's notification; the
     // accessory lists leave it out whatever it is (owner hub, 3.0.0,
     // research/protocol/2026-10-12-notifications-live.md).
-    let valuesByAccessory = false;
-    if (needValues && read.fresh) {
-      values = byId(catalog.accessories);
-      observedAt = read.valuesObservedAt;
-    } else if (needValues) {
-      const fresh = await readValues(
-        client,
-        serial,
-        catalog,
-        [...candidates, ...switchCandidates(catalog, selection, candidates)],
-        deadline,
-        selection.roomId,
-        selection.notify,
-      );
-      if (fresh.stale && !refreshed && fresh.byAccessory) {
-        // The device reads carry the current name, room and services of
-        // each accessory they read: those catalog entries are updated
-        // instead of re-reading the home on the deadline the reads have
-        // spent (the owner's 81 accessory.get took about 9 s of a 10 s
-        // timeout, 2026-10-12-notifications-live).
-        catalog = await withAccessoriesRead(client, serial, catalog, fresh);
-        candidates = selectCandidates(catalog, selection);
-        values = byId(fresh.accessories);
-        observedAt = fresh.observedAt;
-        valuesByAccessory = true;
-        // The name asked for left the devices the catalog had under it,
-        // and may now be another's, such as a device paired again under a
-        // new id: the home is read again, on a deadline of its own.
-        if (candidates.length === 0 && selection.query !== null) {
-          read = await client.homeCatalog(
-            serial,
-            Date.now() + client.timeoutMs,
-            { refresh: true },
-          );
-          refreshed = true;
-          catalog = read.catalog;
-          candidates = selectCandidates(catalog, selection);
-          values = byId(catalog.accessories);
-          observedAt = read.valuesObservedAt;
-          valuesByAccessory = false;
-        }
-      } else if (fresh.stale && !refreshed) {
-        read = await client.homeCatalog(serial, deadline, { refresh: true });
-        catalog = read.catalog;
-        // Devices moved out of a room deleted in the SprutHub app.
-        if (selection.roomId !== null && !hasRoom(catalog, selection)) {
-          throw roomNotFound(selection);
-        }
-        candidates = selectCandidates(catalog, selection);
-        values = byId(catalog.accessories);
-        observedAt = read.valuesObservedAt;
-      } else {
-        // An empty room read agrees with an empty room of the catalog even
-        // after the room was deleted in the app; the room list tells.
-        if (selection.roomId !== null && fresh.accessories.length === 0) {
-          const { rooms } = await client.nativeRooms(serial, deadline);
-          if (!rooms.some(({ id }) => id === selection.roomId)) {
-            throw roomNotFound(selection);
-          }
-        }
-        if (fresh.wholeHome) {
-          catalog = client.rememberHomeCatalog(serial, {
-            rooms: catalog.rooms,
-            accessories: fresh.accessories,
-            observedAt: fresh.observedAt,
-            generation: fresh.generation,
-          });
-          candidates = selectCandidates(catalog, selection);
-        }
-        values = byId(fresh.accessories);
-        observedAt = fresh.observedAt;
-        valuesByAccessory = fresh.byAccessory === true;
-      }
-    }
-    // A room or a refreshed catalog was read as a list: the matched
-    // accessories are read again, each with accessory.get.
-    if (selection.notify && !valuesByAccessory) {
+    if (selection.notify) {
       const reads = await readEachAccessory(
         client,
         serial,
@@ -925,118 +832,18 @@ function deviceText(service, accessory, rooms) {
   return `${service.name} ${accessory.name} ${room?.name ?? ""}`;
 }
 
-// Fresh values of the candidates' accessories with the fewest native
-// requests; a selected room is read whole with accessory.list {roomId}, so
-// a device moved or added there shows. A targeted read that disagrees with
-// the catalog (an accessory gone, added, renamed, moved or changed) marks
-// the catalog stale. eachAccessory (a notification answer) reads every
-// accessory outside a room with accessory.get, however many.
-async function readValues(
-  client,
-  serial,
-  catalog,
-  candidates,
-  deadline,
-  roomId,
-  eachAccessory = false,
-) {
-  const generation = client.writeGeneration;
-  const accessoryIds = accessoryIdsOf(candidates);
-  const roomIds =
-    roomId === null
-      ? [...new Set(candidates.map((c) => c.accessory.roomId))]
-      : [roomId];
-  if (roomId === null && accessoryIds.length === 0) {
-    return {
-      accessories: [],
-      observedAt: catalog.observedAt,
-      stale: false,
-      byAccessory: true,
-    };
-  }
-  if (
-    roomId === null &&
-    (eachAccessory || accessoryIds.length <= TARGETED_ACCESSORY_READS)
-  ) {
-    const reads = eachAccessory
-      ? await readEachAccessory(client, serial, accessoryIds)
-      : await Promise.all(
-          accessoryIds.map((id) =>
-            client.nativeAccessory(serial, id, deadline),
-          ),
-        );
-    const accessories = reads.map(({ accessory }) => accessory);
-    return {
-      accessories: accessories.filter(Boolean),
-      // Every accessory read, those the hub no longer has included.
-      readIds: accessoryIds,
-      observedAt: latest(reads.map(({ observedAt }) => observedAt)),
-      stale: accessoryIds.some(
-        (id, index) =>
-          !accessories[index] ||
-          catalog.identities.get(id) !== accessoryIdentity(accessories[index]),
-      ),
-      byAccessory: true,
-      generation,
-    };
-  }
-  if (roomIds.length <= TARGETED_ROOM_READS) {
-    const reads = await Promise.all(
-      roomIds.map((roomId) =>
-        client.nativeAccessories(serial, deadline, { roomId }),
-      ),
-    );
-    const accessories = reads.flatMap((read, index) =>
-      read.accessories.filter(({ roomId }) => roomId === roomIds[index]),
-    );
-    const known = catalog.accessories.filter(({ roomId }) =>
-      roomIds.includes(roomId),
-    );
-    return {
-      accessories,
-      observedAt: latest(reads.map(({ observedAt }) => observedAt)),
-      stale:
-        accessories.length !== known.length ||
-        accessories.some(
-          (accessory) =>
-            catalog.identities.get(accessory.id) !==
-            accessoryIdentity(accessory),
-        ),
-    };
-  }
-  const read = await client.nativeAccessories(serial, deadline);
-  const knownRooms = new Set(catalog.rooms.map(({ id }) => id));
-  return {
-    accessories: read.accessories,
-    observedAt: read.observedAt,
-    wholeHome: true,
-    generation,
-    // An accessory in a room the catalog does not know means new rooms.
-    stale: read.accessories.some(({ roomId }) => !knownRooms.has(roomId)),
-  };
-}
-
-// The catalog with the accessories a targeted read found in place of its
-// entries for them and without those it found gone; the other entries and
-// the time the catalog was read stay. A room the catalog does not know
-// takes one room list, on a deadline of its own.
-async function withAccessoriesRead(client, serial, catalog, read) {
-  const found = byId(read.accessories);
-  const readIds = new Set(read.readIds);
-  const accessories = catalog.accessories
-    .filter(({ id }) => !readIds.has(id) || found.has(id))
-    .map((accessory) => found.get(accessory.id) ?? accessory);
-  const knownRooms = new Set(catalog.rooms.map(({ id }) => id));
-  const rooms = read.accessories.some(({ roomId }) => !knownRooms.has(roomId))
-    ? (await client.nativeRooms(serial, Date.now() + client.timeoutMs)).rooms
-    : catalog.rooms;
-  return client.rememberHomeCatalog(serial, {
-    rooms,
-    accessories,
-    observedAt: catalog.observedAt,
-    builtAt: catalog.builtAt,
-    generation: read.generation,
-  });
+// When the hub last reported what an answer shows: the latest read or event
+// of the candidates' accessories, of all accessories without candidates,
+// and the whole read of the home.
+function latestObservation(catalog, candidates = null) {
+  const ids =
+    candidates === null
+      ? [...catalog.accessoryObservedAt.keys()]
+      : accessoryIdsOf(candidates);
+  return latest([
+    catalog.observedAt,
+    ...ids.map((id) => catalog.accessoryObservedAt.get(id)),
+  ]);
 }
 
 function accessoryIdsOf(candidates) {
@@ -1658,9 +1465,8 @@ function overviewEntries(selection, { roomList, scenarios, extensions }) {
 // lists them: counted as that call selects them, so a light word classifies
 // the question there too, and the relays it lists beside the lamps count
 // apart.
-function deviceMatchesHint(serial, query, rooms, accessories) {
+function deviceMatchesHint(serial, query, catalog) {
   const selection = findSelection({ query }, serial);
-  const catalog = { rooms: rooms.rooms, accessories: accessories.accessories };
   const candidates = selectCandidates(catalog, selection);
   const switches = switchCandidates(catalog, selection, candidates).length;
   return candidates.length + switches > 0
