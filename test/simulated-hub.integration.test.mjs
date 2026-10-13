@@ -342,6 +342,8 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
     reason: "Включать свет в ванной при движении",
   });
   assert.equal(prepared.status, "prepared");
+  // No scenario turns the bathroom light on by its motion yet.
+  assert.equal(prepared.existing_rules, undefined);
   assert.deepEqual(hub.writes(), []);
 
   const applied = await call(client, "apply_native_change", {
@@ -389,6 +391,74 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
     diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
     [],
   );
+  assertEveryRequestSupported(hub);
+});
+
+// «Когда в коридоре движение, включай там свет»: scenario 3 already turns
+// the corridor light on by motion and off two minutes later. A second
+// scenario would duplicate it, so the plan names it before any write.
+test("a rule the home already has is named before a second scenario is written", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "block_create",
+    target_ref: homeRef,
+    name: "Свет в коридоре при движении",
+    description: "Включает свет в коридоре при движении",
+    active: true,
+    on_start: false,
+    sync: false,
+    data: {
+      targets: [
+        {
+          type: "if",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: 13,
+                sId: 13,
+                cId: 14,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                cond: "=",
+                value: "true",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+          then: [
+            {
+              type: "service",
+              aId: 14,
+              sId: 13,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 14, hc: "On", value: "true" },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    reason: "Включать свет в коридоре при движении",
+  });
+
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(prepared.existing_rules, [
+    {
+      ref: `${homeRef}/scenario/3`,
+      name: "Свет в коридоре по движению",
+      active: true,
+      relation: "superset",
+    },
+  ]);
+  assert.equal(typeof prepared.tell_owner, "string");
+  assert.deepEqual(hub.writes(), []);
   assertEveryRequestSupported(hub);
 });
 
