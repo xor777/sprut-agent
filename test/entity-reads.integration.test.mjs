@@ -371,6 +371,35 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
                   time: 30000,
                 },
                 { type: "code", code: "return true;" },
+                // «И поменялось на обратное в течение» 10 s: true just after
+                // motion stops, which the reading of false cannot rule out.
+                {
+                  type: "characteristic",
+                  aId: 13,
+                  sId: 13,
+                  cId: 14,
+                  hs: "MotionSensor",
+                  hc: "MotionDetected",
+                  cond: "=",
+                  value: "true",
+                  trigger: false,
+                  timeCond: "<",
+                  time: 10000,
+                },
+                // A hold form the decoder does not know.
+                {
+                  type: "characteristic",
+                  aId: 13,
+                  sId: 13,
+                  cId: 14,
+                  hs: "MotionSensor",
+                  hc: "MotionDetected",
+                  cond: "=",
+                  value: "true",
+                  trigger: false,
+                  timeCond: "<=",
+                  time: 10000,
+                },
               ],
             },
             // biome-ignore lint/suspicious/noThenProperty: native SprutHub BLOCK key.
@@ -470,6 +499,26 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
     status: "not_analyzed",
     pointer: `${pointer}/if/conditions/6`,
   });
+  // There is no motion now: the value does not match, and only a hold of
+  // «unchanged for more than» is decided by that.
+  const motion = {
+    type: "characteristic",
+    trigger: false,
+    device: "Датчик движения в коридоре",
+    room: "Коридор",
+    service: "Движение",
+    characteristic: "Обнаружено движение",
+    characteristic_type: "MotionDetected",
+    op: "=",
+    value: true,
+    current: { value: false },
+    holds_now: null,
+    ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
+  };
+  assert.deepEqual(conditions.slice(7), [
+    { ...motion, held: { op: "<", seconds: 10 } },
+    { ...motion, held: { op: "<=", seconds: 10 } },
+  ]);
   assert.deepEqual(
     rule.then.map(({ op, type, characteristic, value, unit, ...rest }) =>
       op ? { op, characteristic, value, unit } : { type, ...rest },
