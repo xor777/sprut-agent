@@ -453,6 +453,49 @@ for (const route of ["change_ref", "change_refs"]) {
   });
 }
 
+// The same promise when the agent goes through the contract and
+// prepare_native_change instead of send_device_commands.
+test("a lamp's level through prepare_native_change reports it is not restorable and the curtains' position that it is", async (t) => {
+  const { client } = await setup(t, LAMP_LOGIC);
+  for (const [target, value, restorable] of [
+    [FLOOR_LEVEL, 20, false],
+    [CURTAIN_TARGET, 50, true],
+  ]) {
+    const input = {
+      operation: "characteristic_value",
+      target_ref: refOf(target),
+      value,
+      reason: "Приглушить торшер до 20% и прикрыть шторы",
+    };
+    const contract = await call(client, "get_native_change_contract", {
+      operation: input.operation,
+      target_ref: input.target_ref,
+    });
+    const prepared = await call(client, "prepare_native_change", input);
+    const applied = await call(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const shown = await call(client, "get_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    for (const [name, answer] of Object.entries({
+      contract,
+      prepared,
+      applied,
+      shown,
+    })) {
+      const message = `${name}: ${JSON.stringify(answer)}`;
+      assert.equal(answer.restore_supported, restorable, message);
+      assert.equal(
+        answer.restore_limitation?.code,
+        restorable ? undefined : "lamp_level_not_restored",
+        message,
+      );
+    }
+  }
+});
+
 // A level set through prepare_native_change, also when the hub refused the
 // device read at prepare, is still a lamp's level at undo: written back,
 // 55 would switch on the lamp the owner has since turned off.
