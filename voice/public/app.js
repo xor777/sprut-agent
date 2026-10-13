@@ -7,7 +7,6 @@ const button = document.getElementById("talk");
 const logElement = document.getElementById("log");
 const endButton = document.getElementById("end");
 
-const TOKEN_KEY = "sprut-voice-token";
 const VOICE_KEY = "sprut-voice-voice";
 const IDLE_HANGUP_MS = 45_000;
 // With the microphone off the person is busy elsewhere; wait longer.
@@ -24,14 +23,18 @@ const STATES = {
   speaking: ["Говорит", ""],
   ended: ["Разговор закончен", "Нажмите, чтобы поговорить снова"],
   error: ["Ошибка", "Не получилось. Нажмите ещё раз"],
-  no_token: ["Нет приглашения", "Откройте ссылку-приглашение"],
+  no_token: ["Нет приглашения", "Откройте ссылку-приглашение ещё раз"],
 };
 
-let token = readToken();
 const voice = readVoice();
 let session = null;
 
-setState(token ? "idle" : "no_token");
+// The access key now lives in an HttpOnly cookie left by the invite link;
+// an older version kept it here.
+try {
+  localStorage.removeItem("sprut-voice-token");
+} catch {}
+setState("idle");
 navigator.serviceWorker?.register("/sw.js").catch(() => {});
 // During a conversation the orb turns the microphone off and on, so the
 // person can talk to someone nearby without ending it.
@@ -47,8 +50,6 @@ document.addEventListener("visibilitychange", () => {
 });
 
 async function start() {
-  token = readToken();
-  if (!token) return setState("no_token");
   const current = {
     calls: new Map(),
     lines: new Map(),
@@ -353,30 +354,22 @@ function send(current, event) {
 async function api(path, body = {}) {
   const response = await fetch(path, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (response.status === 204) return {};
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error?.message ?? `Ошибка ${response.status}`);
-    error.code = data.error?.code;
-    if (error.code === "unauthorized") {
-      try {
-        localStorage.removeItem(TOKEN_KEY);
-      } catch {}
-      token = null;
-    }
+    // Without the invite cookie the server answers as an empty address.
+    error.code = response.status === 404 ? "unauthorized" : data.error?.code;
     throw error;
   }
   return data;
 }
 
 function remoteLog(type, text) {
-  if (!token || !text) return;
+  if (!text) return;
   api("/api/log", { events: [{ type, text }] }).catch(() => {});
 }
 
@@ -450,31 +443,12 @@ function setState(state, detail) {
   );
 }
 
-// The invite link carries the access key in its fragment, which never
-// reaches a server log; the page keeps it and removes it from the address.
-function readToken() {
-  const match = /(?:^#|&)k=([^&]+)/.exec(location.hash);
-  if (match) {
-    const value = decodeURIComponent(match[1]);
-    history.replaceState(null, "", location.pathname + location.search);
-    try {
-      localStorage.setItem(TOKEN_KEY, value);
-    } catch {}
-    return value;
-  }
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return token ?? null;
-  }
-}
-
 // «/?voice=cedar» picks a built-in voice for this phone and keeps it; the
 // server accepts only its own list and otherwise uses the default.
 function readVoice() {
   const requested = new URLSearchParams(location.search).get("voice");
   if (requested !== null) {
-    history.replaceState(null, "", location.pathname + location.hash);
+    history.replaceState(null, "", location.pathname);
     try {
       if (requested) localStorage.setItem(VOICE_KEY, requested);
       else localStorage.removeItem(VOICE_KEY);

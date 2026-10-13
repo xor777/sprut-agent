@@ -34,6 +34,16 @@ const STATIC_FILES = {
   "/icon-192.png": ["icon-192.png", "image/png"],
   "/icon-512.png": ["icon-512.png", "image/png"],
 };
+// Chrome fetches the manifest and icons without cookies to install the app;
+// they name nothing but «Домик». Everything else needs the invite.
+const PUBLIC_PATHS = new Set([
+  "/manifest.webmanifest",
+  "/icon-192.png",
+  "/icon-512.png",
+]);
+const INVITE_PATH = /^\/i\/([^/]+)$/;
+const INVITE_COOKIE = "sv";
+const INVITE_COOKIE_MAX_AGE_S = 365 * 24 * 60 * 60;
 const MAX_BODY_BYTES = 64 * 1024;
 const VOICE_SECRETS = ["OPENAI_API_KEY", "VOICE_ACCESS_TOKEN"];
 
@@ -81,13 +91,18 @@ export async function startVoiceServer({
     env.OPENAI_BASE_URL || "https://api.openai.com/v1"
   ).replace(/\/$/, "");
 
-  const authorized = (request) => {
-    const match = /^Bearer (.+)$/.exec(request.headers.authorization ?? "");
-    if (!match) return false;
-    const given = Buffer.from(match[1]);
+  const matches = (value) => {
+    const given = Buffer.from(String(value ?? ""));
     return (
       given.length === accessToken.length && timingSafeEqual(given, accessToken)
     );
+  };
+  // The phone carries the key in an HttpOnly cookie left by the invite link;
+  // tools and tests may send it as a bearer key instead.
+  const authorized = (request) => {
+    const bearer = /^Bearer (.+)$/.exec(request.headers.authorization ?? "");
+    if (bearer) return matches(bearer[1]);
+    return matches(cookieValue(request.headers.cookie, INVITE_COOKIE));
   };
 
   const mintSession = async ({ voice } = {}) => {
@@ -160,6 +175,21 @@ export async function startVoiceServer({
 
   const handle = async (request, response) => {
     const url = new URL(request.url, "http://localhost");
+    const invite = INVITE_PATH.exec(url.pathname);
+    if (request.method === "GET" && invite) {
+      if (!matches(safeDecode(invite[1]))) return notFound(response);
+      response.writeHead(302, {
+        Location: "/",
+        "Set-Cookie": `${INVITE_COOKIE}=${encodeURIComponent(env.VOICE_ACCESS_TOKEN)}; Path=/; Max-Age=${INVITE_COOKIE_MAX_AGE_S}; HttpOnly; Secure; SameSite=Lax`,
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+      });
+      return response.end();
+    }
+    // Without the invite the site is an empty address: every page, script
+    // and call answers the same not-found, so nothing tells a home is here.
+    const open = PUBLIC_PATHS.has(url.pathname) || authorized(request);
+    if (!open) return notFound(response);
     const file = STATIC_FILES[url.pathname];
     if (request.method === "GET" && file) {
       const body = await readFile(path.join(publicDirectory, file[0]));
@@ -169,18 +199,11 @@ export async function startVoiceServer({
       });
       return response.end(body);
     }
-    if (!url.pathname.startsWith("/api/")) {
-      return send(response, 404, error("not_found", "Нет такой страницы."));
+    if (!url.pathname.startsWith("/api/") || PUBLIC_PATHS.has(url.pathname)) {
+      return notFound(response);
     }
     if (request.method !== "POST") {
       return send(response, 405, error("method_not_allowed", "Только POST."));
-    }
-    if (!authorized(request)) {
-      return send(
-        response,
-        401,
-        error("unauthorized", "Нужна ссылка-приглашение."),
-      );
     }
     const body = await readJson(request);
     if (url.pathname === "/api/session") {
@@ -292,6 +315,30 @@ async function readJson(request) {
   }
 }
 
+function notFound(response) {
+  response.writeHead(404, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  response.end("Not found");
+}
+
+function cookieValue(header, name) {
+  for (const part of String(header ?? "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return safeDecode(rest.join("="));
+  }
+  return null;
+}
+
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
 function send(response, status, body) {
   if (body === undefined) {
     response.writeHead(status);
@@ -348,7 +395,7 @@ async function main() {
     tunnel = await openQuickTunnel(server.url, console.log);
     console.log(`[voice] public address: ${tunnel.url}`);
     console.log(
-      `[voice] invite link (open it on the phone once): ${tunnel.url}/#k=${env.VOICE_ACCESS_TOKEN}`,
+      `[voice] invite link: ${tunnel.url}/i/<VOICE_ACCESS_TOKEN from ${file}>`,
     );
   }
   const shutdown = async () => {

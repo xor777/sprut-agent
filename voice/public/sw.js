@@ -1,6 +1,6 @@
 // Keeps the page shell available so the installed app opens without network
 // and shows that it cannot connect; API calls always go to the network.
-const CACHE = "sprut-voice-v4";
+const CACHE = "sprut-voice-v5";
 const SHELL = ["/", "/app.js", "/manifest.webmanifest", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {
@@ -33,8 +33,11 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        // A not-found without the invite must not replace the cached shell.
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        }
         return response;
       })
       .catch(() =>

@@ -59,8 +59,11 @@ async function setup(t, { faults, editHome, afterStart } = {}) {
       },
       body: JSON.stringify(body ?? {}),
     });
-    const text = await response.text();
-    return { status: response.status, body: text ? JSON.parse(text) : null };
+    const json = response.headers.get("content-type")?.includes("json");
+    return {
+      status: response.status,
+      body: json ? await response.json() : await response.text(),
+    };
   };
   // A browser request: no key in the page, only what the invite left.
   const visit = async (route, { cookie, method = "GET", body } = {}) => {
