@@ -5146,13 +5146,23 @@ export function isSensitiveNativeNode(value, key = "") {
   ) {
     return true;
   }
-  // The option's own key decides for its label too: a CHECKBOX
-  // InstallCodeEnabled labelled «Install code» is a flag.
-  if (
-    typeof value.key === "string" &&
-    isFlagOrSize(value.key, value.value ?? value.configured_value)
-  ) {
-    return false;
+  // A flag or size key decides for its label, type and ref where the value
+  // cannot be what they name. A boolean holds no secret: a CHECKBOX
+  // InstallCodeEnabled labelled «Install code» is a flag. A number is a
+  // size or a kind unless they name a secret without such a part: Mode
+  // labelled «Password» may hold the password, PinCodeLength labelled «PIN
+  // code length» does not.
+  const configured = value.value ?? value.configured_value;
+  if (typeof value.key === "string" && isFlagOrSize(value.key, configured)) {
+    return (
+      !isBooleanValue(configured) &&
+      [value.name, value.type, value.ref].some(
+        (candidate) =>
+          typeof candidate === "string" &&
+          isSensitiveKey(candidate) &&
+          !isFlagOrSize(candidate, configured),
+      )
+    );
   }
   return (
     [value.key, value.name, value.type, value.ref].some(
@@ -5185,16 +5195,25 @@ const FLAG_OR_SIZE_PARTS = new Set([
 
 function isFlagOrSize(name, value) {
   const scalar =
-    typeof value === "boolean" ||
+    isBooleanValue(value) ||
     typeof value === "number" ||
     (value !== null &&
       typeof value === "object" &&
-      ["boolValue", "intValue", "longValue", "doubleValue"].some((kind) =>
+      ["intValue", "longValue", "doubleValue"].some((kind) =>
         Object.hasOwn(value, kind),
       ));
   return (
     scalar &&
     credentialKeyParts(name).some((part) => FLAG_OR_SIZE_PARTS.has(part))
+  );
+}
+
+function isBooleanValue(value) {
+  return (
+    typeof value === "boolean" ||
+    (value !== null &&
+      typeof value === "object" &&
+      Object.hasOwn(value, "boolValue"))
   );
 }
 
