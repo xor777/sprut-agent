@@ -83,7 +83,30 @@ async function setup(t) {
   // the test lost it first (loseNext).
   const stopOnNext = (method) =>
     onNext(method, () => process.kill(servers.at(-1).transport.pid, "SIGKILL"));
-  return { hub, client, connect, onNext, stopOnNext };
+  // The hub refuses the reads of this method whose count from now on is in
+  // ordinals (1 is the next one), and answers the others.
+  const refuseReads = (method, ordinals) => {
+    let count = 0;
+    hooks.onRequest = (request) => {
+      if (request.method !== method) return;
+      count += 1;
+      if (ordinals.includes(count)) hub.refuseNext(method);
+      if (count >= Math.max(...ordinals)) hooks.onRequest = undefined;
+    };
+  };
+  // The same, counted from the moment the hub receives the next request of
+  // `after`.
+  const refuseReadsAfter = (after, method, ordinals) =>
+    onNext(after, () => refuseReads(method, ordinals));
+  return {
+    hub,
+    client,
+    connect,
+    onNext,
+    stopOnNext,
+    refuseReads,
+    refuseReadsAfter,
+  };
 }
 
 async function call(client, name, args) {
@@ -726,6 +749,76 @@ for (const { name, write, read, inputs } of CHAINS) {
     assert.equal(earlier.status, "restored", JSON.stringify(earlier));
     await assertBothUndone(hub, restarted, initial, first, second);
   });
+
+  // The earlier undo depends on the read that settles the later one: when
+  // that read fails too, nothing is written for the earlier change and its
+  // outcome is unknown; the undo once more puts both back.
+  test(`«верни как было» over ${name} whose later undo is not read back, nor its check before the earlier undo, writes nothing for the earlier one and once repeated puts both back`, async (t) => {
+    const { hub, client, refuseReadsAfter } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const afterFirst = hub.snapshot();
+    const second = await applied(client, inputs[1](hub));
+    const armed = refuseReadsAfter(write, read, [1, 3]);
+    const undone = await call(client, "restore_native_change", {
+      change_refs: [first.change_ref, second.change_ref],
+    });
+    await armed;
+    const item = itemOf(undone, first);
+    assert.equal(item.status, "uncertain", JSON.stringify(undone.results));
+    assert.equal(item.sent, false);
+    assert.deepEqual(item.next, {
+      tool: "restore_native_change",
+      arguments: { change_ref: first.change_ref },
+    });
+    // The later undo took effect, the earlier change is still in place.
+    assert.deepEqual(diffHomeSnapshots(afterFirst, hub.snapshot()), []);
+
+    const sentBefore = hub.requests.length;
+    const repeated = await call(client, "restore_native_change", {
+      change_refs: [first.change_ref, second.change_ref],
+    });
+    assert.equal(repeated.status, "ok", JSON.stringify(repeated.results));
+    assert.equal(writesSince(hub, sentBefore).length, 1);
+    await assertBothUndone(hub, client, initial, first, second);
+  });
+
+  test(`after the MCP server stopped during the undo of the later of ${name}, an undo of the earlier one whose check of the later one is not read writes nothing, and once repeated puts both back`, async (t) => {
+    const { hub, client, connect, stopOnNext, refuseReads } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const afterFirst = hub.snapshot();
+    const second = await applied(client, inputs[1](hub));
+    const stopped = stopOnNext(write);
+    callUnanswered(client, "restore_native_change", {
+      change_ref: second.change_ref,
+    });
+    await stopped;
+    const restarted = await connect();
+    // The earlier change's own read passes; the read of the later one fails.
+    refuseReads(read, [2]);
+    const unread = await call(restarted, "restore_native_change", {
+      change_ref: first.change_ref,
+    });
+    assert.equal(
+      unread.restore_outcome?.status,
+      "uncertain",
+      JSON.stringify(unread),
+    );
+    assert.deepEqual(unread.next, {
+      tool: "restore_native_change",
+      arguments: { change_ref: first.change_ref },
+    });
+    assert.deepEqual(diffHomeSnapshots(afterFirst, hub.snapshot()), []);
+
+    const earlier = await call(
+      restarted,
+      unread.next.tool,
+      unread.next.arguments,
+    );
+    assert.equal(earlier.status, "restored", JSON.stringify(earlier));
+    await assertBothUndone(hub, restarted, initial, first, second);
+  });
 }
 
 // The later of two changes of one scenario was sent, but its request never
@@ -738,7 +831,11 @@ const LATER_APPLY_CHAINS = [
   {
     name: "BLOCK data change",
     write: "scenario.update",
-    settled: { conflict: "change_was_not_applied", item: "not_applied" },
+    settled: {
+      conflict: "change_was_not_applied",
+      item: "not_applied",
+      title: "not applied",
+    },
     inputs: [
       (hub) => blockDataInput(hub, "20"),
       (hub) => blockDataInput(hub, "40"),
@@ -747,7 +844,11 @@ const LATER_APPLY_CHAINS = [
   {
     name: "LOGIC code change",
     write: "scenario.update",
-    settled: { conflict: "change_was_not_applied", item: "not_applied" },
+    settled: {
+      conflict: "change_was_not_applied",
+      item: "not_applied",
+      title: "not applied",
+    },
     inputs: [
       (hub) =>
         logicCodeInput(
@@ -766,7 +867,7 @@ const LATER_APPLY_CHAINS = [
   {
     name: "scenario rename",
     write: "window.update",
-    settled: { conflict: undefined, item: "not_owned" },
+    settled: { conflict: undefined, item: "not_owned", title: "not owned" },
     inputs: [() => renameInput("Ночь"), () => renameInput("Ночь, свет")],
   },
 ];
@@ -803,7 +904,7 @@ async function assertLaterNotApplied(
 }
 
 for (const { name, write, settled, inputs } of LATER_APPLY_CHAINS) {
-  test(`«верни как было» after the agent's later ${name} that never reached the hub puts the scenario back and names that change not applied`, async (t) => {
+  test(`«верни как было» after the agent's later ${name} that never reached the hub puts the scenario back and names that change ${settled.title}`, async (t) => {
     const { hub, client } = await setup(t);
     const initial = hub.snapshot();
     const first = await applied(client, inputs[0](hub));
@@ -826,7 +927,7 @@ for (const { name, write, settled, inputs } of LATER_APPLY_CHAINS) {
     });
   });
 
-  test(`after the MCP server stopped while sending the agent's later ${name} that never reached the hub, undoing the earlier change alone names the later one not applied`, async (t) => {
+  test(`after the MCP server stopped while sending the agent's later ${name} that never reached the hub, undoing the earlier change alone names the later one ${settled.title}`, async (t) => {
     const { hub, client, connect, stopOnNext } = await setup(t);
     const initial = hub.snapshot();
     const first = await applied(client, inputs[0](hub));
@@ -850,6 +951,66 @@ for (const { name, write, settled, inputs } of LATER_APPLY_CHAINS) {
     });
   });
 }
+
+// A pause the agent added to a BLOCK it had changed never reached the hub;
+// the BLOCK's change is then undone. The pause ends not applied, as a
+// pause the hub refused does, never as a pause controller changed.
+const MOTION_BLOCK = "3"; // Свет в коридоре по движению
+
+test("a pause of a BLOCK action that never reached the hub, then the BLOCK's earlier change undone, ends not applied", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const data = JSON.parse(scenarioOf(hub, MOTION_BLOCK).data);
+  data.targets[0].then[1].time = 60_000;
+  const first = await applied(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef(MOTION_BLOCK),
+    data,
+    reason: "Свет в коридоре гаснет через минуту",
+  });
+  const pause = await call(client, "prepare_native_change", {
+    operation: "block_action_pause",
+    target_ref: scenarioRef(MOTION_BLOCK),
+    action_pointer: "/targets/0/then/0",
+    duration_seconds: 600,
+    reason: "Не включать свет в коридоре десять минут",
+  });
+  assert.equal(pause.status, "prepared", JSON.stringify(pause));
+  hub.loseNext("scenario.update");
+  const lost = await call(client, "apply_native_change", {
+    change_ref: pause.change_ref,
+  });
+  assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, pause.change_ref],
+  });
+  assert.equal(itemOf(undone, first).status, "restored");
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+
+  const sentBefore = hub.requests.length;
+  const read = await call(client, "get_native_change", {
+    change_ref: pause.change_ref,
+  });
+  assert.equal(read.status, "not_applied", JSON.stringify(read));
+  assert.equal(read.conflict_reason, "change_was_not_applied");
+  const again = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, pause.change_ref],
+  });
+  assert.deepEqual(
+    again.results.map(({ change_ref: ref, status, reason }) => [
+      ref,
+      status,
+      reason,
+    ]),
+    [
+      [pause.change_ref, "skipped", "not_applied"],
+      [first.change_ref, "restored", undefined],
+    ],
+  );
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
 
 // The first delete of a created BLOCK got no answer and arrives at the hub
 // late: right before the delete the next restore sends, which then finds
@@ -888,6 +1049,40 @@ for (const when of ["the resent delete", "the read before it"]) {
     assert.equal(read.status, "restored", JSON.stringify(read));
   });
 }
+
+// The resent delete is refused, as the late first one deleted the BLOCK,
+// and the read that would settle the refusal fails: nothing is concluded,
+// the undo's outcome is unknown, and once repeated it is found done.
+test("a resent undo of a created BLOCK refused after its late first delete, whose check is not read, stays unknown and once repeated is done", async (t) => {
+  const { hub, client, onNext } = await setup(t);
+  const initial = hub.snapshot();
+  const created = await applied(client, createdBlockInput);
+  const index = hub.state.scenarios.find(
+    ({ name }) => name === CREATED_BLOCK_NAME,
+  ).index;
+  hub.loseNext("scenario.delete");
+  await call(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+
+  const late = onNext("scenario.delete", () => {
+    hub.request({ scenario: { delete: { index } } });
+    hub.refuseNext("scenario.get");
+  });
+  const unread = await call(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+  await late;
+  assert.equal(unread.status, "uncertain", JSON.stringify(unread));
+  assert.deepEqual(unread.next, {
+    tool: "restore_native_change",
+    arguments: { change_ref: created.change_ref },
+  });
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+
+  const done = await call(client, unread.next.tool, unread.next.arguments);
+  assert.equal(done.status, "restored", JSON.stringify(done));
+});
 
 // The undo of a rename takes effect but its answer is lost, and the check
 // of the scenario after it fails too: the undo was sent and its outcome
