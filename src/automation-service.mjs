@@ -12618,9 +12618,16 @@ function scenarioChangeSnapshot(change, scenario) {
 // What a write of this change leaves on the hub, field by field as an
 // applied snapshot holds it: what an apply not yet seen would show.
 function scenarioRequestedSnapshot(change) {
-  return isLogicSourceChange(change)
-    ? logicSourceRequestedSnapshot(change)
-    : change.requested_snapshot;
+  if (isLogicSourceChange(change)) return logicSourceRequestedSnapshot(change);
+  // A create the hub acknowledged has its index even when the read after
+  // it failed; its Desc carries the ownership marker.
+  if (change.kind === "block_create") {
+    return {
+      ...blockCreateRequest(change),
+      data: change.requested_snapshot.data,
+    };
+  }
+  return change.requested_snapshot;
 }
 
 function requiredLogicSource(value) {
