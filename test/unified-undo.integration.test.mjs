@@ -453,6 +453,32 @@ for (const route of ["change_ref", "change_refs"]) {
   });
 }
 
+// A level set through prepare_native_change, also when the hub refused the
+// device read at prepare, is still a lamp's level at undo: written back,
+// 55 would switch on the lamp the owner has since turned off.
+for (const deviceRead of ["answered", "refused"]) {
+  test(`a lamp's level set through prepare_native_change stays as it is after the owner switched the lamp off (device read ${deviceRead})`, async (t) => {
+    const { hub, client } = await setup(t, LAMP_LOGIC);
+    if (deviceRead === "refused") hub.refuseNext("accessory.get");
+    const applied = await prepareAndApply(client, {
+      operation: "characteristic_value",
+      target_ref: refOf(FLOOR_LEVEL),
+      value: 20,
+      reason: "Приглушить торшер до 20%",
+    });
+    hub.changeByHand({ ...FLOOR_ON, value: { boolValue: false } });
+
+    const before = hub.requests.length;
+    const restored = await call(client, "restore_native_change", {
+      change_refs: [applied.change_ref],
+    });
+    assertLevelLeft(itemFor(restored, applied.change_ref));
+    assert.deepEqual(valueWritesSince(hub, before), []);
+    assert.equal(currentValue(hub, FLOOR_ON), false);
+    assert.equal(currentValue(hub, FLOOR_LEVEL), 20);
+  });
+}
+
 // The review's case: the strip, off at 100, is switched on at 40, and a
 // level write of the undo would get no answer. Undo switches it off and
 // neither writes its level or color nor offers to, then or on a repeat.
