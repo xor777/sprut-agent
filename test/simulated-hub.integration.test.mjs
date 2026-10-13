@@ -1272,48 +1272,85 @@ test("the simulator reports BLOCK writes of the web client's forms with their li
   }
 });
 
+const newLeakSensor = {
+  extensionKey: "Controller:zigbee",
+  joinAfterMs: 50,
+  interviewMs: 50,
+  accessory: {
+    id: 200,
+    name: "Новый датчик",
+    deviceId: "00158d0007c0ffee",
+    services: [
+      {
+        sId: 13,
+        type: "LeakSensor",
+        name: "Протечка",
+        characteristics: [{ cId: 14, type: "LeakDetected", value: 0 }],
+      },
+    ],
+  },
+};
+
+const searchAction = (state) => ({
+  extension: {
+    action: {
+      extensionKey: "Controller:zigbee",
+      spaceKey: "main",
+      actionId: 1,
+      state,
+    },
+  },
+});
+
+// A connection that sends nothing and keeps the events the hub pushes to
+// it. The simulator sends them from timers, so a test waits for a number
+// of them to arrive rather than for a fixed time.
+async function listenToEvents(t, hub) {
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  const events = [];
+  socket.on("message", (data) => events.push(JSON.parse(data.toString())));
+  return {
+    kinds: () =>
+      events.map(({ event }) =>
+        event?.extension
+          ? `extension ${event.extension.event}`
+          : event?.extensionChild
+            ? `extensionChild ${event.extensionChild.event}`
+            : event?.accessory
+              ? `accessory ${event.accessory.event}`
+              : "other",
+      ),
+    arrived: (count) =>
+      new Promise((resolve, reject) => {
+        const check = () => {
+          if (events.length < count) return;
+          clearTimeout(timer);
+          socket.off("message", check);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          socket.off("message", check);
+          reject(new Error(`${events.length} of ${count} events arrived`));
+        }, 5_000);
+        socket.on("message", check);
+        check();
+      }),
+  };
+}
+
 // The ZigBee search as the owner's hub ran it (2026-10-12-device-pairing,
 // check 1): an empty answer, state and endTimestamp read back, a repeat
 // restarting the timer, a stop clearing it, and an extension event pushed
-// to a connection that sent nothing.
+// to a connection that sent nothing. The hub's order of a repeat's event
+// and a device's join was not observed; the repeat goes after the join so
+// that the order of events does not depend on the test's own speed.
 test("the simulator runs a ZigBee search as the live hub did and lets a pairing device join", async (t) => {
   const fixture = await loadHomeFixture("apartment");
-  fixture.pairing = [
-    {
-      extensionKey: "Controller:zigbee",
-      joinAfterMs: 50,
-      interviewMs: 50,
-      accessory: {
-        id: 200,
-        name: "Новый датчик",
-        deviceId: "00158d0007c0ffee",
-        services: [
-          {
-            sId: 13,
-            type: "LeakSensor",
-            name: "Протечка",
-            characteristics: [{ cId: 14, type: "LeakDetected", value: 0 }],
-          },
-        ],
-      },
-    },
-  ];
+  fixture.pairing = [newLeakSensor];
   const { hub, send } = await rawSession(t, {}, fixture);
-  const listener = new WebSocket(hub.url, "json-rpc");
-  t.after(() => listener.close());
-  await once(listener, "open");
-  const events = [];
-  listener.on("message", (data) => events.push(JSON.parse(data.toString())));
-  const action = (state, spaceKey = "main") => ({
-    extension: {
-      action: {
-        extensionKey: "Controller:zigbee",
-        spaceKey,
-        actionId: 1,
-        state,
-      },
-    },
-  });
+  const events = await listenToEvents(t, hub);
   const actions = async () =>
     (
       await send({ extension: { get: { extensionKey: "Controller:zigbee" } } })
@@ -1324,7 +1361,7 @@ test("the simulator runs a ZigBee search as the live hub did and lets a pairing 
     }));
 
   const before = Date.now();
-  assert.deepEqual((await send(action(true))).result, {
+  assert.deepEqual((await send(searchAction(true))).result, {
     extension: { action: {} },
   });
   const [main, zll] = await actions();
@@ -1340,14 +1377,9 @@ test("the simulator runs a ZigBee search as the live hub did and lets a pairing 
     true,
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  await send(action(true));
-  const [restarted] = await actions();
-  assert(restarted.endTimestamp > main.endTimestamp);
-
   // The device joins as a child with progress, then as an accessory the
-  // child window links.
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  // child window links: the start's event and the join's three.
+  await events.arrived(4);
   const children = (
     await send({
       extensionChild: { list: { extensionKey: "Controller:zigbee" } },
@@ -1372,27 +1404,23 @@ test("the simulator runs a ZigBee search as the live hub did and lets a pairing 
   assert.equal(accessory.deviceId, "00158d0007c0ffee");
   assert.equal(accessory.deviceWindow, child.optionsWindow);
 
-  await send(action(false));
+  // The join took joinAfterMs and interviewMs, so the repeat's end is later.
+  await send(searchAction(true));
+  const [restarted] = await actions();
+  assert(restarted.endTimestamp > main.endTimestamp);
+
+  await send(searchAction(false));
   assert.deepEqual(await actions(), [
     { key: "main", state: false, endTimestamp: undefined },
     { key: "discovery", state: false, endTimestamp: undefined },
   ]);
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const kinds = events.map(({ event }) =>
-    event?.extension
-      ? `extension ${event.extension.event}`
-      : event?.extensionChild
-        ? `extensionChild ${event.extensionChild.event}`
-        : event?.accessory
-          ? `accessory ${event.accessory.event}`
-          : "other",
-  );
-  assert.deepEqual(kinds, [
-    "extension EVENT_UPDATE",
+  await events.arrived(6);
+  assert.deepEqual(events.kinds(), [
     "extension EVENT_UPDATE",
     "extensionChild EVENT_ADD",
     "accessory EVENT_ADD",
     "extensionChild EVENT_UPDATE",
+    "extension EVENT_UPDATE",
     "extension EVENT_UPDATE",
   ]);
   const touched = Object.fromEntries(
@@ -1400,4 +1428,41 @@ test("the simulator runs a ZigBee search as the live hub did and lets a pairing 
   );
   assert.equal(touched["extension.action {pairing}"], "schema_only");
   assert.equal(touched["extension.action"], "observed");
+});
+
+// A device that has joined the network and is still being added is one
+// device: a search started meanwhile does not let it join again, so the
+// hub ends with one child and one accessory for it. joinNow and a start
+// handled in the same turn put the start inside that window every time.
+test("a search started while a device is still joining does not add it twice", async (t) => {
+  const { hub, send } = await rawSession(t);
+  const events = await listenToEvents(t, hub);
+
+  hub.joinNow({ ...newLeakSensor, joinAfterMs: 0 });
+  hub.request(searchAction(true));
+  // The child's, the start's and the two of the device becoming an
+  // accessory; the stop's event comes after all of them.
+  await events.arrived(4);
+  await send(searchAction(false));
+  await events.arrived(5);
+
+  assert.deepEqual(events.kinds(), [
+    "extensionChild EVENT_ADD",
+    "extension EVENT_UPDATE",
+    "accessory EVENT_ADD",
+    "extensionChild EVENT_UPDATE",
+    "extension EVENT_UPDATE",
+  ]);
+  const children = (
+    await send({
+      extensionChild: { list: { extensionKey: "Controller:zigbee" } },
+    })
+  ).result.extensionChild.list.children;
+  assert.equal(
+    children.filter(({ id }) => id === "00158d0007c0ffee").length,
+    1,
+  );
+  const accessories = (await send({ accessory: { list: {} } })).result.accessory
+    .list.accessories;
+  assert.equal(accessories.filter(({ id }) => id === 200).length, 1);
 });
