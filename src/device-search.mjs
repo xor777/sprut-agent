@@ -70,14 +70,14 @@ export class DeviceSearches {
         const { search, result } = await this.#start(target, spaceKey, current);
         await keepState(
           () => this.#save(search),
-          () =>
+          async () =>
             result.status === "already_running"
               ? startNotSent(
                   result.active === true,
                   search.endsAt,
                   search.timeZone,
                 )
-              : startedNotKept(search, result),
+              : startedNotKept(search, result, await this.#isKept(search)),
         );
         return result;
       };
@@ -717,6 +717,15 @@ export class DeviceSearches {
     );
   }
 
+  // Whether the directory still holds a watch of this search, as saved
+  // before a save that failed, for get_device_search to find by its ref.
+  async #isKept(search) {
+    const watch = await this.#store(search.serial)
+      .get(searchId(search.ref))
+      .catch(() => null);
+    return watch?.ref === search.ref;
+  }
+
   #store(serial) {
     let store = this.#stores.get(serial);
     if (!store) {
@@ -1005,7 +1014,7 @@ async function keepState(step, notKept) {
   try {
     return await step();
   } catch {
-    throw notKept();
+    throw await notKept();
   }
 }
 
@@ -1032,27 +1041,36 @@ function startNotSent(running, end = null, timeZone = null) {
 }
 
 // A start that was sent, whose search as read back after it could not be
-// kept: get_device_search and stop_device_search cannot follow it until
-// the directory is fixed and a start returns it again.
-function startedNotKept(search, result) {
+// kept. The watch saved before the start (kept) counts the controller's
+// devices from before it, so get_device_search and stop_device_search
+// follow the search by its ref; a new start after the search ended would
+// count a device that joined meanwhile as an old one. Only when that watch
+// is gone too does the agent start again, which returns a running search.
+function startedNotKept(search, result, kept) {
   const running = result.active === true;
+  const sent = running
+    ? `The search was started: the controller's network is open, and any device in pairing mode within range can join until it closes by itself${result.ends_at ? " at ends_at" : ""}${kept ? " or is stopped" : ""}. Tell the owner the network is open.`
+    : `The start was sent to the hub, but the search ${result.active === false ? "does not show as running" : "could not be read back"}; get_entity of the controller shows whether it runs.`;
+  const follow = kept
+    ? `Its state after the start could not be saved in the local state directory, but the watch saved before the start follows it by search_ref: get_device_search reports the devices that join, counted from before the start, and stop_device_search closes the network. Both reach the hub while the directory cannot be written; get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
+    : `The search could not be saved in the local state directory, so get_device_search and stop_device_search cannot follow it yet. ${FIX_STATE_DIRECTORY}; then start the search again: a running search is returned with its stop, without restarting it.`;
   return new SprutHubError(
     "state_storage_unavailable",
-    `${
-      running
-        ? `The search was started: the controller's network is open, and any device in pairing mode within range can join until it closes by itself${result.ends_at ? " at ends_at" : ""}. Tell the owner the network is open.`
-        : `The start was sent to the hub, but the search ${result.active === false ? "does not show as running" : "could not be read back"}; get_entity of the controller shows whether it runs.`
-    } The search could not be saved in the local state directory, so get_device_search and stop_device_search cannot follow it yet. ${FIX_STATE_DIRECTORY}; then start the search again: a running search is returned with its stop, without restarting it.`,
+    `${sent} ${follow}`,
     "restore_state_storage_then_retry",
     {
+      ...(kept ? { search_ref: search.ref } : {}),
       active: result.active,
       ...(result.ends_at
         ? { ends_at: result.ends_at, seconds_left: result.seconds_left }
         : {}),
-      next: {
-        tool: "start_device_search",
-        arguments: { extension_ref: search.extensionRef },
-      },
+      next: kept
+        ? getCall(search)
+        : {
+            tool: "start_device_search",
+            arguments: { extension_ref: search.extensionRef },
+          },
+      ...(kept && result.active !== false ? { stop: stopCall(search) } : {}),
     },
   );
 }
