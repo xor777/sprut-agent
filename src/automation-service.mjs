@@ -1497,6 +1497,7 @@ export class AutomationService {
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
 
+    await this.#beforeNativeValueWrite(change);
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.#writeNativeValue(change, change.requested_value);
@@ -4055,6 +4056,12 @@ export class AutomationService {
     return (await this.#readNativeValueState(change, options)).value;
   }
 
+  // A refusal here comes before the intent is saved, so the record stays as
+  // it was and nothing counts as sent.
+  async #beforeNativeValueWrite(change) {
+    await nativeValueKind(change.kind).beforeWrite?.(this, change);
+  }
+
   async #writeNativeValue(change, value) {
     return nativeValueKind(change.kind).write(this, change, value);
   }
@@ -4165,6 +4172,7 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
+    await this.#beforeNativeValueWrite(change);
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -10210,6 +10218,12 @@ const NATIVE_VALUE_KINDS = {
         "window",
       );
     },
+    beforeWrite: (service, change) =>
+      refuseBridgeExportWrite(
+        service,
+        change.target.windowKey,
+        change.option_key,
+      ),
     write(service, change, value) {
       assertWindowOptionWritable(change.target.windowKey);
       return service.client.updateWindowOption({
@@ -10899,17 +10913,24 @@ async function inspectWindowOption(service, input) {
     input.option_key,
   );
   await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
-  const bridgeExport = await service.client.bridgeExportOptions(
-    service.client.selectedSerial(),
-    owner.windowKey,
-    [option.key],
-    Date.now() + service.client.timeoutMs,
-  );
-  if (bridgeExport) throw bridgeExportUnverified(bridgeExport.next);
+  await refuseBridgeExportWrite(service, owner.windowKey, option.key);
   return {
     fields: { option_key: input.option_key, target: owner },
     ...windowOptionState(option),
   };
+}
+
+// A bridge's export is read, not written (bridgeExportUnverified): the
+// contract and prepare refuse it, and so do apply and restore of a change an
+// earlier version journaled before they did.
+async function refuseBridgeExportWrite(service, windowKey, optionKey) {
+  const bridgeExport = await service.client.bridgeExportOptions(
+    service.client.selectedSerial(),
+    windowKey,
+    [optionKey],
+    Date.now() + service.client.timeoutMs,
+  );
+  if (bridgeExport) throw bridgeExportUnverified(bridgeExport.next);
 }
 
 async function prepareWindowOption(service, input) {

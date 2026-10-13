@@ -37,7 +37,8 @@
   `AutoAddNewAccessory=false` новый аксессуар сам не экспортируется
   ([наблюдение](https://github.com/xor777/sprut-agent/blob/main/research/protocol/2026-10-13-wave4-contracts.md)).
   Запись экспорта (флажки окна ребёнка, `AutoAddNewAccessory`) на хабе не
-  проверялась: `window_option` её не готовит (`bridge_export_unverified`),
+  проверялась: `window_option` её не готовит, а apply и restore изменения,
+  записанного раньше, ничего не отправляют (`bridge_export_unverified`);
   экспорт меняет владелец в приложении SprutHub.
 - Связанные аксессуары есть только в `linked_accessories` из read-only
   `ACCESSORY_LIST`. `value=0`, имена и числа в других контролах и
