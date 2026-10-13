@@ -638,42 +638,41 @@ test("a wrong invite looks like any other missing page and sets nothing", async 
 });
 
 test("spread colours give the room a new set each time, neighbours far apart", async (t) => {
-  const { tool, updates } = await setup(t, {
+  const { tool, listedId } = await setup(t, {
     editHome: addSconceGroup,
     afterStart: linkSconceGroup,
   });
-  const huesOf = (writes) =>
-    writes
-      .filter(({ cId }) => cId === 16)
-      .map(({ aId, control }) => [aId, Object.values(control.value)[0]]);
+  const strip = await listedId("Светодиодная лента");
+  const group = await listedId("Группа бра");
   const colourRoom = () =>
     tool("control_devices", {
       commands: [{ room: "r3", set: { spread_colors: {} } }],
       reason: "покрась гостиную разными цветами",
     });
+  // The hues the strip and both sconce bulbs show, in that order.
+  const shownHues = async () => {
+    const { devices } = await tool("read_devices", {
+      devices: [strip, group],
+    });
+    const byId = Object.fromEntries(
+      devices.map(({ device, state }) => [device, state]),
+    );
+    return [byId[strip].hue, ...byId[group].bulbs.map(({ hue }) => hue)];
+  };
 
   await colourRoom();
-  const first = huesOf(updates());
-  const before = updates().length;
+  const first = await shownHues();
   await colourRoom();
-  const second = huesOf(updates().slice(before));
+  const second = await shownHues();
 
-  // The strip and both sconce bulbs, each far from the one before it, and
-  // a second request writes a new set to all three.
   const gap = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
   for (const hues of [first, second]) {
     assert.equal(hues.length, 3, JSON.stringify(hues));
     for (let index = 1; index < hues.length; index++) {
-      assert(
-        gap(hues[index][1], hues[index - 1][1]) >= 90,
-        JSON.stringify(hues),
-      );
+      assert(gap(hues[index], hues[index - 1]) >= 90, JSON.stringify(hues));
     }
   }
-  assert.notDeepEqual(
-    second.map(([, hue]) => hue),
-    first.map(([, hue]) => hue),
-  );
+  assert.notDeepEqual(second, first);
 });
 
 test("a brightness change moves each lamp from its own level", async (t) => {

@@ -357,7 +357,7 @@ function error(code, message) {
 
 function summarize(output) {
   if (Array.isArray(output?.results)) {
-    return `${output.status}: ${output.results.map(({ name, control, status }) => `${name} ${control} ${status}`).join(", ")}`;
+    return `${output.status}: ${output.results.map(({ name, setting, characteristic, value, status }) => `${name} ${setting}/${characteristic}${value === undefined ? "" : `=${value}`} ${status}`).join(", ")}`;
   }
   if (Array.isArray(output?.problems)) {
     return `${output.status}: ${output.problems.map(({ problem }) => problem).join("; ")}`;
