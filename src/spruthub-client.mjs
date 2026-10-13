@@ -2272,6 +2272,50 @@ export class SprutHubClient {
     );
   }
 
+  // Which of these options of one window set what a bridge exports, and
+  // the read of that export; null when none. A bridge's child is an
+  // accessory, its id the accessory id, and its window
+  // <extensionKey with / for :>/Child/<aId>/ holds that accessory's export,
+  // all of its options; the bridge's own window decides with
+  // AutoAddNewAccessory whether a new accessory is exported
+  // (2026-10-13-wave4-contracts 3.1-3.4). Only a window of that form or
+  // that option costs the list of extensions: a device's window, under its
+  // controller's /Child/, is keyed by the device's own id.
+  async bridgeExportOptions(serial, windowKey, optionKeys, deadline) {
+    const child = /^(.+)\/Child\/([1-9]\d{0,15})\/?$/.exec(windowKey);
+    const autoAdd = optionKeys.includes(BRIDGE_AUTO_ADD_OPTION);
+    if (!child && !autoAdd) return null;
+    const { extensions } = await this.nativeExtensions(serial, deadline);
+    for (const extension of extensions) {
+      if (extension.bundle_type !== "BRIDGE") continue;
+      if (child?.[1] === extension.key.replaceAll(":", "/")) {
+        return {
+          keys: new Set(optionKeys),
+          next: {
+            tool: "get_entity",
+            arguments: {
+              entity_ref: accessoryRef(serial, Number(child[2])),
+              include: ["bridges"],
+            },
+          },
+        };
+      }
+      if (
+        autoAdd &&
+        extension.options_window_ref === windowRef(serial, windowKey)
+      ) {
+        return {
+          keys: new Set([BRIDGE_AUTO_ADD_OPTION]),
+          next: {
+            tool: "get_entity",
+            arguments: { entity_ref: extension.ref, include: ["children"] },
+          },
+        };
+      }
+    }
+    return null;
+  }
+
   async #readBridgeServices(serial, accessory, child, deadline) {
     if (typeof child.optionsWindow !== "string" || !child.optionsWindow) {
       throw new SprutHubError(
@@ -3231,6 +3275,7 @@ export class SprutHubClient {
       response.responseReceivedAt,
     );
     await this.#offerScenarioActive(parsed, normalized, deadline);
+    await this.#withholdBridgeExportWrites(parsed, normalized, deadline);
     return {
       kind: "window",
       ...normalized.physical_configuration,
@@ -3238,6 +3283,36 @@ export class SprutHubClient {
         ? { diagnostics: normalized.diagnostics }
         : { diagnostics_available: normalized.diagnostics_available }),
     };
+  }
+
+  // A bridge's export is read but not offered for writing, as window_option
+  // refuses it. When the extensions cannot be read the offer stays: the
+  // contract reads them again and refuses without them.
+  async #withholdBridgeExportWrites(parsed, normalized, deadline) {
+    const writable = normalized.physical_configuration.options.filter(
+      (option) => option.native_change?.supported === true,
+    );
+    if (writable.length === 0) return;
+    let bridgeExport;
+    try {
+      bridgeExport = await this.bridgeExportOptions(
+        parsed.serial,
+        parsed.windowKey,
+        writable.map(({ key }) => key),
+        deadline,
+      );
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+      return;
+    }
+    for (const option of writable) {
+      if (!bridgeExport?.keys.has(option.key)) continue;
+      option.native_change = {
+        native_write: option.native_change.native_write,
+        supported: false,
+        reason: BRIDGE_EXPORT_UNVERIFIED,
+      };
+    }
   }
 
   // Active in a scenario's options window is that scenario's on/off flag;
@@ -4632,6 +4707,20 @@ function bridgeRunning({ state, enabled }) {
 
 const BRIDGE_NOT_RUNNING =
   "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.";
+
+const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
+const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
+
+// Writing a bridge's export was never checked on a hub
+// (2026-10-13-wave4-contracts, limitations): it is read, not written.
+export function bridgeExportUnverified(next) {
+  return new SprutHubError(
+    BRIDGE_EXPORT_UNVERIFIED,
+    "This option sets what a bridge (HomeKit, Yandex Alice, Google) exports. Changing a bridge's export has not been verified on a SprutHub hub yet, so nothing was prepared or sent; the owner can change it in the SprutHub app.",
+    "get_entity",
+    { next },
+  );
+}
 
 function bridgeChildExported({ spaceKey }) {
   if (spaceKey === BRIDGE_EXPORTED_SPACE) return true;

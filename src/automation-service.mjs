@@ -37,6 +37,7 @@ import {
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import {
+  bridgeExportUnverified,
   characteristicNotifyOffered,
   characteristicNotifyOn,
   HUB_TRANSPORT_ERROR_CODES,
@@ -10898,6 +10899,13 @@ async function inspectWindowOption(service, input) {
     input.option_key,
   );
   await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
+  const bridgeExport = await service.client.bridgeExportOptions(
+    service.client.selectedSerial(),
+    owner.windowKey,
+    [option.key],
+    Date.now() + service.client.timeoutMs,
+  );
+  if (bridgeExport) throw bridgeExportUnverified(bridgeExport.next);
   return {
     fields: { option_key: input.option_key, target: owner },
     ...windowOptionState(option),

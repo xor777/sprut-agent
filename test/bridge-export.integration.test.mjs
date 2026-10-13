@@ -514,10 +514,10 @@ test("a bridge's export is read but not changed until a hub confirms the write",
   assert.deepEqual(hub.writes(), []);
   const changes = await client.callTool({
     name: "list_native_changes",
-    arguments: {},
+    arguments: { home_ref: apartment },
   });
   assert.equal(changes.isError, undefined, changes.content[0]?.text);
-  assert.equal(changes.content[0].text.includes("window_option"), false);
+  assert.deepEqual(changes.structuredContent.changes, []);
 
   // Reading the export still works and shows it unchanged.
   const after = await read(hub, client, {
