@@ -41,6 +41,11 @@ const BATHROOM = 8;
 // starts.
 const NEW_LEAK_SENSOR = 900;
 const NEW_LEAK_SENSOR_JOIN_MS = 3_000;
+// The LOGIC scenario of both fixtures and the name rename-logic-scenario
+// asks for.
+const LEAK_LOGIC = "9";
+const LEAK_LOGIC_NAME = "Защита от протечки";
+const LEAK_LOGIC_NEW_NAME = "Протечка под мойкой";
 
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
@@ -541,6 +546,47 @@ export const CASES = {
       onlyChanges(
         ({ key, after }, { initialState }) =>
           after === false && roomLightKeys(initialState, KITCHEN).includes(key),
+      ),
+    ],
+  },
+  // SprutHub sets a LOGIC's name from info.name in its code on every code
+  // write (research/protocol/2026-10-13-wave4-contracts.md 1.5): a rename
+  // that lasts changes the name and info.name, and no other part of the
+  // code. A rename of the window alone comes back with the next code edit.
+  "rename-logic-scenario": {
+    prompt: `Переименуй сценарий «${LEAK_LOGIC_NAME}» в «${LEAK_LOGIC_NEW_NAME}»`,
+    graders: [
+      {
+        name: "logic_renamed",
+        grade: ({ after }) =>
+          result(
+            after[`scenario/${LEAK_LOGIC}/name`] === LEAK_LOGIC_NEW_NAME,
+            `scenario/${LEAK_LOGIC}/name=${after[`scenario/${LEAK_LOGIC}/name`]}`,
+          ),
+      },
+      {
+        name: "code_changed_only_in_info_name",
+        grade: ({ before, after }) => {
+          const code = before[`scenario/${LEAK_LOGIC}/data`];
+          const expected = code.replace(
+            `name: "${LEAK_LOGIC_NAME}"`,
+            `name: "${LEAK_LOGIC_NEW_NAME}"`,
+          );
+          const actual = after[`scenario/${LEAK_LOGIC}/data`];
+          return result(
+            expected !== code && actual === expected,
+            actual === expected
+              ? "only info.name changed"
+              : actual === code
+                ? "code unchanged: info.name still names the old name"
+                : "code differs from the old code with only info.name changed",
+          );
+        },
+      },
+      onlyChanges(({ key }) =>
+        [`scenario/${LEAK_LOGIC}/name`, `scenario/${LEAK_LOGIC}/data`].includes(
+          key,
+        ),
       ),
     ],
   },

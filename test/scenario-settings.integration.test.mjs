@@ -235,9 +235,9 @@ test("window_option renames a BLOCK, a LOGIC and a GLOBAL, and restore puts each
   assert.equal(storedWindowValue(hub, LOGIC, "Name"), LOGIC_NAME);
 });
 
-test("a LOGIC renamed with window_option keeps its name through a later code edit, and a code edit that sets a name back says so", async (t) => {
+test("a LOGIC renamed with window_option keeps its name through a later code edit that its restore does not drop, and a code edit that sets a name back says so", async (t) => {
   const { hub, client } = await setup(t);
-  await change(client, LOGIC, "Name", "Протечка под мойкой");
+  const renamed = await change(client, LOGIC, "Name", "Протечка под мойкой");
 
   // A later edit of the code as the hub now holds it keeps the name.
   const entity = await call(client, "get_entity", {
@@ -263,6 +263,16 @@ test("a LOGIC renamed with window_option keeps its name through a later code edi
   assert.equal(applied.status, "applied");
   assert.equal(scenarioOf(hub, LOGIC).data, edited);
   assert.equal(scenarioOf(hub, LOGIC).name, "Протечка под мойкой");
+
+  // The rename's restore would put back the code from before it and drop
+  // the later edit, so it refuses while that edit stands.
+  const writesBefore = hub.writes().length;
+  const refused = await call(client, "restore_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assert.equal(refused.status, "conflict");
+  assert.equal(hub.writes().length, writesBefore);
+  assert.equal(scenarioOf(hub, LOGIC).data, edited);
 
   // The owner renames it in the app: only the window, the code keeps its
   // info.name. A code edit that keeps that info.name would set the name

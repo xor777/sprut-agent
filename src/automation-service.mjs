@@ -31,6 +31,11 @@ import {
   withHiddenHttpUrls,
 } from "./block-model.mjs";
 import {
+  LOGIC_INFO_FIELDS,
+  readLogicInfo,
+  rewriteLogicInfo,
+} from "./logic-info.mjs";
+import {
   inspectNativeOption,
   isSelectableNativeValidValue,
   nativeScalarContract,
@@ -278,7 +283,7 @@ export class AutomationService {
         operation: input.operation,
         target_ref: input.target_ref,
         ...(kind.optionKey ? { option_key: input.option_key } : {}),
-        observed_value: draft.value,
+        observed_value: publicTypedValue(draft.value),
         native_write_sent: false,
         // The characteristic command no-op has never reported ownership.
         ...(kind.command ? {} : { owned_change_created: false }),
@@ -709,7 +714,7 @@ export class AutomationService {
       input.on_start !== undefined ||
       input.sync !== undefined
     ) {
-      throw unsupportedBlockFlags(input.target_ref);
+      throw unsupportedBlockFlags(input);
     }
     if (!isRecord(input.data)) {
       throw new SprutHubError(
@@ -972,6 +977,12 @@ export class AutomationService {
   }
 
   async #prepareLogicSourceUpdate(input) {
+    const metadataField = Object.keys(LOGIC_SOURCE_METADATA_INPUTS).find(
+      (field) => input[field] !== undefined,
+    );
+    if (metadataField) {
+      throw logicSourceMetadataInput(input.target_ref, metadataField);
+    }
     const source = requiredLogicSource(input.source);
     const target = parseScenarioRef(input.target_ref, this.hubSerial);
     const scenario = await this.client.getScenario(target.index);
@@ -994,6 +1005,7 @@ export class AutomationService {
         owned_change_created: false,
       };
     }
+    const metadata = logicMetadataAfterCodeWrite(baseline, source);
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
@@ -1005,7 +1017,15 @@ export class AutomationService {
       target,
       reason: input.reason,
       baseline_snapshot: baseline,
-      requested_snapshot: { ...structuredClone(baseline), data: source },
+      requested_snapshot: {
+        ...structuredClone(baseline),
+        ...metadata.snapshot,
+        data: source,
+      },
+      ...(metadata.setsBack.length > 0
+        ? { code_sets_back: metadata.setsBack }
+        : {}),
+      ...(metadata.warnings.length > 0 ? { warnings: metadata.warnings } : {}),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -6223,7 +6243,10 @@ function assertWindowOptionWritable(windowKey) {
   );
 }
 
-const SCENARIO_METADATA_KEYS = new Set(["Name", "Desc"]);
+// The options of a scenario's options window that window_option writes
+// on the scenario ref (SCENARIO_METADATA_OPTIONS); Active is
+// scenario_active's.
+const SCENARIO_METADATA_KEYS = new Set(["Name", "Desc", "OnStart", "Sync"]);
 
 function parseWindowOptionOwner(ref, configuredSerial) {
   try {
@@ -6242,7 +6265,7 @@ function parseWindowOptionOwner(ref, configuredSerial) {
 function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
   return new SprutHubError(
     "scenario_owner_required",
-    "TEXT Name and Desc on a BLOCK are written through window_option with the owning scenario ref.",
+    "A scenario's Name, Desc, OnStart and Sync are written through window_option with the owning scenario ref, which confirms them with scenario.get and, for a LOGIC, writes them into its code too; nothing was sent.",
     "get_entity",
     scenarioRef
       ? {
@@ -6317,18 +6340,27 @@ function activeInsteadOfValue(input) {
   );
 }
 
-function unsupportedBlockFlags(targetRef) {
+function unsupportedBlockFlags(input) {
+  const optionKey =
+    input.on_start !== undefined
+      ? "OnStart"
+      : input.sync !== undefined
+        ? "Sync"
+        : undefined;
   return new SprutHubError(
     "unsupported_block_flags",
-    "block_data_update does not change runtime flags. Omit active, on_start, and sync.",
+    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active.",
     "get_native_change_contract",
     {
       next: {
         tool: "get_native_change_contract",
-        arguments: {
-          operation: "block_data_update",
-          target_ref: targetRef,
-        },
+        arguments: optionKey
+          ? {
+              operation: "window_option",
+              target_ref: input.target_ref,
+              option_key: optionKey,
+            }
+          : { operation: "scenario_active", target_ref: input.target_ref },
       },
     },
   );
@@ -9606,8 +9638,21 @@ function validateCharacteristicValue(value, contract) {
   return validated.value;
 }
 
+// logic_code_state, kept only with a LOGIC's Name, Desc and OnStart
+// (scenarioMetadataState), is part of the value; other values lack it.
 function valuesEqual(left, right) {
-  return left?.kind === right?.kind && Object.is(left?.value, right?.value);
+  return (
+    left?.kind === right?.kind &&
+    Object.is(left?.value, right?.value) &&
+    left?.logic_code_state === right?.logic_code_state
+  );
+}
+
+// A value as a response shows it, without the internal logic_code_state.
+function publicTypedValue(typed) {
+  if (!typed || typeof typed !== "object") return typed;
+  const { logic_code_state: _state, ...shown } = typed;
+  return shown;
 }
 
 function groupValuesEqual(left, right) {
@@ -10348,6 +10393,9 @@ const NATIVE_VALUE_KINDS = {
     inspect: inspectWindowOption,
     prepare: prepareWindowOption,
     async read(service, change, { requireWrite = false } = {}) {
+      if (change.owner_kind === "scenario") {
+        return readScenarioOwnedOption(service, change, { requireWrite });
+      }
       const option = await readWindowOption(
         service.client,
         change.target,
@@ -10355,10 +10403,7 @@ const NATIVE_VALUE_KINDS = {
       );
       return boundOptionState(
         change,
-        windowOptionState(option, {
-          requireWrite,
-          allowText: change.owner_kind === "scenario",
-        }),
+        windowOptionState(option, { requireWrite }),
         "window",
       );
     },
@@ -10370,6 +10415,9 @@ const NATIVE_VALUE_KINDS = {
       ),
     write(service, change, value) {
       assertWindowOptionWritable(change.target.windowKey);
+      if (change.owner_kind === "scenario") {
+        return writeScenarioOption(service, change, value);
+      }
       return service.client.updateWindowOption({
         ...change.target,
         key: change.option_key,
@@ -11172,9 +11220,12 @@ async function inspectWindowOption(service, input) {
         target: { windowKey },
         owner_kind: "scenario",
         owner_index: owner.index,
+        owner_type: scenario.type,
       },
       scenario,
-      ...windowOptionState(option, { allowText: true }),
+      ...scenarioMetadataState(scenario, option, input.option_key, {
+        requireWrite: true,
+      }),
     };
   }
   const option = await readWindowOption(
@@ -11216,31 +11267,189 @@ async function prepareWindowOption(service, input) {
       requested: validateCharacteristicValue(input.value, contract),
     };
   }
-  if (typeof input.value !== "string") {
+  const spec = SCENARIO_METADATA_OPTIONS[input.option_key];
+  if (spec.kind === "stringValue" && typeof input.value !== "string") {
     throw new SprutHubError(
       "invalid_native_value",
-      "BLOCK Name and Desc require a string value.",
+      `A scenario's ${input.option_key} takes a string value.`,
       "get_native_change_contract",
     );
   }
   if (input.option_key === "Name")
     requiredNativeName(input.value, "window_option");
-  const requestedText =
-    input.option_key === "Desc"
+  const requestedValue =
+    input.option_key === "Desc" && scenario.type === "BLOCK"
       ? nativeScenarioDescription(
           input.value,
           await provenBlockOwnershipMarker(
             service,
             input.target_ref,
-            typeof scenario.desc === "string" ? scenario.desc : value.value,
+            scenario.desc,
           ),
         )
       : input.value;
+  const requested = validateCharacteristicValue(requestedValue, contract);
+  if (value.logic_code_state === undefined) {
+    return { fields, contract, value, requested };
+  }
+  const code = logicInfoRewrite(
+    scenario,
+    input.option_key,
+    requested.value,
+    input.target_ref,
+  );
   return {
-    fields,
+    fields: {
+      ...fields,
+      ...(code.source === scenario.data
+        ? {}
+        : {
+            logic_source: {
+              baseline: scenario.data,
+              requested: code.source,
+              edits: code.edits,
+            },
+          }),
+      ...(code.warnings.length > 0 ? { warnings: code.warnings } : {}),
+    },
     contract,
     value,
-    requested: validateCharacteristicValue(requestedText, contract),
+    requested: {
+      ...requested,
+      logic_code_state: logicCodeState(code.source, scenario, input.option_key),
+    },
+  };
+}
+
+// A scenario's name, description, start on boot and sequential run, as
+// the options of its options window. On SprutHub 3.0.0 these options are
+// the only way to change them for a BLOCK, a LOGIC and a GLOBAL:
+// scenario.update {name, desc, onStart, sync} is acknowledged and ignored
+// (research/protocol/2026-10-13-wave4-contracts.md 1.3, 1.4, 1.8, 1.10).
+// A LOGIC's code sets name, description and onStart again from its info
+// on every code write (1.5); info names the field there.
+const SCENARIO_METADATA_OPTIONS = {
+  Name: { field: "name", kind: "stringValue", info: "name" },
+  Desc: { field: "desc", kind: "stringValue", info: "description" },
+  OnStart: { field: "onStart", kind: "boolValue", info: "onStart" },
+  Sync: { field: "sync", kind: "boolValue" },
+};
+const SCENARIO_METADATA_TYPES = new Set(["BLOCK", "LOGIC", "GLOBAL"]);
+
+// The current value comes from scenario.get: a LOGIC's window keeps the
+// last values written to it and can disagree with the scenario, and a
+// built-in's shows placeholders (1.7, 1.11). The window gives the
+// contract. For a LOGIC's Name, Desc and OnStart the value also carries
+// logic_code_state, a fingerprint of its code and the other two values its
+// code sets: an edit of either is a change of this setting.
+function scenarioMetadataState(scenario, option, optionKey, options) {
+  const spec = SCENARIO_METADATA_OPTIONS[optionKey];
+  const { contract } = windowOptionState(option, {
+    ...options,
+    allowText: true,
+  });
+  const current = scenario[spec.field];
+  if (
+    contract.kind !== spec.kind ||
+    typeof current !== (spec.kind === "boolValue" ? "boolean" : "string")
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      `SprutHub returned the scenario's ${optionKey} in an unexpected form.`,
+      "get_entity",
+    );
+  }
+  return {
+    value: {
+      value: current,
+      kind: spec.kind,
+      ...(scenario.type === "LOGIC" && spec.info
+        ? {
+            logic_code_state: logicCodeState(
+              scenario.data,
+              scenario,
+              optionKey,
+            ),
+          }
+        : {}),
+    },
+    contract: { ...contract, confirmation: "separate_scenario_get_readback" },
+  };
+}
+
+function logicCodeState(source, scenario, optionKey) {
+  if (typeof source !== "string") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned a LOGIC scenario without its code.",
+      "get_entity",
+    );
+  }
+  const others = Object.entries(SCENARIO_METADATA_OPTIONS)
+    .filter(([key, { info }]) => info && key !== optionKey)
+    .map(([, { field }]) => scenario[field]);
+  return sourceFingerprint(JSON.stringify([source, ...others]));
+}
+
+// The LOGIC's code with the requested value in its info, so a later code
+// write keeps it. When that writes the code, the other values its info
+// sets are made the scenario's current ones too: SprutHub sets all three
+// from info on every code write, and a name or description changed in
+// the app would otherwise go back. Without a code change (info already
+// says the requested value) only the window is written.
+function logicInfoRewrite(scenario, optionKey, requestedValue, scenarioRef) {
+  const info = readLogicInfo(scenario.data);
+  const unreadable =
+    info.problem ??
+    LOGIC_INFO_FIELDS.map((field) => info.problems[field])
+      .filter(Boolean)
+      .join("; ");
+  if (unreadable) {
+    throw new SprutHubError(
+      "logic_info_not_editable",
+      `SprutHub sets this LOGIC's name, description and start on boot from info in its code on every code write, so a change of ${optionKey} must also be written there, and ${unreadable}. Nothing was sent. Write the code with the new value as a plain value in info through logic_source_update; info.name, info.description and info.onStart there set the scenario's name, description and start on boot.`,
+      "get_native_change_contract",
+      {
+        next: {
+          tool: "get_native_change_contract",
+          arguments: {
+            operation: "logic_source_update",
+            target_ref: scenarioRef,
+          },
+        },
+      },
+    );
+  }
+  const target = SCENARIO_METADATA_OPTIONS[optionKey].info;
+  if (info.fields[target].value === requestedValue) {
+    return { source: scenario.data, edits: [], warnings: [] };
+  }
+  const desired = Object.fromEntries(
+    Object.values(SCENARIO_METADATA_OPTIONS)
+      .filter(({ info: field }) => field)
+      .map(({ field, info: infoField }) => [
+        infoField,
+        infoField === target ? requestedValue : scenario[field],
+      ]),
+  );
+  const rewritten = rewriteLogicInfo(scenario.data, info, desired);
+  const check = readLogicInfo(rewritten.source);
+  if (
+    check.problem ||
+    LOGIC_INFO_FIELDS.some(
+      (field) => check.fields[field]?.value !== desired[field],
+    )
+  ) {
+    throw new Error("LOGIC info rewrite did not read back.");
+  }
+  return {
+    ...rewritten,
+    warnings: rewritten.edits
+      .filter(({ field }) => field !== `info.${target}`)
+      .map(
+        ({ field, from, to }) =>
+          `The code's ${field} was ${JSON.stringify(from)} while the scenario has ${JSON.stringify(to)}, set outside the code; this change writes ${JSON.stringify(to)} into ${field} too, so writing the code does not set it back.`,
+      ),
   };
 }
 
@@ -11296,20 +11505,27 @@ async function readScenarioMetadataOption(client, owner, optionKey) {
   if (!SCENARIO_METADATA_KEYS.has(optionKey)) {
     throw new SprutHubError(
       "unsupported_window_option",
-      "A scenario window_option target supports only Name and Desc.",
+      "A scenario window_option target supports Name, Desc, OnStart (run when the hub starts) and Sync (run actions one after another). Turn a scenario on or off with scenario_active.",
       "get_entity",
     );
   }
   const scenario = await client.getScenario(owner.index);
   if (!scenario) throw scenarioNotFound();
-  if (scenario.type !== "BLOCK") throw unsupportedScenarioType();
+  if (scenario.predefined === true) throw predefinedScenarioReadOnly();
+  if (!SCENARIO_METADATA_TYPES.has(scenario.type)) {
+    throw new SprutHubError(
+      "unsupported_scenario_type",
+      `Name, Desc, OnStart and Sync are changed for BLOCK, LOGIC and GLOBAL scenarios; this one is ${String(scenario.type)}.`,
+      "get_entity",
+    );
+  }
   if (
     typeof scenario.optionsWindow !== "string" ||
     scenario.optionsWindow.length === 0
   ) {
     throw new SprutHubError(
       "options_window_unavailable",
-      "This scenario has no native options window for Name and Desc.",
+      "This scenario has no native options window, the only place SprutHub changes its name, description and flags.",
       "get_entity",
     );
   }
@@ -11319,6 +11535,82 @@ async function readScenarioMetadataOption(client, owner, optionKey) {
     optionKey,
   );
   return { scenario, option, windowKey: scenario.optionsWindow };
+}
+
+function predefinedScenarioReadOnly() {
+  return new SprutHubError(
+    "predefined_scenario_read_only",
+    "This is a built-in SprutHub scenario: its name and flags come from SprutHub's own code and its options window shows placeholders, so it is not changed here and nothing was sent. The owner can change it in the SprutHub app.",
+    "get_entity",
+  );
+}
+
+// A change prepared on the scenario ref reads its value from scenario.get
+// (scenarioMetadataState) and the contract from the window.
+async function readScenarioOwnedOption(service, change, { requireWrite }) {
+  const scenario = await service.client.getScenario(change.owner_index);
+  if (!scenario) throw scenarioNotFound();
+  const option = await readWindowOption(
+    service.client,
+    change.target,
+    change.option_key,
+  );
+  return boundOptionState(
+    change,
+    scenarioMetadataState(scenario, option, change.option_key, {
+      requireWrite,
+    }),
+    "window",
+  );
+}
+
+// The window option, and for a LOGIC whose info had to change, its code
+// first: a code write sets name, description and onStart from info, so the
+// window written after it decides the value. On restore the saved code goes
+// back, then the window puts back this option and every other value the
+// change wrote into info to keep, since the saved code may set those
+// otherwise. Once the code was written, a failed window write leaves the
+// outcome to readback.
+async function writeScenarioOption(service, change, value) {
+  const restoring = valuesEqual(value, change.baseline_value);
+  const code = change.logic_source;
+  const windowWrites = [[change.option_key, value]];
+  if (code && restoring) {
+    for (const edit of code.edits) {
+      const key = Object.keys(SCENARIO_METADATA_OPTIONS).find(
+        (optionKey) =>
+          `info.${SCENARIO_METADATA_OPTIONS[optionKey].info}` === edit.field,
+      );
+      if (key === change.option_key) continue;
+      windowWrites.push([
+        key,
+        { value: edit.to, kind: SCENARIO_METADATA_OPTIONS[key].kind },
+      ]);
+    }
+  }
+  if (code) {
+    await service.client.updateScenarioData(
+      change.owner_index,
+      restoring ? code.baseline : code.requested,
+    );
+  }
+  try {
+    for (const [key, typed] of windowWrites) {
+      await service.client.updateWindowOption({
+        ...change.target,
+        key,
+        value: nativeScalarValue(typed),
+      });
+    }
+  } catch (error) {
+    if (!code) throw error;
+    throw new SprutHubError(
+      "uncertain_write",
+      "The code was written, then a window write of the scenario failed.",
+      "get_native_change",
+      { requestSent: true },
+    );
+  }
 }
 
 async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
@@ -11335,12 +11627,9 @@ async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
     );
   }
   if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
-  if (option.inputType !== "TEXT" && option.inputType !== "TEXT_MULTILINE") {
-    return;
-  }
+  // The window shows a LOGIC's stale values, and its code sets them back.
   const matches = (await service.client.listScenarios()).filter(
-    (scenario) =>
-      scenario.type === "BLOCK" && scenario.optionsWindow === windowKey,
+    (scenario) => scenario.optionsWindow === windowKey,
   );
   if (matches.length !== 1) return;
   throw scenarioOwnerRequired(
@@ -11349,23 +11638,38 @@ async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
   );
 }
 
+// The scenario at the index is still the one prepared: same type, not
+// built-in, same options window. A record from before LOGIC and GLOBAL
+// were supported has no owner_type and was a BLOCK.
 async function scenarioWindowOwnerConflict(service, change) {
   if (change.owner_kind !== "scenario") return undefined;
   const scenario = await service.client.getScenario(change.owner_index);
-  return scenario?.type !== "BLOCK" ||
+  return !scenario ||
+    scenario.type !== (change.owner_type ?? "BLOCK") ||
+    scenario.predefined === true ||
     scenario.optionsWindow !== change.target.windowKey
     ? "owner_window_changed"
     : undefined;
 }
 
 function windowOptionLimitations(change) {
+  if (change.owner_kind !== "scenario") {
+    return [
+      "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
+    ];
+  }
   return [
-    "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
-    ...(change.owner_kind === "scenario"
+    "Written to the scenario's options window, as the SprutHub app does, and confirmed with scenario.get; scenario.update does not change a name, description or flag.",
+    "Name, Desc, OnStart, Sync and the scenario's data or code are separate native changes. They can be prepared on a shared baseline and restored independently. A write checks this field, the scenario's type and its options window, not sibling fields.",
+    "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A later observed change of this field still blocks restore even if the value later matches. A proven apply is not resent.",
+    ...(change.owner_type === "LOGIC" && change.option_key !== "Sync"
       ? [
-          "Name, Desc, and BLOCK data are separate native changes. They can be prepared on a shared baseline and restored independently. A metadata write checks this field, BLOCK type, and the current scenario→optionsWindow binding, not sibling Name, Desc, data, or flags.",
-          "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A later observed change of this field still blocks restore even if the value later matches. A proven apply is not resent.",
-          "A proven create marker in Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
+          "SprutHub sets a LOGIC's name, description and start on boot from info in its code on every code write, so this change also writes the value into info (logic_source.edits) and the rest of the code stays as it was. The code and the other two values count as part of this setting: an edit of them between apply and restore blocks restore. Restore puts back the saved code, then this value and any other the change wrote into info.",
+        ]
+      : []),
+    ...(change.owner_type === undefined || change.owner_type === "BLOCK"
+      ? [
+          "A proven create marker in a BLOCK's Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
         ]
       : []),
   ];
@@ -12385,9 +12689,97 @@ function logicDeleteAssignmentCheckUnproven(change) {
   return checked === undefined || checked !== createdLogicType(change);
 }
 
+// Inputs of logic_source_create that logic_source_update does not take,
+// with the option of the scenario's options window that changes each.
+const LOGIC_SOURCE_METADATA_INPUTS = {
+  name: "Name",
+  description: "Desc",
+  on_start: "OnStart",
+  sync: "Sync",
+  active: null,
+};
+
+function logicSourceMetadataInput(targetRef, field) {
+  const optionKey = LOGIC_SOURCE_METADATA_INPUTS[field];
+  return new SprutHubError(
+    "unsupported_logic_metadata",
+    optionKey
+      ? `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. info.name, info.description and info.onStart in the code set the scenario's name, description and start on boot on every code write. To change ${field} alone, prepare window_option ${optionKey} on the scenario ref: for a LOGIC it also writes the value into info.`
+      : "logic_source_update writes only the code; nothing was prepared. Turn the scenario on or off with scenario_active.",
+    "get_native_change_contract",
+    {
+      next: {
+        tool: "get_native_change_contract",
+        arguments: optionKey
+          ? {
+              operation: "window_option",
+              target_ref: targetRef,
+              option_key: optionKey,
+            }
+          : { operation: "scenario_active", target_ref: targetRef },
+      },
+    },
+  );
+}
+
+// What a LOGIC's name, description and start on boot become when this code
+// is written: SprutHub sets them from its info on every code write, even
+// unchanged (research/protocol/2026-10-13-wave4-contracts.md 1.5). A value
+// changed outside the code (in the app, or by window_option before the
+// code carried it) that the code keeps unchanged in info is set back:
+// code_sets_back names it before anything is sent.
+const LOGIC_INFO_METADATA = [
+  { info: "name", field: "name", shown: "name", label: "name" },
+  {
+    info: "description",
+    field: "desc",
+    shown: "description",
+    label: "description",
+  },
+  {
+    info: "onStart",
+    field: "onStart",
+    shown: "on_start",
+    label: "start on boot",
+  },
+];
+
+function logicMetadataAfterCodeWrite(baseline, source) {
+  const written = readLogicInfo(source);
+  const current = readLogicInfo(baseline.data);
+  const snapshot = {};
+  const setsBack = [];
+  const warnings = [];
+  const unknown = [];
+  for (const { info, field, shown, label } of LOGIC_INFO_METADATA) {
+    const literal = written.fields[info];
+    if (!literal) {
+      unknown.push(label);
+      continue;
+    }
+    snapshot[field] = literal.value;
+    if (
+      literal.value === baseline[field] ||
+      current.fields[info]?.value !== literal.value
+    ) {
+      continue;
+    }
+    setsBack.push({ field: shown, from: baseline[field], to: literal.value });
+    warnings.push(
+      `This code write sets the ${label} back to ${JSON.stringify(literal.value)} from info.${info}: the current ${JSON.stringify(baseline[field])} was set outside the code. To keep it, write it into info.${info}.`,
+    );
+  }
+  if (unknown.length > 0) {
+    warnings.push(
+      `SprutHub sets the scenario's ${unknown.join(", ")} from info in the code on every code write, and ${written.problem ?? "info does not hold it as a plain value"}, so after this write ${unknown.length === 1 ? "it is" : "they are"} not known.`,
+    );
+  }
+  return { snapshot, setsBack, warnings };
+}
+
 function logicSourceContract(mode) {
   return {
-    version: "2026-09-24",
+    version: "2026-10-13",
     scenario_type: "LOGIC",
     mode,
     source: {
@@ -12399,6 +12791,9 @@ function logicSourceContract(mode) {
       mode === "create"
         ? ["name", "description", "active", "on_start", "sync", "source"]
         : ["source"],
+    // research/protocol/2026-10-13-wave4-contracts.md 1.5, 1.6.
+    metadata_from_info:
+      "SprutHub sets the scenario's name, description and start on boot from info.name, info.description and info.onStart in the code, at create (over the name, description and on_start sent) and again on every code write, even unchanged; sync is not in the code. Write them in info as plain values. A code update that keeps an info value the scenario no longer has, as a name changed in the app, sets it back: the preview lists it in code_sets_back with a warning. To change the name, description, start on boot or sync alone, prepare window_option Name, Desc, OnStart or Sync on the scenario ref; for a LOGIC it also writes the value into info.",
     assignment: {
       mapping:
         "a created LOGIC's native type is the string of its scenario index (SprutHub 3.0.0); the selected service lists it in logic.types only while the LOGIC is on, named as the scenario, so logic_assignment_ready is true only then; with that service or its accessory removed it is false (logic_target_service_not_found), and restore works without it; an entry of that type named otherwise leaves the LOGIC unmapped (logic_type_name_mismatch), and so does a scenario at that index without this change's ownership marker (logic_scenario_not_owned): another LOGIC at a reused index, or this one with the marker removed from its source, which nothing tells apart; with no scenario at the index, or once the LOGIC was seen gone, nothing is mapped either (logic_scenario_not_found)",
@@ -13564,6 +13959,12 @@ function publicNativeChange(
             : {}),
         },
       },
+      ...(change.code_sets_back
+        ? { code_sets_back: structuredClone(change.code_sets_back) }
+        : {}),
+      ...(change.warnings
+        ? { warnings: structuredClone(change.warnings) }
+        : {}),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent
@@ -13852,9 +14253,12 @@ function publicNativeChange(
   // as a NUMBER) holds the option's values; they are shown hidden, as
   // get_entity shows the option now.
   const hidden = optionChange && optionValuesHidden(change, observedValue);
-  const shownValue = (typed) => (hidden ? hiddenOptionValue(typed) : typed);
+  const shownValue = (typed) =>
+    hidden ? hiddenOptionValue(typed) : publicTypedValue(typed);
   const namedValue = (typed) =>
-    hidden ? hiddenOptionValue(typed) : namedOptionValue(change, typed);
+    hidden
+      ? hiddenOptionValue(typed)
+      : namedOptionValue(change, publicTypedValue(typed));
   const valueChoices = optionChange
     ? {
         baseline: namedValue(change.baseline_value),
@@ -13898,6 +14302,18 @@ function publicNativeChange(
         kind: change.requested_value.kind,
       },
     },
+    ...(change.logic_source
+      ? {
+          // The code is shown by its edits only: the rest is unchanged
+          // and may hold secrets.
+          logic_source: {
+            edits: structuredClone(change.logic_source.edits),
+            unchanged_outside_edits: true,
+            from_sha256: sourceFingerprint(change.logic_source.baseline),
+            to_sha256: sourceFingerprint(change.logic_source.requested),
+          },
+        }
+      : {}),
     ...(change.warnings ? { warnings: structuredClone(change.warnings) } : {}),
     ...(change.notification_services
       ? {

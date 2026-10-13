@@ -996,6 +996,79 @@ test("homekit-floor-lamp needs HomeKit's export of the floor lamp read", async (
   );
 });
 
+// The hub sets a LOGIC's name from info.name in its code on every code
+// write, so a window rename alone does not last.
+test("rename-logic-scenario needs the new name in the scenario and in info.name, and no other change", async (t) => {
+  const newName = "Протечка под мойкой";
+  const rename = async (session, { code, window = true, index = "9" }) => {
+    const { scenario } = await session.send({
+      scenario: { get: { index, expand: "data" } },
+    });
+    if (code) {
+      await session.send({
+        scenario: { update: { index, data: code(scenario.get.data) } },
+      });
+    }
+    if (window) {
+      await session.send({
+        window: {
+          update: {
+            windowKey: scenario.get.optionsWindow,
+            options: [{ key: "Name", value: { stringValue: newName } }],
+          },
+        },
+      });
+    }
+  };
+  const withName = (data) =>
+    data.replace('name: "Защита от протечки"', `name: "${newName}"`);
+
+  const lasting = await nativeSession(t);
+  await rename(lasting, { code: withName });
+  assert.deepEqual(lasting.grade("rename-logic-scenario", "Переименовал."), {
+    logic_renamed: true,
+    code_changed_only_in_info_name: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // The code alone renames it too: the hub reads info.name.
+  const codeOnly = await nativeSession(t);
+  await rename(codeOnly, { code: withName, window: false });
+  assert.equal(
+    codeOnly.grade("rename-logic-scenario", "Переименовал.").logic_renamed,
+    true,
+  );
+
+  const windowOnly = await nativeSession(t);
+  await rename(windowOnly, {});
+  assert.deepEqual(windowOnly.grade("rename-logic-scenario", "Переименовал."), {
+    logic_renamed: true,
+    code_changed_only_in_info_name: false,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const rewritten = await nativeSession(t);
+  await rename(rewritten, {
+    code: (data) => withName(data).replace("  author", "    author"),
+  });
+  assert.equal(
+    rewritten.grade("rename-logic-scenario", "Переименовал.")
+      .code_changed_only_in_info_name,
+    false,
+  );
+
+  const another = await nativeSession(t);
+  await rename(another, { code: withName });
+  await rename(another, { index: "5" });
+  assert.equal(
+    another.grade("rename-logic-scenario", "Переименовал.")
+      .nothing_else_changed,
+    false,
+  );
+});
+
 // Whether the answer asks which rule is meant is the judge's; a guess that
 // writes fails here.
 test("an ambiguous scenario request fails a guess that writes", async (t) => {

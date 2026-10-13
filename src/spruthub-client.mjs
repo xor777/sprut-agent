@@ -2880,7 +2880,7 @@ export class SprutHubClient {
       entity.configuration = normalizeScenarioConfiguration(scenario);
     }
     if (
-      scenario.type === "BLOCK" &&
+      ["BLOCK", "LOGIC", "GLOBAL"].includes(scenario.type) &&
       typeof scenario.optionsWindow === "string" &&
       scenario.optionsWindow.length > 0
     ) {
@@ -2900,16 +2900,10 @@ export class SprutHubClient {
           Array.isArray(window.options)
         ) {
           entity.metadata_options = window.options
-            .filter(
-              (option) => option?.key === "Name" || option?.key === "Desc",
+            .filter((option) =>
+              Object.hasOwn(SCENARIO_METADATA_FIELDS, option?.key),
             )
-            .map((option) =>
-              normalizeOption(option, {
-                operation: "window_option",
-                targetRef: entity.ref,
-                allowText: true,
-              }),
-            );
+            .map((option) => scenarioMetadataOption(scenario, option, entity));
         }
       } catch (error) {
         if (!(error instanceof SprutHubError)) throw error;
@@ -5914,6 +5908,42 @@ function publicNativeOptionChange(
         option_key: option.key,
       },
     },
+  };
+}
+
+// The options of a scenario's options window that window_option changes on
+// the scenario ref, and the scenario field each one sets.
+const SCENARIO_METADATA_FIELDS = {
+  Name: "name",
+  Desc: "desc",
+  OnStart: "onStart",
+  Sync: "sync",
+};
+
+// The value shown is the scenario's own: a LOGIC's window keeps the values
+// last written to it, and a built-in's shows placeholders
+// (research/protocol/2026-10-13-wave4-contracts.md 1.7, 1.11).
+function scenarioMetadataOption(scenario, option, entity) {
+  const normalized = normalizeOption(option, {
+    operation: "window_option",
+    targetRef: entity.ref,
+    allowText: true,
+  });
+  if (normalized.redacted) return normalized;
+  const current = scenario[SCENARIO_METADATA_FIELDS[option.key]];
+  return {
+    ...normalized,
+    configured_value:
+      current === undefined ? null : sanitizeNativeData(current),
+    ...(scenario.predefined === true
+      ? {
+          native_change: {
+            native_write: option.write === true,
+            supported: false,
+            reason: "predefined_scenario_read_only",
+          },
+        }
+      : {}),
   };
 }
 

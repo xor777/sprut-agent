@@ -16964,7 +16964,11 @@ test("a restored BLOCK create marker does not claim a later scenario at the same
   ]);
 });
 
-test("get_entity does not offer BLOCK Name and Desc writes on a LOGIC scenario", async (t) => {
+// A LOGIC's Name and Desc are changed on its scenario ref, and the code's
+// info gets the new name and the description the scenario has, since
+// SprutHub sets both from info on every code write
+// (research/protocol/2026-10-13-wave4-contracts.md 1.5).
+test("get_entity offers a LOGIC scenario's Name and Desc on its scenario ref with the code's info rewritten", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const logicWindowKey = "opaque-logic-window";
   hub.state.scenarios.push({
@@ -16996,28 +17000,56 @@ test("get_entity does not offer BLOCK Name and Desc writes on a LOGIC scenario",
     logicEntity.structuredContent.entity.options_window_ref,
     undefined,
   );
-  assert.equal(
-    logicEntity.structuredContent.entity.metadata_options?.some(
-      (option) => option.native_change?.supported === true,
-    ) ?? false,
-    false,
+  assert.deepEqual(
+    logicEntity.structuredContent.entity.metadata_options.map(
+      ({ key, configured_value: value, native_change: change }) => [
+        key,
+        value,
+        change.supported,
+        change.next?.arguments.target_ref,
+      ],
+    ),
+    [
+      ["Name", "LOGIC сценарий", true, logicRef],
+      ["Desc", "Не BLOCK", true, logicRef],
+    ],
   );
-  const rejected = await client.callTool({
+  const prepared = await client.callTool({
     name: "prepare_native_change",
     arguments: {
       operation: "window_option",
       target_ref: logicRef,
       option_key: "Name",
-      value: "Не расширять LOGIC",
-      reason: "LOGIC metadata не входит в этот срез",
+      value: "Новое имя LOGIC",
+      reason: "Переименовать LOGIC",
     },
   });
-  assert.equal(rejected.isError, true);
-  assert.equal(
-    rejected.structuredContent.error.code,
-    "unsupported_scenario_type",
-  );
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent.diff.value, {
+    from: "LOGIC сценарий",
+    to: "Новое имя LOGIC",
+    kind: "stringValue",
+  });
+  assert.deepEqual(prepared.structuredContent.logic_source.edits, [
+    {
+      field: "info.name",
+      line: 2,
+      from: "Bedside start level",
+      to: "Новое имя LOGIC",
+    },
+    {
+      field: "info.description",
+      line: 3,
+      from: "Set the initial brightness once",
+      to: "Не BLOCK",
+    },
+  ]);
+  assert.equal(prepared.structuredContent.warnings.length, 1);
   assert.equal(windowUpdates(hub).length, 0);
+  assert.equal(
+    hub.requests.some(({ scenario }) => scenario?.update),
+    false,
+  );
 
   const blockEntity = await client.callTool({
     name: "get_entity",
