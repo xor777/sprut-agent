@@ -1775,7 +1775,8 @@ export class AutomationService {
     if (
       hasKnownSettingSemantics(change) &&
       !valuesEqual(current, change.baseline_value) &&
-      !valuesEqual(current, change.requested_value)
+      !valuesEqual(current, change.requested_value) &&
+      !scenarioOptionRestoreUnderway(change, current)
     ) {
       return {
         direction,
@@ -4235,7 +4236,8 @@ export class AutomationService {
         const unconfirmedRestore =
           pending.direction === "restore" &&
           pending.outcome === "expected_missing" &&
-          valuesEqual(pending.current, change.requested_value);
+          (valuesEqual(pending.current, change.requested_value) ||
+            scenarioOptionRestoreUnderway(change, pending.current));
         const retryableRestore =
           unconfirmedRestore && isRetryableNativeValueChange(change);
         if (!completedApply && !retryableRestore) return pending.result;
@@ -4315,7 +4317,10 @@ export class AutomationService {
           : {}),
       });
     }
-    if (!valuesEqual(current, change.requested_value)) {
+    if (
+      !valuesEqual(current, change.requested_value) &&
+      !scenarioOptionRestoreUnderway(change, current)
+    ) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "manual_change",
         manual_change_observed: true,
@@ -4369,6 +4374,14 @@ export class AutomationService {
   // seen now: this change is governed by it, which is no manual change and
   // costs this change no restore right. The newest such change is named.
   async #laterOwnedValueChange(change, current) {
+    // A scenario's option is one link of that scenario's chain: a LOGIC's
+    // Name, Desc and OnStart follow every write of its code.
+    if (change.owner_kind === "scenario") {
+      return this.#laterOwnedScenarioEdit(
+        change,
+        await this.client.getScenario(change.owner_index),
+      );
+    }
     const key = valueTargetKey(change);
     let latest;
     for (const candidate of await this.store.list()) {
@@ -4776,7 +4789,7 @@ export class AutomationService {
       change.applied_snapshot !== undefined;
     const later = ownedTargetAbsent
       ? undefined
-      : await this.#laterOwnedScenarioChange(change, current);
+      : await this.#laterOwnedScenarioEdit(change, current.scenario);
     return this.#finishNative(change, "conflict", undefined, {
       ...observation.fields,
       conflict_reason: later ? "later_owned_change" : "manual_change",
@@ -4786,33 +4799,36 @@ export class AutomationService {
     });
   }
 
-  // The agent's own later edit of the same scenario (BLOCK data, LOGIC code
-  // or a pause) that left it as it is now: undo that edit first.
-  async #laterOwnedScenarioChange(change, current) {
-    const index = change.scenario_index ?? change.target?.index;
-    if (index === undefined) return undefined;
-    let latest;
-    for (const candidate of await this.store.list()) {
-      if (
-        candidate.id === change.id ||
-        candidate.home_ref !== change.home_ref ||
-        ![
-          "block_data_update",
-          "block_action_pause",
-          "logic_source_update",
-        ].includes(candidate.kind) ||
-        candidate.target?.index !== index ||
-        !changeStillInEffect(candidate) ||
-        compareApplication(candidate, change) <= 0 ||
-        !scenarioChangeObservation(candidate, current, "applied").matches
-      ) {
-        continue;
-      }
-      if (!latest || compareApplication(candidate, latest) > 0) {
-        latest = candidate;
-      }
-    }
-    return latest;
+  // The agent's changes of one scenario form one chain: the agent's own
+  // later changes of it that still hold (its data or code, a pause, its
+  // Name, Desc, OnStart or Sync) account for every field this change set
+  // and the scenario no longer holds as it left them. That is no change by
+  // hand and costs this change no restore right: the newest of them that
+  // changed such a field is undone first.
+  async #laterOwnedScenarioEdit(change, scenario) {
+    const index = scenarioChainIndex(change);
+    const differing = scenarioFieldsDiffering(change, scenario);
+    if (index === undefined || !differing?.length) return undefined;
+    const later = (await this.store.list()).filter(
+      (candidate) =>
+        candidate.id !== change.id &&
+        candidate.home_ref === change.home_ref &&
+        !SCENARIO_CREATE_KINDS.has(candidate.kind) &&
+        scenarioChainIndex(candidate) === index &&
+        changeStillInEffect(candidate) &&
+        compareApplication(candidate, change) > 0 &&
+        scenarioEditHolds(candidate, scenario),
+    );
+    const covered = new Set(later.flatMap(scenarioFieldsOwned));
+    if (!differing.every((field) => covered.has(field))) return undefined;
+    return later
+      .filter((candidate) =>
+        scenarioFieldsOwned(candidate).some((field) =>
+          differing.includes(field),
+        ),
+      )
+      .sort(compareApplication)
+      .at(-1);
   }
 
   async #applyScenarioChange(change) {
@@ -11343,38 +11359,43 @@ const SCENARIO_METADATA_TYPES = new Set(["BLOCK", "LOGIC", "GLOBAL"]);
 // logic_code_state, a fingerprint of its code and the other two values its
 // code sets: an edit of either is a change of this setting.
 function scenarioMetadataState(scenario, option, optionKey, options) {
-  const spec = SCENARIO_METADATA_OPTIONS[optionKey];
   const { contract } = windowOptionState(option, {
     ...options,
     allowText: true,
   });
-  const current = scenario[spec.field];
-  if (
-    contract.kind !== spec.kind ||
-    typeof current !== (spec.kind === "boolValue" ? "boolean" : "string")
-  ) {
-    throw new SprutHubError(
-      "incompatible_response",
-      `SprutHub returned the scenario's ${optionKey} in an unexpected form.`,
-      "get_entity",
-    );
+  if (contract.kind !== SCENARIO_METADATA_OPTIONS[optionKey].kind) {
+    throw scenarioOptionForm(optionKey);
   }
   return {
-    value: {
-      value: current,
-      kind: spec.kind,
-      ...(scenario.type === "LOGIC" && spec.info
-        ? {
-            logic_code_state: logicCodeState(
-              scenario.data,
-              scenario,
-              optionKey,
-            ),
-          }
-        : {}),
-    },
+    value: scenarioOptionValue(scenario, optionKey),
     contract: { ...contract, confirmation: "separate_scenario_get_readback" },
   };
+}
+
+// The option's value as the scenario holds it.
+function scenarioOptionValue(scenario, optionKey) {
+  const spec = SCENARIO_METADATA_OPTIONS[optionKey];
+  const current = scenario[spec.field];
+  if (typeof current !== (spec.kind === "boolValue" ? "boolean" : "string")) {
+    throw scenarioOptionForm(optionKey);
+  }
+  return {
+    value: current,
+    kind: spec.kind,
+    ...(scenario.type === "LOGIC" && spec.info
+      ? {
+          logic_code_state: logicCodeState(scenario.data, scenario, optionKey),
+        }
+      : {}),
+  };
+}
+
+function scenarioOptionForm(optionKey) {
+  return new SprutHubError(
+    "incompatible_response",
+    `SprutHub returned the scenario's ${optionKey} in an unexpected form.`,
+    "get_entity",
+  );
 }
 
 function logicCodeState(source, scenario, optionKey) {
@@ -11574,20 +11595,10 @@ async function readScenarioOwnedOption(service, change, { requireWrite }) {
 async function writeScenarioOption(service, change, value) {
   const restoring = valuesEqual(value, change.baseline_value);
   const code = change.logic_source;
-  const windowWrites = [[change.option_key, value]];
-  if (code && restoring) {
-    for (const edit of code.edits) {
-      const key = Object.keys(SCENARIO_METADATA_OPTIONS).find(
-        (optionKey) =>
-          `info.${SCENARIO_METADATA_OPTIONS[optionKey].info}` === edit.field,
-      );
-      if (key === change.option_key) continue;
-      windowWrites.push([
-        key,
-        { value: edit.to, kind: SCENARIO_METADATA_OPTIONS[key].kind },
-      ]);
-    }
-  }
+  const windowWrites =
+    code && restoring
+      ? scenarioOptionRestoreWrites(change)
+      : [[change.option_key, value]];
   if (code) {
     await service.client.updateScenarioData(
       change.owner_index,
@@ -11611,6 +11622,66 @@ async function writeScenarioOption(service, change, value) {
       { requestSent: true },
     );
   }
+}
+
+// The window writes of a restore after the saved code: this option, then
+// every other value the change wrote into info to keep.
+function scenarioOptionRestoreWrites(change) {
+  const writes = [[change.option_key, change.baseline_value]];
+  for (const edit of change.logic_source.edits) {
+    const key = Object.keys(SCENARIO_METADATA_OPTIONS).find(
+      (optionKey) =>
+        `info.${SCENARIO_METADATA_OPTIONS[optionKey].info}` === edit.field,
+    );
+    if (key === change.option_key) continue;
+    writes.push([
+      key,
+      { value: edit.to, kind: SCENARIO_METADATA_OPTIONS[key].kind },
+    ]);
+  }
+  return writes;
+}
+
+// A restore of a LOGIC's Name, Desc or OnStart stopped part way: its saved
+// code is back, which set all three from that code's info, and not every
+// window write after it is done. Read as this option, that is any mix of
+// what the saved code's info says and what those writes put back. It is the
+// restore's own state: the restore is retried, not taken for a change by
+// hand.
+function scenarioOptionRestoreUnderway(change, current) {
+  const code = change.logic_source;
+  if (
+    change.owner_kind !== "scenario" ||
+    !code ||
+    nativeIntentDirection(change) !== "restore" ||
+    current?.logic_code_state === undefined
+  ) {
+    return false;
+  }
+  const info = readLogicInfo(code.baseline);
+  const written = new Map(
+    scenarioOptionRestoreWrites(change).map(([key, typed]) => [
+      key,
+      typed.value,
+    ]),
+  );
+  let states = [{}];
+  for (const [key, spec] of Object.entries(SCENARIO_METADATA_OPTIONS)) {
+    if (!spec.info) continue;
+    const choices = [info.fields[spec.info]?.value];
+    if (written.has(key)) choices.push(written.get(key));
+    states = states.flatMap((state) =>
+      choices.map((value) => ({ ...state, [spec.field]: value })),
+    );
+  }
+  const { field } = SCENARIO_METADATA_OPTIONS[change.option_key];
+  return states.some((state) =>
+    valuesEqual(current, {
+      value: state[field],
+      kind: change.baseline_value.kind,
+      logic_code_state: logicCodeState(code.baseline, state, change.option_key),
+    }),
+  );
 }
 
 async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
@@ -11658,15 +11729,13 @@ function windowOptionLimitations(change) {
       "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
     ];
   }
+  const followsCode = scenarioOptionFollowsCode(change);
   return [
     "Written to the scenario's options window, as the SprutHub app does, and confirmed with scenario.get; scenario.update does not change a name, description or flag.",
-    "Name, Desc, OnStart, Sync and the scenario's data or code are separate native changes. They can be prepared on a shared baseline and restored independently. A write checks this field, the scenario's type and its options window, not sibling fields.",
-    "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A later observed change of this field still blocks restore even if the value later matches. A proven apply is not resent.",
-    ...(change.owner_type === "LOGIC" && change.option_key !== "Sync"
-      ? [
-          "SprutHub sets a LOGIC's name, description and start on boot from info in its code on every code write, so this change also writes the value into info (logic_source.edits) and the rest of the code stays as it was. The code and the other two values count as part of this setting: an edit of them between apply and restore blocks restore. Restore puts back the saved code, then this value and any other the change wrote into info.",
-        ]
-      : []),
+    followsCode
+      ? "SprutHub sets a LOGIC's name, description and start on boot from info in its code on every code write, so this change also writes the value into info (logic_source.edits) and the rest of the code stays as it was. Its Name, Desc and OnStart and its code are therefore one chain: prepare the next of them once this one is applied (one prepared earlier refuses with baseline_changed). While a later one by the agent stands, get and restore of this one answer later_owned_change with restore_first_change_ref; change_refs with all of them restores newest first. Any other edit of the code, name, description or start on boot blocks restore as a change by hand. Restore puts back the saved code, then this value and any other the change wrote into info; if it stops between them, restore again. Sync is separate."
+      : "This option is written apart from the scenario's other options and its data or code: each is its own change, they can be prepared on the same scenario and restored in any order. A later change of this option by the agent is restored first (later_owned_change names it).",
+    "A completed restore stays closed: get may refresh the current value or a read error, but apply and restore of this change do not write again. A change by hand once observed still blocks restore even if the value later matches. A proven apply is not resent.",
     ...(change.owner_type === undefined || change.owner_type === "BLOCK"
       ? [
           "A proven create marker in a BLOCK's Desc is kept by the adapter only while that create still owns the current scenario; it is not copied from a restored or deleted owner and does not restore create-delete rights.",
@@ -12345,6 +12414,118 @@ function isBlockChange(change) {
   );
 }
 
+const SCENARIO_CREATE_KINDS = new Set(["block_create", "logic_source_create"]);
+const SCENARIO_OPTION_FIELDS = ["name", "desc", "onStart", "sync"];
+const LOGIC_CODE_FIELDS = ["name", "desc", "onStart", "data"];
+
+// The fields of a scenario a change sets, which are the ones it checks to
+// know it still holds. A BLOCK's data and a LOGIC's code are written apart
+// from the name, description, start on boot and sequential run, which only
+// the options window changes (research/protocol/2026-10-13-wave4-
+// contracts.md 1.3, 1.10). A LOGIC's code sets its name, description and
+// onStart from info on every code write (1.5), so its code, a LOGIC's Name,
+// Desc and OnStart change (which writes them into info, its value carrying
+// logic_code_state) and those three are one setting; its Sync is not in
+// the code. A create sets all of them. active belongs to scenario_active.
+function scenarioFieldsOwned(change) {
+  if (change.kind === "window_option") {
+    return scenarioOptionFollowsCode(change)
+      ? LOGIC_CODE_FIELDS
+      : [SCENARIO_METADATA_OPTIONS[change.option_key].field];
+  }
+  if (change.kind === "logic_source_update") return LOGIC_CODE_FIELDS;
+  if (change.kind === "block_data_update") {
+    // A record from before the options window wrote name and desc too.
+    return [...new Set([...blockUpdateFields(change), "data"])];
+  }
+  if (change.kind === "block_action_pause") return ["data"];
+  return [...SCENARIO_OPTION_FIELDS, "data"];
+}
+
+function scenarioOptionFollowsCode(change) {
+  return change.requested_value?.logic_code_state !== undefined;
+}
+
+// The scenario's name, description, start on boot and sequential run are
+// compared only where the change sets them.
+function withoutUnownedOptions(change, configuration) {
+  const owned = scenarioFieldsOwned(change);
+  return Object.fromEntries(
+    Object.entries(configuration).filter(
+      ([field]) =>
+        !SCENARIO_OPTION_FIELDS.includes(field) || owned.includes(field),
+    ),
+  );
+}
+
+// The scenario a change belongs to in the agent's chain of changes of it.
+function scenarioChainIndex(change) {
+  let index;
+  if (change.kind === "window_option") {
+    index = change.owner_kind === "scenario" ? change.owner_index : undefined;
+  } else if (SCENARIO_CREATE_KINDS.has(change.kind)) {
+    index = change.scenario_index;
+  } else if (
+    ["block_data_update", "block_action_pause", "logic_source_update"].includes(
+      change.kind,
+    )
+  ) {
+    index = change.target?.index;
+  }
+  return index === undefined || index === null ? undefined : String(index);
+}
+
+// The fields this change set that the scenario no longer holds as the
+// change left them: an option's value and a pause are read as a whole.
+// undefined when the scenario is gone or of another type.
+function scenarioFieldsDiffering(change, scenario) {
+  if (!isRecord(scenario)) return undefined;
+  if (["window_option", "block_action_pause"].includes(change.kind)) {
+    return scenarioFieldsOwned(change);
+  }
+  const expected = change.applied_snapshot;
+  if (expected === undefined) return undefined;
+  let now;
+  let then;
+  try {
+    [now, then] = isBlockChange(change)
+      ? [scenarioSnapshot(scenario), expected].map(
+          comparableNativeScenarioConfiguration,
+        )
+      : [logicScenarioSnapshot(scenario), expected];
+  } catch (error) {
+    if (error instanceof SprutHubError) return undefined;
+    throw error;
+  }
+  if (now.type !== then.type) return undefined;
+  return scenarioFieldsOwned(change).filter(
+    (field) => !isDeepStrictEqual(now[field], then[field]),
+  );
+}
+
+// The scenario still holds what this change of it set.
+function scenarioEditHolds(change, scenario) {
+  try {
+    if (change.kind === "window_option") {
+      return (
+        scenario.type === (change.owner_type ?? "BLOCK") &&
+        valuesEqual(
+          scenarioOptionValue(scenario, change.option_key),
+          change.requested_value,
+        )
+      );
+    }
+    return scenarioChangeObservation(
+      change,
+      { scenario, logicTypes: [] },
+      "applied",
+    ).matches;
+  } catch (error) {
+    if (error instanceof SprutHubError) return false;
+    throw error;
+  }
+}
+
 function scenarioChangeObservation(change, current, snapshot) {
   const expectedSnapshot = snapshot === "restored" ? "baseline" : snapshot;
   return isLogicSourceChange(change)
@@ -12457,14 +12638,17 @@ function logicEditableSnapshot(snapshot) {
   };
 }
 
-function logicSnapshotMatches(scenario, expected) {
+function logicSnapshotMatches(change, scenario, expected) {
+  const comparable = (snapshot) =>
+    withoutUnownedOptions(
+      change,
+      withoutRuntimeActive(logicEditableSnapshot(snapshot)),
+    );
   return (
     scenario !== null &&
     isDeepStrictEqual(
-      withoutRuntimeActive(
-        logicEditableSnapshot(logicScenarioSnapshot(scenario)),
-      ),
-      withoutRuntimeActive(logicEditableSnapshot(expected)),
+      comparable(logicScenarioSnapshot(scenario)),
+      comparable(expected),
     )
   );
 }
@@ -12496,7 +12680,7 @@ function logicSourceObservation(change, current, snapshot) {
         !(type !== undefined && logicTypeListed(current.logicTypes, type));
     } else {
       expected = change.baseline_snapshot;
-      matches = logicSnapshotMatches(current.scenario, expected);
+      matches = logicSnapshotMatches(change, current.scenario, expected);
     }
   } else if (snapshot === "requested") {
     expected = logicSourceRequestedSnapshot(change);
@@ -12505,7 +12689,7 @@ function logicSourceObservation(change, current, snapshot) {
     expected = change.applied_snapshot;
     matches =
       expected !== undefined &&
-      logicSnapshotMatches(current.scenario, expected);
+      logicSnapshotMatches(change, current.scenario, expected);
   } else if (snapshot === "restored") {
     if (change.kind === "logic_source_create") {
       const type = createdLogicType(change);
@@ -13039,7 +13223,7 @@ function blockMatchesRequested(change, scenario) {
   const current = scenarioSnapshot(scenario);
   if (["block_data_update", "block_action_pause"].includes(change.kind)) {
     if (!change.requested_snapshot) return false;
-    return blockConfigurationsEqual(current, change.requested_snapshot);
+    return blockConfigurationsEqual(change, current, change.requested_snapshot);
   }
   const expected = blockCreateRequest(change);
   return (
@@ -13060,7 +13244,7 @@ function blockStillAtBaseline(change, scenario) {
   const baseline = change.restore_snapshot ?? change.baseline_snapshot;
   return (
     scenario !== null &&
-    blockConfigurationsEqual(scenarioSnapshot(scenario), baseline)
+    blockConfigurationsEqual(change, scenarioSnapshot(scenario), baseline)
   );
 }
 
@@ -13076,6 +13260,7 @@ function blockMatchesApplied(change, scenario) {
     scenario !== null &&
     change.applied_snapshot !== undefined &&
     blockConfigurationsEqual(
+      change,
       scenarioSnapshot(scenario),
       change.applied_snapshot,
     )
@@ -13208,15 +13393,16 @@ function snapshotsEqual(left, right) {
 // Turning a scenario off or on is not an edit of the configuration that a
 // BLOCK, LOGIC, or automation change owns, so their ownership checks leave it
 // out on both sides; journals saved with active in their snapshots still match.
-// onStart and sync stay compared: no public operation writes them.
+// The name, description, onStart and sync are left out the same way where
+// the change does not set them (withoutUnownedOptions).
 function withoutRuntimeActive({ active: _active, ...configuration }) {
   return configuration;
 }
 
-function blockConfigurationsEqual(left, right) {
+function blockConfigurationsEqual(change, left, right) {
   return snapshotsEqual(
-    withoutRuntimeActive(left),
-    withoutRuntimeActive(right),
+    withoutUnownedOptions(change, withoutRuntimeActive(left)),
+    withoutUnownedOptions(change, withoutRuntimeActive(right)),
   );
 }
 
