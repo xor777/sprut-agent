@@ -654,3 +654,66 @@ test("relations of a device name the owner's code scenarios whose source mention
   );
   assertReadOnly(hub, baseline);
 });
+
+test("relations name how many code scenarios were not searched and how to list them, at any number of them", async (t) => {
+  // The apartment's own LOGIC, then the owner's GLOBAL and LOGIC code that
+  // does not mention the lamp: 31 and 65 code scenarios, of which the
+  // first 24 are searched.
+  const homeWith = (globals) => (hub) => {
+    for (let index = 0; index < globals + 4; index += 1) {
+      const type = index < globals ? "GLOBAL" : "LOGIC";
+      addScenario(hub, {
+        index: String(100 + index),
+        name: `Код ${index + 1}`,
+        type,
+        data: `global.value${index} = function () {\n  return ${index};\n};`,
+      });
+    }
+  };
+  const relationsOf = async (globals) => {
+    const { hub, client, baseline } = await setup(t, homeWith(globals));
+    const lamp = await read(client, {
+      entity_ref: `${homeRef}/accessory/32`,
+      include: ["relations"],
+    });
+    assertReadOnly(hub, baseline);
+    return lamp;
+  };
+  const notRead = (lamp) =>
+    lamp.entity.relations.unchecked.filter(
+      ({ area }) => area === "scenario_code",
+    );
+  const next = {
+    tool: "home_overview",
+    candidates: [
+      { home_ref: homeRef, list: "scenarios", type: "GLOBAL" },
+      { home_ref: homeRef, list: "scenarios", type: "LOGIC" },
+    ],
+  };
+
+  const few = await relationsOf(26);
+  assert.equal(few.entity.relations.checked.code_scenarios_searched, 24);
+  assert.deepEqual(notRead(few), [
+    {
+      area: "scenario_code",
+      outcome: "not_read",
+      limit: 24,
+      scenarios_not_read: 7,
+      next,
+    },
+  ]);
+
+  const many = await relationsOf(60);
+  assert.equal(many.entity.relations.checked.code_scenarios_searched, 24);
+  assert.deepEqual(notRead(many), [
+    {
+      area: "scenario_code",
+      outcome: "not_read",
+      limit: 24,
+      scenarios_not_read: 41,
+      next,
+    },
+  ]);
+  // One more digit in the count, nothing else.
+  assert.equal(many.bytes - few.bytes, 1);
+});
