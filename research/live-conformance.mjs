@@ -96,9 +96,7 @@ const READ_TOOLS = new Set([
   "find_devices",
   "get_entity",
   "get_native_change_contract",
-  "get_scenario_sdk",
   "get_native_change",
-  "list_native_changes",
   "read_hub_log",
 ]);
 const PREPARE_OPERATIONS = new Set([
@@ -1216,8 +1214,17 @@ async function main() {
       lamp_service: relativeRef(targets.lamp.serviceRef),
       lamp_values_before: await lampValues(hub, targets.lamp),
     };
-    const sdk = await hub.read("get_scenario_sdk", { home_ref: hub.homeRef });
-    report.scenario_sdk = { sha256: sdk.sha256, complete: sdk.sdk_complete };
+    // The live SDK (~38 KB) is larger than one page: its sha256 and
+    // completeness are in the identity of the overview.
+    const sdk = await hub.read("get_entity", {
+      entity_ref: hub.homeRef,
+      include: ["sdk"],
+    });
+    const sdkIdentity = sdk.identity ?? sdk.entity;
+    report.scenario_sdk = {
+      sha256: sdkIdentity?.sha256,
+      complete: sdkIdentity?.sdk_complete,
+    };
 
     const before = await homeSnapshot(hub, targets);
     report.snapshot.before_sha256 = sha256(stableJson(before));

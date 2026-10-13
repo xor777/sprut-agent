@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse } from "@babel/parser";
 import jsTokens from "js-tokens";
 import { WebSocket } from "ws";
@@ -653,7 +653,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "observation_in_progress",
         "Another native observation is already running in this MCP process.",
-        "get_native_observation",
+        "read_hub_log",
         { observation_ref: activeClient.#observation?.ref },
       );
     }
@@ -701,7 +701,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "observation_in_progress",
         "Another native observation is already running in this MCP process.",
-        "get_native_observation",
+        "read_hub_log",
         { observation_ref: this.#observation.ref },
       );
     }
@@ -728,7 +728,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "invalid_observation_scope",
         "Characteristic references in one observation must be unique.",
-        "start_native_observation",
+        "read_hub_log",
       );
     }
 
@@ -1109,74 +1109,6 @@ export class SprutHubClient {
       : null;
   }
 
-  async inspectAutomation({ source, target }) {
-    const deadline = Date.now() + this.timeoutMs;
-    const selections = {};
-    for (const [role, selected] of Object.entries({ source, target })) {
-      const roomResponse = await this.#request(
-        { room: { get: { id: selected.roomId } } },
-        deadline,
-      );
-      const room = roomResponse.result?.room?.get;
-      validateRoom(room, selected.roomId);
-      const accessoriesResponse = await this.#request(
-        {
-          accessory: {
-            list: {
-              roomId: selected.roomId,
-              expand: "services,characteristics",
-            },
-          },
-        },
-        deadline,
-      );
-      const accessories = extractNativeList(accessoriesResponse, [
-        "accessory",
-        "list",
-        "accessories",
-      ]);
-      accessories.forEach(validateAccessory);
-
-      const directScenarios = extractNativeList(
-        await this.#request(
-          { scenario: { list: { aId: selected.aId } } },
-          deadline,
-        ),
-        ["scenario", "list", "scenarios"],
-      );
-      const assignedLogics = extractNativeList(
-        await this.#request(
-          { logic: { list: { aId: selected.aId, sId: selected.sId } } },
-          deadline,
-        ),
-        ["logic", "list", "logics"],
-      );
-      const links = extractNativeList(
-        await this.#request(
-          {
-            link: {
-              list: {
-                aId: selected.aId,
-                sId: selected.sId,
-                cId: selected.cId,
-              },
-            },
-          },
-          deadline,
-        ),
-        ["link", "list", "links"],
-      );
-      selections[role] = {
-        room,
-        accessories,
-        directScenarios,
-        assignedLogics,
-        links,
-      };
-    }
-    return selections;
-  }
-
   async listScenarioDetails({ descriptionIncludes } = {}) {
     const deadline = Date.now() + this.timeoutMs;
     const scenarios = extractScenarioCatalog(
@@ -1223,11 +1155,13 @@ export class SprutHubClient {
     return scenario;
   }
 
-  async getScenarioSdk() {
-    const response = await this.#request(
-      { scenario: { sdk: {} } },
-      Date.now() + this.timeoutMs,
-    );
+  // The scenario SDK declarations of a home, as get_entity include sdk on
+  // its ref. bytes and sha256 describe the text as read; the server
+  // compares them with the text it returns (sdk_complete).
+  async #readScenarioSdk(serial, deadline) {
+    const response = await this.#request({ scenario: { sdk: {} } }, deadline, {
+      serial,
+    });
     const sdk = response.result?.scenario?.sdk?.sdk;
     if (typeof sdk !== "string" || sdk.length === 0) {
       throw new SprutHubError(
@@ -1235,7 +1169,16 @@ export class SprutHubClient {
         "SprutHub returned an incomplete scenario SDK.",
       );
     }
-    return { sdk, responseReceivedAt: response.responseReceivedAt };
+    return {
+      sdk,
+      bytes: Buffer.byteLength(sdk),
+      sha256: createHash("sha256").update(sdk).digest("hex"),
+      sdk_origin: "spruthub_scenario_sdk",
+      sdk_limitations: [
+        "The declarations describe code executed by SprutHub; they are not a Node.js or browser API.",
+        "The SDK does not prove callback ordering, repeated-value delivery, or runtime behavior on a particular service.",
+      ],
+    };
   }
 
   async getAccessory(id) {
@@ -2008,6 +1951,17 @@ export class SprutHubClient {
     let ownerContext = {};
     if (parsed.kind === "home") {
       entity = { kind: "home", ref: homeRef(parsed.serial) };
+      if (requested.has("sdk")) {
+        try {
+          Object.assign(
+            entity,
+            await this.#readScenarioSdk(parsed.serial, deadline),
+          );
+        } catch (error) {
+          if (!(error instanceof SprutHubError)) throw error;
+          markIncludeUnread(entity, "sdk", error);
+        }
+      }
     } else if (parsed.kind === "room") {
       entity = await this.#readRoomEntity(parsed, deadline);
     } else if (
@@ -4019,7 +3973,7 @@ export class SprutHubClient {
     throw new SprutHubError(
       "observation_not_found",
       "The native observation is not available in this MCP process.",
-      "start_native_observation",
+      "read_hub_log",
     );
   }
 
@@ -4028,7 +3982,7 @@ export class SprutHubClient {
       throw new SprutHubError(
         "observation_not_found",
         "The native observation is not available in this MCP process.",
-        "start_native_observation",
+        "read_hub_log",
       );
     }
     return this.#observation;
@@ -4076,12 +4030,12 @@ export class SprutHubClient {
       ...(publicStatus === "observing"
         ? {
             next: {
-              tool: "get_native_observation",
+              tool: "read_hub_log",
               arguments: { observation_ref: observation.ref },
             },
             stop: {
-              tool: "stop_native_observation",
-              arguments: { observation_ref: observation.ref },
+              tool: "read_hub_log",
+              arguments: { observation_ref: observation.ref, stop: true },
             },
           }
         : {}),
@@ -4575,7 +4529,7 @@ function invalidObservationScope() {
   return new SprutHubError(
     "invalid_observation_scope",
     "Use characteristic and scenario references from the same explicitly selected home.",
-    "start_native_observation",
+    "read_hub_log",
   );
 }
 
@@ -5172,6 +5126,9 @@ function includeWasApplied(entity, include) {
   if (include === "bridges") {
     return entity.kind === "accessory" && Array.isArray(entity.bridges);
   }
+  if (include === "sdk") {
+    return entity.kind === "home" && typeof entity.sdk === "string";
+  }
   return false;
 }
 
@@ -5244,6 +5201,14 @@ function explainUnappliedInclude(entity, include, ownerContext) {
 }
 
 function nextReadTowardOwner(entity, include, ownerContext) {
+  // The scenario SDK belongs to the home.
+  const home = /^spruthub:\/\/hub\/[^/]+/.exec(entity.ref ?? "")?.[0];
+  if (include === "sdk" && entity.kind !== "home" && home) {
+    return {
+      tool: "get_entity",
+      arguments: { entity_ref: home, include: ["sdk"] },
+    };
+  }
   if (entity.kind === "home") {
     return {
       tool: "home_overview",
@@ -5358,6 +5323,7 @@ function ownerCandidatesFromContainer(entity, include) {
 }
 
 function ownerScopeReason(entity, include) {
+  if (include === "sdk" && entity.kind !== "home") return "home_scoped";
   if (entity.kind === "home") return "catalog_required";
   if (["extension", "extension_child"].includes(entity.kind))
     return "window_scoped";

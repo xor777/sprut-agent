@@ -22,9 +22,7 @@ const projectRoot = path.resolve(
 );
 const serial = "empty-lists-hub";
 const homeRef = `spruthub://hub/${serial}`;
-const livingRoomRef = `${homeRef}/room/1`;
 const storeRoomRef = `${homeRef}/room/2`;
-const sensorRef = `${homeRef}/accessory/10/service/13/characteristic/14`;
 const lampServiceRef = `${homeRef}/accessory/11/service/13`;
 const lampRef = `${lampServiceRef}/characteristic/14`;
 
@@ -227,19 +225,6 @@ async function callError(client, name, args) {
   return result.structuredContent.error;
 }
 
-function previewArguments() {
-  return {
-    name: "Движение включает лампу",
-    reason: "Включать лампу при движении",
-    source_room_ref: livingRoomRef,
-    source_characteristic_ref: sensorRef,
-    source_value: true,
-    target_room_ref: livingRoomRef,
-    target_characteristic_ref: lampRef,
-    target_value: true,
-  };
-}
-
 test("a room without devices reads as an empty room", async (t) => {
   const hub = await startHub(t, furnishedHome());
   const client = await startClient(t, hub);
@@ -362,26 +347,6 @@ test("a device without scenarios, logic, links or options reads as checked empty
   assert.deepEqual(service.entity.available_logic_types, []);
 });
 
-test("the first automation of a home without scenarios is previewed", async (t) => {
-  const hub = await startHub(t, furnishedHome());
-  const client = await startClient(t, hub);
-
-  const preview = await call(
-    client,
-    "preview_boolean_automation",
-    previewArguments(),
-  );
-  assert.equal(preview.status, "prepared");
-  assert.deepEqual(preview.existing_rules, []);
-  for (const side of ["source", "target"]) {
-    assert.deepEqual(preview.context[side], {
-      scenario_associations: [],
-      assigned_logics: [],
-      links: [],
-    });
-  }
-});
-
 test("a list reply without its list object or with a non-array list is not an empty list", async (t) => {
   const hub = await startHub(t, furnishedHome());
   const client = await startClient(t, hub);
@@ -400,29 +365,6 @@ test("a list reply without its list object or with a non-array list is not an em
       entity_ref: storeRoomRef,
     });
     assert.equal(error.code, "incompatible_response", JSON.stringify(broken));
-  }
-
-  // A preview must not report "no scenarios, logic or links tied to the
-  // pair" when those lists were not read. The home-wide scenario catalog
-  // stays readable so that only the pair's list is broken.
-  for (const [method, broken] of [
-    ["scenario.list", { scenario: {} }],
-    ["scenario.list", { scenario: { list: { scenarios: null } } }],
-    ["logic.list", { logic: {} }],
-    ["link.list", {}],
-  ]) {
-    hub.override((candidate, params) => {
-      if (candidate === "scenario.list" && params.aId === undefined) {
-        return { scenario: { list: { scenarios: [] } } };
-      }
-      return candidate === method ? broken : undefined;
-    });
-    const error = await callError(
-      client,
-      "preview_boolean_automation",
-      previewArguments(),
-    );
-    assert.equal(error.code, "incompatible_response", method);
   }
 
   hub.override((method) =>

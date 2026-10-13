@@ -55,7 +55,7 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
   await client.connect(transport);
 
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 25);
+  assert.equal(tools.tools.length, 13);
   assert.equal(
     tools.tools.some(({ name }) => name === "home_overview"),
     true,

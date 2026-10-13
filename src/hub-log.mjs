@@ -19,12 +19,15 @@ const LEVEL_RANK = new Map(
 
 // One read_hub_log call. Filters and the byte limit run in present(), after
 // the server redacted the native text, so a filter cannot probe a hidden
-// secret.
+// secret. Without home_ref it reads the selected home (selectedHome).
 export function hubLogRead(input) {
   let request;
   return {
-    async read(client, secrets) {
-      request = hubLogRequest(input, secrets);
+    async read(client, secrets, selectedHome) {
+      request = hubLogRequest(
+        { ...input, home_ref: input.home_ref ?? selectedHome(client) },
+        secrets,
+      );
       return client.readHubLog({
         homeRef: request.homeRef,
         count: NATIVE_COUNT,
@@ -193,7 +196,7 @@ function hubLogPage(result, request, matches, entries) {
       readAll
         ? "SprutHub keeps only a short recent log buffer, read whole here back to oldest_entry_at. Earlier events are not retained: no match before that time does not mean nothing happened."
         : `This read holds the newest ${result.native.requested_count} log entries back to oldest_entry_at; SprutHub may keep older ones that were not read.`,
-      "In a live read without a Debug subscription the buffer held no scenario execution lines. To see a scenario run, keep start_native_observation for that scenario active during it.",
+      "In a live read without a Debug subscription the buffer held no scenario execution lines. To see a scenario run, keep a watch on that scenario (read_hub_log watch) during it.",
       ...(truncated
         ? [
             "Only the newest matches that fit max_bytes are shown. Narrow min_level, contains or scenario_ref, or raise max_bytes, to see the rest.",

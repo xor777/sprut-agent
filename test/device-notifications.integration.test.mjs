@@ -320,7 +320,7 @@ test("«уведомляй, когда открывается входная д�
   assert.deepEqual(again.observed_value, { value: true, kind: "boolValue" });
   assert.equal(notifyWrites(hub).length, 1);
 
-  const history = await call(client, "list_native_changes", {
+  const history = await call(client, "get_native_change", {
     home_ref: homeRef,
     entity_ref: frontDoor,
   });
@@ -414,7 +414,7 @@ test("a notification is refused before any write where the web client offers non
     "invalid_native_value",
   );
   assert.deepEqual(notifyWrites(hub), []);
-  const history = await call(client, "list_native_changes", {
+  const history = await call(client, "get_native_change", {
     home_ref: homeRef,
   });
   assert.deepEqual(history.changes, []);

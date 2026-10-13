@@ -334,6 +334,22 @@ test("read_hub_log returns the hub execution log newest first with hub-local tim
   assert(Buffer.byteLength(text) <= 16_000);
 });
 
+test("read_hub_log without home_ref reads the selected home, and a stop without a watch reads nothing", async (t) => {
+  const hub = await startHub();
+  const client = await startClient(t, hub);
+
+  const stop = await readLog(client, { stop: true });
+  assert.equal(stop.isError, true);
+  assert.equal(stop.structuredContent.error.code, "observation_ref_required");
+  assert.equal(hub.requests.length, 0);
+
+  const result = await readLog(client, {});
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assertOnlyLogReads(hub, 1);
+  assert.equal(result.structuredContent.home_ref, homeRef);
+  assert.deepEqual(result.structuredContent.entries, expectedNewestFirst);
+});
+
 // Agents quoted UTC log times to the owner as local time («с 06:42» at 09:42
 // hub time). Each time carries the offset of the hub's zone at that
 // instant, so a clock change inside the buffer reads right.

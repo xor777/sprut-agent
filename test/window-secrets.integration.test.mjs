@@ -342,16 +342,16 @@ test("keys, pairing codes and login links in option windows reach no answer, whi
     reason: "Вернуть ключ сети",
   });
 
-  const point = await ok("save_configuration_point", {
+  const point = await ok("configuration_point", {
     home_ref: homeRef,
     entity_refs: [zigbeeWindowRef, homekitWindowRef],
   });
-  await ok("get_configuration_point", { point_ref: point.point_ref });
-  await ok("get_configuration_point", {
+  await ok("configuration_point", { point_ref: point.point_ref });
+  await ok("configuration_point", {
     point_ref: point.point_ref,
     compare: true,
   });
-  await ok("list_configuration_points", { home_ref: homeRef });
+  await ok("configuration_point", { home_ref: homeRef });
   const log = await ok("read_hub_log", { home_ref: homeRef });
 
   assert.deepEqual(leakedSecrets(answers), []);
@@ -442,7 +442,7 @@ test("a passcode saved before it was hidden stays hidden in points and changes, 
   const restoredAgain = await ok("restore_native_change", {
     change_ref: changeRef,
   });
-  const listed = await ok("list_native_changes", { home_ref: homeRef });
+  const listed = await ok("get_native_change", { home_ref: homeRef });
   const prepared = await refused("prepare_native_change", {
     operation: "window_option",
     target_ref: keypadWindowRef,
@@ -451,7 +451,7 @@ test("a passcode saved before it was hidden stays hidden in points and changes, 
     reason: "Сменить код",
   });
 
-  const point = await ok("save_configuration_point", {
+  const point = await ok("configuration_point", {
     home_ref: homeRef,
     entity_refs: [keypadWindowRef],
   });
@@ -474,10 +474,10 @@ test("a passcode saved before it was hidden stays hidden in points and changes, 
   };
   delete stored.captured[0].not_captured_options;
   await writeFile(pointFile, `${JSON.stringify(stored, null, 2)}\n`);
-  const shownPoint = await ok("get_configuration_point", {
+  const shownPoint = await ok("configuration_point", {
     point_ref: point.point_ref,
   });
-  const compared = await ok("get_configuration_point", {
+  const compared = await ok("configuration_point", {
     point_ref: point.point_ref,
     compare: true,
   });
@@ -627,16 +627,6 @@ test("text carrying [REDACTED] from an answer is never written over the owner's 
           },
         ],
       },
-    }),
-    automation: await refusal("preview_boolean_automation", {
-      name: `${mark} (копия)`,
-      reason: "Скопировать сценарий",
-      source_room_ref: `${homeRef}/room/2`,
-      source_characteristic_ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
-      source_value: true,
-      target_room_ref: `${homeRef}/room/2`,
-      target_characteristic_ref: `${homeRef}/accessory/14/service/13/characteristic/14`,
-      target_value: true,
     }),
   };
 
@@ -1250,7 +1240,7 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
   const second = (
     await ok("get_entity", { entity_ref: windowRef(SECOND_XIAOMI_WINDOW) })
   ).entity;
-  const point = await ok("save_configuration_point", {
+  const point = await ok("configuration_point", {
     home_ref: homeRef,
     entity_refs: [xiaomiRef],
   });
@@ -1262,11 +1252,11 @@ test("a confirmation code typed during a Xiaomi cloud login reaches no answer, w
   fill("Ticket", XIAOMI_TICKET);
   fill("SmsCode", SMS_CODE);
   const filled = (await ok("get_entity", { entity_ref: xiaomiRef })).entity;
-  await ok("get_configuration_point", {
+  await ok("configuration_point", {
     point_ref: point.point_ref,
     compare: true,
   });
-  await ok("save_configuration_point", {
+  await ok("configuration_point", {
     home_ref: homeRef,
     entity_refs: [xiaomiRef],
   });

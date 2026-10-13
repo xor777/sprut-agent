@@ -7,6 +7,7 @@ import {
   parseConfigurationPointRef,
 } from "./configuration-point-store.mjs";
 import {
+  homeRef as homeRefOf,
   isRedactedNode,
   isSensitiveNativeNode,
   parseEntityRef,
@@ -44,7 +45,8 @@ export class ConfigurationPointService {
     });
   }
 
-  async save({ home_ref: homeRef, entity_refs: entityRefs }) {
+  async save({ home_ref: requestedHomeRef, entity_refs: entityRefs }) {
+    const homeRef = this.#selectedHomeRef(requestedHomeRef);
     const serial = this.#requireHome(homeRef);
     this.#requireClient();
     const started = new Date().toISOString();
@@ -88,13 +90,19 @@ export class ConfigurationPointService {
       captured: captured.map(({ entity_ref, kind }) => ({ entity_ref, kind })),
       not_captured: notCaptured,
       next: {
-        tool: "get_configuration_point",
+        tool: "configuration_point",
         arguments: { point_ref: pointRef },
       },
     };
   }
 
-  async list({ home_ref: homeRef, entity_ref: entityRef, limit = 10, cursor }) {
+  async list({
+    home_ref: requestedHomeRef,
+    entity_ref: entityRef,
+    limit = 10,
+    cursor,
+  }) {
+    const homeRef = this.#selectedHomeRef(requestedHomeRef);
     const serial = this.#requireHome(homeRef);
     if (entityRef !== undefined) this.#requireEntityHome(entityRef, serial);
     const { points, unavailable } = await this.storeFor(serial).list();
@@ -133,7 +141,7 @@ export class ConfigurationPointService {
       },
       next: nextCursor
         ? {
-            tool: "list_configuration_points",
+            tool: "configuration_point",
             arguments: {
               home_ref: homeRef,
               ...(entityRef ? { entity_ref: entityRef } : {}),
@@ -153,8 +161,8 @@ export class ConfigurationPointService {
       throw new SprutHubError(
         "configuration_point_not_found",
         "No configuration point with this reference exists for the selected home.",
-        "list_configuration_points",
-        { next: { tool: "list_configuration_points", arguments: {} } },
+        "configuration_point",
+        { next: { tool: "configuration_point", arguments: {} } },
       );
     }
     const point = withSecretOptionsHidden(withRequestUrlsHidden(stored));
@@ -271,6 +279,19 @@ export class ConfigurationPointService {
         "retry",
       );
     }
+  }
+
+  #selectedHomeRef(homeRef) {
+    if (homeRef !== undefined) return homeRef;
+    if (this.configuredSerial == null) {
+      throw new SprutHubError(
+        "home_ref_required",
+        "No home is selected in the connection settings: pass home_ref from home_overview.",
+        "home_overview",
+        { next: { tool: "home_overview", arguments: {} } },
+      );
+    }
+    return homeRefOf(this.configuredSerial);
   }
 
   #requireHome(homeRef) {
@@ -550,7 +571,7 @@ function summarizePoint(point, serial) {
     entity_refs: point.selected_entity_refs,
     captured_kinds: [...new Set(point.captured.map(({ kind }) => kind))],
     next: {
-      tool: "get_configuration_point",
+      tool: "configuration_point",
       arguments: { point_ref: pointRef },
     },
   };
@@ -806,8 +827,8 @@ function decodeListCursor(cursor, homeRef, entityRef) {
 function invalidCursor() {
   return new SprutHubError(
     "invalid_cursor",
-    "Use the cursor returned by list_configuration_points for the same home and filter.",
-    "list_configuration_points",
+    "Use the cursor returned by the configuration_point list for the same home and filter.",
+    "configuration_point",
   );
 }
 

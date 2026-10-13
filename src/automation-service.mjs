@@ -76,6 +76,39 @@ const RESTORE_BATCH_LIMIT = 100;
 const ROOM_NAME_MAX_LENGTH = 32;
 const ROOM_NAME_REFUSED_CHARACTER =
   /\p{Extended_Pictographic}|[\uFE00-\uFE0F]/u;
+// Changes that make the hub act by itself from now on. An applied one
+// tells the agent to say what it will overwrite.
+const AUTOMATION_CHANGE_KINDS = new Set([
+  "block_create",
+  "block_data_update",
+  "logic_source_create",
+  "logic_source_update",
+]);
+const AUTOMATION_OVERWRITE_NOTE =
+  "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
+// The operations of prepare_native_change and get_native_change_contract.
+export const NATIVE_CHANGE_OPERATIONS = [
+  "characteristic_value",
+  "characteristic_option",
+  "window_option",
+  "characteristic_notify",
+  "logic_assignment",
+  "logic_active",
+  "logic_option",
+  "logic_source_create",
+  "logic_source_update",
+  "block_create",
+  "block_data_update",
+  "block_action_pause",
+  "scenario_active",
+  "scenario_run",
+  "accessory_placement",
+  "room_create",
+  "room_name",
+  "service_name",
+  "service_visible",
+  "virtual_light_group",
+];
 const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and dropped an emoji from one, so a longer name, or one with emoji, pictographs, variation selectors or other characters outside the Basic Multilingual Plane, is refused before any write (only one emoji was seen dropped; the rest are refused as a precaution). A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
 
 export class AutomationService {
@@ -89,24 +122,6 @@ export class AutomationService {
       hubUrl,
       hubSerial,
     });
-  }
-
-  async getScenarioSdk(homeReference) {
-    parseConfiguredHomeRef(homeReference, this.hubSerial);
-    const { sdk, responseReceivedAt } = await this.client.getScenarioSdk();
-    return {
-      status: "ok",
-      home_ref: homeReference,
-      sdk,
-      bytes: Buffer.byteLength(sdk),
-      sha256: createHash("sha256").update(sdk).digest("hex"),
-      freshness: { hub_response_received_at: responseReceivedAt },
-      content_origin: "spruthub_scenario_sdk",
-      limitations: [
-        "The declarations describe code executed by SprutHub; they are not a Node.js or browser API.",
-        "The SDK does not prove callback ordering, repeated-value delivery, or runtime behavior on a particular service.",
-      ],
-    };
   }
 
   async getNativeChangeContract(input) {
@@ -204,6 +219,7 @@ export class AutomationService {
         operation: input.operation,
         target_ref: input.target_ref,
         contract: logicSourceContract("create"),
+        next: sdkNext(this.hubSerial),
       };
     }
     if (input.operation === "logic_source_update") {
@@ -216,6 +232,7 @@ export class AutomationService {
         operation: input.operation,
         target_ref: input.target_ref,
         contract: logicSourceContract("update"),
+        next: sdkNext(this.hubSerial),
       };
     }
     throw unsupportedNativeOperation();
@@ -1078,28 +1095,36 @@ export class AutomationService {
     const id = parseNativeChangeRef(changeReference);
     return this.#exclusiveWrite(async () => {
       const change = await this.#requireNativeChange(id);
-      if (change.kind === "accessory_placement") {
-        return this.#applyAccessoryPlacement(change);
-      }
-      if (change.kind === "room_create") {
-        return this.#applyRoomCreate(change);
-      }
-      if (change.kind === "virtual_light_group") {
-        return this.#applyVirtualLightGroup(change);
-      }
-      if (change.kind === "logic_assignment") {
-        return this.#applyLogicAssignment(change);
-      }
-      if (change.kind === "scenario_run") {
-        return this.#applyScenarioRun(change);
-      }
-      if (isLogicSourceChange(change)) {
-        return this.#applyScenarioChange(change);
-      }
-      return isNativeValueChange(change)
-        ? this.#applyValueChange(change)
-        : this.#applyScenarioChange(change);
+      const result = await this.#applyNative(change);
+      return AUTOMATION_CHANGE_KINDS.has(change.kind) &&
+        result.status === "applied"
+        ? { ...result, tell_owner: AUTOMATION_OVERWRITE_NOTE }
+        : result;
     });
+  }
+
+  async #applyNative(change) {
+    if (change.kind === "accessory_placement") {
+      return this.#applyAccessoryPlacement(change);
+    }
+    if (change.kind === "room_create") {
+      return this.#applyRoomCreate(change);
+    }
+    if (change.kind === "virtual_light_group") {
+      return this.#applyVirtualLightGroup(change);
+    }
+    if (change.kind === "logic_assignment") {
+      return this.#applyLogicAssignment(change);
+    }
+    if (change.kind === "scenario_run") {
+      return this.#applyScenarioRun(change);
+    }
+    if (isLogicSourceChange(change)) {
+      return this.#applyScenarioChange(change);
+    }
+    return isNativeValueChange(change)
+      ? this.#applyValueChange(change)
+      : this.#applyScenarioChange(change);
   }
 
   // Several characteristic_value changes in one call. One read of each
@@ -1858,7 +1883,8 @@ export class AutomationService {
   }
 
   async getNativeChange(changeReference) {
-    const id = parseNativeChangeRef(changeReference);
+    const { type, id } = parseInspectedChangeRef(changeReference);
+    if (type === "automation") return this.#getAutomationChange(id);
     const change = await this.#requireNativeChange(id);
     if (change.kind === "accessory_placement") {
       return this.#getAccessoryPlacement(change);
@@ -1938,10 +1964,14 @@ export class AutomationService {
   }
 
   // One native change keeps its full record as the answer; a group ref is
-  // undone as a group; an apply_automation_change ref is rolled back.
+  // undone as a group; an earlier boolean automation is rolled back.
   async restoreNativeChange(changeReference) {
     const { type, id } = parseRestoreRef(changeReference);
-    if (type === "automation") return this.rollback(changeReference);
+    if (type === "automation") {
+      return this.#exclusiveWrite(async () =>
+        this.#rollbackAutomation(await this.#requireAutomationChange(id)),
+      );
+    }
     if (type === "group") return this.restoreChanges([changeReference]);
     return this.#exclusiveWrite(async () =>
       this.#restoreNative(await this.#requireNativeChange(id)),
@@ -1979,7 +2009,7 @@ export class AutomationService {
           throw new SprutHubError(
             "change_not_found",
             "No change of this group was found for this configured hub.",
-            "list_native_changes",
+            "get_native_change",
           );
         }
         for (const member of members) {
@@ -2004,7 +2034,7 @@ export class AutomationService {
       throw new SprutHubError(
         "too_many_changes",
         `One restore takes at most ${RESTORE_BATCH_LIMIT} changes. Restore the newest ones first, then the rest in another call.`,
-        "list_native_changes",
+        "get_native_change",
       );
     }
     return [...entries.values()];
@@ -3788,11 +3818,12 @@ export class AutomationService {
   }
 
   async listNativeChanges({
-    home_ref: homeRef,
+    home_ref: requestedHomeRef,
     entity_ref: entityRef,
-    limit,
+    limit = 10,
     cursor,
   }) {
+    const homeRef = requestedHomeRef ?? configuredHomeRef(this.hubSerial);
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     if (entityRef !== undefined) requireEntityHome(entityRef, this.hubSerial);
     const selection = historySelection(homeRef, entityRef, limit, cursor);
@@ -5791,194 +5822,12 @@ export class AutomationService {
     return matches[0] ?? null;
   }
 
-  async previewBooleanAutomation(input) {
-    // The scenario is created with this name and the reason as its Desc.
-    refuseRedactionMark(input.name, "name");
-    refuseRedactionMark(input.reason, "reason");
-    const source = parseCharacteristicRef(
-      input.source_characteristic_ref,
-      this.hubSerial,
-    );
-    const target = parseCharacteristicRef(
-      input.target_characteristic_ref,
-      this.hubSerial,
-    );
-    const sourceRoomId = parseRoomRef(input.source_room_ref, this.hubSerial);
-    const targetRoomId = parseRoomRef(input.target_room_ref, this.hubSerial);
-    const context = await this.client.inspectAutomation({
-      source: { ...source, roomId: sourceRoomId },
-      target: { ...target, roomId: targetRoomId },
-    });
-    const condition = selectCharacteristic(
-      context.source,
-      source,
-      input.source_value,
-      false,
-      this.hubSerial,
-    );
-    const action = selectCharacteristic(
-      context.target,
-      target,
-      input.target_value,
-      true,
-      this.hubSerial,
-    );
-    const autoOff = selectAutoOff(
-      input.auto_off_after_seconds,
-      condition,
-      action,
-    );
-    const nativeData = buildNativeData(condition, action, autoOff);
-    const id = this.store.newId();
-    const now = new Date().toISOString();
-    const change = {
-      id,
-      status: "prepared",
-      name: input.name,
-      reason: input.reason,
-      marker: `sprut-agent:automation:${id}`,
-      home_ref: configuredHomeRef(this.hubSerial),
-      created_at: now,
-      updated_at: now,
-      condition,
-      action,
-      ...(autoOff ? { auto_off: autoOff } : {}),
-      native_data: nativeData,
-    };
-    const existingRules = relatedRules(
-      await this.client.listScenarioDetails(),
-      change,
-      change.home_ref,
-    ).map(({ rule }) => rule);
-    await this.store.save(change);
-
-    return {
-      status: "prepared",
-      change_ref: changeRef(id),
-      name: input.name,
-      reason: input.reason,
-      condition,
-      action,
-      ...(autoOff ? { auto_off: autoOff } : {}),
-      native_shape: {
-        mechanism: "BLOCK",
-        active: true,
-        on_start: false,
-        sync: false,
-        else_actions: [],
-      },
-      existing_rules: existingRules,
-      context: normalizeContext(context, change.home_ref),
-      limitations: [
-        "Preview does not change the hub and is not an atomic reservation.",
-        "existing_rules covers BLOCK scenarios that fire on this trigger and write this target. Apply reuses an equivalent rule and creates nothing next to a superset; a conflict is only reported, so the requested rule would run next to it. An inactive_superset is a turned-off rule that would do this and more: apply creates the requested rule, and turning that rule on instead would also bring back its extra behavior.",
-        "Scenario associations come from the accessory index and do not establish a direction or cover arbitrary code and bridges.",
-        ...(autoOff
-          ? [
-              "The native RESET delay counts from the latest trigger; it does not determine whether a person is still present.",
-            ]
-          : ["The rule does not turn the target off automatically."]),
-        "Apply and rollback are serialized only inside this MCP process for the configured hub.",
-        "SprutHub has no observed conditional delete; another process or the UI can edit after the rollback check.",
-      ],
-    };
-  }
-
-  async apply(changeReference) {
-    const id = parseChangeRef(changeReference);
-    return this.#exclusiveWrite(async () => {
-      const change = await this.#requireChange(id);
-      await this.#preflight(change);
-      let reconciliation = await this.#reconcile(change);
-      let observation = observeReconciliation(change, reconciliation);
-      if (observation.kind !== "absent") {
-        return this.#finishObservation(change, observation, {
-          ...(observation.kind === "owned_match"
-            ? verifiedApplyFields(false)
-            : {}),
-          ...(["equivalent", "superset_conflict"].includes(observation.kind)
-            ? { created: false }
-            : {}),
-        });
-      }
-      if (["creating", "uncertain"].includes(change.status)) {
-        return this.#finish(change, { status: "uncertain" }, uncertainResult);
-      }
-      if (change.status === "rolled_back") {
-        return {
-          status: "rolled_back",
-          change_ref: changeReference,
-          created: false,
-          owned: true,
-        };
-      }
-
-      change.status = "creating";
-      change.updated_at = new Date().toISOString();
-      change.apply_started_at ??= change.updated_at;
-      await this.#saveBeforeWrite(change);
-      try {
-        const created = await this.client.createScenario(
-          expectedScenario(change),
-        );
-        change.scenario_index = created.index;
-      } catch (error) {
-        if (!isUncertainWriteError(error)) {
-          error.details = await this.#finishKnownNoEffect(
-            change,
-            changeReference,
-            "prepared",
-            error,
-            "restore_state_storage_then_preview_boolean_automation",
-          );
-          throw error;
-        }
-        try {
-          reconciliation = await this.#reconcile(change);
-        } catch {
-          return this.#finish(change, { status: "uncertain" }, uncertainResult);
-        }
-        observation = observeReconciliation(change, reconciliation);
-        if (observation.kind === "owned_match") {
-          return this.#finishObservation(change, observation, {
-            ...verifiedApplyFields(true),
-            recovered_after_uncertain_write: true,
-            ...(error.code === "connection_closed"
-              ? { recovered_after_disconnect: true }
-              : {}),
-          });
-        }
-        if (
-          ["owned_conflict", "ownership_conflict"].includes(observation.kind)
-        ) {
-          return this.#finishObservation(change, observation);
-        }
-        return this.#finish(change, { status: "uncertain" }, uncertainResult);
-      }
-
-      try {
-        reconciliation = await this.#reconcile(change);
-      } catch {
-        return this.#finish(change, { status: "uncertain" }, uncertainResult);
-      }
-      observation = observeReconciliation(change, reconciliation);
-      if (observation.kind === "owned_match") {
-        return this.#finishObservation(
-          change,
-          observation,
-          verifiedApplyFields(true),
-        );
-      }
-      if (["owned_conflict", "ownership_conflict"].includes(observation.kind)) {
-        return this.#finishObservation(change, observation);
-      }
-      return this.#finish(change, { status: "uncertain" }, uncertainResult);
-    });
-  }
-
-  async getChange(changeReference) {
-    const id = parseChangeRef(changeReference);
-    const change = await this.#requireChange(id);
+  // A spruthub-change://automation ref names a rule that the boolean
+  // automation tools of 0.4.0 and earlier created. They are gone; their
+  // records stay readable (get_native_change) and undoable
+  // (restore_native_change), and nothing new is written under such a ref.
+  async #getAutomationChange(id) {
+    const change = await this.#requireAutomationChange(id);
     const reconciliation = await this.#reconcile(change);
     const observation = observeReconciliation(change, reconciliation);
     if (observation.kind !== "absent") {
@@ -5991,13 +5840,6 @@ export class AutomationService {
       return publicChange(change);
     }
     return uncertainResult(change);
-  }
-
-  async rollback(changeReference) {
-    const id = parseChangeRef(changeReference);
-    return this.#exclusiveWrite(async () =>
-      this.#rollbackAutomation(await this.#requireAutomationChange(id)),
-    );
   }
 
   async #rollbackAutomation(change) {
@@ -6064,27 +5906,17 @@ export class AutomationService {
     return this.#finishDeleteReadback(change, afterDelete, false);
   }
 
-  // An apply_automation_change ref names only a preview_boolean_automation
-  // record, never a native change of the same journal.
+  // An automation ref names only such an earlier record, never a native
+  // change of the same journal. A record without home_ref is from before
+  // home-qualified refs.
   async #requireAutomationChange(id) {
-    const change = await this.#requireChange(id);
-    if (isNativeChange(change)) {
-      throw new SprutHubError(
-        "change_not_found",
-        "The automation change was not found for this configured hub.",
-        "preview_boolean_automation",
-      );
-    }
-    return change;
-  }
-
-  async #requireChange(id) {
     const change = await this.store.get(id);
-    if (!change) {
+    if (!change || isNativeChange(change)) {
       throw new SprutHubError(
         "change_not_found",
         "The automation change was not found for this configured hub.",
-        "preview_boolean_automation",
+        "get_native_change",
+        { next: { tool: "get_native_change", arguments: {} } },
       );
     }
     if (
@@ -6094,64 +5926,6 @@ export class AutomationService {
       throw unsupportedHomeWrite();
     }
     return change;
-  }
-
-  async #preflight(change) {
-    const allowLegacy = change.home_ref === undefined;
-    const source = parseCharacteristicRef(
-      change.condition.characteristic.ref,
-      this.hubSerial,
-      allowLegacy,
-    );
-    const target = parseCharacteristicRef(
-      change.action.characteristic.ref,
-      this.hubSerial,
-      allowLegacy,
-    );
-    const context = await this.client.inspectAutomation({
-      source: {
-        ...source,
-        roomId: parseRoomRef(
-          change.condition.room.ref,
-          this.hubSerial,
-          allowLegacy,
-        ),
-      },
-      target: {
-        ...target,
-        roomId: parseRoomRef(
-          change.action.room.ref,
-          this.hubSerial,
-          allowLegacy,
-        ),
-      },
-    });
-    const condition = selectCharacteristic(
-      context.source,
-      source,
-      change.condition.value,
-      false,
-      this.hubSerial,
-    );
-    const action = selectCharacteristic(
-      context.target,
-      target,
-      change.action.value,
-      true,
-      this.hubSerial,
-    );
-    if (
-      condition.service.type !== change.condition.service.type ||
-      condition.characteristic.type !== change.condition.characteristic.type ||
-      action.service.type !== change.action.service.type ||
-      action.characteristic.type !== change.action.characteristic.type
-    ) {
-      throw new SprutHubError(
-        "binding_changed",
-        "A selected SprutHub binding changed after preview.",
-        "preview_boolean_automation",
-      );
-    }
   }
 
   async #reconcile(change) {
@@ -6216,40 +5990,20 @@ export class AutomationService {
     }));
   }
 
-  async #finishKnownNoEffect(
-    change,
-    changeReference,
-    status,
-    error,
-    persistenceAction,
-  ) {
+  async #finishKnownNoEffect(change, changeReference, status, error) {
     const rejection = writeRejection(error);
-    return this.#finish(
-      change,
-      { status },
-      () => ({
-        ...error.details,
-        change_ref: changeReference,
-        hub_effect: "not_applied",
-        ...(rejection ? { rejection } : {}),
-      }),
-      persistenceAction,
-    );
+    return this.#finish(change, { status }, () => ({
+      ...error.details,
+      change_ref: changeReference,
+      hub_effect: "not_applied",
+      ...(rejection ? { rejection } : {}),
+    }));
   }
 
-  async #finish(
-    change,
-    state,
-    makeResult,
-    persistenceAction = "restore_state_storage_then_get_automation_change",
-  ) {
+  async #finish(change, state, makeResult) {
     Object.assign(change, state, { updated_at: new Date().toISOString() });
     const localStateSaved = await this.#trySave(change);
-    return withLocalState(
-      makeResult(change),
-      localStateSaved,
-      persistenceAction,
-    );
+    return withLocalState(makeResult(change), localStateSaved);
   }
 
   async #trySave(change) {
@@ -6292,22 +6046,18 @@ export class AutomationService {
   }
 }
 
-function parseRoomRef(ref, configuredSerial, allowLegacy = false) {
+function parseRoomRef(ref, configuredSerial) {
   const scoped = /^spruthub:\/\/hub\/([^/]+)\/room\/(\d+)$/.exec(ref);
-  if (scoped) {
-    const serial = decodeReferenceSegment(scoped[1]);
-    requireConfiguredHome(serial, configuredSerial);
-    return Number(scoped[2]);
-  }
-  const legacy = allowLegacy ? /^spruthub:\/\/room\/(\d+)$/.exec(ref) : null;
-  if (!legacy) {
+  if (!scoped) {
     throw new SprutHubError(
       "invalid_room_ref",
       "Use a home-qualified room reference returned by home_overview.",
       "home_overview",
     );
   }
-  return Number(legacy[1]);
+  const serial = decodeReferenceSegment(scoped[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  return Number(scoped[2]);
 }
 
 function parseAccessoryRef(ref, configuredSerial) {
@@ -6341,36 +6091,24 @@ function parseServiceRef(ref, configuredSerial) {
   return { aId: Number(match[2]), sId: Number(match[3]) };
 }
 
-function parseCharacteristicRef(ref, configuredSerial, allowLegacy = false) {
+function parseCharacteristicRef(ref, configuredSerial) {
   const scoped =
     /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
       ref,
     );
-  if (scoped) {
-    const serial = decodeReferenceSegment(scoped[1]);
-    requireConfiguredHome(serial, configuredSerial);
-    return {
-      aId: Number(scoped[2]),
-      sId: Number(scoped[3]),
-      cId: Number(scoped[4]),
-    };
-  }
-  const match = allowLegacy
-    ? /^spruthub:\/\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
-        ref,
-      )
-    : null;
-  if (!match) {
+  if (!scoped) {
     throw new SprutHubError(
       "invalid_characteristic_ref",
       "Use a characteristic reference returned by find_devices or get_entity.",
       "find_devices",
     );
   }
+  const serial = decodeReferenceSegment(scoped[1]);
+  requireConfiguredHome(serial, configuredSerial);
   return {
-    aId: Number(match[1]),
-    sId: Number(match[2]),
-    cId: Number(match[3]),
+    aId: Number(scoped[2]),
+    sId: Number(scoped[3]),
+    cId: Number(scoped[4]),
   };
 }
 
@@ -6709,6 +6447,8 @@ function unsupportedNativeOperation() {
   return new SprutHubError(
     "unsupported_native_operation",
     "This native operation is not supported in the current slice.",
+    "use_a_supported_operation",
+    { supported_operations: NATIVE_CHANGE_OPERATIONS },
   );
 }
 
@@ -6774,7 +6514,7 @@ function virtualLightGroupContract() {
       ui_ordered_link_cleanup_requires_live_recheck: true,
     },
     limitations: [
-      "Creation and every link are sequential native writes, not one atomic transaction.",
+      "Creation and every link are sequential native writes, not one atomic transaction: when the hub refuses a later step, the earlier ones stay, apply answers hub_effect=partial with change showing them, and next is restore_native_change to remove them.",
       "A lost accessory-create response does not establish ownership from a matching candidate and is never retried blindly.",
       "A same-valued virtual command can be acknowledged without reaching every member; member readback is required.",
       "SprutHub exposes no native compare-and-set; a race remains after each pre-write observation.",
@@ -6950,7 +6690,7 @@ function scenarioRunContract() {
     limitations: [
       "GLOBAL, built-in (predefined), and other non-BLOCK, non-LOGIC scenarios are refused with scenario_run_unverified_type until a manual run is verified on a hub: a GLOBAL run may register its timers and subscriptions again. Ask the owner to run such a scenario in the SprutHub app.",
       "A turned-off scenario is refused: SprutHub acknowledges a run of a turned-off BLOCK but runs none of its actions. scenario_active turns it on and also re-arms its triggers.",
-      "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write. start_native_observation for this scenario, active during the run, shows what it did; the hub log kept no scenario lines without such a subscription.",
+      "When effect.predicted is false, the hub decides what runs; listed targets are only the literal actions it may write. read_hub_log watch on this scenario, active during the run, shows what it did; the hub log kept no scenario lines without such a watch.",
       "Target readback cannot prove that this command caused an observed value or that physical devices acted atomically.",
       "SprutHub exposes no native compare-and-set; a race remains after the pre-run scenario check.",
     ],
@@ -11374,7 +11114,7 @@ function ownedVirtualGroupContext(changes, target) {
     throw new SprutHubError(
       "incompatible_local_state",
       "More than one owned virtual-light journal claims this characteristic.",
-      "list_native_changes",
+      "get_native_change",
     );
   }
   return matches[0] ?? null;
@@ -12630,12 +12370,20 @@ function scenarioRequestedSnapshot(change) {
   return change.requested_snapshot;
 }
 
+// The hub's scenario SDK, read before LOGIC code is written.
+function sdkNext(serial) {
+  return {
+    tool: "get_entity",
+    arguments: { entity_ref: configuredHomeRef(serial), include: ["sdk"] },
+  };
+}
+
 function requiredLogicSource(value) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new SprutHubError(
       "invalid_native_change",
       "LOGIC source must be a non-empty string.",
-      "get_scenario_sdk",
+      "get_entity",
     );
   }
   return value;
@@ -13558,6 +13306,22 @@ function parseNativeChangeRef(ref) {
   return match[1];
 }
 
+// A change to inspect: a native change or an earlier boolean automation.
+function parseInspectedChangeRef(ref) {
+  const match =
+    /^spruthub-change:\/\/(native|automation)\/([a-f0-9]{24})$/.exec(
+      typeof ref === "string" ? ref : "",
+    );
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_change_ref",
+      "Use a change_ref from prepare_native_change, send_device_commands or the history (get_native_change without change_ref).",
+      "get_native_change",
+    );
+  }
+  return { type: match[1], id: match[2] };
+}
+
 function parseRestoreRef(ref) {
   const match =
     /^spruthub-change:\/\/(native|automation|group)\/([a-f0-9]{24})$/.exec(
@@ -13566,8 +13330,8 @@ function parseRestoreRef(ref) {
   if (!match) {
     throw new SprutHubError(
       "invalid_change_ref",
-      "Use a change_ref or group_ref from list_native_changes, send_device_commands, apply_native_change or apply_automation_change.",
-      "list_native_changes",
+      "Use a change_ref or group_ref from send_device_commands, prepare_native_change or the history of get_native_change.",
+      "get_native_change",
     );
   }
   return { type: match[1], id: match[2] };
@@ -13814,10 +13578,7 @@ function automationRestoreItem(change, base, result, before) {
         status: "uncertain",
         reason: deleteSent ? "restore_unconfirmed" : "apply_unconfirmed",
         sent: deleteSent,
-        next: {
-          tool: "get_automation_change",
-          arguments: { change_ref: base.change_ref },
-        },
+        next: nativeChangeNext(base.change_ref),
       };
     }
     default:
@@ -13858,14 +13619,7 @@ function restoreFailureItem(change, automation, error) {
     },
     ...(details.hub_effect ? { hub_effect: details.hub_effect } : {}),
     ...(details.rejection ? { rejection: details.rejection } : {}),
-    next:
-      details.next ??
-      (automation
-        ? {
-            tool: "get_automation_change",
-            arguments: { change_ref: base.change_ref },
-          }
-        : nativeChangeNext(base.change_ref)),
+    next: details.next ?? nativeChangeNext(base.change_ref),
   };
 }
 
@@ -14480,7 +14234,7 @@ function publicNativeChange(
         ...(plan.effect.predicted
           ? []
           : [
-              "SprutHub decides during the run which conditions, delays, and code let actions execute, so the effect is not predicted. Listed targets are only literal actions it may write; start_native_observation for this scenario, active during the run, shows what it did.",
+              "SprutHub decides during the run which conditions, delays, and code let actions execute, so the effect is not predicted. Listed targets are only literal actions it may write; read_hub_log watch on this scenario, active during the run, shows what it did.",
             ]),
         ...(plan.targets_known
           ? []
@@ -14847,10 +14601,7 @@ function changeSummary(change, homeRef) {
     ...(appliedAt ? { applied_at: appliedAt } : {}),
     created_at: change.created_at,
     updated_at: change.updated_at,
-    next: {
-      tool: "get_automation_change",
-      arguments: { change_ref: reference },
-    },
+    next: nativeChangeNext(reference),
   };
 }
 
@@ -14995,7 +14746,7 @@ function encodeHistoryCursor(after, scope) {
 
 function historyNext(selection, cursor) {
   return {
-    tool: "list_native_changes",
+    tool: "get_native_change",
     arguments: {
       home_ref: selection.homeRef,
       ...(selection.entityRef ? { entity_ref: selection.entityRef } : {}),
@@ -15008,8 +14759,8 @@ function historyNext(selection, cursor) {
 function invalidHistoryCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
-    "Use the cursor returned by list_native_changes for the same home and entity filter.",
-    "restart_list_native_changes",
+    "Use the cursor returned by the history of get_native_change for the same home and entity filter.",
+    "restart_history",
     { next: historyNext(selection, null) },
   );
 }
@@ -15129,223 +14880,6 @@ function canonicalAncestors(ref) {
 
 function uniqueRefs(refs) {
   return [...new Set(refs.filter((ref) => typeof ref === "string"))];
-}
-
-function selectCharacteristic(selection, ref, value, requireWrite, serial) {
-  const accessory = selection.accessories.find(({ id }) => id === ref.aId);
-  const service = accessory?.services?.find(({ sId }) => sId === ref.sId);
-  const characteristic = service?.characteristics?.find(
-    ({ cId }) => cId === ref.cId,
-  );
-  const control = characteristic?.control;
-  if (
-    !accessory ||
-    accessory.roomId !== selection.room.id ||
-    !service ||
-    !control
-  ) {
-    throw new SprutHubError(
-      "characteristic_not_found",
-      "The selected characteristic was not found in the selected room.",
-      "find_devices",
-    );
-  }
-  if (accessory.online !== true) {
-    throw new SprutHubError(
-      "device_unavailable",
-      "A selected device is currently unavailable.",
-      "retry",
-    );
-  }
-  if (
-    typeof value !== "boolean" ||
-    typeof control.value?.boolValue !== "boolean"
-  ) {
-    throw new SprutHubError(
-      "unsupported_characteristic",
-      "This automation supports boolean characteristics only.",
-    );
-  }
-  if (control.read !== true || (requireWrite && control.write !== true)) {
-    throw new SprutHubError(
-      "insufficient_rights",
-      requireWrite
-        ? "The target characteristic is not writable."
-        : "The source characteristic is not readable.",
-    );
-  }
-
-  const normalized = {
-    room: {
-      ref: `${configuredHomeRef(serial)}/room/${selection.room.id}`,
-      name: selection.room.name,
-    },
-    device: {
-      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}`,
-      name: accessory.name,
-    },
-    service: {
-      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}/service/${service.sId}`,
-      name: service.name,
-      type: service.type,
-    },
-    characteristic: {
-      ref: `${configuredHomeRef(serial)}/accessory/${accessory.id}/service/${service.sId}/characteristic/${characteristic.cId}`,
-      name: control.name,
-      type: control.type ?? control.key,
-      read: control.read === true,
-      write: control.write === true,
-    },
-    value,
-  };
-  return requireWrite
-    ? normalized
-    : { ...normalized, operator: "=", trigger: true };
-}
-
-function selectAutoOff(seconds, condition, action) {
-  if (seconds === undefined) return null;
-  if (
-    condition.characteristic.type !== "MotionDetected" ||
-    condition.value !== true ||
-    action.characteristic.type !== "On" ||
-    action.value !== true
-  ) {
-    throw new SprutHubError(
-      "unsupported_auto_off",
-      "Auto-off is supported only for MotionDetected=true to On=true automations.",
-    );
-  }
-  return {
-    after_seconds: seconds,
-    timer_mode: "RESET",
-    restarts_on_each_trigger: true,
-    target_value: false,
-  };
-}
-
-function buildNativeData(condition, action, autoOff) {
-  const source = parseCharacteristicRef(condition.characteristic.ref);
-  const target = parseCharacteristicRef(action.characteristic.ref);
-  return {
-    blockId: 0,
-    targets: [
-      {
-        type: "if",
-        blockId: 1,
-        if: {
-          type: "condition",
-          blockId: 2,
-          mode: "AND",
-          conditions: [
-            {
-              type: "characteristic",
-              blockId: 3,
-              ...source,
-              value: String(condition.value),
-              cond: "=",
-              trigger: true,
-              hs: condition.service.type,
-              hc: condition.characteristic.type,
-              time: 0,
-              timeCond: "",
-            },
-          ],
-        },
-        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
-        then: [
-          {
-            type: "service",
-            blockId: 4,
-            aId: target.aId,
-            sId: target.sId,
-            hs: action.service.type,
-            characteristics: [
-              {
-                type: "set",
-                blockId: 5,
-                cId: target.cId,
-                hc: action.characteristic.type,
-                value: String(action.value),
-              },
-            ],
-          },
-          ...(autoOff
-            ? [
-                {
-                  type: "delay",
-                  blockId: 6,
-                  index: 1,
-                  mode: "RESET",
-                  time: autoOff.after_seconds * 1_000,
-                  targets: [
-                    {
-                      type: "service",
-                      blockId: 7,
-                      aId: target.aId,
-                      sId: target.sId,
-                      hs: action.service.type,
-                      characteristics: [
-                        {
-                          type: "set",
-                          blockId: 8,
-                          cId: target.cId,
-                          hc: action.characteristic.type,
-                          value: "false",
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ]
-            : []),
-        ],
-        else: [],
-        then_delay: 0,
-        else_delay: 0,
-        mode: "EVERY",
-      },
-    ],
-  };
-}
-
-// Only what the decision about this pair needs: mechanisms already tied to
-// the two devices. Home-wide catalogs stay out of the preview.
-function normalizeContext(context, homeReference) {
-  return {
-    source: normalizeSelectionContext(context.source, homeReference),
-    target: normalizeSelectionContext(context.target, homeReference),
-  };
-}
-
-function normalizeSelectionContext(selection, homeReference) {
-  return {
-    scenario_associations: selection.directScenarios.map((scenario) => ({
-      ref: `${homeReference}/scenario/${encodeURIComponent(scenario.index)}`,
-      name: scenario.name,
-      type: scenario.type,
-      predefined: scenario.predefined === true,
-      active: scenario.active === true,
-      on_start: scenario.onStart === true,
-      sync: scenario.sync === true,
-      meaning: "accessory_index_association",
-      direction: "not_established",
-    })),
-    assigned_logics: selection.assignedLogics,
-    links: selection.links.map(({ type }) => ({ type })),
-  };
-}
-
-export function parseChangeRef(ref) {
-  const match = /^spruthub-change:\/\/automation\/([a-f0-9]{24})$/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_change_ref",
-      "Use a change reference returned by preview_boolean_automation.",
-      "preview_boolean_automation",
-    );
-  }
-  return match[1];
 }
 
 function changeRef(id) {
@@ -15696,14 +15230,6 @@ function runtimeDifferences(scenario) {
     }));
 }
 
-function verifiedApplyFields(created) {
-  return {
-    created,
-    hub_configuration_verified: true,
-    physical_effect_observed: false,
-  };
-}
-
 function rolledBackResult(change, removed) {
   return {
     ...publicChange(change),
@@ -15716,7 +15242,7 @@ function rolledBackResult(change, removed) {
 function withLocalState(
   result,
   saved,
-  action = "restore_state_storage_then_get_automation_change",
+  action = "restore_state_storage_then_get_native_change",
 ) {
   if (saved) return result;
   return {

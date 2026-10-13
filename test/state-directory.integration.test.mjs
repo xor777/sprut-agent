@@ -82,7 +82,7 @@ async function historySurvivesAnotherWorkingDirectory(t, stateDirectory) {
     value: 30,
     reason: "Приглушить торшер",
   });
-  const point = await call(firstClient, "save_configuration_point", {
+  const point = await call(firstClient, "configuration_point", {
     home_ref: homeRef,
     entity_refs: [`${homeRef}/scenario/3`],
   });
@@ -98,7 +98,7 @@ async function historySurvivesAnotherWorkingDirectory(t, stateDirectory) {
     change_ref: prepared.change_ref,
   });
   assert.equal(change.status, "prepared");
-  const points = await call(secondClient, "list_configuration_points", {
+  const points = await call(secondClient, "configuration_point", {
     home_ref: homeRef,
   });
   assert.deepEqual(

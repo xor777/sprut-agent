@@ -1535,23 +1535,18 @@ test("a write-bound home does not restrict explicit reads or follow their select
   );
 
   const requestCount = hub.requests.length;
-  const preview = await client.callTool({
-    name: "preview_boolean_automation",
+  const write = await client.callTool({
+    name: "prepare_native_change",
     arguments: {
-      name: "Не создавать",
+      operation: "characteristic_value",
+      target_ref:
+        "spruthub://hub/home%20B/accessory/7/service/8/characteristic/9",
+      value: false,
       reason: "Проверка границы",
-      source_room_ref: "spruthub://hub/home%20B/room/1",
-      source_characteristic_ref:
-        "spruthub://hub/home%20B/accessory/7/service/8/characteristic/9",
-      source_value: true,
-      target_room_ref: "spruthub://hub/home%20B/room/1",
-      target_characteristic_ref:
-        "spruthub://hub/home%20B/accessory/7/service/8/characteristic/9",
-      target_value: false,
     },
   });
-  assert.equal(preview.isError, true);
-  assert.equal(preview.structuredContent.error.code, "unsupported_home_write");
+  assert.equal(write.isError, true);
+  assert.equal(write.structuredContent.error.code, "unsupported_home_write");
   assert.equal(hub.requests.length, requestCount);
 });
 

@@ -4751,24 +4751,19 @@ test("ambiguous container continuations restart without losing current entries",
   );
 });
 
-test("automation preview rejects foreign-home references before any hub request", async (t) => {
+test("a write naming another home is refused before any hub request", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
   const requestCount = hub.requests.length;
 
   const result = await client.callTool({
-    name: "preview_boolean_automation",
+    name: "prepare_native_change",
     arguments: {
-      name: "Чужой дом",
-      reason: "Проверка границы записи",
-      source_room_ref: "spruthub://hub/home%2FA/room/1",
-      source_characteristic_ref:
-        "spruthub://hub/home%2FA/accessory/32/service/13/characteristic/15",
-      source_value: true,
-      target_room_ref: "spruthub://hub/home%20B/room/1",
-      target_characteristic_ref:
+      operation: "characteristic_value",
+      target_ref:
         "spruthub://hub/home%20B/accessory/32/service/13/characteristic/15",
-      target_value: true,
+      value: true,
+      reason: "Проверка границы записи",
     },
   });
 

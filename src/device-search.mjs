@@ -54,7 +54,7 @@ const MAX_DISCOVERY_TIME_MS = 60 * 60_000;
 // ahead of this machine's.
 const CLOCK_SLACK_MS = 5_000;
 const DISCOVERY_TIME_LIMITATION =
-  "The hub's device search time (DiscoveryTime) could not be read, so this search is taken to end at most an hour after its start. A search the owner starts or restarts in the SprutHub app within that hour, before this one is seen to end, may be taken for this one, and stop_device_search would stop it.";
+  "The hub's device search time (DiscoveryTime) could not be read, so this search is taken to end at most an hour after its start. A search the owner starts or restarts in the SprutHub app within that hour, before this one is seen to end, may be taken for this one, and a stop of this search would stop it.";
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
 const SEARCH_REF_PART = "/device_search/";
@@ -246,7 +246,7 @@ export class DeviceSearches {
     }
     // From now on a search not shown running has ended: a start that never
     // showed ends this watch as unknown, and a search that shows later is
-    // found by start_device_search, not resent.
+    // found by device_search, not resent.
     search.startRead = true;
     if (view.active === false && !search.seenRunning) {
       search.ended = "unknown";
@@ -438,7 +438,7 @@ export class DeviceSearches {
       return;
     }
     // Once the search is seen ended it stays so: a later run is watched by
-    // another search (start_device_search).
+    // another search (device_search).
     search.ended = search.stopSent
       ? "stopped"
       : search.endsAt !== null &&
@@ -834,7 +834,7 @@ export class DeviceSearches {
     }
     throw new SprutHubError(
       "device_search_not_found",
-      "No device search with this ref is kept: it was not started by this product, or it is older than 3 days. Read the controller to see whether its search runs; start_device_search returns a running search without restarting it.",
+      "No device search with this ref is kept: it was not started by this product, or it is older than 3 days. Read the controller to see whether its search runs; device_search with its extension_ref returns a running search without restarting it.",
       controller ? "get_entity" : "home_overview",
       {
         next: controller
@@ -1099,7 +1099,7 @@ const FIX_STATE_DIRECTORY =
 // written. The network is as it was: running says whether the controller
 // showed its search running, or is null when the hub was not read yet. A
 // running search ends by itself at end. kept is its watch still in the
-// directory, whose ref get_device_search and stop_device_search follow:
+// directory, whose ref get_device_search and its stop follow:
 // both still reach the hub when only writes fail.
 function startNotSent(running, end = null, timeZone = null, kept = null) {
   const notSent =
@@ -1116,7 +1116,7 @@ function startNotSent(running, end = null, timeZone = null, kept = null) {
     "state_storage_unavailable",
     `${notSent}. The controller's search was already running: any device in pairing mode within range can join ${until}. ${
       kept
-        ? `This product watches it under search_ref: stop_device_search closes the network now, and get_device_search reports the devices that join; both reach the hub while the directory cannot be written, and get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
+        ? `This product watches it under search_ref: device_search with stop closes the network now, and get_device_search reports the devices that join; both reach the hub while the directory cannot be written, and get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
         : `No search ref of this product follows it, so it cannot be stopped from here before the directory is fixed; the owner can stop it in the SprutHub app. ${FIX_STATE_DIRECTORY}; then start the search again: it returns the running search with its stop, without restarting it.`
     }`,
     "restore_state_storage_then_retry",
@@ -1131,7 +1131,7 @@ function startNotSent(running, end = null, timeZone = null, kept = null) {
 
 // A start that was sent, whose search as read back after it could not be
 // kept. The watch saved before the start (kept) counts the controller's
-// devices from before it, so get_device_search and stop_device_search
+// devices from before it, so get_device_search and its stop
 // follow the search by its ref; a new start after the search ended would
 // count a device that joined meanwhile as an old one. Only when that watch
 // is gone too does the agent start again, which returns a running search.
@@ -1141,8 +1141,8 @@ function startedNotKept(search, result, kept) {
     ? `The search was started: the controller's network is open, and any device in pairing mode within range can join until it closes by itself${result.ends_at ? " at ends_at" : ""}${kept ? " or is stopped" : ""}. Tell the owner the network is open.`
     : `The start was sent to the hub, but the search ${result.active === false ? "does not show as running" : "could not be read back"}; get_entity of the controller shows whether it runs.`;
   const follow = kept
-    ? `Its state after the start could not be saved in the local state directory, but the watch saved before the start follows it by search_ref: get_device_search reports the devices that join, counted from before the start, and stop_device_search closes the network. Both reach the hub while the directory cannot be written; get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
-    : `The search could not be saved in the local state directory, so get_device_search and stop_device_search cannot follow it yet. ${FIX_STATE_DIRECTORY}; then start the search again: a running search is returned with its stop, without restarting it.`;
+    ? `Its state after the start could not be saved in the local state directory, but the watch saved before the start follows it by search_ref: get_device_search reports the devices that join, counted from before the start, and device_search with stop closes the network. Both reach the hub while the directory cannot be written; get_device_search lists the new devices once it can. ${FIX_STATE_DIRECTORY}; then call next.`
+    : `The search could not be saved in the local state directory, so get_device_search and device_search cannot follow it yet. ${FIX_STATE_DIRECTORY}; then start the search again: a running search is returned with its stop, without restarting it.`;
   return new SprutHubError(
     "state_storage_unavailable",
     `${sent} ${follow}`,
@@ -1156,7 +1156,7 @@ function startedNotKept(search, result, kept) {
       next: kept
         ? getCall(search)
         : {
-            tool: "start_device_search",
+            tool: "device_search",
             arguments: { extension_ref: search.extensionRef },
           },
       ...(kept && result.active !== false ? { stop: stopCall(search) } : {}),
@@ -1238,7 +1238,10 @@ function getCall(search) {
 }
 
 function stopCall(search) {
-  return { tool: "stop_device_search", arguments: { search_ref: search.ref } };
+  return {
+    tool: "device_search",
+    arguments: { search_ref: search.ref, stop: true },
+  };
 }
 
 // One hint for each outcome among the new devices, and for the search
@@ -1250,7 +1253,7 @@ function reportGuidance(search, view) {
   const hints = {};
   if (view.later) {
     hints.search =
-      "This search has ended, but the controller's network is open again by a later search, as one started in the SprutHub app, that this ref neither watches nor stops: any device in pairing mode within range can join. start_device_search returns that search with its own stop. Tell the owner the network is still open.";
+      "This search has ended, but the controller's network is open again by a later search, as one started in the SprutHub app, that this ref neither watches nor stops: any device in pairing mode within range can join. device_search with the extension_ref returns that search with its own stop. Tell the owner the network is still open.";
   } else if (outcomes.size === 0 && !running) {
     hints.search = `The search ended and no new device is listed${
       search.startedBeforeWatch
@@ -1285,7 +1288,7 @@ function reportGuidance(search, view) {
         ? getCall(search)
         : view.later || outcomes.size === 0
           ? {
-              tool: "start_device_search",
+              tool: "device_search",
               arguments: { extension_ref: search.extensionRef },
             }
           : null,

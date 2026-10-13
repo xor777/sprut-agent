@@ -2562,7 +2562,7 @@ test("a window option applies one native setting and restores its baseline after
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
   assert.deepEqual(
@@ -2628,7 +2628,7 @@ test("an already desired window option creates no owned change or write", async 
     owned_change_created: false,
   });
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -3007,7 +3007,7 @@ test("a prepared window change cannot restore a matching manual value", async (t
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
 
@@ -3464,7 +3464,7 @@ test("an action-only BLOCK is explicitly run once and can be run again with a ne
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: fixture.scenarioRef },
   });
   assert.equal(history.structuredContent.changes[0].operation, "scenario_run");
@@ -4357,7 +4357,7 @@ test("a GLOBAL or built-in scenario is not run until its manual run is verified 
         );
       }
       const history = await client.callTool({
-        name: "list_native_changes",
+        name: "get_native_change",
         arguments: { home_ref: homeRef, entity_ref: targetRef },
       });
       assert.deepEqual(history.structuredContent.changes, []);
@@ -4467,7 +4467,7 @@ test("a turned-off scenario is not run and the agent is pointed to scenario_acti
     });
   }
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: targetRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -4897,7 +4897,7 @@ test("a read-only characteristic exposes writable options through the shared typ
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: motionCharacteristicRef },
   });
   assert.deepEqual(
@@ -5251,7 +5251,7 @@ test("sensitive LIST options stay redacted and cannot create history for any own
   }
 
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -5287,7 +5287,7 @@ test("sensitive LIST options stay redacted and cannot create history for any own
   );
   assert.equal(JSON.stringify(hiddenHistory).includes("LEAK"), false);
   const summaries = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.equal(JSON.stringify(summaries).includes("LEAK"), false);
@@ -5675,7 +5675,7 @@ test("a prepared climate mode is restorable through history after restart", asyn
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: climateServiceRef },
   });
   assert.equal(history.isError, undefined, history.content[0]?.text);
@@ -7240,7 +7240,7 @@ test("device commands turn off several lamps in one call and journal each comman
   }
 
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 50 },
   });
   assert.equal(history.isError, undefined, history.content[0]?.text);
@@ -7572,7 +7572,7 @@ test("one invalid device command rejects the whole call before any write", async
     assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: true });
   }
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -9044,7 +9044,7 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const found = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: characteristicRef },
   });
   assert.equal(found.isError, undefined, found.content[0]?.text);
@@ -9054,7 +9054,7 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
     preparedCreate.structuredContent.change_ref,
   );
   const byScenario = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: created.structuredContent.scenario_ref,
@@ -9072,7 +9072,7 @@ test("daily interval BLOCK completes create, find, update, readback, and restore
   assert.equal(observed.structuredContent.status, "applied");
   assert.equal(observed.structuredContent.configuration_matches, true);
   const unrelatedSourceHistory = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: motionCharacteristicRef },
   });
   assert.deepEqual(unrelatedSourceHistory.structuredContent.changes, []);
@@ -13237,7 +13237,7 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   );
 
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.equal(history.structuredContent.changes[0].recorded_status, "applied");
@@ -13283,7 +13283,7 @@ test("a BLOCK action pause expires on the hub after the MCP client stops", async
   assert.equal(completed.structuredContent.status, "completed");
   assert.equal(completed.structuredContent.pause_effect.status, "expired");
   const completedHistory = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 20 },
   });
   const completedSummary = completedHistory.structuredContent.changes.find(
@@ -13494,7 +13494,7 @@ test("a repeated pause through its visible action keeps ownership after an ordin
   );
 
   const history = await recoveredClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 20 },
   });
   const firstHistory = history.structuredContent.changes.find(
@@ -13588,7 +13588,7 @@ test("a rejected pause remains not applied and cannot write an expired controlle
   assert.equal(status.structuredContent.status, "not_applied");
   assert.equal(status.structuredContent.pause_effect.status, "not_applied");
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 20 },
   });
   const summary = history.structuredContent.changes.find(
@@ -14086,7 +14086,7 @@ test("BLOCK update restore preserves an active pause and records its explicit re
     removal.structuredContent.change_ref,
   );
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 20 },
   });
   const removedSummary = history.structuredContent.changes.find(
@@ -15425,7 +15425,7 @@ test("window_option renames a BLOCK through its options window and restores afte
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.deepEqual(
@@ -15438,7 +15438,7 @@ test("window_option renames a BLOCK through its options window and restores afte
     ].sort(),
   );
   const windowHistory = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioWindowRef },
   });
   assert.equal(windowHistory.structuredContent.changes.length, 2);
@@ -15595,7 +15595,7 @@ test("block_data_update rejects metadata and flags before any write or journal e
     false,
   );
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -15633,7 +15633,7 @@ test("a lost BLOCK rename through window_option is recovered and a later manual 
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   const persisted = await secondClient.callTool({
@@ -15904,7 +15904,7 @@ test("the first BLOCK rename is kept when the following description write is los
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.equal(
@@ -17404,7 +17404,7 @@ test("BLOCK create recovers when its applied result cannot be saved", async (t) 
 
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: appliedWithoutSave.structuredContent.scenario_ref,
@@ -17567,7 +17567,7 @@ test("history discovers changes by home and entity after restart", async (t) => 
   const secondClient = await startClient(t, hub, stateDirectory);
 
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.equal(history.isError, undefined, history.content[0]?.text);
@@ -17598,7 +17598,7 @@ test("history discovers changes by home and entity after restart", async (t) => 
     characteristicRef,
   ]) {
     const found = await secondClient.callTool({
-      name: "list_native_changes",
+      name: "get_native_change",
       arguments: { home_ref: homeRef, entity_ref: ref },
     });
     assert.deepEqual(
@@ -17612,17 +17612,6 @@ test("history discovers changes by home and entity after restart", async (t) => 
 test("history finds one entity and continues through older pages without changing scope", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
-  const catalog = await client.listTools();
-  const historyTool = catalog.tools.find(
-    ({ name }) => name === "list_native_changes",
-  );
-  assert.equal(historyTool.inputSchema.properties.limit.default, 10);
-  assert.equal(historyTool.inputSchema.properties.limit.maximum, 50);
-  assert.deepEqual(historyTool.inputSchema.properties.cursor, {
-    type: "string",
-    minLength: 1,
-    description: "Opaque continuation returned by the previous matching call",
-  });
 
   const selected = await client.callTool({
     name: "prepare_native_change",
@@ -17652,7 +17641,7 @@ test("history finds one entity and continues through older pages without changin
   }
 
   const exact = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.equal(exact.isError, undefined, exact.content[0]?.text);
@@ -17662,9 +17651,18 @@ test("history finds one entity and continues through older pages without changin
   );
   assert.equal(exact.structuredContent.page.next_cursor, null);
   assert.equal(exact.structuredContent.next, null);
+  // Without home_ref the history is the selected home's.
+  const selectedHome = await client.callTool({
+    name: "get_native_change",
+    arguments: { entity_ref: scenarioRef },
+  });
+  assert.deepEqual(
+    selectedHome.structuredContent.changes,
+    exact.structuredContent.changes,
+  );
 
   const first = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 2 },
   });
   assert.equal(first.isError, undefined, first.content[0]?.text);
@@ -17673,7 +17671,7 @@ test("history finds one entity and continues through older pages without changin
   assert.equal(first.structuredContent.page.remaining_changes, 4);
   assert.ok(first.structuredContent.page.next_cursor);
   assert.deepEqual(first.structuredContent.next, {
-    tool: "list_native_changes",
+    tool: "get_native_change",
     arguments: {
       home_ref: homeRef,
       limit: 2,
@@ -17721,7 +17719,7 @@ test("history finds one entity and continues through older pages without changin
   );
 
   const changedScope = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: scenarioRef,
@@ -17732,7 +17730,7 @@ test("history finds one entity and continues through older pages without changin
   assert.equal(changedScope.isError, true);
   assert.equal(changedScope.structuredContent.error.code, "invalid_cursor");
   assert.deepEqual(changedScope.structuredContent.next, {
-    tool: "list_native_changes",
+    tool: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef, limit: 2 },
   });
 });
@@ -17756,7 +17754,7 @@ test("history continuation does not repeat a page after its boundary change is r
   }
 
   const complete = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.equal(complete.isError, undefined, complete.content[0]?.text);
@@ -17765,7 +17763,7 @@ test("history continuation does not repeat a page after its boundary change is r
     .map(({ change_ref: changeRef }) => changeRef);
 
   const first = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, limit: 2 },
   });
   assert.equal(first.isError, undefined, first.content[0]?.text);
@@ -17844,7 +17842,7 @@ test("history cursor keeps its exact ordering boundary after the anchor is remov
   await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 
   const complete = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: deviceWindowRef },
   });
   assert.equal(complete.isError, undefined, complete.content[0]?.text);
@@ -17853,7 +17851,7 @@ test("history cursor keeps its exact ordering boundary after the anchor is remov
   );
 
   const first = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: deviceWindowRef,
@@ -17915,7 +17913,7 @@ test("history labels a saved conflict before its next tool verifies current appl
   const secondClient = await startClient(t, hub, stateDirectory);
   const requestsBeforeHistory = hub.requests.length;
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRef },
   });
   assert.equal(history.isError, undefined, history.content[0]?.text);
@@ -17992,7 +17990,7 @@ test("history indexes created scenarios and BLOCK bindings before and after upda
     [`${homeRef}/accessory/34/service/13/characteristic/16`, update],
   ]) {
     const history = await secondClient.callTool({
-      name: "list_native_changes",
+      name: "get_native_change",
       arguments: { home_ref: homeRef, entity_ref: entityRef },
     });
     assert.equal(history.isError, undefined, history.content[0]?.text);
@@ -18526,7 +18524,7 @@ test("a native logic assignment is configured without a duplicate and restored a
   assert.equal(hub.requests.filter(({ logic }) => logic?.create).length, 1);
 
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: smoothLogicRef },
   });
   assert.deepEqual(
@@ -19078,7 +19076,7 @@ test("an accessory is renamed and moved as one owned change, then restored after
   await firstClient.close();
   const secondClient = await startClient(t, hub, stateDirectory);
   const history = await secondClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: accessoryRef, limit: 10 },
   });
   assert.equal(history.structuredContent.changes.length, 1);
@@ -19413,7 +19411,7 @@ test("a room name longer than SprutHub keeps or with emoji is refused before any
     false,
   );
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -19508,7 +19506,7 @@ test("a room name with an emoji inside the Basic Multilingual Plane is refused b
     false,
   );
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -20148,62 +20146,66 @@ test("room creation rechecks all current names before writing", async (t) => {
   );
 });
 
-test("get_scenario_sdk returns native typed declarations with matching public metadata", async (t) => {
+test("the scenario SDK returns native typed declarations with matching public metadata", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
 
   const result = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.equal(result.structuredContent.sdk, scenarioSdk);
-  assert.equal(result.structuredContent.sdk_complete, true);
+  assert.equal(result.structuredContent.entity.sdk, scenarioSdk);
+  assert.equal(result.structuredContent.entity.sdk_complete, true);
   assert.equal(
-    result.structuredContent.bytes,
-    Buffer.byteLength(result.structuredContent.sdk),
+    result.structuredContent.entity.bytes,
+    Buffer.byteLength(result.structuredContent.entity.sdk),
   );
   assert.equal(
-    result.structuredContent.sha256,
-    createHash("sha256").update(result.structuredContent.sdk).digest("hex"),
+    result.structuredContent.entity.sha256,
+    createHash("sha256")
+      .update(result.structuredContent.entity.sdk)
+      .digest("hex"),
   );
 });
 
-test("get_scenario_sdk identifies a hidden credential without claiming complete metadata", async (t) => {
+test("the scenario SDK identifies a hidden credential without claiming complete metadata", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   hub.state.scenarioSdk = `${scenarioSdk}\nconst defaults = { password: "sdk-secret-must-not-leak" };`;
 
   const result = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.equal(result.structuredContent.sdk, "[REDACTED]");
-  assert.equal(result.structuredContent.sdk_complete, false);
+  assert.equal(result.structuredContent.entity.sdk, "[REDACTED]");
+  assert.equal(result.structuredContent.entity.sdk_complete, false);
   assert.equal(
-    result.structuredContent.bytes,
-    Buffer.byteLength(result.structuredContent.sdk),
+    result.structuredContent.entity.bytes,
+    Buffer.byteLength(result.structuredContent.entity.sdk),
   );
   assert.equal(
-    result.structuredContent.sha256,
-    createHash("sha256").update(result.structuredContent.sdk).digest("hex"),
+    result.structuredContent.entity.sha256,
+    createHash("sha256")
+      .update(result.structuredContent.entity.sdk)
+      .digest("hex"),
   );
   assert.doesNotMatch(result.content[0].text, /sdk-secret-must-not-leak/);
 
   hub.state.scenarioSdk = `${scenarioSdk}\ndeclare const embeddedValue = "native-change-test-token";`;
   const knownSecret = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
-  assert.equal(knownSecret.structuredContent.sdk, "[REDACTED]");
-  assert.equal(knownSecret.structuredContent.sdk_complete, false);
+  assert.equal(knownSecret.structuredContent.entity.sdk, "[REDACTED]");
+  assert.equal(knownSecret.structuredContent.entity.sdk_complete, false);
   assert.doesNotMatch(knownSecret.content[0].text, /native-change-test-token/);
 });
 
-test("get_scenario_sdk hides credential initializers across TypeScript type syntax", async (t) => {
+test("the scenario SDK hides credential initializers across TypeScript type syntax", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
 
@@ -20217,8 +20219,8 @@ test("get_scenario_sdk hides credential initializers across TypeScript type synt
   for (const declaration of credentialDeclarations) {
     hub.state.scenarioSdk = `${scenarioSdk}\n${declaration}`;
     const hiddenCredential = await client.callTool({
-      name: "get_scenario_sdk",
-      arguments: { home_ref: homeRef },
+      name: "get_entity",
+      arguments: { entity_ref: homeRef, include: ["sdk"] },
     });
 
     assert.equal(
@@ -20226,36 +20228,136 @@ test("get_scenario_sdk hides credential initializers across TypeScript type synt
       undefined,
       hiddenCredential.content[0]?.text,
     );
-    assert.equal(hiddenCredential.structuredContent.sdk, "[REDACTED]");
-    assert.equal(hiddenCredential.structuredContent.sdk_complete, false);
+    assert.equal(hiddenCredential.structuredContent.entity.sdk, "[REDACTED]");
+    assert.equal(hiddenCredential.structuredContent.entity.sdk_complete, false);
     assert.doesNotMatch(hiddenCredential.content[0].text, /must-not-leak/);
   }
 
   hub.state.scenarioSdk = `${scenarioSdk}\ndeclare function login(password: String, retries = 3): Mail;`;
   const ordinaryDefault = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
-  assert.equal(ordinaryDefault.structuredContent.sdk, hub.state.scenarioSdk);
-  assert.equal(ordinaryDefault.structuredContent.sdk_complete, true);
+  assert.equal(
+    ordinaryDefault.structuredContent.entity.sdk,
+    hub.state.scenarioSdk,
+  );
+  assert.equal(ordinaryDefault.structuredContent.entity.sdk_complete, true);
 });
 
-test("get_scenario_sdk fails closed without exposing declaration parser errors", async (t) => {
+test("the scenario SDK fails closed without exposing declaration parser errors", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   hub.state.scenarioSdk = `${scenarioSdk}\ninterface Broken { password(password: String): Mail;`;
 
   const result = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
 
   assert.equal(result.isError, undefined, result.content[0]?.text);
-  assert.equal(result.structuredContent.sdk, "[REDACTED]");
-  assert.equal(result.structuredContent.sdk_complete, false);
+  assert.equal(result.structuredContent.entity.sdk, "[REDACTED]");
+  assert.equal(result.structuredContent.entity.sdk_complete, false);
   assert.doesNotMatch(
     result.content[0].text,
     /unexpected|parser|unterminated/i,
+  );
+});
+
+// The owner's hub serves about 38 KB of declarations, more than one page.
+test("a scenario SDK larger than a page is read whole through its next calls", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+  hub.state.scenarioSdk = [
+    scenarioSdk,
+    ...Array.from(
+      { length: 900 },
+      (_, index) =>
+        `declare function setLevel${index}(aId: number, value: number): void;`,
+    ),
+  ].join("\n");
+  assert.ok(Buffer.byteLength(hub.state.scenarioSdk) > 40_000);
+
+  const overview = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
+  });
+  assert.equal(overview.isError, undefined, overview.content[0]?.text);
+  const { identity, representation } = overview.structuredContent;
+  assert.equal(identity.sdk_complete, true);
+  assert.equal(
+    identity.sha256,
+    createHash("sha256").update(hub.state.scenarioSdk).digest("hex"),
+  );
+  let next = representation.available_parts.find(
+    ({ pointer }) => pointer === "/sdk",
+  ).next;
+  let text = "";
+  let pages = 0;
+  while (next) {
+    const page = await client.callTool({
+      name: next.tool,
+      arguments: next.arguments,
+    });
+    assert.equal(page.isError, undefined, page.content[0]?.text);
+    assert.ok(Buffer.byteLength(page.content[0].text) <= 16_000);
+    const { selection } = page.structuredContent;
+    text +=
+      typeof selection.value === "string"
+        ? selection.value
+        : selection.value.text;
+    next = selection.next ?? null;
+    pages += 1;
+  }
+  assert.ok(pages >= 3, `${pages} pages`);
+  assert.equal(text, hub.state.scenarioSdk);
+});
+
+test("the scenario SDK is read on the home, and an unknown operation names the supported ones", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  const characteristic = await client.callTool({
+    name: "get_entity",
+    arguments: { entity_ref: characteristicRef, include: ["sdk"] },
+  });
+  assert.equal(
+    characteristic.isError,
+    undefined,
+    characteristic.content[0]?.text,
+  );
+  assert.equal(characteristic.structuredContent.entity.sdk, undefined);
+  assert.deepEqual(
+    characteristic.structuredContent.entity.include_resolution.not_applied,
+    [
+      {
+        include: "sdk",
+        reason: "home_scoped",
+        next: {
+          tool: "get_entity",
+          arguments: { entity_ref: homeRef, include: ["sdk"] },
+        },
+      },
+    ],
+  );
+
+  const unknown = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "firmware_update" },
+  });
+  assert.equal(unknown.isError, true);
+  assert.equal(
+    unknown.structuredContent.error.code,
+    "unsupported_native_operation",
+  );
+  assert.ok(
+    unknown.structuredContent.supported_operations.includes("block_create"),
+  );
+  const listed = await client.listTools();
+  assert.deepEqual(
+    unknown.structuredContent.supported_operations,
+    listed.tools.find(({ name }) => name === "prepare_native_change")
+      .inputSchema.properties.operation.enum,
   );
 });
 
@@ -20279,21 +20381,31 @@ test("credential-like native text outside the SDK declaration role stays hidden"
   assert.doesNotMatch(result.content[0].text, /synthetic-secret-must-not-leak/);
 });
 
-test("an incomplete native SDK response stays an error instead of becoming a complete declaration", async (t) => {
+test("an incomplete native SDK response is an unread include, never a complete declaration", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   hub.state.scenarioSdk = null;
 
   const result = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: "get_entity",
+    arguments: { entity_ref: homeRef, include: ["sdk"] },
   });
 
-  assert.equal(result.isError, true);
-  assert.equal(result.structuredContent.status, "error");
-  assert.equal(result.structuredContent.error.code, "incompatible_response");
-  assert.equal(result.structuredContent.sdk, undefined);
-  assert.equal(result.structuredContent.sdk_complete, undefined);
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.deepEqual(
+    result.structuredContent.entity.include_resolution.not_applied.map(
+      ({ include, reason, error_code }) => ({ include, reason, error_code }),
+    ),
+    [
+      {
+        include: "sdk",
+        reason: "read_failed",
+        error_code: "incompatible_response",
+      },
+    ],
+  );
+  assert.equal(result.structuredContent.entity.sdk, undefined);
+  assert.equal(result.structuredContent.entity.sdk_complete, undefined);
 });
 
 test("restoring an unapplied scenario change does not accuse a manual edit or cancel later apply", async (t) => {
@@ -20465,14 +20577,20 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
 
+  // The contract of LOGIC code leads to the hub's SDK.
+  const contract = await client.callTool({
+    name: "get_native_change_contract",
+    arguments: { operation: "logic_source_create", target_ref: serviceRef },
+  });
+  assert.equal(contract.isError, undefined, contract.content[0]?.text);
   const sdk = await client.callTool({
-    name: "get_scenario_sdk",
-    arguments: { home_ref: homeRef },
+    name: contract.structuredContent.next.tool,
+    arguments: contract.structuredContent.next.arguments,
   });
   assert.equal(sdk.isError, undefined, sdk.content[0]?.text);
-  assert.equal(sdk.structuredContent.sdk, scenarioSdk);
+  assert.equal(sdk.structuredContent.entity.sdk, scenarioSdk);
   assert.equal(
-    sdk.structuredContent.sha256,
+    sdk.structuredContent.entity.sha256,
     createHash("sha256").update(scenarioSdk).digest("hex"),
   );
 
@@ -20549,7 +20667,7 @@ test("a native LOGIC source is created, assigned, updated, read back, and restor
 
   const restartedClient = await startClient(t, hub, stateDirectory);
   const history = await restartedClient.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: created.structuredContent.logic_ref,
@@ -21183,7 +21301,7 @@ test("a type another LOGIC adds on the anchor during the create does not change 
   assertIdentityMapping(created, { ready: true, reason: undefined });
   const history = async (entityRef) => {
     const result = await client.callTool({
-      name: "list_native_changes",
+      name: "get_native_change",
       arguments: { home_ref: homeRef, entity_ref: entityRef },
     });
     assert.equal(result.isError, undefined, result.content[0]?.text);
@@ -21351,7 +21469,7 @@ test("another LOGIC at the created LOGIC's index does not lend the change its ty
   assert.equal(read.logic_assignment_ready, false);
   assert.equal(read.logic_mapping_reason, "logic_scenario_not_owned");
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: `${serviceRef}/logic/created-1`,
@@ -21393,7 +21511,7 @@ test("a created LOGIC the owner deleted lends the change no logic ref or readine
   };
   assertUnmapped(await callChangeTool(client, "get_native_change", changeRef));
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: {
       home_ref: homeRef,
       entity_ref: `${serviceRef}/logic/created-1`,
@@ -22664,7 +22782,7 @@ test("an existing scenario of any type is turned off and back on through the Act
       assert.deepEqual(scenarioWithoutActive(scenario), configuration);
 
       const history = await firstClient.callTool({
-        name: "list_native_changes",
+        name: "get_native_change",
         arguments: { home_ref: homeRef, entity_ref: targetRef },
       });
       assert.deepEqual(
@@ -22810,7 +22928,7 @@ test("an already inactive scenario creates no change or write", async (t) => {
     owned_change_created: false,
   });
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: scenarioRefFor(scenario) },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -22879,7 +22997,7 @@ test("a scenario whose active state SprutHub omits is neither switched nor resto
     }),
   );
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: targetRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -22953,7 +23071,7 @@ test("scenario_active refuses a scenario without an Active option in its options
       );
     }
     const history = await client.callTool({
-      name: "list_native_changes",
+      name: "get_native_change",
       arguments: { home_ref: homeRef, entity_ref: targetRef },
     });
     assert.deepEqual(history.structuredContent.changes, []);
@@ -23129,7 +23247,7 @@ test("a scenario whose flag and Active option disagree is refused at contract an
     });
   }
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: targetRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -23659,7 +23777,7 @@ test("scenario_active prepared with active instead of value points to value befo
   });
   assert.deepEqual(scenarioUpdates(hub), []);
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: targetRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);
@@ -23927,7 +24045,7 @@ test("a room or service is renamed or hidden with one native update and restored
       );
 
       const history = await firstClient.callTool({
-        name: "list_native_changes",
+        name: "get_native_change",
         arguments: { home_ref: homeRef, entity_ref: settingCase.targetRef },
       });
       assert.deepEqual(
@@ -24114,7 +24232,7 @@ test("a room or service that already has the requested setting creates no change
         owned_change_created: false,
       });
       const history = await client.callTool({
-        name: "list_native_changes",
+        name: "get_native_change",
         arguments: { home_ref: homeRef, entity_ref: settingCase.targetRef },
       });
       assert.deepEqual(history.structuredContent.changes, []);
@@ -24225,7 +24343,7 @@ test("a service whose visibility the hub does not report is not hidden on a gues
     );
   }
   const history = await client.callTool({
-    name: "list_native_changes",
+    name: "get_native_change",
     arguments: { home_ref: homeRef, entity_ref: serviceVisible.targetRef },
   });
   assert.deepEqual(history.structuredContent.changes, []);

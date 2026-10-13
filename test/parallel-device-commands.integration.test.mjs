@@ -863,7 +863,7 @@ test("a level alone that switches an off lamp on says so", async (t) => {
 
 // Each write needs its intent in the journal first (see above). When the
 // state directory cannot be written, nothing is sent and the agent learns
-// the cause, as start_device_search and apply_automation_change say it.
+// the cause, as device_search and apply_native_change say it.
 test("commands are not sent when the journal cannot be saved, and say why", async (t) => {
   const { hub, client, stateDirectory } = await setup(t);
   t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));

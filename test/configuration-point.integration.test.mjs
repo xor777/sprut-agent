@@ -763,7 +763,7 @@ async function followCurrentObservation(client, page, entityRef) {
 function comparisonEntitiesListNext(result) {
   const next = result.representation?.next ?? null;
   if (!next) return null;
-  assert.equal(next.tool, "get_configuration_point");
+  assert.equal(next.tool, "configuration_point");
   assert.equal(next.arguments.pointer, "/comparison/entities");
   assert.equal(typeof next.arguments.version, "string");
   assert.equal(Number.isInteger(next.arguments.offset), true);
@@ -852,7 +852,7 @@ test("a later agent finds a saved configuration point and compares real setting 
   const firstClient = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await firstClient.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [
@@ -900,7 +900,7 @@ test("a later agent finds a saved configuration point and compares real setting 
     ],
   );
   assert.deepEqual(saved.next, {
-    tool: "get_configuration_point",
+    tool: "configuration_point",
     arguments: { point_ref: saved.point_ref },
   });
   await firstClient.close();
@@ -927,7 +927,7 @@ test("a later agent finds a saved configuration point and compares real setting 
   const secondClient = await startClient(t, hub, stateDirectory);
   const listed = toolResult(
     await secondClient.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_ref: accessoryRef },
     }),
   );
@@ -937,7 +937,7 @@ test("a later agent finds a saved configuration point and compares real setting 
 
   const past = toolResult(
     await secondClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   );
@@ -960,7 +960,7 @@ test("a later agent finds a saved configuration point and compares real setting 
 
   const compared = toolResult(
     await secondClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1064,7 +1064,7 @@ test("sensitive configuration is redacted before save and hidden values are not 
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [logicRef, deviceWindowRef, accessoryRef],
@@ -1075,7 +1075,7 @@ test("sensitive configuration is redacted before save and hidden values are not 
     saved,
     toolResult(
       await client.callTool({
-        name: "get_configuration_point",
+        name: "configuration_point",
         arguments: { point_ref: saved.point_ref },
       }),
     ),
@@ -1109,7 +1109,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [accessoryRef, logicRef, missingAccessoryRef],
@@ -1130,7 +1130,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
   hub.state.behavior.failLogicGet = true;
   const partial = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [accessoryRef, logicRef],
@@ -1149,7 +1149,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
 
   const otherHome = toolError(
     await client.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: otherHomeRef },
     }),
   );
@@ -1165,7 +1165,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
   });
   const listed = toolResult(
     await client.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: homeRef },
     }),
   );
@@ -1181,7 +1181,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
   );
   const corrupt = toolError(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: {
         point_ref: `spruthub-point://hub/${serial}/configuration/${"ab".repeat(12)}`,
       },
@@ -1205,7 +1205,7 @@ test("a broken point, a failed entity read, and another home stay distinct from 
   );
   const afterForeign = toolResult(
     await client.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: homeRef },
     }),
   );
@@ -1223,7 +1223,7 @@ test("the saved point remains readable after restart without a live hub", async 
   const firstClient = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await firstClient.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [accessoryRef, logicRef] },
     }),
   );
@@ -1234,14 +1234,29 @@ test("the saved point remains readable after restart without a live hub", async 
   const offlineClient = await startClient(t, { url: hub.url }, stateDirectory);
   const listed = toolResult(
     await offlineClient.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: homeRef },
     }),
   );
   assert.equal(listed.points[0].point_ref, saved.point_ref);
+  // Without home_ref the list is the selected home's, still without a hub.
+  const selected = toolResult(
+    await offlineClient.callTool({
+      name: "configuration_point",
+      arguments: {},
+    }),
+  );
+  assert.deepEqual(selected.points, listed.points);
+  const both = toolError(
+    await offlineClient.callTool({
+      name: "configuration_point",
+      arguments: { point_ref: saved.point_ref, entity_refs: [accessoryRef] },
+    }),
+  );
+  assert.equal(both.error.code, "invalid_point_call");
   const past = toolResult(
     await offlineClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   );
@@ -1252,7 +1267,7 @@ test("the saved point remains readable after restart without a live hub", async 
   );
   const compareOffline = toolError(
     await offlineClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1265,7 +1280,7 @@ test("the saved point remains readable after restart without a live hub", async 
   );
 });
 
-test("a later agent follows get_configuration_point next to a compared change of a large saved point", async (t) => {
+test("a later agent follows the configuration_point next to a compared change of a large saved point", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   hub.state.scenarios[0].data = JSON.stringify(
     officeBlockData({ delay: 0, targetCount: 250 }),
@@ -1273,7 +1288,7 @@ test("a later agent follows get_configuration_point next to a compared change of
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
     }),
   );
@@ -1284,7 +1299,7 @@ test("a later agent follows get_configuration_point next to a compared change of
   for (const maxBytes of [16_000, 32_768]) {
     const overview = toolResult(
       await client.callTool({
-        name: "get_configuration_point",
+        name: "configuration_point",
         arguments: {
           point_ref: saved.point_ref,
           compare: true,
@@ -1315,7 +1330,7 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
     }),
   );
@@ -1323,7 +1338,7 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
   // out, its blockIds kept.
   const shown = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   ).entity.entities.find(({ entity_ref }) => entity_ref === scenarioRef);
@@ -1335,7 +1350,7 @@ test("a BLOCK kept with or without the web client's if defaults compares unchang
     comparisonFor(
       toolResult(
         await client.callTool({
-          name: "get_configuration_point",
+          name: "configuration_point",
           arguments: { point_ref: saved.point_ref, compare: true },
         }),
       ),
@@ -1415,7 +1430,7 @@ test("a point saved with a request URL as read shows and compares it hidden", as
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [scenarioRef] },
     }),
   );
@@ -1435,7 +1450,7 @@ test("a point saved with a request URL as read shows and compares it hidden", as
   const read = async (compare) =>
     toolResult(
       await client.callTool({
-        name: "get_configuration_point",
+        name: "configuration_point",
         arguments: { point_ref: saved.point_ref, compare },
       }),
     );
@@ -1482,7 +1497,7 @@ test("incomplete logic and window options are not compared as added, removed, or
   const client = await startClient(t, hub, stateDirectory);
   const available = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [logicRef, deviceWindowRef],
@@ -1495,7 +1510,7 @@ test("incomplete logic and window options are not compared as added, removed, or
   ).value = { stringValue: replacementWindowPasswordSecret };
   const passwordCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: available.point_ref, compare: true },
     }),
   );
@@ -1512,7 +1527,7 @@ test("incomplete logic and window options are not compared as added, removed, or
   hub.state.windows[deviceWindowKey].options = deviceWindowOptions(7);
   const unavailableCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: available.point_ref, compare: true },
     }),
   );
@@ -1529,7 +1544,7 @@ test("incomplete logic and window options are not compared as added, removed, or
 
   const unavailable = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [logicRef, deviceWindowRef],
@@ -1540,7 +1555,7 @@ test("incomplete logic and window options are not compared as added, removed, or
   hub.state.windows[deviceWindowKey].options = deviceWindowOptions(1);
   const restoredCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: unavailable.point_ref, compare: true },
     }),
   );
@@ -1562,7 +1577,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
   const firstClient = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await firstClient.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [
@@ -1619,7 +1634,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
   const secondClient = await startClient(t, hub, stateDirectory);
   const listed = toolResult(
     await secondClient.callTool({
-      name: "list_configuration_points",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_ref: fanSpeedRef },
     }),
   );
@@ -1632,7 +1647,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
 
   const past = toolResult(
     await secondClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   );
@@ -1659,7 +1674,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
 
   const compared = toolResult(
     await secondClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1703,7 +1718,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
   };
   const afterSetpoint = toolResult(
     await secondClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1724,7 +1739,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
   const offlineClient = await startClient(t, { url: hub.url }, stateDirectory);
   const offlinePast = toolResult(
     await offlineClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   );
@@ -1736,7 +1751,7 @@ test("a later agent recalls saved climate setpoints after telemetry and off-stat
   assert.equal(capturedEntity(offlinePast, fanSpeedRef).settings.value, 30);
   const compareOffline = toolError(
     await offlineClient.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1754,7 +1769,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   const client = await startClient(t, hub, stateDirectory);
   const accessoryOnly = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [accessoryRef] },
     }),
   );
@@ -1764,7 +1779,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   characteristicControl(hub.state, fanSpeedRef).value = { intValue: 0 };
   const oldPast = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: accessoryOnly.point_ref },
     }),
   );
@@ -1774,7 +1789,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   assert.equal(JSON.stringify(oldPast).includes("TargetTemperature"), false);
   const oldCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: accessoryOnly.point_ref, compare: true },
     }),
   );
@@ -1797,7 +1812,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   characteristicControl(hub.state, fanSpeedRef).value = { intValue: 30 };
   const fanSaved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [fanSpeedRef] },
     }),
   );
@@ -1810,7 +1825,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
   fanControl.validValues[0].name = "Тихо";
   const remapped = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: fanSaved.point_ref, compare: true },
     }),
   );
@@ -1823,7 +1838,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
 
   const temperatureSaved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: [targetTemperatureRef] },
     }),
   );
@@ -1838,7 +1853,7 @@ test("unsaved climate characteristics and changed setpoint meaning are not compa
     "CurrentTemperature";
   const retyped = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: temperatureSaved.point_ref, compare: true },
     }),
   );
@@ -1856,7 +1871,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   const client = await startClient(t, hub, stateDirectory);
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [targetTemperatureRef, targetModeRef, fanSpeedRef],
@@ -1866,7 +1881,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   assert.equal(saved.status, "ok");
   const past = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref },
     }),
   );
@@ -1879,7 +1894,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   const beforeOnline = hub.requests.length;
   const onlineCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1919,7 +1934,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   const beforeOffline = hub.requests.length;
   const offlineCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -1979,7 +1994,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   characteristicControl(hub.state, fanSpeedRef).value = { intValue: 60 };
   const changedCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -2013,7 +2028,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   fanControl.validValues[0].name = "Тихо";
   const remapped = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -2031,7 +2046,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   );
   const largeSaved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: {
         home_ref: homeRef,
         entity_refs: [scenarioRef, targetTemperatureRef],
@@ -2040,7 +2055,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   );
   const overview = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: {
         point_ref: largeSaved.point_ref,
         compare: true,
@@ -2062,7 +2077,7 @@ test("a later agent sees current climate availability of an unchanged saved setp
   hub.state.accessories = hub.state.accessories.filter(({ id }) => id !== 40);
   const missingCompared = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: { point_ref: saved.point_ref, compare: true },
     }),
   );
@@ -2090,7 +2105,7 @@ test("a later agent pages mixed comparison entities by returned offset while obs
   ];
   const saved = toolResult(
     await client.callTool({
-      name: "save_configuration_point",
+      name: "configuration_point",
       arguments: { home_ref: homeRef, entity_refs: mixedRefs },
     }),
   );
@@ -2114,7 +2129,7 @@ test("a later agent pages mixed comparison entities by returned offset while obs
   };
   const first = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: listArguments,
     }),
   );
@@ -2203,7 +2218,7 @@ test("a later agent pages mixed comparison entities by returned offset while obs
 
   const afterObservation = toolResult(
     await client.callTool({
-      name: "get_configuration_point",
+      name: "configuration_point",
       arguments: listArguments,
     }),
   );

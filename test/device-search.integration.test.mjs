@@ -326,7 +326,7 @@ test("an action the client cannot read leaves the controller and its search usab
   assert.equal(entity.spaces[0].actions_unreadable, true);
   assert.equal(entity.spaces[1].actions_unreadable, undefined);
 
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(started.status, "started");
@@ -335,8 +335,9 @@ test("an action the client cannot read leaves the controller and its search usab
     wait_seconds: 0,
   });
   assert.equal(report.active, true);
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.stop_sent, true);
   assert.deepEqual(searchActions(hub), [
@@ -352,7 +353,7 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
   );
   const childrenBefore = zigbeeChildren(hub);
 
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(started.status, "started");
@@ -463,15 +464,17 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
 
   // The network is still open: stopping closes it once, a repeat sends
   // nothing.
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.stop_sent, true);
   assert.equal(stopped.active, false);
   assert.equal(stopped.ended, "stopped");
   assert.equal(stopped.new_devices[0].accessories[0].ref, sensorRef);
-  const again = await call(client, "stop_device_search", {
+  const again = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(again.stop_sent, false);
   assert.equal(again.ended, "stopped");
@@ -491,11 +494,11 @@ test("a new leak sensor joins during the search, is placed in the bathroom and r
 test("a search that already runs is returned without a resend that would extend it", async (t) => {
   const { hub, client } = await setup(t, await apartment());
 
-  const first = await call(client, "start_device_search", {
+  const first = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(first.status, "started");
-  const second = await call(client, "start_device_search", {
+  const second = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(second.status, "already_running");
@@ -503,12 +506,15 @@ test("a search that already runs is returned without a resend that would extend 
   assert.equal(second.ends_at, first.ends_at);
   assert.equal(searchActions(hub).length, 1);
 
-  await call(client, "stop_device_search", { search_ref: first.search_ref });
+  await call(client, "device_search", {
+    search_ref: first.search_ref,
+    stop: true,
+  });
   assert.equal(searchActions(hub).length, 2);
 
   // Started in the SprutHub app: the agent waits on it, sends nothing.
   startNatively(hub);
-  const elsewhere = await call(client, "start_device_search", {
+  const elsewhere = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(elsewhere.status, "already_running");
@@ -522,7 +528,7 @@ test("a search that ends with nothing new says so and offers a new start", async
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert(started.seconds_left <= 2, started);
@@ -537,13 +543,14 @@ test("a search that ends with nothing new says so and offers a new start", async
   assert.equal(ended.ended, "expired");
   assert.deepEqual(ended.new_devices, []);
   assert.deepEqual(ended.next, {
-    tool: "start_device_search",
+    tool: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   // The timer closed the network; the agent sent only the start.
   assert.equal(searchActions(hub).length, 1);
-  const stop = await call(client, "stop_device_search", {
+  const stop = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stop.stop_sent, false);
   assert.equal(searchActions(hub).length, 1);
@@ -557,7 +564,7 @@ test("a device that joined while nobody read the search is reported after it end
     t,
     await apartment({ discoveryTimeMs: 1_500, pairing: [leakSensor()] }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await new Promise((resolve) => setTimeout(resolve, 2_500));
@@ -582,7 +589,7 @@ test("a search survives an MCP server restart between its start and the owner's 
     t,
     await apartment({ pairing: [leakSensor({ joinAfterMs: 1_500 })] }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(started.status, "started");
@@ -607,14 +614,15 @@ test("a search survives an MCP server restart between its start and the owner's 
 
   // A start in the new process returns the same search without a resend,
   // and its stop closes the network.
-  const again = await call(nextTurn, "start_device_search", {
+  const again = await call(nextTurn, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(again.status, "already_running");
   assert.equal(again.search_ref, started.search_ref);
   assert.equal(again.devices_before, started.devices_before);
-  const stopped = await call(nextTurn, "stop_device_search", {
+  const stopped = await call(nextTurn, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.stop_sent, true);
   assert.equal(stopped.ended, "stopped");
@@ -630,8 +638,8 @@ test("a search survives an MCP server restart between its start and the owner's 
 test("two starts at once send one start", async (t) => {
   const { hub, client } = await setup(t, await apartment());
   const starts = await Promise.all([
-    call(client, "start_device_search", { extension_ref: zigbeeRef }),
-    call(client, "start_device_search", { extension_ref: zigbeeRef }),
+    call(client, "device_search", { extension_ref: zigbeeRef }),
+    call(client, "device_search", { extension_ref: zigbeeRef }),
   ]);
   assert.deepEqual(starts.map(({ status }) => status).sort(), [
     "already_running",
@@ -651,13 +659,14 @@ test("a stop after the search ended unseen sends nothing", async (t) => {
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await new Promise((resolve) => setTimeout(resolve, 2_500));
 
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.stop_sent, false);
   assert.equal(stopped.active, false);
@@ -675,7 +684,7 @@ test("a watch whose search ended unseen does not act on a search started later i
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const ours = await call(client, "start_device_search", {
+  const ours = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await new Promise((resolve) => setTimeout(resolve, 2_500));
@@ -687,12 +696,13 @@ test("a watch whose search ended unseen does not act on a search started later i
       .find(({ extensionKey }) => extensionKey === ZIGBEE)
       .spaces[0].actions.find(({ id }) => id === 1).state;
   const startAgain = {
-    tool: "start_device_search",
+    tool: "device_search",
     arguments: { extension_ref: zigbeeRef },
   };
 
-  const stale = await call(client, "stop_device_search", {
+  const stale = await call(client, "device_search", {
     search_ref: ours.search_ref,
+    stop: true,
   });
   assert.equal(stale.stop_sent, false);
   assert.equal(stale.active, false);
@@ -704,7 +714,7 @@ test("a watch whose search ended unseen does not act on a search started later i
   assert.equal(stale.stop, undefined);
   assert.equal(running(), true);
 
-  const owners = await call(client, "start_device_search", {
+  const owners = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(owners.status, "already_running");
@@ -712,8 +722,8 @@ test("a watch whose search ended unseen does not act on a search started later i
   assert.equal(owners.active, true);
   assert(owners.seconds_left > 50, owners);
   assert.deepEqual(owners.stop, {
-    tool: "stop_device_search",
-    arguments: { search_ref: owners.search_ref },
+    tool: "device_search",
+    arguments: { search_ref: owners.search_ref, stop: true },
   });
   const old = await call(client, "get_device_search", {
     search_ref: ours.search_ref,
@@ -736,14 +746,14 @@ test("a start after a watch's search ended unseen watches the search started lat
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const ours = await call(client, "start_device_search", {
+  const ours = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await new Promise((resolve) => setTimeout(resolve, 2_500));
   hub.state.discoveryTimeMs = 60_000;
   startNatively(hub);
 
-  const owners = await call(client, "start_device_search", {
+  const owners = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(owners.status, "already_running");
@@ -751,8 +761,9 @@ test("a start after a watch's search ended unseen watches the search started lat
   assert.equal(owners.active, true);
   assert(owners.seconds_left > 50, owners);
 
-  const old = await call(client, "stop_device_search", {
+  const old = await call(client, "device_search", {
     search_ref: ours.search_ref,
+    stop: true,
   });
   assert.equal(old.stop_sent, false);
   assert.equal(old.ended, "expired");
@@ -778,7 +789,7 @@ test("a search that ends with nothing new says what it did not count", async (t)
     await apartment({ discoveryTimeMs: 1_500 }),
   );
   startNatively(hub);
-  const watched = await call(client, "start_device_search", {
+  const watched = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(watched.status, "already_running");
@@ -808,7 +819,7 @@ test("a new device the hub shows an error for is reported failed", async (t) => 
       pairing: [leakSensor({ error: "Модель не поддерживается" })],
     }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   const read = {
@@ -849,8 +860,8 @@ test("a new device the hub shows an error for is reported failed", async (t) => 
   assert.deepEqual(Object.keys(failed.hints), ["failed"]);
   assert.deepEqual(failed.next, read);
   assert.deepEqual(failed.stop, {
-    tool: "stop_device_search",
-    arguments: { search_ref: started.search_ref },
+    tool: "device_search",
+    arguments: { search_ref: started.search_ref, stop: true },
   });
 
   let ended = failed;
@@ -880,7 +891,7 @@ test("a device the hub is still adding after the search ended stays pending", as
     }),
     { shiftedClock: true },
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   const read = {
@@ -953,7 +964,7 @@ test("new devices with different outcomes are each reported with their own hint"
       ],
     }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await accessoryCreated(hub, 200);
@@ -985,8 +996,9 @@ test("new devices with different outcomes are each reported with their own hint"
     arguments: { search_ref: started.search_ref },
   });
 
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.ended, "stopped");
   assert.deepEqual(outcomes(stopped), expected);
@@ -1003,14 +1015,14 @@ test("a device the hub adds after the search ended shows on that search", async 
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const first = await call(client, "start_device_search", {
+  const first = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   const nothing = await waitForResult(client, first.search_ref, [
     "no_new_device",
   ]);
   assert.deepEqual(nothing.next, {
-    tool: "start_device_search",
+    tool: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   hub.joinNow(leakSensor({ joinAfterMs: 0, interviewMs: 100 }));
@@ -1041,7 +1053,7 @@ test("a device the owner pairs in the app after a search found nothing is not ne
     t,
     await apartment({ discoveryTimeMs: 1_500 }),
   );
-  const first = await call(client, "start_device_search", {
+  const first = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await waitForResult(client, first.search_ref, ["no_new_device"]);
@@ -1051,7 +1063,7 @@ test("a device the owner pairs in the app after a search found nothing is not ne
   await accessoryCreated(hub, 200);
   startNatively(hub, false);
 
-  const next = await call(client, "start_device_search", {
+  const next = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(next.status, "started");
@@ -1095,7 +1107,7 @@ test("a search is refused for a controller that cannot search, a stopped one and
     ],
   ];
   for (const [args, reason] of refusals) {
-    const refused = await toolError(client, "start_device_search", args);
+    const refused = await toolError(client, "device_search", args);
     assert.equal(refused.error.code, "device_search_unavailable", reason);
     assert.equal(refused.reason, reason);
     assert.deepEqual(refused.next, {
@@ -1103,7 +1115,7 @@ test("a search is refused for a controller that cannot search, a stopped one and
       arguments: { entity_ref: args.extension_ref },
     });
   }
-  const room = await toolError(client, "start_device_search", {
+  const room = await toolError(client, "device_search", {
     extension_ref: `${home}/room/${BATHROOM}`,
   });
   assert.equal(room.error.code, "invalid_entity_ref");
@@ -1117,7 +1129,7 @@ test("a start the hub refuses is a rejection with nothing started", async (t) =>
     message: "Controller is busy",
   });
 
-  const refused = await toolError(client, "start_device_search", {
+  const refused = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(refused.error.code, "request_rejected");
@@ -1130,7 +1142,7 @@ test("a start the hub refuses is a rejection with nothing started", async (t) =>
   assert.equal(searchActions(hub).length, 1);
 
   // The next start is an ordinary start, not a watch of the refused one.
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(started.status, "started");
@@ -1145,7 +1157,7 @@ test("a start whose watch cannot be saved opens no network and says how to fix t
   t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
   await chmod(stateDirectory, 0o555);
 
-  const refused = await toolError(client, "start_device_search", {
+  const refused = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.deepEqual(searchActions(hub), []);
@@ -1156,7 +1168,7 @@ test("a start whose watch cannot be saved opens no network and says how to fix t
 
   // Once the directory can be written, the same start opens the network.
   await chmod(stateDirectory, 0o700);
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(started.status, "started");
@@ -1178,18 +1190,19 @@ async function watchDirectory(stateDirectory) {
 // fails, and the start sends nothing.
 test("a start whose kept searches cannot be written sends nothing", async (t) => {
   const { hub, client, stateDirectory } = await setup(t, await apartment());
-  const earlier = await call(client, "start_device_search", {
+  const earlier = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
-  await call(client, "stop_device_search", {
+  await call(client, "device_search", {
     search_ref: earlier.search_ref,
+    stop: true,
   });
   const watches = await watchDirectory(stateDirectory);
   t.after(() => chmod(watches, 0o700).catch(() => {}));
   await chmod(watches, 0o555);
 
   // The stopped search is the controller's latest, saved first.
-  const latest = await toolError(client, "start_device_search", {
+  const latest = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   // Not written for 4 days, it is removed first.
@@ -1197,7 +1210,7 @@ test("a start whose kept searches cannot be written sends nothing", async (t) =>
   for (const name of await readdir(watches)) {
     await utimes(path.join(watches, name), fourDaysAgo, fourDaysAgo);
   }
-  const aged = await toolError(client, "start_device_search", {
+  const aged = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await chmod(watches, 0o700);
@@ -1233,11 +1246,11 @@ test("a start beside a running search whose watch cannot be saved sends nothing,
   // Started in the SprutHub app; nothing is kept yet.
   startNatively(hub);
   await chmod(stateDirectory, 0o555);
-  const beside = await toolError(client, "start_device_search", {
+  const beside = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await chmod(stateDirectory, 0o700);
-  const watched = await call(client, "start_device_search", {
+  const watched = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
 
@@ -1245,18 +1258,18 @@ test("a start beside a running search whose watch cannot be saved sends nothing,
   const watches = await watchDirectory(stateDirectory);
   t.after(() => chmod(watches, 0o700).catch(() => {}));
   await chmod(watches, 0o555);
-  const besideWatched = await toolError(client, "start_device_search", {
+  const besideWatched = await toolError(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await chmod(watches, 0o700);
-  const again = await call(client, "start_device_search", {
+  const again = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   // The error gives the ref of the watch kept for the running search. Its
   // stop reaches the hub while the directory still cannot be written.
   assert.deepEqual(besideWatched.stop, {
-    tool: "stop_device_search",
-    arguments: { search_ref: watched.search_ref },
+    tool: "device_search",
+    arguments: { search_ref: watched.search_ref, stop: true },
   });
   await chmod(watches, 0o555);
   const stopped = await toolError(
@@ -1310,7 +1323,7 @@ test("a start whose watch cannot be saved after the start was sent says the netw
   const { hub, client, stateDirectory } = await setup(t, await apartment());
   hub.delayReplies("extension.action", 1_000);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1320,11 +1333,12 @@ test("a start whose watch cannot be saved after the start was sent says the netw
   const result = await answer;
   hub.delayReplies("extension.action", 0);
   await chmod(watches, 0o700);
-  const again = await call(client, "start_device_search", {
+  const again = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: again.search_ref,
+    stop: true,
   });
 
   assert.equal(result.isError, true, result.content[0]?.text);
@@ -1341,8 +1355,8 @@ test("a start whose watch cannot be saved after the start was sent says the netw
     arguments: { search_ref: refused.search_ref },
   });
   assert.deepEqual(refused.stop, {
-    tool: "stop_device_search",
-    arguments: { search_ref: refused.search_ref },
+    tool: "device_search",
+    arguments: { search_ref: refused.search_ref, stop: true },
   });
   assert(!JSON.stringify(refused).includes(stateDirectory), refused);
   // A start after the error watches the same run, not a new one.
@@ -1375,7 +1389,7 @@ test("a start whose watch cannot be saved after it was sent is followed by its r
   );
   hub.delayReplies("extension.action", 500);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1424,8 +1438,9 @@ test("a start whose watch cannot be saved after it was sent is followed by its r
     search_ref: refused.search_ref,
     wait_seconds: 0,
   });
-  const stale = await call(client, "stop_device_search", {
+  const stale = await call(client, "device_search", {
     search_ref: refused.search_ref,
+    stop: true,
   });
   assert.equal(later.active, false);
   assert.equal(later.later_search?.active, true);
@@ -1446,7 +1461,7 @@ test("a watch kept before its start does not take a search started in the app af
   );
   hub.delayReplies("extension.action", 500);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1466,8 +1481,9 @@ test("a watch kept before its start does not take a search started in the app af
   const refused = result.structuredContent;
   assert.equal(refused.error.code, "state_storage_unavailable");
   const read = await call(client, refused.next.tool, refused.next.arguments);
-  const stale = await call(client, "stop_device_search", {
+  const stale = await call(client, "device_search", {
     search_ref: refused.search_ref,
+    stop: true,
   });
 
   assert.equal(read.search_ref, refused.search_ref);
@@ -1490,7 +1506,7 @@ test("a watch kept before its start follows its own search while it runs and sto
   const { hub, client, stateDirectory } = await setup(t, await apartment());
   hub.delayReplies("extension.action", 500);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1507,8 +1523,9 @@ test("a watch kept before its start follows its own search while it runs and sto
     search_ref: refused.search_ref,
     wait_seconds: 0,
   });
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: refused.search_ref,
+    stop: true,
   });
 
   assert.equal(read.status, "searching");
@@ -1537,7 +1554,7 @@ test("a watch kept beside a running search does not take the owner's next search
   // read-only between the two saves.
   hub.delayReplies("extensionChild.list", 500);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(async () => {
@@ -1570,8 +1587,9 @@ test("a watch kept beside a running search does not take the owner's next search
     search_ref: refused.search_ref,
     wait_seconds: 0,
   });
-  const stale = await call(client, "stop_device_search", {
+  const stale = await call(client, "device_search", {
     search_ref: refused.search_ref,
+    stop: true,
   });
 
   assert.equal(read.active, false);
@@ -1592,15 +1610,16 @@ test("a start without the hub's search time watches its own search and says what
     ({ key }) => key !== "DiscoveryTime",
   );
 
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   const read = await call(client, "get_device_search", {
     search_ref: started.search_ref,
     wait_seconds: 0,
   });
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
 
   assert.equal(started.status, "started");
@@ -1623,7 +1642,7 @@ test("a start whose watch is gone after it was sent points at a new start", asyn
   const { hub, client, stateDirectory } = await setup(t, await apartment());
   hub.delayReplies("extension.action", 500);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1634,7 +1653,7 @@ test("a start whose watch is gone after it was sent points at a new start", asyn
   const result = await answer;
   hub.delayReplies("extension.action", 0);
   await chmod(watches, 0o700);
-  const again = await call(client, "start_device_search", {
+  const again = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
 
@@ -1644,7 +1663,7 @@ test("a start whose watch is gone after it was sent points at a new start", asyn
   assert.equal(refused.active, true);
   assert.equal(refused.search_ref, undefined);
   assert.deepEqual(refused.next, {
-    tool: "start_device_search",
+    tool: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   assert.equal(again.status, "already_running");
@@ -1662,7 +1681,7 @@ test("a start the hub refuses stays a rejection when its watch cannot be removed
   });
   hub.delayReplies("extension.action", 1_000);
   const answer = client.callTool({
-    name: "start_device_search",
+    name: "device_search",
     arguments: { extension_ref: zigbeeRef },
   });
   await until(() => searchActions(hub).length === 1, "the start");
@@ -1672,7 +1691,7 @@ test("a start the hub refuses stays a rejection when its watch cannot be removed
   const result = await answer;
   hub.delayReplies("extension.action", 0);
   await chmod(watches, 0o700);
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
 
@@ -1695,7 +1714,7 @@ test("a read and a stop whose search cannot be saved say what reached the hub", 
     t,
     await apartment({ pairing: [leakSensor()] }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await accessoryCreated(hub, 200);
@@ -1706,16 +1725,18 @@ test("a read and a stop whose search cannot be saved say what reached the hub", 
     search_ref: started.search_ref,
     wait_seconds: 0,
   });
-  const stopped = await toolError(client, "stop_device_search", {
+  const stopped = await toolError(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   await chmod(watches, 0o700);
   const after = await call(client, "get_device_search", {
     search_ref: started.search_ref,
     wait_seconds: 0,
   });
-  const stoppedAgain = await call(client, "stop_device_search", {
+  const stoppedAgain = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
 
   for (const refused of [read, stopped]) {
@@ -1746,7 +1767,7 @@ test("a start whose reply is lost is unknown with the search state read back", a
     { faults: { droppedReply: [{ method: "extension.action" }] } },
   );
 
-  const unknown = await call(client, "start_device_search", {
+  const unknown = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(unknown.status, "unknown");
@@ -1773,7 +1794,7 @@ test("a new device whose reads fail is reported unreadable beside the search sta
     t,
     await apartment({ pairing: [leakSensor()] }),
   );
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   await accessoryCreated(hub, 200);
@@ -1813,8 +1834,9 @@ test("a new device whose reads fail is reported unreadable beside the search sta
   // The hub refuses the accessory read after the stop: the network is
   // closed and said so, the device still listed.
   hub.refuseNext("accessory.get", { code: -32000, message: "Busy" });
-  const stopped = await call(client, "stop_device_search", {
+  const stopped = await call(client, "device_search", {
     search_ref: started.search_ref,
+    stop: true,
   });
   assert.equal(stopped.stop_sent, true);
   assert.equal(stopped.active, false);
@@ -1872,7 +1894,7 @@ test("a new device whose reads fail is reported unreadable beside the search sta
 
 test("devices of another controller are neither reported nor touched", async (t) => {
   const { hub, client } = await setup(t, await apartment());
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
 
@@ -1916,7 +1938,7 @@ test("devices of another controller are neither reported nor touched", async (t)
 
 test("an existing device of the controller that changes during the search is reported apart from new ones", async (t) => {
   const { hub, client } = await setup(t, await apartment());
-  const started = await call(client, "start_device_search", {
+  const started = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   const lamp = hub.state.accessories.find(
@@ -1957,7 +1979,7 @@ test("search answers stay the same size in a home with many devices on the contr
     ],
   ]) {
     const { hub, client } = await setup(t, fixture);
-    const start = await callBytes(client, "start_device_search", {
+    const start = await callBytes(client, "device_search", {
       extension_ref: `spruthub://hub/${hub.serial}/extension/${encodeURIComponent(ZIGBEE)}`,
     });
     let report;
@@ -1997,8 +2019,11 @@ test("search answers stay the same size in a home with many devices on the contr
 test("an unknown search ref points at the controller to read again", async (t) => {
   const { client } = await setup(t, await apartment());
   const missing = `${zigbeeRef}/device_search/00000000-0000-4000-8000-000000000000`;
-  for (const name of ["get_device_search", "stop_device_search"]) {
-    const unknown = await toolError(client, name, { search_ref: missing });
+  for (const [name, args] of [
+    ["get_device_search", { search_ref: missing }],
+    ["device_search", { search_ref: missing, stop: true }],
+  ]) {
+    const unknown = await toolError(client, name, args);
     assert.equal(unknown.error.code, "device_search_not_found");
     assert.deepEqual(unknown.next, {
       tool: "get_entity",
@@ -2007,15 +2032,60 @@ test("an unknown search ref points at the controller to read again", async (t) =
   }
 });
 
+// device_search opens a network with extension_ref and closes one only
+// with search_ref and stop: any other shape sends nothing and says which
+// call the agent meant.
+test("a device_search call that neither starts nor stops sends nothing", async (t) => {
+  const { hub, client } = await setup(t, await apartment());
+  const started = await call(client, "device_search", {
+    extension_ref: zigbeeRef,
+  });
+  assert.equal(searchActions(hub).length, 1);
+
+  const read = await toolError(client, "device_search", {
+    search_ref: started.search_ref,
+  });
+  assert.equal(read.error.code, "invalid_device_search_call");
+  assert.deepEqual(read.next, {
+    tool: "get_device_search",
+    arguments: { search_ref: started.search_ref },
+  });
+  for (const args of [
+    {},
+    { stop: true },
+    { extension_ref: zigbeeRef, search_ref: started.search_ref, stop: true },
+  ]) {
+    const refused = await toolError(client, "device_search", args);
+    assert.equal(
+      refused.error.code,
+      "invalid_device_search_call",
+      JSON.stringify(args),
+    );
+  }
+  assert.equal(searchActions(hub).length, 1);
+  assert.equal(
+    (
+      await call(client, "get_device_search", {
+        search_ref: started.search_ref,
+        wait_seconds: 0,
+      })
+    ).active,
+    true,
+  );
+});
+
 // Watches are kept in the state directory only for a few days: a new
 // search removes those not written for 3 days, and their refs are then
 // unknown.
 test("a search not touched for days is removed when a new one starts", async (t) => {
   const { client, stateDirectory } = await setup(t, await apartment());
-  const old = await call(client, "start_device_search", {
+  const old = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
-  await call(client, "stop_device_search", { search_ref: old.search_ref });
+  await call(client, "device_search", {
+    search_ref: old.search_ref,
+    stop: true,
+  });
   const watches = path.join(
     stateDirectory,
     (await readdir(stateDirectory)).find((name) =>
@@ -2027,7 +2097,7 @@ test("a search not touched for days is removed when a new one starts", async (t)
     await utimes(path.join(watches, name), fourDaysAgo, fourDaysAgo);
   }
 
-  const fresh = await call(client, "start_device_search", {
+  const fresh = await call(client, "device_search", {
     extension_ref: zigbeeRef,
   });
   assert.equal(fresh.status, "started");

@@ -1307,7 +1307,7 @@ function scenarioCounts(scenarios) {
 }
 
 // device_search marks a running controller that can search for new
-// devices (start_device_search).
+// devices (device_search).
 function extensionSummary({
   ref,
   name,

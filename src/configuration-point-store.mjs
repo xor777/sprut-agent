@@ -144,8 +144,8 @@ export function parseConfigurationPointRef(ref) {
   if (!match) {
     throw new SprutHubError(
       "invalid_point_ref",
-      "Use a configuration point reference returned by save_configuration_point or list_configuration_points.",
-      "list_configuration_points",
+      "Use a point_ref returned by configuration_point.",
+      "configuration_point",
     );
   }
   return {
@@ -162,7 +162,7 @@ function corruptConfigurationPoint(id, hubSerial) {
   return new SprutHubError(
     "corrupt_configuration_point",
     "The saved configuration point file is unreadable. Capture a new point; this file cannot be used as history.",
-    "save_configuration_point",
+    "configuration_point",
     {
       ...(isPointId(id)
         ? { point_ref: configurationPointRef(hubSerial, id) }

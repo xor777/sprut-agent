@@ -980,37 +980,6 @@ test("an earlier command on a device the agent changed again names the later com
   assert.deepEqual(homeChanges(hub), []);
 });
 
-test("an automation from apply_automation_change is undone through restore_native_change", async (t) => {
-  const { hub, client } = await setup(t);
-  const prepared = await call(client, "preview_boolean_automation", {
-    name: "Свет в ванной по движению",
-    reason: "Включать свет в ванной при движении",
-    source_room_ref: `${homeRef}/room/8`,
-    source_characteristic_ref: refOf(characteristic(38, 14)),
-    source_value: true,
-    target_room_ref: `${homeRef}/room/8`,
-    target_characteristic_ref: refOf(characteristic(35, 14)),
-    target_value: true,
-  });
-  const applied = await call(client, "apply_automation_change", {
-    change_ref: prepared.change_ref,
-  });
-  assert.equal(applied.status, "applied");
-  assert.notDeepEqual(homeChanges(hub), []);
-
-  const restored = await call(client, "restore_native_change", {
-    change_refs: [prepared.change_ref],
-  });
-  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
-  assert.equal(itemFor(restored, prepared.change_ref).status, "restored");
-  assert.deepEqual(homeChanges(hub), []);
-
-  const single = await call(client, "restore_native_change", {
-    change_ref: prepared.change_ref,
-  });
-  assert.equal(single.status, "rolled_back");
-});
-
 test("a scenario run stays non-restorable with a reason while the rest of the request is undone", async (t) => {
   const { hub, client } = await setup(t);
   const prepared = await prepareAndApply(client, {
@@ -1052,7 +1021,7 @@ test("history summaries name what changed, why, when and in which group", async 
     reason: "Сделать террасу",
   });
 
-  const history = await call(client, "list_native_changes", {
+  const history = await call(client, "get_native_change", {
     home_ref: homeRef,
     limit: 10,
   });
@@ -1088,7 +1057,7 @@ test("history names a prepared device setting by its device", async (t) => {
     reason: "Сделать в гостиной теплее",
   });
 
-  const history = await call(client, "list_native_changes", {
+  const history = await call(client, "get_native_change", {
     home_ref: homeRef,
     limit: 10,
   });

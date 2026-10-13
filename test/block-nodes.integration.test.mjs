@@ -871,7 +871,7 @@ test("answers name only the scheme and host of a request, whatever part of its U
     configuration,
     edited,
     applied,
-    history: await call(client, "list_native_changes", { home_ref: homeRef }),
+    history: await call(client, "get_native_change", { home_ref: homeRef }),
   };
   assert.deepEqual(
     Object.fromEntries(

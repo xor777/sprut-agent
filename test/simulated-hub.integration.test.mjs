@@ -258,6 +258,8 @@ test("a prepared characteristic value changes only that simulated characteristic
     change_ref: prepared.change_ref,
   });
   assert.equal(applied.status, "applied");
+  // A one-off setting is not an automation: nothing to say it overwrites.
+  assert.equal(applied.tell_owner, undefined);
   assert.deepEqual(applied.observed_value, { value: 30, kind: "intValue" });
   assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
     { key: "characteristic/16.13.15/Brightness", before: 55, after: 30 },
@@ -346,6 +348,9 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
     change_ref: prepared.change_ref,
   });
   assert.equal(applied.status, "applied");
+  // An automation from now on: the agent is told to say what it will
+  // overwrite.
+  assert.equal(typeof applied.tell_owner, "string");
   const created = hub.state.scenarios.at(-1);
   assert.equal(applied.scenario_ref, `${homeRef}/scenario/${created.index}`);
   assert.equal(created.name, "Свет в ванной по движению");
@@ -383,45 +388,6 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
   assert.deepEqual(
     diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
     [],
-  );
-  assertEveryRequestSupported(hub);
-});
-
-test("motion turning on the corridor light is not duplicated next to the rule that already does it", async (t) => {
-  const { hub, client } = await setup(t);
-  const corridor = `${homeRef}/room/2`;
-
-  const prepared = await call(client, "preview_boolean_automation", {
-    name: "Свет в коридоре по движению",
-    reason: "Включать свет в коридоре при движении",
-    source_room_ref: corridor,
-    source_characteristic_ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
-    source_value: true,
-    target_room_ref: corridor,
-    target_characteristic_ref: `${homeRef}/accessory/14/service/13/characteristic/14`,
-    target_value: true,
-  });
-  assert.deepEqual(
-    prepared.existing_rules.map(({ ref, name, relation }) => [
-      ref,
-      name,
-      relation,
-    ]),
-    [[`${homeRef}/scenario/3`, "Свет в коридоре по движению", "superset"]],
-  );
-
-  const applied = await call(client, "apply_automation_change", {
-    change_ref: prepared.change_ref,
-  });
-  assert.equal(applied.status, "conflict");
-  assert.equal(applied.created, false);
-  assert.equal(applied.existing_rule.ref, `${homeRef}/scenario/3`);
-  assert.deepEqual(hub.writes(), []);
-  assert.deepEqual(
-    hub.state.scenarios
-      .map(({ name }) => name)
-      .filter((name) => name === "Свет в коридоре по движению"),
-    ["Свет в коридоре по движению"],
   );
   assertEveryRequestSupported(hub);
 });

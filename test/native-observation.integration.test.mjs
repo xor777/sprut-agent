@@ -247,14 +247,16 @@ async function waitFor(predicate, timeoutMs = ORDINARY_HUB_TIMEOUT_MS) {
 
 async function startObservation(client, overrides = {}) {
   const result = await client.callTool({
-    name: "start_native_observation",
+    name: "read_hub_log",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [characteristicRef],
-      scenario_ref: scenarioRef,
-      duration_seconds: 1,
-      max_events: 20,
-      ...overrides,
+      watch: {
+        characteristic_refs: [characteristicRef],
+        scenario_ref: scenarioRef,
+        seconds: 1,
+        max_events: 20,
+        ...overrides,
+      },
     },
   });
   assert.equal(result.isError, undefined, result.content[0]?.text);
@@ -264,7 +266,7 @@ async function startObservation(client, overrides = {}) {
 
 async function getObservation(client, observationRef, waitSeconds = 0) {
   const result = await client.callTool({
-    name: "get_native_observation",
+    name: "read_hub_log",
     arguments: {
       observation_ref: observationRef,
       wait_seconds: waitSeconds,
@@ -593,7 +595,7 @@ test("an observation start stops waiting for a slow hub time zone without closin
 test("ordinary reads stay available without changing an active observation home", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub, { serial: null });
-  const started = await startObservation(client, { duration_seconds: 2 });
+  const started = await startObservation(client, { seconds: 2 });
 
   const homes = await client.callTool({ name: "home_overview", arguments: {} });
   assert.equal(homes.isError, undefined, homes.content[0]?.text);
@@ -650,13 +652,15 @@ test("stop during subscription startup cannot resurrect the observation", async 
   const hub = await startHub({ subscribeDelayMs: 150 });
   const client = await startClient(t, hub);
   const startPromise = client.callTool({
-    name: "start_native_observation",
+    name: "read_hub_log",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [characteristicRef],
-      scenario_ref: scenarioRef,
-      duration_seconds: 10,
-      max_events: 20,
+      watch: {
+        characteristic_refs: [characteristicRef],
+        scenario_ref: scenarioRef,
+        seconds: 10,
+        max_events: 20,
+      },
     },
   });
   await waitFor(() =>
@@ -664,13 +668,15 @@ test("stop during subscription startup cannot resurrect the observation", async 
   );
 
   const duplicate = await client.callTool({
-    name: "start_native_observation",
+    name: "read_hub_log",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [characteristicRef],
-      scenario_ref: scenarioRef,
-      duration_seconds: 10,
-      max_events: 20,
+      watch: {
+        characteristic_refs: [characteristicRef],
+        scenario_ref: scenarioRef,
+        seconds: 10,
+        max_events: 20,
+      },
     },
   });
   assert.equal(duplicate.isError, true);
@@ -680,8 +686,11 @@ test("stop during subscription startup cannot resurrect the observation", async 
   );
 
   const stopped = await client.callTool({
-    name: "stop_native_observation",
-    arguments: { observation_ref: duplicate.structuredContent.observation_ref },
+    name: "read_hub_log",
+    arguments: {
+      observation_ref: duplicate.structuredContent.observation_ref,
+      stop: true,
+    },
   });
   const started = await startPromise;
   assert.equal(stopped.isError, undefined, stopped.content[0]?.text);
@@ -708,13 +717,15 @@ test("a failed new start preserves the previous completed evidence", async (t) =
   assert.equal(completed.status, "completed");
 
   const failed = await client.callTool({
-    name: "start_native_observation",
+    name: "read_hub_log",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [characteristicRef],
-      scenario_ref: scenarioRef,
-      duration_seconds: 1,
-      max_events: 20,
+      watch: {
+        characteristic_refs: [characteristicRef],
+        scenario_ref: scenarioRef,
+        seconds: 1,
+        max_events: 20,
+      },
     },
   });
   assert.equal(failed.isError, true);
@@ -735,7 +746,7 @@ test("a failed new start preserves the previous completed evidence", async (t) =
 test("connection loss is an explicit terminal observation result", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
-  const started = await startObservation(client, { duration_seconds: 10 });
+  const started = await startObservation(client, { seconds: 10 });
 
   hub.disconnect();
   const result = await getObservation(client, started.observation_ref, 2);
@@ -752,15 +763,17 @@ test("observation rejects characteristic references from another home", async (t
   const client = await startClient(t, hub);
 
   const result = await client.callTool({
-    name: "start_native_observation",
+    name: "read_hub_log",
     arguments: {
       home_ref: homeRef,
-      characteristic_refs: [
-        "spruthub://hub/home%20B/accessory/34/service/13/characteristic/15",
-      ],
-      scenario_ref: scenarioRef,
-      duration_seconds: 1,
-      max_events: 20,
+      watch: {
+        characteristic_refs: [
+          "spruthub://hub/home%20B/accessory/34/service/13/characteristic/15",
+        ],
+        scenario_ref: scenarioRef,
+        seconds: 1,
+        max_events: 20,
+      },
     },
   });
 
@@ -778,11 +791,11 @@ test("observation rejects characteristic references from another home", async (t
 test("explicit stop cancels observation and releases its native subscription", async (t) => {
   const hub = await startHub();
   const client = await startClient(t, hub);
-  const started = await startObservation(client, { duration_seconds: 10 });
+  const started = await startObservation(client, { seconds: 10 });
 
   const stopped = await client.callTool({
-    name: "stop_native_observation",
-    arguments: { observation_ref: started.observation_ref },
+    name: "read_hub_log",
+    arguments: { observation_ref: started.observation_ref, stop: true },
   });
 
   assert.equal(stopped.isError, undefined, stopped.content[0]?.text);
@@ -807,7 +820,7 @@ test("event limit ends observation as a visibly truncated result", async (t) => 
   const hub = await startHub();
   const client = await startClient(t, hub);
   const started = await startObservation(client, {
-    duration_seconds: 10,
+    seconds: 10,
     max_events: 1,
   });
 

@@ -62,7 +62,7 @@ const RAW_REFS = [
   /(?<!\p{L})(?:аксессуар|сценари|комнат|сервис|характеристик|устройств)\p{L}*\s*[№#]\s*\d/iu,
   /(?<!\p{L})(?:аксессуар|сценарий)\s+\d/iu,
   /\b[a-z]+_refs?\b/i,
-  // A tool or native field name: list_native_changes, execution_error.
+  // A tool or native field name: get_native_change, execution_error.
   /\b[a-z]+(?:_[a-z]+)+\b/,
   /\/configuration\//i,
   /\b(?:Bridge|Controller):\w/,
