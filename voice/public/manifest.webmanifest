@@ -1,13 +1,13 @@
 {
-  "name": "Сладкий домик",
+  "name": "Домик",
   "short_name": "Домик",
   "lang": "ru",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0b0820",
-  "theme_color": "#0b0820",
+  "background_color": "#07070d",
+  "theme_color": "#07070d",
   "icons": [
     {
       "src": "/icon-192.png",

@@ -10,19 +10,20 @@ const TOKEN_KEY = "sprut-voice-token";
 const VOICE_KEY = "sprut-voice-voice";
 const IDLE_HANGUP_MS = 45_000;
 const ENDING_GRACE_MS = 8_000;
+// A tool call longer than this gets a soft «working» sound until it ends.
+const WORKING_SOUND_AFTER_MS = 1_200;
+// The state is shown by the orb only; words go to screen readers, and the
+// hint appears only when there is something to do.
 const STATES = {
-  idle: ["Нажмите и говорите", ""],
-  connecting: ["Подключаюсь…", ""],
-  listening: ["Слушаю", "Нажмите, чтобы закончить"],
-  thinking: ["Думаю…", ""],
-  working: ["Выполняю…", ""],
-  speaking: ["Говорю", "Можно перебить"],
-  ended: ["Разговор закончен", "Нажмите, чтобы поговорить ещё"],
-  error: ["Не получилось", "Нажмите ещё раз"],
-  no_token: [
-    "Нужна ссылка-приглашение",
-    "Откройте ссылку, которую вам прислали",
-  ],
+  idle: ["Готово к разговору", "Нажмите, чтобы поговорить"],
+  connecting: ["Подключение", ""],
+  listening: ["Слушает", ""],
+  thinking: ["Думает", ""],
+  working: ["Выполняет", ""],
+  speaking: ["Говорит", ""],
+  ended: ["Разговор закончен", "Нажмите, чтобы поговорить снова"],
+  error: ["Ошибка", "Не получилось. Нажмите ещё раз"],
+  no_token: ["Нет приглашения", "Откройте ссылку-приглашение"],
 };
 
 let token = readToken();
@@ -42,9 +43,14 @@ document.addEventListener("visibilitychange", () => {
 async function start() {
   token = readToken();
   if (!token) return setState("no_token");
-  const current = { calls: new Map(), speaking: false, ending: false };
-  // Created inside the tap, as mobile browsers require, and only measures.
-  current.meter = createMeter();
+  const current = {
+    calls: new Map(),
+    lines: new Map(),
+    speaking: false,
+    ending: false,
+  };
+  // Created inside the tap, as mobile browsers require.
+  current.fx = createEffects(button);
   session = current;
   logElement.replaceChildren();
   setState("connecting");
@@ -60,7 +66,7 @@ async function start() {
       api("/api/session", voice ? { voice } : {}),
     ]);
     current.stream = stream;
-    current.meter?.attach("input", stream);
+    current.fx?.attach("input", stream);
     if (session !== current) return release(current);
 
     const pc = new RTCPeerConnection();
@@ -70,13 +76,13 @@ async function start() {
     current.audio = audio;
     pc.addEventListener("track", (event) => {
       audio.srcObject = event.streams[0];
-      current.meter?.attach("output", event.streams[0]);
+      current.fx?.attach("output", event.streams[0]);
       audio.play().catch(() => {});
     });
     pc.addEventListener("connectionstatechange", () => {
       if (session !== current) return;
       if (["failed", "closed"].includes(pc.connectionState)) {
-        stop("error", "Связь прервалась");
+        stop("error", "Связь прервалась. Нажмите ещё раз");
       }
     });
     pc.addTrack(stream.getAudioTracks()[0], stream);
@@ -85,6 +91,7 @@ async function start() {
     current.channel = channel;
     channel.addEventListener("open", () => {
       if (session !== current) return;
+      current.fx?.chime("start");
       send(current, {
         type: "response.create",
         response: {
@@ -128,7 +135,7 @@ async function start() {
     if (error.name === "NotAllowedError") {
       return stop("error", "Разрешите доступ к микрофону");
     }
-    stop("error", error.message);
+    stop("error");
   }
 }
 
@@ -141,10 +148,36 @@ function onEvent(current, event) {
       break;
     case "input_audio_buffer.speech_stopped":
       current.userSpeaking = false;
+      remoteLog("event", "speech_stopped");
       setState("thinking");
+      break;
+    case "input_audio_buffer.committed":
+      // Holds the person's place in the conversation until the
+      // transcription arrives, which may come after the answer starts.
+      userLine(current, event.item_id);
+      break;
+    case "conversation.item.input_audio_transcription.delta": {
+      const line = userLine(current, event.item_id);
+      if (line.dataset.placeholder) {
+        line.textContent = "";
+        delete line.dataset.placeholder;
+      }
+      line.append(event.delta ?? "");
+      break;
+    }
+    case "conversation.item.input_audio_transcription.completed":
+      finishUserLine(current, event.item_id, event.transcript);
+      break;
+    case "response.output_audio_transcript.delta":
+      assistantLine(current, event.item_id).append(event.delta ?? "");
+      break;
+    case "response.output_audio_transcript.done":
+      assistantLine(current, event.item_id).textContent = event.transcript;
+      remoteLog("assistant", event.transcript);
       break;
     case "output_audio_buffer.started":
       current.speaking = true;
+      remoteLog("event", "audio_started");
       setState("speaking");
       break;
     case "output_audio_buffer.stopped":
@@ -159,12 +192,6 @@ function onEvent(current, event) {
       break;
     case "response.done":
       finishResponse(current, event.response);
-      break;
-    case "conversation.item.input_audio_transcription.completed":
-      addLine("user", event.transcript);
-      break;
-    case "response.output_audio_transcript.done":
-      addLine("assistant", event.transcript);
       break;
     case "error":
       remoteLog("error", event.error?.message ?? JSON.stringify(event));
@@ -200,6 +227,12 @@ function startCall(current, { call_id: callId, name, arguments: args }) {
         detail: error.message,
       })),
   );
+  clearTimeout(current.workingTimer);
+  current.workingTimer = setTimeout(() => {
+    if (session === current && current.calls.size > 0) {
+      current.fx?.working(true);
+    }
+  }, WORKING_SOUND_AFTER_MS);
 }
 
 async function finishResponse(current, response) {
@@ -226,6 +259,10 @@ async function finishResponse(current, response) {
     });
     current.calls.delete(callId);
   }
+  if (current.calls.size === 0) {
+    clearTimeout(current.workingTimer);
+    current.fx?.working(false);
+  }
   if (calls.every((item) => item.name === "end_conversation")) {
     if (!current.speaking) stop("ended");
     return;
@@ -250,18 +287,22 @@ function armIdle(current) {
 function stop(state, detail) {
   const current = session;
   session = null;
-  if (current) release(current);
+  if (current) {
+    if (state === "ended") current.fx?.chime("end");
+    release(current);
+  }
   setState(state, detail);
 }
 
 function release(current) {
   clearTimeout(current.idle);
+  clearTimeout(current.workingTimer);
   current.channel?.close();
   current.pc?.close();
   for (const track of current.stream?.getTracks() ?? []) track.stop();
   if (current.audio) current.audio.srcObject = null;
   current.wakeLock?.release().catch(() => {});
-  current.meter?.stop();
+  current.fx?.stop();
 }
 
 function send(current, event) {
@@ -300,21 +341,63 @@ function remoteLog(type, text) {
   api("/api/log", { events: [{ type, text }] }).catch(() => {});
 }
 
-function addLine(role, text) {
-  if (!text?.trim()) return;
-  remoteLog(role, text);
+// Lines are keyed by the Realtime item they show, so text streams into its
+// own line and the person's words keep their place before the answer.
+function userLine(current, itemId) {
+  let line = current.lines.get(itemId);
+  if (!line) {
+    line = addLine("user pending");
+    line.textContent = "…";
+    line.dataset.placeholder = "1";
+    current.lines.set(itemId, line);
+  }
+  return line;
+}
+
+function finishUserLine(current, itemId, transcript) {
+  const line = userLine(current, itemId);
+  const text = transcript?.trim();
+  if (!text) {
+    line.remove();
+    return;
+  }
+  line.textContent = text;
+  line.classList.remove("pending");
+  remoteLog("user", text);
+  keepNewestInView();
+}
+
+function assistantLine(current, itemId) {
+  let line = current.lines.get(itemId);
+  if (!line) {
+    line = addLine("assistant");
+    current.lines.set(itemId, line);
+  }
+  keepNewestInView();
+  return line;
+}
+
+function addLine(kind) {
+  const nearBottom =
+    logElement.scrollHeight - logElement.scrollTop - logElement.clientHeight <
+    80;
   const line = document.createElement("p");
-  line.className = role;
-  line.textContent = role === "user" ? `Вы: ${text}` : text;
+  line.className = `line ${kind}`;
   logElement.append(line);
-  while (logElement.childElementCount > 6)
-    logElement.firstElementChild.remove();
+  if (nearBottom) keepNewestInView();
+  return line;
+}
+
+function keepNewestInView() {
+  requestAnimationFrame(() => {
+    logElement.scrollTop = logElement.scrollHeight;
+  });
 }
 
 function setState(state, detail) {
-  const [title, hint] = STATES[state];
+  const [spoken, hint] = STATES[state];
   document.body.dataset.state = state;
-  statusElement.textContent = title;
+  statusElement.textContent = spoken;
   hintElement.textContent = detail ?? hint;
   button.setAttribute(
     "aria-label",
@@ -360,9 +443,10 @@ function readVoice() {
   }
 }
 
-// Loudness of the person and of the assistant drives the orb and the little
-// house's mouth through --level and --mouth. Nothing is played through it.
-function createMeter() {
+// Sound and motion of the orb. The loudness of both voices drives --level
+// on the orb alone, so a frame restyles only that small element; soft tones
+// mark the start and end of a conversation and a long tool call.
+function createEffects(orb) {
   const Context = window.AudioContext ?? window.webkitAudioContext;
   if (!Context) return null;
   const context = new Context();
@@ -371,10 +455,10 @@ function createMeter() {
   silent.connect(context.destination);
   const analysers = {};
   const samples = new Uint8Array(512);
-  const root = document.documentElement.style;
   let level = 0;
-  let mouth = 0;
+  let shown = 0;
   let frame = 0;
+  let workingTimer = 0;
   const loudness = (analyser) => {
     if (!analyser) return 0;
     analyser.getByteTimeDomainData(samples);
@@ -385,13 +469,26 @@ function createMeter() {
   const tick = () => {
     const output = Math.min(1, loudness(analysers.output) * 5);
     const input = Math.min(1, loudness(analysers.input) * 4);
-    level += (Math.max(output, input * 0.7) - level) * 0.3;
-    mouth += (output - mouth) * 0.45;
-    root.setProperty("--level", level.toFixed(3));
-    root.setProperty("--mouth", mouth.toFixed(3));
+    level += (Math.max(output, input * 0.7) - level) * 0.25;
+    if (Math.abs(level - shown) > 0.015) {
+      shown = level;
+      orb.style.setProperty("--level", level.toFixed(3));
+    }
     frame = requestAnimationFrame(tick);
   };
   frame = requestAnimationFrame(tick);
+  const tone = (frequency, at, length, volume) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(volume, at + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + length);
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.start(at);
+    oscillator.stop(at + length + 0.05);
+  };
   return {
     attach(kind, stream) {
       try {
@@ -403,11 +500,28 @@ function createMeter() {
         context.resume().catch(() => {});
       } catch {}
     },
+    chime(kind) {
+      const now = context.currentTime;
+      const [first, second] = kind === "start" ? [660, 990] : [880, 587];
+      tone(first, now, 0.18, 0.06);
+      tone(second, now + 0.12, 0.26, 0.06);
+    },
+    working(on) {
+      clearInterval(workingTimer);
+      if (!on) return;
+      const pulse = () => {
+        const now = context.currentTime;
+        tone(740, now, 0.12, 0.025);
+        tone(988, now + 0.16, 0.14, 0.02);
+      };
+      pulse();
+      workingTimer = setInterval(pulse, 1100);
+    },
     stop() {
+      clearInterval(workingTimer);
       cancelAnimationFrame(frame);
-      root.setProperty("--level", "0");
-      root.setProperty("--mouth", "0");
-      context.close().catch(() => {});
+      orb.style.setProperty("--level", "0");
+      setTimeout(() => context.close().catch(() => {}), 600);
     },
   };
 }
