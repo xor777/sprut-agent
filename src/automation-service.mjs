@@ -4417,9 +4417,11 @@ export class AutomationService {
   // setting or scenario whose own write is still unknown are settled, each
   // by its own read (reconcilePendingValueChange, reconcileScenarioWrite).
   // This undo goes on only while the hub shows its change in place, so a
-  // later change's undo that the read shows took effect is restored now:
-  // once this write lands, that later change's baseline is gone and no
-  // read of it could tell its own undo from a change by hand.
+  // later change's undo that the read shows took effect is restored now.
+  // A later apply that the read shows did not take effect (its baseline is
+  // there) on what this undo rewrites is not applied: this is the last read
+  // that can tell. Once this write lands, that later change's baseline is
+  // gone and no read of it could tell this undo from a change by hand.
   async #settleLaterUnknownWrites(change) {
     for (const later of await this.store.list()) {
       if (
@@ -4432,10 +4434,20 @@ export class AutomationService {
         continue;
       }
       try {
-        if (isNativeValueChange(later)) {
-          await this.#reconcilePendingValueChange(later);
-        } else {
-          await this.#reconcileScenarioWrite(later);
+        const pending = isNativeValueChange(later)
+          ? await this.#reconcilePendingValueChange(later)
+          : await this.#reconcileScenarioWrite(later);
+        if (
+          pending?.direction === "apply" &&
+          pending.outcome === "expected_missing" &&
+          writesOverlap(change, later)
+        ) {
+          await this.#finishNative(later, "not_owned", pending.current, {
+            conflict_reason: "change_was_not_applied",
+            last_verification: freshVerification(
+              "baseline_observed_before_earlier_undo",
+            ),
+          });
         }
       } catch {
         // Left as it was; its own next read settles it.
@@ -4486,7 +4498,11 @@ export class AutomationService {
       return undefined;
     }
     return this.#finishNative(change, "not_owned", current, {
-      conflict_reason: undefined,
+      // A sent change found not applied stays so named.
+      conflict_reason:
+        change.conflict_reason === "change_was_not_applied"
+          ? "change_was_not_applied"
+          : undefined,
       last_verification: freshVerification(
         valuesEqual(current, change.baseline_value)
           ? "baseline_value_observed"
@@ -12277,6 +12293,19 @@ function sameWriteChain(change, other) {
     isNativeValueChange(other) &&
     valueTargetKey(other) === valueTargetKey(change)
   );
+}
+
+// An undo of change rewrites what other set: the same setting, or a field
+// of the scenario both own (scenarioFieldsOwned).
+function writesOverlap(change, other) {
+  if (scenarioChainIndex(change) === undefined) {
+    return (
+      isNativeValueChange(other) &&
+      valueTargetKey(other) === valueTargetKey(change)
+    );
+  }
+  const owned = scenarioFieldsOwned(other);
+  return scenarioFieldsOwned(change).some((field) => owned.includes(field));
 }
 
 // A sent write of this change whose outcome its journal does not hold yet.
