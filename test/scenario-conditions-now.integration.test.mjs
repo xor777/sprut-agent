@@ -566,6 +566,9 @@ test("relations of a device name the owner's code scenarios whose source mention
         "// Hub.getAccessory(32) was the desk lamp before",
         "Hub.getAccessory(320).getService(HS.Lightbulb);",
         'log("Настольная лампа у окна");',
+        "Hub.setCharacteristicValue(320, 14, true);",
+        // 32 is a characteristic id of the corridor motion sensor here.
+        "Hub.getCharacteristicValue(13, 32);",
       ].join("\n"),
     });
     addScenario(hub, {
@@ -573,6 +576,26 @@ test("relations of a device name the owner's code scenarios whose source mention
       name: "Состояние лампы",
       type: "GLOBAL",
       data: "global.deskLampOn = function () {\n  return Hub.getCharacteristic(32, 14).getValue();\n};",
+    });
+    // The Hub methods by accessory and characteristic id that the hub's
+    // scenario.sdk declares besides getAccessory and getCharacteristic.
+    addScenario(hub, {
+      index: "55",
+      name: "Включить лампу",
+      type: "GLOBAL",
+      data: "global.deskLampOn = function () {\n  Hub.setCharacteristicValue(32, 14, true);\n};",
+    });
+    addScenario(hub, {
+      index: "56",
+      name: "Переключить лампу",
+      type: "GLOBAL",
+      data: "global.deskLampToggle = function () {\n  Hub.toggleCharacteristicValue(32, 14);\n};",
+    });
+    addScenario(hub, {
+      index: "57",
+      name: "Яркость лампы",
+      type: "GLOBAL",
+      data: "global.deskLampLevel = function () {\n  return Hub.getCharacteristicValue(32, 15);\n};",
     });
   });
   const mentions = [
@@ -592,14 +615,19 @@ test("relations of a device name the owner's code scenarios whose source mention
       found_by: ["accessory_name"],
       lines: [3],
     },
-    {
-      scenario_ref: `${homeRef}/scenario/54`,
-      scenario_name: "Состояние лампы",
+    ...[
+      ["54", "Состояние лампы"],
+      ["55", "Включить лампу"],
+      ["56", "Переключить лампу"],
+      ["57", "Яркость лампы"],
+    ].map(([index, name]) => ({
+      scenario_ref: `${homeRef}/scenario/${index}`,
+      scenario_name: name,
       scenario_type: "GLOBAL",
       active: true,
       found_by: ["accessory_id"],
       lines: [2],
-    },
+    })),
   ];
   const withoutNext = (list) => list.map(({ next: _next, ...rest }) => rest);
 
@@ -617,22 +645,21 @@ test("relations of a device name the owner's code scenarios whose source mention
       include: ["configuration"],
     },
   });
-  // The apartment's own LOGIC and the four added user ones; the built-in
+  // The apartment's own LOGIC and the seven added user ones; the built-in
   // one is not read.
-  assert.equal(lamp.entity.relations.checked.code_scenarios_searched, 5);
+  assert.equal(lamp.entity.relations.checked.code_scenarios_searched, 8);
+  const code = ["9", "50", "51", "53", "54", "55", "56", "57"];
   assert.deepEqual(
     requests
       .filter(
         ({ method, params }) =>
           method === "scenario.get" &&
           params.scenario.get.expand === "data" &&
-          ["9", "50", "51", "52", "53", "54"].includes(
-            params.scenario.get.index,
-          ),
+          [...code, "52"].includes(params.scenario.get.index),
       )
       .map(({ params }) => params.scenario.get.index)
       .sort(),
-    ["50", "51", "53", "54", "9"],
+    code.sort(),
   );
 
   const on = await read(client, {
