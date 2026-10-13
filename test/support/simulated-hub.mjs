@@ -1049,12 +1049,24 @@ async function loadFixtureFile(file) {
 // wall clock on the machine's hub-local date; the clock then runs at the
 // machine's pace. It places the seeded log, the settings window's time and
 // the log lines of later runs. Without it the hub clock is the machine's.
-// eventEveryMs sends every connection, without a subscription, a
-// characteristic EVENT_UPDATE frame this often with the current value of the
-// home's characteristics in turn, as the owner's hub sends every socket
-// characteristic and room events (35 in 120 s at rest,
-// 2026-10-12-device-pairing H12). Without it the simulator sends no events
-// at rest, only those its own changes cause.
+// Events go only to a connection that has sent a request with the home's
+// serial, without a subscription: on the owner's hub a socket that only
+// listed homes got none in 19 minutes, one that read room.list once got the
+// whole stream (2026-10-13-voice-latency-baseline, section 5). A change the
+// simulator makes pushes the events the hub pushes for it: a value write
+// one characteristic EVENT_UPDATE per characteristic, the written one even
+// when its value stays, after the reply (2026-10-13-lamp-logic-undo 4.2,
+// 4.5); a created accessory EVENT_ADD with its services (voice baseline,
+// section 5). For edits the hub was not seen to announce (rooms, renames,
+// moves, deletions, services) the frames follow the hub's proto (RoomEvent,
+// AccessoryEvent, ServiceEvent: event type and the changed items). hub.emit
+// pushes a frame as the hub would for an edit made in the SprutHub app.
+// eventEveryMs sends such a connection, this often, a characteristic
+// EVENT_UPDATE with the current value of the home's characteristics in turn
+// and every third time a room EVENT_UPDATE with a room's id, name, order
+// and visibility, as the owner's hub does at rest (about 14 and 6 a minute,
+// voice baseline, section 5). Without it the simulator sends no events at
+// rest, only those its own changes cause.
 // latencyMs, a number or ({method, arrival}) => ms with arrival counting the
 // requests of a connection from 1, handles each request that long after it
 // arrives and answers it at once, as a hub about 90 ms away does
@@ -1115,13 +1127,40 @@ export async function startSimulatedHub(
       protocols.has("json-rpc") ? "json-rpc" : false,
   });
   await once(server, "listening");
-  // The hub pushes event frames to every connection without a subscription
-  // (owner's hub: characteristic and room events, and the extension event
-  // after a search action, 2026-10-12-device-pairing H12 and P5).
+  // The hub pushes event frames to every connection that has sent the home's
+  // serial, without a subscription (owner's hub: characteristic and room
+  // events, and the extension event after a search action,
+  // 2026-10-12-device-pairing H12 and P5).
+  const receivesEvents = new WeakSet();
   state.emit = (event) => {
     const text = JSON.stringify({ event });
     for (const client of server.clients) {
-      if (client.readyState === client.OPEN) client.send(text);
+      if (client.readyState === client.OPEN && receivesEvents.has(client)) {
+        client.send(text);
+      }
+    }
+  };
+  // Events of a change a request makes go out after its reply.
+  state.emitAfterReply = (event) => {
+    if (state.replyEvents) state.replyEvents.push(event);
+    else state.emit(event);
+  };
+  const handleWithEvents = (raw, connectionId) => {
+    state.replyEvents = [];
+    try {
+      return {
+        reply: handleMessage(
+          state,
+          requests,
+          token,
+          raw,
+          refusals,
+          connectionId,
+        ),
+        events: state.replyEvents,
+      };
+    } finally {
+      state.replyEvents = null;
     }
   };
   // Every WebSocket connection with the time of its first request and its
@@ -1137,23 +1176,35 @@ export async function startSimulatedHub(
     };
     connections.push(connection);
     let nextEvent = 0;
+    let nextCharacteristic = 0;
+    let nextRoom = 0;
     const sendEvent = () => {
+      if (!receivesEvents.has(socket)) return;
+      const room = nextEvent++ % 3 === 2 && state.rooms.length > 0;
+      if (room) {
+        const { id, name, order, visible } =
+          state.rooms[nextRoom++ % state.rooms.length];
+        socket.send(
+          JSON.stringify({
+            event: {
+              room: {
+                event: "EVENT_UPDATE",
+                rooms: [{ id, name, order, visible }],
+              },
+            },
+          }),
+        );
+        return;
+      }
       const characteristics = state.accessories.flatMap(({ services }) =>
         services.flatMap((service) => service.characteristics),
       );
       if (characteristics.length === 0) return;
-      const { aId, sId, cId, control } =
-        characteristics[nextEvent++ % characteristics.length];
       socket.send(
         JSON.stringify({
-          event: {
-            characteristic: {
-              event: "EVENT_UPDATE",
-              characteristics: [
-                { aId, sId, cId, control: { value: control.value } },
-              ],
-            },
-          },
+          event: valueEvent(
+            characteristics[nextCharacteristic++ % characteristics.length],
+          ),
         }),
       );
     };
@@ -1166,14 +1217,17 @@ export async function startSimulatedHub(
     });
     const handle = (raw, receivedAt) => {
       const recorded = requests.length;
-      const reply = handleMessage(
-        state,
-        requests,
-        token,
+      const { reply, events: replyEvents } = handleWithEvents(
         raw,
-        refusals,
         connection.id,
       );
+      if (
+        requests.length > recorded &&
+        requests.at(-1).serial === state.hub.serial &&
+        requests.at(-1).error?.code !== 401
+      ) {
+        receivesEvents.add(socket);
+      }
       const text = reply ? JSON.stringify(reply) : null;
       const entry = requests.length > recorded ? requests.at(-1) : undefined;
       // The hub-side cost of the request: bytes of the reply frame sent (0
@@ -1183,13 +1237,17 @@ export async function startSimulatedHub(
         entry.received_ms = receivedAt;
       }
       const delay = entry ? replyDelays.get(entry.method) : undefined;
+      // The events of what the request changed go out after its reply.
       const send = () => {
-        if (entry && text) entry.answered_ms = performance.now();
-        if (socket.readyState === socket.OPEN) socket.send(text);
+        if (text) {
+          if (entry) entry.answered_ms = performance.now();
+          if (socket.readyState === socket.OPEN) socket.send(text);
+        }
+        for (const event of replyEvents) state.emit(event);
       };
       if (text && delay) {
         setTimeout(send, delay);
-      } else if (text) {
+      } else {
         send();
       }
     };
@@ -1231,11 +1289,8 @@ export async function startSimulatedHub(
     writes: () => requests.filter(({ write }) => write),
     // Handles native params as a request of a client without a socket, for
     // replaying what a run sent; returns the reply, null if it is dropped.
-    request: (params) =>
-      handleMessage(
-        state,
-        requests,
-        token,
+    request: (params) => {
+      const { reply, events } = handleWithEvents(
         JSON.stringify({
           id: requests.length + 1,
           token,
@@ -1243,8 +1298,14 @@ export async function startSimulatedHub(
           cid,
           params,
         }),
-        refusals,
-      ),
+        null,
+      );
+      for (const event of events) state.emit(event);
+      return reply;
+    },
+    // Pushes an event frame to the connections that receive events, as the
+    // hub does for an edit made in the SprutHub app.
+    emit: (event) => state.emit(event),
     refuseNext: (method, error) => {
       const queue = refusals.get(method) ?? [];
       queue.push(
@@ -1325,6 +1386,8 @@ export async function startSimulatedHub(
         timers: _timers,
         timerHandles: _timerHandles,
         emit: _emit,
+        emitAfterReply: _emitAfterReply,
+        replyEvents: _replyEvents,
         ...rest
       } = state;
       return {
@@ -1491,12 +1554,14 @@ const HANDLERS = {
       visible: true,
     };
     state.rooms.push(room);
+    emitRooms(state, "EVENT_ADD", [room]);
     return room;
   },
   "room.delete": (state, { id }) => {
     const at = state.rooms.findIndex((room) => room.id === id);
     if (at < 0) throw notFound(`Room ${id}`);
     state.rooms.splice(at, 1);
+    emitRooms(state, "EVENT_REMOVE", [{ id }]);
     return {};
   },
   // RoomUpdateRequest {id, name, visible}: only the sent fields change.
@@ -1514,6 +1579,7 @@ const HANDLERS = {
       }
       room.visible = input.visible;
     }
+    emitRooms(state, "EVENT_UPDATE", [room]);
     return {};
   },
 
@@ -1577,6 +1643,7 @@ const HANDLERS = {
       ],
     };
     state.accessories.push(accessory);
+    emitAccessories(state, "EVENT_ADD", [accessory]);
     // The create reply of the fake hubs omits `virtual`; the stored accessory
     // keeps it, as accessory.get reports it. notify was not seen in it.
     const { virtual: _virtual, ...reply } = accessory;
@@ -1598,6 +1665,7 @@ const HANDLERS = {
       }
     }
     if (Object.hasOwn(input, "roomId")) accessory.roomId = input.roomId;
+    emitAccessories(state, "EVENT_UPDATE", [accessory]);
     return {};
   },
   "accessory.delete": (state, { id }) => {
@@ -1609,6 +1677,9 @@ const HANDLERS = {
     for (const key of [...state.links.keys()]) {
       if (key.startsWith(`${id}.`)) state.links.delete(key);
     }
+    state.emitAfterReply?.({
+      accessory: { event: "EVENT_REMOVE", accessories: [{ id }] },
+    });
     return {};
   },
 
@@ -1629,6 +1700,10 @@ const HANDLERS = {
       }
       service.visible = input.visible;
     }
+    const { characteristics: _characteristics, ...changed } = service;
+    state.emitAfterReply?.({
+      service: { event: "EVENT_UPDATE", services: [structuredClone(changed)] },
+    });
     return {};
   },
 
@@ -3055,6 +3130,7 @@ function runScenario(state, scenario) {
         characteristic.control.value,
         action.value,
       );
+      state.emitAfterReply?.(valueEvent(characteristic));
       run.executed.push({ aId: target.aId, sId: target.sId, cId: action.cId });
     }
   }
@@ -3959,13 +4035,48 @@ function recordFault(state, fault, entry) {
   });
 }
 
+// A written value pushes its event even when it stays the same; what links
+// and lamp logic change pushes one each (2026-10-13-lamp-logic-undo 4.2,
+// 4.5).
 function writeValue(state, characteristic, value) {
   const previous = characteristic.control.value;
   characteristic.control.value = value;
+  const changed = [characteristic];
   if (!sameValue(previous, value)) {
-    propagateVirtualLinks(state, characteristic, value);
+    changed.push(...propagateVirtualLinks(state, characteristic, value));
   }
-  applyLampLogic(state, characteristic, previous);
+  changed.push(...applyLampLogic(state, characteristic, previous));
+  for (const item of new Set(changed)) {
+    state.emitAfterReply?.(valueEvent(item));
+  }
+}
+
+function emitRooms(state, event, rooms) {
+  state.emitAfterReply?.({
+    room: { event, rooms: structuredClone(rooms) },
+  });
+}
+
+function emitAccessories(state, event, accessories) {
+  state.emitAfterReply?.({
+    accessory: {
+      event,
+      accessories: accessories.map((accessory) =>
+        projectAccessory(accessory, "services,characteristics"),
+      ),
+    },
+  });
+}
+
+function valueEvent({ aId, sId, cId, control }) {
+  return {
+    characteristic: {
+      event: "EVENT_UPDATE",
+      characteristics: [
+        { aId, sId, cId, control: { value: structuredClone(control.value) } },
+      ],
+    },
+  };
 }
 
 // LightbulbControl ("Связь включения и уровня") as observed on the owner's
@@ -3984,34 +4095,42 @@ function applyLampLogic(state, characteristic, previous) {
       logic.type === "LightbulbControl" &&
       logic.active,
   );
-  if (!active) return;
+  if (!active) return [];
   const service = requireService(state, aId, sId);
   const find = (type) =>
     service.characteristics.find(({ control }) => control.type === type);
   const on = find("On");
   const brightness = find("Brightness");
-  if (!on || !brightness || characteristic !== brightness) return;
+  if (!on || !brightness || characteristic !== brightness) return [];
   const lit = brightness.control.value.intValue > 0;
-  let changed = false;
+  const changed = [];
   if (!lit && !sameValue(brightness.control.value, previous)) {
     brightness.control.value = previous;
-    changed = true;
+    changed.push(brightness);
   }
   if (on.control.value.boolValue !== lit) {
     on.control.value = { boolValue: lit };
-    changed = true;
+    changed.push(on);
   }
-  if (changed) recordFault(state, "lamp_logic", state.currentRequest);
+  if (changed.length > 0) {
+    recordFault(state, "lamp_logic", state.currentRequest);
+  }
+  return changed;
 }
 
+// The characteristics a value written to source set through its IN links.
 function propagateVirtualLinks(state, source, value) {
+  const changed = [];
   for (const link of state.links.get(characteristicKey(source)) ?? []) {
     if (link.type !== "IN") continue;
     for (const target of link.characteristics) {
       const characteristic = findCharacteristic(state, target);
-      if (characteristic) characteristic.control.value = structuredClone(value);
+      if (!characteristic) continue;
+      characteristic.control.value = structuredClone(value);
+      changed.push(characteristic);
     }
   }
+  return changed;
 }
 
 function subscriptionUuid(state, domain) {

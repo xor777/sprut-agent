@@ -1552,15 +1552,34 @@ const searchAction = (state) => ({
   },
 });
 
-// A connection that sends nothing and keeps the events the hub pushes to
-// it. The simulator sends them from timers, so a test waits for a number
-// of them to arrive rather than for a fixed time.
+// A connection that reads the room list once, as a socket must before the
+// hub pushes it events (2026-10-13-voice-latency-baseline, section 5), and
+// keeps the events the hub pushes to it. The simulator sends them from
+// timers, so a test waits for a number of them to arrive rather than for a
+// fixed time.
 async function listenToEvents(t, hub) {
   const socket = new WebSocket(hub.url, "json-rpc");
   t.after(() => socket.close());
   await once(socket, "open");
   const events = [];
-  socket.on("message", (data) => events.push(JSON.parse(data.toString())));
+  socket.on("message", (data) => {
+    const frame = JSON.parse(data.toString());
+    if (frame.event !== undefined) events.push(frame);
+  });
+  const listed = new Promise((resolve) =>
+    socket.on("message", (data) => {
+      if (JSON.parse(data.toString()).id === 1) resolve();
+    }),
+  );
+  socket.send(
+    JSON.stringify({
+      id: 1,
+      token: hub.token,
+      serial: hub.serial,
+      params: { room: { list: {} } },
+    }),
+  );
+  await listed;
   return {
     kinds: () =>
       events.map(({ event }) =>
@@ -1773,4 +1792,114 @@ test("a search started while a device is still joining does not add it twice", a
   const accessories = (await send({ accessory: { list: {} } })).result.accessory
     .list.accessories;
   assert.equal(accessories.filter(({ id }) => id === 200).length, 1);
+});
+
+// A raw connection that keeps every frame it receives in order.
+async function frameLog(t, hub) {
+  const socket = new WebSocket(hub.url, "json-rpc");
+  t.after(() => socket.close());
+  await once(socket, "open");
+  const frames = [];
+  const waiters = [];
+  socket.on("message", (data) => {
+    frames.push(JSON.parse(data.toString()));
+    for (const waiter of [...waiters]) waiter();
+  });
+  let id = 0;
+  return {
+    frames,
+    send(params, { serial = hub.serial } = {}) {
+      id += 1;
+      socket.send(
+        JSON.stringify({
+          id,
+          token: hub.token,
+          ...(serial === null ? {} : { serial }),
+          params,
+        }),
+      );
+      return id;
+    },
+    until(check) {
+      return new Promise((resolve, reject) => {
+        const waiter = () => {
+          if (!check(frames)) return;
+          clearTimeout(timer);
+          waiters.splice(waiters.indexOf(waiter), 1);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          reject(new Error(`${frames.length} frames, condition not met`));
+        }, 5_000);
+        waiters.push(waiter);
+        waiter();
+      });
+    },
+  };
+}
+
+const lampOnEvent = (frame) =>
+  frame.event?.characteristic?.characteristics?.some(
+    ({ aId, sId, cId }) => aId === 16 && sId === 13 && cId === 14,
+  );
+
+// The owner's hub: a socket that only listed homes got no event in 19
+// minutes, one that read room.list once got the whole stream
+// (2026-10-13-voice-latency-baseline, section 5); a write's event follows
+// its reply, also when the value stays (2026-10-13-lamp-logic-undo 4.2,
+// 4.5).
+test("the simulator pushes events only to a connection that sent the home's serial, a write's after its reply", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
+    eventEveryMs: 20,
+  });
+  t.after(() => hub.close());
+  const homesOnly = await frameLog(t, hub);
+  const reader = await frameLog(t, hub);
+
+  homesOnly.send({ hub: { list: {} } }, { serial: null });
+  reader.send({ room: { list: {} } });
+  await reader.until(
+    (frames) =>
+      frames.some(({ event }) => event?.room?.event === "EVENT_UPDATE") &&
+      frames.filter(({ event }) => event?.characteristic).length >= 2,
+  );
+  assert.deepEqual(
+    homesOnly.frames.map(({ id }) => id),
+    [1],
+  );
+
+  const quiet = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => quiet.close());
+  const writer = await frameLog(t, quiet);
+  const other = await frameLog(t, quiet);
+  other.send({ room: { list: {} } });
+  await other.until((frames) => frames.length === 1);
+  for (const value of [false, false]) {
+    const id = writer.send({
+      characteristic: {
+        update: {
+          aId: 16,
+          sId: 13,
+          cId: 14,
+          control: { value: { boolValue: value } },
+        },
+      },
+    });
+    await writer.until(
+      (frames) =>
+        frames.some(lampOnEvent) && frames.some((frame) => frame.id === id),
+    );
+    const reply = writer.frames.findIndex((frame) => frame.id === id);
+    const event = writer.frames.findIndex(
+      (frame, index) => index > reply && lampOnEvent(frame),
+    );
+    assert(event > reply, JSON.stringify(writer.frames));
+    assert.deepEqual(
+      writer.frames[event].event.characteristic.characteristics[0].control,
+      { value: { boolValue: false } },
+    );
+    writer.frames.length = 0;
+  }
+  await other.until((frames) => frames.filter(lampOnEvent).length === 2);
 });
