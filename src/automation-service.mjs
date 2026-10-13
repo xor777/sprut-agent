@@ -283,7 +283,32 @@ export class AutomationService {
         ...(kind.notes ? kind.notes(draft) : {}),
       };
     }
-    return publicNativeChange(await this.#recordValueChange(input, draft));
+    return publicNativeChange(
+      await this.#recordValueChange(
+        input,
+        draft,
+        draft.fields.target_name === undefined
+          ? await this.#deviceName(draft.fields.target)
+          : {},
+      ),
+    );
+  }
+
+  // The device and channel a setting belongs to, saved so that history
+  // names it as the owner knows it. A name is optional: only a transport
+  // failure stops the prepare.
+  async #deviceName(target) {
+    if (!Number.isInteger(target?.aId)) return {};
+    try {
+      const name = deviceCommandName(
+        await this.client.getAccessory(target.aId),
+        target,
+      );
+      return name ? { target_name: name } : {};
+    } catch (error) {
+      if (!isDeviceCommandRejection(error)) throw error;
+      return {};
+    }
   }
 
   async #recordValueChange(input, draft, journal = {}) {
@@ -1644,10 +1669,21 @@ export class AutomationService {
   async restoreChanges(references) {
     const parsed = references.map(parseRestoreRef);
     return this.#exclusiveWrite(async () => {
-      const entries = await this.#restoreEntries(parsed);
+      const ordered = restoreOrder(await this.#restoreEntries(parsed));
+      const onBefore = await this.#lampOnBeforeRestore(ordered);
       const results = [];
-      for (const entry of restoreOrder(entries)) {
-        results.push(await this.#restoreEntry(entry));
+      // Lamps this call already wrote to: a lamp's level can bring its On
+      // back with it (a level above 0 switches a lamp with lamp logic on).
+      const lampsWritten = new Set();
+      for (const entry of ordered) {
+        const item = await this.#restoreEntry(entry, {
+          lampWritten: lampsWritten.has(lampKey(entry.change)),
+          valueBeforeCall: onBefore.get(entry.change.id),
+        });
+        if (item.sent && lampKey(entry.change) !== null) {
+          lampsWritten.add(lampKey(entry.change));
+        }
+        results.push(item);
       }
       return restoreChangesResult(configuredHomeRef(this.hubSerial), results);
     });
@@ -1697,7 +1733,37 @@ export class AutomationService {
     return [...entries.values()];
   }
 
-  async #restoreEntry({ change: listed, automation }) {
+  // The On of a lamp whose level is restored in the same call, read before
+  // any write: whether On was already back before this call (changed by
+  // someone else) or came back with the level.
+  async #lampOnBeforeRestore(entries) {
+    const levels = new Set(
+      entries
+        .filter(({ change }) => LIGHT_LEVEL_TYPES.has(change.contract?.type))
+        .map(({ change }) => lampKey(change)),
+    );
+    const values = new Map();
+    for (const { change } of entries) {
+      if (
+        change.contract?.type !== "On" ||
+        !levels.has(lampKey(change)) ||
+        lampKey(change) === null
+      ) {
+        continue;
+      }
+      try {
+        const characteristic = await this.client.getCharacteristic(
+          change.target,
+        );
+        values.set(change.id, typedNativeValue(characteristic.control.value));
+      } catch {
+        // Unknown: the item then reports what it sees, without this hint.
+      }
+    }
+    return values;
+  }
+
+  async #restoreEntry({ change: listed, automation }, context) {
     let change;
     try {
       // Read again: restoring an earlier item may have updated this record.
@@ -1710,6 +1776,7 @@ export class AutomationService {
     const before = {
       status: change.status,
       restoreIntentAt: restoreIntentTime(change),
+      ...context,
     };
     try {
       const result = automation
@@ -12390,10 +12457,7 @@ function restoreOrder(entries) {
   const ordered = [...entries].sort((left, right) =>
     compareApplication(right.change, left.change),
   );
-  const lamp = ({ change }) =>
-    change.kind === "characteristic_value" && change.target
-      ? `${change.target.aId}.${change.target.sId}`
-      : null;
+  const lamp = ({ change }) => lampKey(change);
   const isLevel = (entry) =>
     lamp(entry) !== null && LIGHT_LEVEL_TYPES.has(entry.change.contract?.type);
   const isOn = (entry) =>
@@ -12416,6 +12480,13 @@ function restoreOrder(entries) {
     }
   });
   return result;
+}
+
+// The service a characteristic command belongs to, such as one lamp.
+function lampKey(change) {
+  return change.kind === "characteristic_value" && change.target
+    ? `${change.target.aId}.${change.target.sId}`
+    : null;
 }
 
 function restoreIntentTime(change) {
@@ -12487,6 +12558,20 @@ function restoreItem(change, automation, result, before) {
           status: "restored",
           sent: false,
           note: "nothing_to_restore",
+          ...observed,
+        };
+      }
+      if (
+        before.lampWritten &&
+        before.valueBeforeCall !== undefined &&
+        !valuesEqual(before.valueBeforeCall, change.baseline_value)
+      ) {
+        // Another value of this lamp put back in this call brought it back.
+        return {
+          ...base,
+          status: "restored",
+          sent: false,
+          note: "restored_with_lamp",
           ...observed,
         };
       }

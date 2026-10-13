@@ -318,6 +318,29 @@ test("a lamp whose level switches it on is reported restored, not changed by han
   assert.equal(currentValue(hub, FLOOR_LEVEL), 55);
 });
 
+test("a lamp switched back on by hand stays reported when its level is put back in the same undo", async (t) => {
+  const { hub, client } = await setup(t);
+  const sent = await command(
+    client,
+    [
+      [FLOOR_LEVEL, 20],
+      [FLOOR_ON, false],
+    ],
+    "Приглушить и выключить торшер",
+  );
+  hub.changeByHand({ ...FLOOR_ON, value: { boolValue: true } });
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(itemFor(restored, sent.results[0].change_ref).sent, true);
+  const on = itemFor(restored, sent.results[1].change_ref);
+  assert.equal(on.status, "skipped");
+  assert.equal(on.reason, "changed_since");
+  assert.equal(on.already_previous, true);
+  assert.equal(currentValue(hub, FLOOR_LEVEL), 55);
+});
+
 test("an offline lamp is reported, not guessed, and restored once it is back", async (t) => {
   const { hub, client } = await setup(t);
   const sent = await command(client, [[FLOOR_ON, false]], "Выключить торшер");
