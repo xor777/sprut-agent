@@ -698,8 +698,16 @@ export class DeviceSearches {
     return search;
   }
 
+  // Removes the watch of a start that did not reach the hub or that the hub
+  // refused. The caller's error says what happened on the hub, so a watch
+  // that cannot be removed stays: its ref was never given out, and a later
+  // start takes it as a start still on its way, watching a search only if
+  // the controller shows one running, with devices counted from before the
+  // refused start.
   async #forget(search) {
-    await this.#store(search.serial).delete(searchId(search.ref));
+    await this.#store(search.serial)
+      .delete(searchId(search.ref))
+      .catch(() => {});
   }
 
   async #save(search) {
