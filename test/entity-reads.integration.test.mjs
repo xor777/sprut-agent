@@ -400,6 +400,20 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
                   timeCond: "<=",
                   time: 10000,
                 },
+                // «Дверь закрыта дольше 30 s» while the door is closed now.
+                {
+                  type: "characteristic",
+                  aId: 11,
+                  sId: 13,
+                  cId: 14,
+                  hs: "ContactSensor",
+                  hc: "ContactSensorState",
+                  cond: "=",
+                  value: "0",
+                  trigger: false,
+                  timeCond: ">",
+                  time: 30000,
+                },
               ],
             },
             // biome-ignore lint/suspicious/noThenProperty: native SprutHub BLOCK key.
@@ -515,10 +529,29 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
     holds_now: null,
     ref: `${homeRef}/accessory/13/service/13/characteristic/14`,
   };
-  assert.deepEqual(conditions.slice(7), [
+  assert.deepEqual(conditions.slice(7, 9), [
     { ...motion, held: { op: "<", seconds: 10 } },
     { ...motion, held: { op: "<=", seconds: 10 } },
   ]);
+  // The closed door matches now, but one reading does not say for how long:
+  // a door closed 2 s ago does not meet «more than 30 s».
+  assert.deepEqual(conditions[9], {
+    type: "characteristic",
+    trigger: false,
+    device: "Датчик двери",
+    room: "Прихожая",
+    service: "Входная дверь",
+    characteristic: "Состояние контакта",
+    characteristic_type: "ContactSensorState",
+    op: "=",
+    value: 0,
+    value_name: "Закрыто",
+    held: { op: ">", seconds: 30 },
+    current: { value: 0, value_name: "Закрыто" },
+    holds_now: null,
+    ref: `${homeRef}/accessory/11/service/13/characteristic/14`,
+  });
+  assert.equal(conditions.length, 10);
   assert.deepEqual(
     rule.then.map(({ op, type, characteristic, value, unit, ...rest }) =>
       op ? { op, characteristic, value, unit } : { type, ...rest },
