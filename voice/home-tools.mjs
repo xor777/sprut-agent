@@ -106,6 +106,11 @@ const ENGLISH_COLORS = {
 };
 const WHITE_KELVIN = { теплый: 2700, нейтральный: 4000, холодный: 6000 };
 const NEUTRAL_KELVIN = 4000;
+// RGB LEDs mixing a white at the full black-body saturation look orange or
+// pink to the owner; a white made from colour uses this share of it.
+const MIXED_WHITE_SATURATION = 0.6;
+// C_ColorMode values on the owner's hub: which of colour or white a lamp shows.
+const COLOR_MODE = { HUE: 1, TEMPERATURE: 2 };
 // «Разными цветами» for a whole room: neighbours differ as much as possible.
 const CONTRAST_PALETTE = [
   "красный",
@@ -256,7 +261,7 @@ export class HomeTools {
     }
     const planned = [];
     const problems = [];
-    for (const command of expandRooms(catalog, commands, problems)) {
+    for (const command of expandTargets(catalog, commands, problems)) {
       const device = catalog.devices.get(command?.device);
       if (!device) {
         problems.push({
@@ -283,8 +288,9 @@ export class HomeTools {
     // From the VM every command costs about a second of hub round trips, and
     // the MCP always sends On even when the lamp already has it. A command
     // whose characteristic already holds the value is answered here instead.
+    for (const item of ordered) switchColorMode(item, current);
     const toSend = ordered.filter(
-      (item) => !sameValue(current.get(item.ref), item.value),
+      (item) => item.force || !sameValue(current.get(item.ref), item.value),
     );
     let sent = [];
     if (toSend.length > 0) {
@@ -333,6 +339,9 @@ export class HomeTools {
       return {
         device: item.device.id,
         name: item.device.name,
+        ...(item.device.memberOf
+          ? { group: catalog.devices.get(item.device.memberOf)?.name }
+          : {}),
         room: catalog.rooms.get(item.device.roomId)?.name ?? null,
         control: item.control,
         status: result.status,
@@ -397,6 +406,12 @@ export class HomeTools {
     const pages = await mapLimit([...roomRefs], 4, (ref) =>
       this.#readRoom(catalog.homeRef, ref),
     );
+    const shown = new Map();
+    for (const page of pages) {
+      for (const { service } of page.services) {
+        shown.set(serviceId(service.ref), readingsOf(service));
+      }
+    }
     const found = [];
     for (const page of pages) {
       for (const { room: hubRoom, device, service } of page.services) {
@@ -415,7 +430,9 @@ export class HomeTools {
           ...(Number.isFinite(device.battery_percent)
             ? { battery: `${device.battery_percent} %` }
             : {}),
-          values: readingsOf(service),
+          values: listed.members
+            ? groupReadings(readingsOf(service), listed.members, shown)
+            : readingsOf(service),
         });
       }
     }
@@ -553,6 +570,7 @@ export class HomeTools {
         control.unit = capabilities.unit;
       }
     });
+    await this.#findGroups(devices);
     return {
       homeRef,
       homeName: overview.home.name,
@@ -560,6 +578,41 @@ export class HomeTools {
       rooms,
       devices,
     };
+  }
+
+  // A lamp whose On is fed by other lamps' On through Virtual links is a
+  // group, like the owner's chandelier over five hidden bulbs. The hub links
+  // its power, level and colour to the bulbs but not their white, so white
+  // and colour go to the bulbs themselves.
+  async #findGroups(devices) {
+    const lamps = [...devices.values()].filter(
+      (device) =>
+        device.kind === "light" &&
+        !device.hidden &&
+        device.controls.power?.kind === "bool",
+    );
+    await mapLimit(lamps, 6, async (device) => {
+      const body = await this.#call("get_entity", {
+        entity_ref: device.controls.power.ref,
+        include: ["relations"],
+      }).catch(() => null);
+      const links = body?.entity?.relations?.characteristic_links ?? [];
+      const members = links
+        .filter(
+          ({ type, index }) =>
+            type === "IN" && String(index).startsWith("Virtual/"),
+        )
+        .flatMap(({ related_characteristic_refs: refs = [] }) => refs)
+        .map((ref) => serviceId(ref.replace(/\/characteristic\/\d+$/, "")))
+        .filter((id) => id && id !== device.id && devices.has(id));
+      if (members.length === 0) return;
+      device.members = [...new Set(members)];
+      for (const id of device.members) devices.get(id).memberOf = device.id;
+      device.controls.color_temperature = {
+        control: "color_temperature",
+        kind: "members",
+      };
+    });
   }
 
   async #readRoom(homeRef, roomRef) {
@@ -596,6 +649,7 @@ export function describeCatalog(catalog) {
       const controls = Object.entries(device.controls)
         .map(([name, control]) => describeControl(name, control))
         .join("; ");
+      if (device.memberOf) continue;
       if (device.hidden) {
         const names = hidden.get(controls) ?? [];
         names.push(
@@ -617,6 +671,15 @@ export function describeCatalog(catalog) {
       }
       if (!device.available) parts.push("; сейчас не на связи");
       lines.push(parts.join(""));
+      if (device.members) {
+        const members = device.members.map((id) => {
+          const member = catalog.devices.get(id);
+          return `[${id}] «${member.name}»${member.available ? "" : " (не на связи)"}`;
+        });
+        lines.push(
+          `  группа: цвет и оттенок белого получат её лампочки ${members.join(", ")}`,
+        );
+      }
     }
     for (const [controls, names] of hidden) {
       lines.push(
@@ -652,6 +715,7 @@ function catalogEntry({ room, device, service }) {
       saturationRef: saturation.ref,
     };
   }
+  const mode = values.find(({ type }) => type === "C_ColorMode");
   const readings = [
     ...new Set(
       values
@@ -670,6 +734,7 @@ function catalogEntry({ room, device, service }) {
     kind: service.kind,
     hidden: service.hidden === true,
     available: device.available !== false,
+    modeRef: mode?.ref ?? null,
     controls,
     readings,
   };
@@ -683,7 +748,7 @@ function describeControl(name, control) {
     const { min, max } = kelvinRange(control);
     return `${name} (тёплый, нейтральный, холодный или ${min}–${max} K)`;
   }
-  if (control.kind === "kelvin-color") {
+  if (control.kind === "kelvin-color" || control.kind === "members") {
     return `${name} (тёплый, нейтральный, холодный)`;
   }
   if (control.values?.length) {
@@ -740,9 +805,14 @@ function resolveCommand(device, control, raw) {
         options: COLORS.map(([name]) => name),
       };
     }
-    const items = [{ ref: spec.ref, value: color.hue, control }];
+    const items = [{ ref: spec.ref, value: color.hue, control, part: "Hue" }];
     if (spec.saturationRef) {
-      items.push({ ref: spec.saturationRef, value: color.saturation, control });
+      items.push({
+        ref: spec.saturationRef,
+        value: color.saturation,
+        control,
+        part: "Saturation",
+      });
     }
     return { items };
   }
@@ -754,8 +824,13 @@ function resolveCommand(device, control, raw) {
     const { hue, saturation } = kelvinColor(kelvin);
     return {
       items: [
-        { ref: spec.hueRef, value: hue, control },
-        { ref: spec.saturationRef, value: saturation, control },
+        { ref: spec.hueRef, value: hue, control, part: "Hue" },
+        {
+          ref: spec.saturationRef,
+          value: Math.round(saturation * MIXED_WHITE_SATURATION),
+          control,
+          part: "Saturation",
+        },
       ],
     };
   }
@@ -843,6 +918,27 @@ function closeEnough(current, requested, control) {
   return distance <= (TOLERANCE[control] ?? 0);
 }
 
+// A lamp keeps its stored white while it shows a colour, and its colour
+// while it shows white. A white for a lamp in colour mode (or a colour for
+// one in white mode) is therefore always sent, one step off the stored value
+// when they are equal, since an equal value would change nothing.
+function switchColorMode(item, current) {
+  const mode = item.device.modeRef
+    ? current.get(item.device.modeRef)
+    : undefined;
+  const switches =
+    (item.part === "ColorTemperature" && mode === COLOR_MODE.HUE) ||
+    (item.part === "Hue" && mode === COLOR_MODE.TEMPERATURE);
+  if (!switches) return;
+  item.force = true;
+  if (sameValue(current.get(item.ref), item.value)) {
+    item.value =
+      item.part === "Hue"
+        ? (item.value + 1) % 360
+        : Math.max(1, item.value - 1);
+  }
+}
+
 function sameValue(current, requested) {
   if (current === undefined || current === null) return false;
   if (typeof requested === "boolean") return current === requested;
@@ -854,6 +950,42 @@ function sameValue(current, requested) {
 // per device of that kind there that can do it and is on the network.
 // Colour and white also reach the bulbs hidden behind groups, since a group
 // passes on only power and level; power and level go to what the app shows.
+function expandTargets(catalog, commands, problems) {
+  return expandGroups(catalog, expandRooms(catalog, commands, problems));
+}
+
+// White and colour for a group go to its bulbs: the group passes colour on
+// but has no white, and a bulb showing colour must be told to switch.
+function expandGroups(catalog, commands) {
+  const expanded = [];
+  for (const command of commands) {
+    const group = catalog.devices.get(command?.device);
+    if (
+      !group?.members ||
+      !["color", "color_temperature"].includes(command.control)
+    ) {
+      expanded.push(command);
+      continue;
+    }
+    const members = group.members
+      .map((id) => catalog.devices.get(id))
+      .filter(
+        (member) => member.available && supports(member, command.control),
+      );
+    const palette = PALETTE_WORDS.has(normalize(command.value));
+    members.forEach((member, index) => {
+      expanded.push({
+        device: member.id,
+        control: command.control,
+        value: palette
+          ? CONTRAST_PALETTE[index % CONTRAST_PALETTE.length]
+          : command.value,
+      });
+    });
+  }
+  return expanded;
+}
+
 function expandRooms(catalog, commands, problems) {
   const expanded = [];
   for (const command of commands) {
@@ -875,12 +1007,15 @@ function expandRooms(catalog, commands, problems) {
     }
     const kind = command.kind ?? "light";
     const withHidden = ["color", "color_temperature"].includes(command.control);
+    // Colour and white go to every bulb and lamp but not to the groups,
+    // which would pass a colour on over the bulbs' white; power and level
+    // go to what the app shows, groups included.
     const targets = [...catalog.devices.values()].filter(
       (device) =>
         device.roomId === room.id &&
         device.kind === kind &&
         device.available &&
-        (withHidden || !device.hidden) &&
+        (withHidden ? !device.members : !device.hidden) &&
         supports(device, command.control),
     );
     if (targets.length === 0) {
@@ -1029,7 +1164,9 @@ function normalize(value) {
 }
 
 function single(spec, value) {
-  return { items: [{ ref: spec.ref, value, control: spec.control }] };
+  return {
+    items: [{ ref: spec.ref, value, control: spec.control, part: spec.type }],
+  };
 }
 
 function parseOnOff(value) {
@@ -1102,6 +1239,30 @@ function readingsOf(service) {
     readings["оттенок белого"] = whiteName(mireds);
   }
   return readings;
+}
+
+// A group's own colour is not what its bulbs show; the bulbs speak for it.
+function groupReadings(readings, members, shown) {
+  const counts = new Map();
+  for (const id of members) {
+    const bulb = shown.get(id);
+    if (!bulb) continue;
+    const look =
+      bulb.включено === "нет"
+        ? "выключена"
+        : (bulb.цвет ??
+          bulb["оттенок белого"]?.replace(/ \(.*\)$/, "") ??
+          "неизвестно");
+    counts.set(look, (counts.get(look) ?? 0) + 1);
+  }
+  const { цвет: _colour, "оттенок белого": _white, ...rest } = readings;
+  if (counts.size === 0) return readings;
+  return {
+    ...rest,
+    лампочки: [...counts]
+      .map(([look, count]) => `${look} — ${count}`)
+      .join(", "),
+  };
 }
 
 function formatValue(value) {
