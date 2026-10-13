@@ -1480,10 +1480,7 @@ export class AutomationService {
           groupValuesEqual(value, change.requested_value),
         )
       : undefined;
-    if (
-      sameSettingValue(change, current, expected, contract) &&
-      groupDeliveryConfirmed !== false
-    ) {
+    if (valuesEqual(current, expected) && groupDeliveryConfirmed !== false) {
       const completedStatus = direction === "restore" ? "restored" : "applied";
       const verificationResult =
         direction === "restore"
@@ -1509,8 +1506,8 @@ export class AutomationService {
     }
     if (
       hasKnownSettingSemantics(change) &&
-      !sameSettingValue(change, current, change.baseline_value, contract) &&
-      !sameSettingValue(change, current, change.requested_value, contract)
+      !valuesEqual(current, change.baseline_value) &&
+      !valuesEqual(current, change.requested_value)
     ) {
       return {
         direction,
@@ -4059,11 +4056,9 @@ export class AutomationService {
         };
       }
     }
-    const matches = (left, right) =>
-      sameSettingValue(change, left, right, contract);
-    const later = await this.#laterOwnedValueChange(change, current, matches);
+    const later = await this.#laterOwnedValueChange(change, current);
     if (later) return this.#finishLaterOwnedValueChange(change, later, current);
-    if (matches(current, change.baseline_value)) {
+    if (valuesEqual(current, change.baseline_value)) {
       return this.#finishNative(change, "restored", current, {
         last_verification: freshVerification("baseline_value_observed"),
         ...(nativeIntentDirection(change) === "restore"
@@ -4071,7 +4066,7 @@ export class AutomationService {
           : {}),
       });
     }
-    if (!matches(current, change.requested_value)) {
+    if (!valuesEqual(current, change.requested_value)) {
       return this.#finishNative(change, "conflict", current, {
         conflict_reason: "manual_change",
         manual_change_observed: true,
@@ -4095,7 +4090,7 @@ export class AutomationService {
   }
 
   async #observeProvenNativeValue(change, current) {
-    if (!sameSettingValue(change, current, change.requested_value)) {
+    if (!valuesEqual(current, change.requested_value)) {
       const later = await this.#laterOwnedValueChange(change, current);
       if (later) {
         return this.#finishLaterOwnedValueChange(change, later, current);
@@ -4123,7 +4118,7 @@ export class AutomationService {
   // The agent's own later change of the same setting that set the value
   // seen now: this change is governed by it, which is no manual change and
   // costs this change no restore right. The newest such change is named.
-  async #laterOwnedValueChange(change, current, matches = valuesEqual) {
+  async #laterOwnedValueChange(change, current) {
     const key = valueTargetKey(change);
     let latest;
     for (const candidate of await this.store.list()) {
@@ -4134,7 +4129,7 @@ export class AutomationService {
         valueTargetKey(candidate) !== key ||
         !changeStillInEffect(candidate) ||
         compareApplication(candidate, change) <= 0 ||
-        !matches(current, candidate.requested_value)
+        !valuesEqual(current, candidate.requested_value)
       ) {
         continue;
       }
@@ -11340,24 +11335,6 @@ function compareApplication(left, right) {
   );
 }
 
-// A device may store a level one step off what was sent (rounding to its
-// own scale), so a command's readback within one native step counts as the
-// value sent; other settings compare exactly.
-function sameSettingValue(change, left, right, contract = change.contract) {
-  if (valuesEqual(left, right)) return true;
-  if (!nativeValueKind(change.kind)?.command) return false;
-  const numeric = ["intValue", "longValue", "doubleValue"];
-  if (!numeric.includes(left?.kind) || !numeric.includes(right?.kind)) {
-    return false;
-  }
-  const a = Number(left.value);
-  const b = Number(right.value);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  const step =
-    typeof contract?.step === "number" && contract.step > 0 ? contract.step : 0;
-  return Math.abs(a - b) <= step + 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
-}
-
 function groupRef(id) {
   return `spruthub-change://group/${id}`;
 }
@@ -13566,7 +13543,7 @@ function publicNativeChange(
       "SprutHub exposes no native compare-and-set for this operation.",
       restoration.supported
         ? kind.command
-          ? "Restore writes the previous value back only while the device still shows the value this change set (within one native step) and is online; past physical effects are not reversed."
+          ? "Restore writes the previous value back only while the device still shows the value this change set and is online; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
