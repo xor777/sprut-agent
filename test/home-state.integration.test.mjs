@@ -1271,3 +1271,47 @@ test("a home that keeps changing during every read is not answered from those re
   assert.equal(answer.error.code, "home_changing");
   assert.equal(answer.error.action, "retry");
 });
+
+// After the connection is lost the hub pushes its events down the new
+// connection as soon as the whole read's first request reaches it; in a
+// busy home some come before the home list does (accessory.list took
+// 245 ms on the owner's hub). They belong to that read.
+test("after a reconnect the hub's events during the whole read do not make it read again", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+    { eventEveryMs: 80 },
+  );
+  await call("home_overview", {});
+  await hub.dropConnections();
+  // The MCP process sees the close.
+  await sleep(300);
+  hub.delayReplies("accessory.list", 245);
+
+  const after = await call("find_devices", { state: "on" });
+  assert.deepEqual(
+    methods(after.native).filter((method) => method === "accessory.list"),
+    ["accessory.list"],
+  );
+  assert.deepEqual(onRefs(after.body), servicesOnInState(hub.state, home));
+});
+
+// A refresh asks for a whole read begun after the call; it must not drop
+// the reads other calls have in flight. Eight refreshes 120 ms apart while
+// the home list takes 245 ms.
+test("refreshes in flight together each get an answer", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  await call("home_overview", {});
+  await restEvent(hub);
+  hub.delayReplies("accessory.list", 245);
+
+  const answers = [];
+  for (let index = 0; index < 8; index += 1) {
+    answers.push(call("find_devices", { query: "торшер", refresh: true }));
+    await sleep(120);
+  }
+  for (const answer of await Promise.all(answers)) {
+    assert(methods(answer.native).includes("accessory.list"));
+    assert.equal(onValue(listed(answer.body)[0].service), true);
+  }
+});
