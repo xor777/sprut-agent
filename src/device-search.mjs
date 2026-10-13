@@ -54,7 +54,7 @@ const MAX_DISCOVERY_TIME_MS = 60 * 60_000;
 // ahead of this machine's.
 const CLOCK_SLACK_MS = 5_000;
 const DISCOVERY_TIME_LIMITATION =
-  "The hub's device search time (DiscoveryTime) could not be read, so this search is taken to end at most an hour after its start: within that hour, a search the owner starts in the SprutHub app after this one ended is taken for this one, and stop_device_search would stop it.";
+  "The hub's device search time (DiscoveryTime) could not be read, so this search is taken to end at most an hour after its start. A search the owner starts or restarts in the SprutHub app within that hour, before this one is seen to end, may be taken for this one, and stop_device_search would stop it.";
 // Devices listed per answer; the rest are counted.
 const DEVICE_LIMIT = 10;
 const SEARCH_REF_PART = "/device_search/";
