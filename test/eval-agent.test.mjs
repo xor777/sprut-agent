@@ -2715,6 +2715,110 @@ test("restore-floor-lamp needs the dim and the restore", async (t) => {
   assert.equal(untouched.grade("Вернул.").first_turn_dimmed_to_30, false);
 });
 
+const switchLight = (aId, value) => ({
+  characteristic: {
+    update: { aId, sId: 13, cId: 14, control: { value: { boolValue: value } } },
+  },
+});
+
+test("restore-room-lights needs the living room lights off and then back as they were", async (t) => {
+  const restored = await caseSession(t, "restore-room-lights");
+  for (const aId of [15, 16]) await restored.send(switchLight(aId, false));
+  for (const aId of [16, 15]) await restored.send(switchLight(aId, true));
+  assert.deepEqual(restored.grade("Включил обратно люстру и торшер."), {
+    first_turn_switched_living_room_lights_off: true,
+    home_unchanged: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const halfway = await caseSession(t, "restore-room-lights");
+  for (const aId of [15, 16]) await halfway.send(switchLight(aId, false));
+  await halfway.send(switchLight(16, true));
+  assert.equal(halfway.grade("Вернул.").home_unchanged, false);
+
+  // The strip was off before: switching it on is not putting it back.
+  const extra = await caseSession(t, "restore-room-lights");
+  for (const aId of [15, 16]) await extra.send(switchLight(aId, false));
+  for (const aId of [15, 16, 17]) await extra.send(switchLight(aId, true));
+  assert.equal(extra.grade("Вернул.").home_unchanged, false);
+
+  const untouched = await caseSession(t, "restore-room-lights");
+  assert.equal(
+    untouched.grade("Вернул.").first_turn_switched_living_room_lights_off,
+    false,
+  );
+});
+
+test("restore-room-lights-by-hand keeps the chandelier as the owner set it between the turns", async (t) => {
+  const definition = CASES["restore-room-lights-by-hand"];
+  const kept = await caseSession(t, "restore-room-lights-by-hand");
+  for (const aId of [15, 16]) await kept.send(switchLight(aId, false));
+  definition.betweenTurns(kept.hub);
+  await kept.send(switchLight(16, true));
+  assert.deepEqual(
+    kept.grade("Торшер включил, люстру вы уже включили сами — не трогал."),
+    {
+      first_turn_switched_living_room_lights_off: true,
+      hand_set_chandelier_kept: true,
+      nothing_else_changed: true,
+      answer_has_no_raw_refs: true,
+    },
+  );
+
+  // Putting the chandelier back to 80 % undoes the owner's own change.
+  const overwritten = await caseSession(t, "restore-room-lights-by-hand");
+  for (const aId of [15, 16]) await overwritten.send(switchLight(aId, false));
+  definition.betweenTurns(overwritten.hub);
+  await overwritten.send(switchLight(16, true));
+  await overwritten.send({
+    characteristic: {
+      update: {
+        aId: 15,
+        sId: 13,
+        cId: 15,
+        control: { value: { intValue: 80 } },
+      },
+    },
+  });
+  assert.equal(overwritten.grade("Вернул.").hand_set_chandelier_kept, false);
+
+  // Sending On=true again leaves the same values but writes over the
+  // owner's switch.
+  const resent = await caseSession(t, "restore-room-lights-by-hand");
+  for (const aId of [15, 16]) await resent.send(switchLight(aId, false));
+  definition.betweenTurns(resent.hub);
+  for (const aId of [16, 15]) await resent.send(switchLight(aId, true));
+  assert.equal(resent.grade("Вернул.").hand_set_chandelier_kept, false);
+});
+
+test("a case's change between turns happens after the first turn and before the follow-up", async (t) => {
+  const seen = [];
+  const { records } = await scriptedRun(t, {
+    turnOff: [on(15), on(16)],
+    answer: "Выключил люстру и торшер.",
+    definition: {
+      ...CASES["turn-off-room"],
+      followUps: ["Верни как было"],
+      betweenTurns: (hub) => {
+        seen.push(
+          hub.requests.filter(
+            ({ method }) => method === "characteristic.update",
+          ).length,
+        );
+        hub.changeByHand({
+          aId: 15,
+          sId: 13,
+          cId: 14,
+          value: { boolValue: true },
+        });
+      },
+    },
+  });
+  assert.equal(records.length, 2);
+  // Called once, after the first turn's two commands.
+  assert.deepEqual(seen, [2]);
+});
+
 test("a follow-up turn resumes the same Claude session and grades the last answer", async (t) => {
   const { outcome, records } = await scriptedRun(t, {
     turnOff: [on(15), on(16)],

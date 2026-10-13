@@ -24,6 +24,10 @@ import {
 
 const FLOOR_LAMP_ON = "characteristic/16.13.14/On";
 const FLOOR_LAMP_BRIGHTNESS = "characteristic/16.13.15/Brightness";
+// The living room chandelier («Люстра»), on at 80 % in both fixtures.
+const CHANDELIER = { aId: 15, sId: 13 };
+const CHANDELIER_ON = "characteristic/15.13.14/On";
+const CHANDELIER_BRIGHTNESS = "characteristic/15.13.15/Brightness";
 const LIVING_ROOM = 3;
 const KITCHEN = 4;
 const KITCHEN_LAMP = 22;
@@ -817,6 +821,55 @@ export const CASES = {
       ],
     }),
   },
+  // «Верни как было» after «Выключи свет в гостиной»: the second turn puts
+  // back exactly the lamps the first switched off.
+  "restore-room-lights": {
+    prompt: "Выключи свет в гостиной",
+    followUps: ["Верни как было"],
+    harnesses: ["claude"],
+    graders: [
+      livingRoomLightsSwitchedOff(),
+      onlyChanges(() => false, "home_unchanged"),
+    ],
+  },
+  // The same, but between the turns the owner switches the chandelier back
+  // on by hand and dims it to 30 %: undo must leave it as the owner set it
+  // and send it nothing, and still bring back the other lamps.
+  "restore-room-lights-by-hand": {
+    prompt: "Выключи свет в гостиной",
+    followUps: ["Верни как было"],
+    harnesses: ["claude"],
+    betweenTurns: (hub) => {
+      hub.changeByHand({ ...CHANDELIER, cId: 14, value: { boolValue: true } });
+      hub.changeByHand({ ...CHANDELIER, cId: 15, value: { intValue: 30 } });
+    },
+    graders: [
+      livingRoomLightsSwitchedOff(),
+      {
+        name: "hand_set_chandelier_kept",
+        grade: ({ after, requests, finalState }) => {
+          const hand = finalState.handChanges?.[0];
+          const written = requests.filter(
+            ({ method, params, seq }) =>
+              method === "characteristic.update" &&
+              params?.characteristic?.update?.aId === CHANDELIER.aId &&
+              hand !== undefined &&
+              seq > hand.after_seq,
+          ).length;
+          return result(
+            hand !== undefined &&
+              after[CHANDELIER_ON] === true &&
+              after[CHANDELIER_BRIGHTNESS] === 30 &&
+              written === 0,
+            `On=${after[CHANDELIER_ON]} Brightness=${after[CHANDELIER_BRIGHTNESS]} writes after the hand change: ${written}`,
+          );
+        },
+      },
+      onlyChanges(
+        ({ key, after }) => key === CHANDELIER_BRIGHTNESS && after === 30,
+      ),
+    ],
+  },
   // Two turns in one Claude session: the second asks to undo the first.
   "restore-floor-lamp": {
     prompt: "Поставь торшер на 30%",
@@ -889,6 +942,40 @@ function livingRoomLightsOff() {
         roomLightKeys(initialState, LIVING_ROOM).includes(key),
     ),
   ];
+}
+
+// Every living room light that was on got an On=false write. With
+// home_unchanged it means the lights went off and came back.
+function livingRoomLightsSwitchedOff() {
+  return {
+    name: "first_turn_switched_living_room_lights_off",
+    grade: ({ requests, before, initialState }) => {
+      const keys = roomLightKeys(initialState, LIVING_ROOM).filter(
+        (key) => before[key] === true,
+      );
+      const switchedOff = new Set(
+        requests
+          .filter(
+            ({ method, params, error }) =>
+              method === "characteristic.update" &&
+              !error &&
+              params?.characteristic?.update?.control?.value?.boolValue ===
+                false,
+          )
+          .map(({ params }) => {
+            const { aId, sId, cId } = params.characteristic.update;
+            return `characteristic/${aId}.${sId}.${cId}/On`;
+          }),
+      );
+      const missed = keys.filter((key) => !switchedOff.has(key));
+      return result(
+        keys.length > 0 && missed.length === 0,
+        missed.length === 0
+          ? `all ${keys.length} switched off`
+          : `never switched off: ${missed.join(", ")}`,
+      );
+    },
+  };
 }
 
 function noWrites() {

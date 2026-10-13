@@ -181,6 +181,11 @@ export async function runCase({
     const run = await HARNESSES[harness]({
       prompt: definition.prompt,
       followUps: definition.followUps ?? [],
+      // What happens in the home between two turns, such as the owner
+      // switching a lamp by hand.
+      betweenTurns: definition.betweenTurns
+        ? () => definition.betweenTurns(hub)
+        : undefined,
       model,
       plugin,
       hub,
@@ -768,6 +773,7 @@ export function isolatedEnvironment(overrides) {
 async function runClaude({
   prompt,
   followUps = [],
+  betweenTurns,
   model,
   plugin,
   hub,
@@ -846,6 +852,7 @@ async function runClaude({
   };
   try {
     for (const [index, text] of [prompt, ...followUps].entries()) {
+      if (index > 0) await betweenTurns?.();
       const turn = await runProcess({
         command,
         args: [

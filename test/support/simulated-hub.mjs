@@ -1230,6 +1230,8 @@ export async function startSimulatedHub(
       );
       state.handChanges.push({
         at: new Date().toISOString(),
+        // Requests the hub had received by then: later ones have a larger seq.
+        after_seq: requests.length,
         aId,
         sId,
         cId,
