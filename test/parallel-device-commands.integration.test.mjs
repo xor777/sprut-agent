@@ -395,8 +395,9 @@ test("each write of 20 lamps and of their undo leaves only after the journal hol
 // The intent the journal held, as the hub received the write update: a
 // change of that characteristic whose intent is to send that value.
 function journalIntent(stateDirectory, { aId, sId, cId, control }) {
+  // The journal itself, never the temporary file a concurrent save renames.
   const file = readdirSync(stateDirectory).find((name) =>
-    name.startsWith("automation-changes-"),
+    /^automation-changes-[^.]*\.json$/.test(name),
   );
   if (!file) return undefined;
   const { changes } = JSON.parse(
