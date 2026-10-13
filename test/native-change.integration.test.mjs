@@ -21241,6 +21241,12 @@ for (const tool of [
       read.status,
       tool === "restore_native_change" ? "conflict" : "applied",
     );
+    assert.equal(
+      read.conflict_reason,
+      tool === "restore_native_change"
+        ? "logic_assignments_present"
+        : undefined,
+    );
     assertIdentityMapping(read, {
       ready: false,
       reason: "logic_type_not_available_on_target",
