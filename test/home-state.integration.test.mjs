@@ -469,7 +469,7 @@ test("devices added, moved and removed in the SprutHub app follow the hub's even
   hub.emit({
     accessory: {
       event: "EVENT_UPDATE",
-      accessories: [{ id: 26, roomId: 3, name: nightLight.name }],
+      accessories: [{ id: 26, roomId: 3 }],
     },
   });
   await settle();
@@ -531,7 +531,10 @@ test("a room the room list lacks is not asked for again on each event", async (t
   assert(overview.body.rooms.some(({ ref }) => ref === `${home}/room/99`));
 
   hub.emit({
-    accessory: { event: "EVENT_UPDATE", accessories: [{ id: 26 }] },
+    accessory: {
+      event: "EVENT_UPDATE",
+      accessories: [{ id: 26, name: "Ночник" }],
+    },
   });
   hub.emit({ room: { event: "EVENT_UPDATE", rooms: [{ id: 99 }] } });
   await settle();
@@ -563,9 +566,14 @@ test("a value changed while the whole home is read shows in the answers after th
 test("a value changed while one device is read again shows in the answer after the read", async (t) => {
   const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
   await call("home_overview", {});
-  // The floor lamp's accessory changed in the SprutHub app: the next
-  // answer reads it again.
-  hub.emit({ accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16 }] } });
+  // The floor lamp renamed in the SprutHub app: the next answer reads it
+  // again.
+  hub.emit({
+    accessory: {
+      event: "EVENT_UPDATE",
+      accessories: [{ id: 16, name: "Торшер" }],
+    },
+  });
   await settle();
   hub.delayReplies("accessory.get", 400);
   const from = hub.requests.length;
@@ -978,9 +986,12 @@ test("a device moved to a room created without an event, and a room moved in the
   );
   await call("home_overview", {});
 
+  // The room's EVENT_ADD, which the hub pushes, is lost on the way.
   hub.state.rooms.push({ id: 41, name: "Веранда", order: 41, visible: true });
   hub.state.accessories.find(({ id }) => id === 16).roomId = 41;
-  hub.emit({ accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16 }] } });
+  hub.emit({
+    accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16, roomId: 41 }] },
+  });
   await settle();
   const moved = await call("find_devices", { query: "торшер" });
   assert.deepEqual(methods(moved.native), ["accessory.get", "room.list"]);

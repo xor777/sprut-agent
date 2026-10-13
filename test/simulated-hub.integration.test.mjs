@@ -1915,3 +1915,92 @@ test("the simulator pushes events only to a connection that sent the home's seri
   }
   await other.until((frames) => frames.filter(lampOnEvent).length === 2);
 });
+
+// The frames the owner's hub pushed for these edits of its own objects
+// (2026-10-13-structure-events): only what changed, and a new name also as
+// the value of the Name characteristic.
+test("the simulator announces renames, moves and deletions with the frames the owner's hub pushed", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => hub.close());
+  const listener = await frameLog(t, hub);
+  listener.send({ room: { list: {} } });
+  await listener.until((frames) => frames.length === 1);
+  const events = () => listener.frames.flatMap(({ event }) => event ?? []);
+
+  hub.request({
+    accessory: {
+      create: {
+        name: "Выключатель",
+        roomId: 30,
+        // The owner's hub gave a Switch its Name unasked; the simulator
+        // only when asked.
+        services: [{ type: "Switch", name: "Свет", optional: ["Name"] }],
+      },
+    },
+  });
+  const { id } = hub.state.accessories.at(-1);
+  const service = hub.state.accessories.at(-1).services.at(-1);
+  const name = service.characteristics.find(
+    ({ control }) => control.type === "Name",
+  );
+  const information = hub.state.accessories
+    .at(-1)
+    .services.find(({ type }) => type === "AccessoryInformation")
+    .characteristics.find(({ control }) => control.type === "Name");
+  await listener.until((frames) =>
+    frames.some(({ event }) => event?.accessory?.event === "EVENT_ADD"),
+  );
+  listener.frames.length = 0;
+  hub.request({ accessory: { update: { id, name: "Выключатель 2" } } });
+  hub.request({ accessory: { update: { id, roomId: 3 } } });
+  hub.request({
+    service: { update: { aId: id, sId: service.sId, name: "Свет 2" } },
+  });
+  hub.request({ accessory: { delete: { id } } });
+  hub.request({ room: { delete: { id: 30 } } });
+  await listener.until((frames) => frames.length === 7);
+
+  assert.deepEqual(events(), [
+    {
+      accessory: {
+        event: "EVENT_UPDATE",
+        accessories: [{ id, name: "Выключатель 2" }],
+      },
+    },
+    {
+      characteristic: {
+        event: "EVENT_UPDATE",
+        characteristics: [
+          {
+            aId: id,
+            sId: information.sId,
+            cId: information.cId,
+            control: { value: { stringValue: "Выключатель 2" } },
+          },
+        ],
+      },
+    },
+    { accessory: { event: "EVENT_UPDATE", accessories: [{ id, roomId: 3 }] } },
+    {
+      service: {
+        event: "EVENT_UPDATE",
+        services: [{ aId: id, sId: service.sId, name: "Свет 2" }],
+      },
+    },
+    {
+      characteristic: {
+        event: "EVENT_UPDATE",
+        characteristics: [
+          {
+            aId: id,
+            sId: service.sId,
+            cId: name.cId,
+            control: { value: { stringValue: "Свет 2" } },
+          },
+        ],
+      },
+    },
+    { accessory: { event: "EVENT_REMOVE", accessories: [{ id }] } },
+    { room: { event: "EVENT_REMOVE", rooms: [{ id: 30 }] } },
+  ]);
+});

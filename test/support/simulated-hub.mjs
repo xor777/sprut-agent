@@ -1056,11 +1056,18 @@ async function loadFixtureFile(file) {
 // simulator makes pushes the events the hub pushes for it: a value write
 // one characteristic EVENT_UPDATE per characteristic, the written one even
 // when its value stays, after the reply (2026-10-13-lamp-logic-undo 4.2,
-// 4.5); a created accessory EVENT_ADD with its services (voice baseline,
-// section 5). For edits the hub was not seen to announce (rooms, renames,
-// moves, deletions, services) the frames follow the hub's proto (RoomEvent,
-// AccessoryEvent, ServiceEvent: event type and the changed items). hub.emit
-// pushes a frame as the hub would for an edit made in the SprutHub app.
+// 4.5); a created accessory EVENT_ADD with its services and
+// characteristics; a room created, renamed or deleted room EVENT_ADD,
+// EVENT_UPDATE with the room or EVENT_REMOVE with its id; an accessory
+// renamed or moved EVENT_UPDATE with its id and the changed field only, a
+// rename then the new value of its information service's Name; a service
+// renamed service EVENT_UPDATE {aId, sId, name}, then its Name value; a
+// deleted accessory EVENT_REMOVE with its id (2026-10-13-structure-events).
+// On the owner's hub the event of a configuration write reached the
+// writing socket before or after the reply; here always after. A service's
+// visibility pushes the same form as its name, which was not observed.
+// hub.emit pushes a frame as the hub would for an edit made in the
+// SprutHub app.
 // eventEveryMs sends such a connection, this often, a characteristic
 // EVENT_UPDATE with the current value of the home's characteristics in turn
 // and every third time a room EVENT_UPDATE with a room's id, name, order
@@ -1135,14 +1142,27 @@ export async function startSimulatedHub(
   // Events this matches are lost on the way to every connection
   // (dropEvents).
   let lostEvents = null;
+  // Events this matches reach every connection later (delayEvents).
+  let lateEvents = null;
   state.emit = (event) => {
     if (lostEvents?.(event)) return;
     const text = JSON.stringify({ event });
-    for (const client of server.clients) {
-      if (client.readyState === client.OPEN && receivesEvents.has(client)) {
-        client.send(text);
+    const send = () => {
+      for (const client of server.clients) {
+        if (client.readyState === client.OPEN && receivesEvents.has(client)) {
+          client.send(text);
+        }
       }
+    };
+    if (!lateEvents?.match(event)) {
+      send();
+      return;
     }
+    const timer = setTimeout(() => {
+      state.timers.delete(timer);
+      send();
+    }, lateEvents.ms);
+    state.timers.add(timer);
   };
   // Events of a change a request makes go out after its reply.
   state.emitAfterReply = (event) => {
@@ -1315,6 +1335,14 @@ export async function startSimulatedHub(
     // hub and a client; null delivers them again.
     dropEvents: (match) => {
       lostEvents = match;
+    },
+    // From now on the events that match(event) accepts reach the
+    // connections ms later, as the owner's hub pushed a write's event to
+    // the writing socket up to 556 ms after the write's reply, with the
+    // reply of the next write (2026-10-13-structure-events); null sends
+    // them at once again.
+    delayEvents: (match, ms) => {
+      lateEvents = match ? { match, ms } : null;
     },
     // Pushes text as it is to the connections that receive events, as a
     // frame a client cannot read.
@@ -1680,20 +1708,31 @@ const HANDLERS = {
   "accessory.update": (state, input) => {
     const accessory = requireAccessory(state, input.id);
     if (Object.hasOwn(input, "roomId")) requireRoom(state, input.roomId);
+    const changed = { id: accessory.id };
+    let nameCharacteristic;
     if (Object.hasOwn(input, "name")) {
       if (typeof input.name !== "string" || input.name.length === 0) {
         throw invalidParams("Accessory name must be a non-empty string");
       }
       accessory.name = input.name;
-      const nameCharacteristic = accessory.services
+      changed.name = input.name;
+      nameCharacteristic = accessory.services
         .find(({ type }) => type === "AccessoryInformation")
         ?.characteristics.find(({ control }) => control.type === "Name");
       if (nameCharacteristic) {
         nameCharacteristic.control.value = { stringValue: input.name };
       }
     }
-    if (Object.hasOwn(input, "roomId")) accessory.roomId = input.roomId;
-    emitAccessories(state, "EVENT_UPDATE", [accessory]);
+    if (Object.hasOwn(input, "roomId")) {
+      accessory.roomId = input.roomId;
+      changed.roomId = input.roomId;
+    }
+    state.emitAfterReply?.({
+      accessory: { event: "EVENT_UPDATE", accessories: [changed] },
+    });
+    if (nameCharacteristic) {
+      state.emitAfterReply?.(valueEvent(nameCharacteristic));
+    }
     return {};
   },
   "accessory.delete": (state, { id }) => {
@@ -1716,22 +1755,34 @@ const HANDLERS = {
   // sent name and visible change; order and grid are not modelled.
   "service.update": (state, input) => {
     const service = requireService(state, input.aId, input.sId);
+    const changed = { aId: service.aId, sId: service.sId };
+    let nameCharacteristic;
     if (Object.hasOwn(input, "name")) {
       if (typeof input.name !== "string" || input.name.trim().length === 0) {
         throw invalidParams("Service name must be a non-empty string");
       }
       service.name = input.name;
+      changed.name = input.name;
+      nameCharacteristic = service.characteristics.find(
+        ({ control }) => control.type === "Name",
+      );
+      if (nameCharacteristic) {
+        nameCharacteristic.control.value = { stringValue: input.name };
+      }
     }
     if (Object.hasOwn(input, "visible")) {
       if (typeof input.visible !== "boolean") {
         throw invalidParams("Service visible must be a boolean");
       }
       service.visible = input.visible;
+      changed.visible = input.visible;
     }
-    const { characteristics: _characteristics, ...changed } = service;
     state.emitAfterReply?.({
-      service: { event: "EVENT_UPDATE", services: [structuredClone(changed)] },
+      service: { event: "EVENT_UPDATE", services: [changed] },
     });
+    if (nameCharacteristic) {
+      state.emitAfterReply?.(valueEvent(nameCharacteristic));
+    }
     return {};
   },
 
