@@ -936,10 +936,15 @@ const SERVICE_TYPES = [
 
 // Declarations shaped like the hub's scenario.sdk reply (the live one is
 // ~38 KB); this is a reduced synthetic text, not a copy of the hub SDK.
+// Hub's methods by accessory id have the live signatures (owner hub,
+// 2026-09-09-automations; the same text read again on 2026-10-13).
 const SCENARIO_SDK = `interface Hub {
-  getAccessory(aId: number): Accessory;
+  getAccessory(id: number): Accessory;
   getAccessories(): Accessory[];
-  getCharacteristic(aId: number, sId: number, cId: number): Characteristic;
+  getCharacteristicValue(aid: number, cid: number): any;
+  setCharacteristicValue(aid: number, cid: number, value: any);
+  toggleCharacteristicValue(aid: number, cid: number);
+  getCharacteristic(aid: number, cid: number): Characteristic;
   getRooms(): Room[];
 }
 interface Accessory {

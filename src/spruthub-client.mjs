@@ -4242,7 +4242,7 @@ function relationFailure(area, read) {
 }
 
 const RELATIONS_LIMITATION =
-  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in Hub.getAccessory or Hub.getCharacteristic or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue) or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&
@@ -5448,9 +5448,9 @@ function codeScenarioSummary(scenario) {
   };
 }
 
-// Where a code source names an accessory, by the scenario API's forms
-// (scenario.sdk): Hub.getAccessory(<id>) or Hub.getCharacteristic(<id>, …)
-// with the id written as a number, or a string that is exactly its name.
+// Where a code source names an accessory, by the Hub methods of the
+// hub's scenario.sdk that take its id first (ACCESSORY_ID_METHODS) with the
+// id written as a number, or by a string that is exactly its name.
 // Comments do not count; an id held in a variable is not found. Returns
 // found_by and the first lines, or null.
 function accessoryMentions(source, { id, name }) {
@@ -5468,7 +5468,7 @@ function accessoryMentions(source, { id, name }) {
       token.type === "IdentifierName" &&
       token.value === "Hub" &&
       after(1)?.value === "." &&
-      ["getAccessory", "getCharacteristic"].includes(after(2)?.value) &&
+      ACCESSORY_ID_METHODS.has(after(2)?.value) &&
       after(3)?.value === "(" &&
       after(4)?.type === "NumericLiteral" &&
       Number(after(4).value) === id &&
@@ -5493,6 +5493,18 @@ function accessoryMentions(source, { id, name }) {
     lines: [...lines].sort((a, b) => a - b).slice(0, 10),
   };
 }
+
+// Hub methods whose first argument is an accessory id, as the owner hub's
+// scenario.sdk declares them: read on 2026-09-09
+// (research/protocol/2026-09-09-automations.md) and again, the same
+// SHA-256, on 2026-10-13.
+const ACCESSORY_ID_METHODS = new Set([
+  "getAccessory",
+  "getCharacteristic",
+  "getCharacteristicValue",
+  "setCharacteristicValue",
+  "toggleCharacteristicValue",
+]);
 
 const JAVASCRIPT_TRIVIA = new Set([
   "HashbangComment",
