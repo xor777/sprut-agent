@@ -59,7 +59,26 @@ async function setup(t, { faults, editHome, afterStart } = {}) {
       },
       body: JSON.stringify(body ?? {}),
     });
-    return { status: response.status, body: await response.json() };
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  // A browser request: no key in the page, only what the invite left.
+  const visit = async (route, { cookie, method = "GET", body } = {}) => {
+    const response = await fetch(`${server.url}${route}`, {
+      method,
+      redirect: "manual",
+      headers: {
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    return {
+      status: response.status,
+      location: response.headers.get("location"),
+      setCookie: response.headers.get("set-cookie"),
+      text: await response.text(),
+    };
   };
   const tool = async (name, args) => {
     const { status, body } = await post("/api/tool", { name, arguments: args });
@@ -83,7 +102,7 @@ async function setup(t, { faults, editHome, afterStart } = {}) {
       .writes()
       .filter(({ method }) => method === "characteristic.update")
       .map(({ params }) => params.characteristic.update);
-  return { hub, openai, post, tool, listedId, updates };
+  return { hub, openai, post, visit, tool, listedId, updates };
 }
 
 async function startFakeOpenAI() {
@@ -215,7 +234,7 @@ test("when one command of a request is not understood, nothing is sent", async (
   assert.deepEqual(updates(), []);
 });
 
-test("without the invite key neither the home nor OpenAI is reached", async (t) => {
+test("without the invite key neither the home nor OpenAI is reached, and nothing says they exist", async (t) => {
   const { hub, openai, post, listedId } = await setup(t);
   const floorLamp = await listedId("Торшер");
   const sessionsBefore = openai.sessions.length;
@@ -228,8 +247,8 @@ test("without the invite key neither the home nor OpenAI is reached", async (t) 
   };
 
   for (const token of [null, "wrong-token", `${ACCESS_TOKEN}x`]) {
-    assert.equal((await post("/api/tool", command, token)).status, 401);
-    assert.equal((await post("/api/session", {}, token)).status, 401);
+    assert.equal((await post("/api/tool", command, token)).status, 404);
+    assert.equal((await post("/api/session", {}, token)).status, 404);
   }
 
   assert.equal(openai.sessions.length, sessionsBefore);
@@ -563,4 +582,56 @@ test("a group reads as the colours its bulbs show", async (t) => {
 
   assert.match(sconce.values.лампочки, /фиолетовый — 2/);
   assert.equal(sconce.values.цвет, undefined);
+});
+
+test("without the invite the site shows nothing but what installing the app needs", async (t) => {
+  const { visit } = await setup(t);
+
+  for (const route of ["/", "/index.html", "/app.js", "/sw.js", "/nope"]) {
+    const page = await visit(route);
+    assert.equal(page.status, 404, route);
+    assert.doesNotMatch(page.text, /Домик|voice|sprut/i, route);
+  }
+  assert.equal((await visit("/manifest.webmanifest")).status, 200);
+  assert.equal((await visit("/icon-192.png")).status, 200);
+});
+
+test("the invite link lets the phone in for a year with a cookie the page cannot read", async (t) => {
+  const { visit } = await setup(t);
+
+  const invite = await visit(`/i/${ACCESS_TOKEN}`);
+
+  assert.equal(invite.status, 302);
+  assert.equal(invite.location, "/");
+  assert.match(invite.setCookie, /^sv=[^;]+;/);
+  for (const attribute of [
+    /HttpOnly/,
+    /Secure/,
+    /SameSite=Lax/,
+    /Max-Age=31536000/,
+    /Path=\//,
+  ]) {
+    assert.match(invite.setCookie, attribute);
+  }
+  const cookie = invite.setCookie.split(";")[0];
+  const page = await visit("/", { cookie });
+  assert.equal(page.status, 200);
+  assert.match(page.text, /<title>Домик<\/title>/);
+  const read = await visit("/api/tool", {
+    cookie,
+    method: "POST",
+    body: { name: "read_devices", arguments: { room: "r3" } },
+  });
+  assert.equal(read.status, 200);
+  assert.equal(JSON.parse(read.text).output.status, "ok");
+});
+
+test("a wrong invite looks like any other missing page and sets nothing", async (t) => {
+  const { visit } = await setup(t);
+
+  for (const route of ["/i/wrong", `/i/${ACCESS_TOKEN}x`, "/i/"]) {
+    const invite = await visit(route);
+    assert.equal(invite.status, 404, route);
+    assert.equal(invite.setCookie, null, route);
+  }
 });
