@@ -477,14 +477,26 @@ test("only allowlisted reads are reads, and link settings show in the home diff"
   const socket = new WebSocket(hub.url, "json-rpc");
   t.after(() => socket.close());
   await once(socket, "open");
+  // Replies are matched by id: a write's events follow its reply.
+  const waiting = new Map();
+  socket.on("message", (data) => {
+    const message = JSON.parse(data.toString());
+    waiting.get(message.id)?.(message);
+  });
   let id = 0;
-  const send = async (params) => {
+  const send = (params) => {
     id += 1;
+    const current = id;
+    const replied = new Promise((resolve) => waiting.set(current, resolve));
     socket.send(
-      JSON.stringify({ id, token: hub.token, serial: hub.serial, params }),
+      JSON.stringify({
+        id: current,
+        token: hub.token,
+        serial: hub.serial,
+        params,
+      }),
     );
-    const [data] = await once(socket, "message");
-    return JSON.parse(data.toString());
+    return replied;
   };
 
   await send({ room: { list: {} } });
