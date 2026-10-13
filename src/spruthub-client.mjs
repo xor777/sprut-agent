@@ -5169,7 +5169,21 @@ export function isSensitiveNativeNode(value, key = "") {
       (candidate) => typeof candidate === "string" && isSensitiveKey(candidate),
     ) ||
     namesOptionSecret(value) ||
-    holdsKeyMaterial(value)
+    holdsKeyMaterial(value) ||
+    holdsConfirmationCode(value)
+  );
+}
+
+// A field for the one-time code of a cloud login, as the Xiaomi
+// controller's Ticket labelled «Код подтверждения»: filled, it holds the
+// code sent to the owner; empty, it only shows that a login waits for it.
+function holdsConfirmationCode(node) {
+  const text = optionStringValue(node);
+  if (text === null || text.trim() === "") return false;
+  return (
+    (typeof node.key === "string" &&
+      credentialKeyParts(node.key).includes("ticket")) ||
+    (typeof node.name === "string" && /код\s+подтверждения/iu.test(node.name))
   );
 }
 
