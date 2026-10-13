@@ -5882,9 +5882,10 @@ function redactSensitiveText(text, role = "data") {
     // A HomeKit setup payload, which pairs a controller with the bridge.
     /\bX-HM:\/\/[\dA-Z]{9}/i.test(text) ||
     // A Wi-Fi QR payload with a password: WIFI:T:WPA;S:<ssid>;P:<password>;;
-    // A payload ends where the next WIFI: begins, so a text of many WIFI:
-    // and no P: is read once, not once from each WIFI:.
-    /\bWIFI:(?:(?:(?!WIFI:)[^;])*;)*?P:[^;]/.test(text) ||
+    // A payload ends where the next payload could begin, a WIFI: after no
+    // letter, digit or _, so a text of many WIFI: and no P: is read once,
+    // not once from each WIFI:. A name such as Home_WIFI: stays inside it.
+    /\bWIFI:(?:(?:(?!\bWIFI:)[^;])*;)*?P:[^;]/.test(text) ||
     containsLabelledKeyMaterial(text) ||
     containsSensitiveAssignment(text, role);
   return containsCredential ? "[REDACTED]" : text;
