@@ -43,6 +43,8 @@ async function start() {
   token = readToken();
   if (!token) return setState("no_token");
   const current = { calls: new Map(), speaking: false, ending: false };
+  // Created inside the tap, as mobile browsers require, and only measures.
+  current.meter = createMeter();
   session = current;
   logElement.replaceChildren();
   setState("connecting");
@@ -58,6 +60,7 @@ async function start() {
       api("/api/session", voice ? { voice } : {}),
     ]);
     current.stream = stream;
+    current.meter?.attach("input", stream);
     if (session !== current) return release(current);
 
     const pc = new RTCPeerConnection();
@@ -67,6 +70,7 @@ async function start() {
     current.audio = audio;
     pc.addEventListener("track", (event) => {
       audio.srcObject = event.streams[0];
+      current.meter?.attach("output", event.streams[0]);
       audio.play().catch(() => {});
     });
     pc.addEventListener("connectionstatechange", () => {
@@ -173,6 +177,7 @@ function onEvent(current, event) {
 function startCall(current, { call_id: callId, name, arguments: args }) {
   if (!callId || current.calls.has(callId)) return;
   if (name === "end_conversation") {
+    remoteLog("tool", "end_conversation");
     current.ending = true;
     current.calls.set(callId, Promise.resolve({ status: "ok" }));
     setTimeout(() => {
@@ -256,6 +261,7 @@ function release(current) {
   for (const track of current.stream?.getTracks() ?? []) track.stop();
   if (current.audio) current.audio.srcObject = null;
   current.wakeLock?.release().catch(() => {});
+  current.meter?.stop();
 }
 
 function send(current, event) {
@@ -352,4 +358,56 @@ function readVoice() {
   } catch {
     return null;
   }
+}
+
+// Loudness of the person and of the assistant drives the orb and the little
+// house's mouth through --level and --mouth. Nothing is played through it.
+function createMeter() {
+  const Context = window.AudioContext ?? window.webkitAudioContext;
+  if (!Context) return null;
+  const context = new Context();
+  const silent = context.createGain();
+  silent.gain.value = 0;
+  silent.connect(context.destination);
+  const analysers = {};
+  const samples = new Uint8Array(512);
+  const root = document.documentElement.style;
+  let level = 0;
+  let mouth = 0;
+  let frame = 0;
+  const loudness = (analyser) => {
+    if (!analyser) return 0;
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) sum += ((sample - 128) / 128) ** 2;
+    return Math.sqrt(sum / samples.length);
+  };
+  const tick = () => {
+    const output = Math.min(1, loudness(analysers.output) * 5);
+    const input = Math.min(1, loudness(analysers.input) * 4);
+    level += (Math.max(output, input * 0.7) - level) * 0.3;
+    mouth += (output - mouth) * 0.45;
+    root.setProperty("--level", level.toFixed(3));
+    root.setProperty("--mouth", mouth.toFixed(3));
+    frame = requestAnimationFrame(tick);
+  };
+  frame = requestAnimationFrame(tick);
+  return {
+    attach(kind, stream) {
+      try {
+        const analyser = context.createAnalyser();
+        analyser.fftSize = samples.length;
+        context.createMediaStreamSource(stream).connect(analyser);
+        analyser.connect(silent);
+        analysers[kind] = analyser;
+        context.resume().catch(() => {});
+      } catch {}
+    },
+    stop() {
+      cancelAnimationFrame(frame);
+      root.setProperty("--level", "0");
+      root.setProperty("--mouth", "0");
+      context.close().catch(() => {});
+    },
+  };
 }

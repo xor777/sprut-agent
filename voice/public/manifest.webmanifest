@@ -1,13 +1,13 @@
 {
-  "name": "Дом — голосовой помощник",
-  "short_name": "Дом",
+  "name": "Сладкий домик",
+  "short_name": "Домик",
   "lang": "ru",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0f172a",
-  "theme_color": "#0f172a",
+  "background_color": "#0b0820",
+  "theme_color": "#0b0820",
   "icons": [
     {
       "src": "/icon-192.png",

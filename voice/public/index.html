@@ -6,22 +6,82 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#0f172a" />
-    <title>Дом</title>
+    <meta name="theme-color" content="#0b0820" />
+    <title>Домик</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon-192.png" />
     <style>
+      /* Registered colours glide from one state to the next. */
+      @property --c1 {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #f472b6;
+      }
+      @property --c2 {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #a78bfa;
+      }
+      @property --c3 {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #fdba74;
+      }
+      @property --glow {
+        syntax: "<color>";
+        inherits: true;
+        initial-value: #f9a8d4;
+      }
       :root {
-        --bg: #0f172a;
-        --text: #f8fafc;
-        --muted: #94a3b8;
-        --idle: #f1f5f9;
-        --idle-ink: #0f172a;
-        --listening: #22c55e;
-        --thinking: #38bdf8;
-        --working: #f59e0b;
-        --speaking: #6366f1;
-        --error: #ef4444;
+        --bg: #0b0820;
+        --text: #fdf4ff;
+        --muted: #c4b5fd;
+        --ink: #2a1650;
+        --cheek: #fb7185;
+        --level: 0;
+        --mouth: 0;
+      }
+      body {
+        --c1: #f472b6;
+        --c2: #a78bfa;
+        --c3: #fdba74;
+        --glow: #f9a8d4;
+        transition:
+          --c1 1.2s ease,
+          --c2 1.2s ease,
+          --c3 1.2s ease,
+          --glow 1.2s ease;
+      }
+      [data-state="listening"] {
+        --c1: #34d399;
+        --c2: #22d3ee;
+        --c3: #a7f3d0;
+        --glow: #5eead4;
+      }
+      [data-state="thinking"],
+      [data-state="connecting"] {
+        --c1: #818cf8;
+        --c2: #38bdf8;
+        --c3: #c084fc;
+        --glow: #93c5fd;
+      }
+      [data-state="working"] {
+        --c1: #fbbf24;
+        --c2: #fb7185;
+        --c3: #f472b6;
+        --glow: #fcd34d;
+      }
+      [data-state="speaking"] {
+        --c1: #f472b6;
+        --c2: #8b5cf6;
+        --c3: #22d3ee;
+        --glow: #f0abfc;
+      }
+      [data-state="error"] {
+        --c1: #fb7185;
+        --c2: #f43f5e;
+        --c3: #fda4af;
+        --glow: #fda4af;
       }
       * {
         box-sizing: border-box;
@@ -37,144 +97,429 @@
         -webkit-tap-highlight-color: transparent;
         user-select: none;
       }
-      /* One screen without scrolling: the newest lines of the conversation
-         stay at the bottom and older ones fade out at the top. */
+
+      /* A slow aurora behind everything, tinted by the current state. */
+      .sky {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .blob {
+        position: absolute;
+        width: 70vmax;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        filter: blur(70px);
+        opacity: 0.5;
+        animation: drift 26s ease-in-out infinite alternate;
+      }
+      .b1 {
+        background: var(--c1);
+        top: -30vmax;
+        left: -25vmax;
+      }
+      .b2 {
+        background: var(--c2);
+        bottom: -35vmax;
+        right: -30vmax;
+        animation-duration: 31s;
+        animation-delay: -8s;
+      }
+      .b3 {
+        background: var(--c3);
+        top: 30%;
+        left: -40vmax;
+        width: 55vmax;
+        opacity: 0.32;
+        animation-duration: 23s;
+        animation-delay: -14s;
+      }
+      .b4 {
+        background: #f472b6;
+        top: -20vmax;
+        right: -35vmax;
+        width: 50vmax;
+        opacity: 0.25;
+        animation-duration: 35s;
+      }
+      @keyframes drift {
+        from {
+          transform: translate(0, 0) scale(1);
+        }
+        to {
+          transform: translate(12vmax, 9vmax) scale(1.15);
+        }
+      }
+      .spark {
+        position: absolute;
+        left: var(--x);
+        top: var(--y);
+        width: 3px;
+        height: 3px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 0 8px 2px rgb(255 255 255 / 0.6);
+        animation: twinkle 3.6s ease-in-out infinite;
+        animation-delay: var(--d);
+      }
+      @keyframes twinkle {
+        0%,
+        100% {
+          opacity: 0.1;
+          transform: scale(0.6);
+        }
+        50% {
+          opacity: 0.9;
+          transform: scale(1.2);
+        }
+      }
+
       main {
+        position: relative;
         height: 100dvh;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 20px;
-        padding: max(24px, env(safe-area-inset-top)) 16px
-          max(24px, env(safe-area-inset-bottom));
+        gap: 18px;
+        padding: max(20px, env(safe-area-inset-top)) 16px
+          max(20px, env(safe-area-inset-bottom));
         text-align: center;
+      }
+      .brand {
+        flex: none;
+        margin: 0;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.32em;
+        background: linear-gradient(90deg, #fbcfe8, #c4b5fd, #a5f3fc);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      .brand span {
+        display: inline-block;
+        color: #f9a8d4;
+        animation: beat 1.6s ease-in-out infinite;
+      }
+      @keyframes beat {
+        0%,
+        30%,
+        100% {
+          transform: scale(1);
+        }
+        15% {
+          transform: scale(1.3);
+        }
       }
       .status,
       .hint {
         flex: none;
+        margin: 0;
       }
       .status {
-        margin: 0;
-        font-size: 34px;
-        font-weight: 650;
+        font-size: 30px;
+        font-weight: 700;
         min-height: 1.3em;
+        background: linear-gradient(180deg, #fff, #e9d5ff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
       }
       .hint {
-        margin: 0;
-        font-size: 20px;
+        font-size: 18px;
         color: var(--muted);
+        opacity: 0.85;
         min-height: 1.4em;
       }
-      .talk {
-        --color: var(--idle);
+
+      /* The orb: a glass sphere with a living swirl and a little house. */
+      .orb {
         position: relative;
-        width: min(72vw, 40dvh, 320px);
         flex: none;
+        width: min(64vw, 36dvh, 300px);
         aspect-ratio: 1;
+        padding: 0;
         border: none;
         border-radius: 50%;
-        background: var(--color);
-        color: var(--idle-ink);
-        display: grid;
-        place-items: center;
+        background: none;
         cursor: pointer;
-        box-shadow: 0 12px 40px rgb(0 0 0 / 0.45);
-        transition:
-          background 0.25s,
-          transform 0.15s;
+        transform: scale(calc(1 + var(--level) * 0.1));
+        transition: transform 0.08s linear;
       }
-      .talk:active {
-        transform: scale(0.97);
+      .orb:active {
+        transform: scale(0.96);
       }
-      .talk svg {
-        width: 38%;
-        height: 38%;
-      }
-      .talk::after {
-        content: "";
+      .orb > * {
         position: absolute;
-        inset: -14px;
         border-radius: 50%;
-        border: 6px solid var(--color);
-        opacity: 0;
+        pointer-events: none;
       }
-      [data-state="listening"] .talk {
-        --color: var(--listening);
-        color: #052e16;
+      .orb-glow {
+        inset: -22%;
+        background: radial-gradient(circle, var(--glow) 0%, transparent 62%);
+        opacity: calc(0.5 + var(--level) * 0.5);
+        filter: blur(14px);
       }
-      [data-state="listening"] .talk::after {
-        animation: pulse 1.8s ease-out infinite;
+      .orb-swirl {
+        inset: 0;
+        background: conic-gradient(
+          from 0deg,
+          var(--c1),
+          var(--c2),
+          var(--c3),
+          var(--c1)
+        );
+        animation: spin 14s linear infinite;
       }
-      [data-state="thinking"] .talk,
-      [data-state="connecting"] .talk {
-        --color: var(--thinking);
-        color: #082f49;
+      [data-state="working"] .orb-swirl,
+      [data-state="connecting"] .orb-swirl {
+        animation-duration: 2.4s;
       }
-      [data-state="working"] .talk {
-        --color: var(--working);
-        color: #451a03;
+      .orb-gloss {
+        inset: 0;
+        background:
+          radial-gradient(
+            circle at 32% 24%,
+            rgb(255 255 255 / 0.7),
+            transparent 34%
+          ),
+          radial-gradient(
+            circle at 50% 60%,
+            transparent 45%,
+            rgb(30 10 60 / 0.35)
+          );
+        box-shadow:
+          inset 0 0 40px rgb(255 255 255 / 0.25),
+          0 18px 50px rgb(20 0 40 / 0.55);
       }
-      [data-state="speaking"] .talk {
-        --color: var(--speaking);
-        color: #eef2ff;
-      }
-      [data-state="speaking"] .talk::after,
-      [data-state="working"] .talk::after,
-      [data-state="connecting"] .talk::after {
-        animation: pulse 1.1s ease-out infinite;
-      }
-      [data-state="error"] .talk {
-        --color: var(--error);
-        color: #fff;
-      }
-      @keyframes pulse {
-        from {
-          opacity: 0.7;
-          transform: scale(0.92);
-        }
+      @keyframes spin {
         to {
-          opacity: 0;
-          transform: scale(1.15);
+          transform: rotate(1turn);
         }
       }
+      .house {
+        inset: 17%;
+        width: 66%;
+        height: 66%;
+        border-radius: 0;
+        overflow: visible;
+        filter: drop-shadow(0 8px 12px rgb(40 10 80 / 0.35));
+        animation: bob 4s ease-in-out infinite;
+      }
+      @keyframes bob {
+        50% {
+          transform: translateY(-3%);
+        }
+      }
+      .eyes,
+      .eye,
+      .mouth {
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+      .eyes {
+        transition: transform 0.3s ease;
+      }
+      .eye {
+        animation: blink 5s infinite;
+      }
+      @keyframes blink {
+        0%,
+        92%,
+        100% {
+          transform: scaleY(1);
+        }
+        95% {
+          transform: scaleY(0.12);
+        }
+      }
+      [data-state="listening"] .eyes {
+        transform: translateY(-2px) scale(1.08);
+      }
+      [data-state="thinking"] .eyes {
+        animation: look 1.8s ease-in-out infinite;
+      }
+      @keyframes look {
+        25% {
+          transform: translateX(-3px);
+        }
+        75% {
+          transform: translateX(3px);
+        }
+      }
+      [data-state="working"] .eye {
+        animation: none;
+        transform: scaleY(0.5);
+      }
+      [data-state="connecting"] .eye,
+      [data-state="no_token"] .eye {
+        animation: none;
+        transform: scaleY(0.15);
+      }
+      .mouth {
+        transform-origin: center top;
+        transform: scaleY(calc(0.45 + var(--mouth) * 2.2));
+        transition: transform 0.06s linear;
+      }
+      [data-state="error"] .mouth {
+        transform: scaleY(0.45) rotate(180deg);
+      }
+      .puff {
+        top: 2%;
+        right: 22%;
+        border-radius: 0;
+        font-size: clamp(14px, 4vw, 20px);
+        color: #fbcfe8;
+        opacity: 0;
+        animation: puff 4.5s ease-out infinite;
+      }
+      [data-state="working"] .puff,
+      [data-state="thinking"] .puff,
+      [data-state="connecting"] .puff,
+      [data-state="error"] .puff {
+        display: none;
+      }
+      @keyframes puff {
+        0%,
+        55% {
+          opacity: 0;
+          transform: translateY(0) scale(0.5);
+        }
+        70% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: translateY(-45px) scale(1.15) rotate(12deg);
+        }
+      }
+
       .log {
-        width: min(100%, 560px);
+        width: min(100%, 520px);
         flex: 0 1 auto;
         min-height: 0;
         overflow: hidden;
         display: flex;
         flex-direction: column;
         justify-content: flex-end;
-        gap: 6px;
-        mask-image: linear-gradient(to bottom, transparent 0, #000 32px);
+        gap: 8px;
         font-size: 16px;
-        color: var(--muted);
+        line-height: 1.35;
         text-align: left;
         overflow-wrap: anywhere;
+        mask-image: linear-gradient(to bottom, transparent 0, #000 36px);
       }
       .log p {
+        flex: none;
         margin: 0;
+        padding: 8px 12px;
+        border-radius: 16px;
+        max-width: 88%;
+        background: rgb(255 255 255 / 0.07);
+        border: 1px solid rgb(255 255 255 / 0.08);
+        color: #e9d5ff;
       }
       .log .user {
-        color: var(--text);
+        align-self: flex-end;
+        background: rgb(255 255 255 / 0.14);
+        color: #fff;
       }
       @media (prefers-reduced-motion: reduce) {
-        [data-state] .talk::after {
+        .blob,
+        .spark,
+        .orb-swirl,
+        .house,
+        .eye,
+        .eyes,
+        .puff,
+        .brand span {
           animation: none;
         }
       }
     </style>
   </head>
   <body data-state="idle">
+    <div class="sky" aria-hidden="true">
+      <i class="blob b1"></i>
+      <i class="blob b2"></i>
+      <i class="blob b3"></i>
+      <i class="blob b4"></i>
+      <i class="spark" style="--x: 12%; --y: 14%; --d: 0s"></i>
+      <i class="spark" style="--x: 82%; --y: 9%; --d: 1.1s"></i>
+      <i class="spark" style="--x: 68%; --y: 27%; --d: 2.3s"></i>
+      <i class="spark" style="--x: 24%; --y: 38%; --d: 0.7s"></i>
+      <i class="spark" style="--x: 90%; --y: 52%; --d: 1.8s"></i>
+      <i class="spark" style="--x: 7%; --y: 64%; --d: 2.9s"></i>
+      <i class="spark" style="--x: 47%; --y: 6%; --d: 3.2s"></i>
+      <i class="spark" style="--x: 76%; --y: 78%; --d: 0.4s"></i>
+    </div>
     <main>
+      <p class="brand">сладкий домик <span>♥</span></p>
       <p id="status" class="status" aria-live="polite">Нажмите и говорите</p>
-      <button id="talk" class="talk" type="button" aria-label="Поговорить">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <button id="talk" class="orb" type="button" aria-label="Поговорить">
+        <span class="orb-glow"></span>
+        <span class="orb-swirl"></span>
+        <span class="orb-gloss"></span>
+        <svg class="house" viewBox="0 0 120 120" aria-hidden="true">
+          <rect x="76" y="20" width="13" height="26" rx="4" fill="#fff" />
           <path
-            d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm7-4a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V20H8a1 1 0 1 0 0 2h8a1 1 0 1 0 0-2h-3v-2.07A7 7 0 0 0 19 11Z"
+            d="M60 18 L101 54 L92 54 L92 92 Q92 100 84 100 L36 100 Q28 100 28 92 L28 54 L19 54 Z"
+            fill="#fff"
+            stroke="#fff"
+            stroke-width="8"
+            stroke-linejoin="round"
+          />
+          <g class="eyes">
+            <rect
+              class="eye"
+              x="39"
+              y="60"
+              width="14"
+              height="17"
+              rx="6"
+              fill="var(--ink)"
+            />
+            <rect
+              class="eye"
+              x="67"
+              y="60"
+              width="14"
+              height="17"
+              rx="6"
+              fill="var(--ink)"
+            />
+            <circle cx="44" cy="65" r="2.6" fill="#fff" />
+            <circle cx="72" cy="65" r="2.6" fill="#fff" />
+          </g>
+          <ellipse
+            cx="36"
+            cy="86"
+            rx="6.5"
+            ry="3.8"
+            fill="var(--cheek)"
+            opacity="0.55"
+          />
+          <ellipse
+            cx="84"
+            cy="86"
+            rx="6.5"
+            ry="3.8"
+            fill="var(--cheek)"
+            opacity="0.55"
+          />
+          <rect
+            class="mouth"
+            x="53"
+            y="83"
+            width="14"
+            height="7"
+            rx="3.5"
+            fill="var(--ink)"
           />
         </svg>
+        <span class="puff">♥</span>
       </button>
       <p id="hint" class="hint"></p>
       <section id="log" class="log" aria-live="polite"></section>
