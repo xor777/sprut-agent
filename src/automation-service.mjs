@@ -1778,29 +1778,16 @@ export class AutomationService {
 
   // «Верни как было»: the agent's own changes of one request, undone
   // newest first so a later change of the same target goes before the one
-  // it built on, and a lamp's level before its On. Each item is decided by
-  // the home right before its own write and answers for itself; nothing is
-  // undone as all-or-nothing.
+  // it built on; a lamp's On and level in the order restoreOrder gives.
+  // Each item is decided by the home right before its own write and
+  // answers for itself; nothing is undone as all-or-nothing.
   async restoreChanges(references) {
     const parsed = references.map(parseRestoreRef);
     return this.#exclusiveWrite(async () => {
       const ordered = restoreOrder(await this.#restoreEntries(parsed));
-      const onBefore = await this.#lampOnBeforeRestore(ordered);
-      const switchedOn = await this.#lampsSwitchedBackOn(ordered, onBefore);
       const results = [];
-      // Lamps this call already wrote to: a lamp's level can bring its On
-      // back with it (a level above 0 switches a lamp with lamp logic on).
-      const lampsWritten = new Set();
       for (const entry of ordered) {
-        const item = await this.#restoreEntry(entry, {
-          lampWritten: lampsWritten.has(lampKey(entry.change)),
-          valueBeforeCall: onBefore.get(entry.change.id),
-          lampSwitchedBackOn: switchedOn.has(lampKey(entry.change)),
-        });
-        if (item.sent && lampKey(entry.change) !== null) {
-          lampsWritten.add(lampKey(entry.change));
-        }
-        results.push(item);
+        results.push(await this.#restoreEntry(entry));
       }
       return restoreChangesResult(configuredHomeRef(this.hubSerial), results);
     });
@@ -1850,59 +1837,7 @@ export class AutomationService {
     return [...entries.values()];
   }
 
-  // The On of a lamp whose level is restored in the same call, read before
-  // any write: whether On was already back before this call (changed by
-  // someone else) or came back with the level.
-  async #lampOnBeforeRestore(entries) {
-    const levels = new Set(
-      entries
-        .filter(({ change }) => LIGHT_LEVEL_TYPES.has(change.contract?.type))
-        .map(({ change }) => lampKey(change)),
-    );
-    const values = new Map();
-    for (const { change } of entries) {
-      if (
-        change.contract?.type !== "On" ||
-        !levels.has(lampKey(change)) ||
-        lampKey(change) === null
-      ) {
-        continue;
-      }
-      try {
-        const characteristic = await this.client.getCharacteristic(
-          change.target,
-        );
-        values.set(change.id, typedNativeValue(characteristic.control.value));
-      } catch {
-        // Unknown: the item then reports what it sees, without this hint.
-      }
-    }
-    return values;
-  }
-
-  // Lamps this restore switches back on: the agent switched one off, it
-  // still shows off, and no later change of the agent switched it since.
-  // Only for these may a level above 0 be written while the lamp is off.
-  async #lampsSwitchedBackOn(entries, onBefore) {
-    const lamps = new Set();
-    for (const { change } of entries) {
-      const current = onBefore.get(change.id);
-      if (
-        current === undefined ||
-        change.baseline_value?.value !== true ||
-        !valuesEqual(current, change.requested_value) ||
-        !nativeValueProvenApply(change) ||
-        !changeStillInEffect(change) ||
-        (await this.#laterOwnedValueChange(change, current))
-      ) {
-        continue;
-      }
-      lamps.add(lampKey(change));
-    }
-    return lamps;
-  }
-
-  async #restoreEntry({ change: listed, automation }, context) {
+  async #restoreEntry({ change: listed, automation }) {
     let change;
     try {
       // Read again: restoring an earlier item may have updated this record.
@@ -1915,19 +1850,18 @@ export class AutomationService {
     const before = {
       status: change.status,
       restoreIntentAt: restoreIntentTime(change),
-      ...context,
     };
     try {
       const result = automation
         ? await this.#rollbackAutomation(change)
-        : await this.#restoreNative(change, context);
+        : await this.#restoreNative(change);
       return restoreItem(change, automation, result, before);
     } catch (error) {
       return restoreFailureItem(change, automation, error);
     }
   }
 
-  async #restoreNative(change, context = {}) {
+  async #restoreNative(change) {
     if (change.kind === "accessory_placement") {
       return this.#restoreAccessoryPlacement(change);
     }
@@ -1949,7 +1883,7 @@ export class AutomationService {
           "get_native_change",
         );
       }
-      return this.#restoreValueChange(change, context);
+      return this.#restoreValueChange(change);
     }
     if (change.kind === "logic_assignment") {
       return this.#restoreLogicAssignment(change);
@@ -4127,7 +4061,7 @@ export class AutomationService {
     return nativeValueKind(change.kind).write(this, change, value);
   }
 
-  async #restoreValueChange(change, context = {}) {
+  async #restoreValueChange(change) {
     const lifecycle = nativeValueLifecycle(change);
     if (lifecycle.phase === "restore_completed") {
       return publicStoredNativeChange(change);
@@ -4141,13 +4075,20 @@ export class AutomationService {
         const completedApply =
           pending.direction === "apply" &&
           pending.outcome === "expected_observed";
-        const retryableRestore =
+        const unconfirmedRestore =
           pending.direction === "restore" &&
           pending.outcome === "expected_missing" &&
-          isRetryableNativeValueChange(change) &&
           valuesEqual(pending.current, change.requested_value);
+        const retryableRestore =
+          unconfirmedRestore && isRetryableNativeValueChange(change);
         if (!completedApply && !retryableRestore) {
-          return pending.result;
+          // The device still shows the agent's value, so the item offers
+          // the resend of this undo write (restoreResendNext): a level
+          // passes the same lamp check as the write itself.
+          const lampOff =
+            unconfirmedRestore &&
+            (await this.#lampOffLevelSkip(change, pending.current));
+          return lampOff || pending.result;
         }
         currentState = { value: pending.current, contract: pending.contract };
       }
@@ -4217,13 +4158,8 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
-    const lampLevel = await this.#lampLevelSkipped(
-      change,
-      accessory,
-      current,
-      context,
-    );
-    if (lampLevel) return lampLevel;
+    const lampOff = await this.#lampOffLevelSkip(change, current, accessory);
+    if (lampOff) return lampOff;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -4240,20 +4176,26 @@ export class AutomationService {
 
   // With «Связь включения и уровня» (LightbulbControl), which the owner's
   // hub assigns to every dimmable lamp, a Brightness write above 0 switches
-  // the lamp on, and 0 switches it off without being stored: the level stays
-  // (2026-10-13-lamp-logic-undo). So restore never writes a level of 0, and
-  // writes a level above 0 to a lamp that is off only when this same
-  // restore switches it back on. Otherwise the lamp stays as the owner, a
-  // scenario or the agent's own later command left it, and the item says
-  // which.
-  async #lampLevelSkipped(change, accessory, current, context) {
+  // a lamp that is off on, and 0 switches it off without being stored: the
+  // level stays (2026-10-13-lamp-logic-undo). Every level write of undo,
+  // and every resend of one that undo offers, passes here: a level of 0 is
+  // never written, and a level above 0 only to a lamp whose On, read right
+  // now, is on. A restore that switches the lamp back on writes its On
+  // first (restoreOrder), so this read sees it on. Whether the logic is
+  // assigned is not checked: every lamp with On and Brightness is treated
+  // as having it. Hue, Saturation and ColorTemperature are not checked.
+  async #lampOffLevelSkip(change, current, accessory) {
     if (
       change.kind !== "characteristic_value" ||
       change.contract?.type !== "Brightness"
     ) {
       return undefined;
     }
-    const onTarget = lightLevelOnTarget(accessory, change.target, "Brightness");
+    const onTarget = lightLevelOnTarget(
+      accessory ?? (await this.client.getAccessory(change.target.aId)),
+      change.target,
+      "Brightness",
+    );
     if (!onTarget) return undefined;
     const skipped = (outcome) => ({
       ...publicNativeChange(change, current),
@@ -4266,39 +4208,40 @@ export class AutomationService {
           "A lamp keeps no level of 0: writing 0 switches it off and leaves the level as it is, so nothing was written. Its On is put back on its own.",
       });
     }
-    if (context.lampSwitchedBackOn === true) return undefined;
     const on = typedNativeValue(
       (await this.client.getCharacteristic(onTarget)).control.value,
     );
     if (on.value !== false) return undefined;
-    // The agent's own On command made after this level change.
+    // The agent's own later command that switched the lamp off, named only
+    // when undoing it would switch the lamp back on.
     const later = await this.#laterOwnedValueChange(
       { ...change, target: onTarget },
       on,
     );
-    let outcome;
-    if (later) {
-      outcome = {
+    if (
+      later?.baseline_value?.value === true &&
+      nativeValueLifecycle(later).phase !== "right_lost"
+    ) {
+      return skipped({
         reason: "later_change",
         later_change_ref: `spruthub-change://native/${later.id}`,
         message:
           "The agent's later command switched this lamp off, and writing its level back would switch it on, so nothing was written. Undo later_change_ref together with this change.",
-      };
-    } else if (change.lamp_on_before === true) {
-      outcome = {
+      });
+    }
+    if (change.lamp_on_before === true) {
+      return skipped({
         reason: "changed_since",
         already_previous: false,
         message:
           "The lamp was switched off after the agent's change, and writing its level back would switch it on, so nothing was written.",
-      };
-    } else {
-      outcome = {
-        reason: "lamp_off",
-        message:
-          "The lamp is off, and writing a level above 0 can switch it on, so nothing was written; the level stays as the agent set it.",
-      };
+      });
     }
-    return skipped(outcome);
+    return skipped({
+      reason: "lamp_off",
+      message:
+        "The lamp is off, and writing a level above 0 can switch it on, so nothing was written; the level stays as the agent set it.",
+    });
   }
 
   async #observeProvenNativeValue(change, current) {
@@ -12641,9 +12584,14 @@ function parseRestoreRef(ref) {
 }
 
 // Newest first, so each change is undone before the ones it built on. A
-// lamp's On is moved after its level changes in the same call: a lamp
-// coming back on shows its previous level at once, and one going off is
-// switched off last.
+// lamp with both On and level changes here has them undone together, at
+// the place of its newest one, each kind newest first. A level is written
+// only to a lamp that is on (#lampOffLevelSkip), so the levels go right
+// after the last On change that this restore switches back on: the lamp
+// comes on at its stored level, then takes the level back. With no such
+// On change they go before the On changes, while the lamp is still on:
+// switching it off first would let the level switch it on again
+// (2026-10-13-lamp-logic-undo, U1–U4).
 function restoreOrder(entries) {
   const ordered = [...entries].sort((left, right) =>
     compareApplication(right.change, left.change),
@@ -12653,23 +12601,33 @@ function restoreOrder(entries) {
     lamp(entry) !== null && LIGHT_LEVEL_TYPES.has(entry.change.contract?.type);
   const isOn = (entry) =>
     lamp(entry) !== null && entry.change.contract?.type === "On";
-  const lastLevel = new Map();
-  ordered.forEach((entry, index) => {
-    if (isLevel(entry)) lastLevel.set(lamp(entry), index);
-  });
+  const isLampPart = (entry) => isOn(entry) || isLevel(entry);
+  const lamps = new Map();
+  for (const entry of ordered.filter(isLampPart)) {
+    const parts = lamps.get(lamp(entry)) ?? { on: [], levels: [] };
+    (isOn(entry) ? parts.on : parts.levels).push(entry);
+    lamps.set(lamp(entry), parts);
+  }
   const result = [];
-  const held = new Map();
-  ordered.forEach((entry, index) => {
-    const key = lamp(entry);
-    if (isOn(entry) && (lastLevel.get(key) ?? -1) > index) {
-      held.set(key, [...(held.get(key) ?? []), entry]);
-      return;
+  const placed = new Set();
+  for (const entry of ordered) {
+    const parts = isLampPart(entry) ? lamps.get(lamp(entry)) : undefined;
+    if (!parts || parts.on.length === 0 || parts.levels.length === 0) {
+      result.push(entry);
+      continue;
     }
-    result.push(entry);
-    if (isLevel(entry) && lastLevel.get(key) === index) {
-      result.push(...(held.get(key) ?? []));
-    }
-  });
+    if (placed.has(lamp(entry))) continue;
+    placed.add(lamp(entry));
+    const split =
+      parts.on.findLastIndex(
+        ({ change }) => change.baseline_value?.value === true,
+      ) + 1;
+    result.push(
+      ...parts.on.slice(0, split),
+      ...parts.levels,
+      ...parts.on.slice(split),
+    );
+  }
   return result;
 }
 
@@ -12747,20 +12705,6 @@ function restoreItem(change, automation, result, before) {
           status: "restored",
           sent: false,
           note: "nothing_to_restore",
-          ...observed,
-        };
-      }
-      if (
-        before.lampWritten &&
-        before.valueBeforeCall !== undefined &&
-        !valuesEqual(before.valueBeforeCall, change.baseline_value)
-      ) {
-        // Another value of this lamp put back in this call brought it back.
-        return {
-          ...base,
-          status: "restored",
-          sent: false,
-          note: "restored_with_lamp",
           ...observed,
         };
       }
@@ -12995,8 +12939,8 @@ function restoreChangesResult(homeRef, results) {
     summary,
     results,
     limitations: [
-      "Results are in the order the changes were undone: newest first, a lamp's level before its On. Each item was checked against the home right before its own write.",
-      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_off: a level is not written to a lamp that is off, as it can switch the lamp on.",
+      "Results are in the order the changes were undone: newest first; a lamp switched back on gets its On before its brightness, one switched off its brightness first. Each item was checked against the home right before its own write.",
+      "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_off: brightness is not written, nor offered for resend, to a lamp that is off, as it can switch the lamp on; this holds for every lamp with On and Brightness, as whether its lamp logic is assigned is not checked. Hue, saturation and color temperature are written without this check.",
       "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, sent notifications and HTTP requests cannot be undone.",
     ],
   };
