@@ -66,20 +66,24 @@ async function setup(t) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
+  // Runs action once, the moment the hub receives the next request of
+  // this method and before it handles it.
+  const onNext = (method, action) =>
+    new Promise((resolve) => {
+      hooks.onRequest = (request) => {
+        if (request.method !== method) return;
+        hooks.onRequest = undefined;
+        action(request);
+        resolve();
+      };
+    });
   // The MCP server process is killed the moment the hub receives the next
   // request of this method, before any answer: what its journal holds then
   // is all the next server has. The hub then handles the request unless
   // the test lost it first (loseNext).
   const stopOnNext = (method) =>
-    new Promise((resolve) => {
-      hooks.onRequest = (request) => {
-        if (request.method !== method) return;
-        hooks.onRequest = undefined;
-        process.kill(servers.at(-1).transport.pid, "SIGKILL");
-        resolve();
-      };
-    });
-  return { hub, client, connect, stopOnNext };
+    onNext(method, () => process.kill(servers.at(-1).transport.pid, "SIGKILL"));
+  return { hub, client, connect, onNext, stopOnNext };
 }
 
 async function call(client, name, args) {
@@ -396,30 +400,34 @@ for (const reached of [false, true]) {
   });
 }
 
+// A BLOCK the agent creates: a button that turns the chandelier off.
+const CREATED_BLOCK_NAME = "Выключить люстру";
+const createdBlockInput = {
+  operation: "block_create",
+  target_ref: homeRef,
+  name: CREATED_BLOCK_NAME,
+  description: "Выключает люстру в гостиной",
+  active: true,
+  on_start: false,
+  sync: false,
+  data: {
+    targets: [
+      {
+        type: "service",
+        aId: 15,
+        sId: 13,
+        hs: "Lightbulb",
+        characteristics: [{ type: "set", cId: 14, hc: "On", value: "false" }],
+      },
+    ],
+  },
+  reason: "Кнопка «выключить люстру»",
+};
+
 test("a BLOCK the agent created whose undo request was lost is deleted by restoring again", async (t) => {
   const { hub, client } = await setup(t);
   const initial = hub.snapshot();
-  const created = await applied(client, {
-    operation: "block_create",
-    target_ref: homeRef,
-    name: "Выключить люстру",
-    description: "Выключает люстру в гостиной",
-    active: true,
-    on_start: false,
-    sync: false,
-    data: {
-      targets: [
-        {
-          type: "service",
-          aId: 15,
-          sId: 13,
-          hs: "Lightbulb",
-          characteristics: [{ type: "set", cId: 14, hc: "On", value: "false" }],
-        },
-      ],
-    },
-    reason: "Кнопка «выключить люстру»",
-  });
+  const created = await applied(client, createdBlockInput);
   hub.loseNext("scenario.delete");
   const lost = await call(client, "restore_native_change", {
     change_ref: created.change_ref,
@@ -637,5 +645,85 @@ for (const direction of ["undo", "apply"]) {
     assert.equal(undone.status, "ok", JSON.stringify(undone.results));
     assertOnlyWrites(hub, sentBefore, BLOCK);
     assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  });
+}
+
+// Two changes of one scenario, the later built on the earlier. The later
+// one's undo takes effect, but its outcome is not read: the read right
+// after its write fails, or the MCP server stops first. The earlier one's
+// undo then goes on, as the hub shows it in place, which it does only
+// because the later undo took effect. That later undo is the agent's own
+// and done, never a change by hand.
+const CHAINS = [
+  {
+    name: "two BLOCK data changes",
+    write: "scenario.update",
+    read: "scenario.get",
+    inputs: [
+      (hub) => blockDataInput(hub, "20"),
+      (hub) => blockDataInput(hub, "40"),
+    ],
+  },
+  {
+    name: "two scenario renames",
+    write: "window.update",
+    read: "window.get",
+    inputs: [() => renameInput("Ночь"), () => renameInput("Ночь, свет")],
+  },
+];
+
+async function assertBothUndone(hub, client, initial, first, second) {
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  const sentBefore = hub.requests.length;
+  const read = await call(client, "get_native_change", {
+    change_ref: second.change_ref,
+  });
+  assert.equal(read.status, "restored", JSON.stringify(read));
+  assert.equal(read.manual_change_observed, undefined);
+  const again = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, second.change_ref],
+  });
+  assert.equal(again.status, "ok", JSON.stringify(again.results));
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+}
+
+for (const { name, write, read, inputs } of CHAINS) {
+  test(`«верни как было» over ${name} whose later undo was not read back puts both back and never names that undo a change by hand`, async (t) => {
+    const { hub, client, onNext } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const second = await applied(client, inputs[1](hub));
+    // The read right after the later undo's write fails once.
+    const armed = onNext(write, () => hub.refuseNext(read));
+    const undone = await call(client, "restore_native_change", {
+      change_refs: [first.change_ref, second.change_ref],
+    });
+    await armed;
+    assert.equal(
+      itemOf(undone, second).status,
+      "uncertain",
+      JSON.stringify(undone.results),
+    );
+    assert.equal(itemOf(undone, first).status, "restored");
+    await assertBothUndone(hub, client, initial, first, second);
+  });
+
+  test(`after the MCP server stopped during the undo of the later of ${name}, undoing the earlier one alone settles the later undo as done`, async (t) => {
+    const { hub, client, connect, stopOnNext } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const second = await applied(client, inputs[1](hub));
+    const stopped = stopOnNext(write);
+    callUnanswered(client, "restore_native_change", {
+      change_ref: second.change_ref,
+    });
+    await stopped;
+    const restarted = await connect();
+    const earlier = await call(restarted, "restore_native_change", {
+      change_ref: first.change_ref,
+    });
+    assert.equal(earlier.status, "restored", JSON.stringify(earlier));
+    await assertBothUndone(hub, restarted, initial, first, second);
   });
 }
