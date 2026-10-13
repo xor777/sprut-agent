@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#07070d" />
+    <title>Домик</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon-192.png" />
+    <style>
+      :root {
+        --bg: #07070d;
+        --text: #ecebf5;
+        --muted: #8d8ba6;
+        --accent: #8b8cf8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        color: var(--text);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* A still backdrop: nothing large repaints while the conversation runs. */
+      body {
+        background:
+          radial-gradient(
+            120% 70% at 50% 115%,
+            rgb(99 102 241 / 0.32),
+            transparent 62%
+          ),
+          radial-gradient(
+            90% 55% at -10% -10%,
+            rgb(236 72 153 / 0.16),
+            transparent 60%
+          ),
+          radial-gradient(
+            80% 50% at 110% 10%,
+            rgb(34 211 238 / 0.1),
+            transparent 60%
+          ),
+          var(--bg);
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+
+      main {
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        padding: max(14px, env(safe-area-inset-top)) 18px
+          max(18px, env(safe-area-inset-bottom));
+      }
+      header {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 28px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .brand svg {
+        width: 16px;
+        height: 16px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--state, #4b4a63);
+        box-shadow: 0 0 10px var(--state, transparent);
+        transition:
+          background 0.4s,
+          box-shadow 0.4s;
+      }
+
+      /* The conversation owns the screen; the newest line stays in view. */
+      .log {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        scrollbar-width: none;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 24px 2px 12px;
+        mask-image: linear-gradient(to bottom, transparent 0, #000 40px);
+      }
+      .log::-webkit-scrollbar {
+        display: none;
+      }
+      .log > :first-child {
+        margin-top: auto;
+      }
+      .line {
+        margin: 0;
+        overflow-wrap: anywhere;
+        animation: rise 0.25s ease-out;
+      }
+      .assistant {
+        font-size: 21px;
+        line-height: 1.38;
+        font-weight: 400;
+        letter-spacing: -0.005em;
+      }
+      .user {
+        align-self: flex-end;
+        max-width: 82%;
+        padding: 8px 13px;
+        border-radius: 16px 16px 4px 16px;
+        background: rgb(255 255 255 / 0.07);
+        color: #c9c8de;
+        font-size: 15px;
+        line-height: 1.35;
+      }
+      .user.pending {
+        color: var(--muted);
+      }
+      .welcome {
+        color: var(--muted);
+        font-size: 24px;
+        font-weight: 300;
+        line-height: 1.35;
+      }
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+      }
+
+      footer {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        padding-top: 8px;
+      }
+      .hint {
+        margin: 0;
+        min-height: 1.3em;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      /* The orb: a small glass sphere; only it moves. */
+      .orb {
+        --level: 0;
+        position: relative;
+        width: 92px;
+        height: 92px;
+        padding: 0;
+        border: none;
+        border-radius: 50%;
+        background: none;
+        cursor: pointer;
+        isolation: isolate;
+      }
+      .orb > span {
+        position: absolute;
+        border-radius: 50%;
+        pointer-events: none;
+      }
+      .core {
+        inset: 0;
+        overflow: hidden;
+        box-shadow:
+          0 10px 30px rgb(0 0 0 / 0.5),
+          inset 0 0 0 1px rgb(255 255 255 / 0.12);
+        transform: scale(calc(1 + var(--level) * 0.08));
+      }
+      .core::before {
+        content: "";
+        position: absolute;
+        inset: -25%;
+        background: conic-gradient(
+          from 0deg,
+          #22d3ee,
+          #818cf8,
+          #f472b6,
+          #fbbf24,
+          #22d3ee
+        );
+        animation: spin 9s linear infinite;
+      }
+      .core::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background:
+          radial-gradient(
+            circle at 32% 26%,
+            rgb(255 255 255 / 0.65),
+            transparent 32%
+          ),
+          radial-gradient(circle at 50% 50%, transparent 40%, rgb(7 7 13 / 0.55));
+      }
+      .ring {
+        inset: -10px;
+        border: 2px solid var(--state, transparent);
+        opacity: calc(0.25 + var(--level) * 0.75);
+        transform: scale(calc(1 + var(--level) * 0.22));
+      }
+      .arc {
+        inset: -10px;
+        opacity: 0;
+        background: conic-gradient(
+          from 0deg,
+          transparent 0 70%,
+          var(--state, #fff) 100%
+        );
+        mask: radial-gradient(
+          farthest-side,
+          transparent calc(100% - 2px),
+          #000 calc(100% - 2px)
+        );
+        transition: opacity 0.3s;
+      }
+      [data-state="idle"] .core,
+      [data-state="ended"] .core,
+      [data-state="no_token"] .core,
+      [data-state="error"] .core {
+        filter: saturate(0.55) brightness(0.8);
+        animation: breathe 4.5s ease-in-out infinite;
+      }
+      [data-state="connecting"] .arc,
+      [data-state="thinking"] .arc,
+      [data-state="working"] .arc {
+        opacity: 1;
+        animation: spin 1.1s linear infinite;
+      }
+      [data-state="working"] .arc {
+        animation-duration: 0.8s;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(1turn);
+        }
+      }
+      @keyframes breathe {
+        50% {
+          transform: scale(0.95);
+        }
+      }
+      .mic-off {
+        position: absolute;
+        inset: 30%;
+        width: 40%;
+        height: 40%;
+        color: #fff;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+      }
+      [data-muted] .mic-off {
+        opacity: 0.9;
+      }
+      [data-muted] .core {
+        filter: grayscale(1) brightness(0.45);
+      }
+      [data-muted] .ring,
+      [data-muted] .arc {
+        opacity: 0;
+      }
+      .end {
+        min-height: 36px;
+        padding: 0 18px;
+        border: 1px solid rgb(255 255 255 / 0.14);
+        border-radius: 18px;
+        background: rgb(255 255 255 / 0.04);
+        color: var(--muted);
+        font: inherit;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .end[hidden] {
+        display: none;
+      }
+      [data-state="listening"] {
+        --state: #2dd4bf;
+      }
+      [data-state="thinking"],
+      [data-state="connecting"] {
+        --state: #818cf8;
+      }
+      [data-state="working"] {
+        --state: #fbbf24;
+      }
+      [data-state="speaking"] {
+        --state: #f472b6;
+      }
+      [data-state="error"] {
+        --state: #fb7185;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .core::before,
+        .orb .arc,
+        .orb .core,
+        .line {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body data-state="idle">
+    <main>
+      <header>
+        <p class="brand">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3.5 11 12 4l8.5 7M6 9.5V20h12V9.5" />
+          </svg>
+          Домик
+        </p>
+        <span class="dot" aria-hidden="true"></span>
+      </header>
+      <section id="log" class="log" aria-live="polite">
+        <p class="line welcome">Скажите, что сделать дома</p>
+      </section>
+      <footer>
+        <button id="talk" class="orb" type="button" aria-label="Поговорить">
+          <span class="ring"></span>
+          <span class="arc"></span>
+          <span class="core"></span>
+          <svg
+            class="mic-off"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M9 5a3 3 0 0 1 6 0v5M15 13.5A3 3 0 0 1 9 11V9M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.4 2.3M12 18v3M4 4l16 16"
+            />
+          </svg>
+        </button>
+        <p id="hint" class="hint"></p>
+        <button id="end" class="end" type="button" hidden>Закончить</button>
+        <p id="status" class="sr-only" aria-live="polite"></p>
+      </footer>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

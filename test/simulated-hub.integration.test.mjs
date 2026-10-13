@@ -1590,6 +1590,64 @@ async function listenToEvents(t, hub) {
   };
 }
 
+test("a search restarted while a device is being interviewed does not pair it twice", async (t) => {
+  // In the full run the ZigBee search test restarted its search between a
+  // device's announcement and the end of its interview, and the simulator
+  // paired the same device a second time; a live device mid-pairing does
+  // not join again.
+  const fixture = await loadHomeFixture("apartment");
+  fixture.pairing = [
+    {
+      extensionKey: "Controller:zigbee",
+      joinAfterMs: 0,
+      interviewMs: 200,
+      accessory: {
+        id: 201,
+        name: "Ещё датчик",
+        deviceId: "00158d0007c0beef",
+        services: [
+          {
+            sId: 13,
+            type: "LeakSensor",
+            name: "Протечка",
+            characteristics: [{ cId: 14, type: "LeakDetected", value: 0 }],
+          },
+        ],
+      },
+    },
+  ];
+  const { send } = await rawSession(t, {}, fixture);
+  const start = () =>
+    send({
+      extension: {
+        action: {
+          extensionKey: "Controller:zigbee",
+          spaceKey: "main",
+          actionId: 1,
+          state: true,
+        },
+      },
+    });
+
+  await start();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await start();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  const children = (
+    await send({
+      extensionChild: { list: { extensionKey: "Controller:zigbee" } },
+    })
+  ).result.extensionChild.list.children.filter(
+    ({ id }) => id === "00158d0007c0beef",
+  );
+  const accessories = (
+    await send({ accessory: { list: {} } })
+  ).result.accessory.list.accessories.filter(({ id }) => id === 201);
+  assert.equal(children.length, 1);
+  assert.equal(accessories.length, 1);
+});
+
 // The ZigBee search as the owner's hub ran it (2026-10-12-device-pairing,
 // check 1): an empty answer, state and endTimestamp read back, a repeat
 // restarting the timer, a stop clearing it, and an extension event pushed

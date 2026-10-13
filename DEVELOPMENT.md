@@ -37,6 +37,50 @@ node ./dist/plugin/dist/server.mjs
 `.codex-plugin/mcp.json` использует `./dist/server.mjs` с `cwd: "."`: Codex
 запускает процесс из папки плагина.
 
+## Голосовой стенд владельца
+
+На `sprut.spaoasis.ru` работает отдельный голосовой прототип из `voice/`.
+Текущий исходный срез — `9d0e6d5`, установка в `/opt/sprut-voice/current`.
+Доступ к ВМ: `ssh sprut-voice` (`dmitry@153.76.166.188`), ключ через
+локальный агент 1Password, sudo без пароля. SSH root и вход по паролю закрыты.
+
+Сервис `sprut-voice.service` запускает `voice/server.mjs` под пользователем
+`sprut-voice`, Node.js 24.21.0. Для этого среза нужен полный lockfile:
+`ws` используется MCP, хотя пока находится в `devDependencies`. `npm start`
+запускает MCP, а не голосовой HTTP-сервер.
+
+Конфигурация, ключ OpenAI, токен приглашения и сессия SprutHub находятся в
+`/var/lib/sprut-voice/.config/sprut-agent/`, журнал — в
+`/var/lib/sprut-voice/state/`; файлы доступны только сервисному пользователю.
+При замене уже загруженного ключа или токена перезапусти сервис:
+
+```sh
+ssh sprut-voice 'sudo systemctl restart sprut-voice'
+ssh sprut-voice 'systemctl status sprut-voice sprut-routing sprut-egress caddy'
+```
+
+Caddy обслуживает HTTPS и передаёт запросы на `127.0.0.1:8787`. Для изменения
+его конфигурации нужен restart: административный API отключён. Вывод voice
+и Xray не сохраняется в journald: прототип пишет реплики и аргументы команд
+без редактирования. Не запускай на стенде `--tunnel`: он печатает приглашение.
+
+Исходящий TCP/UDP ВМ перехватывает `sprut-routing.service`; Xray в
+`sprut-egress.service` направляет `geosite:category-ru` и `geoip:ru` напрямую,
+остальное — через существующий польский `vless-pl`. Используются готовые
+[доменные списки V2Fly](https://github.com/v2fly/domain-list-community)
+(срез `20261009101206`) и [GeoIP V2Fly](https://github.com/v2fly/geoip)
+(`202610050438`), файлы в `/opt/sprut-egress/`. Обновление списков — вручную
+с проверкой конфигурации и обоих маршрутов. ICMP не переносится VLESS;
+публичного IPv6 у этого стенда нет. Остановка Xray не снимает перехват:
+запросы не переходят на прямой зарубежный выход. `sprut-voice` требует
+успешного запуска маршрутизации. Для UDP на привилегированных портах клиенту
+нужны `CAP_NET_ADMIN` и `CAP_NET_BIND_SERVICE`.
+
+Аудио и установление WebRTC идут между браузером и OpenAI. Маршрутизация ВМ
+не меняет сеть телефона: самому устройству нужен доступ к OpenAI. При ошибке
+открытия разговора прототип может оставить захваченный микрофон; до исправления
+закрой страницу, чтобы его освободить.
+
 ## Проверки
 
 ```sh
