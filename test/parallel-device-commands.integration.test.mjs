@@ -686,8 +686,8 @@ test("brightness 0 beside the same lamp's off is one off, reported for both comm
     [
       [CHANDELIER_ON, "On", false, "Люстра / Люстра"],
       [CHANDELIER_LEVEL, "Brightness", 0, "Люстра / Люстра"],
-      [FLOOR_LEVEL, "Brightness", 0, "Торшер / Торшер"],
-      [FLOOR_ON, "On", false, "Торшер / Торшер"],
+      [FLOOR_LEVEL, "Brightness", 0, "Торшер / Свет"],
+      [FLOOR_ON, "On", false, "Торшер / Свет"],
     ].map(([target, type, requested, name]) => ({
       target_ref: refOf(target),
       name,

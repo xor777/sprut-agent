@@ -1117,10 +1117,18 @@ export class AutomationService {
         readbacks: new Map(),
       };
       await mapWithConcurrency(
-        deviceCommandRuns(items),
+        deviceCommandRuns(items.filter(({ sameWriteAs }) => !sameWriteAs)),
         DEVICE_COMMAND_CONCURRENCY,
         (device) => this.#runDeviceCommands(device, run),
       );
+      for (const { index, sameWriteAs, shown, note } of items) {
+        if (!sameWriteAs) continue;
+        run.results[index] = {
+          ...run.results[sameWriteAs.index],
+          ...shown,
+          note,
+        };
+      }
       await this.#settleLamps(items, devices, run);
       return deviceCommandsResult(
         homeRef,
@@ -1221,21 +1229,29 @@ export class AutomationService {
         );
       }
     }
-    // A brightness 0 sent as a lamp's off is one write with a command to
-    // that lamp's On.
-    const first = new Map();
-    for (const { index, command, draft } of items) {
-      const key = nativeTargetKey(draft.fields.target);
-      if (!first.has(key)) {
-        first.set(key, index);
+    // A brightness 0 sent as a lamp's off beside the same lamp's off is
+    // that off's write, reported for both (sameWriteAs); beside its on it
+    // is refused.
+    const byTarget = new Map();
+    for (const item of items) {
+      const key = nativeTargetKey(item.draft.fields.target);
+      const other = byTarget.get(key);
+      if (!other) {
+        byTarget.set(key, item);
         continue;
       }
-      invalid.push({
-        index,
-        target_ref: command.target_ref,
-        code: "duplicate_target",
-        message: `Command ${first.get(key)} already sets this lamp's On, and brightness 0 is sent as the lamp's off; send one of them.`,
-      });
+      if (!valuesEqual(other.draft.requested, item.draft.requested)) {
+        invalid.push({
+          index: item.index,
+          target_ref: item.command.target_ref,
+          code: "duplicate_target",
+          message: `Command ${other.index} sets this lamp's On to the other value, and brightness 0 is sent as the lamp's off; send one of them.`,
+        });
+        continue;
+      }
+      const [zero, off] = item.shown.sent_as ? [item, other] : [other, item];
+      zero.sameWriteAs = off;
+      byTarget.set(key, off);
     }
     if (invalid.length > 0) {
       throw invalidDeviceCommands(
@@ -10751,7 +10767,7 @@ const DEVICE_COMMAND_CONCURRENCY = 32;
 const LAMP_LEVEL_ZERO_NOTE = {
   code: "lamp_level_zero_is_off",
   message:
-    "On the hub's lamps brightness 0 switches the lamp off and is not stored, so this command was sent as the lamp's off (sent_as): previous_value and observed_value are its on/off, and its brightness stays as it was.",
+    "Sent as the lamp's off (sent_as), one write with any off of the same lamp in this call: previous_value and observed_value are its on/off, and its brightness stays as it was.",
 };
 
 const LAMP_KEPT_OFF_NOTE = {
