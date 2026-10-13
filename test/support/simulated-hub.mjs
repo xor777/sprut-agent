@@ -1058,6 +1058,8 @@ export async function startSimulatedHub(
     ),
   };
   state.faultEvents = [];
+  // Characteristics the owner changed by hand (changeByHand), with the time.
+  state.handChanges = [];
   state.pending = new Set();
   // Timers of the hub's own later steps (a search ending, a device joining);
   // close() clears them.
@@ -1215,6 +1217,24 @@ export async function startSimulatedHub(
         ),
         device,
       );
+    },
+    // Changes a value as the owner does with a wall switch or the SprutHub
+    // app: the home changes, links and lamp logic follow, and no request
+    // is recorded, so a grader tells it apart from the MCP server's writes.
+    changeByHand: ({ aId, sId, cId, value }) => {
+      const characteristic = requireCharacteristic(state, { aId, sId, cId });
+      writeValue(
+        state,
+        characteristic,
+        checkedValue(characteristic.control, value),
+      );
+      state.handChanges.push({
+        at: new Date().toISOString(),
+        aId,
+        sId,
+        cId,
+        value: structuredClone(value),
+      });
     },
     faultEvents: () => structuredClone(state.faultEvents),
     connections: () => structuredClone(connections),
