@@ -575,3 +575,99 @@ test(
     assert.equal(relay.connections.length, 2);
   },
 );
+
+// The home the MCP process keeps warm follows the events of the connection
+// it was read over. A retired connection stays open while requests wait on
+// it and the hub still pushes it events, possibly late against the new
+// connection's: such an event is not dropped, nor applied over the newer
+// read, but has its device read again.
+test(
+  "an event that comes over a retired connection has its device read again",
+  BOUNDED,
+  async (t) => {
+    const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+    const relay = await startRelay(hub);
+    const stateDirectory = await mkdtemp(
+      path.join(tmpdir(), "sprut-agent-hub-connection-"),
+    );
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/server.mjs"],
+      cwd: projectRoot,
+      env: {
+        PATH: process.env.PATH,
+        ...hub.connectionEnv(),
+        SPRUTHUB_URL: relay.url,
+        SPRUTHUB_TIMEOUT_MS: String(TIMEOUT_MS),
+        SPRUT_AGENT_STATE_DIR: stateDirectory,
+      },
+      stderr: "pipe",
+    });
+    const client = new Client({
+      name: "hub-connection-test",
+      version: "1.0.0",
+    });
+    await client.connect(transport);
+    t.after(async () => {
+      await client.close();
+      await relay.close();
+      await hub.close();
+      await rm(stateDirectory, { recursive: true, force: true });
+    });
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args });
+      return { result, at: Date.now() };
+    };
+    const lampsOn = async () => {
+      const before = hub.requests.length;
+      const { result } = await call("find_devices", {
+        home_ref: homeRef,
+        state: "on",
+      });
+      assertAnswered({ result });
+      return {
+        refs: result.structuredContent.rooms.flatMap(({ devices }) =>
+          devices.map(({ ref }) => ref),
+        ),
+        methods: hub.requests.slice(before).map(({ method }) => method),
+      };
+    };
+    assertAnswered(await call("home_overview", {}));
+    const [retired] = relay.connections;
+    const first = relay.hold(accessoryRead(12));
+    const second = relay.hold(accessoryRead(26));
+
+    // The first read runs out of time and retires the connection; the
+    // second still waits on it, so it stays open.
+    const timedOut = call("get_entity", { entity_ref: hallLight });
+    await sleep(TIMEOUT_MS / 2);
+    const waiting = call("get_entity", {
+      entity_ref: `${homeRef}/accessory/26`,
+    });
+    await second.requested;
+    assertTimedOut(await timedOut);
+    first.release();
+    assert.equal(retired.closedAt, null);
+
+    // The home is read again over a new connection, then the floor lamp is
+    // switched off: the hub pushes the event to both connections.
+    const reread = await lampsOn();
+    assert(reread.methods.includes("accessory.list"));
+    assert(reread.refs.includes(floorLamp));
+    hub.changeByHand({
+      aId: 16,
+      sId: 13,
+      cId: 14,
+      value: { boolValue: false },
+    });
+    await sleep(150);
+    assert(retired.events.length > 0, "the retired connection got the event");
+    assert.equal(retired.closedAt, null);
+
+    const after = await lampsOn();
+    assert.deepEqual(after.methods, ["accessory.get"]);
+    assert(!after.refs.includes(floorLamp));
+    second.release();
+    await waiting;
+  },
+);
