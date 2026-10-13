@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { WebSocket, WebSocketServer } from "ws";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -22,14 +24,78 @@ const projectRoot = path.resolve(
   "..",
 );
 
+// One connection to two homes, as the SprutHub cloud serves an account with
+// several: a request goes to the home its serial names (one without a
+// serial to the first, whose home list gains the second home), and both
+// homes push their events down it.
+async function startTwoHomeRelay(first, second) {
+  const secondListed = second.request({ hub: { list: {} } }).result.hub.list
+    .hubs;
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    handleProtocols: (protocols) =>
+      protocols.has("json-rpc") ? "json-rpc" : false,
+  });
+  await once(server, "listening");
+  server.on("connection", (client) => {
+    const homeLists = new Set();
+    const upstreams = new Map(
+      [first, second].map((hub) => {
+        const socket = new WebSocket(hub.url, "json-rpc");
+        const queued = [];
+        socket.on("open", () => {
+          for (const data of queued.splice(0)) socket.send(data);
+        });
+        socket.on("message", (data) => {
+          let text = data.toString();
+          const frame = JSON.parse(text);
+          if (homeLists.delete(frame.id) && frame.result?.hub?.list?.hubs) {
+            frame.result.hub.list.hubs.push(...secondListed);
+            text = JSON.stringify(frame);
+          }
+          if (client.readyState === WebSocket.OPEN) client.send(text);
+        });
+        socket.on("close", () => client.terminate());
+        return [hub.serial, { socket, queued }];
+      }),
+    );
+    client.on("message", (data) => {
+      const text = data.toString();
+      const request = JSON.parse(text);
+      if (request.params?.hub?.list) homeLists.add(request.id);
+      const upstream =
+        upstreams.get(request.serial) ?? upstreams.get(first.serial);
+      if (upstream.socket.readyState === WebSocket.OPEN) {
+        upstream.socket.send(text);
+      } else {
+        upstream.queued.push(text);
+      }
+    });
+    client.on("close", () => {
+      for (const { socket } of upstreams.values()) socket.terminate();
+    });
+  });
+  return {
+    url: `ws://127.0.0.1:${server.address().port}`,
+    close: async () => {
+      for (const socket of server.clients) socket.terminate();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 // With clockStepMs the server runs with test/support/shifted-clock.mjs and
-// shiftClock moves its clock that far forward.
+// shiftClock moves its clock that far forward. With secondHome the server
+// reaches both homes over one connection (startTwoHomeRelay).
 async function setup(
   t,
   fixture,
-  { eventEveryMs, timeoutMs = 3000, clockStepMs } = {},
+  { eventEveryMs, timeoutMs = 3000, clockStepMs, secondHome } = {},
 ) {
   const hub = await startSimulatedHub(fixture, { eventEveryMs });
+  const second = secondHome ? await startSimulatedHub(secondHome) : null;
+  const relay = second ? await startTwoHomeRelay(hub, second) : null;
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-home-state-"),
   );
@@ -43,6 +109,7 @@ async function setup(
     env: {
       PATH: process.env.PATH,
       ...hub.connectionEnv(),
+      ...(relay ? { SPRUTHUB_URL: relay.url } : {}),
       SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
       SPRUT_AGENT_STATE_DIR: stateDirectory,
       ...(clockStepMs ? { SPRUT_TEST_CLOCK_STEP_MS: String(clockStepMs) } : {}),
@@ -53,6 +120,8 @@ async function setup(
   await client.connect(transport);
   t.after(async () => {
     await client.close();
+    await relay?.close();
+    await second?.close();
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
@@ -83,7 +152,7 @@ async function setup(
     await shifted;
   };
   const home = `spruthub://hub/${encodeURIComponent(hub.serial)}`;
-  return { hub, call, callError, home, shiftClock };
+  return { hub, second, call, callError, home, shiftClock };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -638,4 +707,240 @@ test("a device that drops off the network shows as unavailable after its availab
   assert(
     listed(unavailable.body).some(({ device }) => device.ref === nightLight),
   );
+});
+
+// Each frame below comes with an edit the state cannot take from it: the
+// floor lamp renamed in the hub without an event the state applies.
+test("an event the warm home cannot follow has the next answer read the whole home again", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  const lamp = hub.state.accessories.find(({ id }) => id === 16);
+  const frames = {
+    "an accessory event whose item has no id": () =>
+      hub.emit({
+        accessory: {
+          event: "EVENT_UPDATE",
+          accessories: [{ name: lamp.name }],
+        },
+      }),
+    "a hub event": () => hub.emit({ hub: { event: "EVENT_UPDATE" } }),
+    "a frame that is not JSON": () => hub.pushRaw("{"),
+  };
+  for (const [what, push] of Object.entries(frames)) {
+    lamp.name = `Торшер, ${what}`;
+    push();
+    await settle();
+    const lights = await call("find_devices", {
+      room_ref: `${home}/room/3`,
+      kind: "light",
+    });
+    assert(methods(lights.native).includes("accessory.list"), what);
+    assert(
+      listed(lights.body).some(({ device }) => device.name === lamp.name),
+      what,
+    );
+  }
+});
+
+test("an event of a device the warm home cannot apply has that device read again", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  await call("home_overview", {});
+  const lamp = hub.state.accessories.find(({ id }) => id === 16);
+  const service = lamp.services.find(({ sId }) => sId === 13);
+  const read = async () => {
+    const answer = await call("find_devices", { query: "торшер" });
+    return { methods: methods(answer.native), ...listed(answer.body)[0] };
+  };
+
+  // A value event of another type than EVENT_UPDATE.
+  service.characteristics.find(({ cId }) => cId === 14).control.value = {
+    boolValue: false,
+  };
+  hub.emit({
+    characteristic: {
+      event: "EVENT_ADD",
+      characteristics: [
+        { ...floorLampOn, control: { value: { boolValue: false } } },
+      ],
+    },
+  });
+  await settle();
+  const typed = await read();
+  assert.deepEqual(typed.methods, ["accessory.get"]);
+  assert.equal(onValue(typed.service), false);
+
+  // A value of a characteristic the device did not have when it was read.
+  const temperature = structuredClone(
+    hub.state.accessories
+      .find(({ id }) => id === 17)
+      .services.find(({ sId }) => sId === 13)
+      .characteristics.find(({ cId }) => cId === 18),
+  );
+  Object.assign(temperature, { aId: 16, sId: 13, cId: 16 });
+  service.characteristics.push(temperature);
+  hub.emit({
+    characteristic: {
+      event: "EVENT_UPDATE",
+      characteristics: [
+        {
+          aId: 16,
+          sId: 13,
+          cId: 16,
+          control: { value: structuredClone(temperature.control.value) },
+        },
+      ],
+    },
+  });
+  await settle();
+  const added = await read();
+  assert.deepEqual(added.methods, ["accessory.get"]);
+  assert(added.service.values.some(({ type }) => type === "ColorTemperature"));
+
+  // A service renamed in the SprutHub app.
+  service.name = "Торшер у дивана";
+  hub.emit({
+    service: {
+      event: "EVENT_UPDATE",
+      services: [{ aId: 16, sId: 13, name: service.name }],
+    },
+  });
+  await settle();
+  const renamed = await read();
+  assert.deepEqual(renamed.methods, ["accessory.get"]);
+  assert.equal(renamed.service.name, "Торшер у дивана");
+});
+
+// While a read is in flight its log keeps what came meanwhile; past
+// EVENT_LOG_LIMIT entries it cannot say what it missed. Creating 4
+// accessories pushed about 360 frames in 2 s on the owner's hub.
+test("more events during a read than the home keeps have the next answer read it whole again", async (t) => {
+  const { hub, call } = await setup(t, await loadHomeFixture("apartment"));
+  await call("home_overview", {});
+  hub.delayReplies("accessory.list", 400);
+  const from = hub.requests.length;
+  const refreshed = call("find_devices", { query: "торшер", refresh: true });
+  await handled(hub, "accessory.list", from);
+  const hall = hub.state.rooms.find(({ id }) => id === 1);
+  for (let index = 0; index < 1000; index += 1) {
+    hub.emit({
+      room: {
+        event: "EVENT_UPDATE",
+        rooms: [{ id: hall.id, name: hall.name }],
+      },
+    });
+  }
+  hub.changeByHand({ ...floorLampOn, value: { boolValue: false } });
+  await refreshed;
+  hub.delayReplies("accessory.list", 0);
+
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert(methods(lamp.native).includes("accessory.list"));
+  assert.equal(onValue(listed(lamp.body)[0].service), false);
+});
+
+// Events do not name their home: on a connection that carried two homes'
+// serials an event cannot be told to be either's. Both apartments have the
+// floor lamp under the same ids.
+test("events of a second home on the same connection do not change the first home's answers", async (t) => {
+  const secondHome = await loadHomeFixture("apartment");
+  secondHome.hub.serial = "sim-apartment-02";
+  const { call, second } = await setup(t, await loadHomeFixture("apartment"), {
+    secondHome,
+  });
+  const otherHome = `spruthub://hub/${second.serial}`;
+  await call("home_overview", {});
+  const other = await call("find_devices", {
+    home_ref: otherHome,
+    query: "торшер",
+  });
+  assert.equal(onValue(listed(other.body)[0].service), true);
+
+  second.changeByHand({ ...floorLampOn, value: { boolValue: false } });
+  await settle();
+  const lamp = await call("find_devices", { query: "торшер" });
+  assert.equal(onValue(listed(lamp.body)[0].service), true);
+  const otherLamp = await call("find_devices", {
+    home_ref: otherHome,
+    query: "торшер",
+  });
+  assert.equal(onValue(listed(otherLamp.body)[0].service), false);
+});
+
+// A read the hub answered before a configuration write of this process
+// may come back after it.
+test("a configuration write while the home is read has the next answer read it again", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+  const prepared = await call("prepare_native_change", {
+    operation: "service_name",
+    target_ref: `${home}/accessory/17/service/13`,
+    value: "Лента над диваном",
+    reason: "Переименовать ленту",
+  });
+  hub.delayReplies("accessory.list", 600);
+  const from = hub.requests.length;
+  let readDone = false;
+  const reading = call("find_devices", { query: "лента", refresh: true }).then(
+    () => {
+      readDone = true;
+    },
+  );
+  await handled(hub, "accessory.list", from);
+  await call("apply_native_change", { change_ref: prepared.body.change_ref });
+  assert.equal(readDone, false, "the rename went in while the read waited");
+  await reading;
+  hub.delayReplies("accessory.list", 0);
+
+  const lights = await call("find_devices", {
+    room_ref: `${home}/room/3`,
+    kind: "light",
+  });
+  assert(methods(lights.native).includes("accessory.list"));
+  assert(
+    listed(lights.body).some(
+      ({ service }) => service.name === "Лента над диваном",
+    ),
+  );
+});
+
+test("a device moved to a room created without an event, and a room moved in the order, read the room list again", async (t) => {
+  const { hub, call, home } = await setup(
+    t,
+    await loadHomeFixture("apartment"),
+  );
+  await call("home_overview", {});
+
+  hub.state.rooms.push({ id: 41, name: "Веранда", order: 41, visible: true });
+  hub.state.accessories.find(({ id }) => id === 16).roomId = 41;
+  hub.emit({ accessory: { event: "EVENT_UPDATE", accessories: [{ id: 16 }] } });
+  await settle();
+  const moved = await call("find_devices", { query: "торшер" });
+  assert.deepEqual(methods(moved.native), ["accessory.get", "room.list"]);
+  assert.equal(listed(moved.body)[0].room.name, "Веранда");
+
+  // The bedroom moved to the top of the room list in the SprutHub app.
+  const bedroom = hub.state.rooms.find(({ id }) => id === 5);
+  hub.state.rooms = [
+    bedroom,
+    ...hub.state.rooms.filter((room) => room !== bedroom),
+  ];
+  hub.state.rooms.forEach((room, index) => {
+    room.order = index + 1;
+  });
+  hub.emit({
+    room: {
+      event: "EVENT_UPDATE",
+      rooms: [{ id: 5, name: bedroom.name, order: bedroom.order }],
+    },
+  });
+  await settle();
+  const overview = await call("home_overview", {});
+  assert(methods(overview.native).includes("room.list"));
+  assert.equal(overview.body.rooms[0].ref, `${home}/room/5`);
 });

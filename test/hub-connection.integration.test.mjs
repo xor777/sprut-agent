@@ -671,3 +671,67 @@ test(
     await waiting;
   },
 );
+
+// A connection retired while the whole home was being read over it may be
+// gone without a close; the read's reply still comes over it, yet the home
+// must not then follow its events.
+test(
+  "a whole read answered over a connection retired meanwhile has the next answer read the home again",
+  BOUNDED,
+  async (t) => {
+    const { hub, relay, call } = await setup(t);
+    assertAnswered(await call("home_overview", {}));
+    const [retired] = relay.connections;
+    const slow = relay.hold(accessoryRead(12));
+    const beside = relay.hold(accessoryRead(26));
+    const list = relay.hold((params) => params.accessory?.list !== undefined);
+    const lampsOn = async (args = {}) => {
+      const before = hub.requests.length;
+      const outcome = await call("find_devices", {
+        home_ref: homeRef,
+        state: "on",
+        ...args,
+      });
+      assertAnswered(outcome);
+      return {
+        refs: outcome.result.structuredContent.rooms.flatMap(({ devices }) =>
+          devices.map(({ ref }) => ref),
+        ),
+        methods: hub.requests.slice(before).map(({ method }) => method),
+      };
+    };
+
+    // The first read runs out of time and retires the connection; the
+    // whole read and a read beside it still wait there, so it stays open.
+    const timedOut = call("get_entity", { entity_ref: hallLight });
+    await sleep(TIMEOUT_MS / 2);
+    const waiting = call("get_entity", {
+      entity_ref: `${homeRef}/accessory/26`,
+    });
+    const reread = lampsOn({ refresh: true });
+    await beside.requested;
+    await list.requested;
+    assertTimedOut(await timedOut);
+    slow.release();
+
+    // The whole read comes back over the retired connection, which then
+    // goes quiet without a close; the floor lamp is switched off.
+    list.release();
+    await reread;
+    assert.equal(retired.closedAt, null);
+    relay.silence();
+    hub.changeByHand({
+      aId: 16,
+      sId: 13,
+      cId: 14,
+      value: { boolValue: false },
+    });
+    await sleep(150);
+
+    const after = await lampsOn();
+    assert(after.methods.includes("accessory.list"));
+    assert(!after.refs.includes(floorLamp));
+    beside.release();
+    await waiting;
+  },
+);

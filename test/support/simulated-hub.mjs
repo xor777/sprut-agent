@@ -1316,6 +1316,15 @@ export async function startSimulatedHub(
     dropEvents: (match) => {
       lostEvents = match;
     },
+    // Pushes text as it is to the connections that receive events, as a
+    // frame a client cannot read.
+    pushRaw: (text) => {
+      for (const client of server.clients) {
+        if (client.readyState === client.OPEN && receivesEvents.has(client)) {
+          client.send(text);
+        }
+      }
+    },
     refuseNext: (method, error) => {
       const queue = refusals.get(method) ?? [];
       queue.push(
