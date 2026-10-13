@@ -1206,8 +1206,14 @@ test("a start whose kept searches cannot be written sends nothing", async (t) =>
     assert.equal(refused.error.code, "state_storage_unavailable");
     assert.equal(refused.error.action, "restore_state_storage_then_retry");
     assert.equal(refused.active, undefined);
+    assert.match(refused.error.message, /sent nothing to the hub/);
     assert(!JSON.stringify(refused).includes(stateDirectory), refused);
   }
+  // Read before its watch was saved, the controller showed no search. The
+  // old watches are removed before the hub is read: a search started in
+  // the SprutHub app may run, and the answer does not say otherwise.
+  assert.match(latest.error.message, /did not open the network/);
+  assert.doesNotMatch(aged.error.message, /network/);
   assert.deepEqual(searchActions(hub), [
     { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
     { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
@@ -1218,7 +1224,9 @@ test("a start whose kept searches cannot be written sends nothing", async (t) =>
 // A start beside a search that already runs sends nothing either way, but
 // the network is open: an answer that it was not opened would have the
 // agent tell the owner the network is closed while any device can join.
-test("a start beside a running search whose watch cannot be saved sends nothing and says the network stays open", async (t) => {
+// When this product already watches that search, the answer gives its ref,
+// whose stop closes the network without waiting for the directory.
+test("a start beside a running search whose watch cannot be saved sends nothing, says the network stays open and gives the stop of its watch", async (t) => {
   const { hub, client, stateDirectory } = await setup(t, await apartment());
   t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
 
@@ -1244,6 +1252,19 @@ test("a start beside a running search whose watch cannot be saved sends nothing 
   const again = await call(client, "start_device_search", {
     extension_ref: zigbeeRef,
   });
+  // The error gives the ref of the watch kept for the running search. Its
+  // stop reaches the hub while the directory still cannot be written.
+  assert.deepEqual(besideWatched.stop, {
+    tool: "stop_device_search",
+    arguments: { search_ref: watched.search_ref },
+  });
+  await chmod(watches, 0o555);
+  const stopped = await toolError(
+    client,
+    besideWatched.stop.tool,
+    besideWatched.stop.arguments,
+  );
+  await chmod(watches, 0o700);
 
   for (const refused of [beside, besideWatched]) {
     assert.equal(refused.error.code, "state_storage_unavailable");
@@ -1253,10 +1274,23 @@ test("a start beside a running search whose watch cannot be saved sends nothing 
     assert.equal(refused.ends_at, watched.ends_at);
     assert(!JSON.stringify(refused).includes(stateDirectory), refused);
   }
+  // Started in the app while nothing could be kept, the search has no ref.
+  assert.equal(beside.search_ref, undefined);
+  assert.equal(beside.stop, undefined);
+  assert.equal(besideWatched.search_ref, watched.search_ref);
+  assert.deepEqual(besideWatched.next, {
+    tool: "get_device_search",
+    arguments: { search_ref: watched.search_ref },
+  });
   assert.equal(watched.status, "already_running");
   assert.equal(again.status, "already_running");
   assert.equal(again.search_ref, watched.search_ref);
-  assert.deepEqual(searchActions(hub), []);
+  assert.equal(stopped.error.code, "state_storage_unavailable");
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(stopped.active, false);
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
+  ]);
 });
 
 // Resolves once check() is true.
