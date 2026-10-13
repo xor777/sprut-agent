@@ -343,6 +343,49 @@ test("a bridge read that fails is not taken for an accessory not exported", asyn
   assert.deepEqual(hub.writes(), []);
 });
 
+// A bridge lists every accessory it can export, so one missing from a list
+// with children cannot be exported. A list with no children at all (the hub
+// then omits it, 2026-09-17-extension-child-empty-list) shows nothing about
+// one accessory: neither that the bridge cannot export it nor that it does
+// not.
+test("a bridge that lists no accessories does not say an accessory cannot be exported", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  const homekitBridge = fixture.extensions.find(
+    ({ extensionKey }) => extensionKey === "Bridge:homekit",
+  );
+  homekitBridge.unexportable = fixture.accessories.map(({ id }) => id);
+  homekitBridge.exported = {};
+  const { hub, client } = await setup(t, fixture);
+
+  const floorLamp = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/16`,
+    include: ["bridges"],
+  });
+  const [homekit, yandex] = floorLamp.entity.bridges;
+  const { reason, ...unknown } = homekit;
+  assert.deepEqual(unknown, {
+    ref: bridge(apartment, "homekit"),
+    name: "HomeKit",
+    type: "homekit",
+    state: "LOADED",
+    enabled: true,
+    running: true,
+    exported: null,
+    exportable: null,
+  });
+  assert.match(reason, /lists no accessories/i);
+  // The other bridge still answers from its own list.
+  assert.equal(yandex.exported, true);
+  // The bridge's own read shows the list as it is: empty.
+  const homekitChildren = await read(hub, client, {
+    entity_ref: bridge(apartment, "homekit"),
+    include: ["children"],
+  });
+  assert.equal(homekitChildren.entity.exported_count, 0);
+  assert.deepEqual(homekitChildren.entity.children, []);
+  assert.deepEqual(hub.writes(), []);
+});
+
 test("bridge reads stay bounded by the question as the home grows", async (t) => {
   const small = await setup(
     t,

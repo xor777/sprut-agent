@@ -1945,13 +1945,16 @@ const HANDLERS = {
   // A device still joining keeps its status and progressBar in the list, as
   // the web client draws them from the list and its events (K7, K8); a
   // paired device's list entry has neither (owner's hub, H3).
-  "extensionChild.list": (state, { extensionKey }) => ({
-    children: extensionChildren(state, extensionKey).map((child) => {
+  // An empty list is left out of the answer, as the hub does
+  // (2026-09-17-extension-child-empty-list).
+  "extensionChild.list": (state, { extensionKey }) => {
+    const children = extensionChildren(state, extensionKey).map((child) => {
       if (isJoining(state, child)) return child;
       const { description: _d, status: _s, ...summary } = child;
       return summary;
-    }),
-  }),
+    });
+    return children.length === 0 ? {} : { children };
+  },
   "extensionChild.get": (state, { extensionKey, id }) =>
     extensionChildren(state, extensionKey).find((child) => child.id === id) ??
     null,
