@@ -3,34 +3,19 @@ import { parse } from "@babel/parser";
 // SprutHub takes a LOGIC's name, description and start on boot from the
 // info object of its code, at create and again on every code write, even
 // unchanged (owner hub, 3.0.0, research/protocol/2026-10-13-wave4-
-// contracts.md 1.5, 1.6). These helpers find the three values in the code
-// without running it and rewrite them in place, leaving every other byte
-// of the code as it was. Only plain values are read: a name built from
-// parts or taken from a variable has no value here.
-export const LOGIC_INFO_FIELDS = ["name", "description", "onStart"];
-
+// contracts.md 1.5, 1.6). readLogicInfo finds the three values in the code
+// without running it, so that a code write can say what it sets. Only
+// plain values are read: a name built from parts, taken from a variable or
+// changed after the literal has no value here.
 const FIELD_LITERALS = {
   name: "StringLiteral",
   description: "StringLiteral",
   onStart: "BooleanLiteral",
 };
 
-// Why the three values cannot all be rewritten in place, or undefined when
-// they can. A change of any one writes all three (the code sets all three
-// on every write), so one unreadable field stops it.
-export function logicInfoNotEditable(info) {
-  return (
-    info.problem ??
-    (LOGIC_INFO_FIELDS.map((field) => info.problems[field])
-      .filter(Boolean)
-      .join("; ") ||
-      undefined)
-  );
-}
-
-// { fields, problems, problem }: fields holds each info field found as a
-// plain value ({value, start, end, line, quote}); problems says why another
-// field has none; problem, when set, why info itself cannot be read.
+// { values, problems, problem }: values holds each info field found as a
+// plain value; problems says why another field has none; problem, when set,
+// why info itself cannot be read.
 export function readLogicInfo(source) {
   let program;
   try {
@@ -57,7 +42,7 @@ export function readLogicInfo(source) {
       "the code changes info or passes it on after assigning it",
     );
   }
-  const fields = {};
+  const values = {};
   const problems = {};
   for (const property of object.properties) {
     if (property.type === "SpreadElement") {
@@ -67,8 +52,8 @@ export function readLogicInfo(source) {
       return unreadable("info has a computed key");
     }
     const key = propertyKey(property);
-    if (!LOGIC_INFO_FIELDS.includes(key)) continue;
-    if (Object.hasOwn(fields, key) || Object.hasOwn(problems, key)) {
+    if (!Object.hasOwn(FIELD_LITERALS, key)) continue;
+    if (Object.hasOwn(values, key) || Object.hasOwn(problems, key)) {
       return unreadable(`info sets ${key} more than once`);
     }
     const value = property.type === "ObjectProperty" ? property.value : null;
@@ -77,53 +62,18 @@ export function readLogicInfo(source) {
         `info.${key} is not a plain ${key === "onStart" ? "true or false" : "string"}`;
       continue;
     }
-    fields[key] = {
-      value: value.value,
-      start: value.start,
-      end: value.end,
-      line: value.loc.start.line,
-      quote: source[value.start],
-    };
+    values[key] = value.value;
   }
-  for (const key of LOGIC_INFO_FIELDS) {
-    if (!Object.hasOwn(fields, key) && !Object.hasOwn(problems, key)) {
+  for (const key of Object.keys(FIELD_LITERALS)) {
+    if (!Object.hasOwn(values, key) && !Object.hasOwn(problems, key)) {
       problems[key] = `info has no ${key}`;
     }
   }
-  return { fields, problems };
-}
-
-// Sets the info fields in desired that differ from the code, each in place
-// of its value; info is readLogicInfo(source) and must hold every field
-// desired names. Edits come in the order of the code.
-export function rewriteLogicInfo(source, info, desired) {
-  const changed = LOGIC_INFO_FIELDS.filter(
-    (field) =>
-      Object.hasOwn(desired, field) &&
-      info.fields[field].value !== desired[field],
-  )
-    .map((field) => ({ field, literal: info.fields[field] }))
-    .sort((left, right) => left.literal.start - right.literal.start);
-  let rewritten = source;
-  for (const { field, literal } of [...changed].reverse()) {
-    rewritten =
-      rewritten.slice(0, literal.start) +
-      literalText(desired[field], literal.quote) +
-      rewritten.slice(literal.end);
-  }
-  return {
-    source: rewritten,
-    edits: changed.map(({ field, literal }) => ({
-      field: `info.${field}`,
-      line: literal.line,
-      from: literal.value,
-      to: desired[field],
-    })),
-  };
+  return { values, problems };
 }
 
 function unreadable(problem) {
-  return { fields: {}, problems: {}, problem };
+  return { values: {}, problems: {}, problem };
 }
 
 // info = {...} or var/let/const info = {...} at the top level.
@@ -257,24 +207,4 @@ function propertyKey(property) {
   if (property.key.type === "Identifier") return property.key.name;
   if (property.key.type === "StringLiteral") return property.key.value;
   return undefined;
-}
-
-// A JavaScript literal of value, a string in the quote the code used.
-function literalText(value, quote) {
-  if (typeof value === "boolean") return String(value);
-  let text = quote;
-  for (const character of value) {
-    if (character === "\\" || character === quote) {
-      text += `\\${character}`;
-    } else if (character === "\n") {
-      text += "\\n";
-    } else if (character === "\r") {
-      text += "\\r";
-    } else if (character < " " || character === " " || character === " ") {
-      text += `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
-    } else {
-      text += character;
-    }
-  }
-  return text + quote;
 }
