@@ -2037,6 +2037,7 @@ function pairingDevicesFor(state, { extensionKey, spaceKey }) {
   return state.pairing.filter(
     (device) =>
       device.joined !== true &&
+      device.joining !== true &&
       device.extensionKey === extensionKey &&
       (device.spaceKey ?? "main") === spaceKey,
   );
@@ -2050,6 +2051,8 @@ function isJoining(state, child) {
 }
 
 function announceJoining(state, extension, device) {
+  // A device being interviewed does not join again on a repeated search.
+  device.joining = true;
   const child = {
     extensionKey: extension.extensionKey,
     id: device.accessory.deviceId,
