@@ -1048,6 +1048,32 @@ test("history summaries name what changed, why, when and in which group", async 
   assert.equal(room.group_ref, undefined);
 });
 
+// «Что ты менял в гостиной?»: a room ref selects changes of the room itself,
+// not of the devices in it, so an empty answer says where those are.
+test("history of a room says that its devices' changes are found by the device", async (t) => {
+  const { client } = await setup(t);
+  const sent = await command(
+    client,
+    [[CHANDELIER_ON, false]],
+    "Выключить люстру",
+  );
+
+  const room = await call(client, "get_native_change", {
+    entity_ref: `${homeRef}/room/3`,
+  });
+  assert.deepEqual(room.changes, []);
+  assert.equal(typeof room.hint, "string");
+
+  const device = await call(client, "get_native_change", {
+    entity_ref: `${homeRef}/accessory/15`,
+  });
+  assert.deepEqual(
+    device.changes.map(({ change_ref: ref }) => ref),
+    [sent.results[0].change_ref],
+  );
+  assert.equal(device.hint, undefined);
+});
+
 test("history names a prepared device setting by its device", async (t) => {
   const { client } = await setup(t);
   const setpoint = await prepareAndApply(client, {

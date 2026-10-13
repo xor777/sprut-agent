@@ -260,6 +260,14 @@ test("a prepared characteristic value changes only that simulated characteristic
   assert.equal(applied.status, "applied");
   // A one-off setting is not an automation: nothing to say it overwrites.
   assert.equal(applied.tell_owner, undefined);
+  assert.equal(
+    (
+      await call(client, "get_native_change", {
+        change_ref: prepared.change_ref,
+      })
+    ).tell_owner,
+    undefined,
+  );
   assert.deepEqual(applied.observed_value, { value: 30, kind: "intValue" });
   assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
     { key: "characteristic/16.13.15/Brightness", before: 55, after: 30 },
@@ -351,8 +359,13 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
   });
   assert.equal(applied.status, "applied");
   // An automation from now on: the agent is told to say what it will
-  // overwrite.
+  // overwrite, also when a later check confirms it applied.
   assert.equal(typeof applied.tell_owner, "string");
+  const checked = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(checked.status, "applied");
+  assert.equal(checked.tell_owner, applied.tell_owner);
   const created = hub.state.scenarios.at(-1);
   assert.equal(applied.scenario_ref, `${homeRef}/scenario/${created.index}`);
   assert.equal(created.name, "Свет в ванной по движению");
