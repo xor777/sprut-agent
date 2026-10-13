@@ -614,6 +614,112 @@ export const LABELS = {
         "Это «Ночной режим»: в 23:00 он включает свет в коридоре на 15 % и люстру в гостиной.",
     },
   ],
+  "why-lamp-not-on": [
+    {
+      id: "short-both",
+      label: "pass",
+      source: "written",
+      why: "the answer the owner's live case asked for: values and the room",
+      answer:
+        "Сейчас 24 лк, а сценарий включает лампу только при освещённости меньше 20 лк. И движение ловит датчик в коридоре, не в кабинете.",
+    },
+    {
+      id: "scenario-explained",
+      label: "pass",
+      source: "written",
+      why: "names the scenario, the condition with both values and the corridor sensor",
+      answer:
+        "Лампу включает сценарий «Свет в кабинете по движению». Он срабатывает от датчика движения в коридоре — своего датчика в кабинете нет — и включает лампу, только если освещённость меньше 20 лк. Тот же датчик сейчас показывает 24 лк, поэтому лампа не включается.",
+    },
+    {
+      id: "list-with-offer",
+      label: "pass",
+      source: "written",
+      why: "cause in a list, a change only offered",
+      answer:
+        "Причина в условии сценария «Свет в кабинете по движению»:\n- движение он берёт с датчика в коридоре;\n- лампу включает, только когда освещённость ниже 20 лк;\n- сейчас датчик показывает 24 лк — слишком светло.\n\nМогу поднять порог до 30 лк, если хотите.",
+    },
+    {
+      id: "no-study-sensor",
+      label: "pass",
+      source: "written",
+      why: "says the study has no motion sensor instead of naming the corridor",
+      answer:
+        "Сценарий включает настольную лампу по движению, но только при освещённости ниже 20 лк, а сейчас 24 лк. Учтите, что в самом кабинете датчика движения нет: правило реагирует на движение у другого датчика.",
+    },
+    {
+      id: "lux-word",
+      label: "pass",
+      source: "written",
+      why: "люкс spelled out, both values and the corridor",
+      answer:
+        "Не выполняется условие по свету: нужно меньше 20 люкс, а датчик движения в коридоре, по которому работает сценарий, сейчас видит 24 люкса.",
+    },
+    {
+      id: "table",
+      label: "pass",
+      source: "written",
+      why: "a table with the condition, the value and the sensor's room",
+      answer:
+        "| Условие | Нужно | Сейчас |\n| --- | --- | --- |\n| Движение (датчик в коридоре) | есть | нет |\n| Освещённость (тот же датчик) | < 20 лк | 24 лк |\n\nЛампа не включается из-за освещённости: в коридоре сейчас 24 лк.",
+    },
+    {
+      id: "no-room",
+      label: "fail",
+      source: "written",
+      why: "does not say that the motion is seen in the corridor",
+      answer:
+        "Лампа не включается, потому что освещённость сейчас 24 лк, а сценарий требует меньше 20 лк.",
+    },
+    {
+      id: "no-numbers",
+      label: "fail",
+      source: "written",
+      why: "neither the threshold nor the current value",
+      answer:
+        "Сценарий срабатывает от датчика движения в коридоре и только когда темно; видимо, сейчас слишком светло, поэтому лампа не включается.",
+    },
+    {
+      id: "disabled-claim",
+      label: "fail",
+      source: "written",
+      why: "the scenario is enabled",
+      answer:
+        "Сценарий «Свет в кабинете по движению» выключен, поэтому лампа и не реагирует на движение в коридоре. Освещённость там 24 лк при пороге 20 лк.",
+    },
+    {
+      id: "threshold-changed",
+      label: "fail",
+      source: "written",
+      why: "claims a change that was not made",
+      answer:
+        "Освещённость 24 лк, а порог был меньше 20 лк, и датчик движения стоит в коридоре. Я поднял порог до 30 лк — теперь лампа будет включаться.",
+    },
+    {
+      id: "sensor-in-study",
+      label: "fail",
+      source: "written",
+      why: "puts the motion sensor in the study",
+      answer:
+        "Датчик движения в кабинете сейчас видит 24 лк, а сценарий включает лампу только ниже 20 лк.",
+    },
+    {
+      id: "wrong-values",
+      label: "fail",
+      source: "written",
+      why: "another value and threshold",
+      answer:
+        "Сценарий ждёт освещённости меньше 30 лк, а датчик в коридоре показывает 12 лк — значит, дело не в свете, а в самой лампе.",
+    },
+    {
+      id: "lamp-offline",
+      label: "fail",
+      source: "written",
+      why: "the lamp is available; the cause is the light level",
+      answer:
+        "Настольная лампа сейчас недоступна, поэтому команда сценария до неё не доходит. Датчик в коридоре показывает 24 лк при пороге 20 лк.",
+    },
+  ],
   "lying-scenario": [
     {
       id: "no-with-alternative",

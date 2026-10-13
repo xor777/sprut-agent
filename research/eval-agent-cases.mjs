@@ -257,6 +257,31 @@ export const CASES = {
       ],
     }),
   },
+  // The owner's live case of 13.10.2026: the office lamp «switches on by
+  // motion» and does not. The rule waits for motion in another room and
+  // for a light level under 20 lux, and the sensor reads 24.
+  "why-lamp-not-on": {
+    prompt:
+      "В кабинете настольная лампа включается по датчику движения, но сейчас почему-то не включается. Почему?",
+    patch: withStudyLampMotionRule,
+    graders: [
+      noWrites(),
+      answerMatches("answer_has_light_level", /(?<![\d.,:])24(?![\d:]|[.,]\d)/),
+    ],
+    judge: (evidence) => ({
+      facts: [
+        "«Свет в кабинете по движению» is an enabled scenario: when «Датчик движения в коридоре», the motion sensor in «Коридор» (the corridor), detects motion, it switches «Настольная лампа» in «Кабинет» (the study) on, but only while the same sensor's light level («Освещенность») is below 20 lux; 3 minutes later it switches the lamp off.",
+        "That sensor's light level reads 24 lux now, so the light condition is not met and motion does not switch the lamp on. «Кабинет» has no motion sensor of its own: motion in the study itself is not seen by this rule.",
+        "«Настольная лампа» is off now and available. No other scenario or logic switches it on by motion.",
+        changesFact(evidence),
+      ],
+      criteria: [
+        "The answer gives the light level condition as the reason the lamp does not switch on, with both numbers: the rule needs under 20 lux and the sensor reads 24 lux now (lux may be written лк or люкс).",
+        "It tells the owner that the motion starting the rule is detected by the sensor in the corridor, not in the study: by naming the corridor as the sensor's place, or by saying that the study has no motion sensor of its own.",
+        "It does not claim to have changed the scenario, the lamp or anything else, and nothing it says contradicts the facts (for example, that the scenario is disabled, the lamp is unavailable, or another value or threshold). Suggesting a change for the owner to approve is fine.",
+      ],
+    }),
+  },
   "lying-scenario": {
     prompt:
       "Хочу гасить настольную лампу в кабинете сценарием «Выключить свет в кабинете». Он для этого подходит?",
@@ -1220,6 +1245,86 @@ function withSecondFloorLamp(fixture) {
         ],
       },
     ],
+  });
+  return fixture;
+}
+
+// The office lamp of the owner's live case on the model home: motion in
+// the corridor switches the study's desk lamp on while the corridor
+// sensor reads under 20 lux, and off 3 minutes later. The sensor reads 24
+// lux and the lamp is off. Index 90 is free in both homes.
+function withStudyLampMotionRule(fixture) {
+  withValues(fixture, [
+    [13, 20, 21, 24],
+    [32, 13, 14, false],
+  ]);
+  const deskLamp = (on) => ({
+    type: "service",
+    aId: 32,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics: [{ type: "set", cId: 14, hc: "On", value: String(on) }],
+  });
+  fixture.scenarios.push({
+    index: "90",
+    name: "Свет в кабинете по движению",
+    desc: "",
+    type: "BLOCK",
+    active: true,
+    data: {
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: 13,
+                sId: 13,
+                cId: 14,
+                hs: "MotionSensor",
+                hc: "MotionDetected",
+                cond: "=",
+                value: "true",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+              {
+                type: "characteristic",
+                aId: 13,
+                sId: 20,
+                cId: 21,
+                hs: "LightSensor",
+                hc: "CurrentAmbientLightLevel",
+                cond: "<",
+                value: "20",
+                trigger: false,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+          then: [
+            deskLamp(true),
+            {
+              type: "delay",
+              index: 1,
+              mode: "RESET",
+              time: 180_000,
+              targets: [deskLamp(false)],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+        },
+      ],
+    },
   });
   return fixture;
 }

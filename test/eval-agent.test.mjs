@@ -30,6 +30,7 @@ import {
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import { LABELS } from "../research/eval-judge-labels.mjs";
 import {
+  evaluateRulesOnChange,
   loadHomeFixture,
   startSimulatedHub,
 } from "./support/simulated-hub.mjs";
@@ -2135,6 +2136,53 @@ test("ambiguous-bedroom-light takes the bedroom light or leaves the home for a q
   await both.send(setOn(26, 13, false));
   await both.send(setOn(30, 13, false));
   assert.equal(both.grade("Выключил.").nothing_else_changed, false);
+});
+
+// why-lamp-not-on tells the judge that motion in the corridor does not
+// switch the study lamp on because the light level is 24 lux, over the
+// rule's 20. The patched home must behave so in both fixtures, and at a
+// lower light level the same motion must switch the lamp on.
+test("why-lamp-not-on keeps the study lamp off on motion only for the light level", async (t) => {
+  const motion = { aId: 13, sId: 13, cId: 14 };
+  const light = { aId: 13, sId: 20, cId: 21 };
+  for (const fixture of ["apartment", "house"]) {
+    const session = await caseSession(t, "why-lamp-not-on", fixture);
+    const { state } = session.hub;
+    const rule = state.scenarios.find(
+      ({ name }) => name === "Свет в кабинете по движению",
+    );
+    assert.equal(rule.active, true, fixture);
+    const sensor = state.accessories.find(({ id }) => id === 13);
+    const rooms = new Map(state.rooms.map(({ id, name }) => [id, name]));
+    assert.equal(rooms.get(sensor.roomId), "Коридор", fixture);
+    assert.equal(
+      state.accessories.some(
+        ({ roomId, services }) =>
+          rooms.get(roomId) === "Кабинет" &&
+          services.some(({ type }) => type === "MotionSensor"),
+      ),
+      false,
+      fixture,
+    );
+    const lampAfterMotion = (preset) =>
+      evaluateRulesOnChange(state, {
+        preset: [{ ...motion, value: false }, ...preset],
+        change: { ...motion, value: true },
+      }).after["32.13.14"];
+    assert.equal(lampAfterMotion([]), false, fixture);
+    assert.equal(lampAfterMotion([{ ...light, value: 15 }]), true, fixture);
+
+    assert.deepEqual(
+      session.grade(
+        "Сейчас 24 лк, а нужно меньше 20; движение ловит датчик в коридоре.",
+      ),
+      {
+        no_writes: true,
+        answer_has_light_level: true,
+        answer_has_no_raw_refs: true,
+      },
+    );
+  }
 });
 
 // Whether the answer admits the light stayed on is the judge's. What the
