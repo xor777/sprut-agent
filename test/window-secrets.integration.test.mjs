@@ -1129,3 +1129,61 @@ test("flag and length settings named after codes, IR codes and product identifie
   assert.deepEqual(options.InstallCodeEnabled, { boolValue: false });
   assert.deepEqual(options.PinCodeLength, { intValue: 6 });
 });
+
+// A flag or size name decides for its label only where its value cannot be
+// what the label names. A number under Mode labelled «Password» may be the
+// password itself; a CHECKBOX labelled «Install code» and a number
+// labelled «PIN code length» are a flag and a size.
+const ALARM_WINDOW = "Controller/zigbee/Child/00158d0001f0a1b2/";
+const ALARM_PASSWORD = 73195046;
+const ALARM_PIN = 482913;
+
+test("a number under a flag or size name labelled as a password stays hidden, while flags and sizes labelled after codes stay shown", async (t) => {
+  const { hub, answers, ok, refused } = await setup(t);
+  const number = (key, name, value, extra) =>
+    option(
+      key,
+      name,
+      "GenericInteger",
+      "NUMBER",
+      { intValue: value },
+      { minValue: 0, maxValue: 99_999_999, minStep: 1, ...extra },
+    );
+  hub.state.windows[ALARM_WINDOW] = {
+    windowKey: ALARM_WINDOW,
+    label: { text: "Сигнализация" },
+    options: [
+      number("Mode", "Password", ALARM_PASSWORD),
+      number("PinMode", "PIN", ALARM_PIN, { inputType: "PASSWORD" }),
+      number("PinCodeLength", "PIN code length", 6),
+      option(
+        "InstallCodeEnabled",
+        "Install code",
+        "GenericBoolean",
+        "CHECKBOX",
+        {
+          boolValue: true,
+        },
+      ),
+    ],
+  };
+  const alarmRef = windowRef(ALARM_WINDOW);
+
+  const shown = (await ok("get_entity", { entity_ref: alarmRef })).entity;
+  const prepared = await refused("prepare_native_change", {
+    operation: "window_option",
+    target_ref: alarmRef,
+    option_key: "Mode",
+    value: 1,
+    reason: "Владелец попросил",
+  });
+
+  assert.deepEqual(leakedSecrets(answers, { ALARM_PASSWORD, ALARM_PIN }), []);
+  assert.deepEqual(shownOptions(shown.options), {
+    PinCodeLength: 6,
+    InstallCodeEnabled: true,
+  });
+  assert.equal(hiddenCount(shown.options), 2);
+  assert.equal(prepared, "sensitive_native_data");
+  assert.deepEqual(windowWrites(hub), []);
+});
