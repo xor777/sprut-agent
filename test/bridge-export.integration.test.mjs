@@ -214,6 +214,7 @@ test("a bridge lists what it exports first, with rooms and a count", async (t) =
   });
   const { entity } = homekit;
   assert.equal(entity.exported_count, 5);
+  assert.equal(Object.hasOwn(entity, "limitation"), false);
   assert.deepEqual(
     entity.spaces.map(({ key, child_count }) => [key, child_count]),
     [
@@ -261,6 +262,7 @@ test("a bridge lists what it exports first, with rooms and a count", async (t) =
   });
   assert.equal(yandex.entity.state, "NOT_LOADED");
   assert.equal(yandex.entity.enabled, false);
+  assert.match(yandex.entity.limitation, /not running/i);
   assert.equal(yandex.entity.exported_count, 3);
   assert.equal(yandex.entity.children.length, 28);
   assert.deepEqual(
