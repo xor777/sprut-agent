@@ -1270,10 +1270,14 @@ test("a start whose watch cannot be saved after the start was sent says the netw
 // stop, with the search as read in the call: an internal error would hide
 // that the stop closed the network.
 test("a read and a stop whose search cannot be saved say what reached the hub", async (t) => {
-  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  const { hub, client, stateDirectory } = await setup(
+    t,
+    await apartment({ pairing: [leakSensor()] }),
+  );
   const started = await call(client, "start_device_search", {
     extension_ref: zigbeeRef,
   });
+  await accessoryCreated(hub, 200);
   const watches = await watchDirectory(stateDirectory);
   t.after(() => chmod(watches, 0o700).catch(() => {}));
   await chmod(watches, 0o555);
@@ -1297,6 +1301,8 @@ test("a read and a stop whose search cannot be saved say what reached the hub", 
     assert.equal(refused.error.code, "state_storage_unavailable");
     assert.equal(refused.error.action, "restore_state_storage_then_retry");
     assert.equal(refused.search_ref, started.search_ref);
+    // The sensor that joined is not lost to the agent meanwhile.
+    assert.equal(refused.result, "joined");
     assert(!JSON.stringify(refused).includes(stateDirectory), refused);
   }
   assert.equal(read.active, true);

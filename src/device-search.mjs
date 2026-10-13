@@ -112,7 +112,10 @@ export class DeviceSearches {
           view = await this.#read(search);
         }
         const report = this.#report(search, view);
-        await this.#save(search);
+        await keepState(
+          () => this.#save(search),
+          () => reportNotKept(search, report),
+        );
         return report;
       },
     );
@@ -125,7 +128,10 @@ export class DeviceSearches {
       (search) =>
         this.#exclusive(search.extensionKey, async () => {
           const report = await this.#stop(search);
-          await this.#save(search);
+          await keepState(
+            () => this.#save(search),
+            () => reportNotKept(search, report),
+          );
           return report;
         }),
     );
@@ -1039,6 +1045,30 @@ function startedNotKept(search, result) {
         tool: "start_device_search",
         arguments: { extension_ref: search.extensionRef },
       },
+    },
+  );
+}
+
+// A read or a stop whose search, as read in the call, could not be kept:
+// the stop it sent (stop_sent) is not undone. The new devices are summed
+// up by result; get_device_search lists them once the search is kept.
+function reportNotKept(search, report) {
+  const stopSent = report.stop_sent === true;
+  return new SprutHubError(
+    "state_storage_unavailable",
+    `${stopSent ? "The stop was sent to the hub" : "This call sent nothing to the hub"}; the fields beside this error are the search as read ${stopSent ? "after the stop" : "now"}. The search could not be saved in the local state directory. ${FIX_STATE_DIRECTORY}; then read it again with get_device_search.`,
+    "restore_state_storage_then_retry",
+    {
+      search_ref: search.ref,
+      active: report.active,
+      ...(report.ends_at
+        ? { ends_at: report.ends_at, seconds_left: report.seconds_left }
+        : {}),
+      result: report.result,
+      ...(report.stop_sent === undefined
+        ? {}
+        : { stop_sent: report.stop_sent }),
+      next: getCall(search),
     },
   );
 }
