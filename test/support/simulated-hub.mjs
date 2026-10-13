@@ -1255,6 +1255,14 @@ export async function startSimulatedHub(
       );
       refusals.set(method, queue);
     },
+    // The next request of this method is lost on its way: the hub never
+    // handles it, so nothing changes and no reply comes; the client times
+    // out (a droppedReply fault, by contrast, is applied).
+    loseNext: (method) => {
+      const queue = refusals.get(method) ?? [];
+      queue.push(LOST_REQUEST);
+      refusals.set(method, queue);
+    },
     // Replies to this method from now on are sent ms after the request is
     // handled; 0 sends them at once again.
     delayReplies: (method, ms) => {
@@ -1343,6 +1351,9 @@ export async function startSimulatedHub(
   };
 }
 
+// A queued refusal that loses the request instead (loseNext).
+const LOST_REQUEST = Symbol("lost request");
+
 function handleMessage(
   state,
   requests,
@@ -1384,6 +1395,11 @@ function handleMessage(
     return fail(new SimulatorError(-32000, "Unknown hub serial"));
   }
   const refusal = refusals.get(method)?.shift();
+  if (refusal === LOST_REQUEST) {
+    recordFault(state, "lost_request", entry);
+    entry.replyDropped = true;
+    return null;
+  }
   if (refusal) return fail(new SimulatorError(refusal.code, refusal.message));
   const handler = HANDLERS[method];
   state.currentRequest = entry;

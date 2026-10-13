@@ -935,3 +935,58 @@ test("the owner's rename back to the agent's earlier name is a change by hand of
   assert.equal(refused.manual_change_observed, true);
   assert.deepEqual(writesSince(hub, sentBefore), []);
 });
+
+// A setting write whose request was lost leaves its scenario as it was; it
+// does not stop the agent's other changes of the scenario from being
+// undone, and the undo does not send the lost write.
+test("after a BLOCK's Sync write is lost, «верни как было» puts back its rename and does not write Sync", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const renamed = await change(client, BLOCK, "Name", "Ночь");
+  const sync = await call(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: scenarioRef(BLOCK),
+    option_key: "Sync",
+    value: true,
+    reason: "Владелец попросил",
+  });
+  hub.loseNext("window.update");
+  const lost = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: sync.change_ref },
+  });
+  assert.notEqual(lost.structuredContent.status, "applied");
+  assert.equal(scenarioOf(hub, BLOCK).sync, false);
+  const read = await call(client, "get_native_change", {
+    change_ref: sync.change_ref,
+  });
+  assert.notEqual(read.status, "applied");
+
+  const sentBefore = hub.requests.length;
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [renamed.change_ref, sync.change_ref],
+  });
+  const results = Object.fromEntries(
+    undone.results.map((item) => [item.change_ref, item]),
+  );
+  assert.equal(
+    results[renamed.change_ref].status,
+    "restored",
+    JSON.stringify(undone.results),
+  );
+  assert.deepEqual(
+    writesSince(hub, sentBefore).map(({ params }) => params.window.update),
+    [
+      {
+        windowKey: scenarioOf(hub, BLOCK).optionsWindow,
+        options: [
+          {
+            key: "Name",
+            value: { stringValue: initial[`scenario/${BLOCK}/name`] },
+          },
+        ],
+      },
+    ],
+  );
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
