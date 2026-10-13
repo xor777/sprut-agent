@@ -17,10 +17,10 @@ import {
 // server asked for; the hub is the offline simulator.
 const ACCESS_TOKEN = "voice-test-token";
 
-async function setup(t, { faults } = {}) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
-    faults,
-  });
+async function setup(t, { faults, editHome } = {}) {
+  const home = await loadHomeFixture("apartment");
+  editHome?.(home);
+  const hub = await startSimulatedHub(home, { faults });
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-voice-"));
   const openai = await startFakeOpenAI();
   const homeTools = new HomeTools({
@@ -350,5 +350,68 @@ test("a level the hub shows only a moment later is reported as done", async (t) 
   assert.deepEqual(
     output.results.map(({ control, status, now }) => [control, status, now]),
     [["brightness", "applied", 30]],
+  );
+});
+
+test("a whole-room light command reaches every lamp of that room and no other", async (t) => {
+  const { tool, updates } = await setup(t);
+
+  const output = await tool("control_devices", {
+    commands: [{ room: "r3", kind: "light", control: "power", value: "off" }],
+    reason: "выключи свет в гостиной",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  // Люстра and Торшер were on; Лента was already off; other rooms untouched.
+  assert.deepEqual(
+    updates()
+      .map(({ aId }) => aId)
+      .sort(),
+    [15, 16],
+  );
+});
+
+test("warm white on a lamp with colour only is made from its colour", async (t) => {
+  const { tool, listedId, updates } = await setup(t, {
+    editHome: (home) => {
+      const strip = home.accessories.find(({ id }) => id === 17);
+      strip.services[0].characteristics =
+        strip.services[0].characteristics.filter(
+          ({ type }) => type !== "ColorTemperature",
+        );
+    },
+  });
+  const strip = await listedId("Светодиодная лента");
+
+  const output = await tool("control_devices", {
+    commands: [
+      { device: strip, control: "color_temperature", value: "тёплый" },
+    ],
+    reason: "сделай ленту тёплым белым",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  const written = Object.fromEntries(
+    updates().map(({ cId, control }) => [cId, Object.values(control.value)[0]]),
+  );
+  // Hue (16) and Saturation (17) of a 2700 K white, then On (14).
+  assert.deepEqual(written, { 16: 29, 17: 66, 14: true });
+});
+
+test("white on a lamp that has a white temperature uses it, not a bare colour", async (t) => {
+  const { tool, listedId, updates } = await setup(t);
+  const strip = await listedId("Светодиодная лента");
+
+  await tool("control_devices", {
+    commands: [{ device: strip, control: "color", value: "белый" }],
+    reason: "сделай ленту белой",
+  });
+
+  // ColorTemperature (18) at 4000 K, not Saturation 0 of the RGB LEDs.
+  assert.deepEqual(
+    updates()
+      .filter(({ cId }) => cId !== 14)
+      .map(({ cId, control }) => [cId, Object.values(control.value)[0]]),
+    [[18, 250]],
   );
 });
