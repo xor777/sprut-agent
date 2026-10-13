@@ -73,10 +73,13 @@ export class DeviceSearches {
       };
       // Watches not written for days go first, so none of them is taken
       // for the controller's latest.
-      const latest = await beforeStartSent(async () => {
-        await this.#store(target.serial).prune();
-        return this.#latest(target);
-      });
+      const latest = await keepState(
+        async () => {
+          await this.#store(target.serial).prune();
+          return this.#latest(target);
+        },
+        () => startNotSent(false),
+      );
       return latest === null
         ? begin(null)
         : this.#using(
@@ -132,7 +135,15 @@ export class DeviceSearches {
     const timeZone = await client.hubTimeZone(target.serial, deadline);
     if (current) {
       this.#updateState(current, extension);
-      await beforeStartSent(() => this.#save(current));
+      await keepState(
+        () => this.#save(current),
+        () =>
+          startNotSent(
+            action.state === true,
+            runningActionEnd(action),
+            timeZone,
+          ),
+      );
     }
     if (action.state === true) {
       // A resend would restart the hub's timer and keep the network open
@@ -664,7 +675,10 @@ export class DeviceSearches {
     };
     // Kept before the start is sent: a start whose watch cannot be kept is
     // not sent.
-    await beforeStartSent(() => this.#save(search));
+    await keepState(
+      () => this.#save(search),
+      () => startNotSent(running, runningActionEnd(action), timeZone),
+    );
     return search;
   }
 
@@ -959,20 +973,38 @@ function refusedByHub(error, ref, step) {
   );
 }
 
-// Runs a step of the state directory that comes before the start is sent.
-// When it fails, the agent learns that nothing reached the hub and how to
-// fix the directory; the file system's error names the path, so it is left
-// out.
-async function beforeStartSent(step) {
+// Runs a step of the state directory. When it fails, notKept() gives the
+// error that says what this call did on the hub, which the failed step does
+// not undo, and how to fix the directory; the file system's error names the
+// path, so it is left out.
+async function keepState(step, notKept) {
   try {
     return await step();
   } catch {
-    throw new SprutHubError(
+    throw notKept();
+  }
+}
+
+const FIX_STATE_DIRECTORY =
+  "Make that directory writable, or set SPRUT_AGENT_STATE_DIR to a writable directory and restart the MCP server";
+
+// A start that sent nothing because its watch could not be kept. The
+// network is as it was: closed, or open by the controller's search that
+// already runs (running), which ends by itself at end.
+function startNotSent(running, end = null, timeZone = null) {
+  if (!running) {
+    return new SprutHubError(
       "state_storage_unavailable",
-      "The device search could not be saved in the local state directory, so this call sent nothing to the hub and did not open the network. Make that directory writable, or set SPRUT_AGENT_STATE_DIR to a writable directory and restart the MCP server; then start the search again.",
+      `The device search could not be saved in the local state directory, so this call sent nothing to the hub and did not open the network. ${FIX_STATE_DIRECTORY}; then start the search again.`,
       "restore_state_storage_then_retry",
     );
   }
+  return new SprutHubError(
+    "state_storage_unavailable",
+    `The device search could not be saved in the local state directory, so this call sent nothing to the hub. The controller's search was already running and stays open until it ends by itself${end === null ? "" : " at ends_at"}: any device in pairing mode within range can join until then. ${FIX_STATE_DIRECTORY}; then start the search again: it returns the running search with its stop, without restarting it.`,
+    "restore_state_storage_then_retry",
+    { active: true, ...(end === null ? {} : searchEnd(end, timeZone)) },
+  );
 }
 
 // A read of one device that failed: the hub refused it or did not answer
