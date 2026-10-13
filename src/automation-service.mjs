@@ -43,6 +43,8 @@ import {
   characteristicNotifyOn,
   characteristicRef,
   HUB_TRANSPORT_ERROR_CODES,
+  hiddenLogicCode,
+  hiddenLogicInfo,
   isHubReadFailure,
   isSensitiveNativeNode,
   SprutHubError,
@@ -6402,8 +6404,15 @@ function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
 // its code on every code write, also unchanged, and a write of its options
 // window does not change info (research/protocol/2026-10-13-wave4-
 // contracts.md 1.4, 1.5): the window would hold them only until the next
-// code write, so they are changed in the code.
-function logicInfoInCode(scenarioRef, optionKey) {
+// code write, so they are changed in the code. In code the agent cannot
+// read (hiddenLogicCode), the owner changes them in the SprutHub app.
+function logicInfoInCode(scenarioRef, optionKey, scenario) {
+  if (hiddenLogicCode(scenario?.data)) {
+    return new SprutHubError(
+      "logic_info_in_code",
+      `${hiddenLogicInfo(optionKey)} Nothing was sent.`,
+    );
+  }
   const field = { Name: "name", Desc: "description", OnStart: "onStart" }[
     optionKey
   ];
@@ -11543,7 +11552,7 @@ async function readScenarioMetadataOption(
     );
   }
   if (scenario.type === "LOGIC" && optionKey !== "Sync") {
-    throw logicInfoInCode(scenarioRef, optionKey);
+    throw logicInfoInCode(scenarioRef, optionKey, scenario);
   }
   if (
     typeof scenario.optionsWindow !== "string" ||
@@ -11611,7 +11620,12 @@ async function rejectDirectScenarioMetadataWindow(service, windowKey, option) {
   if (matches.length !== 1) return;
   const scenarioRef = `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
   if (matches[0].type === "LOGIC" && option.key !== "Sync") {
-    throw logicInfoInCode(scenarioRef, option.key);
+    // The list carries no code; the scenario read does.
+    throw logicInfoInCode(
+      scenarioRef,
+      option.key,
+      await service.client.getScenario(matches[0].index),
+    );
   }
   throw scenarioOwnerRequired(scenarioRef, option.key);
 }

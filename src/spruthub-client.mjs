@@ -6128,22 +6128,46 @@ function scenarioMetadataOption(scenario, option, entity) {
         ? {
             // A LOGIC's code sets its name, description and onStart from
             // info on every code write (1.5): they are changed there, with
-            // logic_source_update.
+            // logic_source_update, unless the agent cannot read that code.
             native_change: {
               native_write: option.write === true,
               supported: false,
               reason: "logic_info_in_code",
-              next: {
-                tool: "get_entity",
-                arguments: {
-                  entity_ref: entity.ref,
-                  include: ["configuration"],
-                },
-              },
+              ...(hiddenLogicCode(scenario.data)
+                ? { message: hiddenLogicInfo(option.key) }
+                : {
+                    next: {
+                      tool: "get_entity",
+                      arguments: {
+                        entity_ref: entity.ref,
+                        include: ["configuration"],
+                      },
+                    },
+                  }),
             },
           }
         : {}),
   };
+}
+
+// Code with credential-shaped text reads back as [REDACTED] in every answer
+// (redactSensitiveText, as get_entity shows the configuration), and writing
+// the mark back is refused: the agent can neither read nor rewrite info in
+// it.
+export function hiddenLogicCode(source) {
+  return (
+    typeof source === "string" &&
+    redactSensitiveText(source, "javascript_source") === "[REDACTED]"
+  );
+}
+
+// What the agent tells the owner about a LOGIC's Name, Desc or OnStart in
+// such code.
+export function hiddenLogicInfo(optionKey) {
+  const field = { Name: "name", Desc: "description", OnStart: "onStart" }[
+    optionKey
+  ];
+  return `This LOGIC's ${optionKey} is info.${field} in its code, and its code holds credential-shaped text that sprut-agent shows only as [REDACTED]: the agent cannot read or rewrite that code, so it cannot change this. Tell the owner to change info.${field} in the code in the SprutHub app; a change in the scenario's options would last only until the next code write.`;
 }
 
 function codeScenarioSummary(scenario) {
