@@ -345,7 +345,6 @@ export class SprutHubClient {
         },
         token,
       );
-      if (feed && feed.serials.size > 1) state.markStale("mixed_homes");
     } finally {
       state.endRead(token);
     }
@@ -3476,8 +3475,11 @@ export class SprutHubClient {
 
   // A write of a device value waits for its event in the warm home state;
   // another write that may change what the state holds has the home read
-  // again, before and after it, so that a read in flight across the write
-  // does not answer for after it.
+  // again after it, also when a read was in flight across it (the state
+  // replays the mark over that read). A failed value write leaves the
+  // value to what comes next: a refusal or a write never sent changed
+  // nothing, and a write without a reply had its connection retired or
+  // lost, which has the whole home read again.
   async #request(params, deadline, { serial = this.serial } = {}) {
     const method = nativeMethod(params);
     if (READ_ONLY_METHODS.has(method)) {
@@ -3493,20 +3495,13 @@ export class SprutHubClient {
         ? [...this.#homeStates.values()]
         : [this.#homeStates.get(serial)].filter(Boolean);
     this.#writeGeneration += 1;
-    for (const state of states) {
-      if (target) state.writeSent(target);
-      else if (homeWrite) state.markStale("own_write");
-    }
+    if (target) for (const state of states) state.writeSent(target);
     try {
       const response = await this.#send(params, deadline, serial);
       if (target) for (const state of states) state.writeAnswered(target);
       return response;
     } catch (error) {
-      const refused =
-        error instanceof SprutHubError && error.hubError !== undefined;
-      if (target) {
-        for (const state of states) state.writeFailed(target, { refused });
-      }
+      if (target) for (const state of states) state.writeFailed(target);
       throw error;
     } finally {
       this.#writeGeneration += 1;
@@ -3715,20 +3710,16 @@ export class SprutHubClient {
   }
 
   // A request with a home's serial has the hub push that home's events to
-  // the connection (2026-10-13-voice-latency-baseline, section 5). Events
-  // do not name their home, so a connection that carried two homes' serials
-  // cannot feed either home's warm state.
+  // the connection (2026-10-13-voice-latency-baseline, section 5).
   #noteSerial(socket, serial) {
     const record = this.#connections.get(socket);
-    if (!record || serial === null || record.serials.has(serial)) return;
+    if (!record || serial === null) return;
     record.serials.add(serial);
-    if (record.serials.size < 2) return;
-    for (const known of record.serials) {
-      this.#homeStates.get(known)?.markStale("mixed_homes");
-    }
   }
 
-  // The events of a connection are applied to the home it carries.
+  // The events of a connection are applied to the home it carries. Events
+  // do not name their home: an event over a connection that carried two
+  // homes' serials is applied to neither, and both are read again.
   #routeHomeEvent(event, socket) {
     const record = this.#connections.get(socket);
     if (!record) return;

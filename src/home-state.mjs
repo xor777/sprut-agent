@@ -182,11 +182,6 @@ export class HomeState {
     this.#append({ stale: reason });
   }
 
-  markAccessoryStale(id, reason) {
-    this.#staleAccessories.set(id, reason);
-    this.#append({ accessory: id, reason });
-  }
-
   // The connection record is retired or lost: the state is stale if it
   // follows that connection.
   connectionGone(record, reason) {
@@ -203,11 +198,10 @@ export class HomeState {
     if (write) write.ackAt = Date.now();
   }
 
-  // A refused write changed nothing; any other failure leaves the value
-  // unknown until the accessory is read again.
-  writeFailed(target, { refused }) {
+  // The client reads again what a failed write may have changed: a write
+  // without a reply retires or loses the connection the state follows.
+  writeFailed(target) {
     this.#pending.delete(valueKey(target));
-    if (!refused) this.markAccessoryStale(target.aId, "write_outcome_unknown");
   }
 
   // A read sent after a write's reply shows what the write did.
@@ -241,11 +235,6 @@ export class HomeState {
         this.#stale ??= entry.stale;
       } else if (scope.all && entry.gone) {
         if (entry.gone === this.#feed) this.#stale ??= entry.reason;
-      } else if (
-        entry.accessory !== undefined &&
-        (scope.all || scope.accessory === entry.accessory)
-      ) {
-        this.#staleAccessories.set(entry.accessory, entry.reason);
       }
     }
     if (token.log.overflow) this.#stale ??= "event_burst";
