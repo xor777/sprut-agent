@@ -4217,13 +4217,13 @@ export class AutomationService {
     }
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
-    const lampOff = await this.#levelOnLampOff(
+    const lampLevel = await this.#lampLevelSkipped(
       change,
       accessory,
       current,
       context,
     );
-    if (lampOff) return lampOff;
+    if (lampLevel) return lampLevel;
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -4238,22 +4238,35 @@ export class AutomationService {
     return this.#reconcileValueAfterWrite(change, "restore", true);
   }
 
-  // With «Связь включения и уровня» (LightbulbControl) a Brightness above
-  // 0 switches the lamp on. So a level is not written back to a lamp that
-  // is off now unless this same restore switches it back on: the lamp
-  // stays as the owner, a scenario or the agent's own later command left
-  // it, and the item says which.
-  async #levelOnLampOff(change, accessory, current, context) {
+  // With «Связь включения и уровня» (LightbulbControl), which the owner's
+  // hub assigns to every dimmable lamp, a Brightness write above 0 switches
+  // the lamp on, and 0 switches it off without being stored: the level stays
+  // (2026-10-13-lamp-logic-undo). So restore never writes a level of 0, and
+  // writes a level above 0 to a lamp that is off only when this same
+  // restore switches it back on. Otherwise the lamp stays as the owner, a
+  // scenario or the agent's own later command left it, and the item says
+  // which.
+  async #lampLevelSkipped(change, accessory, current, context) {
     if (
       change.kind !== "characteristic_value" ||
-      change.contract?.type !== "Brightness" ||
-      !(Number(change.baseline_value?.value) > 0) ||
-      context.lampSwitchedBackOn === true
+      change.contract?.type !== "Brightness"
     ) {
       return undefined;
     }
     const onTarget = lightLevelOnTarget(accessory, change.target, "Brightness");
     if (!onTarget) return undefined;
+    const skipped = (outcome) => ({
+      ...publicNativeChange(change, current),
+      restore_outcome: { status: "skipped", ...outcome },
+    });
+    if (Number(change.baseline_value?.value) === 0) {
+      return skipped({
+        reason: "not_restorable",
+        message:
+          "A lamp keeps no level of 0: writing 0 switches it off and leaves the level as it is, so nothing was written. Its On is put back on its own.",
+      });
+    }
+    if (context.lampSwitchedBackOn === true) return undefined;
     const on = typedNativeValue(
       (await this.client.getCharacteristic(onTarget)).control.value,
     );
@@ -4285,10 +4298,7 @@ export class AutomationService {
           "The lamp is off, and writing a level above 0 can switch it on, so nothing was written; the level stays as the agent set it.",
       };
     }
-    return {
-      ...publicNativeChange(change, current),
-      restore_outcome: { status: "skipped", ...outcome },
-    };
+    return skipped(outcome);
   }
 
   async #observeProvenNativeValue(change, current) {
