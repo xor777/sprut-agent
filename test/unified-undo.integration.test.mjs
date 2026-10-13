@@ -34,8 +34,11 @@ function refOf({ aId, sId, cId }) {
   return `${homeRef}/accessory/${aId}/service/${sId}/characteristic/${cId}`;
 }
 
-async function setup(t) {
-  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+async function setup(t, hubOptions = {}) {
+  const hub = await startSimulatedHub(
+    await loadHomeFixture("apartment"),
+    hubOptions,
+  );
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-unified-undo-"),
   );
@@ -285,6 +288,34 @@ test("a lamp's level is put back before the lamp is switched", async (t) => {
     ["16.14", true],
   ]);
   assert.deepEqual(homeChanges(hub), []);
+});
+
+test("a lamp whose level switches it on is reported restored, not changed by hand", async (t) => {
+  // With «Связь включения и уровня» a level above 0 turns the lamp on, so
+  // putting its level back already brings back its On.
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 16, sId: 13 }] },
+  });
+  const sent = await command(
+    client,
+    [
+      [FLOOR_LEVEL, 20],
+      [FLOOR_ON, false],
+    ],
+    "Приглушить и выключить торшер",
+  );
+  assert.equal(currentValue(hub, FLOOR_ON), false);
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: sent.group_ref,
+  });
+  assert.equal(restored.status, "ok", JSON.stringify(restored.results));
+  const on = itemFor(restored, sent.results[1].change_ref);
+  assert.equal(on.status, "restored");
+  assert.equal(on.sent, false);
+  assert.equal(on.reason, undefined);
+  assert.equal(currentValue(hub, FLOOR_ON), true);
+  assert.equal(currentValue(hub, FLOOR_LEVEL), 55);
 });
 
 test("an offline lamp is reported, not guessed, and restored once it is back", async (t) => {
@@ -579,4 +610,25 @@ test("history summaries name what changed, why, when and in which group", async 
   assert.equal(room.reason, "Сделать террасу");
   assert.equal(room.name, "Терраса");
   assert.equal(room.group_ref, undefined);
+});
+
+test("history names a prepared device setting by its device", async (t) => {
+  const { client } = await setup(t);
+  const setpoint = await prepareAndApply(client, {
+    operation: "characteristic_value",
+    target_ref: refOf(characteristic(19, 17)),
+    value: 24,
+    reason: "Сделать в гостиной теплее",
+  });
+
+  const history = await call(client, "list_native_changes", {
+    home_ref: homeRef,
+    limit: 10,
+  });
+  const summary = history.changes.find(
+    ({ change_ref: ref }) => ref === setpoint.change_ref,
+  );
+  assert.equal(summary.name, "Кондиционер / Кондиционер");
+  assert.deepEqual(summary.value, { from: 23, to: 24 });
+  assert.equal(summary.reason, "Сделать в гостиной теплее");
 });
