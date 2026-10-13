@@ -2445,6 +2445,7 @@ async function startHub(port = 0) {
         [params.scenario?.list, "afterScenarioList"],
         [params.logic?.list, "afterLogicList"],
         [params.characteristic?.update, "afterCharacteristicUpdate"],
+        [params.accessory?.get, "afterAccessoryGet"],
       ]) {
         if (matches && state.behavior[callbackName]) {
           const callback = state.behavior[callbackName];
@@ -7345,21 +7346,32 @@ test("a setpoint sent as a device command stays restorable", async (t) => {
   });
 });
 
-test("each device command is decided by the value read right before its write", async (t) => {
+test("each device command is decided by the call's read of its device, and a change after that read is no conflict", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   installClimateFixture(hub);
   const lights = installLivingRoomLights(hub);
   const [temperature] = climateSettings;
   currentCharacteristicValue(hub, lights.sconce.on).boolValue = false;
-  // Right after the floor lamp is switched off, a link switches the
-  // chandelier off, a motion scenario switches the sconce on and someone
-  // sets the requested temperature on the thermostat.
-  hub.state.behavior.afterCharacteristicUpdate = () => {
-    currentCharacteristicValue(hub, lights.chandelier.on).boolValue = false;
-    currentCharacteristicValue(hub, lights.sconce.on).boolValue = true;
-    currentCharacteristicValue(hub, temperature.ref).doubleValue =
-      temperature.requested;
+  // The call reads the floor lamp, the chandelier, the sconce and the
+  // thermostat, in that order, before any write. Right after the first
+  // read a link switches the chandelier off and a motion scenario switches
+  // the sconce on; right after the last someone sets the requested
+  // temperature on the thermostat.
+  let reads = 0;
+  const duringReads = () => {
+    reads += 1;
+    if (reads === 1) {
+      currentCharacteristicValue(hub, lights.chandelier.on).boolValue = false;
+      currentCharacteristicValue(hub, lights.sconce.on).boolValue = true;
+    }
+    if (reads === 4) {
+      currentCharacteristicValue(hub, temperature.ref).doubleValue =
+        temperature.requested;
+      return;
+    }
+    hub.state.behavior.afterAccessoryGet = duringReads;
   };
+  hub.state.behavior.afterAccessoryGet = duringReads;
   const client = await startClient(t, hub, stateDirectory);
 
   const sent = await sendDeviceCommands(
@@ -7373,7 +7385,7 @@ test("each device command is decided by the value read right before its write", 
   assert.equal(sent.isError, undefined, sent.content[0]?.text);
   const [floor, chandelier, sconce, setpoint] = sent.structuredContent.results;
   assert.deepEqual(
-    [floor, chandelier, sconce].map(
+    [floor, chandelier, sconce, setpoint].map(
       ({ status, sent, previous_value, observed_value }) => ({
         status,
         sent,
@@ -7383,11 +7395,52 @@ test("each device command is decided by the value read right before its write", 
     ),
     [
       // The chandelier is already off, but a lamp command is still sent.
-      { status: "applied", sent: true, previous_value: true },
-      { status: "applied", sent: true, previous_value: false },
-      { status: "applied", sent: true, previous_value: true },
-    ].map((expected) => ({ ...expected, observed_value: false })),
+      { previous_value: true, observed_value: false },
+      { previous_value: false, observed_value: false },
+      { previous_value: true, observed_value: false },
+      // Decided by the read before the temperature was set: sent, and the
+      // value found at the read back is no conflict.
+      {
+        previous_value: temperature.baseline,
+        observed_value: temperature.requested,
+      },
+    ].map((expected) => ({ status: "applied", sent: true, ...expected })),
   );
+  assert.equal(sent.structuredContent.status, "ok");
+  assert.deepEqual(
+    deviceCommandUpdates(hub)
+      .map(({ aId }) => aId)
+      .sort(),
+    [34, 40, 41, 42],
+  );
+  for (const { on } of Object.values(lights)) {
+    assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: false });
+  }
+});
+
+test("a setting of a device the call already wrote to is decided by a read right before its write", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  installClimateFixture(hub);
+  const [temperature, mode] = climateSettings;
+  // Switching to cooling brings the cooling setpoint, the one requested.
+  hub.state.behavior.afterCharacteristicUpdate = () => {
+    currentCharacteristicValue(hub, temperature.ref).doubleValue =
+      temperature.requested;
+  };
+  const client = await startClient(t, hub, stateDirectory);
+
+  const sent = await sendDeviceCommands(
+    client,
+    [
+      { target_ref: mode.ref, value: mode.requested },
+      { target_ref: temperature.ref, value: temperature.requested },
+    ],
+    "Включить охлаждение на 23 градуса",
+  );
+  assert.equal(sent.isError, undefined, sent.content[0]?.text);
+  assert.equal(sent.structuredContent.status, "ok");
+  const [modeItem, setpoint] = sent.structuredContent.results;
+  assert.equal(modeItem.status, "applied");
   assert.deepEqual(
     {
       status: setpoint.status,
@@ -7402,15 +7455,10 @@ test("each device command is decided by the value read right before its write", 
       change_ref: null,
     },
   );
-  assert.equal(sent.structuredContent.status, "ok");
-  assert.deepEqual(deviceCommandUpdates(hub), [
-    offUpdate(41),
-    offUpdate(40),
-    offUpdate(42),
-  ]);
-  for (const { on } of Object.values(lights)) {
-    assert.deepEqual(currentCharacteristicValue(hub, on), { boolValue: false });
-  }
+  assert.deepEqual(
+    deviceCommandUpdates(hub).map(({ cId, control }) => [cId, control.value]),
+    [[31, { intValue: mode.requested }]],
+  );
 });
 
 test("a light level set on a lamp that stays off comes back with a warning and does not turn it on", async (t) => {

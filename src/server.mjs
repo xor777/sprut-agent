@@ -411,7 +411,7 @@ server.registerTool(
   {
     title: "Send direct commands to SprutHub devices",
     description:
-      "Writes to the hub. One-shot device commands (on/off, brightness, position, setpoint) for one or many devices in one call; take characteristic refs from find_devices. All commands are checked against the live contract first: if any is invalid, nothing is sent and each invalid item is listed. They then run in order; each is decided by a read right before its write and reports applied, already_desired, uncertain, conflict, rejected or not_sent, previous_value and change_ref for get_native_change; a rejected item is the hub refusing its write, with the hub's reason in rejection. uncertain is not proof that nothing happened; a repeat holds a value whose earlier send got no answer, and that item's next resends it. group_ref names the whole call: restore_native_change with it puts the previous values back, for a lamp only its on/off, where devices still show what was sent. For configuration changes use prepare_native_change.",
+      "Writes to the hub. One-shot device commands (on/off, brightness, position, setpoint) for one or many devices in one call; take characteristic refs from find_devices. All commands are checked against the live contract first: if any is invalid, nothing is sent and each invalid item is listed. Devices run at once, each one's commands in turn (a lamp's off after its level). Each item is decided by the call's read of its device and reports applied, already_desired, uncertain, conflict, rejected or not_sent, previous_value and change_ref for get_native_change; a rejected item is the hub refusing its write, with the hub's reason in rejection. uncertain is not proof that nothing happened; a repeat holds a value whose earlier send got no answer, and that item's next resends it. group_ref names the whole call: restore_native_change with it puts the previous values back, for a lamp only its on/off, where devices still show what was sent. For configuration changes use prepare_native_change.",
     inputSchema: {
       home_ref: z
         .string()
@@ -437,7 +437,9 @@ server.registerTool(
         )
         .min(1)
         .max(50)
-        .describe("Commands sent in this order, one per characteristic."),
+        .describe(
+          "One per characteristic; results keep this order, and one device's commands are sent in it.",
+        ),
       reason: z
         .string()
         .min(1)

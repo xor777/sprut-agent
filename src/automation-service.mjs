@@ -40,6 +40,7 @@ import {
   bridgeExportUnverified,
   characteristicNotifyOffered,
   characteristicNotifyOn,
+  characteristicRef,
   HUB_TRANSPORT_ERROR_CODES,
   isHubReadFailure,
   isSensitiveNativeNode,
@@ -1082,68 +1083,78 @@ export class AutomationService {
     });
   }
 
-  // Several characteristic_value changes in one call: every command's
-  // contract is validated before any is recorded or sent, then each one goes
-  // through the same journal record and apply lifecycle as prepare → apply.
-  // The call is one group: its changes share group_id, so one restore puts
-  // back the whole request, each value as it was before the call.
+  // Several characteristic_value changes in one call. One read of each
+  // device, sent together, gives every command's contract and value, the
+  // device's name and a lamp's On; every command is validated before any is
+  // recorded or sent. The devices then run at once: a device's own commands
+  // one after another, each sent after the hub answered the one before,
+  // since two writes to one lamp in flight together are applied in either
+  // order (2026-10-13-parallel-writes); after them one read of the device
+  // decides each of its commands. Each command goes through the same journal
+  // record and apply lifecycle as prepare → apply. The call is one group:
+  // its changes share group_id, so one restore puts back the whole request,
+  // each value as it was before the call.
   async sendDeviceCommands({ home_ref: homeRef, commands, reason }) {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     const targets = parseDeviceCommandTargets(commands, this.hubSerial);
     return this.#exclusiveWrite(async () => {
-      const items = await this.#validateDeviceCommands(commands, targets);
-      const changes = await this.store.list();
-      const groupId = this.store.newId();
-      const lampsOn = await this.#lampsOnBeforeCall(items);
-      const results = [];
-      for (const [index, item] of items.entries()) {
-        const service = serviceKey(item.draft.fields.target);
-        // An earlier command of this call to the same device may already
-        // have changed this value (a level above 0 switches a lamp with
-        // «Связь включения и уровня» on): its value before the call, read
-        // at validation, is what undo puts back.
-        const touchedEarlier = items
-          .slice(0, index)
-          .some(
-            (other, earlier) =>
-              serviceKey(other.draft.fields.target) === service &&
-              results[earlier].sent === true,
-          );
-        results.push(
-          await this.#sendDeviceCommand(
-            item,
-            changes,
-            homeRef,
-            reason,
-            {
-              group_id: groupId,
-              group_index: index,
-              ...(item.onTarget ? { lamp_level: true } : {}),
-            },
-            touchedEarlier ? item.draft.value : undefined,
-          ),
-        );
-      }
-      await this.#settleLamps(items, results, lampsOn, {
+      const devices = await this.#readCommandDevices([
+        ...new Set(targets.map(({ aId }) => aId)),
+      ]);
+      const items = await this.#validateDeviceCommands(
+        commands,
+        targets,
+        devices,
+      );
+      const run = {
+        changes: await this.store.list(),
         homeRef,
         reason,
-        groupId,
-      });
+        groupId: this.store.newId(),
+        results: [],
+        readbacks: new Map(),
+      };
+      await mapWithConcurrency(
+        deviceCommandRuns(items),
+        DEVICE_COMMAND_CONCURRENCY,
+        (device) => this.#runDeviceCommands(device, run),
+      );
+      await this.#settleLamps(items, devices, run);
       return deviceCommandsResult(
         homeRef,
-        results,
-        results.some(({ change_ref: ref }) => typeof ref === "string")
-          ? groupRef(groupId)
+        run.results,
+        run.results.some(({ change_ref: ref }) => typeof ref === "string")
+          ? groupRef(run.groupId)
           : null,
       );
     });
   }
 
-  async #validateDeviceCommands(commands, targets) {
+  // One accessory.get per device of the call, sent together. A home
+  // snapshot kept current by hub events could answer this read instead;
+  // the read back after the writes stays.
+  async #readCommandDevices(aIds) {
+    const reads = await mapWithConcurrency(
+      aIds,
+      DEVICE_COMMAND_CONCURRENCY,
+      (aId) => this.#readCommandDevice(aId),
+    );
+    return new Map(aIds.map((aId, index) => [aId, reads[index]]));
+  }
+
+  async #readCommandDevice(aId) {
+    try {
+      return { accessory: await this.client.getAccessory(aId) };
+    } catch (error) {
+      return { error };
+    }
+  }
+
+  async #validateDeviceCommands(commands, targets, devices) {
     const items = [];
     const invalid = [];
-    const accessories = new Map();
     for (const [index, command] of commands.entries()) {
+      const target = targets[index];
       const input = {
         operation: "characteristic_value",
         target_ref: command.target_ref,
@@ -1151,23 +1162,50 @@ export class AutomationService {
       };
       let inspected;
       try {
-        inspected = await inspectCharacteristicValue(this, input);
+        const accessory = commandDevice(devices.get(target.aId));
+        inspected = inspectedCommandValue(accessory, target);
         const draft = await characteristicValueDraft(this, input, inspected);
-        const accessory = await this.#deviceCommandAccessory(
-          accessories,
-          targets[index].aId,
+        const name = deviceCommandName(accessory, target);
+        const onTarget = lightLevelOnTarget(
+          accessory,
+          target,
+          draft.contract.type,
         );
-        items.push({
-          command,
-          input,
-          draft,
-          name: deviceCommandName(accessory, targets[index]),
-          onTarget: lightLevelOnTarget(
-            accessory,
-            targets[index],
-            draft.contract.type,
-          ),
-        });
+        const shown = {
+          target_ref: command.target_ref,
+          name,
+          type: draft.contract.type,
+          requested: draft.requested.value,
+        };
+        if (onTarget && isLampLevelZero(draft)) {
+          // On the hub's lamps brightness 0 switches the lamp off and is not
+          // stored, the level stays (2026-10-13-lamp-logic-undo, 4): the
+          // command is the lamp's off, recorded and undone as one.
+          const off = {
+            ...input,
+            target_ref: characteristicRefOf(this.hubSerial, onTarget),
+            value: false,
+          };
+          items.push({
+            index,
+            command,
+            input: off,
+            draft: await characteristicValueDraft(
+              this,
+              off,
+              inspectedCommandValue(accessory, onTarget),
+            ),
+            name,
+            onTarget: null,
+            shown: {
+              ...shown,
+              sent_as: { target_ref: off.target_ref, type: "On", value: false },
+            },
+            note: LAMP_LEVEL_ZERO_NOTE,
+          });
+          continue;
+        }
+        items.push({ index, command, input, draft, name, onTarget, shown });
       } catch (error) {
         if (!isDeviceCommandRejection(error)) throw error;
         invalid.push(
@@ -1175,83 +1213,88 @@ export class AutomationService {
         );
       }
     }
-    if (invalid.length > 0) throw invalidDeviceCommands(invalid);
+    // A brightness 0 sent as a lamp's off is one write with a command to
+    // that lamp's On.
+    const first = new Map();
+    for (const { index, command, draft } of items) {
+      const key = nativeTargetKey(draft.fields.target);
+      if (!first.has(key)) {
+        first.set(key, index);
+        continue;
+      }
+      invalid.push({
+        index,
+        target_ref: command.target_ref,
+        code: "duplicate_target",
+        message: `Command ${first.get(key)} already sets this lamp's On, and brightness 0 is sent as the lamp's off; send one of them.`,
+      });
+    }
+    if (invalid.length > 0) {
+      throw invalidDeviceCommands(
+        invalid.sort((left, right) => left.index - right.index),
+      );
+    }
     return items;
   }
 
-  async #deviceCommandAccessory(accessories, aId) {
-    if (!accessories.has(aId)) {
-      accessories.set(
-        aId,
-        this.client.getAccessory(aId).catch((error) => {
-          // The accessory only names the result and finds a lamp's On; a
-          // transport failure still stops the call before any write, other
-          // read problems leave the result unnamed and without that check.
-          if (!isDeviceCommandRejection(error)) throw error;
-          return null;
-        }),
-      );
+  // One device's commands one after another, each sent after the hub
+  // answered the one before; then one read of the device decides each
+  // command sent.
+  async #runDeviceCommands({ aId, items }, run) {
+    const pending = [];
+    let written = false;
+    for (const item of items) {
+      const outcome = await this.#sendDeviceCommand(item, run, written);
+      written ||= outcome.sent;
+      if (outcome.pending) pending.push(outcome.pending);
+      else run.results[item.index] = outcome.result;
     }
-    return accessories.get(aId);
+    if (pending.length === 0) return;
+    const readback = await this.#readCommandDevice(aId);
+    run.readbacks.set(aId, readback);
+    for (const { item, change, acknowledged, shown } of pending) {
+      try {
+        run.results[item.index] = {
+          ...shown,
+          ...deviceCommandOutcome(
+            await this.#reconcileValueAfterWrite(
+              change,
+              "apply",
+              acknowledged,
+              async () =>
+                characteristicValueState(
+                  change,
+                  commandCharacteristic(commandDevice(readback), change.target)
+                    .control,
+                ),
+            ),
+          ),
+          ...item.earlierContext,
+        };
+      } catch (error) {
+        run.results[item.index] = {
+          ...shown,
+          ...deviceCommandFailure(change, error),
+          ...item.earlierContext,
+        };
+      }
+    }
   }
 
-  // The On of each lamp a level command goes to, before the call's first
-  // write: from the call's own On command read at validation, else read
-  // now. Unknown when that read is refused; a transport failure stops the
-  // call before any write.
-  async #lampsOnBeforeCall(items) {
-    const values = new Map();
-    for (const { onTarget } of items) {
-      if (!onTarget || values.has(serviceKey(onTarget))) continue;
-      const commanded = items.find(
-        ({ draft }) =>
-          nativeTargetKey(draft.fields.target) === nativeTargetKey(onTarget),
-      );
-      let value = commanded?.draft.value;
-      if (!commanded) {
-        try {
-          const { control } = await this.client.getCharacteristic(onTarget);
-          value = typedNativeValue(control.value);
-        } catch (error) {
-          if (!isDeviceCommandRejection(error)) throw error;
-        }
-      }
-      values.set(serviceKey(onTarget), value);
-    }
-    return values;
-  }
-
-  // Each lamp a level command went to is read once after the whole call.
-  // A level applied to a lamp still off is only stored, so an agent must
-  // not report the lamp as lit at that level. A lamp the call switched
-  // without an On command (a level above 0 with «Связь включения и
-  // уровня») has that switch journaled in the call's group, so undo puts
-  // it back too. The results are already final: a failed On read leaves the
-  // item without a warning or that journal entry.
-  async #settleLamps(items, results, lampsOn, { homeRef, reason, groupId }) {
-    const onValues = new Map();
-    const readOn = (onTarget) => {
-      const key = nativeTargetKey(onTarget);
-      if (!onValues.has(key)) {
-        onValues.set(
-          key,
-          this.client
-            .getCharacteristic(onTarget)
-            .then(({ control }) => ({
-              value: typedNativeValue(control.value),
-              contract: characteristicContract(control),
-            }))
-            .catch(() => undefined),
-        );
-      }
-      return onValues.get(key);
-    };
+  // Each lamp a level command went to, read back after its device's
+  // commands. A level applied to a lamp still off is only stored, so an
+  // agent must not report the lamp as lit at that level. A lamp the call
+  // switched without an On command (a level above 0 with «Связь включения
+  // и уровня») says so, and that switch is journaled in the call's group,
+  // so undo puts it back too. The results are already final: a lamp whose
+  // On was not read back gets no warning, note or journal entry.
+  async #settleLamps(items, devices, { results, readbacks, ...run }) {
     const switched = new Set();
-    for (const [index, { onTarget, name }] of items.entries()) {
+    for (const { index, onTarget, name } of items) {
       const result = results[index];
       const delivered = result.sent === true && result.status !== "rejected";
       if (!onTarget || (result.status !== "applied" && !delivered)) continue;
-      const on = await readOn(onTarget);
+      const on = lampOnState(readbacks.get(onTarget.aId), onTarget);
       if (result.status === "applied" && on?.value.value === false) {
         result.warning = {
           code: "device_off_level_stored",
@@ -1259,7 +1302,7 @@ export class AutomationService {
             "The lamp is off, so this level is only stored and shows when the lamp is turned on; it was not turned on.",
         };
       }
-      const before = lampsOn.get(serviceKey(onTarget));
+      const before = lampOnState(devices.get(onTarget.aId), onTarget)?.value;
       if (
         !delivered ||
         on === undefined ||
@@ -1274,12 +1317,13 @@ export class AutomationService {
         continue;
       }
       switched.add(serviceKey(onTarget));
+      if (on.value.value === true) result.note = LAMP_SWITCHED_ON_NOTE;
       try {
         const change = await this.#recordValueChange(
           {
             operation: "characteristic_value",
-            target_ref: `${homeRef}/accessory/${onTarget.aId}/service/${onTarget.sId}/characteristic/${onTarget.cId}`,
-            reason,
+            target_ref: characteristicRefOf(this.hubSerial, onTarget),
+            reason: run.reason,
           },
           {
             fields: { target: onTarget },
@@ -1289,7 +1333,7 @@ export class AutomationService {
             extra: {},
           },
           {
-            group_id: groupId,
+            group_id: run.groupId,
             group_index: items.length + switched.size - 1,
             ...(name ? { target_name: name } : {}),
             caused_by_change_id: parseNativeChangeRef(result.change_ref),
@@ -1308,22 +1352,18 @@ export class AutomationService {
     }
   }
 
+  // Records and sends one command. The result is final unless the write
+  // went out; then the read back after its device's commands decides it
+  // (pending). written: an earlier command of this call went to the device.
   async #sendDeviceCommand(
-    { command, input, draft, name },
-    changes,
-    homeRef,
-    reason,
-    journal,
-    callBaseline,
+    item,
+    { changes, homeRef, reason, groupId },
+    written,
   ) {
-    const item = {
-      target_ref: command.target_ref,
-      name,
-      type: draft.contract.type,
-      requested: draft.requested.value,
-    };
+    const { command, input, draft, name, onTarget, index } = item;
+    const shown = { ...item.shown, ...(item.note ? { note: item.note } : {}) };
+    item.earlierContext = {};
     let change;
-    let earlierContext = {};
     let previous = {};
     try {
       // A failure here still yields this item's result, so the results of
@@ -1334,18 +1374,23 @@ export class AutomationService {
           : await this.#uncertainEarlierCommand(changes, draft);
       if (earlier?.held) {
         return {
-          ...item,
-          status: "uncertain",
           sent: false,
-          ...(earlier.current ? { observed_value: earlier.current.value } : {}),
-          change_ref: earlier.result.change_ref,
-          restore_supported: earlier.result.restore_supported === true,
-          reason: "earlier_command_unresolved",
-          next: resendDeviceCommandNext(homeRef, command, reason),
+          result: {
+            ...shown,
+            status: "uncertain",
+            sent: false,
+            ...(earlier.current
+              ? { observed_value: earlier.current.value }
+              : {}),
+            change_ref: earlier.result.change_ref,
+            restore_supported: earlier.result.restore_supported === true,
+            reason: "earlier_command_unresolved",
+            next: resendDeviceCommandNext(homeRef, command, reason),
+          },
         };
       }
       if (earlier) {
-        earlierContext = {
+        item.earlierContext = {
           earlier_command: {
             change_ref: earlier.result.change_ref,
             status: earlier.result.status,
@@ -1355,48 +1400,56 @@ export class AutomationService {
           },
         };
       }
-      // No preview was shown for this call, so the value read at validation
-      // is not a baseline to defend: a link or scenario that changed this
-      // characteristic while earlier commands ran is not a conflict. The
-      // command is decided by a read right before its own write, and that
-      // same read is the change's baseline, unless this call itself wrote
-      // to the same device before (callBaseline): what the call changed
-      // there is the agent's.
-      const read = await prepareCharacteristicValue(this, input);
-      if (nativeValueAlreadyDesired(read)) {
+      // No preview was shown for this call, so a link or scenario that
+      // changed this value since the call read the device is not a
+      // conflict: the command is decided by that read, which is also the
+      // change's baseline. Once an earlier command of this call went to the
+      // device, a known setting (whose equal value is not resent) is decided
+      // by a read right before its write; its baseline stays the value
+      // before the call: what the call changed there is the agent's.
+      const current =
+        written && !draft.alwaysSend
+          ? await prepareCharacteristicValue(this, input)
+          : draft;
+      if (nativeValueAlreadyDesired(current)) {
         return {
-          ...item,
-          status: "already_desired",
           sent: false,
-          observed_value: read.value.value,
-          change_ref: null,
-          restore_supported: false,
+          result: {
+            ...shown,
+            status: "already_desired",
+            sent: false,
+            observed_value: current.value.value,
+            change_ref: null,
+            restore_supported: false,
+          },
         };
       }
-      const current =
-        callBaseline === undefined ? read : { ...read, value: callBaseline };
-      previous = { previous_value: current.value.value };
-      change = await this.#recordValueChange({ ...input, reason }, current, {
-        ...journal,
+      previous = { previous_value: draft.value.value };
+      change = await this.#recordValueChange({ ...input, reason }, draft, {
+        group_id: groupId,
+        group_index: index,
+        ...(onTarget ? { lamp_level: true } : {}),
         ...(name ? { target_name: name } : {}),
       });
+      const acknowledged = await this.#writeRecordedValue(change, draft.value);
       return {
-        ...item,
-        ...previous,
-        ...deviceCommandOutcome(
-          await this.#applyValueChange(change, {
-            value: current.value,
-            contract: current.contract,
-          }),
-        ),
-        ...earlierContext,
+        sent: true,
+        pending: {
+          item,
+          change,
+          acknowledged,
+          shown: { ...shown, ...previous },
+        },
       };
     } catch (error) {
       return {
-        ...item,
-        ...previous,
-        ...deviceCommandFailure(change, error),
-        ...earlierContext,
+        sent: change?.native_write_sent === true,
+        result: {
+          ...shown,
+          ...previous,
+          ...deviceCommandFailure(change, error),
+          ...item.earlierContext,
+        },
       };
     }
   }
@@ -1497,12 +1550,19 @@ export class AutomationService {
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
 
+    const acknowledged = await this.#writeRecordedValue(change, current);
+    return this.#reconcileValueAfterWrite(change, "apply", acknowledged);
+  }
+
+  // The apply write of a change that holds its right: its intent saved
+  // first, then the write. A refusal by the hub ends the change not_applied
+  // with current as observed and is thrown; true when the hub acknowledged
+  // the write, false when its outcome is left to the read back.
+  async #writeRecordedValue(change, current) {
     await this.#beforeNativeValueWrite(change);
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.#writeNativeValue(change, change.requested_value);
-      change.native_acknowledged = true;
-      change.write_intent.acknowledged = true;
     } catch (error) {
       if (!isUncertainWriteError(error)) {
         throw await this.#finishRefusedWrite(
@@ -1512,14 +1572,23 @@ export class AutomationService {
           current,
         );
       }
-      return this.#reconcileValueAfterWrite(change, "apply");
+      return false;
     }
-    return this.#reconcileValueAfterWrite(change, "apply", true);
+    change.native_acknowledged = true;
+    change.write_intent.acknowledged = true;
+    return true;
   }
 
-  async #reconcileValueAfterWrite(change, direction, acknowledged = false) {
+  // read, when given, is the read back instead of the change's own read.
+  async #reconcileValueAfterWrite(
+    change,
+    direction,
+    acknowledged = false,
+    read = undefined,
+  ) {
     const pending = await this.#reconcilePendingValueChange(change, {
       acknowledged,
+      read,
     });
     if (!pending || pending.direction !== direction) {
       throw new Error("Native write intent changed before readback.");
@@ -1529,7 +1598,7 @@ export class AutomationService {
 
   async #reconcilePendingValueChange(
     change,
-    { requireWrite = false, acknowledged = false } = {},
+    { requireWrite = false, acknowledged = false, read } = {},
   ) {
     if (!nativeValueIntentEvidence(change).unresolved) {
       return undefined;
@@ -1549,7 +1618,9 @@ export class AutomationService {
     let state;
     let groupMemberObservations;
     try {
-      state = await this.#readNativeValueState(change, { requireWrite });
+      state = read
+        ? await read()
+        : await this.#readNativeValueState(change, { requireWrite });
       if (
         direction === "apply" &&
         change.group_member_targets &&
@@ -10625,6 +10696,122 @@ function lightLevelOnTarget(accessory, { aId, sId }, type) {
   return Number.isInteger(on?.cId) ? { aId, sId, cId: on.cId } : null;
 }
 
+// Devices whose commands are under way at once in one send_device_commands
+// call. The owner's hub took 48 writes in flight on one socket without an
+// error or a wrong result (2026-10-13-parallel-writes); 32 stays below that
+// and still covers the largest room of the owner's home (20 light services)
+// in one round.
+const DEVICE_COMMAND_CONCURRENCY = 32;
+
+const LAMP_LEVEL_ZERO_NOTE = {
+  code: "lamp_level_zero_is_off",
+  message:
+    "On the hub's lamps brightness 0 switches the lamp off and is not stored, so this command was sent as the lamp's off (sent_as): previous_value and observed_value are its on/off, and its brightness stays as it was.",
+};
+
+const LAMP_SWITCHED_ON_NOTE = {
+  code: "lamp_switched_on",
+  message:
+    "The lamp was off; on the hub's lamps a brightness or color write switches the lamp on, so it is on now.",
+};
+
+// Calls operation for each item with at most limit under way, resolving to
+// the results in the items' order.
+async function mapWithConcurrency(items, limit, operation) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await operation(items[index], index);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
+
+// The commands of one call by device, each device's in the order they are
+// sent. A lamp's off goes after the level and color commands of the same
+// lamp: a level write switches a lamp with «Связь включения и уровня» on,
+// so [On=false, Brightness=70] sent in that order ends on at 70
+// (2026-10-13-lamp-logic-undo, U2 and U4). Other commands keep the call's
+// order.
+function deviceCommandRuns(items) {
+  const lampLevels = new Set(
+    items
+      .filter(({ onTarget }) => onTarget)
+      .map(({ onTarget }) => serviceKey(onTarget)),
+  );
+  const lampOff = ({ draft }) =>
+    draft.contract.type === "On" &&
+    draft.requested.value === false &&
+    lampLevels.has(serviceKey(draft.fields.target));
+  const runs = new Map();
+  for (const item of items) {
+    const run = runs.get(item.draft.fields.target.aId) ?? [];
+    run.push(item);
+    runs.set(item.draft.fields.target.aId, run);
+  }
+  return [...runs].map(([aId, run]) => ({
+    aId,
+    items: [...run.filter((item) => !lampOff(item)), ...run.filter(lampOff)],
+  }));
+}
+
+function isLampLevelZero(draft) {
+  return draft.contract.type === "Brightness" && draft.requested.value === 0;
+}
+
+// The accessory of a device read, or the read's error.
+function commandDevice(read) {
+  if (read.error) throw read.error;
+  return read.accessory;
+}
+
+function commandCharacteristic(accessory, { sId, cId }) {
+  const characteristic = accessory.services
+    ?.find((service) => service.sId === sId)
+    ?.characteristics?.find((entry) => entry.cId === cId);
+  if (!characteristic?.control || typeof characteristic.control !== "object") {
+    throw new SprutHubError(
+      "characteristic_not_found",
+      "The characteristic was not found on its device.",
+      "find_devices",
+    );
+  }
+  return characteristic;
+}
+
+function inspectedCommandValue(accessory, target) {
+  const { control } = commandCharacteristic(accessory, target);
+  return {
+    fields: { target },
+    contract: characteristicContract(control),
+    value: typedNativeValue(control.value),
+  };
+}
+
+// A lamp's On in a device read, undefined when that read failed or holds no
+// usable On.
+function lampOnState(read, onTarget) {
+  if (!read?.accessory) return undefined;
+  try {
+    const { control } = commandCharacteristic(read.accessory, onTarget);
+    return {
+      value: typedNativeValue(control.value),
+      contract: characteristicContract(control),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function characteristicRefOf(serial, { aId, sId, cId }) {
+  return characteristicRef(serial, aId, sId, cId);
+}
+
 function nativeChangeNext(changeRef) {
   return { tool: "get_native_change", arguments: { change_ref: changeRef } };
 }
@@ -10731,7 +10918,7 @@ function deviceCommandsResult(homeRef, results, groupReference) {
     summary,
     results,
     limitations: [
-      "observed_value is a readback after the command; it cannot prove the command caused it.",
+      "observed_value is a read of the device after its commands; it cannot prove the command caused it.",
       "restore_native_change with group_ref puts back the previous values of this call's commands, each only while its device still shows the value sent; past physical effects are not undone.",
     ],
   };
@@ -10837,15 +11024,19 @@ async function ownedVirtualGroupContext(store, target) {
   return matches[0] ?? null;
 }
 
-async function readCharacteristicValueState(
-  service,
+async function readCharacteristicValueState(service, change, options) {
+  const characteristic = await service.client.getCharacteristic(change.target);
+  return characteristicValueState(change, characteristic.control, options);
+}
+
+// The value and contract of a recorded characteristic change from a read of
+// its control, refused when the characteristic is no longer the one bound.
+function characteristicValueState(
   change,
+  control,
   { requireWrite = false } = {},
 ) {
-  const characteristic = await service.client.getCharacteristic(change.target);
-  const contract = characteristicContract(characteristic.control, {
-    requireWrite,
-  });
+  const contract = characteristicContract(control, { requireWrite });
   if (
     contract.type !== change.contract.type ||
     contract.kind !== change.contract.kind
@@ -10857,10 +11048,7 @@ async function readCharacteristicValueState(
     );
   }
   change.contract = contract;
-  return {
-    value: typedNativeValue(characteristic.control.value),
-    contract,
-  };
+  return { value: typedNativeValue(control.value), contract };
 }
 
 async function readCharacteristicOption(client, target, optionKey) {

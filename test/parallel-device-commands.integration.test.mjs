@@ -303,12 +303,16 @@ test("«выключи свет в гостиной» with 20 lamps reaches the 
     elapsedMs < 25 * LATENCY_MS,
     `the call took ${Math.round(elapsedMs)} ms`,
   );
-  // The hub answered the writes out of order; each result is still its
-  // own lamp's (checked above).
-  const answered = [...writes].sort(
-    (left, right) => left.answered_ms - right.answered_ms,
+  // The hub answered the writes in another order than they reached it
+  // (records follow the answers); each result is still its own lamp's
+  // (checked above).
+  const received = [...writes].sort(
+    (left, right) => left.received_ms - right.received_ms,
   );
-  assert.notDeepEqual(answered, writes);
+  assert.notDeepEqual(
+    received.map(({ seq }) => seq),
+    writes.map(({ seq }) => seq),
+  );
 });
 
 test("«верни как было» after the 20 lamps puts back every lamp the call switched off", async (t) => {
