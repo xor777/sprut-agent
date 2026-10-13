@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  utimes,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1293,19 +1301,120 @@ test("a start whose watch cannot be saved after the start was sent says the netw
   assert.equal(refused.active, true);
   assert.match(refused.ends_at, /\+03:00$/);
   assert.equal(typeof refused.seconds_left, "number");
+  // The watch kept before the start follows the search.
   assert.deepEqual(refused.next, {
-    tool: "start_device_search",
-    arguments: { extension_ref: zigbeeRef },
+    tool: "get_device_search",
+    arguments: { search_ref: refused.search_ref },
+  });
+  assert.deepEqual(refused.stop, {
+    tool: "stop_device_search",
+    arguments: { search_ref: refused.search_ref },
   });
   assert(!JSON.stringify(refused).includes(stateDirectory), refused);
-  // The start that follows the error watches the same run, not a new one.
+  // A start after the error watches the same run, not a new one.
   assert.equal(again.status, "already_running");
+  assert.equal(again.search_ref, refused.search_ref);
   assert.equal(again.ends_at, refused.ends_at);
   assert.equal(stopped.stop_sent, true);
   assert.deepEqual(searchActions(hub), [
     { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
     { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: false },
   ]);
+});
+
+function searchRuns(hub) {
+  return hub.state.extensions
+    .find(({ extensionKey }) => extensionKey === ZIGBEE)
+    .spaces[0].actions.find(({ id }) => id === 1).state;
+}
+
+// The same failure, with the directory fixed only after the network closed
+// (fixing it needs the owner and may need a restart). The watch kept before
+// the start counts the controller's devices from before it, so the sensor
+// that joined meanwhile is new to it. Following the error must reach that
+// watch: a second start would open the network again with the sensor
+// counted as an old device, and it would never be reported.
+test("a start whose watch cannot be saved after it was sent is followed by its ref after the network closed, without a second start", async (t) => {
+  const { hub, client, stateDirectory } = await setup(
+    t,
+    await apartment({ discoveryTimeMs: 2_000, pairing: [leakSensor()] }),
+  );
+  hub.delayReplies("extension.action", 500);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await accessoryCreated(hub, 200);
+  await until(() => searchRuns(hub) === false, "the end of the search");
+  await chmod(watches, 0o700);
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  const followed = await call(
+    client,
+    refused.next.tool,
+    refused.next.arguments,
+  );
+  const report = await call(client, "get_device_search", {
+    search_ref: followed.search_ref,
+    wait_seconds: 0,
+  });
+
+  assert.deepEqual(searchActions(hub), [
+    { extensionKey: ZIGBEE, spaceKey: "main", actionId: 1, state: true },
+  ]);
+  assert.equal(report.search_ref, refused.search_ref);
+  assert.equal(report.active, false);
+  assert.equal(report.result, "joined");
+  assert.deepEqual(
+    report.new_devices.map(({ ref, accessories }) => ({
+      ref,
+      accessories: accessories.map(({ ref: accessory }) => accessory),
+    })),
+    [{ ref: sensorChildRef, accessories: [sensorRef] }],
+  );
+});
+
+// When the watch kept before the start is gone as well, no ref follows the
+// search: the error points at a start, which returns a running search
+// without restarting it.
+test("a start whose watch is gone after it was sent points at a new start", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  hub.delayReplies("extension.action", 500);
+  const answer = client.callTool({
+    name: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  await until(() => searchActions(hub).length === 1, "the start");
+  const watches = await watchDirectory(stateDirectory);
+  await rename(watches, `${watches}-moved`);
+  await mkdir(watches, { mode: 0o555 });
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  const result = await answer;
+  hub.delayReplies("extension.action", 0);
+  await chmod(watches, 0o700);
+  const again = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+
+  assert.equal(result.isError, true, result.content[0]?.text);
+  const refused = result.structuredContent;
+  assert.equal(refused.error.code, "state_storage_unavailable");
+  assert.equal(refused.active, true);
+  assert.equal(refused.search_ref, undefined);
+  assert.deepEqual(refused.next, {
+    tool: "start_device_search",
+    arguments: { extension_ref: zigbeeRef },
+  });
+  assert.equal(again.status, "already_running");
+  assert.equal(searchActions(hub).length, 1);
 });
 
 // A start the hub refuses removes the watch kept for it. If the directory
