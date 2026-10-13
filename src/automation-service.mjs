@@ -1718,6 +1718,7 @@ export class AutomationService {
         outcome: "read_failed",
         result: await this.#finishNative(change, "uncertain", undefined, {
           configuration_matches: undefined,
+          ...withoutLaterChange(change),
           last_verification: failedVerification(error),
         }),
       };
@@ -5000,6 +5001,7 @@ export class AutomationService {
         "read_failed",
         await this.#finishNative(change, "uncertain", undefined, {
           configuration_matches: undefined,
+          ...withoutLaterChange(change),
           last_verification: failedVerification(error),
         }),
       );
@@ -5611,6 +5613,7 @@ export class AutomationService {
         "read_failed",
         await this.#finishNative(change, "uncertain", undefined, {
           configuration_matches: undefined,
+          ...withoutLaterChange(change),
           last_verification: failedVerification(error),
         }),
       );
@@ -12284,7 +12287,8 @@ function writeOutcomeUnknown(change) {
 }
 
 // An unknown write no longer hidden by the agent's later change
-// (finishHiddenByLaterChange) does not name it any more.
+// (finishHiddenByLaterChange), or whose read failed, does not name it any
+// more.
 function withoutLaterChange(change) {
   return change.conflict_reason === "later_owned_change"
     ? { conflict_reason: undefined, restore_first_change_id: undefined }
