@@ -30,6 +30,52 @@ import {
   visitKnownBlockNodes,
   withHiddenHttpUrls,
 } from "./block-model.mjs";
+import {
+  activeInsteadOfValue,
+  assertWindowOptionWritable,
+  changeRef,
+  configuredHomeRef,
+  decodeReferenceSegment,
+  groupRef,
+  inactiveScenarioRun,
+  isRecord,
+  isUncertainWriteError,
+  isUnreadError,
+  isVerifiedRunType,
+  logicInfoInCode,
+  logicNotFound,
+  nativeChangeNext,
+  nativeTargetKey,
+  parseAccessoryRef,
+  parseCharacteristicRef,
+  parseConfiguredHomeRef,
+  parseInspectedChangeRef,
+  parseLogicRef,
+  parseNativeChangeRef,
+  parseRestoreRef,
+  parseRoomRef,
+  parseScenarioRef,
+  parseServiceRef,
+  parseWindowOptionOwner,
+  REDACTED_MARK,
+  refuseRedactedChangeTexts,
+  refuseRedactionMark,
+  requireEntityHome,
+  SCENARIO_METADATA_KEYS,
+  scenarioActiveOwnerRequired,
+  scenarioNotFound,
+  scenarioOwnerRequired,
+  serviceKey,
+  stableJson,
+  stableNativeId,
+  unsupportedBlockFlags,
+  unsupportedBlockMetadata,
+  unsupportedHomeWrite,
+  unsupportedNativeOperation,
+  unsupportedScenarioType,
+  unverifiedScenarioRunType,
+  writeRejection,
+} from "./change-refs.mjs";
 import { readLogicInfo } from "./logic-info.mjs";
 import {
   inspectNativeOption,
@@ -43,8 +89,6 @@ import {
   characteristicNotifyOn,
   characteristicRef,
   HUB_TRANSPORT_ERROR_CODES,
-  hiddenLogicCode,
-  hiddenLogicInfo,
   isHubReadFailure,
   isSensitiveNativeNode,
   SprutHubError,
@@ -86,29 +130,6 @@ const AUTOMATION_CHANGE_KINDS = new Set([
 ]);
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
-// The operations of prepare_native_change and get_native_change_contract.
-export const NATIVE_CHANGE_OPERATIONS = [
-  "characteristic_value",
-  "characteristic_option",
-  "window_option",
-  "characteristic_notify",
-  "logic_assignment",
-  "logic_active",
-  "logic_option",
-  "logic_source_create",
-  "logic_source_update",
-  "block_create",
-  "block_data_update",
-  "block_action_pause",
-  "scenario_active",
-  "scenario_run",
-  "accessory_placement",
-  "room_create",
-  "room_name",
-  "service_name",
-  "service_visible",
-  "virtual_light_group",
-];
 const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and dropped an emoji from one, so a longer name, or one with emoji, pictographs, variation selectors or other characters outside the Basic Multilingual Plane, is refused before any write (only one emoji was seen dropped; the rest are refused as a precaution). A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
 
 export class AutomationService {
@@ -6046,412 +6067,6 @@ export class AutomationService {
   }
 }
 
-function parseRoomRef(ref, configuredSerial) {
-  const scoped = /^spruthub:\/\/hub\/([^/]+)\/room\/(\d+)$/.exec(ref);
-  if (!scoped) {
-    throw new SprutHubError(
-      "invalid_room_ref",
-      "Use a home-qualified room reference returned by home_overview.",
-      "home_overview",
-    );
-  }
-  const serial = decodeReferenceSegment(scoped[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return Number(scoped[2]);
-}
-
-function parseAccessoryRef(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)$/.exec(ref ?? "");
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_accessory_ref",
-      "Use a home-qualified accessory reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return { id: Number(match[2]) };
-}
-
-function parseServiceRef(ref, configuredSerial) {
-  const match =
-    /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)$/.exec(
-      ref ?? "",
-    );
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_service_ref",
-      "Use a home-qualified service reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return { aId: Number(match[2]), sId: Number(match[3]) };
-}
-
-function parseCharacteristicRef(ref, configuredSerial) {
-  const scoped =
-    /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/characteristic\/(\d+)$/.exec(
-      ref,
-    );
-  if (!scoped) {
-    throw new SprutHubError(
-      "invalid_characteristic_ref",
-      "Use a characteristic reference returned by find_devices or get_entity.",
-      "find_devices",
-    );
-  }
-  const serial = decodeReferenceSegment(scoped[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return {
-    aId: Number(scoped[2]),
-    sId: Number(scoped[3]),
-    cId: Number(scoped[4]),
-  };
-}
-
-function decodeReferenceSegment(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    throw new SprutHubError(
-      "invalid_characteristic_ref",
-      "Use a home-qualified characteristic reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-}
-
-function requireConfiguredHome(serial, configuredSerial) {
-  if (configuredSerial !== undefined && serial !== configuredSerial) {
-    throw unsupportedHomeWrite();
-  }
-}
-
-function unsupportedHomeWrite() {
-  return new SprutHubError(
-    "unsupported_home_write",
-    "Automation writes are limited to the configured SprutHub home.",
-    "select_configured_home",
-  );
-}
-
-function configuredHomeRef(serial) {
-  return `spruthub://hub/${encodeURIComponent(serial)}`;
-}
-
-function parseConfiguredHomeRef(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)$/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_home_ref",
-      "Use a home reference returned by home_overview.",
-      "home_overview",
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return serial;
-}
-
-function parseScenarioRef(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)\/scenario\/([^/]+)$/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_scenario_ref",
-      "Use a home-qualified scenario reference from home_overview with list=scenarios.",
-      "home_overview",
-      { next: { tool: "home_overview", arguments: { list: "scenarios" } } },
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return { index: decodeReferenceSegment(match[2]) };
-}
-
-function parseWindowRef(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)\/window\/([^/]*)$/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_window_ref",
-      "Use a home-qualified window reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  return { windowKey: decodeReferenceSegment(match[2]) };
-}
-
-function assertWindowOptionWritable(windowKey) {
-  if (windowKey !== "") return;
-  throw new SprutHubError(
-    "unsupported_window_option",
-    "Home settings windows are read-only in this slice; clock, timezone, network, and security options cannot be changed through native write tools.",
-    "get_entity",
-  );
-}
-
-// The options of a scenario's options window that window_option writes
-// on the scenario ref (SCENARIO_METADATA_OPTIONS); Active is
-// scenario_active's.
-const SCENARIO_METADATA_KEYS = new Set(["Name", "Desc", "OnStart", "Sync"]);
-
-function parseWindowOptionOwner(ref, configuredSerial) {
-  try {
-    return { kind: "scenario", ...parseScenarioRef(ref, configuredSerial) };
-  } catch (error) {
-    if (
-      !(error instanceof SprutHubError) ||
-      error.code !== "invalid_scenario_ref"
-    ) {
-      throw error;
-    }
-  }
-  return { kind: "window", ...parseWindowRef(ref, configuredSerial) };
-}
-
-function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
-  return new SprutHubError(
-    "scenario_owner_required",
-    "A scenario's Name, Desc, OnStart and Sync are written through window_option with the owning scenario ref, which confirms them with scenario.get; nothing was sent.",
-    "get_entity",
-    scenarioRef
-      ? {
-          next: {
-            tool: "get_native_change_contract",
-            arguments: {
-              operation: "window_option",
-              target_ref: scenarioRef,
-              option_key: optionKey,
-            },
-          },
-        }
-      : {},
-  );
-}
-
-// SprutHub sets a LOGIC's name, description and start on boot from info in
-// its code on every code write, also unchanged, and a write of its options
-// window does not change info (research/protocol/2026-10-13-wave4-
-// contracts.md 1.4, 1.5): the window would hold them only until the next
-// code write, so they are changed in the code. In code the agent cannot
-// read (hiddenLogicCode), the owner changes them in the SprutHub app.
-function logicInfoInCode(scenarioRef, optionKey, scenario) {
-  if (hiddenLogicCode(scenario?.data)) {
-    return new SprutHubError(
-      "logic_info_in_code",
-      `${hiddenLogicInfo(optionKey)} Nothing was sent.`,
-    );
-  }
-  const field = { Name: "name", Desc: "description", OnStart: "onStart" }[
-    optionKey
-  ];
-  return new SprutHubError(
-    "logic_info_in_code",
-    `A LOGIC's ${optionKey} is info.${field} in its code: SprutHub sets the scenario's name, description and start on boot from info on every code write, so a change in its options window would last only until the next one. Nothing was sent. Read the code (get_entity with include configuration), change info.${field} there as a plain value and leave the rest of the code as it is, then prepare logic_source_update with that code; its prepare lists in code_sets what the write sets. Sync is not in the code and changes with window_option.`,
-    "get_entity",
-    {
-      next: {
-        tool: "get_entity",
-        arguments: { entity_ref: scenarioRef, include: ["configuration"] },
-      },
-    },
-  );
-}
-
-function scenarioActiveOwnerRequired(scenarioRef) {
-  return new SprutHubError(
-    "scenario_owner_required",
-    "Active in a scenario's options window is that scenario's on/off flag. It is switched with scenario_active on the scenario ref, which confirms it with scenario.get as well as the window; nothing was sent.",
-    "get_native_change_contract",
-    scenarioRef
-      ? {
-          next: {
-            tool: "get_native_change_contract",
-            arguments: {
-              operation: "scenario_active",
-              target_ref: scenarioRef,
-            },
-          },
-        }
-      : {},
-  );
-}
-
-function unsupportedBlockMetadata(input) {
-  return new SprutHubError(
-    "unsupported_block_metadata",
-    "block_data_update writes only data. Change Name or Desc with window_option using the scenario ref.",
-    "get_native_change_contract",
-    {
-      next: {
-        tool: "get_native_change_contract",
-        arguments: {
-          operation: "window_option",
-          target_ref: input.target_ref,
-          option_key: typeof input.name === "string" ? "Name" : "Desc",
-        },
-      },
-    },
-  );
-}
-
-// block_create and logic_source_create take an initial active flag, so agents
-// switching an existing scenario or logic reach for it instead of value.
-function activeInsteadOfValue(input) {
-  return new SprutHubError(
-    "invalid_native_value",
-    `${input.operation} takes the new on/off state in value; active only sets the initial flag of block_create and logic_source_create. Prepare again with value=${input.active}.`,
-    "prepare_native_change",
-    {
-      next: {
-        tool: "prepare_native_change",
-        arguments: {
-          operation: input.operation,
-          target_ref: input.target_ref,
-          value: input.active,
-          reason: input.reason,
-        },
-      },
-    },
-  );
-}
-
-function unsupportedBlockFlags(input) {
-  const optionKey =
-    input.on_start !== undefined
-      ? "OnStart"
-      : input.sync !== undefined
-        ? "Sync"
-        : undefined;
-  return new SprutHubError(
-    "unsupported_block_flags",
-    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active.",
-    "get_native_change_contract",
-    {
-      next: {
-        tool: "get_native_change_contract",
-        arguments: optionKey
-          ? {
-              operation: "window_option",
-              target_ref: input.target_ref,
-              option_key: optionKey,
-            }
-          : { operation: "scenario_active", target_ref: input.target_ref },
-      },
-    },
-  );
-}
-
-function parseLogicRef(ref, configuredSerial) {
-  const match =
-    /^spruthub:\/\/hub\/([^/]+)\/accessory\/(\d+)\/service\/(\d+)\/logic\/([^/]+)$/.exec(
-      ref,
-    );
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_logic_ref",
-      "Use a home-qualified logic reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  const serial = decodeReferenceSegment(match[1]);
-  requireConfiguredHome(serial, configuredSerial);
-  const type = decodeReferenceSegment(match[4]);
-  if (type.length === 0) {
-    throw new SprutHubError(
-      "invalid_logic_ref",
-      "Use a home-qualified logic reference returned by get_entity.",
-      "get_entity",
-    );
-  }
-  return {
-    aId: Number(match[2]),
-    sId: Number(match[3]),
-    type,
-  };
-}
-
-function requireEntityHome(ref, configuredSerial) {
-  const match = /^spruthub:\/\/hub\/([^/]+)(?:\/|$)/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_entity_ref",
-      "Use a home-qualified entity reference returned by SprutHub discovery.",
-      "home_overview",
-    );
-  }
-  requireConfiguredHome(decodeReferenceSegment(match[1]), configuredSerial);
-}
-
-function scenarioNotFound() {
-  return new SprutHubError(
-    "scenario_not_found",
-    "The selected SprutHub scenario was not found.",
-    "home_overview",
-  );
-}
-
-function inactiveScenarioRun(targetRef) {
-  return new SprutHubError(
-    "scenario_inactive",
-    "This scenario is turned off, so the run is not sent: SprutHub acknowledges a manual run of a turned-off BLOCK but runs none of its actions. scenario_active turns it on and also re-arms its triggers; do that only if the owner wants it on, then prepare scenario_run again.",
-    "get_native_change_contract",
-    {
-      next: {
-        tool: "get_native_change_contract",
-        arguments: { operation: "scenario_active", target_ref: targetRef },
-      },
-    },
-  );
-}
-
-// A manual run was observed for an action-only BLOCK; user LOGIC is run on
-// the owner's decision. A GLOBAL run may execute its code again and register
-// its cron jobs and subscriptions a second time, and built-in scenarios were
-// never run, so other types wait for a live check.
-function isVerifiedRunType(snapshot) {
-  return (
-    ["BLOCK", "LOGIC"].includes(snapshot.type) && snapshot.predefined !== true
-  );
-}
-
-function unverifiedScenarioRunType(snapshot) {
-  const kind =
-    snapshot.predefined === true ? "built-in" : String(snapshot.type);
-  return new SprutHubError(
-    "scenario_run_unverified_type",
-    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. scenario_active can turn this scenario on or off; to run it now, ask the owner to run it in the SprutHub app.`,
-  );
-}
-
-function unsupportedScenarioType() {
-  return new SprutHubError(
-    "unsupported_scenario_type",
-    "Only native BLOCK scenario data can be changed in this slice.",
-  );
-}
-
-function logicNotFound() {
-  return new SprutHubError(
-    "logic_not_found",
-    "The selected native logic assignment was not found.",
-    "get_entity",
-  );
-}
-
-function unsupportedNativeOperation() {
-  return new SprutHubError(
-    "unsupported_native_operation",
-    "This native operation is not supported in the current slice.",
-    "use_a_supported_operation",
-    { supported_operations: NATIVE_CHANGE_OPERATIONS },
-  );
-}
-
 function accessoryPlacementContract(accessory) {
   return {
     current: {
@@ -8507,45 +8122,6 @@ function validateBlockNode(node, kind, path, context) {
   report(path, `node type ${kind ?? "missing"} is not supported`);
 }
 
-// What every answer of sprut-agent shows in place of credential-shaped text
-// (redactSensitiveText in spruthub-client.mjs). A BLOCK read through
-// get_entity may carry it; it is never the owner's text or URL.
-const REDACTED_MARK = "[REDACTED]";
-
-// Text with the mark that an agent writes is a copy of an answer, as a
-// scenario Desc with a camera link read as [REDACTED]: written, it would
-// replace the owner's name, description, value or source on the hub for
-// good. BLOCK data has its own rules (validateBlockNode,
-// restoreHiddenBlockStrings).
-function refuseRedactionMark(text, field) {
-  if (typeof text !== "string" || !text.includes(REDACTED_MARK)) return;
-  throw new SprutHubError(
-    "invalid_native_value",
-    `The ${field} contains ${REDACTED_MARK}, which sprut-agent shows in place of credential-shaped text; it is not the owner's text, and writing it would replace the stored text with the mark. Ask the owner for the full new ${field} and send it without ${REDACTED_MARK}.`,
-  );
-}
-
-// The names, descriptions and LOGIC source a prepared change writes; its
-// scalar value is checked again by validateCharacteristicValue.
-function refuseRedactedChangeTexts(change) {
-  const requested = change.requested_snapshot;
-  const texts = {
-    accessory_placement: { name: requested?.name },
-    room_create: { name: change.requested_name },
-    virtual_light_group: { name: change.create_request?.name },
-    block_create: { name: requested?.name, description: requested?.desc },
-    logic_source_create: {
-      name: requested?.name,
-      description: requested?.desc,
-      source: requested?.data,
-    },
-    logic_source_update: { source: requested?.data },
-  }[change.kind];
-  for (const [field, text] of Object.entries(texts ?? {})) {
-    refuseRedactionMark(text, field);
-  }
-}
-
 // The characteristic a from action copies, as the web client writes it: the
 // source's ids and types in from_* fields and value "" or none (the hub
 // stores it without value), since the value comes from the source when the
@@ -9398,14 +8974,6 @@ function invalidBlockProblems(found) {
   );
 }
 
-function stableNativeId(value) {
-  return Number.isSafeInteger(value) && value >= 0;
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function parseBlockValue(value, kind, path) {
   if (kind === "boolValue") {
     if (value === "true") return true;
@@ -9908,10 +9476,6 @@ function virtualLightSettingsSnapshot(accessory, target, types) {
 
 function virtualLinkTarget({ aId, sId, cId }) {
   return { tAId: aId, tSId: sId, tCId: cId };
-}
-
-function nativeTargetKey({ aId, sId, cId }) {
-  return `${aId}:${sId}:${cId}`;
 }
 
 function normalizeVirtualLinks(links) {
@@ -10906,10 +10470,6 @@ function characteristicRefOf(serial, { aId, sId, cId }) {
   return characteristicRef(serial, aId, sId, cId);
 }
 
-function nativeChangeNext(changeRef) {
-  return { tool: "get_native_change", arguments: { change_ref: changeRef } };
-}
-
 function resendDeviceCommandNext(homeRef, command, reason) {
   return {
     tool: "send_device_commands",
@@ -11894,10 +11454,6 @@ function compareApplication(left, right) {
     left.created_at.localeCompare(right.created_at) ||
     left.id.localeCompare(right.id)
   );
-}
-
-function groupRef(id) {
-  return `spruthub-change://group/${id}`;
 }
 
 function isKnownCharacteristicSetting(type) {
@@ -12983,19 +12539,6 @@ function nativeConfigurationFingerprint(value) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function blockCreateRequest(change) {
   return {
     name: change.requested_snapshot.name,
@@ -13292,53 +12835,6 @@ function comparableNativeScenarioConfiguration(snapshot) {
   // ScenarioMessage rooms, iconsIf/iconsThen, error, order and bundleId are
   // hub projections or runtime diagnostics, not editable configuration.
   return nativeScenarioConfiguration(snapshot, canonicalBlock(snapshot.data));
-}
-
-function parseNativeChangeRef(ref) {
-  const match = /^spruthub-change:\/\/native\/([a-f0-9]{24})$/.exec(ref);
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_change_ref",
-      "Use a change reference returned by prepare_native_change.",
-      "prepare_native_change",
-    );
-  }
-  return match[1];
-}
-
-// A change to inspect: a native change or an earlier boolean automation.
-function parseInspectedChangeRef(ref) {
-  const match =
-    /^spruthub-change:\/\/(native|automation)\/([a-f0-9]{24})$/.exec(
-      typeof ref === "string" ? ref : "",
-    );
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_change_ref",
-      "Use a change_ref from prepare_native_change, send_device_commands or the history (get_native_change without change_ref).",
-      "get_native_change",
-    );
-  }
-  return { type: match[1], id: match[2] };
-}
-
-function parseRestoreRef(ref) {
-  const match =
-    /^spruthub-change:\/\/(native|automation|group)\/([a-f0-9]{24})$/.exec(
-      typeof ref === "string" ? ref : "",
-    );
-  if (!match) {
-    throw new SprutHubError(
-      "invalid_change_ref",
-      "Use a change_ref or group_ref from send_device_commands, prepare_native_change or the history of get_native_change.",
-      "get_native_change",
-    );
-  }
-  return { type: match[1], id: match[2] };
-}
-
-function serviceKey({ aId, sId }) {
-  return `${aId}.${sId}`;
 }
 
 function restoreIntentTime(change) {
@@ -14882,10 +14378,6 @@ function uniqueRefs(refs) {
   return [...new Set(refs.filter((ref) => typeof ref === "string"))];
 }
 
-function changeRef(id) {
-  return `spruthub-change://automation/${id}`;
-}
-
 function expectedScenario(change) {
   return {
     name: change.name,
@@ -15424,35 +14916,4 @@ function uncertainResult(change) {
 // refused the request (or it was never delivered): then no room was created.
 function roomCreationOutcomeUnknown(change) {
   return change.native_write_sent === true && change.status !== "not_applied";
-}
-
-// An error reply to the write request means the hub received it and refused
-// it, whatever the code. Only a transport-level unknown after sending (timeout,
-// closed connection, unreadable or unrecognized reply) may have changed the
-// home.
-// A read the hub did not answer or refused (undoOrUnknown). A write the hub
-// refused carries its rejection (finishRefusedWrite) and is not one.
-function isUnreadError(error) {
-  return isHubReadFailure(error) && error.details?.rejection === undefined;
-}
-
-function isUncertainWriteError(error) {
-  return (
-    error instanceof SprutHubError &&
-    error.requestSent === true &&
-    error.hubError === undefined
-  );
-}
-
-function writeRejection(error) {
-  if (!(error instanceof SprutHubError) || error.hubError === undefined) {
-    return undefined;
-  }
-  return {
-    code: error.code,
-    protocol_code: error.hubError.code,
-    ...(error.hubError.message !== undefined
-      ? { hub_message: error.hubError.message }
-      : {}),
-  };
 }

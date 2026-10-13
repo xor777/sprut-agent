@@ -3,10 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import packageMetadata from "../package.json" with { type: "json" };
-import {
-  AutomationService,
-  NATIVE_CHANGE_OPERATIONS,
-} from "./automation-service.mjs";
+import { AutomationService } from "./automation-service.mjs";
+import { NATIVE_CHANGE_OPERATIONS } from "./change-refs.mjs";
 import { ConfigurationPointService } from "./configuration-point-service.mjs";
 import { DeviceSearches } from "./device-search.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
