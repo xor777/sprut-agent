@@ -21235,7 +21235,12 @@ for (const tool of [
 
     const restartedClient = await startClient(t, hub, stateDirectory);
     const read = await callChangeTool(restartedClient, tool, changeRef);
-    assert.equal(read.status, "applied");
+    // A restore that finds the create done goes on to undo it in the same
+    // call, here stopped by the LOGIC's assignment.
+    assert.equal(
+      read.status,
+      tool === "restore_native_change" ? "conflict" : "applied",
+    );
     assertIdentityMapping(read, {
       ready: false,
       reason: "logic_type_not_available_on_target",

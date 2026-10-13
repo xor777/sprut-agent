@@ -1794,32 +1794,40 @@ export class AutomationService {
     // (restoreGoesOn); anything else is left unexplained.
     const unchanged =
       direction === "restore" ? change.requested_value : change.baseline_value;
-    return {
-      direction,
-      outcome: valuesEqual(current, unchanged)
-        ? "expected_missing"
-        : "unexplained",
-      current,
-      contract,
-      result: await this.#finishNative(change, "uncertain", current, {
-        ...(groupMemberObservations
+    const outcome = valuesEqual(current, unchanged)
+      ? "expected_missing"
+      : "unexplained";
+    const result = await this.#finishNative(change, "uncertain", current, {
+      ...(groupMemberObservations
+        ? {
+            group_member_observations: groupMemberObservations,
+            group_delivery_confirmed: false,
+          }
+        : {}),
+      last_verification: freshVerification(verificationResult),
+      ...(groupDeliveryConfirmed === false
+        ? { conflict_reason: "group_members_not_converged" }
+        : acknowledged
           ? {
-              group_member_observations: groupMemberObservations,
-              group_delivery_confirmed: false,
+              conflict_reason:
+                direction === "restore"
+                  ? "ack_without_baseline_result"
+                  : "ack_without_requested_result",
             }
           : {}),
-        last_verification: freshVerification(verificationResult),
-        ...(groupDeliveryConfirmed === false
-          ? { conflict_reason: "group_members_not_converged" }
-          : acknowledged
-            ? {
-                conflict_reason:
-                  direction === "restore"
-                    ? "ack_without_baseline_result"
-                    : "ack_without_requested_result",
-              }
-            : {}),
-      }),
+    });
+    // A setting's restore is sent again; a device command's is offered as
+    // its resend (restoreResendNext).
+    const restoreAgain =
+      direction === "restore" &&
+      outcome === "expected_missing" &&
+      isRetryableNativeValueChange(change);
+    return {
+      direction,
+      outcome,
+      current,
+      contract,
+      result: restoreAgain ? withRestoreAgainNext(result, change) : result,
     };
   }
 
@@ -4391,6 +4399,20 @@ export class AutomationService {
     });
   }
 
+  // A write whose outcome is unknown, read while the agent's own later
+  // change of the same setting or scenario holds what is there: what this
+  // write did shows only once that change is undone, so it stays unknown
+  // (and is settled by the next read) and names that change first. Not a
+  // change by hand.
+  async #finishHiddenByLaterChange(change, later, observedValue, fields = {}) {
+    return this.#finishNative(change, "uncertain", observedValue, {
+      ...fields,
+      conflict_reason: "later_owned_change",
+      restore_first_change_id: later.id,
+      last_verification: freshVerification("later_owned_change"),
+    });
+  }
+
   async #finishObservedValueOwnershipLoss(change, current) {
     if (!manualValueChangeObserved(change)) return undefined;
     if (
@@ -4784,10 +4806,11 @@ export class AutomationService {
   // Name, Desc, OnStart or Sync) account for every field this change set
   // and the scenario no longer holds as it left them. That is no change by
   // hand and costs this change no restore right: the newest of them that
-  // changed such a field is undone first.
-  async #laterOwnedScenarioEdit(change, scenario) {
+  // changed such a field is undone first. expected is what this change
+  // left, its applied snapshot unless its apply is not settled yet.
+  async #laterOwnedScenarioEdit(change, scenario, expected) {
     const index = scenarioChainIndex(change);
-    const differing = scenarioFieldsDiffering(change, scenario);
+    const differing = scenarioFieldsDiffering(change, scenario, expected);
     if (index === undefined || !differing?.length) return undefined;
     const later = (await this.store.list()).filter(
       (candidate) =>
@@ -4823,9 +4846,7 @@ export class AutomationService {
       return publicStoredNativeChange(change);
     }
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileScenarioRestore(change, false)
-        : this.#reconcileScenarioApply(change, false);
+      return (await this.#reconcileScenarioWrite(change)).result;
     }
     const current = await this.#observeScenarioChange(change);
     if (scenarioLacksProvenApply(change)) {
@@ -4909,20 +4930,36 @@ export class AutomationService {
       if (!isUncertainWriteError(error)) {
         throw await this.#finishRefusedWrite(change, "not_applied", error);
       }
-      return this.#reconcileScenarioApply(change, false);
+      return (await this.#reconcileScenarioApply(change, false)).result;
     }
-    return this.#reconcileScenarioApply(change, true);
+    return (await this.#reconcileScenarioApply(change, true)).result;
+  }
+
+  // A scenario write the journal holds as unknown (applying, restoring or
+  // uncertain), settled by a fresh read in its direction.
+  async #reconcileScenarioWrite(change) {
+    return nativeIntentDirection(change) === "restore"
+      ? this.#reconcileScenarioRestore(change, false)
+      : this.#reconcileScenarioApply(change, false);
   }
 
   async #reconcileScenarioApply(change, acknowledged) {
+    const settled = (outcome, result) => ({
+      direction: "apply",
+      outcome,
+      result,
+    });
     let current;
     try {
       current = await this.#observeScenarioChange(change);
     } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
+      return settled(
+        "read_failed",
+        await this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          last_verification: failedVerification(error),
+        }),
+      );
     }
     const requested = scenarioChangeObservation(change, current, "requested");
     if (requested.matches) {
@@ -4932,35 +4969,61 @@ export class AutomationService {
       } else if (change.kind === "block_data_update") {
         await this.#markPauseOutcomes(change, "apply");
       }
-      return this.#finishNative(change, "applied", undefined, {
-        scenario_index: current.scenario.index,
-        applied_snapshot:
-          change.applied_snapshot ??
-          scenarioChangeSnapshot(change, current.scenario),
-        logic_assignments: undefined,
-        conflict_reason: undefined,
-        ...requested.fields,
-        last_verification: freshVerification(
-          isLogicSourceChange(change)
-            ? "applied_logic_source"
-            : "applied_configuration",
-        ),
-        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-      });
+      return settled(
+        "expected_observed",
+        await this.#finishNative(change, "applied", undefined, {
+          scenario_index: current.scenario.index,
+          applied_snapshot:
+            change.applied_snapshot ??
+            scenarioChangeSnapshot(change, current.scenario),
+          logic_assignments: undefined,
+          conflict_reason: undefined,
+          ...requested.fields,
+          last_verification: freshVerification(
+            isLogicSourceChange(change)
+              ? "applied_logic_source"
+              : "applied_configuration",
+          ),
+          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+        }),
+      );
     }
     const baseline = scenarioChangeObservation(change, current, "baseline");
     if (baseline.matches) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        ...requested.fields,
-        ...(acknowledged
-          ? { conflict_reason: "ack_without_requested_result" }
-          : {}),
-      });
+      return settled(
+        "expected_missing",
+        await this.#finishNative(change, "uncertain", undefined, {
+          ...requested.fields,
+          ...withoutLaterChange(change),
+          ...(acknowledged
+            ? { conflict_reason: "ack_without_requested_result" }
+            : {}),
+        }),
+      );
     }
-    return this.#finishNative(change, "conflict", undefined, {
-      conflict_reason: "manual_change",
-      ...requested.fields,
-    });
+    const later = await this.#laterOwnedScenarioEdit(
+      change,
+      current.scenario,
+      scenarioRequestedSnapshot(change),
+    );
+    if (later) {
+      return settled(
+        "later_owned_change",
+        await this.#finishHiddenByLaterChange(
+          change,
+          later,
+          undefined,
+          requested.fields,
+        ),
+      );
+    }
+    return settled(
+      "conflict",
+      await this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        ...requested.fields,
+      }),
+    );
   }
 
   #adoptRequestedLogicSource(change, current, requested) {
@@ -4989,9 +5052,7 @@ export class AutomationService {
 
   async #getScenarioChange(change) {
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileScenarioRestore(change, false)
-        : this.#reconcileScenarioApply(change, false);
+      return (await this.#reconcileScenarioWrite(change)).result;
     }
     let current;
     try {
@@ -5040,9 +5101,7 @@ export class AutomationService {
       return publicStoredNativeChange(change);
     }
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileScenarioRestore(change, false)
-        : this.#reconcileScenarioApply(change, false);
+      return (await this.#reconcileScenarioWrite(change)).result;
     }
     let current;
     try {
@@ -5097,9 +5156,8 @@ export class AutomationService {
     )
       return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileScenarioRestore(change, false)
-        : this.#reconcileScenarioApply(change, false);
+      const pending = await this.#reconcileScenarioWrite(change);
+      if (!restoreGoesOn(pending)) return pending.result;
     }
     if (pauseHasNoProvenHubEffect(change)) {
       // Proven non-send: there is no controller to remove. Missing wrapper is
@@ -5174,9 +5232,9 @@ export class AutomationService {
       if (!isUncertainWriteError(error)) {
         throw await this.#finishRefusedWrite(change, "applied", error);
       }
-      return this.#reconcileScenarioRestore(change, false);
+      return (await this.#reconcileScenarioRestore(change, false)).result;
     }
-    return this.#reconcileScenarioRestore(change, true);
+    return (await this.#reconcileScenarioRestore(change, true)).result;
   }
 
   async #markReplacedPauseSuperseded(change) {
@@ -5304,9 +5362,8 @@ export class AutomationService {
   async #restoreScenarioChange(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
     if (["applying", "restoring", "uncertain"].includes(change.status)) {
-      return nativeIntentDirection(change) === "restore"
-        ? this.#reconcileScenarioRestore(change, false)
-        : this.#reconcileScenarioApply(change, false);
+      const pending = await this.#reconcileScenarioWrite(change);
+      if (!restoreGoesOn(pending)) return pending.result;
     }
     const current = await this.#observeScenarioChange(change);
     this.#adoptRequestedLogicSource(
@@ -5457,39 +5514,88 @@ export class AutomationService {
       if (!isUncertainWriteError(error)) {
         throw await this.#finishRefusedWrite(change, "applied", error);
       }
-      return this.#reconcileScenarioRestore(change, false);
+      return (await this.#reconcileScenarioRestore(change, false)).result;
     }
-    return this.#reconcileScenarioRestore(change, true);
+    return (await this.#reconcileScenarioRestore(change, true)).result;
   }
 
+  // A restore of a scenario change whose outcome was unknown, as a setting's
+  // is (reconcilePendingValueChange): back as before is restored; the
+  // agent's change still in place did not take effect and is sent again by
+  // the next restore (restoreGoesOn); anything else changed since, by the
+  // agent's own later change of the scenario or by hand.
   async #reconcileScenarioRestore(change, acknowledged) {
+    const settled = (outcome, result) => ({
+      direction: "restore",
+      outcome,
+      result,
+    });
     let current;
     try {
       current = await this.#observeScenarioChange(change);
     } catch (error) {
-      return this.#finishNative(change, "uncertain", undefined, {
-        configuration_matches: undefined,
-        last_verification: failedVerification(error),
-      });
+      return settled(
+        "read_failed",
+        await this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          last_verification: failedVerification(error),
+        }),
+      );
     }
     const baseline = scenarioChangeObservation(change, current, "restored");
     if (baseline.matches) {
       if (change.kind === "block_data_update") {
         await this.#markPauseOutcomes(change, "restore");
       }
-      return this.#finishNative(change, "restored", undefined, {
-        logic_assignments: undefined,
-        referencing_scenario_targets: undefined,
-        ...baseline.fields,
-        ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
-      });
+      return settled(
+        "expected_observed",
+        await this.#finishNative(change, "restored", undefined, {
+          logic_assignments: undefined,
+          referencing_scenario_targets: undefined,
+          ...baseline.fields,
+          ...(!acknowledged ? { recovered_after_uncertain_write: true } : {}),
+        }),
+      );
     }
-    return this.#finishNative(change, "uncertain", undefined, {
-      ...baseline.fields,
-      ...(acknowledged
-        ? { conflict_reason: "ack_without_requested_result" }
-        : {}),
-    });
+    const unconfirmed = async () =>
+      this.#finishNative(change, "uncertain", undefined, {
+        ...baseline.fields,
+        ...withoutLaterChange(change),
+        ...(acknowledged
+          ? { conflict_reason: "ack_without_requested_result" }
+          : {}),
+      });
+    if (scenarioChangeObservation(change, current, "applied").matches) {
+      return settled(
+        "expected_missing",
+        withRestoreAgainNext(await unconfirmed(), change),
+      );
+    }
+    // A created LOGIC gone while its type is still listed: nothing tells
+    // what happened.
+    if (current.scenario === null && SCENARIO_CREATE_KINDS.has(change.kind)) {
+      return settled("unexplained", await unconfirmed());
+    }
+    const later = await this.#laterOwnedScenarioEdit(change, current.scenario);
+    if (later) {
+      return settled(
+        "later_owned_change",
+        await this.#finishHiddenByLaterChange(
+          change,
+          later,
+          undefined,
+          baseline.fields,
+        ),
+      );
+    }
+    return settled(
+      "conflict",
+      await this.#finishNative(change, "conflict", undefined, {
+        ...baseline.fields,
+        conflict_reason: "manual_change",
+        restore_first_change_id: undefined,
+      }),
+    );
   }
 
   async #recordScenarioObservation(change, observation) {
@@ -12048,6 +12154,27 @@ function restoreGoesOn({ direction, outcome }) {
     : outcome === "expected_missing";
 }
 
+// The answer to a restore whose read shows it did not take effect: the
+// next restore_native_change reads first and sends only while the agent's
+// change is still in place.
+function withRestoreAgainNext(result, change) {
+  return {
+    ...result,
+    next: {
+      tool: "restore_native_change",
+      arguments: { change_ref: `spruthub-change://native/${change.id}` },
+    },
+  };
+}
+
+// An unknown write no longer hidden by the agent's later change
+// (finishHiddenByLaterChange) does not name it any more.
+function withoutLaterChange(change) {
+  return change.conflict_reason === "later_owned_change"
+    ? { conflict_reason: undefined, restore_first_change_id: undefined }
+    : {};
+}
+
 function nativeValueIntentEvidence(change) {
   if (!isNativeValueChange(change)) {
     return { outcome: "not_applicable", unresolved: false };
@@ -12266,12 +12393,15 @@ function scenarioChainIndex(change) {
 }
 
 // The fields this change set that the scenario no longer holds as the
-// change left them: a pause is read as a whole. undefined when the
-// scenario is gone or of another type.
-function scenarioFieldsDiffering(change, scenario) {
+// change left them (expected, its applied snapshot by default): a pause is
+// read as a whole. undefined when the scenario is gone or of another type.
+function scenarioFieldsDiffering(
+  change,
+  scenario,
+  expected = change.applied_snapshot,
+) {
   if (!isRecord(scenario)) return undefined;
   if (change.kind === "block_action_pause") return scenarioFieldsOwned(change);
-  const expected = change.applied_snapshot;
   if (expected === undefined) return undefined;
   let now;
   let then;
@@ -12325,6 +12455,19 @@ function scenarioChangeSnapshot(change, scenario) {
   return isLogicSourceChange(change)
     ? logicScenarioSnapshot(scenario)
     : scenarioSnapshot(scenario);
+}
+
+// What a write of this change leaves on the hub, field by field as an
+// applied snapshot holds it: what an apply not yet seen would show.
+function scenarioRequestedSnapshot(change) {
+  if (isLogicSourceChange(change)) return logicSourceRequestedSnapshot(change);
+  if (change.kind === "block_create") {
+    return {
+      ...blockCreateRequest(change),
+      data: change.requested_snapshot.data,
+    };
+  }
+  return change.requested_snapshot;
 }
 
 function requiredLogicSource(value) {
@@ -13311,6 +13454,18 @@ function restoreItem(change, automation, result, before) {
   }
   const intentAt = restoreIntentTime(change);
   const sent = intentAt !== undefined && intentAt !== before.restoreIntentAt;
+  // Settled or still unknown underneath, a change the agent changed again
+  // later is undone after that one.
+  if (result.conflict_reason === "later_owned_change") {
+    return {
+      ...base,
+      status: "skipped",
+      reason: "later_change",
+      sent,
+      later_change_ref: result.restore_first_change_ref,
+      ...observed,
+    };
+  }
   switch (result.status) {
     case "restored":
       if (before.status === "restored") {
@@ -13346,16 +13501,6 @@ function restoreItem(change, automation, result, before) {
         ...observed,
       };
     case "conflict":
-      if (result.conflict_reason === "later_owned_change") {
-        return {
-          ...base,
-          status: "skipped",
-          reason: "later_change",
-          sent: false,
-          later_change_ref: result.restore_first_change_ref,
-          ...observed,
-        };
-      }
       if (
         ["manual_change", "value_changed_after_apply"].includes(
           result.conflict_reason,
@@ -13413,6 +13558,7 @@ function restoreItem(change, automation, result, before) {
         ...observed,
         next:
           (restoring && restoreResendNext(change, result)) ||
+          result.next ||
           nativeChangeNext(base.change_ref),
       };
     }
