@@ -73,6 +73,13 @@ function assertReadOnly(hub, baseline = hub.initialSnapshot()) {
   );
 }
 
+// Whether the apartment hub's clock (Europe/Moscow, +03:00 since 2014) is
+// within 23:00–06:00 now.
+function hubNightNow() {
+  const hour = new Date(Date.now() + 3 * 3_600_000).getUTCHours();
+  return hour >= 23 || hour < 6;
+}
+
 function action({ op, device, room, characteristic, value, unit, ref }) {
   return {
     op,
@@ -110,9 +117,11 @@ test("a BLOCK summary names what the scenario does without its JSON", async (t) 
         to: { at: "06:00" },
         days: "every day",
         text: "23:00–06:00 every day",
+        holds_now: hubNightNow(),
       },
     ],
   });
+  assert.match(nightSummary.current_values.hub_time, /\+03:00$/);
   assert.deepEqual(rule.then.map(action), [
     {
       op: "set",
@@ -280,7 +289,12 @@ test("a BLOCK summary names what the scenario does without its JSON", async (t) 
     entity_ref: `${homeRef}/scenario/5`,
     include: ["configuration"],
   });
-  assert.deepEqual(withConfiguration.entity.summary, nightSummary);
+  // The same summary, read at another moment.
+  const withoutReadTime = ({ current_values: _read, ...summary }) => summary;
+  assert.deepEqual(
+    withoutReadTime(withConfiguration.entity.summary),
+    withoutReadTime(nightSummary),
+  );
   assert.equal(
     withConfiguration.entity.configuration.value.targets[0].if.conditions[0]
       .start.cron,
@@ -446,6 +460,9 @@ test("a BLOCK summary decodes time forms and scenario runs and lists unknown nod
     value: 1,
     value_name: "Открыто",
     held: { op: ">", seconds: 30 },
+    // The door is closed now, so it has not been open for 30 s.
+    current: { value: 0, value_name: "Закрыто" },
+    holds_now: false,
     ref: `${homeRef}/accessory/11/service/13/characteristic/14`,
   });
   assert.deepEqual(conditions[6], {
@@ -641,12 +658,15 @@ test("relations of the corridor light list only its own roles with branch, value
   assert.deepEqual(relations.checked, {
     scenario_accessory_index: "found",
     block_scenarios_read: 3,
+    // The leak protection LOGIC; it names the kettle socket, not this light.
+    code_scenarios_searched: 1,
     logic_assignments: "checked_empty",
     characteristic_links: "found",
   });
   assert.deepEqual(relations.unchecked, []);
   assert.equal(typeof relations.limitation, "string");
   assert.deepEqual(relations.assigned_logics, []);
+  assert.deepEqual(relations.code_mentions, []);
 
   const sensor = await read(client, {
     entity_ref: `${homeRef}/accessory/13`,
@@ -666,6 +686,8 @@ test("relations of the corridor light list only its own roles with branch, value
         role: "trigger",
         op: "=",
         value: true,
+        current: { value: false },
+        holds_now: false,
       },
       // The fixture's evening living-room rule also reads this sensor's light level.
       {
@@ -677,6 +699,8 @@ test("relations of the corridor light list only its own roles with branch, value
         op: "<",
         value: 30,
         unit: "lux",
+        current: { value: 12, unit: "lux" },
+        holds_now: true,
       },
     ],
   );

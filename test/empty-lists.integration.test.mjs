@@ -345,12 +345,14 @@ test("a device without scenarios, logic, links or options reads as checked empty
   assert.deepEqual(lamp.entity.relations.checked, {
     scenario_accessory_index: "checked_empty",
     block_scenarios_read: 0,
+    code_scenarios_searched: 0,
     logic_assignments: "checked_empty",
     characteristic_links: "checked_empty",
   });
   assert.deepEqual(lamp.entity.relations.unchecked, []);
   assert.deepEqual(lamp.entity.relations.scenario_roles, []);
   assert.deepEqual(lamp.entity.relations.assigned_logics, []);
+  assert.deepEqual(lamp.entity.relations.code_mentions, []);
   assert.deepEqual(lamp.entity.relations.characteristic_links, []);
 
   const service = await call(client, "get_entity", {

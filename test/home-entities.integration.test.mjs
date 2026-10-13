@@ -1471,6 +1471,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   const relations = result.structuredContent.entity.relations;
   const blockRef = "spruthub://hub/home%2FA/scenario/mixed-device-block";
   const conditions = "/configuration/value/targets/1/if/conditions";
+  // The sensor shows no motion now (MotionDetected false).
   assert.deepEqual(relations.scenario_roles, [
     {
       scenario_ref: blockRef,
@@ -1479,6 +1480,8 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       role: "trigger",
       op: "=",
       value: true,
+      current: { value: false },
+      holds_now: false,
       pointer: `${conditions}/0`,
     },
     {
@@ -1488,6 +1491,8 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       role: "condition",
       op: "=",
       value: false,
+      current: { value: false },
+      holds_now: true,
       pointer: `${conditions}/1`,
     },
     {
@@ -1497,6 +1502,8 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       role: "condition",
       op: "=",
       value: true,
+      current: { value: false },
+      holds_now: false,
       pointer: `${conditions}/3/conditions/1`,
     },
   ]);
@@ -1592,6 +1599,7 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
   assert.deepEqual(relations.checked, {
     scenario_accessory_index: "found",
     block_scenarios_read: 1,
+    code_scenarios_searched: 1,
     logic_assignments: "found",
     characteristic_links: "found",
   });
@@ -1667,23 +1675,25 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
       params.logic?.list ||
       params.link?.list,
   );
-  assert.equal(
-    relationRequests.filter(({ params }) => params.scenario?.get).length,
-    1,
+  // BLOCK data only of the scenario the index lists; the whole list once,
+  // for the owner's code scenarios, whose source is searched for the
+  // device and not shown.
+  assert.deepEqual(
+    relationRequests
+      .filter(({ params }) => params.scenario?.get)
+      .map(({ params }) => params.scenario.get.index)
+      .sort(),
+    ["global-code", "mixed-device-block"],
   );
   assert.equal(
-    relationRequests.some(
+    relationRequests.filter(
       ({ params }) =>
         params.scenario?.list && params.scenario.list.aId === undefined,
-    ),
-    false,
+    ).length,
+    1,
   );
-  assert.equal(
-    relationRequests.some(
-      ({ params }) => params.scenario?.get?.index === "global-code",
-    ),
-    false,
-  );
+  assert.deepEqual(relations.code_mentions, []);
+  assert.doesNotMatch(JSON.stringify(relations), /must-not-leak/);
 });
 
 test("get_entity relations preserve an inactive BLOCK state", async (t) => {
@@ -1907,21 +1917,19 @@ test("empty accessory scenario index stays bounded without claiming no influence
   assert.deepEqual(relations.checked, {
     scenario_accessory_index: "checked_empty",
     block_scenarios_read: 0,
+    code_scenarios_searched: 1,
     logic_assignments: "found",
     characteristic_links: "checked_empty",
   });
   // An empty index does not prove that nothing else influences the sensor.
   assert.equal(typeof relations.limitation, "string");
-  assert.equal(
-    hub.requests.some(({ params }) => params.scenario?.get),
-    false,
-  );
-  assert.equal(
-    hub.requests.some(
-      ({ params }) =>
-        params.scenario?.list && params.scenario.list.aId === undefined,
-    ),
-    false,
+  // No BLOCK of the whole list is read in its place; only the owner's code
+  // scenario is, for mentions of the device.
+  assert.deepEqual(
+    hub.requests
+      .filter(({ params }) => params.scenario?.get)
+      .map(({ params }) => params.scenario.get.index),
+    ["global-code"],
   );
 });
 
@@ -1958,12 +1966,11 @@ test("failed accessory scenario index remains unknown without a catalog fallback
       error_code: "request_rejected",
     },
   );
-  assert.equal(
-    hub.requests.some(
-      ({ params }) =>
-        params.scenario?.list && params.scenario.list.aId === undefined,
-    ),
-    false,
+  assert.deepEqual(
+    hub.requests
+      .filter(({ params }) => params.scenario?.get)
+      .map(({ params }) => params.scenario.get.index),
+    ["global-code"],
   );
 });
 

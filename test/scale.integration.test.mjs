@@ -136,10 +136,11 @@ test("household reads cost the same at 1x, 2x and 4x the owner's home", async (t
     const { overview, on, temperature, lights, scenario, relations } =
       run.answers;
     assert.equal(scenario.entity.name, "Вечерний свет в гостиной");
-    assert.equal(
-      JSON.stringify(scenario.entity.summary),
-      JSON.stringify(runs[0].answers.scenario.entity.summary),
-    );
+    // The same summary at every size, apart from the moment it was read.
+    const { current_values: _read, ...summary } = scenario.entity.summary;
+    const { current_values: _first, ...first } =
+      runs[0].answers.scenario.entity.summary;
+    assert.equal(JSON.stringify(summary), JSON.stringify(first));
     assert.match(JSON.stringify(scenario.entity.summary), /Торшер/);
     assert.deepEqual(
       relations.entity.relations.scenario_roles.map(

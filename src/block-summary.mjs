@@ -29,10 +29,15 @@ const ACTION_OPS = {
 const ACTION_KINDS = new Set(SERVICE_ACTION_KINDS);
 
 // Accessory ids and FIRE scenario indexes a BLOCK names, so the caller reads
-// only the catalogs that the decoding needs.
+// only the catalogs that the decoding needs; the accessories of its
+// characteristic conditions in the order they appear, whose values a
+// summary reads now; and whether it has an interval, which needs the hub's
+// clock.
 export function blockBindings(data) {
   const accessoryIds = new Set();
   const scenarioIndexes = new Set();
+  const conditionAccessoryIds = new Set();
+  let hasInterval = false;
   const visit = (value) => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
@@ -44,14 +49,23 @@ export function blockBindings(data) {
     if (value.type === "scenario" && typeof value.index === "string") {
       scenarioIndexes.add(value.index);
     }
+    if (value.type === "characteristic" && Number.isSafeInteger(value.aId)) {
+      conditionAccessoryIds.add(value.aId);
+    }
+    if (value.type === "interval") hasInterval = true;
     for (const child of Object.values(value)) visit(child);
   };
   visit(data);
-  return { accessoryIds, scenarioIndexes };
+  return { accessoryIds, scenarioIndexes, conditionAccessoryIds, hasInterval };
 }
 
 // context: { homeRef, accessories: Map|null, rooms: Map|null,
 // scenarios: Map|null, isSensitiveControl }. A null catalog was not read.
+// With values (a Map from accessory id to { accessory } read now, or to
+// { status } when that read failed) each characteristic condition gets its
+// current value and holds_now; an accessory missing from it was not read.
+// With clock ({ minutes, weekday } of the hub's wall clock now, or null
+// when the hub's zone is unknown) each interval gets holds_now.
 export function decodeBlock(data, context) {
   const state = {
     context,
@@ -282,6 +296,9 @@ function decodeCondition(node, pointer, chain, state, nested = false) {
         to: to ? withoutDays(to) : null,
         ...(from ? { days: from.days } : {}),
         text,
+        ...(state.context.clock === undefined
+          ? {}
+          : { holds_now: intervalHoldsNow(from, to, state.context.clock) }),
       },
       text,
     };
@@ -337,6 +354,9 @@ function decodeCharacteristicCondition(node, pointer, chain, state) {
   const compared = decodeValue(node.value, target);
   const held = decodeHeld(node);
   const text = `${targetText(target)} ${op ?? "?"} ${valueText(compared)}${held ? ` ${held.text}` : ""}`;
+  const now = state.context.values
+    ? conditionNow(state.context.values.get(node.aId), target, node, held)
+    : {};
   if (trigger) state.triggers.push(text);
   state.records.push({
     ref: target.ref,
@@ -348,6 +368,7 @@ function decodeCharacteristicCondition(node, pointer, chain, state) {
     op,
     ...compared,
     ...(held ? { held: withoutText(held) } : {}),
+    ...now,
   });
   return {
     value: {
@@ -357,10 +378,96 @@ function decodeCharacteristicCondition(node, pointer, chain, state) {
       op,
       ...compared,
       ...(held ? { held: withoutText(held) } : {}),
+      ...now,
       ref: target.ref,
     },
     text,
   };
+}
+
+// What the condition's characteristic shows now and whether the condition
+// is true with it: a fact at read time, not a forecast (a trigger starts
+// the scenario only when its value changes). holds_now is null when the
+// value is unknown (not read, read failed, device unavailable) or one
+// reading cannot decide the comparison or a hold time.
+function conditionNow(read, target, node, held) {
+  if (read === undefined) {
+    return { current: { status: "not_read" }, holds_now: null };
+  }
+  if (read.status) return { current: { status: read.status }, holds_now: null };
+  if (!target.control) {
+    return { current: { status: "not_found" }, holds_now: null };
+  }
+  const field = VALUE_FIELDS.find((candidate) =>
+    Object.hasOwn(target.control.value ?? {}, candidate),
+  );
+  if (field === undefined) {
+    return { current: { status: "no_value" }, holds_now: null };
+  }
+  const value = target.control.value[field];
+  const current = {
+    value,
+    ...(typeof value === "number" && typeof target.control.unit === "string"
+      ? { unit: target.control.unit }
+      : {}),
+    ...valueName(target.control, field, value),
+  };
+  if (read.accessory.online === false) {
+    return {
+      current: { ...current, device_available: false },
+      holds_now: null,
+    };
+  }
+  const holds = compareNow(node.cond, node.value, value);
+  // A hold time needs how long the value has stood; only a value that
+  // does not match decides it.
+  return { current, holds_now: held && holds !== false ? null : holds };
+}
+
+// The comparison as the hub's characteristic condition makes it: on the
+// stored text of the value, as numbers when both sides are numbers.
+function compareNow(op, expected, actual) {
+  if (typeof expected !== "string") return null;
+  const actualText = String(actual);
+  const numbers = [Number(actualText), Number(expected)];
+  const numeric =
+    actualText.trim() !== "" &&
+    expected.trim() !== "" &&
+    numbers.every(Number.isFinite);
+  const equal = numeric ? numbers[0] === numbers[1] : actualText === expected;
+  if (op === "=") return equal;
+  if (op === "!=") return !equal;
+  if (!numeric) return null;
+  if (op === ">") return numbers[0] > numbers[1];
+  if (op === ">=") return numbers[0] >= numbers[1];
+  if (op === "<") return numbers[0] < numbers[1];
+  if (op === "<=") return numbers[0] <= numbers[1];
+  return null;
+}
+
+// Whether the hub's wall clock is inside an interval between two daily
+// times. Sun, date and offset forms are not decided, nor, on restricted
+// days, the part of an overnight interval after midnight: which day the
+// hub counts it to was not observed.
+function intervalHoldsNow(from, to, clock) {
+  if (clock === null) return null;
+  const start = dailyMinutes(from);
+  const end = dailyMinutes(to);
+  if (start === null || end === null || start === end) return null;
+  const now = clock.minutes;
+  const overnight = start > end;
+  const inside = overnight
+    ? now >= start || now < end
+    : now >= start && now < end;
+  if (!inside || from.days === "every day") return inside;
+  if (!Array.isArray(from.days) || (overnight && now < end)) return null;
+  return from.days.includes(clock.weekday);
+}
+
+function dailyMinutes(time) {
+  if (!time?.at || time.date || time.offset_seconds) return null;
+  const [hours, minutes] = time.at.split(":").map(Number);
+  return hours * 60 + minutes;
 }
 
 function decodeService(node, pointer, chain, delay, state) {
@@ -542,6 +649,10 @@ export function relationRole(record) {
       ? {}
       : { value_status: record.value_status }),
     ...(record.held ? { held: record.held } : {}),
+    ...(record.current ? { current: record.current } : {}),
+    ...(Object.hasOwn(record, "holds_now")
+      ? { holds_now: record.holds_now }
+      : {}),
     ...(record.role === "action"
       ? { branch: record.chain.at(-1)?.branch ?? null }
       : {}),
@@ -730,7 +841,9 @@ function describeTarget(context, aId, sId, cId, { nativeType }) {
   const valid = [aId, sId, cId].every(
     (id) => Number.isSafeInteger(id) && id >= 0,
   );
-  const accessory = valid ? context.accessories?.get(aId) : undefined;
+  const accessory = valid
+    ? (context.values?.get(aId)?.accessory ?? context.accessories?.get(aId))
+    : undefined;
   const service = accessory?.services?.find((item) => item?.sId === sId);
   const control = service?.characteristics?.find(
     (item) => item?.cId === cId,
@@ -751,7 +864,10 @@ function describeTarget(context, aId, sId, cId, { nativeType }) {
         : null,
     sensitive:
       isRecord(control) && context.isSensitiveControl?.(control) === true,
-    resolved: context.accessories != null,
+    // A device whose read failed is not known to be gone.
+    resolved:
+      context.accessories != null &&
+      context.values?.get(aId)?.status !== "read_failed",
   };
 }
 
@@ -800,17 +916,21 @@ function decodeValue(raw, target, { numeric = false } = {}) {
     typeof value === "number" && typeof target.control?.unit === "string"
       ? target.control.unit
       : undefined;
-  const named = Array.isArray(target.control?.validValues)
-    ? target.control.validValues.find((candidate) => {
+  return {
+    value,
+    ...(unit === undefined ? {} : { unit }),
+    ...valueName(target.control, field, value),
+  };
+}
+
+function valueName(control, field, value) {
+  const named = Array.isArray(control?.validValues)
+    ? control.validValues.find((candidate) => {
         const typed = candidate?.value?.[field];
         return typed !== undefined && Object.is(typed, value);
       })
     : undefined;
-  return {
-    value,
-    ...(unit === undefined ? {} : { unit }),
-    ...(typeof named?.name === "string" ? { value_name: named.name } : {}),
-  };
+  return typeof named?.name === "string" ? { value_name: named.name } : {};
 }
 
 function valueText({ value, unit, value_name: valueName }) {

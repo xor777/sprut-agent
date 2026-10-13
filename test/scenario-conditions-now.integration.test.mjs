@@ -284,9 +284,10 @@ test("a scenario read says which condition is false now, with the value and the 
       holds_now: false,
     },
   ]);
+  const [turnOn, pause] = ifStep.then;
   assert.deepEqual(
-    ifStep.then.map(({ device, room }) => [device, room]),
-    [["Настольная лампа", "Кабинет"]],
+    [turnOn.device, turnOn.room, pause.seconds, pause.steps[0].device],
+    ["Настольная лампа", "Кабинет", 180, "Настольная лампа"],
   );
   assert.equal(typeof summary.current_values.observed_at, "string");
   assert.equal(summary.current_values.devices_read, 1);

@@ -42,6 +42,13 @@ const HUB_TIME_ZONE_WAIT_MS = 2_000;
 // A BLOCK names its devices from the home catalog; the ones the catalog
 // lacks are read one by one up to this many, past that the catalog is read.
 const REFERENCED_ACCESSORY_READS = 16;
+// A BLOCK summary reads the devices of its characteristic conditions now,
+// one accessory.get each, up to this many; the rest show status not_read.
+const CONDITION_VALUE_READS = 16;
+// Relations search the sources of the owner's code scenarios, one
+// scenario.get each, up to this many (one LOGIC and one GLOBAL besides 7
+// built-in LOGIC on the owner's hub, 2026-09-24-live-conformance-3).
+const CODE_SOURCE_READS = 24;
 // Native methods that only read. Any other method may change the home, so
 // sending one drops the cached home catalogs.
 const READ_ONLY_METHODS = new Set([
@@ -2241,6 +2248,10 @@ export class SprutHubClient {
             ),
         )
       : null;
+    // Awaited after the BLOCK roles; a failure surfaces there, not as an
+    // unhandled rejection meanwhile.
+    const codePromise = this.#readCodeMentions(serial, accessory, deadline);
+    codePromise.catch(() => {});
     const [associationRead, logicReads, linkRead] = await Promise.all([
       associationPromise,
       Promise.all(logicPromises),
@@ -2258,9 +2269,12 @@ export class SprutHubClient {
         relationFailure("scenario_accessory_index", associationRead),
       );
     }
+    // Code scenarios the hub's index lists for this accessory; the ones
+    // the source search found a mention in are listed there instead.
+    const indexedCode = [];
     for (const association of associations) {
       if (association.type === "BLOCK") continue;
-      unchecked.push({
+      indexedCode.push({
         area: "scenario_code",
         outcome: "not_analyzed",
         scenario_ref: association.ref,
@@ -2292,6 +2306,18 @@ export class SprutHubClient {
       readBlocks,
       unchecked,
       deadline,
+    );
+
+    const code = await codePromise;
+    if (code.searched !== null) {
+      checked.code_scenarios_searched = code.searched;
+    }
+    const mentioned = new Set(
+      code.mentions.map(({ scenario_ref: ref }) => ref),
+    );
+    unchecked.push(
+      ...indexedCode.filter(({ scenario_ref: ref }) => !mentioned.has(ref)),
+      ...code.unchecked,
     );
 
     const assignedLogics = logicReads.flatMap((read) =>
@@ -2357,6 +2383,7 @@ export class SprutHubClient {
       scenario_roles: roles,
       other_roles_count: others,
       assigned_logics: assignedLogics,
+      code_mentions: code.mentions,
       characteristic_links: characteristicLinks,
       system_links: systemLinks,
       checked,
@@ -2391,6 +2418,9 @@ export class SprutHubClient {
       // The selected accessory was already read; its own values still decode.
       context.accessories = new Map([[accessory.id, accessory]]);
     }
+    // The selected accessory was read just now, so its own conditions carry
+    // current values without another read.
+    context.values = new Map([[accessory.id, { accessory }]]);
     const matches = selectedRef
       ? (record) => record.ref === selectedRef
       : (record) => record.accessoryId === accessory.id;
@@ -2488,6 +2518,99 @@ export class SprutHubClient {
         },
       };
     }
+  }
+
+  // The owner's code scenarios (built-in ones are assigned to services and
+  // listed as assigned logic) whose source names this accessory, each
+  // source read once in this call, at most CODE_SOURCE_READS of them.
+  // searched is null when the scenario list could not be read.
+  async #readCodeMentions(serial, accessory, deadline) {
+    const catalogRead = await this.#readRelationSource(
+      { scenario: { list: {} } },
+      deadline,
+      serial,
+      (response) =>
+        extractScenarioCatalog(response).flatMap((scenario) =>
+          scenario.type === "BLOCK" || scenario.predefined === true
+            ? []
+            : [
+                {
+                  index: scenario.index,
+                  ...normalizeScenarioSummary(serial, scenario),
+                },
+              ],
+        ),
+    );
+    if (!catalogRead.ok) {
+      return {
+        mentions: [],
+        searched: null,
+        unchecked: [relationFailure("scenario_code", catalogRead)],
+      };
+    }
+    const code = catalogRead.value;
+    const searched = code.slice(0, CODE_SOURCE_READS);
+    const reads = await Promise.all(
+      searched.map(({ index }) =>
+        this.#readRelationSource(
+          { scenario: { get: { index, expand: "data" } } },
+          deadline,
+          serial,
+          (response) => {
+            const { data } = extractEntity(
+              response,
+              ["scenario", "get"],
+              "scenario",
+            );
+            if (typeof data !== "string") {
+              throw new SprutHubError(
+                "incompatible_response",
+                "SprutHub returned a code scenario without its source.",
+              );
+            }
+            return data;
+          },
+        ),
+      ),
+    );
+    const mentions = [];
+    const unchecked = [];
+    reads.forEach((read, position) => {
+      const scenario = searched[position];
+      if (!read.ok) {
+        unchecked.push({
+          ...relationFailure("scenario_code", read),
+          scenario_ref: scenario.ref,
+        });
+        return;
+      }
+      const found = accessoryMentions(read.value, accessory);
+      if (!found) return;
+      mentions.push({
+        scenario_ref: scenario.ref,
+        scenario_name: scenario.name,
+        scenario_type: scenario.type,
+        active: scenario.active,
+        ...found,
+        next: {
+          tool: "get_entity",
+          arguments: { entity_ref: scenario.ref, include: ["configuration"] },
+        },
+      });
+    });
+    if (code.length > searched.length) {
+      unchecked.push({
+        area: "scenario_code",
+        outcome: "not_read",
+        limit: CODE_SOURCE_READS,
+        scenario_refs: code.slice(searched.length).map(({ ref }) => ref),
+      });
+    }
+    return {
+      mentions,
+      searched: reads.filter(({ ok }) => ok).length,
+      unchecked,
+    };
   }
 
   async #readRelationSource(params, deadline, serial, extract) {
@@ -2623,12 +2746,33 @@ export class SprutHubClient {
     } catch {
       return { format: "block", status: "invalid_json" };
     }
-    const context = await this.#blockNameContext(
-      serial,
-      blockBindings(data),
-      deadline,
+    const bindings = blockBindings(data);
+    // What each condition holds now: its device's value read at this
+    // moment, never the catalog's, and for an interval the hub's clock.
+    const conditionIds = [...bindings.conditionAccessoryIds].filter(
+      (id) => id >= 0,
     );
-    return blockSummary(decodeBlock(data, context), context);
+    const valueIds = new Set(conditionIds.slice(0, CONDITION_VALUE_READS));
+    const [context, timeZone] = await Promise.all([
+      this.#blockNameContext(serial, bindings, deadline, { valueIds }),
+      bindings.hasInterval ? this.#hubTimeZone(serial, deadline) : null,
+    ]);
+    const now = Date.now();
+    if (bindings.hasInterval) context.clock = hubClock(now, timeZone);
+    const summary = blockSummary(decodeBlock(data, context), context);
+    if (conditionIds.length === 0 && !bindings.hasInterval) return summary;
+    const notRead = conditionIds.length - valueIds.size;
+    summary.current_values = {
+      observed_at: context.valuesObservedAt ?? null,
+      devices_read: valueIds.size,
+      ...(notRead > 0
+        ? { devices_not_read: notRead, read_limit: CONDITION_VALUE_READS }
+        : {}),
+      ...(bindings.hasInterval
+        ? { hub_time: timeZone === null ? null : zonedTimestamp(now, timeZone) }
+        : {}),
+    };
+    return summary;
   }
 
   // Names for a decoded BLOCK. Accessories and rooms come from the home
@@ -2636,43 +2780,72 @@ export class SprutHubClient {
   // catalog, is read by accessory.get (the hub has no read by a list of
   // ids). The scenario catalog is read only when the BLOCK runs another
   // scenario. A failed read leaves refs unnamed instead of failing the
-  // entity read.
+  // entity read. The accessories in valueIds are read by accessory.get
+  // whatever the catalog holds, for their current values (context.values).
   async #blockNameContext(
     serial,
     { accessoryIds, scenarioIndexes },
     deadline,
-    { rooms: readRooms = true } = {},
+    { rooms: readRooms = true, valueIds = new Set() } = {},
   ) {
     const needAccessories = accessoryIds.size > 0;
     const needScenarios = scenarioIndexes.size > 0;
+    const nameIds = new Set(
+      [...accessoryIds].filter((id) => !valueIds.has(id)),
+    );
     const catalog = needAccessories ? this.cachedHomeCatalog(serial) : null;
-    const [accessoriesRead, roomsRead, scenariosRead] = await Promise.all([
-      needAccessories
-        ? this.#referencedAccessories(serial, accessoryIds, catalog, deadline)
-        : null,
-      needAccessories && readRooms && !catalog
-        ? this.#readRelationSource(
-            { room: { list: {} } },
-            deadline,
-            serial,
-            (response) =>
-              extractNativeList(response, ["room", "list", "rooms"]),
-          )
-        : null,
-      needScenarios
-        ? this.#readRelationSource(
-            { scenario: { list: {} } },
-            deadline,
-            serial,
-            extractScenarioCatalog,
-          )
-        : null,
-    ]);
+    const [accessoriesRead, valueReads, roomsRead, scenariosRead] =
+      await Promise.all([
+        needAccessories
+          ? nameIds.size > 0
+            ? this.#referencedAccessories(serial, nameIds, catalog, deadline)
+            : { ok: true, value: [] }
+          : null,
+        Promise.all(
+          [...valueIds].map((id) =>
+            this.#readConditionAccessory(serial, id, deadline),
+          ),
+        ),
+        needAccessories && readRooms && !catalog
+          ? this.#readRelationSource(
+              { room: { list: {} } },
+              deadline,
+              serial,
+              (response) =>
+                extractNativeList(response, ["room", "list", "rooms"]),
+            )
+          : null,
+        needScenarios
+          ? this.#readRelationSource(
+              { scenario: { list: {} } },
+              deadline,
+              serial,
+              extractScenarioCatalog,
+            )
+          : null,
+      ]);
+    const values = new Map(
+      valueReads.map(({ id, accessory, status }) => [
+        id,
+        accessory ? { accessory } : { status },
+      ]),
+    );
+    // A device whose value read failed keeps the catalog's name.
     const accessories = accessoriesRead?.ok
-      ? new Map(
-          accessoriesRead.value.map((accessory) => [accessory.id, accessory]),
-        )
+      ? new Map([
+          ...accessoriesRead.value.map((accessory) => [
+            accessory.id,
+            accessory,
+          ]),
+          ...valueReads.flatMap(({ id, accessory, status }) => {
+            const named =
+              accessory ??
+              (status === "read_failed" ? catalog?.byId.get(id) : undefined);
+            return named ? [[id, named]] : [];
+          }),
+        ])
       : null;
+    const observedAt = valueReads.flatMap(({ observedAt: at }) => at ?? []);
     const roomList = catalog
       ? catalog.rooms
       : roomsRead?.ok
@@ -2698,11 +2871,36 @@ export class SprutHubClient {
       accessories,
       rooms,
       scenarios,
+      ...(valueIds.size > 0
+        ? {
+            values,
+            valuesObservedAt:
+              observedAt.length > 0 ? latestObservedAt(observedAt) : null,
+          }
+        : {}),
       isSensitiveControl: (control) => isSensitiveNativeNode(control),
       namesResolved:
         (!needAccessories || accessoriesRead.ok) &&
         (!needScenarios || scenariosRead.ok),
     };
+  }
+
+  // One condition device read now for its value. A failed read marks its
+  // conditions (read_failed) instead of failing the entity read.
+  async #readConditionAccessory(serial, id, deadline) {
+    try {
+      const { accessory, observedAt } = await this.nativeAccessory(
+        serial,
+        id,
+        deadline,
+      );
+      return accessory
+        ? { id, accessory, observedAt }
+        : { id, status: "not_found", observedAt };
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+      return { id, status: "read_failed" };
+    }
   }
 
   async #referencedAccessories(serial, accessoryIds, catalog, deadline) {
@@ -3507,6 +3705,20 @@ export function zonedTimestamp(time, timeZone) {
   return `${wallClock}${offset < 0 ? "-" : "+"}${hh}:${mm}`;
 }
 
+// The hub's wall clock at an instant, as minutes since midnight and a
+// weekday (MON…SUN) for BLOCK intervals; null when its zone is unknown.
+function hubClock(time, timeZone) {
+  const offset = timeZone === null ? null : zoneOffsetMinutes(time, timeZone);
+  if (offset === null) return null;
+  const wall = new Date(time + offset * 60_000);
+  return {
+    minutes: wall.getUTCHours() * 60 + wall.getUTCMinutes(),
+    weekday: ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][
+      wall.getUTCDay()
+    ],
+  };
+}
+
 // The UTC offset of timeZone at an instant in minutes, or null for a zone
 // this process does not know.
 function zoneOffsetMinutes(time, timeZone) {
@@ -4016,7 +4228,7 @@ function relationFailure(area, read) {
 }
 
 const RELATIONS_LIMITATION =
-  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. LOGIC and GLOBAL code, code conditions, code-selected targets and extensions are not analyzed, and stored configuration does not prove that a command ran.";
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in Hub.getAccessory or Hub.getCharacteristic or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&
@@ -5221,6 +5433,60 @@ function codeScenarioSummary(scenario) {
         : "Code is not analyzed: its triggers, conditions and targets are unknown.",
   };
 }
+
+// Where a code source names an accessory, by the scenario API's forms
+// (scenario.sdk): Hub.getAccessory(<id>) or Hub.getCharacteristic(<id>, …)
+// with the id written as a number, or a string that is exactly its name.
+// Comments do not count; an id held in a variable is not found. Returns
+// found_by and the first lines, or null.
+function accessoryMentions(source, { id, name }) {
+  const tokens = [];
+  let line = 1;
+  for (const token of jsTokens(source)) {
+    if (!JAVASCRIPT_TRIVIA.has(token.type)) tokens.push({ ...token, line });
+    line += token.value.match(/\r\n|[\n\r\u2028\u2029]/g)?.length ?? 0;
+  }
+  const foundBy = new Set();
+  const lines = new Set();
+  tokens.forEach((token, index) => {
+    const after = (offset) => tokens[index + offset];
+    const byId =
+      token.type === "IdentifierName" &&
+      token.value === "Hub" &&
+      after(1)?.value === "." &&
+      ["getAccessory", "getCharacteristic"].includes(after(2)?.value) &&
+      after(3)?.value === "(" &&
+      after(4)?.type === "NumericLiteral" &&
+      Number(after(4).value) === id &&
+      [")", ","].includes(after(5)?.value);
+    const byName =
+      ["StringLiteral", "NoSubstitutionTemplate"].includes(token.type) &&
+      token.closed !== false &&
+      typeof name === "string" &&
+      name !== "" &&
+      token.value.length >= 2 &&
+      !token.value.includes("\\") &&
+      token.value.slice(1, -1) === name;
+    if (byId) foundBy.add("accessory_id");
+    if (byName) foundBy.add("accessory_name");
+    if (byId || byName) lines.add(token.line);
+  });
+  if (foundBy.size === 0) return null;
+  return {
+    found_by: ["accessory_id", "accessory_name"].filter((kind) =>
+      foundBy.has(kind),
+    ),
+    lines: [...lines].sort((a, b) => a - b).slice(0, 10),
+  };
+}
+
+const JAVASCRIPT_TRIVIA = new Set([
+  "HashbangComment",
+  "LineTerminatorSequence",
+  "MultiLineComment",
+  "SingleLineComment",
+  "WhiteSpace",
+]);
 
 function normalizeScenarioConfiguration(scenario) {
   if (typeof scenario.data !== "string") {
