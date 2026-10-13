@@ -3499,16 +3499,22 @@ function logicTypeForScenario(index) {
 // (not observed). The context holds no object of this process (an agent
 // under evaluation writes the code); node:vm is still no security boundary.
 function logicInfo(source) {
+  const context = vm.createContext(Object.create(null));
+  vm.runInContext(
+    'HS = new Proxy({}, { get: (_, key) => typeof key === "string" ? key : undefined }); HC = HS;',
+    context,
+  );
   try {
-    const context = vm.createContext(Object.create(null));
-    vm.runInContext(
-      'HS = new Proxy({}, { get: (_, key) => typeof key === "string" ? key : undefined }); HC = HS;',
-      context,
-    );
+    vm.runInContext(source, context, { timeout: 100 });
+  } catch {
+    // Assumed, not observed: the hub still takes info that the code's top
+    // level assigned before it threw (here, often on a name such as Hub
+    // that this empty context lacks).
+  }
+  try {
     const info = vm.runInContext(
-      `${source}\n;typeof info === "undefined" ? undefined : info`,
+      'typeof info === "undefined" ? undefined : info',
       context,
-      { timeout: 100 },
     );
     return isRecord(info) ? info : undefined;
   } catch {

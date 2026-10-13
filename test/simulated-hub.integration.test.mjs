@@ -1278,6 +1278,18 @@ test("the simulator changes scenario names and flags only through the options wi
     onStart: true,
     sync: true,
   });
+  // Code whose top level throws after assigning info (here on Hub, which
+  // the simulator does not provide there) still sets them: assumed.
+  await send({
+    scenario: {
+      update: {
+        index: "9",
+        data: `${renamedSource.replace('name: "Протечка"', 'name: "Протечка 2"')}\nHub.getAccessory(24);`,
+      },
+    },
+  });
+  assert.equal((await fields("9")).name, "Протечка 2");
+  await send({ scenario: { update: { index: "9", data: renamedSource } } });
 
   // A created LOGIC takes name, desc and onStart from its info and sync as
   // sent; its window shows what create sent. A GLOBAL is created as sent.
