@@ -1496,3 +1496,43 @@ test("a label naming a secret hides any text or number under an opaque key, what
   assert.equal(prepared, "sensitive_native_data");
   assert.deepEqual(windowWrites(hub), []);
 });
+
+// A label that names a Wi-Fi key by its WPA version, «WPA2-ключ»,
+// «WPA3-ключ», «WPA/WPA2 ключ», «Ключ WPA2» or «WPA2 key», names the
+// network key under an option key that says nothing (review of 4d8fdca,
+// 2026-10-13).
+const ROUTER_WINDOWS = [
+  ["Controller/router_1/", "WPA2-ключ", "dacha-wifi-5521"],
+  ["Controller/router_2/", "WPA3-ключ", "garden-wifi-8034"],
+  ["Controller/router_3/", "WPA/WPA2 ключ", "garage-wifi-2719"],
+  ["Controller/router_4/", "Ключ WPA2", "attic-wifi-6402"],
+  ["Controller/router_5/", "WPA2 key", "porch-wifi-3158"],
+];
+
+test("a Wi-Fi passphrase under a label naming a WPA2 or WPA3 key stays hidden, while the network name stays shown", async (t) => {
+  const { hub, answers, ok } = await setup(t);
+  const shown = [];
+  for (const [windowKey, label, passphrase] of ROUTER_WINDOWS) {
+    hub.state.windows[windowKey] = {
+      windowKey,
+      label: { text: "Роутер" },
+      options: [
+        text("Psk2", label, passphrase),
+        text("Ssid", "Имя сети", "Dacha"),
+      ],
+    };
+    const { entity } = await ok("get_entity", {
+      entity_ref: windowRef(windowKey),
+    });
+    shown.push(shownOptions(entity.options));
+  }
+
+  const passphrases = Object.fromEntries(
+    ROUTER_WINDOWS.map(([, label, passphrase]) => [label, passphrase]),
+  );
+  assert.deepEqual(leakedSecrets(answers, passphrases), []);
+  assert.deepEqual(
+    shown,
+    ROUTER_WINDOWS.map(() => ({ Ssid: "Dacha" })),
+  );
+});
