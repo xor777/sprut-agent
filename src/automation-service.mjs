@@ -12712,7 +12712,7 @@ function restoreItemBase(change, automation) {
 
 function restoreItem(change, automation, result, before) {
   const base = restoreItemBase(change, automation);
-  if (automation) return automationRestoreItem(base, result, before);
+  if (automation) return automationRestoreItem(change, base, result, before);
   const observed =
     result.observed_value !== undefined &&
     result.observed_value !== null &&
@@ -12888,7 +12888,7 @@ function restoreResendNext(change, result) {
   );
 }
 
-function automationRestoreItem(base, result, before) {
+function automationRestoreItem(change, base, result, before) {
   switch (result.status) {
     case "rolled_back":
       if (before.status === "rolled_back") {
@@ -12916,17 +12916,21 @@ function automationRestoreItem(base, result, before) {
         sent: false,
       };
     case "uncertain":
-    case "rollback_uncertain":
+    case "rollback_uncertain": {
+      // Only a delete of this call ends in rollback_uncertain; uncertain
+      // alone is a creation still unknown, and nothing was sent for it.
+      const deleteSent = change.status === "rollback_uncertain";
       return {
         ...base,
         status: "uncertain",
-        reason: "restore_unconfirmed",
-        sent: true,
+        reason: deleteSent ? "restore_unconfirmed" : "apply_unconfirmed",
+        sent: deleteSent,
         next: {
           tool: "get_automation_change",
           arguments: { change_ref: base.change_ref },
         },
       };
+    }
     default:
       return {
         ...base,
