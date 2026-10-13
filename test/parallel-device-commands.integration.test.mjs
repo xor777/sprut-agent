@@ -567,6 +567,56 @@ test("a lamp told «off, then 70 %» ends off at 70 and its commands reach it on
   assertOneAfterAnother(strip);
 });
 
+// On the hub's lamps a level write switches an off lamp on, even to the
+// level it already has (2026-10-13-lamp-logic-undo, 1 and F9): sent before
+// the off, it would light the lamp for a moment.
+test("a lamp that is off and told «off, then 70 %» gets no level write and never lights", async (t) => {
+  const { hub, client } = await setup(t);
+  const spot = SPOTS[1]; // off at 31
+  const spotOn = characteristic(spot.id, 14);
+  const spotLevel = characteristic(spot.id, 15);
+  const homeBefore = hub.snapshot();
+  const from = hub.requests.length;
+  const sent = await send(
+    client,
+    [
+      [STRIP_ON, false],
+      [STRIP_LEVEL, 70],
+      [spotOn, false],
+      [spotLevel, spot.level],
+    ],
+    "Выключить ленту и поставить ей 70%, выключить спот на его яркости",
+  );
+
+  // An off is still delivered to a lamp that is off; no level is.
+  assert.deepEqual(valueWrites(hub.requests.slice(from)).map(writeOf).sort(), [
+    ["17.14", false],
+    [`${spot.id}.14`, false],
+  ]);
+  assert.deepEqual(diffHomeSnapshots(homeBefore, hub.snapshot()), []);
+  assert.deepEqual(
+    sent.results.map(({ type, status, sent: wasSent, observed_value }) => [
+      type,
+      status,
+      wasSent,
+      observed_value,
+    ]),
+    [
+      ["On", "applied", true, false],
+      ["Brightness", "not_sent", false, undefined],
+      ["On", "applied", true, false],
+      // The level asked for is the one the lamp already has.
+      ["Brightness", "already_desired", false, spot.level],
+    ],
+  );
+  const level = sent.results[1];
+  assert.equal(level.change_ref, null);
+  assert.equal(level.note?.code, "lamp_level_not_sent", JSON.stringify(level));
+  assert.equal(typeof level.note.message, "string");
+  assert.equal(level.warning, undefined);
+  assert.equal(sent.status, "incomplete");
+});
+
 test("brightness 0 on a lamp switches it off, keeps its level and is undone to on", async (t) => {
   const { hub, client } = await setup(t);
   const from = hub.requests.length;
