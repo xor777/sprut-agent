@@ -1265,6 +1265,51 @@ test("a start whose watch cannot be saved after the start was sent says the netw
   ]);
 });
 
+// A read and a stop keep what they learned in the directory too. When it
+// cannot be written, the answer says what reached the hub, nothing or the
+// stop, with the search as read in the call: an internal error would hide
+// that the stop closed the network.
+test("a read and a stop whose search cannot be saved say what reached the hub", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, await apartment());
+  const started = await call(client, "start_device_search", {
+    extension_ref: zigbeeRef,
+  });
+  const watches = await watchDirectory(stateDirectory);
+  t.after(() => chmod(watches, 0o700).catch(() => {}));
+  await chmod(watches, 0o555);
+  const read = await toolError(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  const stopped = await toolError(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+  await chmod(watches, 0o700);
+  const after = await call(client, "get_device_search", {
+    search_ref: started.search_ref,
+    wait_seconds: 0,
+  });
+  const stoppedAgain = await call(client, "stop_device_search", {
+    search_ref: started.search_ref,
+  });
+
+  for (const refused of [read, stopped]) {
+    assert.equal(refused.error.code, "state_storage_unavailable");
+    assert.equal(refused.error.action, "restore_state_storage_then_retry");
+    assert.equal(refused.search_ref, started.search_ref);
+    assert(!JSON.stringify(refused).includes(stateDirectory), refused);
+  }
+  assert.equal(read.active, true);
+  assert.equal(read.ends_at, started.ends_at);
+  assert.equal(read.stop_sent, undefined);
+  assert.equal(stopped.stop_sent, true);
+  assert.equal(stopped.active, false);
+  assert.equal(stopped.ends_at, undefined);
+  assert.equal(after.active, false);
+  assert.equal(stoppedAgain.stop_sent, false);
+  assert.equal(searchActions(hub).length, 2);
+});
+
 test("a start whose reply is lost is unknown with the search state read back", async (t) => {
   const { hub, client } = await setup(
     t,
