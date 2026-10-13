@@ -638,3 +638,70 @@ test("a wrong invite looks like any other missing page and sets nothing", async 
     assert.equal(invite.setCookie, null, route);
   }
 });
+
+test("each «разные» gives the room new colours, and neighbouring lamps differ strongly", async (t) => {
+  const { tool, updates } = await setup(t, {
+    editHome: addSconceGroup,
+    afterStart: linkSconceGroup,
+  });
+  const huesOf = (writes) =>
+    writes
+      .filter(({ cId }) => cId === 16)
+      .map(({ aId, control }) => [aId, Object.values(control.value)[0]]);
+  const colourRoom = () =>
+    tool("control_devices", {
+      commands: [
+        { room: "r3", kind: "light", control: "color", value: "разные" },
+      ],
+      reason: "покрась гостиную разными цветами",
+    });
+
+  await colourRoom();
+  const first = huesOf(updates());
+  const before = updates().length;
+  await colourRoom();
+  const second = huesOf(updates().slice(before));
+
+  // The strip and both sconce bulbs, each far from the one before it, and
+  // a second request writes a new set to all three.
+  const gap = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+  for (const hues of [first, second]) {
+    assert.equal(hues.length, 3, JSON.stringify(hues));
+    for (let index = 1; index < hues.length; index++) {
+      assert(
+        gap(hues[index][1], hues[index - 1][1]) >= 90,
+        JSON.stringify(hues),
+      );
+    }
+  }
+  assert.notDeepEqual(
+    second.map(([, hue]) => hue),
+    first.map(([, hue]) => hue),
+  );
+});
+
+test("«ярче» and «+30» raise each lamp from its own level", async (t) => {
+  const { tool, listedId, updates } = await setup(t);
+  const chandelier = await listedId("Люстра");
+  const floorLamp = await listedId("Торшер");
+
+  const output = await tool("control_devices", {
+    commands: [
+      { device: chandelier, control: "brightness", value: "ярче" },
+      { device: floorLamp, control: "brightness", value: "-30" },
+    ],
+    reason: "люстру поярче, торшер потемнее",
+  });
+
+  assert.equal(output.status, "done", JSON.stringify(output));
+  // Люстра was at 80 and Торшер at 55 (Brightness is cId 15 on both).
+  assert.deepEqual(
+    updates()
+      .filter(({ cId }) => cId === 15)
+      .map(({ aId, control }) => [aId, Object.values(control.value)[0]]),
+    [
+      [15, 100],
+      [16, 25],
+    ],
+  );
+});
