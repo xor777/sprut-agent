@@ -2032,7 +2032,9 @@ function extensionActions(extension) {
   return (extension.spaces ?? []).flatMap(({ actions }) => actions ?? []);
 }
 
-// Devices in pairing mode that a start of this space would let in.
+// Devices in pairing mode that a start of this space would let in. A
+// device that has joined is one device while its interview runs too: a
+// start meanwhile does not announce it again.
 function pairingDevicesFor(state, { extensionKey, spaceKey }) {
   return state.pairing.filter(
     (device) =>
@@ -2050,6 +2052,7 @@ function isJoining(state, child) {
 }
 
 function announceJoining(state, extension, device) {
+  device.joined = true;
   const child = {
     extensionKey: extension.extensionKey,
     id: device.accessory.deviceId,
@@ -2075,7 +2078,6 @@ function announceJoining(state, extension, device) {
 }
 
 function completeJoin(state, extension, device, child) {
-  device.joined = true;
   if (device.error) {
     child.status = "Ошибка подключения";
     delete child.progressBar;
