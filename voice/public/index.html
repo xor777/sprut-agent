@@ -268,6 +268,40 @@
           transform: scale(0.95);
         }
       }
+      .mic-off {
+        position: absolute;
+        inset: 30%;
+        width: 40%;
+        height: 40%;
+        color: #fff;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s;
+      }
+      [data-muted] .mic-off {
+        opacity: 0.9;
+      }
+      [data-muted] .core {
+        filter: grayscale(1) brightness(0.45);
+      }
+      [data-muted] .ring,
+      [data-muted] .arc {
+        opacity: 0;
+      }
+      .end {
+        min-height: 36px;
+        padding: 0 18px;
+        border: 1px solid rgb(255 255 255 / 0.14);
+        border-radius: 18px;
+        background: rgb(255 255 255 / 0.04);
+        color: var(--muted);
+        font: inherit;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .end[hidden] {
+        display: none;
+      }
       [data-state="listening"] {
         --state: #2dd4bf;
       }
@@ -320,8 +354,22 @@
           <span class="ring"></span>
           <span class="arc"></span>
           <span class="core"></span>
+          <svg
+            class="mic-off"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M9 5a3 3 0 0 1 6 0v5M15 13.5A3 3 0 0 1 9 11V9M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.4 2.3M12 18v3M4 4l16 16"
+            />
+          </svg>
         </button>
         <p id="hint" class="hint"></p>
+        <button id="end" class="end" type="button" hidden>Закончить</button>
         <p id="status" class="sr-only" aria-live="polite"></p>
       </footer>
     </main>

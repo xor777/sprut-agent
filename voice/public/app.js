@@ -5,13 +5,14 @@ const statusElement = document.getElementById("status");
 const hintElement = document.getElementById("hint");
 const button = document.getElementById("talk");
 const logElement = document.getElementById("log");
+const endButton = document.getElementById("end");
 
 const TOKEN_KEY = "sprut-voice-token";
 const VOICE_KEY = "sprut-voice-voice";
 const IDLE_HANGUP_MS = 45_000;
+// With the microphone off the person is busy elsewhere; wait longer.
+const MUTED_HANGUP_MS = 5 * 60_000;
 const ENDING_GRACE_MS = 8_000;
-// A tool call longer than this gets a soft «working» sound until it ends.
-const WORKING_SOUND_AFTER_MS = 1_200;
 // The state is shown by the orb only; words go to screen readers, and the
 // hint appears only when there is something to do.
 const STATES = {
@@ -32,9 +33,14 @@ let session = null;
 
 setState(token ? "idle" : "no_token");
 navigator.serviceWorker?.register("/sw.js").catch(() => {});
+// During a conversation the orb turns the microphone off and on, so the
+// person can talk to someone nearby without ending it.
 button.addEventListener("click", () => {
-  if (session) stop("ended");
+  if (session) toggleMute(session);
   else start();
+});
+endButton.addEventListener("click", () => {
+  if (session) stop("ended");
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && session) stop("ended");
@@ -48,11 +54,15 @@ async function start() {
     lines: new Map(),
     speaking: false,
     ending: false,
+    muted: false,
+    responding: false,
+    wantResponse: false,
   };
   // Created inside the tap, as mobile browsers require.
   current.fx = createEffects(button);
   session = current;
   logElement.replaceChildren();
+  endButton.hidden = false;
   setState("connecting");
   try {
     const [stream, minted] = await Promise.all([
@@ -91,7 +101,6 @@ async function start() {
     current.channel = channel;
     channel.addEventListener("open", () => {
       if (session !== current) return;
-      current.fx?.chime("start");
       send(current, {
         type: "response.create",
         response: {
@@ -187,11 +196,19 @@ function onEvent(current, event) {
       if (current.calls.size === 0) setState("listening");
       armIdle(current);
       break;
+    case "response.created":
+      current.responding = true;
+      break;
     case "response.function_call_arguments.done":
       startCall(current, event);
       break;
     case "response.done":
+      current.responding = false;
       finishResponse(current, event.response);
+      if (current.wantResponse && current.calls.size === 0) {
+        current.wantResponse = false;
+        send(current, { type: "response.create" });
+      }
       break;
     case "error":
       remoteLog("error", event.error?.message ?? JSON.stringify(event));
@@ -203,6 +220,11 @@ function onEvent(current, event) {
 // still be saying its short preamble; results go back after response.done.
 function startCall(current, { call_id: callId, name, arguments: args }) {
   if (!callId || current.calls.has(callId)) return;
+  if (name === "stay_silent") {
+    remoteLog("tool", "stay_silent");
+    current.calls.set(callId, Promise.resolve({ status: "ok" }));
+    return;
+  }
   if (name === "end_conversation") {
     remoteLog("tool", "end_conversation");
     current.ending = true;
@@ -227,12 +249,6 @@ function startCall(current, { call_id: callId, name, arguments: args }) {
         detail: error.message,
       })),
   );
-  clearTimeout(current.workingTimer);
-  current.workingTimer = setTimeout(() => {
-    if (session === current && current.calls.size > 0) {
-      current.fx?.working(true);
-    }
-  }, WORKING_SOUND_AFTER_MS);
 }
 
 async function finishResponse(current, response) {
@@ -259,44 +275,67 @@ async function finishResponse(current, response) {
     });
     current.calls.delete(callId);
   }
-  if (current.calls.size === 0) {
-    clearTimeout(current.workingTimer);
-    current.fx?.working(false);
-  }
-  if (calls.every((item) => item.name === "end_conversation")) {
+  if (calls.some((item) => item.name === "end_conversation")) {
     if (!current.speaking) stop("ended");
     return;
   }
+  // Staying silent needs no answer about it.
+  if (calls.every((item) => item.name === "stay_silent")) {
+    setState("listening");
+    return;
+  }
   setState("thinking");
+  requestResponse(current);
+}
+
+// The person may have spoken while a command ran, and the model may be
+// answering that; a second response then fails, so the report waits.
+function requestResponse(current) {
+  if (current.responding) {
+    current.wantResponse = true;
+    return;
+  }
   send(current, { type: "response.create" });
+}
+
+function toggleMute(current) {
+  current.muted = !current.muted;
+  for (const track of current.stream?.getAudioTracks() ?? []) {
+    track.enabled = !current.muted;
+  }
+  if (current.muted) document.body.dataset.muted = "";
+  else delete document.body.dataset.muted;
+  armIdle(current);
+  setState(document.body.dataset.state);
 }
 
 // Ends a forgotten conversation, so an open screen does not keep a paid
 // session listening to the room.
 function armIdle(current) {
   clearTimeout(current.idle);
-  current.idle = setTimeout(() => {
-    if (session !== current) return;
-    if (current.speaking || current.userSpeaking || current.calls.size > 0) {
-      return armIdle(current);
-    }
-    stop("ended");
-  }, IDLE_HANGUP_MS);
+  current.idle = setTimeout(
+    () => {
+      if (session !== current) return;
+      if (current.speaking || current.userSpeaking || current.calls.size > 0) {
+        return armIdle(current);
+      }
+      stop("ended");
+    },
+    current.muted ? MUTED_HANGUP_MS : IDLE_HANGUP_MS,
+  );
 }
 
 function stop(state, detail) {
   const current = session;
   session = null;
-  if (current) {
-    if (state === "ended") current.fx?.chime("end");
-    release(current);
-  }
+  if (current) release(current);
+  endButton.hidden = true;
+  delete document.body.dataset.muted;
   setState(state, detail);
 }
 
 function release(current) {
   clearTimeout(current.idle);
-  clearTimeout(current.workingTimer);
   current.channel?.close();
   current.pc?.close();
   for (const track of current.stream?.getTracks() ?? []) track.stop();
@@ -397,11 +436,17 @@ function keepNewestInView() {
 function setState(state, detail) {
   const [spoken, hint] = STATES[state];
   document.body.dataset.state = state;
-  statusElement.textContent = spoken;
-  hintElement.textContent = detail ?? hint;
+  statusElement.textContent = session?.muted ? "Микрофон выключен" : spoken;
+  hintElement.textContent = session?.muted
+    ? "Микрофон выключен. Нажмите, чтобы говорить"
+    : (detail ?? hint);
   button.setAttribute(
     "aria-label",
-    session ? "Закончить разговор" : "Поговорить",
+    !session
+      ? "Поговорить"
+      : session.muted
+        ? "Включить микрофон"
+        : "Выключить микрофон",
   );
 }
 
@@ -443,9 +488,8 @@ function readVoice() {
   }
 }
 
-// Sound and motion of the orb. The loudness of both voices drives --level
-// on the orb alone, so a frame restyles only that small element; soft tones
-// mark the start and end of a conversation and a long tool call.
+// Motion of the orb: the loudness of both voices drives --level on the orb
+// alone, so a frame restyles only that small element. Nothing is played.
 function createEffects(orb) {
   const Context = window.AudioContext ?? window.webkitAudioContext;
   if (!Context) return null;
@@ -458,7 +502,6 @@ function createEffects(orb) {
   let level = 0;
   let shown = 0;
   let frame = 0;
-  let workingTimer = 0;
   const loudness = (analyser) => {
     if (!analyser) return 0;
     analyser.getByteTimeDomainData(samples);
@@ -477,18 +520,6 @@ function createEffects(orb) {
     frame = requestAnimationFrame(tick);
   };
   frame = requestAnimationFrame(tick);
-  const tone = (frequency, at, length, volume) => {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = frequency;
-    gain.gain.setValueAtTime(0, at);
-    gain.gain.linearRampToValueAtTime(volume, at + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + length);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start(at);
-    oscillator.stop(at + length + 0.05);
-  };
   return {
     attach(kind, stream) {
       try {
@@ -500,28 +531,10 @@ function createEffects(orb) {
         context.resume().catch(() => {});
       } catch {}
     },
-    chime(kind) {
-      const now = context.currentTime;
-      const [first, second] = kind === "start" ? [660, 990] : [880, 587];
-      tone(first, now, 0.18, 0.06);
-      tone(second, now + 0.12, 0.26, 0.06);
-    },
-    working(on) {
-      clearInterval(workingTimer);
-      if (!on) return;
-      const pulse = () => {
-        const now = context.currentTime;
-        tone(740, now, 0.12, 0.025);
-        tone(988, now + 0.16, 0.14, 0.02);
-      };
-      pulse();
-      workingTimer = setInterval(pulse, 1100);
-    },
     stop() {
-      clearInterval(workingTimer);
       cancelAnimationFrame(frame);
       orb.style.setProperty("--level", "0");
-      setTimeout(() => context.close().catch(() => {}), 600);
+      context.close().catch(() => {});
     },
   };
 }
