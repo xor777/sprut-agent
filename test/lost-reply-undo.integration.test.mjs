@@ -728,6 +728,111 @@ for (const { name, write, read, inputs } of CHAINS) {
   });
 }
 
+// The later of two changes of one scenario was sent, but its request never
+// reached the hub. The earlier one is then undone: the read before that
+// undo shows the later change's baseline, the last read that can, as the
+// undo removes it. The later change ends as not applied, never as a
+// change by hand.
+const LATER_APPLY_CHAINS = [
+  {
+    name: "BLOCK data change",
+    write: "scenario.update",
+    inputs: [
+      (hub) => blockDataInput(hub, "20"),
+      (hub) => blockDataInput(hub, "40"),
+    ],
+  },
+  {
+    name: "LOGIC code change",
+    write: "scenario.update",
+    inputs: [
+      (hub) =>
+        logicCodeInput(
+          hub,
+          'log("Протечка: розетка чайника отключена")',
+          'log("Протечка: розетка отключена")',
+        ),
+      (hub) =>
+        logicCodeInput(
+          hub,
+          'description: "Отключает розетку чайника при протечке под мойкой"',
+          'description: "Отключает чайник при протечке"',
+        ),
+    ],
+  },
+  {
+    name: "scenario rename",
+    write: "window.update",
+    inputs: [() => renameInput("Ночь"), () => renameInput("Ночь, свет")],
+  },
+];
+
+async function assertLaterNotApplied(hub, client, initial, first, later) {
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+  const sentBefore = hub.requests.length;
+  const read = await call(client, "get_native_change", {
+    change_ref: later.change_ref,
+  });
+  assert.equal(read.status, "not_owned", JSON.stringify(read));
+  assert.equal(read.conflict_reason, "change_was_not_applied");
+  assert.equal(read.manual_change_observed, undefined);
+  const again = await call(client, "restore_native_change", {
+    change_refs: [first.change_ref, later.change_ref],
+  });
+  assert.deepEqual(
+    again.results.map(({ change_ref: ref, status, reason }) => [
+      ref,
+      status,
+      reason,
+    ]),
+    [
+      [later.change_ref, "skipped", "not_applied"],
+      [first.change_ref, "restored", undefined],
+    ],
+  );
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+}
+
+for (const { name, write, inputs } of LATER_APPLY_CHAINS) {
+  test(`«верни как было» after the agent's later ${name} that never reached the hub puts the scenario back and names that change not applied`, async (t) => {
+    const { hub, client } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const later = await call(client, "prepare_native_change", inputs[1](hub));
+    hub.loseNext(write);
+    const lost = await call(client, "apply_native_change", {
+      change_ref: later.change_ref,
+    });
+    assert.equal(lost.status, "uncertain", JSON.stringify(lost));
+
+    const undone = await call(client, "restore_native_change", {
+      change_refs: [first.change_ref, later.change_ref],
+    });
+    assert.equal(itemOf(undone, first).status, "restored");
+    await assertLaterNotApplied(hub, client, initial, first, later);
+  });
+
+  test(`after the MCP server stopped while sending the agent's later ${name} that never reached the hub, undoing the earlier change alone names the later one not applied`, async (t) => {
+    const { hub, client, connect, stopOnNext } = await setup(t);
+    const initial = hub.snapshot();
+    const first = await applied(client, inputs[0](hub));
+    const later = await call(client, "prepare_native_change", inputs[1](hub));
+    hub.loseNext(write);
+    const stopped = stopOnNext(write);
+    callUnanswered(client, "apply_native_change", {
+      change_ref: later.change_ref,
+    });
+    await stopped;
+    const restarted = await connect();
+    const earlier = await call(restarted, "restore_native_change", {
+      change_ref: first.change_ref,
+    });
+    assert.equal(earlier.status, "restored", JSON.stringify(earlier));
+    await assertLaterNotApplied(hub, restarted, initial, first, later);
+  });
+}
+
 // The first delete of a created BLOCK got no answer and arrives at the hub
 // late: right before the delete the next restore sends, which then finds
 // nothing to delete, or between the read that finds the BLOCK still there
