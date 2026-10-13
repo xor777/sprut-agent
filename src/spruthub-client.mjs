@@ -278,14 +278,14 @@ export class SprutHubClient {
   // in a room the state does not know has the room list read after it.
   async homeCatalog(serial, deadline, { refresh = false } = {}) {
     const state = this.#homeState(serial);
-    if (refresh) state.invalidate("refresh");
     const since = state.readMark();
     for (let pass = 0; pass <= HOME_READ_PASSES; pass += 1) {
-      const needs = state.needs(Date.now(), since);
+      const needs = state.needs(Date.now(), since, refresh);
       if (needs === null) return { catalog: state.catalog() };
       if (pass === HOME_READ_PASSES) break;
       if (needs.whole) {
-        await this.#readWholeHome(state, deadline);
+        // A refresh takes no whole read begun before it.
+        await this.#readWholeHome(state, deadline, refresh ? since : 0);
       } else {
         await Promise.all([
           needs.rooms ? this.#readRoomsInto(state, deadline) : null,
@@ -313,13 +313,16 @@ export class SprutHubClient {
 
   // A whole read already running answers too (it started earlier, with an
   // earlier deadline), unless the state has since learnt of something it
-  // cannot follow: the state would not take that read.
-  #readWholeHome(state, deadline) {
+  // cannot follow (the state would not take that read) or it is not newer
+  // than the read mark after.
+  #readWholeHome(state, deadline, after) {
     const running = this.#wholeReads.get(state.serial);
-    if (running?.generation === state.generation) return running.read;
+    if (running?.generation === state.generation && running.number > after) {
+      return running.read;
+    }
     const token = state.beginRead();
     const read = this.#readWhole(state, token, deadline);
-    const entry = { read, generation: token.generation };
+    const entry = { read, generation: token.generation, number: token.number };
     this.#wholeReads.set(state.serial, entry);
     const forget = () => {
       if (this.#wholeReads.get(state.serial) === entry) {

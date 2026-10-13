@@ -116,11 +116,12 @@ export class HomeState {
   // What must be read before the next answer: the whole home, or the rooms
   // and the accessories to read one by one; null when nothing. A whole read
   // begun after the mark since answers what only time asks for, so that a
-  // call does not read again for a quiet connection it just read over.
-  needs(now = Date.now(), since = Number.POSITIVE_INFINITY) {
+  // call does not read again for a quiet connection it just read over, and
+  // a refresh, which asks for such a read.
+  needs(now = Date.now(), since = Number.POSITIVE_INFINITY, refresh = false) {
     if (
       this.#stale !== null ||
-      (this.#wholeRead <= since && this.#expired(now))
+      (this.#wholeRead <= since && (refresh || this.#expired(now)))
     ) {
       return { whole: true };
     }
@@ -299,7 +300,11 @@ export class HomeState {
   // An event as received; scope: all, the rooms, or one accessory (what a
   // read just replaced).
   #apply(entry, scope) {
-    const fromFeed = entry.record === this.#feed;
+    // While the whole home is due, as after a lost connection, the state
+    // answers nothing and follows no connection: an event is nobody else's.
+    // The whole read in flight, over the connection that brings them, has
+    // them in its log and tells them apart by its own connection.
+    const fromFeed = entry.record === this.#feed || this.#stale !== null;
     for (const [domain, part] of Object.entries(entry.event)) {
       if (domain === "characteristic") {
         this.#characteristicEvent(part, entry, scope, fromFeed);
