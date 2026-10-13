@@ -469,6 +469,51 @@ test("a BLOCK the agent created whose undo request was lost is deleted by restor
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 });
 
+// The hub acknowledged the create but the read after it failed, so the
+// create is unknown; the agent then renames the new BLOCK. That rename is
+// the agent's own, never a change by hand of the create, and undoing both
+// removes the BLOCK.
+test("a created BLOCK whose read after the create failed, then renamed by the agent, names the rename and «верни как было» removes it", async (t) => {
+  const { hub, client, onNext } = await setup(t);
+  const initial = hub.snapshot();
+  const created = await call(
+    client,
+    "prepare_native_change",
+    createdBlockInput,
+  );
+  const armed = onNext("scenario.create", () => hub.refuseNext("scenario.get"));
+  const unread = await call(client, "apply_native_change", {
+    change_ref: created.change_ref,
+  });
+  await armed;
+  assert.equal(unread.status, "uncertain", JSON.stringify(unread));
+  const index = hub.state.scenarios.find(
+    ({ name }) => name === CREATED_BLOCK_NAME,
+  ).index;
+  const renamed = await applied(client, {
+    operation: "window_option",
+    target_ref: scenarioRef(index),
+    option_key: "Name",
+    value: "Люстра выкл",
+    reason: "Переименовать",
+  });
+
+  const read = await call(client, "get_native_change", {
+    change_ref: created.change_ref,
+  });
+  assert.equal(
+    read.conflict_reason,
+    "later_owned_change",
+    JSON.stringify(read),
+  );
+  assert.equal(read.restore_first_change_ref, renamed.change_ref);
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [created.change_ref, renamed.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone.results));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
 // The apply never reached the hub: the scenario is as it was, and the undo
 // writes nothing. That apply stays unconfirmed, as a setting's does: a
 // write without an answer is never taken for one that cannot arrive.
