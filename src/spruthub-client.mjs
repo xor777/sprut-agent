@@ -2228,8 +2228,7 @@ export class SprutHubClient {
       extensions
         .filter(({ bundle_type: bundleType }) => bundleType === "BRIDGE")
         .map(async (extension) => {
-          const running =
-            extension.state === "LOADED" && extension.enabled === true;
+          const running = bridgeRunning(extension);
           const entry = {
             ref: extension.ref,
             name: extension.name,
@@ -2237,12 +2236,7 @@ export class SprutHubClient {
             state: extension.state,
             enabled: extension.enabled,
             running,
-            ...(running
-              ? {}
-              : {
-                  limitation:
-                    "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.",
-                }),
+            ...(running ? {} : { limitation: BRIDGE_NOT_RUNNING }),
           };
           let children;
           try {
@@ -3122,6 +3116,7 @@ export class SprutHubClient {
       entity.exported_count = children.filter(
         ({ space_key: key }) => key === BRIDGE_EXPORTED_SPACE,
       ).length;
+      if (!bridgeRunning(entity)) entity.limitation = BRIDGE_NOT_RUNNING;
     }
     if (requested.has("children")) {
       if (children && bridge) {
@@ -4628,6 +4623,15 @@ function incompatibleExtensionChildIdentity() {
 // A bridge lists an exported accessory in main and one it does not export
 // in notConnected (2026-10-13-wave4-contracts 3.2).
 const BRIDGE_EXPORTED_SPACE = "main";
+
+// A bridge serves its export only while it runs; one that is NOT_LOADED or
+// off keeps the setting (2026-10-13-wave4-contracts 3.1, 3.3).
+function bridgeRunning({ state, enabled }) {
+  return state === "LOADED" && enabled === true;
+}
+
+const BRIDGE_NOT_RUNNING =
+  "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.";
 
 function bridgeChildExported({ spaceKey }) {
   if (spaceKey === BRIDGE_EXPORTED_SPACE) return true;
