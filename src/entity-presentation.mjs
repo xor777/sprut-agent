@@ -14,6 +14,7 @@ const IDENTITY_KEYS = [
   "key",
   "id",
   "space_key",
+  "room",
 ];
 
 export function presentEntityResult(

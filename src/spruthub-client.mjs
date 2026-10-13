@@ -2012,6 +2012,7 @@ export class SprutHubClient {
     validateAccessory(accessory);
     const ownerContext = {
       device_window_ref: ownerWindowRef(parsed.serial, accessory.deviceWindow),
+      accessory_ref: accessoryRef(parsed.serial, accessory.id),
     };
     if (parsed.kind === "accessory") {
       const entity = normalizeAccessoryDetail(
@@ -2031,6 +2032,18 @@ export class SprutHubClient {
           accessory,
           deadline,
         );
+      }
+      if (requested.has("bridges")) {
+        try {
+          entity.bridges = await this.#readAccessoryBridges(
+            parsed.serial,
+            accessory,
+            deadline,
+          );
+        } catch (error) {
+          if (!(error instanceof SprutHubError)) throw error;
+          markIncludeUnread(entity, "bridges", error);
+        }
       }
       if (
         requested.has("physical_configuration") ||
@@ -2196,6 +2209,118 @@ export class SprutHubClient {
       null,
       deadline,
     );
+  }
+
+  // The accessory's export to each bridge (HomeKit, Yandex, Google): a
+  // bridge lists one child per accessory it can export, with the accessory
+  // id as its id, in main when exported and in notConnected when not; the
+  // child's window has a CHECKBOX s:<sId> per exportable service, true when
+  // exported. Both read on a bridge that does not run too
+  // (2026-10-13-wave4-contracts 3.2, 3.3). A bridge's list is read whole
+  // (16-18 KB on the owner's hub): the hub's answer for one child of a
+  // bridge that cannot export it was not observed. The window is read only
+  // where the accessory is exported: a notConnected child's services were
+  // all false.
+  async #readAccessoryBridges(serial, accessory, deadline) {
+    const { extensions } = await this.nativeExtensions(serial, deadline);
+    const childId = String(accessory.id);
+    return Promise.all(
+      extensions
+        .filter(({ bundle_type: bundleType }) => bundleType === "BRIDGE")
+        .map(async (extension) => {
+          const running =
+            extension.state === "LOADED" && extension.enabled === true;
+          const entry = {
+            ref: extension.ref,
+            name: extension.name,
+            type: extension.type,
+            state: extension.state,
+            enabled: extension.enabled,
+            running,
+            ...(running
+              ? {}
+              : {
+                  limitation:
+                    "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.",
+                }),
+          };
+          let children;
+          try {
+            ({ children } = await this.nativeExtensionChildren(
+              serial,
+              extension.key,
+              deadline,
+            ));
+          } catch (error) {
+            if (!(error instanceof SprutHubError)) throw error;
+            return { ...entry, exported: null, error_code: error.code };
+          }
+          const child = children.find(({ id }) => id === childId);
+          if (!child) return { ...entry, exported: false, exportable: false };
+          const exported = bridgeChildExported(child);
+          if (exported !== true) return { ...entry, exported };
+          try {
+            return {
+              ...entry,
+              exported,
+              services: await this.#readBridgeServices(
+                serial,
+                accessory,
+                child,
+                deadline,
+              ),
+            };
+          } catch (error) {
+            if (!(error instanceof SprutHubError)) throw error;
+            return { ...entry, exported, services_error_code: error.code };
+          }
+        }),
+    );
+  }
+
+  async #readBridgeServices(serial, accessory, child, deadline) {
+    if (typeof child.optionsWindow !== "string" || !child.optionsWindow) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned a bridge child without its window.",
+      );
+    }
+    const response = await this.#request(
+      { window: { get: { windowKey: child.optionsWindow } } },
+      deadline,
+      { serial },
+    );
+    const window = extractEntity(response, ["window", "get"], "window");
+    if (
+      window.windowKey !== child.optionsWindow ||
+      !Array.isArray(window.options)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incomplete bridge window data.",
+      );
+    }
+    return window.options.flatMap((option) => {
+      const match = /^s:(\d+)$/.exec(option?.key ?? "");
+      if (!match || option.inputType !== "CHECKBOX") return [];
+      const sId = Number(match[1]);
+      const service = accessory.services?.find(
+        (candidate) => candidate.sId === sId,
+      );
+      const value = option.value?.boolValue;
+      return [
+        {
+          ref: serviceRef(serial, accessory.id, sId),
+          name:
+            service?.name ??
+            (typeof option.name === "string"
+              ? redactSensitiveText(option.name)
+              : null),
+          // A value the hub did not give is unknown, not false.
+          exported: typeof value === "boolean" ? value : null,
+        },
+      ];
+    });
   }
 
   async #readRelations(serial, accessory, services, characteristic, deadline) {
@@ -2992,24 +3117,63 @@ export class SprutHubClient {
         ).length;
       }
     }
+    const bridge = extension.bundleType === "BRIDGE";
+    if (children && bridge) {
+      entity.exported_count = children.filter(
+        ({ space_key: key }) => key === BRIDGE_EXPORTED_SPACE,
+      ).length;
+    }
     if (requested.has("children")) {
-      if (children) {
+      if (children && bridge) {
+        Object.assign(
+          entity,
+          await this.#bridgeChildren(parsed.serial, children, deadline),
+        );
+      } else if (children) {
         entity.children = children;
       } else {
         // Optional children must not discard a successful extension.get.
-        Object.defineProperty(entity, INCLUDE_READ_ERROR, {
-          value: {
-            ...(entity[INCLUDE_READ_ERROR] ?? {}),
-            children: {
-              code: childrenError.code,
-              message: childrenError.message,
-            },
-          },
-          enumerable: false,
-        });
+        markIncludeUnread(entity, "children", childrenError);
       }
     }
     return entity;
+  }
+
+  // A bridge's children are the home's accessories: the exported ones
+  // first, each with its accessory ref and room from the home catalog. A
+  // catalog that cannot be read leaves the rooms out and says why.
+  async #bridgeChildren(serial, children, deadline) {
+    let catalog = null;
+    let catalogError = null;
+    try {
+      ({ catalog } = await this.homeCatalog(serial, deadline));
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+      catalogError = error;
+    }
+    const rooms = new Map(
+      (catalog?.rooms ?? []).map(({ id, name }) => [id, name]),
+    );
+    const listed = children.map((child) => {
+      const id = /^[1-9]\d{0,15}$/.test(child.id) ? Number(child.id) : null;
+      if (id === null) return child;
+      const accessory = catalog?.byId.get(id);
+      return {
+        ...child,
+        accessory_ref: accessoryRef(serial, id),
+        ...(catalog
+          ? { room: accessory ? (rooms.get(accessory.roomId) ?? null) : null }
+          : {}),
+      };
+    });
+    const exported = ({ space_key: key }) => key === BRIDGE_EXPORTED_SPACE;
+    return {
+      ...(catalogError ? { rooms_error_code: catalogError.code } : {}),
+      children: [
+        ...listed.filter(exported),
+        ...listed.filter((child) => !exported(child)),
+      ],
+    };
   }
 
   async #readExtensionChildren(serial, selectedExtensionKey, deadline) {
@@ -4461,6 +4625,28 @@ function incompatibleExtensionChildIdentity() {
   );
 }
 
+// A bridge lists an exported accessory in main and one it does not export
+// in notConnected (2026-10-13-wave4-contracts 3.2).
+const BRIDGE_EXPORTED_SPACE = "main";
+
+function bridgeChildExported({ spaceKey }) {
+  if (spaceKey === BRIDGE_EXPORTED_SPACE) return true;
+  return spaceKey === "notConnected" ? false : null;
+}
+
+// An optional include that could not be read must not discard the entity
+// read before it; include_resolution names the failure.
+function markIncludeUnread(entity, include, error) {
+  Object.defineProperty(entity, INCLUDE_READ_ERROR, {
+    value: {
+      ...(entity[INCLUDE_READ_ERROR] ?? {}),
+      [include]: { code: error.code, message: error.message },
+    },
+    enumerable: false,
+    configurable: true,
+  });
+}
+
 function normalizeExtensionChildren(serial, children, expectedExtensionKey) {
   const normalized = children.map((child) =>
     normalizeExtensionChildSummary(serial, child, expectedExtensionKey),
@@ -4706,6 +4892,9 @@ function includeWasApplied(entity, include) {
   if (include === "children") {
     return entity.kind === "extension" && Array.isArray(entity.children);
   }
+  if (include === "bridges") {
+    return entity.kind === "accessory" && Array.isArray(entity.bridges);
+  }
   return false;
 }
 
@@ -4782,6 +4971,19 @@ function nextReadTowardOwner(entity, include, ownerContext) {
     return {
       tool: "home_overview",
       arguments: { home_ref: entity.ref },
+    };
+  }
+
+  // A bridge exports an accessory; a service, characteristic or logic of it
+  // reads its bridges through the accessory.
+  if (
+    include === "bridges" &&
+    entity.kind !== "accessory" &&
+    typeof ownerContext.accessory_ref === "string"
+  ) {
+    return {
+      tool: "get_entity",
+      arguments: { entity_ref: ownerContext.accessory_ref, include: [include] },
     };
   }
 
@@ -4882,6 +5084,7 @@ function ownerScopeReason(entity, include) {
   if (entity.kind === "home") return "catalog_required";
   if (["extension", "extension_child"].includes(entity.kind))
     return "window_scoped";
+  if (include === "bridges") return "accessory_scoped";
   if (include === "configuration") return "scenario_scoped";
   if (include === "options") {
     if (entity.kind === "scenario") return "window_scoped";
