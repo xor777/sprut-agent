@@ -174,9 +174,11 @@ import {
 import {
   blockCreateRequest,
   blockMatchesRequested,
+  blockRuleEffects,
   blockStillAtBaseline,
   blockUpdateWritesData,
   classifyScenarioRunDelivery,
+  existingRuleRelation,
   isBlockChange,
   isLogicSourceChange,
   pauseHasNoProvenHubEffect,
@@ -239,6 +241,11 @@ const AUTOMATION_CHANGE_KINDS = new Set([
   "logic_source_create",
   "logic_source_update",
 ]);
+// A new BLOCK that a scenario of the home already does, wholly or in part.
+const EXISTING_RULE_NOTE =
+  "A scenario in existing_rules already does this on the same trigger. Tell the owner and do not apply unless they asked for a second scenario; to change that one, edit it with block_data_update.";
+const PARTIAL_RULE_NOTE =
+  "A scenario in existing_rules already does part of this on the same trigger. Tell the owner which part before applying.";
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
 export class AutomationService {
@@ -841,10 +848,59 @@ export class AutomationService {
       updated_at: now,
       history: [{ status: "prepared", at: now }],
     };
+    const existingRules = await this.#existingBlockRules(data);
     await this.store.save(change);
-    return publicNativeChange(change, undefined, {
-      blockActionSnapshotFresh: true,
-    });
+    return {
+      ...publicNativeChange(change, undefined, {
+        blockActionSnapshotFresh: true,
+      }),
+      ...(existingRules.length > 0
+        ? {
+            existing_rules: existingRules,
+            tell_owner: existingRules.some(({ relation }) =>
+              ["same", "superset"].includes(relation),
+            )
+              ? EXISTING_RULE_NOTE
+              : PARTIAL_RULE_NOTE,
+          }
+        : {}),
+    };
+  }
+
+  // BLOCK scenarios that already set what a new BLOCK would set on the same
+  // triggers. They are found through the hub's index of the accessories the
+  // new BLOCK writes, as relations find them.
+  async #existingBlockRules(data) {
+    const requested = blockRuleEffects(data);
+    const accessoryIds = new Set([...requested.values()].map(({ aId }) => aId));
+    const listed = new Map();
+    for (const aId of accessoryIds) {
+      for (const summary of await this.client.listAccessoryScenarios(aId)) {
+        if (summary?.type === "BLOCK") listed.set(summary.index, summary);
+      }
+    }
+    const rules = [];
+    for (const index of listed.keys()) {
+      const scenario = await this.client.getScenario(index);
+      if (scenario?.type !== "BLOCK" || typeof scenario.data !== "string") {
+        continue;
+      }
+      let stored;
+      try {
+        stored = JSON.parse(scenario.data);
+      } catch {
+        continue;
+      }
+      const relation = existingRuleRelation(stored, data, requested);
+      if (!relation) continue;
+      rules.push({
+        ref: `${configuredHomeRef(this.hubSerial)}/scenario/${encodeURIComponent(index)}`,
+        name: scenario.name,
+        active: scenario.active === true,
+        relation,
+      });
+    }
+    return rules;
   }
 
   async #prepareBlockUpdate(input) {

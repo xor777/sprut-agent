@@ -1109,6 +1109,16 @@ export class SprutHubClient {
       : null;
   }
 
+  // The scenarios the hub's index lists for one accessory, as relations
+  // read them (scenario.list {aId}); a summary without data.
+  async listAccessoryScenarios(aId) {
+    const response = await this.#request(
+      { scenario: { list: { aId } } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractNativeList(response, ["scenario", "list", "scenarios"]);
+  }
+
   async listScenarioDetails({ descriptionIncludes } = {}) {
     const deadline = Date.now() + this.timeoutMs;
     const scenarios = extractScenarioCatalog(

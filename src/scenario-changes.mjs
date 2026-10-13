@@ -552,3 +552,82 @@ export function comparableNativeScenarioConfiguration(snapshot) {
   // hub projections or runtime diagnostics, not editable configuration.
   return nativeScenarioConfiguration(snapshot, canonicalBlock(snapshot.data));
 }
+
+// What a BLOCK does on its triggers, one key per trigger and characteristic
+// it sets on it: the trigger condition, the branch, the characteristic and
+// value set, and the delay before it. Only characteristic triggers, daily
+// intervals and time triggers of top-level ifs count; a BLOCK that is only
+// run by hand or by another scenario has none.
+export function blockRuleEffects(data) {
+  const effects = new Map();
+  const block = canonicalBlock(data);
+  for (const target of Array.isArray(block?.targets) ? block.targets : []) {
+    if (target?.type !== "if") continue;
+    const triggers = ruleTriggers(target.if);
+    for (const [branch, actions] of [
+      ["then", target.then],
+      ["else", target.else],
+    ]) {
+      for (const action of ruleActions(actions, 0)) {
+        for (const trigger of triggers) {
+          const effect = { trigger, branch, ...action };
+          effects.set(JSON.stringify(effect), effect);
+        }
+      }
+    }
+  }
+  return effects;
+}
+
+function ruleTriggers(node) {
+  if (node?.type === "condition" && Array.isArray(node.conditions)) {
+    return node.conditions.flatMap(ruleTriggers);
+  }
+  if (node?.type === "characteristic" && node.trigger === true) {
+    const { aId, sId, cId, cond, value } = node;
+    return [{ aId, sId, cId, cond, value }];
+  }
+  if (
+    (node?.type === "interval" && node.trigger === true) ||
+    node?.type === "cron"
+  ) {
+    return [node];
+  }
+  return [];
+}
+
+function ruleActions(actions, delay) {
+  if (!Array.isArray(actions)) return [];
+  return actions.flatMap((action) => {
+    if (action?.type === "delay") {
+      return ruleActions(action.targets, delay + (action.time ?? 0));
+    }
+    if (action?.type !== "service" || !Array.isArray(action.characteristics)) {
+      return [];
+    }
+    return action.characteristics
+      .filter((setting) => setting?.type === "set")
+      .map((setting) => ({
+        aId: action.aId,
+        sId: action.sId,
+        cId: setting.cId,
+        value: setting.value,
+        delay,
+      }));
+  });
+}
+
+// How a stored BLOCK relates to a requested one: same (the same data),
+// superset (it already sets everything the request sets on the same
+// triggers, and maybe more), partial (some of it), or null.
+export function existingRuleRelation(stored, requested, requestedEffects) {
+  const storedEffects = blockRuleEffects(stored);
+  const shared = [...requestedEffects.keys()].filter((key) =>
+    storedEffects.has(key),
+  );
+  if (shared.length === 0) return null;
+  if (isDeepStrictEqual(canonicalBlock(stored), canonicalBlock(requested))) {
+    return "same";
+  }
+  return shared.length === requestedEffects.size ? "superset" : "partial";
+}
