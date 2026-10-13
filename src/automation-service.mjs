@@ -10720,7 +10720,7 @@ const LAMP_LEVEL_ZERO_NOTE = {
 const LAMP_SWITCHED_ON_NOTE = {
   code: "lamp_switched_on",
   message:
-    "The lamp was off; on the hub's lamps a brightness or color write switches the lamp on, so it is on now.",
+    "The lamp was off before this call and is on now: on the hub's lamps a brightness write switches an off lamp on.",
 };
 
 // Calls operation for each item with at most limit under way, resolving to
