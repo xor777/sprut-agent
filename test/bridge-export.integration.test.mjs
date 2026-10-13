@@ -431,3 +431,98 @@ test("bridge text stays data and secrets in it stay hidden", async (t) => {
   assert.doesNotMatch(floorLamp.text, /X-HM:\/\/0026/);
   assert.equal(floorLamp.entity.bridges[1].exported, true);
 });
+
+// «Добавь торшер в HomeKit»: ticking a service in a bridge child's window
+// was never checked on a hub (2026-10-13-wave4-contracts, limitations), so
+// the export is read but not written: the agent learns it before anything
+// is sent and is pointed at the current export, the owner at the app.
+test("a bridge's export is read but not changed until a hub confirms the write", async (t) => {
+  const { hub, client } = await setup(t);
+  const floorLamp = `${apartment}/accessory/16`;
+  const offersWrite = /get_native_change_contract|prepare_native_change/;
+
+  // The way an agent reaches the flag: the bridge lists the floor lamp, its
+  // window holds s:13, the lamp's light. No read offers a write of it.
+  const homekit = await read(hub, client, {
+    entity_ref: bridge(apartment, "homekit"),
+    include: ["children"],
+  });
+  assert.doesNotMatch(homekit.text, offersWrite);
+  const child = homekit.entity.children.find(
+    ({ accessory_ref }) => accessory_ref === floorLamp,
+  );
+  const childWindow = await read(hub, client, {
+    entity_ref: child.options_window_ref,
+  });
+  const flag = childWindow.entity.options.find(({ key }) => key === "s:13");
+  assert.equal(flag.configured_value, false);
+  assert.equal(flag.native_change.supported, false);
+  assert.equal(flag.native_change.reason, "bridge_export_unverified");
+  assert.doesNotMatch(childWindow.text, offersWrite);
+  const lampBridges = await read(hub, client, {
+    entity_ref: floorLamp,
+    include: ["bridges"],
+  });
+  assert.doesNotMatch(lampBridges.text, offersWrite);
+
+  const refusedWith = async (name, args, next) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, result.content[0]?.text);
+    const { error } = result.structuredContent;
+    assert.equal(error.code, "bridge_export_unverified");
+    assert.match(error.message, /not (been )?verified/i);
+    assert.match(error.message, /SprutHub app/);
+    assert.deepEqual(result.structuredContent.next, next);
+  };
+  const lampExport = {
+    tool: "get_entity",
+    arguments: { entity_ref: floorLamp, include: ["bridges"] },
+  };
+  const tick = {
+    operation: "window_option",
+    target_ref: child.options_window_ref,
+    option_key: "s:13",
+  };
+  await refusedWith("get_native_change_contract", tick, lampExport);
+  await refusedWith(
+    "prepare_native_change",
+    { ...tick, value: true, reason: "Show the floor lamp in HomeKit" },
+    lampExport,
+  );
+
+  // Which new accessories a bridge takes is its own window's
+  // AutoAddNewAccessory: not written either.
+  const autoAdd = {
+    operation: "window_option",
+    target_ref: homekit.entity.options_window_ref,
+    option_key: "AutoAddNewAccessory",
+  };
+  const bridgeExport = {
+    tool: "get_entity",
+    arguments: {
+      entity_ref: bridge(apartment, "homekit"),
+      include: ["children"],
+    },
+  };
+  await refusedWith("get_native_change_contract", autoAdd, bridgeExport);
+  await refusedWith(
+    "prepare_native_change",
+    { ...autoAdd, value: true, reason: "Export new accessories to HomeKit" },
+    bridgeExport,
+  );
+
+  assert.deepEqual(hub.writes(), []);
+  const changes = await client.callTool({
+    name: "list_native_changes",
+    arguments: {},
+  });
+  assert.equal(changes.isError, undefined, changes.content[0]?.text);
+  assert.equal(changes.content[0].text.includes("window_option"), false);
+
+  // Reading the export still works and shows it unchanged.
+  const after = await read(hub, client, {
+    entity_ref: floorLamp,
+    include: ["bridges"],
+  });
+  assert.equal(after.entity.bridges[0].exported, false);
+});
