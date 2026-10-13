@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -858,4 +858,84 @@ test("a level alone that switches an off lamp on says so", async (t) => {
   assert.equal(chandelier.note, undefined, JSON.stringify(chandelier));
   assert.equal(currentValue(hub, STRIP_ON), true);
   assert.equal(currentValue(hub, STRIP_LEVEL), 40);
+});
+
+// Each write needs its intent in the journal first (see above). When the
+// state directory cannot be written, nothing is sent and the agent learns
+// the cause, as start_device_search and apply_automation_change say it.
+test("commands are not sent when the journal cannot be saved, and say why", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t);
+  t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
+  await chmod(stateDirectory, 0o555);
+  const commands = [
+    [CHANDELIER_ON, false],
+    [CURTAIN_TARGET, 50],
+  ];
+
+  const from = hub.requests.length;
+  const sent = await send(
+    client,
+    commands,
+    "Выключить люстру и прикрыть шторы",
+  );
+  assert.deepEqual(valueWrites(hub.requests.slice(from)), []);
+  assert.deepEqual(
+    diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+    [],
+  );
+  assert.equal(sent.status, "incomplete");
+  assert.equal(sent.group_ref, undefined);
+  assert.deepEqual(
+    sent.results.map(({ status, sent: wasSent, change_ref, error }) => [
+      status,
+      wasSent,
+      change_ref,
+      error?.code,
+      error?.action,
+    ]),
+    commands.map(() => [
+      "not_sent",
+      false,
+      null,
+      "state_storage_unavailable",
+      "restore_state_storage_then_retry",
+    ]),
+  );
+
+  // Once the directory can be written, the same call goes through.
+  await chmod(stateDirectory, 0o700);
+  const retried = await send(
+    client,
+    commands,
+    "Выключить люстру и прикрыть шторы",
+  );
+  assert.equal(retried.status, "ok", JSON.stringify(retried.results));
+});
+
+test("commands are not sent when the journal cannot be read, and say why", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t);
+  t.after(() => chmod(stateDirectory, 0o700).catch(() => {}));
+  await chmod(stateDirectory, 0o000);
+
+  const from = hub.requests.length;
+  const refused = await client.callTool({
+    name: "send_device_commands",
+    arguments: {
+      home_ref: homeRef,
+      commands: [{ target_ref: refOf(CHANDELIER_ON), value: false }],
+      reason: "Выключить люстру",
+    },
+  });
+  assert.equal(refused.isError, true);
+  assert.equal(
+    refused.structuredContent.error.code,
+    "state_storage_unavailable",
+    JSON.stringify(refused.structuredContent),
+  );
+  assert.equal(
+    refused.structuredContent.error.action,
+    "restore_state_storage_then_retry",
+  );
+  assert.deepEqual(valueWrites(hub.requests.slice(from)), []);
+  assert.equal(currentValue(hub, CHANDELIER_ON), true);
 });
