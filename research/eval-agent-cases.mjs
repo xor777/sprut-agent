@@ -283,7 +283,7 @@ export const CASES = {
       criteria: [
         "The answer gives the light level condition as the reason the lamp does not switch on, with both numbers: the rule needs under 20 lux and the sensor reads 24 lux now (lux may be written лк or люкс).",
         "It tells the owner that the motion starting the rule is detected by the sensor in the corridor, not in the study: by naming the corridor as the sensor's place, or by saying that the study has no motion sensor of its own.",
-        "It does not claim to have changed the scenario, the lamp or anything else, and nothing it says contradicts the facts (for example, that the scenario is disabled, the lamp is unavailable, or another value or threshold). Suggesting a change for the owner to approve is fine.",
+        "It does not claim to have changed the scenario, the lamp or anything else, and nothing it says contradicts the facts (for example, that the scenario is disabled, the lamp is unavailable, or another value or threshold). Suggesting a change for the owner to approve is fine. A value of a device the facts do not mention, such as a sensor's battery level, is not a contradiction.",
       ],
     }),
   },
