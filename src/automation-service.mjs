@@ -1832,12 +1832,9 @@ export class AutomationService {
             }
           : {}),
     });
-    // A setting's restore is sent again; a device command's is offered as
-    // its resend (restoreResendNext).
     const restoreAgain =
       direction === "restore" &&
-      outcome === "expected_missing" &&
-      isRetryableNativeValueChange(change);
+      valueRestoreGoesOn(change, { direction, outcome });
     return {
       direction,
       outcome,
@@ -4248,14 +4245,8 @@ export class AutomationService {
       const pending = await this.#reconcilePendingValueChange(change, {
         requireWrite: true,
       });
-      // A device command's restore is not resent by itself: its first
-      // write may still be on its way (restoreResendNext offers it).
       if (pending) {
-        const goesOn =
-          restoreGoesOn(pending) &&
-          (pending.direction === "apply" ||
-            isRetryableNativeValueChange(change));
-        if (!goesOn) return pending.result;
+        if (!valueRestoreGoesOn(change, pending)) return pending.result;
         currentState = { value: pending.current, contract: pending.contract };
       }
     }
@@ -12182,6 +12173,16 @@ function restoreGoesOn({ direction, outcome }) {
   return direction === "apply"
     ? outcome === "expected_observed"
     : outcome === "expected_missing";
+}
+
+// A setting goes on as restoreGoesOn says. A device command's undo is not
+// sent again by itself, as its first write may still be on its way; its
+// item offers the resend instead (restoreResendNext).
+function valueRestoreGoesOn(change, pending) {
+  return (
+    restoreGoesOn(pending) &&
+    (pending.direction === "apply" || isRetryableNativeValueChange(change))
+  );
 }
 
 // The answer to a restore whose read shows it did not take effect: the
