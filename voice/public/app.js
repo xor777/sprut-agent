@@ -58,6 +58,8 @@ async function start() {
     muted: false,
     responding: false,
     wantResponse: false,
+    startedAt: performance.now(),
+    marks: [],
   };
   // Created inside the tap, as mobile browsers require.
   current.fx = createEffects(button);
@@ -67,14 +69,16 @@ async function start() {
   setState("connecting");
   try {
     const [stream, minted] = await Promise.all([
-      navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      }),
-      api("/api/session", voice ? { voice } : {}),
+      navigator.mediaDevices
+        .getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        })
+        .then(mark(current, "mic")),
+      api("/api/session", voice ? { voice } : {}).then(mark(current, "key")),
     ]);
     current.stream = stream;
     current.fx?.attach("input", stream);
@@ -92,6 +96,7 @@ async function start() {
     });
     pc.addEventListener("connectionstatechange", () => {
       if (session !== current) return;
+      if (pc.connectionState === "connected") mark(current, "connected")();
       if (["failed", "closed"].includes(pc.connectionState)) {
         stop("error", "Связь прервалась. Нажмите ещё раз");
       }
@@ -102,6 +107,7 @@ async function start() {
     current.channel = channel;
     channel.addEventListener("open", () => {
       if (session !== current) return;
+      mark(current, "channel")();
       send(current, {
         type: "response.create",
         response: {
@@ -131,7 +137,9 @@ async function start() {
         `OpenAI ${answer.status}: ${(await answer.text()).slice(0, 200)}`,
       );
     }
-    await pc.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+    const sdp = await answer.text();
+    mark(current, "sdp")();
+    await pc.setRemoteDescription({ type: "answer", sdp });
     navigator.wakeLock
       ?.request("screen")
       .then((lock) => {
@@ -188,6 +196,11 @@ function onEvent(current, event) {
     case "output_audio_buffer.started":
       current.speaking = true;
       remoteLog("event", "audio_started");
+      if (current.marks) {
+        mark(current, "audio")();
+        remoteLog("timing", current.marks.join(" · "));
+        current.marks = null;
+      }
       setState("speaking");
       break;
     case "output_audio_buffer.stopped":
@@ -366,6 +379,17 @@ async function api(path, body = {}) {
     throw error;
   }
   return data;
+}
+
+// Milliseconds from the tap to each step of opening the conversation, sent
+// once with the first sound to find where the wait goes.
+function mark(current, name) {
+  return (value) => {
+    current.marks?.push(
+      `${name} ${Math.round(performance.now() - current.startedAt)}`,
+    );
+    return value;
+  };
 }
 
 function remoteLog(type, text) {
