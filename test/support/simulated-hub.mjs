@@ -1696,6 +1696,7 @@ const HANDLERS = {
       name,
       online: true,
       virtual: true,
+      ...VIRTUAL_IDENTITY(id),
       services: [
         virtualInformationService(id, name),
         {
@@ -2632,6 +2633,7 @@ function buildAccessory(state, input) {
     // accessory.get of a physical accessory read virtual: false, present
     // rather than omitted (owner hub, 3.0.0, live-conformance-3-read-only).
     virtual: input.virtual === true,
+    ...(input.virtual === true ? VIRTUAL_IDENTITY(input.id) : {}),
     ...(input.extensionKey && input.virtual !== true
       ? {
           extensionKey: input.extensionKey,
@@ -2658,6 +2660,18 @@ function buildAccessory(state, input) {
 // other information characteristics follow a physical device's; they were
 // not read on a virtual one.
 const VIRTUAL_SERVICE_ID = 13;
+
+// accessory.list and accessory.get give a virtual accessory these fields,
+// and the list has no other sign that it is virtual (owner hub, 3.0.0, all
+// 9 virtual lamp groups, 2026-10-14-light-group-relink). Physical
+// accessories' manufacturer, model and serial are left out here.
+const VIRTUAL_IDENTITY = (id) => ({
+  manufacturer: "MakeSimple",
+  model: "Virtual",
+  manufacturerId: "MakeSimple",
+  modelId: "Virtual",
+  serial: String(id),
+});
 
 function virtualInformationService(id, name) {
   const characteristics = [

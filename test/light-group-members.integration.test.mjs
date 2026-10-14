@@ -418,6 +418,118 @@ test("undo after the owner put the lamps back by hand says it is already as befo
   assert.deepEqual(linkRequestsSince(hub, from), []);
 });
 
+// The group takes the on/off of a lamp that joins (2026-10-14
+// light-group-relink, 11 and 14) and a command equal to what it shows
+// does not reach the lamps (12): a new lamp that is on leaves the kept,
+// switched-off lamps out of step, and «включи люстру» then misses them.
+test("a lamp that joins switched on leaves the kept lamps out of step, and the preview names them", async (t) => {
+  const { client: quiet } = await setup(t);
+  const allOff = await prepareMembers(quiet, [41, 42, NEW_LAMP]);
+  assert.ok(
+    !(allOff.notes ?? []).some((note) => /Лампа люстры [12]/.test(note)),
+    JSON.stringify(allOff.notes),
+  );
+
+  const { hub, client } = await setup(t, (fixture) => {
+    fixture.accessories
+      .find(({ id }) => id === NEW_LAMP)
+      .services[0].characteristics.find(
+        ({ type }) => type === "On",
+      ).value = true;
+    return fixture;
+  });
+
+  const prepared = await prepareMembers(client, [41, 42, NEW_LAMP]);
+
+  const note = (prepared.notes ?? []).find((text) =>
+    /Лампа люстры 1/.test(text),
+  );
+  assert.ok(note, JSON.stringify(prepared.notes));
+  assert.match(note, /Лампа люстры 2/);
+  assert.doesNotMatch(note, /Лампа люстры 3/);
+  // What the note warns of: after apply the group reads on, and turning it
+  // on reaches none of the kept lamps.
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  const sent = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: [
+      {
+        target_ref: `${groupRef}/characteristic/${GROUP_CHARACTERISTICS.On}`,
+        value: true,
+      },
+    ],
+    reason: "Включи люстру",
+  });
+  assert.notEqual(sent.results[0].status, "rejected");
+  assert.equal(value(hub, 41, LAMP_CHARACTERISTICS.On), false);
+});
+
+// «Люстра» is a lamp to the ordinary reads; they say it is a group of
+// which lamps, and which lamps are in a group, so the agent relinks a lamp
+// already on the hub instead of pairing it again.
+test("find_devices and get_entity show a lamp group with its lamps and the lamps in it", async (t) => {
+  const { client } = await setup(t);
+  const services = async () => {
+    const page = await call(client, "find_devices", {
+      home_ref: homeRef,
+      room_ref: `${homeRef}/room/4`,
+    });
+    return new Map(
+      page.rooms.flatMap((room) =>
+        room.devices.flatMap((device) =>
+          device.services.map((service) => [service.ref, service]),
+        ),
+      ),
+    );
+  };
+
+  const kitchen = await services();
+
+  assert.deepEqual(kitchen.get(groupRef).lamp_group, {
+    lamps: [
+      { name: "Лампа люстры 1", room: "Кухня", online: true },
+      { name: "Лампа люстры 2", room: "Кухня", online: true },
+      { name: "Лампа люстры 3", room: "Кухня", online: false },
+    ],
+  });
+  assert.deepEqual(kitchen.get(lampRef(41)).in_lamp_groups, ["Люстра"]);
+  assert.deepEqual(kitchen.get(lampRef(43)).in_lamp_groups, ["Люстра"]);
+  for (const ref of [lampRef(NEW_LAMP), `${homeRef}/accessory/22/service/13`]) {
+    assert.equal(kitchen.get(ref).in_lamp_groups, undefined, ref);
+    assert.equal(kitchen.get(ref).lamp_group, undefined, ref);
+  }
+  const group = await call(client, "get_entity", {
+    entity_ref: `${homeRef}/accessory/${GROUP.aId}`,
+  });
+  assert.equal(
+    group.entity.services.find(({ ref }) => ref === groupRef).lamp_group.lamps
+      .length,
+    3,
+  );
+  const lamp = await call(client, "get_entity", {
+    entity_ref: `${homeRef}/accessory/41`,
+  });
+  assert.deepEqual(
+    lamp.entity.services.find(({ ref }) => ref === lampRef(41)).in_lamp_groups,
+    ["Люстра"],
+  );
+
+  // The agent's own relink shows in the next read.
+  const prepared = await prepareMembers(client, [41, 42, NEW_LAMP]);
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  const after = await services();
+  assert.deepEqual(
+    after.get(groupRef).lamp_group.lamps.map(({ name }) => name),
+    ["Лампа люстры 1", "Лампа люстры 2", "Лампочка"],
+  );
+  assert.deepEqual(after.get(lampRef(NEW_LAMP)).in_lamp_groups, ["Люстра"]);
+  assert.equal(after.get(lampRef(43)).in_lamp_groups, undefined);
+});
+
 test("a lamp without colour temperature joins on what it has, and the preview says what it lacks", async (t) => {
   const { hub, client } = await setup(t, (fixture) => {
     fixture.accessories.push({
