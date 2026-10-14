@@ -8,6 +8,7 @@
 import {
   parseAccessoryRef,
   parseServiceRef,
+  serviceKey,
   stableNativeId,
 } from "./change-refs.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
@@ -35,7 +36,6 @@ export const LAMP_GROUP_TYPES = [
 const controlType = (characteristic) =>
   characteristic.control?.type ?? characteristic.control?.key;
 const targetKey = ({ aId, sId, cId }) => `${aId}.${sId}.${cId}`;
-const serviceKey = ({ aId, sId }) => `${aId}.${sId}`;
 const linkKey = (type, target) => `${type}|${targetKey(target)}`;
 const stepKey = (step) => linkKey(step.type, step.target);
 
