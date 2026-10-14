@@ -30,6 +30,10 @@ import {
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import { LABELS } from "../research/eval-judge-labels.mjs";
 import {
+  GROUP_CHARACTERISTICS,
+  LAMP_CHARACTERISTICS,
+} from "./fixtures/homes/kitchen-chandelier.mjs";
+import {
   evaluateRulesOnChange,
   loadHomeFixture,
   startSimulatedHub,
@@ -1007,6 +1011,95 @@ test("homekit-floor-lamp needs HomeKit's export of the floor lamp read", async (
   assert.equal(
     window.grade("homekit-floor-lamp", answer).read_bridge_export,
     true,
+  );
+});
+
+// «Перевяжи люстру»: the new kitchen lamp in every link of the group, the
+// old offline one out, nothing else changed; the bedroom lamp of the same
+// name or a lamp linked on part of the characteristics fails.
+test("relink-chandelier needs the new kitchen lamp on every link of the group and the old one out", async (t) => {
+  const answer = "Перевязал люстру: новая лампа в группе, старую убрал.";
+  const linkedTypes = Object.keys(GROUP_CHARACTERISTICS);
+  const relink = async (session, { add, remove, types = linkedTypes }) => {
+    for (const type of types) {
+      const source = { aId: 44, sId: 13, cId: GROUP_CHARACTERISTICS[type] };
+      if (add) {
+        await session.send({
+          link: {
+            addVirtual: {
+              ...source,
+              tAId: add,
+              tSId: 13,
+              tCId: LAMP_CHARACTERISTICS[type],
+            },
+          },
+        });
+      }
+      if (remove) {
+        await session.send({
+          link: {
+            remove: {
+              ...source,
+              linkId: `Virtual/${remove}.${LAMP_CHARACTERISTICS[type]}`,
+            },
+          },
+        });
+      }
+    }
+  };
+
+  const done = await nativeSession(t, "kitchen-chandelier");
+  await relink(done, { add: 45, remove: 43 });
+  assert.deepEqual(done.grade("relink-chandelier", answer), {
+    chandelier_relinked: true,
+    new_lamp_follows_chandelier: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const decoy = await nativeSession(t, "kitchen-chandelier");
+  await relink(decoy, { add: 46, remove: 43 });
+  assert.deepEqual(decoy.grade("relink-chandelier", answer), {
+    chandelier_relinked: false,
+    new_lamp_follows_chandelier: false,
+    nothing_else_changed: false,
+    answer_has_no_raw_refs: true,
+  });
+
+  const kept = await nativeSession(t, "kitchen-chandelier");
+  await relink(kept, { add: 45 });
+  assert.equal(
+    kept.grade("relink-chandelier", answer).chandelier_relinked,
+    false,
+  );
+
+  const onOff = await nativeSession(t, "kitchen-chandelier");
+  await relink(onOff, { add: 45, remove: 43, types: ["On", "Brightness"] });
+  await relink(onOff, {
+    remove: 43,
+    types: ["Hue", "Saturation", "ColorTemperature"],
+  });
+  assert.deepEqual(onOff.grade("relink-chandelier", answer), {
+    chandelier_relinked: false,
+    new_lamp_follows_chandelier: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // A new group beside the old one is not the same accessory for Alice.
+  const created = await nativeSession(t, "kitchen-chandelier");
+  await created.send({
+    accessory: {
+      create: {
+        name: "Люстра",
+        roomId: 4,
+        services: [{ type: "Lightbulb", name: "Люстра", optional: [] }],
+      },
+    },
+  });
+  assert.equal(
+    created.grade("relink-chandelier", answer).nothing_else_changed,
+    false,
   );
 });
 
