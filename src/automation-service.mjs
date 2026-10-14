@@ -111,6 +111,29 @@ import {
   resendDeviceCommandNext,
 } from "./device-commands.mjs";
 import {
+  currentLinkIndex,
+  currentMembers,
+  expectedAppliedKeys,
+  foreignDifferences,
+  incomingLinks,
+  isHomeRef,
+  LIGHT_GROUP_MEMBERS,
+  lampControls,
+  lampGroupContract,
+  lampGroupService,
+  lampService,
+  lampServiceRef,
+  linkedTypes,
+  linkKeys,
+  notALampGroup,
+  parseLampRef,
+  planGroupMembers,
+  publicLampGroupMember,
+  restoreSteps,
+  sameKeys,
+  stepInEffect,
+} from "./light-group-members.mjs";
+import {
   createdLogicType,
   createdLogicUnmappedRefusal,
   LOGIC_SOURCE_METADATA_INPUTS,
@@ -310,6 +333,15 @@ export class AutomationService {
       };
     }
     if (input.operation === "virtual_light_group") {
+      if (input.target_ref !== undefined && !isHomeRef(input.target_ref)) {
+        const group = await this.#readLampGroup(input.target_ref);
+        return {
+          status: "ok",
+          operation: input.operation,
+          target_ref: group.ref,
+          contract: lampGroupContract(group),
+        };
+      }
       if (input.target_ref !== undefined) {
         parseConfiguredHomeRef(input.target_ref, this.hubSerial);
       }
@@ -416,7 +448,9 @@ export class AutomationService {
       return this.#prepareRoomCreate(input);
     }
     if (input.operation === "virtual_light_group") {
-      return this.#prepareVirtualLightGroup(input);
+      return isHomeRef(input.target_ref)
+        ? this.#prepareVirtualLightGroup(input)
+        : this.#prepareLampGroupMembers(input);
     }
     throw unsupportedNativeOperation();
   }
@@ -1298,6 +1332,9 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#applyVirtualLightGroup(change);
     }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#applyLampGroupMembers(change);
+    }
     if (change.kind === "logic_assignment") {
       return this.#applyLogicAssignment(change);
     }
@@ -2083,6 +2120,9 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#getVirtualLightGroup(change);
     }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#getLampGroupMembers(change);
+    }
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
@@ -2244,6 +2284,11 @@ export class AutomationService {
     }
     if (change.kind === "virtual_light_group") {
       return this.#restoreVirtualLightGroup(change);
+    }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#undoOrUnknown(change, () =>
+        this.#restoreLampGroupMembers(change),
+      );
     }
     const valueKind = nativeValueKind(change.kind);
     if (valueKind) {
@@ -3986,6 +4031,486 @@ export class AutomationService {
     });
     change.history.push({ status: change.status, at: now });
     await this.#saveBeforeWrite(change);
+  }
+
+  // An existing virtual lamp group as the owner knows it: its lamp service,
+  // name and room, the characteristics it links, the IN links of each and
+  // the lamps they reach, with names, rooms and whether they are online.
+  async #readLampGroup(ref) {
+    const parsed = parseLampRef(ref, this.hubSerial);
+    const accessory = await this.client.getAccessoryOrNull(parsed.aId);
+    if (!accessory) throw notALampGroup(ref);
+    const service = lampGroupService(accessory, parsed.sId, ref);
+    const controls = lampControls(accessory, service);
+    const links = Object.fromEntries(
+      await Promise.all(
+        Object.entries(controls).map(async ([type, target]) => [
+          type,
+          incomingLinks(await this.client.listLinks(target)),
+        ]),
+      ),
+    );
+    const types = linkedTypes(controls, links);
+    const rooms = new Map(
+      (await this.#listRoomRecords()).map(({ id, name }) => [id, name]),
+    );
+    const accessories = new Map([[accessory.id, accessory]]);
+    const members = [];
+    for (const member of currentMembers(types, links)) {
+      const lamp = await this.#lampAccessory(accessories, member.target.aId);
+      members.push({
+        service_ref: lampServiceRef(
+          configuredHomeRef(this.hubSerial),
+          member.target,
+        ),
+        target: member.target,
+        ...(lamp
+          ? {
+              name: lamp.name,
+              room: rooms.get(lamp.roomId) ?? null,
+              online: lamp.online === true,
+            }
+          : { exists: false }),
+        types: member.types,
+      });
+    }
+    return {
+      ref: lampServiceRef(configuredHomeRef(this.hubSerial), {
+        aId: accessory.id,
+        sId: service.sId,
+      }),
+      target: { aId: accessory.id, sId: service.sId },
+      name: accessory.name,
+      room: rooms.get(accessory.roomId) ?? null,
+      controls,
+      links,
+      types,
+      members,
+      rooms,
+      accessories,
+    };
+  }
+
+  async #lampAccessory(accessories, aId) {
+    if (!accessories.has(aId)) {
+      accessories.set(aId, await this.client.getAccessoryOrNull(aId));
+    }
+    return accessories.get(aId);
+  }
+
+  // «Перевяжи группу»: one change that gives the group exactly the named
+  // lamps. Lamps it keeps are not touched; a joining one is linked on each
+  // characteristic the group links that it has; links to a lamp left out
+  // are removed.
+  async #prepareLampGroupMembers(input) {
+    const group = await this.#readLampGroup(input.target_ref);
+    if (
+      !Array.isArray(input.member_service_refs) ||
+      input.member_service_refs.length === 0
+    ) {
+      throw new SprutHubError(
+        "group_members_required",
+        "Name in member_service_refs every lamp the group should hold, the ones it keeps included.",
+        "get_native_change_contract",
+      );
+    }
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const desired = [];
+    for (const ref of input.member_service_refs) {
+      const parsed = parseLampRef(ref, this.hubSerial);
+      const accessory = await this.#lampAccessory(
+        group.accessories,
+        parsed.aId,
+      );
+      if (!accessory) {
+        throw new SprutHubError(
+          "group_member_not_found",
+          `${ref} is not in the home. Find the lamp with find_devices.`,
+          "find_devices",
+        );
+      }
+      const service = lampService(accessory, parsed.sId, ref);
+      const target = { aId: accessory.id, sId: service.sId };
+      if (serviceKey(target) === serviceKey(group.target)) {
+        throw new SprutHubError(
+          "group_member_is_group",
+          "The group cannot be one of its own lamps.",
+          "get_native_change_contract",
+        );
+      }
+      if (
+        desired.some(
+          (member) => serviceKey(member.target) === serviceKey(target),
+        )
+      ) {
+        throw new SprutHubError(
+          "duplicate_group_member",
+          `${ref} is named twice.`,
+          "get_native_change_contract",
+        );
+      }
+      desired.push({
+        ref: lampServiceRef(homeRef, target),
+        target,
+        accessory,
+        controls: lampControls(accessory, service),
+      });
+    }
+    const { steps, changes } = planGroupMembers({
+      homeRef,
+      types: group.types,
+      links: group.links,
+      desired,
+    });
+    const linked = new Set(
+      group.members.map((member) => serviceKey(member.target)),
+    );
+    const kept = new Set(desired.map((member) => serviceKey(member.target)));
+    const members = [
+      ...desired.map((member) => {
+        const planned = changes.get(serviceKey(member.target));
+        const stays = linked.has(serviceKey(member.target));
+        return {
+          service_ref: member.ref,
+          name: member.accessory.name,
+          room: group.rooms.get(member.accessory.roomId) ?? null,
+          online: member.accessory.online === true,
+          change: stays ? "stays" : "joins",
+          links_added: planned.added,
+          lacks: !stays || planned.added.length > 0 ? planned.lacks : [],
+        };
+      }),
+      ...group.members
+        .filter((member) => !kept.has(serviceKey(member.target)))
+        .map((member) => ({
+          service_ref: member.service_ref,
+          ...(member.exists === false
+            ? { exists: false }
+            : { name: member.name, room: member.room, online: member.online }),
+          change: "leaves",
+          links_removed: member.types,
+        })),
+    ];
+    const lampGroup = { ref: group.ref, name: group.name, room: group.room };
+    if (steps.length === 0) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: group.ref,
+        lamp_group: lampGroup,
+        characteristics: [...group.types],
+        members: members.map(publicLampGroupMember),
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const pick = (record) =>
+      Object.fromEntries(group.types.map((type) => [type, record[type]]));
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: LIGHT_GROUP_MEMBERS,
+      status: "prepared",
+      home_ref: homeRef,
+      target_ref: group.ref,
+      reason: input.reason,
+      group: { ...group.target, name: group.name, room: group.room },
+      linked_types: [...group.types],
+      group_controls: pick(group.controls),
+      baseline_links: pick(group.links),
+      member_service_refs: desired.map(({ ref }) => ref),
+      members,
+      steps,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline_links_observed"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #observeLampGroup(change) {
+    const accessory = await this.client.getAccessoryOrNull(change.group.aId);
+    if (!accessory) return { absent: true };
+    const links = {};
+    for (const type of change.linked_types) {
+      links[type] = incomingLinks(
+        await this.client.listLinks(change.group_controls[type]),
+      );
+    }
+    return { absent: false, links };
+  }
+
+  // A group gone, or links that differ where this change sent nothing: the
+  // change stops there and names what it saw.
+  async #lampGroupObstacle(change, observed) {
+    if (observed.absent) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "lamp_group_missing",
+        last_verification: freshVerification("lamp_group_missing"),
+      });
+    }
+    const differences = foreignDifferences(change, observed, change.home_ref);
+    if (differences.length === 0) return null;
+    return this.#finishNative(change, "conflict", undefined, {
+      conflict_reason: "manual_change",
+      observed_differences: differences,
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  // What the group's links now mean for this change.
+  async #recordLampGroupState(change, observed) {
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    const keys = linkKeys(observed.links);
+    const settled = { observed_differences: undefined };
+    if (sameKeys(keys, expectedAppliedKeys(change))) {
+      return this.#finishNative(change, "applied", undefined, {
+        ...settled,
+        configuration_matches: true,
+        last_verification: freshVerification("group_links_observed"),
+      });
+    }
+    if (sameKeys(keys, linkKeys(change.baseline_links))) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#finishNative(change, "restored", undefined, {
+          ...settled,
+          last_verification: freshVerification("baseline_links_observed"),
+        });
+      }
+      if (!change.steps.some(({ sent }) => sent)) {
+        return publicNativeChange(change, undefined, {
+          verification: freshVerification("baseline_links_observed"),
+        });
+      }
+      return this.#finishNative(change, "uncertain", undefined, {
+        ...settled,
+        conflict_reason: "link_write_outcome_unknown",
+        last_verification: freshVerification("sent_link_not_observed"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      ...settled,
+      conflict_reason: "partial_lamp_group_change",
+      last_verification: freshVerification("owned_partial_group_observed"),
+    });
+  }
+
+  async #getLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    let observed;
+    try {
+      observed = await this.#observeLampGroup(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    return this.#recordLampGroupState(change, observed);
+  }
+
+  async #applyLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    const observed = await this.#observeLampGroup(change);
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    if (!change.steps.some(({ sent }) => sent)) {
+      await this.#validateLampGroupJoiners(change);
+    }
+    const stopped = await this.#writeLampGroupSteps(
+      change,
+      change.steps,
+      "apply",
+      observed,
+    );
+    if (stopped) return stopped;
+    change.native_acknowledged = change.steps.every(
+      ({ acknowledged }) => acknowledged,
+    );
+    return this.#recordLampGroupState(
+      change,
+      await this.#observeLampGroup(change),
+    );
+  }
+
+  async #restoreLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (!change.steps.some(({ sent }) => sent)) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    const observed = await this.#observeLampGroup(change);
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    // Derived again each time from what apply sent: a step already undone
+    // is seen in the links and not written again.
+    change.restore_steps = restoreSteps(change);
+    await this.#saveBeforeWrite(change);
+    const stopped = await this.#writeLampGroupSteps(
+      change,
+      change.restore_steps,
+      "restore",
+      observed,
+    );
+    if (stopped) return stopped;
+    // The previous links seen after an undo are its result, whether or not
+    // it had to write anything for them.
+    const after = await this.#observeLampGroup(change);
+    if (
+      !after.absent &&
+      sameKeys(linkKeys(after.links), linkKeys(change.baseline_links))
+    ) {
+      return this.#finishNative(change, "restored", undefined, {
+        observed_differences: undefined,
+        last_verification: freshVerification("baseline_links_observed"),
+      });
+    }
+    return this.#recordLampGroupState(change, after);
+  }
+
+  // The lamps an apply links have not changed since prepare.
+  async #validateLampGroupJoiners(change) {
+    const accessories = new Map();
+    for (const step of change.steps) {
+      if (step.action !== "add") continue;
+      const accessory = await this.#lampAccessory(accessories, step.target.aId);
+      const characteristic =
+        accessory && findNativeCharacteristic(accessory, step.target);
+      if (
+        characteristic?.control?.type !== step.type ||
+        characteristic.control.read !== true ||
+        characteristic.control.write !== true
+      ) {
+        throw new SprutHubError(
+          "binding_changed",
+          "A lamp to join changed after preparation. Nothing was written; prepare again.",
+          "prepare_native_change",
+        );
+      }
+    }
+  }
+
+  // Each step not yet seen in the group's links is written, recorded
+  // before and checked after by reading that characteristic's links again.
+  // Adding a link that exists and removing one that is gone change nothing
+  // on the hub (2026-10-14-light-group-relink, 8 and 10), so a step whose
+  // earlier send is unknown is sent again once the read shows it missing.
+  // Returns a finished result when a write is not confirmed.
+  async #writeLampGroupSteps(change, steps, direction, observed) {
+    for (const step of steps) {
+      if (stepInEffect(step, linkKeys(observed.links))) {
+        if (!step.completed) {
+          step.completed = true;
+          if (step.sent && !step.acknowledged) {
+            change.recovered_after_uncertain_write = true;
+          }
+          await this.#saveBeforeWrite(change);
+        }
+        continue;
+      }
+      const source = change.group_controls[step.type];
+      const linkId =
+        step.action === "remove"
+          ? currentLinkIndex(observed.links, step)
+          : undefined;
+      await this.#persistVirtualLightStep(
+        change,
+        step.action === "add" ? "adding_link" : "removing_link",
+        { characteristic_type: step.type, member_ref: step.member_ref },
+        direction,
+      );
+      Object.assign(step, {
+        sent: true,
+        acknowledged: false,
+        completed: false,
+      });
+      await this.#saveBeforeWrite(change);
+      try {
+        if (step.action === "add") {
+          await this.client.addVirtualLink({
+            ...source,
+            ...virtualLinkTarget(step.target),
+          });
+        } else {
+          await this.client.removeLink({ ...source, linkId });
+        }
+        step.acknowledged = true;
+        change.write_intent.acknowledged = true;
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          step.sent = false;
+          throw await this.#finishRefusedLampGroupStep(
+            change,
+            direction,
+            error,
+          );
+        }
+      }
+      observed.links[step.type] = incomingLinks(
+        await this.client.listLinks(source),
+      );
+      if (!stepInEffect(step, linkKeys(observed.links))) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: step.acknowledged
+            ? "ack_without_link_result"
+            : "link_write_outcome_unknown",
+          last_verification: freshVerification("sent_link_not_observed"),
+        });
+      }
+      step.completed = true;
+      if (!step.acknowledged) change.recovered_after_uncertain_write = true;
+      await this.#saveBeforeWrite(change);
+    }
+    return null;
+  }
+
+  // A link write the hub refused. Before anything of this change took
+  // effect on apply, nothing changed; otherwise the group holds part of it,
+  // recorded as get_native_change sees it, and the error says so.
+  async #finishRefusedLampGroupStep(change, direction, error) {
+    const steps =
+      direction === "apply" ? change.steps : (change.restore_steps ?? []);
+    const partial = steps.some(({ completed }) => completed);
+    if (direction === "apply" && !partial) {
+      return this.#finishRefusedWrite(change, "not_applied", error);
+    }
+    const rejection = writeRejection(error);
+    if (rejection) change.write_intent = { ...change.write_intent, rejection };
+    let recorded;
+    try {
+      recorded = await this.#recordLampGroupState(
+        change,
+        await this.#observeLampGroup(change),
+      );
+    } catch (readError) {
+      recorded = await this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(readError),
+      });
+    }
+    const changeRef = `spruthub-change://native/${change.id}`;
+    error.details = {
+      ...error.details,
+      change_ref: changeRef,
+      hub_effect: partial ? "partial" : "not_applied",
+      ...(rejection ? { rejection } : {}),
+      change: recorded,
+      next:
+        direction === "apply"
+          ? {
+              tool: "restore_native_change",
+              arguments: { change_ref: changeRef },
+            }
+          : nativeChangeNext(changeRef),
+    };
+    return error;
   }
 
   async listNativeChanges({

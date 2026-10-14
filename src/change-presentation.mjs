@@ -2,6 +2,10 @@ import { storedScenarioRunPlan } from "./block-validation.mjs";
 import { ROOM_NAME_LIMIT_NOTE, valuesEqual } from "./change-contracts.mjs";
 import { decodeReferenceSegment } from "./change-refs.mjs";
 import {
+  LIGHT_GROUP_MEMBERS,
+  publicLampGroupChange,
+} from "./light-group-members.mjs";
+import {
   createdLogicMapping,
   logicDeleteAssignmentCheckUnproven,
   logicSourceRequestedSnapshot,
@@ -235,6 +239,12 @@ export function publicNativeChange(
           : []),
       ],
     };
+  }
+  if (change.kind === LIGHT_GROUP_MEMBERS) {
+    return publicLampGroupChange(change, {
+      verification,
+      configurationMatches,
+    });
   }
   if (change.kind === "virtual_light_group") {
     return {

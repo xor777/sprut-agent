@@ -37,9 +37,10 @@ const lampRef = (aId) => `${homeRef}/accessory/${aId}/service/13`;
 // A kitchen lamp with colour but no colour temperature.
 const PLAIN_LAMP = 47;
 
-async function setup(t, patch = (fixture) => fixture) {
+async function setup(t, patch = (fixture) => fixture, hubOptions = {}) {
   const hub = await startSimulatedHub(
     patch(await loadHomeFixture("kitchen-chandelier")),
+    hubOptions,
   );
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-light-group-"),
@@ -377,6 +378,46 @@ test("a link changed by hand between apply and undo is reported and left as the 
   assert.deepEqual(groupLinks(hub), expected);
 });
 
+test("undo after the owner put the lamps back by hand says it is already as before", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await prepareMembers(client, [41, 42, NEW_LAMP]);
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  // In the app: the new lamp out, the old one back.
+  for (const type of TYPES) {
+    const source = { ...GROUP, cId: GROUP_CHARACTERISTICS[type] };
+    hub.request({
+      link: {
+        remove: {
+          ...source,
+          linkId: `Virtual/${NEW_LAMP}.${LAMP_CHARACTERISTICS[type]}`,
+        },
+      },
+    });
+    hub.request({
+      link: {
+        addVirtual: {
+          ...source,
+          tAId: OFFLINE_MEMBER,
+          tSId: 13,
+          tCId: LAMP_CHARACTERISTICS[type],
+        },
+      },
+    });
+  }
+  const from = hub.requests.length;
+
+  const restored = await call(client, "restore_native_change", {
+    change_refs: [prepared.change_ref],
+  });
+
+  assert.equal(restored.results[0].status, "skipped", JSON.stringify(restored));
+  assert.equal(restored.results[0].reason, "changed_since");
+  assert.equal(restored.results[0].already_previous, true);
+  assert.deepEqual(linkRequestsSince(hub, from), []);
+});
+
 test("a lamp without colour temperature joins on what it has, and the preview says what it lacks", async (t) => {
   const { hub, client } = await setup(t, (fixture) => {
     fixture.accessories.push({
@@ -424,6 +465,30 @@ test("a lamp without colour temperature joins on what it has, and the preview sa
       ["On", "Brightness", "Hue", "Saturation"],
     ),
   );
+});
+
+// A link write lost on its way is unknown, not done or failed; applying
+// again reads the links first and sends only what is missing.
+test("a lost link write is unknown until apply again reads and finishes it", async (t) => {
+  const { hub, client } = await setup(t, undefined, {
+    faults: {
+      droppedReply: [{ method: "link.addVirtual", applied: false }],
+    },
+  });
+  const prepared = await prepareMembers(client, [41, 42, 43, NEW_LAMP]);
+
+  const first = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(first.status, "uncertain", JSON.stringify(first));
+  assert.equal(first.conflict_reason, "link_write_outcome_unknown");
+
+  const again = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+
+  assert.equal(again.status, "applied", JSON.stringify(again));
+  assert.deepEqual(groupLinks(hub), expectedLinks([41, 42, 43, NEW_LAMP]));
 });
 
 test("a link step the hub refuses leaves a partial change that undo removes", async (t) => {

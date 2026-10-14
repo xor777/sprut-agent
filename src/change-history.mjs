@@ -2,6 +2,10 @@ import { blockAffectedRefs } from "./block-model.mjs";
 import { publicPauseEffect } from "./change-presentation.mjs";
 import { groupRef, stableNativeId } from "./change-refs.mjs";
 import { changeName, summaryValue } from "./change-restore.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import { createdLogicMapping } from "./logic-changes.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { isLogicSourceChange } from "./scenario-changes.mjs";
@@ -39,7 +43,7 @@ export function changeSummary(change) {
   const value = summaryValue(change);
   return {
     change_ref: reference,
-    operation: change.kind,
+    operation: changeOperation(change),
     ...described,
     target_ref: change.target_ref,
     ...(value ? { value } : {}),
@@ -181,6 +185,13 @@ export function nativeAffectedRefs(change, homeRef) {
     }
     for (const ref of change.member_service_refs) {
       refs.push(...canonicalAncestors(ref));
+    }
+  } else if (change.kind === LIGHT_GROUP_MEMBERS) {
+    // The group and the lamps that join or leave it.
+    refs.push(...canonicalAncestors(change.target_ref));
+    for (const member of change.members) {
+      if (member.change === "stays") continue;
+      refs.push(member.service_ref, ...canonicalAncestors(member.service_ref));
     }
   }
   if (change.kind === "logic_assignment") {

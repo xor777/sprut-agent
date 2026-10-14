@@ -447,6 +447,8 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "accessory_placement",
   "room_create",
   "virtual_light_group",
+  // The lamps of an existing group (light-group-members.mjs).
+  "light_group_members",
   "block_create",
   "block_data_update",
   "block_action_pause",
