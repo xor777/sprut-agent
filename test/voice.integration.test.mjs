@@ -17,13 +17,16 @@ import {
 // server asked for; the hub is the offline simulator.
 const ACCESS_TOKEN = "voice-test-token";
 
-async function setup(t, { faults, editHome, afterStart } = {}) {
+async function setup(
+  t,
+  { faults, editHome, afterStart, openaiHangs = 0 } = {},
+) {
   const home = await loadHomeFixture("apartment");
   editHome?.(home);
   const hub = await startSimulatedHub(home, { faults });
   await afterStart?.(hub);
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "sprut-voice-"));
-  const openai = await startFakeOpenAI();
+  const openai = await startFakeOpenAI({ hangs: openaiHangs });
   const homeTools = new HomeTools({
     env: {
       PATH: process.env.PATH,
@@ -42,11 +45,13 @@ async function setup(t, { faults, editHome, afterStart } = {}) {
     homeTools,
     port: 0,
     log: () => {},
+    openaiAttemptMs: 1000,
   });
   t.after(async () => {
+    // OpenAI first: a call still waiting for it would hold the server open.
+    await openai.close();
     await server.close();
     await homeTools.close();
-    await openai.close();
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
@@ -108,7 +113,9 @@ async function setup(t, { faults, editHome, afterStart } = {}) {
   return { hub, openai, post, visit, tool, listedId, updates };
 }
 
-async function startFakeOpenAI() {
+// The first `hangs` requests are read and never answered, as when the way
+// to OpenAI stalls.
+async function startFakeOpenAI({ hangs = 0 } = {}) {
   const sessions = [];
   const server = http.createServer(async (request, response) => {
     const chunks = [];
@@ -117,6 +124,7 @@ async function startFakeOpenAI() {
     assert.equal(request.url, "/realtime/client_secrets");
     assert.equal(request.headers.authorization, "Bearer sk-test");
     sessions.push(body.session);
+    if (sessions.length <= hangs) return;
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ value: "ek_test", expires_at: 1 }));
   });
@@ -124,7 +132,11 @@ async function startFakeOpenAI() {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     sessions,
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+      }),
   };
 }
 
@@ -154,6 +166,20 @@ test("a session gives the phone a short-lived key and the model the home's devic
   );
   assert.doesNotMatch(JSON.stringify(session), /sk-test|spruthub:\/\//);
 });
+
+test(
+  "a session opens when OpenAI does not answer the first try",
+  { timeout: 15_000 },
+  async (t) => {
+    const { openai, post } = await setup(t, { openaiHangs: 1 });
+
+    const { status, body } = await post("/api/session");
+
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.key, "ek_test");
+    assert.equal(openai.sessions.length, 2);
+  },
+);
 
 test("turning off the floor lamp by its listed id leaves the chandelier in the same room on", async (t) => {
   const { tool, listedId, updates } = await setup(t);
