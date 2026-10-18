@@ -83,6 +83,10 @@ export async function startVoiceServer({
   host = "127.0.0.1",
   log = (...parts) => console.log(...parts),
   reloadEnv = null,
+  // A minted key usually comes back in under two seconds; a request that
+  // has not answered by then is stuck on the way and is sent again.
+  openaiAttemptMs = 5000,
+  openaiAttempts = 3,
 }) {
   if (!env.VOICE_ACCESS_TOKEN)
     throw new Error("VOICE_ACCESS_TOKEN is required");
@@ -105,6 +109,38 @@ export async function startVoiceServer({
     return matches(cookieValue(request.headers.cookie, INVITE_COOKIE));
   };
 
+  // The way to OpenAI goes through a tunnel that now and then stalls or
+  // drops a request; each failed try is logged with its cause. An unused
+  // key from a try that answers late expires on its own.
+  const reachOpenAI = async (url, options) => {
+    for (let attempt = 1; attempt <= openaiAttempts; attempt += 1) {
+      const startedAt = Date.now();
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: AbortSignal.timeout(openaiAttemptMs),
+        });
+        // The body is read under the same limit as the headers.
+        const body = await response.arrayBuffer();
+        return new Response(body, {
+          status: response.status,
+          headers: response.headers,
+        });
+      } catch (failure) {
+        const cause =
+          failure.name === "TimeoutError"
+            ? `no answer in ${openaiAttemptMs} ms`
+            : (failure.cause?.code ??
+              failure.cause?.message ??
+              failure.message);
+        log(
+          `[voice] OpenAI try ${attempt}/${openaiAttempts} failed after ${Date.now() - startedAt} ms: ${cause}`,
+        );
+      }
+    }
+    return null;
+  };
+
   const mintSession = async ({ voice } = {}) => {
     // A key added to voice.env while the server runs is picked up here, so
     // the tunnel address and the invite link stay the same.
@@ -120,14 +156,23 @@ export async function startVoiceServer({
     }
     const catalog = await homeTools.catalog();
     const session = sessionConfig(catalog, env, { voice });
-    const response = await fetch(`${openaiBase}/realtime/client_secrets`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+    const response = await reachOpenAI(
+      `${openaiBase}/realtime/client_secrets`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ session }),
       },
-      body: JSON.stringify({ session }),
-    });
+    );
+    if (!response) {
+      return [
+        504,
+        error("openai_unreachable", "Сервер не смог связаться с OpenAI."),
+      ];
+    }
     const data = await response.json().catch(() => null);
     if (!response.ok || typeof data?.value !== "string") {
       log(

@@ -167,19 +167,17 @@ test("a session gives the phone a short-lived key and the model the home's devic
   assert.doesNotMatch(JSON.stringify(session), /sk-test|spruthub:\/\//);
 });
 
-test(
-  "a session opens when OpenAI does not answer the first try",
-  { timeout: 15_000 },
-  async (t) => {
-    const { openai, post } = await setup(t, { openaiHangs: 1 });
+test("a session opens when OpenAI does not answer the first try", {
+  timeout: 15_000,
+}, async (t) => {
+  const { openai, post } = await setup(t, { openaiHangs: 1 });
 
-    const { status, body } = await post("/api/session");
+  const { status, body } = await post("/api/session");
 
-    assert.equal(status, 200, JSON.stringify(body));
-    assert.equal(body.key, "ek_test");
-    assert.equal(openai.sessions.length, 2);
-  },
-);
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.key, "ek_test");
+  assert.equal(openai.sessions.length, 2);
+});
 
 test("turning off the floor lamp by its listed id leaves the chandelier in the same room on", async (t) => {
   const { tool, listedId, updates } = await setup(t);
