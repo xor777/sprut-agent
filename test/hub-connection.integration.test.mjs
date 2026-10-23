@@ -345,15 +345,12 @@ test(
       floorLampOn,
     );
     // The second read's home list was already on the quiet connection and got
-    // its answer there; its device read went over a new connection. The
-    // first lamp read also read the home for the lamp groups it shows.
+    // its answer there; its device read went over a new connection.
     const [old, fresh, ...more] = relay.connections;
     const methods = (requests) => requests.map(({ method }) => method);
     assert.deepEqual(methods(old.requests), [
       "hub.list",
       "accessory.get",
-      "room.list",
-      "accessory.list",
       "hub.list",
       "hub.list",
     ]);

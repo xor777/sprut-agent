@@ -122,6 +122,21 @@ function value(hub, aId, cId) {
   return Object.values(control.value)[0];
 }
 
+// The kitchen's services in find_devices, by ref.
+async function kitchenServices(client) {
+  const page = await call(client, "find_devices", {
+    home_ref: homeRef,
+    room_ref: `${homeRef}/room/4`,
+  });
+  return new Map(
+    page.rooms.flatMap((room) =>
+      room.devices.flatMap((device) =>
+        device.services.map((service) => [service.ref, service]),
+      ),
+    ),
+  );
+}
+
 function linkRequestsSince(hub, from) {
   return hub.requests
     .slice(from)
@@ -471,56 +486,51 @@ test("a lamp that joins switched on leaves the kept lamps out of step, and the p
 // already on the hub instead of pairing it again.
 test("find_devices and get_entity show a lamp group with its lamps and the lamps in it", async (t) => {
   const { client } = await setup(t);
-  const services = async () => {
-    const page = await call(client, "find_devices", {
-      home_ref: homeRef,
-      room_ref: `${homeRef}/room/4`,
-    });
-    return new Map(
-      page.rooms.flatMap((room) =>
-        room.devices.flatMap((device) =>
-          device.services.map((service) => [service.ref, service]),
-        ),
-      ),
-    );
-  };
-
-  const kitchen = await services();
+  const kitchen = await kitchenServices(client);
 
   // A lamp of the group is offline, so the group names the online lamps
-  // of its room that are in no group and have every characteristic the
-  // group links: the new colour lamp, not «Свет на кухне» with only On and
-  // Brightness, not the bedroom's unlinked «Лампочка» or the group's lamps.
+  // of its room that are in no group, with what the group links that they
+  // lack: «Свет на кухне» has no colour. Not the bedroom's unlinked
+  // «Лампочка», not the group's own lamps.
   assert.deepEqual(kitchen.get(groupRef).lamp_group, {
     lamps: [
       { name: "Лампа люстры 1", room: "Кухня", online: true },
       { name: "Лампа люстры 2", room: "Кухня", online: true },
       { name: "Лампа люстры 3", room: "Кухня", online: false },
     ],
-    replacement_candidates: [
+    unlinked_lamps_in_room: [
+      {
+        name: "Свет на кухне",
+        service_ref: `${homeRef}/accessory/22/service/13`,
+        lacks: ["Hue", "Saturation", "ColorTemperature"],
+      },
       { name: "Лампочка", service_ref: lampRef(NEW_LAMP) },
     ],
   });
-  assert.deepEqual(kitchen.get(lampRef(41)).in_lamp_groups, ["Люстра"]);
-  assert.deepEqual(kitchen.get(lampRef(43)).in_lamp_groups, ["Люстра"]);
+  const inChandelier = [
+    { name: "Люстра", room: "Кухня", service_ref: groupRef },
+  ];
+  assert.deepEqual(kitchen.get(lampRef(41)).in_lamp_groups, inChandelier);
+  assert.deepEqual(kitchen.get(lampRef(43)).in_lamp_groups, inChandelier);
   for (const ref of [lampRef(NEW_LAMP), `${homeRef}/accessory/22/service/13`]) {
     assert.equal(kitchen.get(ref).in_lamp_groups, undefined, ref);
     assert.equal(kitchen.get(ref).lamp_group, undefined, ref);
   }
+  // get_entity marks lamps from a home snapshot that is fresh, as it is
+  // right after find_devices; it does not read the home for them.
   const group = await call(client, "get_entity", {
     entity_ref: `${homeRef}/accessory/${GROUP.aId}`,
   });
-  assert.equal(
-    group.entity.services.find(({ ref }) => ref === groupRef).lamp_group.lamps
-      .length,
-    3,
+  assert.deepEqual(
+    group.entity.services.find(({ ref }) => ref === groupRef).lamp_group,
+    kitchen.get(groupRef).lamp_group,
   );
   const lamp = await call(client, "get_entity", {
     entity_ref: `${homeRef}/accessory/41`,
   });
   assert.deepEqual(
     lamp.entity.services.find(({ ref }) => ref === lampRef(41)).in_lamp_groups,
-    ["Люстра"],
+    inChandelier,
   );
 
   // The agent's own relink shows in the next read.
@@ -528,24 +538,21 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
   await call(client, "apply_native_change", {
     change_ref: prepared.change_ref,
   });
-  const after = await services();
-  assert.deepEqual(
-    after.get(groupRef).lamp_group.lamps.map(({ name }) => name),
-    ["Лампа люстры 1", "Лампа люстры 2", "Лампочка"],
-  );
-  assert.deepEqual(after.get(lampRef(NEW_LAMP)).in_lamp_groups, ["Люстра"]);
+  const after = await kitchenServices(client);
+  assert.deepEqual(after.get(groupRef).lamp_group, {
+    lamps: [
+      { name: "Лампа люстры 1", room: "Кухня", online: true },
+      { name: "Лампа люстры 2", room: "Кухня", online: true },
+      { name: "Лампочка", room: "Кухня", online: true },
+    ],
+  });
+  assert.deepEqual(after.get(lampRef(NEW_LAMP)).in_lamp_groups, inChandelier);
   assert.equal(after.get(lampRef(43)).in_lamp_groups, undefined);
-  // With every lamp online there is nothing to replace.
-  assert.equal(
-    after.get(groupRef).lamp_group.replacement_candidates,
-    undefined,
-  );
-  assert.equal(after.get(groupRef).lamp_group.no_replacement_on_hub, undefined);
 });
 
-// What a candidate must have follows the group's links, not its lamps'
-// type: a group linking only On and Brightness takes «Свет на кухне» too.
-test("a group linking on/off and brightness only takes a plain lamp as a replacement", async (t) => {
+// lacks follows the group's links, not its lamps' type: a group linking
+// only On and Brightness finds nothing missing in «Свет на кухне».
+test("what an unlinked lamp lacks follows what the group links", async (t) => {
   const { client } = await setup(t, (fixture) => {
     fixture.links = fixture.links.filter(
       ({ aId, cId }) =>
@@ -556,15 +563,9 @@ test("a group linking on/off and brightness only takes a plain lamp as a replace
     return fixture;
   });
 
-  const page = await call(client, "find_devices", {
-    home_ref: homeRef,
-    room_ref: `${homeRef}/room/4`,
-  });
-  const group = page.rooms
-    .flatMap((room) => room.devices.flatMap((device) => device.services))
-    .find(({ ref }) => ref === groupRef);
+  const kitchen = await kitchenServices(client);
 
-  assert.deepEqual(group.lamp_group.replacement_candidates, [
+  assert.deepEqual(kitchen.get(groupRef).lamp_group.unlinked_lamps_in_room, [
     {
       name: "Свет на кухне",
       service_ref: `${homeRef}/accessory/22/service/13`,
@@ -573,28 +574,47 @@ test("a group linking on/off and brightness only takes a plain lamp as a replace
   ]);
 });
 
-// A replaced lamp that is not on the hub yet: the group says so, and that
-// it is paired first, instead of a list the agent would take as empty.
-test("a group with an offline lamp and no free lamp in its room says the new one is to be paired", async (t) => {
+// A white lamp that replaced a colour one is still a lamp the group can
+// take (prepare links it on what it has): it is shown with what it lacks.
+test("a white lamp in the room is shown with what it lacks, not left out", async (t) => {
   const { client } = await setup(t, (fixture) => {
-    fixture.accessories = fixture.accessories.filter(
-      ({ id }) => id !== NEW_LAMP,
+    const lamp = fixture.accessories.find(({ id }) => id === NEW_LAMP);
+    lamp.services[0].characteristics = lamp.services[0].characteristics.filter(
+      ({ type }) => type === "On" || type === "Brightness",
     );
+    return fixture;
+  });
+
+  const kitchen = await kitchenServices(client);
+  const unlinked = kitchen.get(groupRef).lamp_group.unlinked_lamps_in_room;
+
+  assert.deepEqual(
+    unlinked.find(({ service_ref }) => service_ref === lampRef(NEW_LAMP)),
+    {
+      name: "Лампочка",
+      service_ref: lampRef(NEW_LAMP),
+      lacks: ["Hue", "Saturation", "ColorTemperature"],
+    },
+  );
+});
+
+// A new lamp that joined in another room, or none on the hub: the kitchen
+// has no unlinked lamp, and the group says only that, never that the new
+// lamp is not on the hub.
+test("with no unlinked lamp in the room the group does not claim the new lamp is missing", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.accessories.find(({ id }) => id === NEW_LAMP).roomId = 5;
     fixture.accessories.find(({ id }) => id === 22).online = false;
     return fixture;
   });
 
-  const page = await call(client, "find_devices", {
-    home_ref: homeRef,
-    query: "люстра",
-  });
-  const group = page.rooms
-    .flatMap((room) => room.devices.flatMap((device) => device.services))
-    .find(({ ref }) => ref === groupRef);
+  const kitchen = await kitchenServices(client);
+  const group = kitchen.get(groupRef).lamp_group;
 
-  assert.equal(group.lamp_group.replacement_candidates, undefined);
-  assert.match(group.lamp_group.no_replacement_on_hub, /device_search/);
-  assert.match(group.lamp_group.no_replacement_on_hub, /Кухня/);
+  assert.deepEqual(group.unlinked_lamps_in_room, []);
+  assert.match(group.no_unlinked_lamp, /Кухня/);
+  assert.match(group.no_unlinked_lamp, /another room/);
+  assert.doesNotMatch(group.no_unlinked_lamp, /not on the hub/);
 });
 
 test("a lamp without colour temperature joins on what it has, and the preview says what it lacks", async (t) => {
