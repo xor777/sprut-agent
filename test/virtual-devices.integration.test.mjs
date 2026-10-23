@@ -687,6 +687,32 @@ test("code that names a virtual device by id is named before it is deleted", asy
   assert.deepEqual(writes(hub, "accessory.delete"), []);
 });
 
+// A home with more code scenarios than one search reads: what was not read
+// is named, but only a reference found stops the undo of a creation.
+test("code left unread does not stop the undo of a creation", async (t) => {
+  const { hub, client } = await setup(t);
+  for (let index = 100; index < 130; index += 1) {
+    hub.state.scenarios.push({
+      index: String(index),
+      name: `Код ${index}`,
+      desc: "",
+      type: "LOGIC",
+      active: false,
+      data: 'info = { name: "Код", description: "", onStart: false };',
+    });
+  }
+  const applied = await createDevice(client, {
+    name: "Режим вечеринки",
+    type: "Switch",
+  });
+  const restored = await call(client, "restore_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.ok(restored.code_unread?.length > 0, JSON.stringify(restored));
+  assert.equal(writes(hub, "accessory.delete").length, 1);
+});
+
 // The id the change saved may now hold another device: the created one was
 // deleted and the id given to a physical device, or the owner renamed it
 // and holds it for theirs. Undo deletes neither, and the change says so.
