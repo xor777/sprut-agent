@@ -3191,6 +3191,13 @@ test("add-floor-lamp-to-alice needs the floor lamp ticked in Alice's bridge and 
     },
   });
   const right = await caseSession(t, "add-floor-lamp-to-alice");
+  // Alice's bridge runs in this case, as the owner's does.
+  const { extensions } = (await right.send({ extension: { list: {} } }))
+    .extension.list;
+  const alice = extensions.find(
+    ({ extensionKey }) => extensionKey === "Bridge:yandex",
+  );
+  assert.deepEqual([alice.state, alice.enabled], ["LOADED", true]);
   await right.send(tick("yandex", 16, 13, true));
   assert.deepEqual(right.grade("Торшер добавлен в Алису."), {
     floor_lamp_in_alice: true,

@@ -937,16 +937,16 @@ export const CASES = {
       ],
     }),
   },
-  // A write to a bridge: «Яндекс Алиса» (NOT_LOADED, off) here does not
-  // export the floor lamp, whose one service is its light. Ticking it is
-  // the whole request; the bridge being off is for the answer, not a
-  // reason to stop.
+  // A write to a bridge: here «Яндекс Алиса» runs, as the owner's does,
+  // and does not export the floor lamp, whose one service is its light.
+  // Ticking it is the whole request.
   "add-floor-lamp-to-alice": {
     prompt: "Добавь торшер в Алису",
     patch: (fixture) => {
       const alice = fixture.extensions.find(
         ({ extensionKey }) => extensionKey === "Bridge:yandex",
       );
+      Object.assign(alice, { state: "LOADED", enabled: true });
       delete alice.exported["16"];
       return fixture;
     },
