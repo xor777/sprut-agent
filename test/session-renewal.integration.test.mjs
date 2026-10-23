@@ -380,21 +380,24 @@ test("a login the hub asks to delay is not tried again before the delay, in a ru
   });
   assert.equal(first.isError, undefined, first.content[0]?.text);
 
-  Object.assign(account, { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 1 });
+  Object.assign(account, { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 2 });
   hub.expireTokens();
-  const delayedAt = Date.now();
+  // The delay runs from the hub's answer, which the first call returns.
+  let delayedBy;
   for (let call = 0; call < 3; call += 1) {
     const result = await sendCommands(client, [[hallLightOn, true]]);
+    delayedBy ??= Date.now();
     assert.equal(result.isError, true, JSON.stringify(result));
     assert.equal(result.structuredContent.error.code, "authentication_delayed");
     assert.equal(result.structuredContent.error.retryable, true);
-    assert.equal(result.structuredContent.retry_after_seconds, 1);
+    const wait = result.structuredContent.retry_after_seconds;
+    assert.ok(wait === 1 || wait === 2, `retry_after_seconds ${wait}`);
   }
   assert.equal(loginsOf(hub), 2, "no login before the delay ends");
 
   delete account.status;
   await new Promise((resolve) =>
-    setTimeout(resolve, delayedAt + 1_100 - Date.now()),
+    setTimeout(resolve, delayedBy + 2_100 - Date.now()),
   );
   const result = await sendCommands(client, [[hallLightOn, true]]);
   assert.equal(result.isError, undefined, result.content[0]?.text);
