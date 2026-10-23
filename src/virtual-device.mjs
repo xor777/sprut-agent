@@ -136,6 +136,19 @@ export function virtualDeviceSnapshot(accessory) {
   };
 }
 
+// The device at a created device's id is that device as created: virtual,
+// with its name, room and services.
+export function sameCreatedDevice(accessory, snapshot) {
+  const services = (list) => list.map(({ sId, type }) => `${sId}:${type}`);
+  const current = virtualDeviceSnapshot(accessory);
+  return (
+    accessory.virtual === true &&
+    current.name === snapshot.name &&
+    current.room_id === snapshot.room_id &&
+    services(current.services).join() === services(snapshot.services).join()
+  );
+}
+
 export function hasDependencies(dependencies) {
   return Object.values(dependencies ?? {}).some((list) => list.length > 0);
 }
@@ -223,6 +236,9 @@ export function publicVirtualDeviceChange(change, { verification }) {
           }
         : {}),
       ...(change.dependencies ? { dependencies: change.dependencies } : {}),
+      ...(change.status === "conflict" && change.observed_device
+        ? { observed_device: change.observed_device }
+        : {}),
       creation_owned: change.creation_owned === true,
       ...tail,
       restore_supported: change.creation_owned === true,

@@ -231,6 +231,7 @@ import {
   notAVirtualDevice,
   ownServices,
   recreateServices,
+  sameCreatedDevice,
   VIRTUAL_DEVICE,
   VIRTUAL_DEVICE_DELETE,
   VIRTUAL_DEVICE_DEPENDENCIES_NOTE,
@@ -906,9 +907,26 @@ export class AutomationService {
         last_verification: freshVerification("created_device_missing"),
       });
     }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
     return this.#finishNative(change, "applied", undefined, {
-      created_snapshot: virtualDeviceSnapshot(accessory),
       last_verification: freshVerification("created_device_observed"),
+    });
+  }
+
+  // The saved id holds another device than the one created: a physical
+  // one, or the created one renamed, moved or rebuilt since. It is not this
+  // change's to delete.
+  async #changedCreatedDevice(change, accessory) {
+    if (sameCreatedDevice(accessory, change.created_snapshot)) return null;
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_device: {
+        name: accessory.name,
+        room_id: accessory.roomId,
+        virtual: accessory.virtual === true,
+      },
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("conflict"),
     });
   }
 
@@ -944,6 +962,8 @@ export class AutomationService {
         last_verification: freshVerification("created_device_absent"),
       });
     }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
     const dependencies = await this.#virtualDeviceDependencies(accessory);
     if (hasDependencies(dependencies)) {
       return this.#finishNative(change, "conflict", undefined, {
