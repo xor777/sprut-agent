@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -30,9 +37,11 @@ const homeRef = "spruthub://hub/sim-apartment-01";
 const hallLightOn = `${homeRef}/accessory/12/service/13/characteristic/14`;
 const floorLampOn = `${homeRef}/accessory/16/service/13/characteristic/14`;
 
-async function setup(t, { account = {}, savedToken } = {}) {
+async function setup(t, { account: accountFields, savedToken } = {}) {
+  // The hub reads the account at each login: a test may change it later.
+  const account = { login, password, ...accountFields };
   const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
-    account: { login, password, ...account },
+    account,
   });
   const directory = await mkdtemp(path.join(tmpdir(), "sprut-session-"));
   const configRoot = path.join(directory, "config");
@@ -80,7 +89,23 @@ async function setup(t, { account = {}, savedToken } = {}) {
     await hub.close();
     await rm(directory, { recursive: true, force: true });
   });
-  return { hub, client, sessionFile, stderr: () => stderr };
+  // What the server wrote besides its answers: stderr and the files of its
+  // state directory, the change journal among them.
+  const written = async () => {
+    const entries = await readdir(path.join(directory, "state"), {
+      recursive: true,
+      withFileTypes: true,
+    }).catch(() => []);
+    const files = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile())
+        .map((entry) =>
+          readFile(path.join(entry.parentPath, entry.name), "utf8"),
+        ),
+    );
+    return [stderr, ...files].join("\n");
+  };
+  return { hub, account, client, sessionFile, written };
 }
 
 const loginsOf = (hub) =>
@@ -110,7 +135,7 @@ function sendCommands(client, commands) {
 }
 
 // The login, the password and every session token, the hub's own and
-// those it issued, stay out of the tool results and the server's stderr.
+// those it issued, stay out of the tool results and what the server wrote.
 function assertNoSecrets(text) {
   for (const secret of [
     login,
@@ -124,7 +149,7 @@ function assertNoSecrets(text) {
 }
 
 test("a saved session the hub no longer accepts is replaced by one login", async (t) => {
-  const { hub, client, sessionFile, stderr } = await setup(t, {
+  const { hub, client, sessionFile, written } = await setup(t, {
     savedToken: expiredToken,
   });
 
@@ -143,11 +168,11 @@ test("a saved session the hub no longer accepts is replaced by one login", async
   const renewed = await savedToken(sessionFile);
   assert.notEqual(renewed, expiredToken);
   assert.equal(hub.acceptsToken(renewed), true);
-  assertNoSecrets(JSON.stringify(overview) + stderr());
+  assertNoSecrets(JSON.stringify(overview) + (await written()));
 });
 
 test("a session that expires while the server runs is renewed once and the commands go through", async (t) => {
-  const { hub, client, sessionFile, stderr } = await setup(t);
+  const { hub, client, sessionFile, written } = await setup(t);
   const first = await client.callTool({
     name: "home_overview",
     arguments: {},
@@ -184,11 +209,11 @@ test("a session that expires while the server runs is renewed once and the comma
   const renewed = await savedToken(sessionFile);
   assert.notEqual(renewed, firstToken);
   assert.equal(hub.acceptsToken(renewed), true);
-  assertNoSecrets(JSON.stringify(result) + stderr());
+  assertNoSecrets(JSON.stringify(result) + (await written()));
 });
 
 test("a refused login names the account status without credentials and is not repeated", async (t) => {
-  const { hub, client, stderr } = await setup(t, {
+  const { hub, client, written } = await setup(t, {
     account: { status: "ACCOUNT_RESPONSE_NO_MORE_TRIES" },
     savedToken: expiredToken,
   });
@@ -223,12 +248,11 @@ test("a refused login names the account status without credentials and is not re
     assert.match(answer.structuredContent.error.message, /wait/i);
   }
   assert.equal(loginsOf(hub), 1, "no second login after a refusal");
-  assertNoSecrets(JSON.stringify([result, repeated]) + stderr());
+  assertNoSecrets(JSON.stringify([result, repeated]) + (await written()));
 });
 
 test("a login refused while the server runs is tried once and tells the owner to check the credentials", async (t) => {
-  const account = {};
-  const { hub, client, stderr } = await setup(t, { account });
+  const { hub, account, client, written } = await setup(t);
   const first = await client.callTool({
     name: "home_overview",
     arguments: {},
@@ -252,7 +276,7 @@ test("a login refused while the server runs is tried once and tells the owner to
   assert.equal(lampOn(hub, 12), false);
   assert.equal(lampOn(hub, 16), true);
   assert.equal(loginsOf(hub), 2, "one login for the expired session");
-  assertNoSecrets(JSON.stringify(results) + stderr());
+  assertNoSecrets(JSON.stringify(results) + (await written()));
 });
 
 test("a refusal unrelated to the session stays request_rejected without a login", async (t) => {
