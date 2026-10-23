@@ -41,7 +41,14 @@ const floorLampOn = `${homeRef}/accessory/16/service/13/characteristic/14`;
 // the hub checks its token.
 async function setup(
   t,
-  { account: accountFields, savedToken, onRequest } = {},
+  {
+    account: accountFields,
+    savedToken,
+    onRequest,
+    // The login, password and hub address in the MCP launch environment:
+    // with a login and password there, connection.env is not read at all.
+    credentialsInEnvironment = false,
+  } = {},
 ) {
   // The hub reads the account at each login: a test may change it later.
   const account = { login, password, ...accountFields };
@@ -55,7 +62,7 @@ async function setup(
   await mkdir(path.dirname(sessionFile), { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(configRoot, "sprut-agent", "connection.env"),
-    `SPRUTHUB_LOGIN=${login}\nSPRUTHUB_PASSWORD=${password}\nSPRUTHUB_URL=${hub.url}\n`,
+    `${credentialsInEnvironment ? "" : `SPRUTHUB_LOGIN=${login}\nSPRUTHUB_PASSWORD=${password}\n`}SPRUTHUB_URL=${hub.url}\n`,
     { mode: 0o600 },
   );
   if (savedToken) {
@@ -81,6 +88,13 @@ async function setup(
       XDG_CONFIG_HOME: configRoot,
       SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
       SPRUT_AGENT_STATE_DIR: path.join(directory, "state"),
+      ...(credentialsInEnvironment
+        ? {
+            SPRUTHUB_LOGIN: login,
+            SPRUTHUB_PASSWORD: password,
+            SPRUTHUB_URL: hub.url,
+          }
+        : {}),
     },
     stderr: "pipe",
   });
@@ -405,6 +419,23 @@ test("a login the hub asks to delay at start is not tried again before the delay
     assert.ok(wait > 55 && wait <= 60, `retry_after_seconds ${wait}`);
   }
   assert.equal(loginsOf(hub), 1, "no login before the delay ends");
+});
+
+test("a refused login points to where the credentials were set", async (t) => {
+  const { client } = await setup(t, {
+    account: { status: "ACCOUNT_RESPONSE_FAILED" },
+    credentialsInEnvironment: true,
+  });
+
+  const result = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
+
+  assert.equal(result.structuredContent.error.code, "authentication_failed");
+  const { message } = result.structuredContent.error;
+  assert.match(message, /MCP launch environment/);
+  assert.doesNotMatch(message, /connection\.env/);
 });
 
 test("a refusal unrelated to the session stays request_rejected without a login", async (t) => {
