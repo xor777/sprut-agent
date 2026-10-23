@@ -21,6 +21,7 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "block_action_pause",
   "scenario_active",
   "scenario_run",
+  "scenario_delete",
   "accessory_placement",
   "room_create",
   "room_name",

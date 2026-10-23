@@ -260,12 +260,17 @@ test("names the BLOCK that runs a deleted scenario, and its undo names it as not
   assert.equal(scenarioOf(hub, NIGHT), undefined);
   assert.equal(scenarioOf(hub, RUNNER).data, runnerData, "left as it was");
 
+  // «Верни как было» for the request: its changes in change_refs.
   const restored = await call(client, "restore_native_change", {
-    change_ref: prepared.change_ref,
+    change_refs: [prepared.change_ref],
   });
-  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.equal(restored.status, "ok", JSON.stringify(restored));
+  const [item] = restored.results;
+  assert.equal(item.status, "restored", JSON.stringify(item));
+  assert.equal(item.recreated.name, "Ночной режим");
+  assert.ok(scenarioOf(hub, item.recreated.scenario_ref.split("/").at(-1)));
   assert.deepEqual(
-    restored.not_restored.scenario_targets.map(({ name }) => name),
+    item.not_restored.scenario_targets.map(({ name }) => name),
     ["Кнопка: ночь"],
   );
 });

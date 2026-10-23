@@ -222,6 +222,19 @@ import {
   scenarioUnprovenApplyFields,
   scenarioUpdateFields,
 } from "./scenario-changes.mjs";
+import {
+  deleteFieldsDiffering,
+  deleteSnapshot,
+  highestScenarioNumber,
+  isRecreatedCopy,
+  recreateRequest,
+  refuseUndeletable,
+  SCENARIO_DELETE,
+  scenarioDeleteContract,
+  scenarioDeleteDependencies,
+  scenarioDeleteTellOwner,
+  scenarioTargetsOf,
+} from "./scenario-delete.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 import {
   characteristicTypeName,
@@ -372,6 +385,19 @@ export class AutomationService {
         contract: blockContract(),
       };
     }
+    if (input.operation === SCENARIO_DELETE) {
+      if (input.target_ref !== undefined) {
+        await this.#readDeletableScenario(input.target_ref);
+      }
+      return {
+        status: "ok",
+        operation: input.operation,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
+        contract: scenarioDeleteContract(),
+      };
+    }
     if (input.operation === "block_action_pause") {
       const target = parseScenarioRef(input.target_ref, this.hubSerial);
       const scenario = await this.client.getScenario(target.index);
@@ -449,6 +475,9 @@ export class AutomationService {
     }
     if (input.operation === "scenario_run") {
       return this.#prepareScenarioRun(input);
+    }
+    if (input.operation === SCENARIO_DELETE) {
+      return this.#prepareScenarioDelete(input);
     }
     if (input.operation === "logic_source_create") {
       return this.#prepareLogicSourceCreate(input);
@@ -1159,6 +1188,275 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
+  async #readDeletableScenario(targetRef) {
+    const target = parseScenarioRef(targetRef, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    const snapshot = deleteSnapshot(scenario);
+    refuseUndeletable(snapshot);
+    return { target, snapshot };
+  }
+
+  // The scenario as it is, and what stops working without it. With any
+  // dependency the owner hears of it first (tell_owner, no next call).
+  async #prepareScenarioDelete(input) {
+    const { target, snapshot } = await this.#readDeletableScenario(
+      input.target_ref,
+    );
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const dependencies = await scenarioDeleteDependencies(
+      this.client,
+      homeRef,
+      snapshot,
+    );
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: SCENARIO_DELETE,
+      status: "prepared",
+      home_ref: homeRef,
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      baseline_snapshot: snapshot,
+      dependencies,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    const tellOwner = scenarioDeleteTellOwner(dependencies);
+    return {
+      ...publicNativeChange(change),
+      ...(tellOwner ? { tell_owner: tellOwner } : {}),
+    };
+  }
+
+  async #applyScenarioDelete(change) {
+    if (
+      !["prepared", "not_applied", "applying", "uncertain"].includes(
+        change.status,
+      ) ||
+      nativeIntentDirection(change) === "restore"
+    ) {
+      return this.#getScenarioDelete(change);
+    }
+    const pending = ["applying", "uncertain"].includes(change.status);
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      if (!pending) throw error;
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return pending
+        ? this.#finishNative(change, "applied", undefined, {
+            last_verification: freshVerification("scenario_absent"),
+          })
+        : this.#finishNative(change, "conflict", undefined, {
+            conflict_reason: "scenario_missing",
+            last_verification: freshVerification("scenario_missing"),
+          });
+    }
+    const snapshot = deleteSnapshot(current);
+    const differing = deleteFieldsDiffering(change.baseline_snapshot, snapshot);
+    if (differing.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_differences: differing,
+        last_verification: freshVerification("baseline_changed"),
+      });
+    }
+    // What undo brings back: the scenario as it is right before the delete.
+    change.deleted_snapshot = snapshot;
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.deleteScenario(change.target.index);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
+      }
+    }
+    return this.#settleScenarioDelete(change);
+  }
+
+  // Whether the scenario is gone decides the delete, answered or not.
+  async #settleScenarioDelete(change) {
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return this.#finishNative(change, "applied", undefined, {
+        last_verification: freshVerification("scenario_absent"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      conflict_reason: change.native_acknowledged
+        ? "ack_without_deletion"
+        : undefined,
+      last_verification: freshVerification("scenario_still_present"),
+    });
+  }
+
+  async #getScenarioDelete(change) {
+    if (["applying", "uncertain", "restoring"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#settleScenarioRecreate(change)
+        : this.#settleScenarioDelete(change);
+    }
+    if (change.status !== "applied") return publicStoredNativeChange(change);
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    // The hub may give the number out again after its counter is reset.
+    return this.#recordNativeObservation(
+      change,
+      undefined,
+      current === null ? "scenario_absent" : "scenario_number_in_use",
+    );
+  }
+
+  // Undo: the scenario is created again from what it held at the delete,
+  // under a new number.
+  async #restoreScenarioDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (
+      ["restoring", "uncertain"].includes(change.status) &&
+      nativeIntentDirection(change) === "restore"
+    ) {
+      return this.#settleScenarioRecreate(change);
+    }
+    if (["applying", "uncertain"].includes(change.status)) {
+      const settled = await this.#settleScenarioDelete(change);
+      if (change.status !== "applied") return settled;
+    }
+    if (change.status !== "applied") {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    change.restore_ceiling = highestScenarioNumber(
+      await this.client.listScenarios(),
+    );
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      const created = await this.client.createScenario(
+        recreateRequest(change.deleted_snapshot),
+      );
+      change.recreated_index = created.index;
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "applied", error);
+      }
+    }
+    return this.#settleScenarioRecreate(change);
+  }
+
+  // The recreated scenario by its number, or after a lost reply the one new
+  // scenario (numbered above the highest before the create) that holds the
+  // same content. None or several leave the undo unknown; it is never sent
+  // again, so no second copy is made.
+  async #settleScenarioRecreate(change) {
+    const saved = change.deleted_snapshot;
+    let found;
+    try {
+      if (change.recreated_index !== undefined) {
+        const scenario = await this.client.getScenario(change.recreated_index);
+        found = scenario ? [scenario] : [];
+      } else {
+        const candidates = (await this.client.listScenarios()).filter(
+          ({ index, type }) =>
+            type === saved.type && Number(index) > change.restore_ceiling,
+        );
+        found = [];
+        for (const { index } of candidates) {
+          const scenario = await this.client.getScenario(index);
+          if (isRecreatedCopy(saved, scenario)) found.push(scenario);
+        }
+      }
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (found.length !== 1) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        conflict_reason:
+          found.length === 0
+            ? "recreated_scenario_not_found"
+            : "several_recreated_candidates",
+        last_verification: freshVerification(
+          found.length === 0
+            ? "recreated_scenario_missing"
+            : "several_recreated_candidates",
+        ),
+      });
+    }
+    const [scenario] = found;
+    change.recreated_index = scenario.index;
+    const differing = deleteFieldsDiffering(saved, deleteSnapshot(scenario));
+    return this.#finishNative(change, "restored", undefined, {
+      configuration_differences: differing.length > 0 ? differing : undefined,
+      not_restored: await this.#notRestoredAfterRecreate(change),
+      last_verification: freshVerification(
+        differing.length > 0
+          ? "recreated_scenario_differs"
+          : "recreated_scenario_observed",
+      ),
+    });
+  }
+
+  // What the recreated scenario did not get back: scenario targets that
+  // still point at the old number, read again now (as prepared when the
+  // read fails), and a LOGIC's device assignments.
+  async #notRestoredAfterRecreate(change) {
+    let targets = change.dependencies?.scenario_targets ?? [];
+    try {
+      const blocks = [];
+      for (const summary of await this.client.listScenarios()) {
+        if (summary.type !== "BLOCK") continue;
+        const scenario = await this.client.getScenario(summary.index);
+        if (scenario && typeof scenario.data === "string")
+          blocks.push(scenario);
+      }
+      targets = scenarioTargetsOf(blocks, change.home_ref, change.target.index);
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+    }
+    const assignments = change.dependencies?.logic_assignments ?? [];
+    return {
+      ...(targets.length > 0 ? { scenario_targets: targets } : {}),
+      ...(assignments.length > 0
+        ? { logic_assignments: structuredClone(assignments) }
+        : {}),
+    };
+  }
+
   async #knownBlockPauses(targetRef) {
     try {
       parseConfiguredHomeRef(targetRef, this.hubSerial);
@@ -1364,6 +1662,9 @@ export class AutomationService {
     }
     if (change.kind === "scenario_run") {
       return this.#applyScenarioRun(change);
+    }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#applyScenarioDelete(change);
     }
     if (isLogicSourceChange(change)) {
       return this.#applyScenarioChange(change);
@@ -2153,6 +2454,9 @@ export class AutomationService {
     if (change.kind === "scenario_run") {
       return this.#getScenarioRun(change);
     }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#getScenarioDelete(change);
+    }
     if (isLogicSourceChange(change)) {
       return this.#getScenarioChange(change);
     }
@@ -2332,6 +2636,11 @@ export class AutomationService {
     }
     if (change.kind === "logic_assignment") {
       return this.#restoreLogicAssignment(change);
+    }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#undoOrUnknown(change, () =>
+        this.#restoreScenarioDelete(change),
+      );
     }
     if (change.kind === "scenario_run") {
       throw new SprutHubError(

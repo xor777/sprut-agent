@@ -151,7 +151,7 @@ export const METHOD_EVIDENCE = {
   ],
   "scenario.create": [
     OBSERVED,
-    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9)",
+    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9); active and sync applied as sent, a scenario target to a missing number stored (2026-10-23-scenario-delete)",
   ],
   "scenario.update": [
     OBSERVED,
@@ -167,7 +167,10 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "acknowledged and ignored for a BLOCK, a LOGIC and a GLOBAL; only data applies (2026-10-13-wave4-contracts 1.3)",
   ],
-  "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.delete": [
+    OBSERVED,
+    "2026-09-13-native-daily-interval; a BLOCK, LOGIC or GLOBAL on or off, other numbers kept, a deleted number not given out again, scenario targets of other BLOCKs left pointing at it, a LOGIC's assignments removed with it (2026-10-23-scenario-delete)",
+  ],
   "scenario.run": [
     OBSERVED,
     "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); the simulator runs only top-level literal set actions",
