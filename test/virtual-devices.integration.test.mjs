@@ -597,6 +597,39 @@ test("«Удали кнопку Десерт» names the scenario it starts befo
   assert.match(JSON.stringify(restored.not_restored), /Сцена Десерт/);
 });
 
+// The id the change saved may now hold another device: the created one was
+// deleted and the id given to a physical device, or the owner renamed it
+// and holds it for theirs. Undo deletes neither, and the change says so.
+test("undo of a creation deletes only the device it created, unchanged", async (t) => {
+  const { hub, client, before } = await setup(t);
+  const applied = await createDevice(client, {
+    name: "Режим вечеринки",
+    type: "Switch",
+  });
+  const [device] = created(hub, before);
+  Object.assign(device, { virtual: false, name: "Розетка обогревателя" });
+  const seen = await call(client, "get_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(seen.status, "conflict");
+  const other = await call(client, "restore_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(other.status, "conflict");
+
+  const renamed = await createDevice(client, {
+    name: "Режим отпуска",
+    type: "Switch",
+  });
+  hub.state.accessories.find(({ name }) => name === "Режим отпуска").name =
+    "Отпуск";
+  const kept = await call(client, "restore_native_change", {
+    change_ref: renamed.change_ref,
+  });
+  assert.equal(kept.status, "conflict");
+  assert.deepEqual(writes(hub, "accessory.delete"), []);
+});
+
 test("a virtual device nothing refers to is deleted without asking, and a physical one never", async (t) => {
   const { hub, client } = await setup(t);
   const prepared = await call(client, "prepare_native_change", {
