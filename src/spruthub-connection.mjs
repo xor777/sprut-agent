@@ -121,6 +121,11 @@ export class SprutHubConnection {
 
   async #createClient() {
     const setup = credentialSetup(this.#env);
+    // Where the owner set the login: with it in the launch environment the
+    // file is not read.
+    const credentialsAt = hasCompleteExplicitConnection(this.#env)
+      ? "the MCP launch environment"
+      : setup.file;
     if (!hasCompleteExplicitConnection(this.#env)) {
       this.#env = await loadCredentialFile(this.#env, setup);
     }
@@ -161,7 +166,7 @@ export class SprutHubConnection {
       timeoutMs,
       sessionFile,
       accountSha256,
-      setup,
+      credentialsAt,
     };
     const renewSession = (rejectedToken) =>
       this.#renewSession(rejectedToken, account);
@@ -227,7 +232,7 @@ export class SprutHubConnection {
     timeoutMs,
     sessionFile,
     accountSha256,
-    setup,
+    credentialsAt,
   }) {
     const waitMs = this.#loginNotBefore - Date.now();
     if (waitMs > 0) throw authenticationDelayed(Math.ceil(waitMs / 1000));
@@ -238,7 +243,7 @@ export class SprutHubConnection {
         login,
         password,
         timeoutMs,
-        setup,
+        credentialsAt,
         remember: (...values) => this.#remember(...values),
       });
     } catch (error) {
@@ -272,7 +277,7 @@ async function authenticate({
   login,
   password,
   timeoutMs,
-  setup,
+  credentialsAt,
   remember,
 }) {
   const deadline = Date.now() + timeoutMs;
@@ -308,7 +313,7 @@ async function authenticate({
         );
         return { cid, token: account.token, homes };
       }
-      rejectAccountStatus(account, setup);
+      rejectAccountStatus(account, credentialsAt);
       const question = account.question;
       if (!question || typeof question.type !== "string") {
         throw incompatibleAuthResponse();
@@ -347,13 +352,13 @@ async function authenticate({
 const ACCOUNT_REFUSALS = {
   ACCOUNT_RESPONSE_FAILED: [
     "check_credentials",
-    (file) =>
-      `SprutHub rejected the login or password. Check SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD in ${file}`,
+    (where) =>
+      `SprutHub rejected the login or password. Check SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD in ${where}`,
   ],
   ACCOUNT_RESPONSE_FORMAT: [
     "check_credentials",
-    (file) =>
-      `SprutHub did not accept the format of the login. Check SPRUTHUB_LOGIN in ${file}`,
+    (where) =>
+      `SprutHub did not accept the format of the login. Check SPRUTHUB_LOGIN in ${where}`,
   ],
   ACCOUNT_RESPONSE_NOT_CONFIRMED: [
     "confirm_login",
@@ -362,8 +367,8 @@ const ACCOUNT_REFUSALS = {
   ],
   ACCOUNT_RESPONSE_NOT_CONNECTED: [
     "check_credentials",
-    (file) =>
-      `SprutHub reports this account as not connected. Check in SprutHub that the account in ${file} has access to the hub`,
+    (where) =>
+      `SprutHub reports this account as not connected. Check in SprutHub that the account in ${where} has access to the hub`,
   ],
   ACCOUNT_RESPONSE_NO_MORE_TRIES: [
     "retry_login_later",
@@ -372,7 +377,7 @@ const ACCOUNT_REFUSALS = {
   ],
 };
 
-function rejectAccountStatus(account, setup) {
+function rejectAccountStatus(account, credentialsAt) {
   if (account.status === "ACCOUNT_RESPONSE_SUCCESS") return;
   if (account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
     throw authenticationDelayed(account.question?.delay ?? 0);
@@ -382,7 +387,7 @@ function rejectAccountStatus(account, setup) {
   const [action, advice] = refusal;
   throw new SprutHubError(
     "authentication_failed",
-    `${advice(setup.file)}, then restart the MCP application.`,
+    `${advice(credentialsAt)}, then restart the MCP application.`,
     action,
     {
       capability_status: "insufficient_access",
