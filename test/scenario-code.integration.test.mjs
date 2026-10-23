@@ -181,6 +181,12 @@ test("GLOBAL code the hub's JavaScript does not know is refused before anything 
     ["class Scene {}", "class"],
     ["var level = 2 ** 3;", "**"],
     ["var known = global.COLOR_SCENE_LIGHTS.includes(26);", ".includes"],
+    // Missing on the owner's hub too (run 4 of 2026-10-23-scenario-code).
+    [
+      "var lamp = global.COLOR_SCENE_LIGHTS.find(function (id) { return id > 16; });",
+      ".find",
+    ],
+    ["var copy = Object.assign({}, PALETTES);", "Object.assign"],
   ]) {
     const refused = await prepareGlobal(
       client,
