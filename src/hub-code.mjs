@@ -7,15 +7,21 @@
 import { parse } from "@babel/parser";
 import { SprutHubError } from "./spruthub-client.mjs";
 
-// What the probe saw Nashorn refuse, with what to write instead. Object
-// methods are matched by name, so a method of the owner's own object with
-// such a name is refused too.
+// What the probe saw Nashorn refuse, with what to write instead; the
+// logical assignments came after ??, which it refused, and were not tried
+// on the hub themselves. Object methods are matched by name, so a method
+// of the owner's own object with such a name is refused too. A method the
+// list lacks is not caught here, and inside a function that other
+// scenarios call it fails only when they run it.
 const UNSUPPORTED = {
   class: "a constructor function",
   destructuring: "reading the fields one by one",
   "...": "concat, apply or a loop",
   "?.": "&& or an if",
   "??": "a ternary that tests for null and undefined",
+  "??=": "an if that tests for null and undefined",
+  "||=": "x = x || …",
+  "&&=": "x = x && …",
   async: "callbacks or setTimeout",
   "**": "Math.pow",
   ".includes": "indexOf(…) !== -1",
@@ -44,8 +50,12 @@ function constructOf(node) {
     case "AwaitExpression":
       return "async";
     case "BinaryExpression":
+      return node.operator === "**" ? "**" : undefined;
     case "AssignmentExpression":
-      return ["**", "**="].includes(node.operator) ? "**" : undefined;
+      if (node.operator === "**=") return "**";
+      return ["??=", "||=", "&&="].includes(node.operator)
+        ? node.operator
+        : undefined;
     case "MemberExpression": {
       const name = node.computed ? undefined : node.property?.name;
       if (["includes", "padStart", "find"].includes(name)) return `.${name}`;

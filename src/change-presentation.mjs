@@ -510,6 +510,7 @@ export function publicNativeChange(
         ...(isGlobalCodeChange(change)
           ? [
               "SprutHub runs a GLOBAL's code at once on every write, on or off, the write of a restore included (executes_on_apply). What the code assigned to global and what it did stay until the hub restarts (hub_memory_kept): a restore writes the old code back and runs it, it does not undo them.",
+              "hub_code_error covers compiling and the top level run at the write, not the functions the code assigns: a function other scenarios call fails only when they run it, seen in the hub log. Check a changed function by running a scenario that calls it, with the owner's consent.",
             ]
           : []),
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",

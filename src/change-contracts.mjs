@@ -444,7 +444,7 @@ export function roomNameLimits() {
 // The hub's JavaScript, for every code it runs
 // (research/protocol/2026-10-23-scenario-code.md section 4).
 export const HUB_JAVASCRIPT =
-  "SprutHub runs scenario code in Nashorn: let/const, arrow functions, template strings, default parameters, for…of work; class, destructuring, ... (spread and rest), ?., ??, async/await, ** and the methods includes, padStart, find, Object.entries and Object.assign do not. Prepare refuses code with them (unsupported_javascript) or code that does not parse (invalid_javascript), with the line. Code that passes can still fail on the hub: after the write the result gives hub_code_error, and when it is true, tell_owner and an offer to restore.";
+  "SprutHub runs scenario code in Nashorn: let/const, arrow functions, template strings, default parameters, for…of work; class, destructuring, ... (spread and rest), ?., ??, ??=, ||=, &&=, async/await, ** and the methods includes, padStart, find, Object.entries and Object.assign do not. Prepare refuses code with them (unsupported_javascript) or code that does not parse (invalid_javascript), with the line; the methods are matched by name, so an own object's method of that name is refused too, and a missing method not on this list passes. hub_code_error after the write is the hub's error flag: it covers compiling and, for a GLOBAL, running its top level at the write, not the bodies of functions it defines. A function that other scenarios call fails only when they run it, and that shows only in the hub log (read_hub_log), not in error: after changing such a function, check it by running a scenario that calls it, with the owner's consent. hub_code_error_before is the flag as read at prepare: an error the scenario already had is not this change's, and its restore would not clear it. When the change brought the error, the result gives tell_owner and an offer to restore.";
 
 export function logicSourceContract(mode, scenarioType = "LOGIC") {
   if (scenarioType === "GLOBAL") {
@@ -470,6 +470,8 @@ export function logicSourceContract(mode, scenarioType = "LOGIC") {
       limitations: [
         "A code edit by hand between prepare and apply is a conflict; SprutHub has no compare-and-set, so a race remains after the check.",
         "Code with credential-shaped text reads as [REDACTED] and is not rewritten (hidden_code).",
+        "hub_code_error: false means the code compiled and its top level ran at the write, not that the functions it assigns work: a scene function breaks only when a BLOCK calls it, seen in the hub log, without error. Check a changed function by running a scenario that calls it, with the owner's consent.",
+        "includes, padStart and find are refused by name, also as methods of the code's own objects.",
       ],
     };
   }
