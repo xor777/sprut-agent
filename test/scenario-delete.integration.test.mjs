@@ -87,8 +87,36 @@ async function setup(t) {
       name: "Кнопка: ночь",
       type: "BLOCK",
       active: true,
+      // Every night at 23:00 it runs NIGHT and switches the study outlet
+      // off.
       data: {
-        targets: [{ type: "scenario", index: NIGHT, mode: "FIRE" }],
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [
+                { type: "cron", mode: "NONE", cron: "0 0 23 ? * * *" },
+              ],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+            then: [
+              { type: "scenario", index: NIGHT, mode: "FIRE" },
+              {
+                type: "service",
+                aId: 33,
+                sId: 13,
+                hs: "Outlet",
+                characteristics: [
+                  { type: "set", cId: 14, hc: "On", value: "false" },
+                ],
+              },
+            ],
+            else: [],
+          },
+        ],
       },
     },
     {
@@ -276,6 +304,51 @@ test("names the BLOCK that runs a deleted scenario, and its undo names it as not
     item.not_restored.scenario_targets.map(({ name }) => name),
     ["Кнопка: ночь"],
   );
+});
+
+// The owner takes tell_owner's advice: the target is removed from the
+// BLOCK, then the scenario is deleted, and «верни как было» undoes both.
+// The scenario comes back under a new number, so the BLOCK's old target
+// cannot be written back; the item says where the scenario is now.
+test("undoing a removed target after its scenario came back names the new scenario", async (t) => {
+  const { hub, client } = await setup(t);
+  const data = JSON.parse(scenarioOf(hub, RUNNER).data);
+  data.targets[0].then.shift();
+  const edit = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: scenarioRef(RUNNER),
+    data,
+    reason: "Убрать запуск ночного режима перед удалением",
+  });
+  assert.equal(edit.status, "prepared", JSON.stringify(edit));
+  const edited = await call(client, "apply_native_change", {
+    change_ref: edit.change_ref,
+  });
+  assert.equal(edited.status, "applied", JSON.stringify(edited));
+  const prepared = await prepareDelete(client, NIGHT);
+  assert.equal(prepared.tell_owner, undefined, prepared.tell_owner);
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+
+  const restored = await call(client, "restore_native_change", {
+    change_refs: [edit.change_ref, prepared.change_ref],
+  });
+  const recreated = restored.results.find(
+    ({ change_ref: ref }) => ref === prepared.change_ref,
+  );
+  assert.equal(recreated.status, "restored", JSON.stringify(recreated));
+  const item = restored.results.find(
+    ({ change_ref: ref }) => ref === edit.change_ref,
+  );
+  assert.equal(item.status, "failed", JSON.stringify(item));
+  const message = item.error.message;
+  assert.ok(
+    message.includes(recreated.recreated.scenario_ref),
+    `names the recreated scenario: ${message}`,
+  );
+  assert.match(message, /Ночной режим/);
+  assert.match(message, /block_data_update/);
 });
 
 test("a LOGIC's device assignments go with it and do not come back", async (t) => {
