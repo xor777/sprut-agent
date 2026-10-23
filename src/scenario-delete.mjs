@@ -404,7 +404,14 @@ export function publicScenarioDelete(change, verification) {
     ...(change.conflict_reason
       ? { conflict_reason: change.conflict_reason }
       : {}),
-    restore_supported: change.status === "applied",
+    // Undo works for a delete that is or may be done; a prepared one is
+    // undone the same way once applied.
+    restore_supported: [
+      "prepared",
+      "applying",
+      "uncertain",
+      "applied",
+    ].includes(change.status),
     limitations: SCENARIO_DELETE_LIMITATIONS,
   };
 }
