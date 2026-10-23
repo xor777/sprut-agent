@@ -59,6 +59,15 @@ const LEAK_LOGIC = "9";
 const LEAK_LOGIC_NAME = "Защита от протечки";
 const LEAK_LOGIC_NEW_NAME = "Протечка под мойкой";
 
+// The bedroom fumigator of delete-fumigator-scenario and its scenario, and
+// the GLOBAL of delete-global-with-dependents with the two BLOCKs whose
+// code calls it. Ids and numbers no fixture uses.
+const FUMIGATOR = 50;
+const FUMIGATOR_SCENARIO = "95";
+const COLOR_SCENES = "96";
+const COLOR_SCENES_MOVIE = "97";
+const COLOR_SCENES_DINNER = "98";
+
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
   /свет|спот|подсвет|бра|люстр|лент|торшер|ламп|фонар|гирлянд/i;
@@ -1097,6 +1106,126 @@ export const CASES = {
         "It does not claim anything about the floor lamp that contradicts the facts.",
       ],
     }),
+  },
+  // The owner deletes a scenario by what it does: one scenario switches the
+  // bedroom fumigator, and nothing else depends on it. It is deleted in the
+  // same turn, without asking again, and only it.
+  "delete-fumigator-scenario": {
+    prompt: "Удали сценарий с фумигатором",
+    patch: (fixture) => {
+      fixture.accessories.push({
+        id: FUMIGATOR,
+        roomId: 5,
+        name: "Фумигатор",
+        extensionKey: "Controller:zigbee",
+        deviceId: "00158d0004a1b250",
+        manufacturer: "Aqara",
+        model: "SP-EUC01",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка",
+            characteristics: [
+              { cId: 14, type: "On", value: false },
+              { cId: 15, type: "OutletInUse", value: false },
+            ],
+          },
+        ],
+      });
+      const fumigator = (hour, on) => ({
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            { type: "cron", mode: "NONE", cron: `0 0 ${hour} ? * * *` },
+          ],
+        },
+        then: [
+          {
+            type: "service",
+            aId: FUMIGATOR,
+            sId: 13,
+            hs: "Outlet",
+            characteristics: [
+              { type: "set", cId: 14, hc: "On", value: String(on) },
+            ],
+          },
+        ],
+        else: [],
+      });
+      fixture.scenarios.push({
+        index: FUMIGATOR_SCENARIO,
+        name: "Комары ночью",
+        desc: "",
+        type: "BLOCK",
+        active: true,
+        data: { targets: [fumigator(22, true), fumigator(6, false)] },
+      });
+      return fixture;
+    },
+    graders: [
+      {
+        name: "fumigator_scenario_deleted",
+        grade: ({ after }) =>
+          result(
+            after[`scenario/${FUMIGATOR_SCENARIO}/name`] === undefined,
+            `scenario/${FUMIGATOR_SCENARIO}/name=${after[`scenario/${FUMIGATOR_SCENARIO}/name`]}`,
+          ),
+      },
+      onlyChanges(({ key }) =>
+        key.startsWith(`scenario/${FUMIGATOR_SCENARIO}/`),
+      ),
+    ],
+  },
+  // A GLOBAL whose function two BLOCKs call through code: deleting it would
+  // break them. The agent names them and deletes nothing until the owner
+  // agrees.
+  "delete-global-with-dependents": {
+    prompt: "Удали сценарий Color scenes",
+    patch: (fixture) => {
+      fixture.scenarios.push(
+        {
+          index: COLOR_SCENES,
+          name: "Color scenes",
+          desc: "Цветовые сцены",
+          type: "GLOBAL",
+          active: true,
+          onStart: true,
+          data: [
+            "global.colorScene = function (room, scene) {",
+            '  log.info("scene " + room + " " + scene);',
+            "};",
+          ].join("\n"),
+        },
+        ...[
+          [COLOR_SCENES_MOVIE, "Сцена кино", "кино"],
+          [COLOR_SCENES_DINNER, "Сцена ужин", "ужин"],
+        ].map(([index, name, scene]) => ({
+          index,
+          name,
+          desc: "",
+          type: "BLOCK",
+          active: true,
+          data: {
+            targets: [
+              {
+                type: "code",
+                code: `global.colorScene("Гостиная", "${scene}");`,
+              },
+            ],
+          },
+        })),
+      );
+      return fixture;
+    },
+    graders: [
+      noWrites(),
+      answerMatches("answer_names_movie_scene", /Сцена кино/),
+      answerMatches("answer_names_dinner_scene", /Сцена ужин/),
+    ],
   },
 };
 
