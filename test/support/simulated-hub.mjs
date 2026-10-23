@@ -1096,7 +1096,9 @@ async function loadFixtureFile(file) {
 // account.auth asks for the e-mail, then the password, and the right pair
 // gets a new token, the flow the login tests follow; status, when set, is
 // the account status answered after the password instead of a token
-// (ACCOUNT_RESPONSE_NO_MORE_TRIES and the like). hub.expireTokens() makes
+// (ACCOUNT_RESPONSE_NO_MORE_TRIES and the like); ACCOUNT_RESPONSE_TOO_FAST
+// is answered to account.auth itself with a question delay of account.delay
+// seconds, as the login tests' hub does. hub.expireTokens() makes
 // every token held so far incorrect, as an expired session.
 export async function startSimulatedHub(
   fixture,
@@ -1511,6 +1513,12 @@ function accountReply(logins, message, connection) {
   });
   const question = (type) =>
     answer({ status: "ACCOUNT_RESPONSE_SUCCESS", question: { type } });
+  if (operation === "auth" && account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
+    return answer({
+      status: account.status,
+      question: { type: "QUESTION_TYPE_EMAIL", delay: account.delay ?? 0 },
+    });
+  }
   if (operation === "auth") {
     stages.set(connection, "email");
     return question("QUESTION_TYPE_EMAIL");

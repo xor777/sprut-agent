@@ -356,6 +356,57 @@ test("a login refused while the server runs is tried once and tells the owner to
   assertNoSecrets(JSON.stringify(results) + (await written()));
 });
 
+// The hub answers ACCOUNT_RESPONSE_TOO_FAST with how long to wait; another
+// login before that would only add to the attempts the hub counts.
+test("a login the hub asks to delay is not tried again before the delay, in a running server", async (t) => {
+  const { hub, account, client } = await setup(t);
+  const first = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
+  assert.equal(first.isError, undefined, first.content[0]?.text);
+
+  Object.assign(account, { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 1 });
+  hub.expireTokens();
+  const delayedAt = Date.now();
+  for (let call = 0; call < 3; call += 1) {
+    const result = await sendCommands(client, [[hallLightOn, true]]);
+    assert.equal(result.isError, true, JSON.stringify(result));
+    assert.equal(result.structuredContent.error.code, "authentication_delayed");
+    assert.equal(result.structuredContent.error.retryable, true);
+    assert.equal(result.structuredContent.retry_after_seconds, 1);
+  }
+  assert.equal(loginsOf(hub), 2, "no login before the delay ends");
+
+  delete account.status;
+  await new Promise((resolve) =>
+    setTimeout(resolve, delayedAt + 1_100 - Date.now()),
+  );
+  const result = await sendCommands(client, [[hallLightOn, true]]);
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  assert.equal(lampOn(hub, 12), true);
+  assert.equal(loginsOf(hub), 3);
+});
+
+test("a login the hub asks to delay at start is not tried again before the delay", async (t) => {
+  const { hub, client } = await setup(t, {
+    account: { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 60 },
+    savedToken: expiredToken,
+  });
+
+  for (let call = 0; call < 3; call += 1) {
+    const result = await client.callTool({
+      name: "home_overview",
+      arguments: {},
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, "authentication_delayed");
+    const wait = result.structuredContent.retry_after_seconds;
+    assert.ok(wait > 55 && wait <= 60, `retry_after_seconds ${wait}`);
+  }
+  assert.equal(loginsOf(hub), 1, "no login before the delay ends");
+});
+
 test("a refusal unrelated to the session stays request_rejected without a login", async (t) => {
   const { hub, client } = await setup(t, { savedToken: SIMULATED_HUB_TOKEN });
   hub.refuseNext("characteristic.update", {
