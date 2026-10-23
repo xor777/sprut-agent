@@ -1610,15 +1610,17 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     logic_assignments: "found",
     characteristic_links: "found",
   });
+  // A code action may act on this device; what it does is not read.
   assert.deepEqual(
-    relations.unchecked.filter(({ area }) => area === "block_node"),
+    relations.unchecked.filter(({ area }) =>
+      ["block_node", "block_code_action"].includes(area),
+    ),
     [
       {
-        area: "block_node",
-        outcome: "unrecognized",
+        area: "block_code_action",
+        outcome: "not_analyzed",
         scenario_ref: blockRef,
         pointer: "/configuration/value/targets/0",
-        native_type: "code",
       },
     ],
   );

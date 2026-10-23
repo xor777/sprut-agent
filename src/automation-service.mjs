@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import { normalizeBlockRequest } from "./block-model.mjs";
 import {
+  blockPathToPointer,
   buildPauseRequestedSnapshot,
   inspectPauseOwnership,
   mergePauseOutcomes,
@@ -908,6 +909,7 @@ export class AutomationService {
         configuredHomeRef(this.hubSerial),
         now,
       ),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -1049,6 +1051,7 @@ export class AutomationService {
       ...(prepared.pauseOutcomes.length > 0
         ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -1337,6 +1340,19 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  // The accessories the code actions a BLOCK change adds or changes name,
+  // each with the action's pointer; code kept as stored is the owner's.
+  async #blockCodeMentions(validation) {
+    const mentions = [];
+    for (const { path, code, kept } of validation.codeActions) {
+      if (kept) continue;
+      for (const mention of await this.#codeMentions(code)) {
+        mentions.push({ pointer: blockPathToPointer(path), ...mention });
+      }
+    }
+    return mentions.length > 0 ? { code_mentions: mentions } : {};
   }
 
   // The accessories code names (accessoryMentions), by ref and name.

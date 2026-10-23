@@ -422,6 +422,12 @@ export function blockMatchesBaseline(change, scenario) {
   return blockStillAtBaseline(change, scenario);
 }
 
+function blockHoldsCode(value) {
+  if (Array.isArray(value)) return value.some(blockHoldsCode);
+  if (!isRecord(value)) return false;
+  return value.type === "code" || Object.values(value).some(blockHoldsCode);
+}
+
 export function blockSnapshotObservation(change, scenario, snapshot) {
   let matches;
   if (snapshot === "baseline") {
@@ -437,6 +443,13 @@ export function blockSnapshotObservation(change, scenario, snapshot) {
   return {
     matches,
     fields: {
+      // The hub's error after a write of code: a code node did not compile
+      // (2026-10-23-scenario-code 2.9-2.12).
+      ...(snapshot !== "baseline" &&
+      isRecord(scenario) &&
+      blockHoldsCode(change.requested_snapshot?.data)
+        ? { hub_code_error: scenario.error === true }
+        : {}),
       configuration_matches: matches,
       last_verification: freshVerification(
         matches ? result : `${result}_missing`,

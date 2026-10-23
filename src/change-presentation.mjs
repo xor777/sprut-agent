@@ -686,6 +686,10 @@ export function publicNativeChange(
             ),
           }
         : {}),
+      ...(change.code_mentions
+        ? { code_mentions: structuredClone(change.code_mentions) }
+        : {}),
+      ...hubCodeErrorFields(change),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent

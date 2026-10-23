@@ -11,6 +11,7 @@ import {
   canonicalBlockNode,
   HTTP_METHODS,
   httpUrlHidden,
+  isActionPath,
   isBlockTrigger,
   NOTIFY_MODES,
   relativeStepNumber,
@@ -43,6 +44,7 @@ import {
   stableJson,
   stableNativeId,
 } from "./change-refs.mjs";
+import { hubCodeProblems } from "./hub-code.mjs";
 import { validateNativeScalarValue } from "./native-option-contract.mjs";
 import {
   checkNotificationRecipients,
@@ -101,6 +103,7 @@ export async function validateBlockData(
     notifications: [],
     notificationServices: [],
     httpRequests: [],
+    codeActions: [],
     clearDelays: [],
     uncheckedActions: [],
     pauseOwnership: inspectPauseOwnership(data, allowedPauses, {
@@ -669,6 +672,11 @@ export function unwritableBlockNodes(node, pointer) {
     return [{ pointer, type: typeof kind === "string" ? kind : null }];
   }
   if (kind === "code") {
+    // A code action is written again as stored, unless answers hide its
+    // code; a code condition only as sprut-agent's own pause.
+    if (!/\/conditions\/\d+$/.test(pointer)) {
+      return hiddenBlockString(node, "code") ? [{ pointer, type: kind }] : [];
+    }
     return parsePauseCode(node.code) ? [] : [{ pointer, type: kind }];
   }
   // A request whose URL answers hide (anything beyond scheme and host, and
@@ -1369,14 +1377,15 @@ export function blockRunShape(data) {
   };
   visitKnownBlockNodes(
     data,
-    (node, kind) => {
+    (node, kind, path) => {
       if (
-        ["if", "condition", "characteristic", "interval", "code"].includes(kind)
+        ["if", "condition", "characteristic", "interval"].includes(kind) ||
+        (kind === "code" && !isActionPath(path))
       ) {
         shape.conditions = true;
       }
-      // Hub code runs while the condition is evaluated and can write any
-      // device, so literal actions are not the whole target list.
+      // Hub code, a condition's or an action's, can write any device, so
+      // literal actions are not the whole target list.
       if (kind === "code") shape.complete = false;
       if (kind === "delay") shape.delays = true;
       // Another scenario's writes are not read here.
@@ -1552,6 +1561,34 @@ export function validateBlockNode(node, kind, path, context) {
     if (Array.isArray(node.conditions) && node.conditions.length === 0) {
       report(field("conditions"), "conditions must not be empty");
     }
+    return;
+  }
+  if (kind === "code" && isActionPath(path)) {
+    if (Object.keys(node).some((key) => !BLOCK_ALLOWED_KEYS.code.has(key))) {
+      report(path, "a code action has only type, blockId and code");
+    } else if (typeof node.code !== "string" || node.code.trim() === "") {
+      report(field("code"), "code must be non-empty JavaScript");
+    } else if (node.code.includes(REDACTED_MARK)) {
+      report(
+        field("code"),
+        "code must not carry [REDACTED]: code that reads so cannot be rewritten; keep that node as get_entity returned it, with its blockId",
+      );
+    } else {
+      const found = hubCodeProblems(node.code, { functionBody: true });
+      for (const problem of found.problems) {
+        valid = false;
+        if (kept) continue;
+        context.problems.push({
+          path: field("code"),
+          message:
+            found.code === "invalid_javascript"
+              ? `the code does not parse (line ${problem.line}: ${problem.message})`
+              : `SprutHub's Nashorn lacks ${problem.construct} (line ${problem.line}; use ${problem.instead})`,
+          ...problem,
+        });
+      }
+    }
+    if (valid) context.codeActions.push({ path, code: node.code, kept });
     return;
   }
   if (kind === "code") {
@@ -2076,9 +2113,10 @@ export function invalidBlock(path, message) {
 
 // Names every failing rule with its RFC 6901 pointer into the BLOCK data.
 export function invalidBlockProblems(found) {
-  const problems = found.map(({ path, message }) => ({
+  const problems = found.map(({ path, message, ...detail }) => ({
     pointer: blockPathToPointer(path),
     message,
+    ...detail,
   }));
   const [only] = problems;
   return new SprutHubError(

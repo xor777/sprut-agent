@@ -10926,46 +10926,34 @@ test("a condition added ahead of kept hub code is read back after the hub renumb
   );
 });
 
-test("hub code added to or changed in an existing BLOCK is refused with its pointer", async (t) => {
+test("hub code added to or changed in an existing BLOCK is prepared, and code that does not parse is refused with its pointer", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   hub.state.scenarios[0].data = JSON.stringify(
     withRuntimeBlockFields(webClientCodeBlock()),
   );
   const stored = await readBlockConfiguration(client);
-  const allowed =
-    "node type code is not supported by this contract; allowed here: if, service, delay, clear_delay, scenario, notify, http";
 
   const added = structuredClone(stored);
   added.targets[0].then.push({ type: "code", code: "log.info('extra');" });
   const changed = structuredClone(stored);
   changed.targets[0].then[0].code = "log.info('hall light off');";
-  const refusals = [];
   for (const data of [added, changed]) {
-    const refused = await prepareBlockUpdate(
-      client,
-      data,
-      "Не писать новый код хаба",
-    );
-    assert.equal(refused.isError, true);
-    refusals.push({
-      code: refused.structuredContent.error.code,
-      message: refused.structuredContent.error.message,
-      problems: refused.structuredContent.problems,
-    });
+    const prepared = await prepareBlockUpdate(client, data, "Писать в журнал");
+    assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
   }
-  assert.deepEqual(refusals, [
-    {
-      code: "invalid_block_data",
-      message: `Unsupported BLOCK data at /targets/0/then/1: ${allowed}.`,
-      problems: [{ pointer: "/targets/0/then/1", message: allowed }],
-    },
-    {
-      code: "invalid_block_data",
-      message: `Unsupported BLOCK data at /targets/0/then/0: ${allowed}.`,
-      problems: [{ pointer: "/targets/0/then/0", message: allowed }],
-    },
-  ]);
+  const broken = structuredClone(stored);
+  broken.targets[0].then.push({ type: "code", code: "log.info('extra';" });
+  const refused = await prepareBlockUpdate(client, broken, "Писать в журнал");
+  assert.equal(refused.isError, true);
+  assert.equal(refused.structuredContent.error.code, "invalid_block_data");
+  assert.deepEqual(
+    refused.structuredContent.problems.map(({ pointer, line }) => ({
+      pointer,
+      line,
+    })),
+    [{ pointer: "/targets/0/then/1/code", line: 1 }],
+  );
   assert.equal(
     hub.requests.some(({ scenario }) => scenario?.update),
     false,
@@ -11720,9 +11708,11 @@ test("an update that grows a web client's one-condition OR group warns that any 
 
 // Without blockIds, rules pair by what they test and do, and the pair also
 // decides which stored code the edit keeps. «При движении ночью яркость 30»
-// merged into a rule with hub code shares more with its own stored rule
-// than with the code rule, so the code is checked as new code and refused.
-// The refusal tells the agent to keep the blockIds; with them the code stays.
+// merged into a rule with a hub code condition shares more with its own
+// stored rule than with the code rule, so the code is checked as a new code
+// condition and refused. The refusal tells the agent to keep the blockIds;
+// with them the code stays. A code action is written like any action
+// (scenario-code.integration.test.mjs), so only the condition is left here.
 test("an edit without blockIds that pairs stored code away is refused at the code with a hint to keep the blockIds", async (t) => {
   const nightDim = () =>
     everyIf({
@@ -11737,23 +11727,6 @@ test("an edit without blockIds that pairs stored code away is refused at the cod
       thenActions: [setAction({ cId: 16, hc: "Brightness", value: "30" })],
     });
   const cases = [
-    {
-      name: "code action",
-      // The web client's code rule: motion runs hub code.
-      codeRule: () => webClientCodeBlock().targets[0],
-      codePointer: "/targets/0/then/1",
-      code: (data) => data.targets[0].then[1],
-      storedCode: (rule) => rule.then[0],
-      merge(rule, night) {
-        rule.if.mode = "AND";
-        rule.if.conditions.push(night.if.conditions[1]);
-        rule.then.unshift(night.then[0]);
-      },
-      move(night, rule) {
-        night.then.push(rule.then[0]);
-      },
-      movedPointer: "/targets/0/then/1",
-    },
     {
       name: "code condition",
       // Motion and a hub code check turn the lamp on.
@@ -12107,7 +12080,10 @@ test("the owner switching a created BLOCK's condition group to OR is an edit onl
   ]);
 });
 
-test("an update names the stored nodes it removes and warns when hub code goes with them", async (t) => {
+// A code action is written like any action, so its removal names it among
+// the removed nodes without the warning for nodes the agent cannot write
+// back.
+test("an update names the stored nodes it removes, a code action among them", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
   const removal = (result) => {
@@ -12158,8 +12134,7 @@ test("an update names the stored nodes it removes and warns when hub code goes w
   assert.deepEqual(code.removed_nodes, [
     { pointer: "/targets/0/then/0", type: "code" },
   ]);
-  assert.equal(code.deletion_warnings.length, 1);
-  assert.match(code.deletion_warnings[0], /code at \/targets\/0\/then\/0/);
+  assert.deepEqual(code.deletion_warnings, []);
   assert.deepEqual(nothing, { removed_nodes: [], deletion_warnings: [] });
   assert.deepEqual(delay, {
     removed_nodes: [{ pointer: "/targets/0/then/1", type: "delay" }],
@@ -12214,10 +12189,13 @@ test("an update names the stored node it removes, not the sibling it edits", asy
     return data;
   };
   // «Убери запись в журнал, а свет по движению включай»: the if holding
-  // hub code goes, the next if stays and changes.
+  // hub code goes, the next if stays and changes. Its code condition is a
+  // node the agent cannot write back; its code action is not.
+  const codeRule = webClientCodeBlock().targets[0];
+  codeRule.if.conditions.push({ type: "code", code: "return true;" });
   const codeThenLight = {
     targets: [
-      webClientCodeBlock().targets[0],
+      codeRule,
       everyIf({
         when: conditionGroup(characteristicCondition()),
         thenActions: [brightness("20")],
@@ -12310,7 +12288,7 @@ test("an update names the stored node it removes, not the sibling it edits", asy
       if_as_read: {
         removed_nodes: [{ pointer: "/targets/0", type: "if" }],
         deletion_warnings: [
-          "This edit deletes stored nodes this contract cannot write: code at /targets/0/then/0. Tell the owner before apply: block_data_update cannot add them back; only restore of this change or the SprutHub interface can.",
+          "This edit deletes stored nodes this contract cannot write: code at /targets/0/if/conditions/1. Tell the owner before apply: block_data_update cannot add them back; only restore of this change or the SprutHub interface can.",
         ],
       },
     },
@@ -12672,7 +12650,7 @@ test("block_data_update wraps a single characteristic if predicate into a condit
   // The code replaced the only trigger, so that rule fails as well.
   assert.equal(
     rejectedUnknown.structuredContent.error.message,
-    "Unsupported BLOCK data: 2 problems. At /targets/0/if: node type code is not supported by this contract; allowed here: condition, characteristic. At /targets: this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron.",
+    "Unsupported BLOCK data: 2 problems. At /targets/0/if: node type code is not allowed here; allowed here: condition, characteristic. At /targets: this edit removes the last trigger of the BLOCK; keep a characteristic or interval with trigger=true, or a time_trigger cron.",
   );
   assert.equal(
     hub.requests.filter(({ scenario }) => scenario?.update).length,
@@ -12836,14 +12814,9 @@ test("BLOCK grammar rejects known nodes in unsupported child slots before send",
 test("an existing BLOCK keeps nodes outside the contract as stored and refuses them when added", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
+  // A code action is inside the contract (scenario-code.integration.test.mjs);
+  // a code condition is not.
   const cases = [
-    {
-      type: "code",
-      add: (data) => {
-        data.targets.push({ type: "code", code: "log.info('manual');" });
-        return `/targets/${data.targets.length - 1}`;
-      },
-    },
     {
       type: "code",
       add: (data) => {

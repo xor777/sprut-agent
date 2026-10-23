@@ -2807,6 +2807,14 @@ export class SprutHubClient {
           pointer,
         });
       }
+      for (const pointer of decoded.codeActions) {
+        unchecked.push({
+          area: "block_code_action",
+          outcome: "not_analyzed",
+          scenario_ref: summary.ref,
+          pointer,
+        });
+      }
       for (const entry of decoded.unrecognized) {
         unchecked.push({
           area: "block_node",
