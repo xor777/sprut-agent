@@ -481,3 +481,38 @@ test("BLOCK code the hub would not run is refused before anything is sent, and c
   assert.equal(condition.pointer, "/targets/0/if/conditions/1");
   assert.deepEqual(writesSince(hub, sentBefore), []);
 });
+
+// A GLOBAL's name, description and flags are not in its code: its options
+// window changes them (2026-10-13-wave4-contracts 1.8).
+test("a GLOBAL code edit that also sends a name, description or start on boot is sent to the options window, not to info in the code", async (t) => {
+  const { hub, client } = await setup(t);
+  const sentBefore = hub.requests.length;
+  for (const [field, value, optionKey] of [
+    ["name", "Сцены", "Name"],
+    ["description", "Палитры", "Desc"],
+    ["on_start", false, "OnStart"],
+  ]) {
+    const refused = await refusal(client, "prepare_native_change", {
+      operation: "logic_source_update",
+      target_ref: globalRef,
+      source: COLOR_SCENES_SOURCE.replace(SCENE_LAMPS_LINE, WITH_NIGHT_LIGHT),
+      [field]: value,
+      reason: "Добавить ночник",
+    });
+    assert.equal(refused.error.code, "unsupported_logic_metadata", field);
+    assert.deepEqual(
+      refused.next,
+      {
+        tool: "get_native_change_contract",
+        arguments: {
+          operation: "window_option",
+          target_ref: globalRef,
+          option_key: optionKey,
+        },
+      },
+      field,
+    );
+    assert.doesNotMatch(refused.error.message, /info\./, field);
+  }
+  assert.deepEqual(writesSince(hub, sentBefore), []);
+});
