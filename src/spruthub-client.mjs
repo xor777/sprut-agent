@@ -1180,8 +1180,6 @@ export class SprutHubClient {
       : null;
   }
 
-  // The scenarios the hub's index lists for one accessory, as relations
-  // read them (scenario.list {aId}); a summary without data.
   // The bridges that export the accessory: each bridge lists it as a child
   // in main while one of its services is exported (bridge export notes in
   // #readAccessoryBridges). A bridge whose list cannot be read is named
@@ -1216,6 +1214,8 @@ export class SprutHubClient {
     return found;
   }
 
+  // The scenarios the hub's index lists for one accessory, as relations
+  // read them (scenario.list {aId}); a summary without data.
   async listAccessoryScenarios(aId) {
     const response = await this.#request(
       { scenario: { list: { aId } } },
@@ -4571,10 +4571,19 @@ export function characteristicNotifyOn(characteristic) {
 // A virtual device's own reading or press that the hub marks read-only but
 // writes all the same: a virtual sensor's value, a virtual button's
 // ProgrammableSwitchEvent (owner hub, 3.0.0, 2026-10-23-virtual-devices,
-// 7 and 10). accessory.get says virtual; accessory.list only gives such an
-// accessory model "Virtual". Not the hub's information service or a Name.
-export function virtuallyWritable(accessory, { sId }, control) {
-  const virtual = accessory?.virtual ?? accessory?.model === "Virtual";
+// 7 and 10). A write needs accessory.get's virtual: true; accessory.list
+// has no virtual field and gives such an accessory model "Virtual", which
+// a list read (listed) takes as the sign. Not the hub's information
+// service or a Name.
+export function virtuallyWritable(
+  accessory,
+  { sId },
+  control,
+  { listed = false } = {},
+) {
+  const virtual = listed
+    ? (accessory?.virtual ?? accessory?.model === "Virtual")
+    : accessory?.virtual;
   if (virtual !== true || control?.read !== true || control.write === true) {
     return false;
   }

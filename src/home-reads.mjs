@@ -1023,7 +1023,7 @@ function characteristicValues(serial, accessory, service, types = null) {
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
         ...(control.write === true ||
-        virtuallyWritable(accessory, service, control)
+        virtuallyWritable(accessory, service, control, { listed: true })
           ? { writable: true }
           : {}),
         ref: characteristicRef(
@@ -1049,7 +1049,9 @@ function characteristicRefs(serial, accessory, service) {
         : {
             type: characteristic.control.type ?? characteristic.control.key,
             ...(characteristic.control.write === true ||
-            virtuallyWritable(accessory, service, characteristic.control)
+            virtuallyWritable(accessory, service, characteristic.control, {
+              listed: true,
+            })
               ? { writable: true }
               : {}),
             ref: characteristicRef(
