@@ -912,6 +912,41 @@ const setOn = (aId, sId, value) => ({
   },
 });
 
+test("create-virtual-switch needs one virtual switch of that name in the living room", async (t) => {
+  const create = (session, roomId, type = "Switch") =>
+    session.send({
+      accessory: {
+        create: {
+          name: "Режим гостей",
+          roomId,
+          services: [{ type, name: "Режим гостей", optional: [] }],
+        },
+      },
+    });
+  const right = await nativeSession(t);
+  await create(right, 3);
+  assert.deepEqual(right.grade("create-virtual-switch", "Готово"), {
+    one_virtual_switch_in_living_room: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+  const kitchen = await nativeSession(t);
+  await create(kitchen, 4);
+  assert.equal(
+    kitchen.grade("create-virtual-switch", "Готово")
+      .one_virtual_switch_in_living_room,
+    false,
+  );
+  const twice = await nativeSession(t);
+  await create(twice, 3);
+  await create(twice, 3, "Outlet");
+  assert.equal(
+    twice.grade("create-virtual-switch", "Готово")
+      .one_virtual_switch_in_living_room,
+    false,
+  );
+});
+
 test("disable-scenario needs the flag of the named scenario and nothing else", async (t) => {
   assert.match(CASES["disable-scenario"].prompt, /«Ночной режим»/);
 

@@ -53,6 +53,11 @@ const BATHROOM = 8;
 // starts.
 const NEW_LEAK_SENSOR = 900;
 const NEW_LEAK_SENSOR_JOIN_MS = 3_000;
+// A virtual scene button and the one BLOCK it starts, as the owner's
+// «Дом» buttons do; ids free in both homes.
+const SCENE_BUTTON = 950;
+const SCENE_BUTTON_BLOCK = "950";
+const SCENE_BUTTON_BLOCK_NAME = "Свет к десерту";
 // The LOGIC scenario of both fixtures and the name rename-logic-scenario
 // asks for.
 const LEAK_LOGIC = "9";
@@ -1047,6 +1052,54 @@ export const CASES = {
       ),
     ],
   },
+  // One new virtual accessory in the living room, of the one Switch
+  // service, under the asked name; nothing of the home changes.
+  "create-virtual-switch": {
+    prompt: "Сделай виртуальный выключатель «Режим гостей» в гостиной",
+    graders: [
+      {
+        name: "one_virtual_switch_in_living_room",
+        grade: ({ finalState, initialState }) => {
+          const known = new Set(initialState.accessories.map(({ id }) => id));
+          const created = finalState.accessories.filter(
+            ({ id }) => !known.has(id),
+          );
+          const services = created.flatMap(({ services }) =>
+            services
+              .filter(({ type }) => type !== "AccessoryInformation")
+              .map(({ type }) => type),
+          );
+          return result(
+            created.length === 1 &&
+              /^режим гостей$/i.test(created[0].name) &&
+              created[0].roomId === LIVING_ROOM &&
+              created[0].virtual === true &&
+              services.join() === "Switch",
+            created
+              .map(
+                ({ name, roomId, virtual }) =>
+                  `${name} room ${roomId} virtual=${virtual} [${services}]`,
+              )
+              .join("; ") || "nothing created",
+          );
+        },
+      },
+      onlyChanges(({ before }) => before === undefined),
+    ],
+  },
+  // «Удали кнопку …»: the button starts a scenario, so nothing is deleted
+  // before the owner hears of it, and the answer names that scenario.
+  "delete-scene-button": {
+    prompt: "Удали кнопку Десерт",
+    patch: withSceneButton,
+    graders: [
+      noWrites(),
+      answerMatches(
+        "answer_names_the_scenario",
+        new RegExp(SCENE_BUTTON_BLOCK_NAME, "i"),
+      ),
+    ],
+  },
   // Two turns in one Claude session: the second asks to undo the first.
   // Undo puts back only a lamp's on/off (on the owner's hub a brightness
   // write switches an off lamp on), so the floor lamp stays at 30 % and the
@@ -1493,6 +1546,78 @@ function withValues(fixture, values) {
     }
     characteristic.value = value;
   }
+  return fixture;
+}
+
+// The owner's kind of scene button: a virtual button «Десерт» in the
+// living room whose single press starts the BLOCK «Свет к десерту», which
+// dims the chandelier.
+function withSceneButton(fixture) {
+  fixture.accessories.push({
+    id: SCENE_BUTTON,
+    roomId: LIVING_ROOM,
+    name: "Десерт",
+    virtual: true,
+    services: [
+      {
+        sId: 13,
+        type: "StatelessProgrammableSwitch",
+        name: "Десерт",
+        characteristics: [
+          { cId: 14, type: "Name", value: "Десерт" },
+          { cId: 15, type: "ProgrammableSwitchEvent", value: 0 },
+        ],
+      },
+    ],
+  });
+  fixture.scenarios.push({
+    index: SCENE_BUTTON_BLOCK,
+    name: SCENE_BUTTON_BLOCK_NAME,
+    desc: "",
+    type: "BLOCK",
+    active: true,
+    data: {
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: SCENE_BUTTON,
+                sId: 13,
+                cId: 15,
+                hs: "StatelessProgrammableSwitch",
+                hc: "ProgrammableSwitchEvent",
+                cond: "=",
+                value: "0",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: native SprutHub BLOCK key.
+          then: [
+            {
+              type: "service",
+              ...CHANDELIER,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 15, hc: "Brightness", value: "30" },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+        },
+      ],
+    },
+  });
   return fixture;
 }
 
