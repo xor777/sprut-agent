@@ -228,12 +228,20 @@ export const NATIVE_VALUE_KINDS = {
         "window",
       );
     },
-    beforeWrite: (service, change) =>
-      refuseBridgeExportWrite(
+    // The guard reads the bridges anyway; a bridge started or stopped since
+    // prepare is told as it is now, and the record saved before the write
+    // keeps that.
+    async beforeWrite(service, change) {
+      const bridge = await refuseBridgeExportWrite(
         service,
         change.target.windowKey,
         change.option_key,
-      ),
+      );
+      if (change.bridge_export && bridge?.extension) {
+        const { limitation: _, ...rest } = change.bridge_export;
+        change.bridge_export = bridgeExportState(rest, bridge.extension);
+      }
+    },
     write(service, change, value) {
       assertWindowOptionWritable(change.target.windowKey);
       return service.client.updateWindowOption({
@@ -841,19 +849,29 @@ async function readBridgeExportOption(service, bridge, windowKey, optionKey) {
     );
   }
   const serviceName = sanitizeNativeData(target.name);
-  const running = bridgeRunning(extension);
   return {
     option: options[0],
     targetName: `${device} / ${serviceName}`,
-    bridgeExport: {
-      device,
-      service: serviceName,
-      service_ref: serviceRef(serial, aId, sId),
-      bridge: bridgeName,
-      bridge_ref: extension.ref,
-      running,
-      ...(running ? {} : { limitation: BRIDGE_NOT_RUNNING }),
-    },
+    bridgeExport: bridgeExportState(
+      {
+        device,
+        service: serviceName,
+        service_ref: serviceRef(serial, aId, sId),
+        bridge: bridgeName,
+        bridge_ref: extension.ref,
+      },
+      extension,
+    ),
+  };
+}
+
+// Whether the bridge runs now, and what that means for the assistant.
+function bridgeExportState(fields, extension) {
+  const running = bridgeRunning(extension);
+  return {
+    ...fields,
+    running,
+    ...(running ? {} : { limitation: BRIDGE_NOT_RUNNING }),
   };
 }
 
