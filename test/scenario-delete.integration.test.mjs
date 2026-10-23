@@ -327,6 +327,25 @@ test("finds a LOGIC's assignments when a device disappears during the scan", asy
   assert.equal(prepared.dependencies.logic_assignments.length, 1);
 });
 
+test("a device whose LOGIC list is refused while it is still there stops the prepare", async (t) => {
+  const { hub, client } = await setup(t);
+  // Not found for a device that is there is no proof it has no
+  // assignments: taken as none, the LOGIC would be deleted without a word
+  // about the device it serves.
+  hub.refuseNext("logic.list", {
+    code: -32603,
+    message: "Not found: 'Accessory 23'",
+  });
+  const refused = await refusal(client, "prepare_native_change", {
+    operation: "scenario_delete",
+    target_ref: scenarioRef(LEAK),
+    reason: "Владелец попросил удалить сценарий",
+  });
+  assert.equal(refused.error.code, "request_rejected", JSON.stringify(refused));
+  assert.deepEqual(writes(hub), []);
+  assert.ok(scenarioOf(hub, LEAK));
+});
+
 test("refuses a built-in scenario without writing", async (t) => {
   const { hub, client } = await setup(t);
   const refused = await refusal(client, "prepare_native_change", {
