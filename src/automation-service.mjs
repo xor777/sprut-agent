@@ -1258,16 +1258,22 @@ export class AutomationService {
     const metadataField = Object.keys(LOGIC_SOURCE_METADATA_INPUTS).find(
       (field) => input[field] !== undefined,
     );
-    if (metadataField) {
-      throw logicSourceMetadataInput(input.target_ref, metadataField);
-    }
-    const source = requiredLogicSource(input.source);
     const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    // Where such a field changes depends on the scenario's type, so the
+    // scenario is read first.
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) throw scenarioNotFound();
     if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
       throw notCodeScenario();
     }
+    if (metadataField) {
+      throw logicSourceMetadataInput(
+        input.target_ref,
+        metadataField,
+        scenario.type,
+      );
+    }
+    const source = requiredLogicSource(input.source);
     const baseline = logicScenarioSnapshot(scenario);
     if (baseline.predefined === true) {
       throw new SprutHubError(

@@ -426,26 +426,46 @@ export const LOGIC_SOURCE_METADATA_INPUTS = {
   active: null,
 };
 
-export function logicSourceMetadataInput(targetRef, field) {
+// A GLOBAL's name, description, start on boot and sync are not in its
+// code: its options window changes them (2026-10-13-wave4-contracts 1.8).
+const GLOBAL_METADATA_OPTIONS = {
+  name: "Name",
+  description: "Desc",
+  on_start: "OnStart",
+  sync: "Sync",
+};
+
+export function logicSourceMetadataInput(targetRef, field, scenarioType) {
   const place = LOGIC_SOURCE_METADATA_INPUTS[field];
-  const [message, next] = place?.startsWith("info.")
+  const globalOption =
+    scenarioType === "GLOBAL" ? GLOBAL_METADATA_OPTIONS[field] : undefined;
+  const [message, next] = globalOption
     ? [
-        `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. SprutHub sets the scenario's name, description and start on boot from info in the code on every code write: write ${place} in source as a plain value.`,
-        { operation: "logic_source_update", target_ref: targetRef },
+        `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. A GLOBAL's code does not set it: prepare window_option ${globalOption} on the scenario ref.`,
+        {
+          operation: "window_option",
+          target_ref: targetRef,
+          option_key: globalOption,
+        },
       ]
-    : place
+    : place?.startsWith("info.")
       ? [
-          `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. Sync is not in the code: prepare window_option Sync on the scenario ref.`,
-          {
-            operation: "window_option",
-            target_ref: targetRef,
-            option_key: place,
-          },
+          `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. SprutHub sets the scenario's name, description and start on boot from info in the code on every code write: write ${place} in source as a plain value.`,
+          { operation: "logic_source_update", target_ref: targetRef },
         ]
-      : [
-          "logic_source_update writes only the code; nothing was prepared. Turn the scenario on or off with scenario_active.",
-          { operation: "scenario_active", target_ref: targetRef },
-        ];
+      : place
+        ? [
+            `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. Sync is not in the code: prepare window_option Sync on the scenario ref.`,
+            {
+              operation: "window_option",
+              target_ref: targetRef,
+              option_key: place,
+            },
+          ]
+        : [
+            "logic_source_update writes only the code; nothing was prepared. Turn the scenario on or off with scenario_active.",
+            { operation: "scenario_active", target_ref: targetRef },
+          ];
   return new SprutHubError(
     "unsupported_logic_metadata",
     message,
