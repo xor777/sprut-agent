@@ -10,20 +10,22 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { scaledHome } from "./fixtures/homes/scaled.mjs";
 import { ORDINARY_HUB_TIMEOUT_MS } from "./support/fake-hub.mjs";
 import {
+  diffHomeSnapshots,
   loadHomeFixture,
   startSimulatedHub,
 } from "./support/simulated-hub.mjs";
 
-// «Торшер есть в Алисе?», «какие устройства видит HomeKit?»: what a bridge
-// (HomeKit, Yandex, Google) exports, read without the owner opening the
-// bridge screens. The apartment's bridges, read off
-// test/fixtures/homes/apartment.json by a person: HomeKit runs and exports
-// the door sensor, the hall light, the chandelier, the air conditioner and
-// the bedroom climate sensor's temperature; «Яндекс Алиса» does not run
-// (NOT_LOADED, off) and keeps the chandelier, the floor lamp and the
-// kitchen light, and cannot export the bedside button. A bridge's export
-// is its child list and the child's window
-// (research/protocol/2026-10-13-wave4-contracts.md, 3).
+// «Торшер есть в Алисе?», «какие устройства видит HomeKit?», «добавь
+// торшер в HomeKit»: what a bridge (HomeKit, Yandex, Google) exports, read
+// and changed without the owner opening the bridge screens. The
+// apartment's bridges, read off test/fixtures/homes/apartment.json by a
+// person: HomeKit runs and exports the door sensor, the hall light, the
+// chandelier, the air conditioner and the bedroom climate sensor's
+// temperature; «Яндекс Алиса» does not run (NOT_LOADED, off) and keeps the
+// chandelier, the floor lamp and the kitchen light, and cannot export the
+// bedside button. A bridge's export is its child list and the child's
+// window (research/protocol/2026-10-13-wave4-contracts.md, 3;
+// 2026-10-14-bridge-export-write.md).
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -33,8 +35,10 @@ const scaled = "spruthub://hub/sim-scaled-01";
 const bridge = (home, key) =>
   `${home}/extension/${encodeURIComponent(`Bridge:${key}`)}`;
 const service = (home, aId, sId) => `${home}/accessory/${aId}/service/${sId}`;
+const childWindow = (home, key, aId) =>
+  `${home}/window/${encodeURIComponent(`Bridge/${key}/Child/${aId}/`)}`;
 
-async function setup(t, fixture) {
+async function setup(t, fixture, { timeoutMs = ORDINARY_HUB_TIMEOUT_MS } = {}) {
   const hub = await startSimulatedHub(
     fixture ?? (await loadHomeFixture("apartment")),
   );
@@ -50,7 +54,7 @@ async function setup(t, fixture) {
       env: {
         PATH: process.env.PATH,
         ...hub.connectionEnv(),
-        SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
+        SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
         SPRUT_AGENT_STATE_DIR: stateDirectory,
       },
       stderr: "pipe",
@@ -110,7 +114,8 @@ test("an accessory's bridges say where it is exported and which of its services"
   assert.deepEqual(floorLamp.entity.include_resolution.applied, ["bridges"]);
   const [homekit, yandex] = floorLamp.entity.bridges;
   assert.equal(floorLamp.entity.bridges.length, 2);
-  // HomeKit runs and does not export the floor lamp.
+  // HomeKit runs and does not export the floor lamp; its window and the
+  // lamp's checkbox there are what an export would change.
   assert.deepEqual(homekit, {
     ref: bridge(apartment, "homekit"),
     name: "HomeKit",
@@ -119,6 +124,15 @@ test("an accessory's bridges say where it is exported and which of its services"
     enabled: true,
     running: true,
     exported: false,
+    window_ref: childWindow(apartment, "homekit", 16),
+    services: [
+      {
+        ref: service(apartment, 16, 13),
+        name: "Свет",
+        option_key: "s:13",
+        exported: false,
+      },
+    ],
   });
   // Alice's bridge keeps the floor lamp but does not run: the setting is
   // there, the assistant sees nothing from it now.
@@ -130,12 +144,19 @@ test("an accessory's bridges say where it is exported and which of its services"
     enabled: false,
     running: false,
     exported: true,
+    window_ref: childWindow(apartment, "yandex", 16),
     services: [
-      { ref: service(apartment, 16, 13), name: "Свет", exported: true },
+      {
+        ref: service(apartment, 16, 13),
+        name: "Свет",
+        option_key: "s:13",
+        exported: true,
+      },
     ],
   });
-  // The services are read from the window of the bridge that exports it.
-  assert.deepEqual(childWindowReads(floorLamp.native), [
+  // The services are read from the window of each bridge that lists it.
+  assert.deepEqual(childWindowReads(floorLamp.native).sort(), [
+    "Bridge/homekit/Child/16/",
     "Bridge/yandex/Child/16/",
   ]);
 
@@ -144,6 +165,26 @@ test("an accessory's bridges say where it is exported and which of its services"
     entity_ref: `${apartment}/accessory/25`,
     include: ["bridges"],
   });
+  const climateServices = (temperature) => [
+    {
+      ref: service(apartment, 25, 13),
+      name: "Температура",
+      option_key: "s:13",
+      exported: temperature,
+    },
+    {
+      ref: service(apartment, 25, 20),
+      name: "Влажность",
+      option_key: "s:20",
+      exported: false,
+    },
+    {
+      ref: service(apartment, 25, 90),
+      name: "Батарея",
+      option_key: "s:90",
+      exported: false,
+    },
+  ];
   assert.deepEqual(climate.entity.bridges, [
     {
       ref: bridge(apartment, "homekit"),
@@ -153,30 +194,26 @@ test("an accessory's bridges say where it is exported and which of its services"
       enabled: true,
       running: true,
       exported: true,
-      services: [
-        {
-          ref: service(apartment, 25, 13),
-          name: "Температура",
-          exported: true,
-        },
-        { ref: service(apartment, 25, 20), name: "Влажность", exported: false },
-        { ref: service(apartment, 25, 90), name: "Батарея", exported: false },
-      ],
+      window_ref: childWindow(apartment, "homekit", 25),
+      services: climateServices(true),
     },
     {
       ...climate.entity.bridges[1],
       ref: bridge(apartment, "yandex"),
       running: false,
       exported: false,
+      window_ref: childWindow(apartment, "yandex", 25),
+      services: climateServices(false),
     },
   ]);
   assert.match(climate.entity.bridges[1].limitation, /not running/i);
-  assert.deepEqual(childWindowReads(climate.native), [
+  assert.deepEqual(childWindowReads(climate.native).sort(), [
     "Bridge/homekit/Child/25/",
+    "Bridge/yandex/Child/25/",
   ]);
 
   // A bridge that cannot export the accessory says so rather than "not
-  // exported".
+  // exported", and offers no window to change.
   const button = await read(hub, client, {
     entity_ref: `${apartment}/accessory/39`,
     include: ["bridges"],
@@ -184,8 +221,11 @@ test("an accessory's bridges say where it is exported and which of its services"
   const [buttonHomekit, buttonYandex] = button.entity.bridges;
   assert.equal(buttonHomekit.exported, false);
   assert.equal(Object.hasOwn(buttonHomekit, "exportable"), false);
+  assert.equal(buttonHomekit.window_ref, childWindow(apartment, "homekit", 39));
   assert.equal(buttonYandex.exported, false);
   assert.equal(buttonYandex.exportable, false);
+  assert.equal(Object.hasOwn(buttonYandex, "window_ref"), false);
+  assert.equal(Object.hasOwn(buttonYandex, "services"), false);
 
   // Without the include an accessory read touches no bridge.
   const plain = await read(hub, client, {
@@ -316,10 +356,15 @@ test("a bridge read that fails is not taken for an accessory not exported", asyn
     entity_ref: `${apartment}/accessory/25`,
     include: ["bridges"],
   });
-  const [homekit] = servicesUnread.entity.bridges;
-  assert.equal(homekit.exported, true);
-  assert.equal(Object.hasOwn(homekit, "services"), false);
-  assert.equal(typeof homekit.services_error_code, "string");
+  // One of the two windows failed: that bridge still says from its list
+  // whether it exports the sensor, and gives no services.
+  const windowUnread = servicesUnread.entity.bridges.filter((entry) =>
+    Object.hasOwn(entry, "services_error_code"),
+  );
+  assert.equal(windowUnread.length, 1);
+  assert.equal(typeof windowUnread[0].exported, "boolean");
+  assert.equal(Object.hasOwn(windowUnread[0], "services"), false);
+  assert.equal(typeof windowUnread[0].services_error_code, "string");
 
   // Without the list of extensions no bridge is known: the include is
   // unread, the accessory still read.
@@ -408,10 +453,11 @@ test("bridge reads stay bounded by the question as the home grows", async (t) =>
   const bridgesBytes = Buffer.byteLength(
     JSON.stringify(largeRead.entity.bridges),
   );
-  assert.ok(bridgesBytes < 1_500, `${bridgesBytes} bytes`);
+  // Two bridges, each with its window and the sensor's three services.
+  assert.ok(bridgesBytes < 2_000, `${bridgesBytes} bytes`);
   assert.ok(Math.abs(largeRead.bytes - smallRead.bytes) < 64);
-  // The list of extensions, each bridge's children and the window of the
-  // one bridge that exports it: no request per accessory of the home.
+  // The list of extensions, each bridge's children and the window of each
+  // bridge that lists it: no request per accessory of the home.
   const methods = (native) =>
     native
       .map(({ method }) => method)
@@ -422,6 +468,7 @@ test("bridge reads stay bounded by the question as the home grows", async (t) =>
     "extension.list",
     "extensionChild.list",
     "extensionChild.list",
+    "window.get",
     "window.get",
   ]);
   assert.deepEqual(methods(largeRead.native), methods(smallRead.native));
@@ -487,66 +534,435 @@ test("bridge text stays data and secrets in it stay hidden", async (t) => {
   assert.equal(floorLamp.entity.bridges[1].exported, true);
 });
 
-// «Добавь торшер в HomeKit»: ticking a service in a bridge child's window
-// was never checked on a hub (2026-10-13-wave4-contracts, limitations), so
-// the export is read but not written: the agent learns it before anything
-// is sent and is pointed at the current export, the owner at the app.
-test("a bridge's export is read but not changed until a hub confirms the write", async (t) => {
-  const { hub, client } = await setup(t);
-  const floorLamp = `${apartment}/accessory/16`;
-  const offersWrite = /get_native_change_contract|prepare_native_change/;
+// «Добавь торшер в HomeKit», «убери люстру из Алисы», «верни как было»: a
+// device's service is ticked or unticked in a bridge child's window
+// (research/protocol/2026-10-14-bridge-export-write.md), as one prepared
+// change per service and bridge, from what the bridges read gives.
 
-  // The way an agent reaches the flag: the bridge lists the floor lamp, its
-  // window holds s:13, the lamp's light. No read offers a write of it.
-  const homekit = await read(hub, client, {
-    entity_ref: bridge(apartment, "homekit"),
-    include: ["children"],
+async function call(client, name, args) {
+  const result = await client.callTool({ name, arguments: args });
+  assert.equal(result.isError, undefined, result.content[0]?.text);
+  return result.structuredContent;
+}
+
+async function refused(client, name, args) {
+  const result = await client.callTool({ name, arguments: args });
+  assert.equal(result.isError, true, result.content[0]?.text);
+  return result.structuredContent;
+}
+
+// The prepare input for one service of an accessory in one bridge, from
+// the accessory's bridges read.
+async function exportInput(hub, client, aId, bridgeKey, sId, value) {
+  const { entity } = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/${aId}`,
+    include: ["bridges"],
   });
-  assert.doesNotMatch(homekit.text, offersWrite);
-  const child = homekit.entity.children.find(
-    ({ accessory_ref }) => accessory_ref === floorLamp,
+  const entry = entity.bridges.find(
+    ({ ref }) => ref === bridge(apartment, bridgeKey),
   );
-  const childWindow = await read(hub, client, {
-    entity_ref: child.options_window_ref,
+  assert.ok(entry?.window_ref, "the bridges read names the window to change");
+  const option = entry.services.find(
+    ({ ref }) => ref === service(apartment, aId, sId),
+  );
+  assert.ok(option?.option_key, "the bridges read names the service's flag");
+  return {
+    operation: "window_option",
+    target_ref: entry.window_ref,
+    option_key: option.option_key,
+    value,
+    reason: "Просьба владельца",
+  };
+}
+
+const exportWrite = (bridgeKey, aId, sId, value) => ({
+  window: {
+    update: {
+      windowKey: `Bridge/${bridgeKey}/Child/${aId}/`,
+      options: [{ key: `s:${sId}`, value: { boolValue: value } }],
+    },
+  },
+});
+
+const writtenSince = (hub, count) =>
+  hub
+    .writes()
+    .slice(count)
+    .map(({ params }) => params);
+
+test("a device is added to a running bridge, read back, and undone", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const floorLamp = `${apartment}/accessory/16`;
+  const tick = await exportInput(hub, client, 16, "homekit", 13, true);
+  assert.equal(tick.target_ref, childWindow(apartment, "homekit", 16));
+  const lampInHomekit = {
+    device: "Торшер",
+    service: "Свет",
+    service_ref: service(apartment, 16, 13),
+    bridge: "HomeKit",
+    bridge_ref: bridge(apartment, "homekit"),
+    running: true,
+  };
+
+  // The contract and the prepared change name the device and the bridge;
+  // nothing is written before apply.
+  const contract = await call(client, "get_native_change_contract", {
+    operation: tick.operation,
+    target_ref: tick.target_ref,
+    option_key: tick.option_key,
   });
-  const flag = childWindow.entity.options.find(({ key }) => key === "s:13");
-  assert.equal(flag.configured_value, false);
-  assert.equal(flag.native_change.supported, false);
-  assert.equal(flag.native_change.reason, "bridge_export_unverified");
-  assert.doesNotMatch(childWindow.text, offersWrite);
-  const lampBridges = await read(hub, client, {
+  assert.deepEqual(contract.bridge_export, lampInHomekit);
+  const writes = hub.writes().length;
+  const prepared = await call(client, "prepare_native_change", tick);
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(prepared.diff.value, {
+    from: false,
+    to: true,
+    kind: "boolValue",
+  });
+  assert.deepEqual(prepared.bridge_export, lampInHomekit);
+  assert.equal(hub.writes().length, writes);
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(applied.bridge_export, lampInHomekit);
+  assert.deepEqual(writtenSince(hub, writes), [
+    exportWrite("homekit", 16, 13, true),
+  ]);
+  // Only the floor lamp's light in HomeKit changed.
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), [
+    { key: "bridge/Bridge:homekit/16.13", before: undefined, after: true },
+  ]);
+  const after = await read(hub, client, {
     entity_ref: floorLamp,
     include: ["bridges"],
   });
-  assert.doesNotMatch(lampBridges.text, offersWrite);
+  assert.equal(after.entity.bridges[0].exported, true);
+  assert.equal(after.entity.bridges[0].services[0].exported, true);
 
-  const refusedWith = async (name, args, next) => {
-    const result = await client.callTool({ name, arguments: args });
-    assert.equal(result.isError, true, result.content[0]?.text);
-    const { error } = result.structuredContent;
-    assert.equal(error.code, "bridge_export_unverified");
-    assert.match(error.message, /not (been )?verified/i);
-    assert.match(error.message, /SprutHub app/);
-    assert.deepEqual(result.structuredContent.next, next);
-  };
-  const lampExport = {
-    tool: "get_entity",
-    arguments: { entity_ref: floorLamp, include: ["bridges"] },
-  };
-  const tick = {
-    operation: "window_option",
-    target_ref: child.options_window_ref,
-    option_key: "s:13",
-  };
-  await refusedWith("get_native_change_contract", tick, lampExport);
-  await refusedWith(
-    "prepare_native_change",
-    { ...tick, value: true, reason: "Show the floor lamp in HomeKit" },
-    lampExport,
+  // The history of the floor lamp says what changed and where.
+  const history = await call(client, "get_native_change", {
+    home_ref: apartment,
+    entity_ref: floorLamp,
+  });
+  assert.deepEqual(
+    history.changes.map(({ change_ref, name, bridge, value }) => ({
+      change_ref,
+      name,
+      bridge,
+      value,
+    })),
+    [
+      {
+        change_ref: prepared.change_ref,
+        name: "Торшер / Свет",
+        bridge: "HomeKit",
+        value: { from: false, to: true },
+      },
+    ],
   );
 
-  // Which new accessories a bridge takes is its own window's
-  // AutoAddNewAccessory: not written either.
+  // «Верни как было».
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [prepared.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone));
+  assert.equal(undone.results[0].status, "restored");
+  assert.equal(undone.results[0].bridge, "HomeKit");
+  assert.deepEqual(writtenSince(hub, writes), [
+    exportWrite("homekit", 16, 13, true),
+    exportWrite("homekit", 16, 13, false),
+  ]);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// «Убери люстру из HomeKit и из Алисы»: one change per bridge; Alice's
+// bridge does not run, so its export is kept and served nothing now, and
+// the agent is told so before and after.
+test("a device is removed from two bridges, one not running, and both are undone together", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const fromHomekit = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 15, "homekit", 13, false),
+  );
+  const fromAlice = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 15, "yandex", 13, false),
+  );
+  assert.equal(fromHomekit.bridge_export.running, true);
+  assert.equal(Object.hasOwn(fromHomekit.bridge_export, "limitation"), false);
+  const { limitation, ...alice } = fromAlice.bridge_export;
+  assert.deepEqual(alice, {
+    device: "Люстра",
+    service: "Люстра",
+    service_ref: service(apartment, 15, 13),
+    bridge: "Яндекс Алиса",
+    bridge_ref: bridge(apartment, "yandex"),
+    running: false,
+  });
+  assert.match(limitation, /not running/i);
+
+  for (const prepared of [fromHomekit, fromAlice]) {
+    const applied = await call(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+  }
+  assert.match(
+    (
+      await call(client, "get_native_change", {
+        change_ref: fromAlice.change_ref,
+      })
+    ).bridge_export.limitation,
+    /not running/i,
+  );
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), [
+    { key: "bridge/Bridge:homekit/15.13", before: true, after: undefined },
+    { key: "bridge/Bridge:yandex/15.13", before: true, after: undefined },
+  ]);
+  const removed = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/15`,
+    include: ["bridges"],
+  });
+  assert.deepEqual(
+    removed.entity.bridges.map(({ exported }) => exported),
+    [false, false],
+  );
+  assert.match(removed.entity.bridges[1].limitation, /not running/i);
+
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [fromHomekit.change_ref, fromAlice.change_ref],
+  });
+  assert.equal(undone.status, "ok", JSON.stringify(undone));
+  assert.deepEqual(
+    undone.results.map(({ bridge, status }) => [bridge, status]).sort(),
+    [
+      ["HomeKit", "restored"],
+      ["Яндекс Алиса", "restored"],
+    ],
+  );
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// The hub stores the tick but its answer is lost, as once on the owner's
+// running «Yandex» (2026-10-14-bridge-export-write 10): the window read
+// decides, and an unknown outcome is not reported as nothing done.
+test("a bridge export whose answer is lost is found done by reading the window", async (t) => {
+  const { hub, client } = await setup(t, undefined, { timeoutMs: 2_000 });
+  const initial = hub.snapshot();
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 16, "homekit", 13, true),
+  );
+  hub.state.faults.droppedReply.push({ method: "window.update", remaining: 1 });
+  // The client times out on the write and reads the window back.
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(applied.verification.result, "requested_value_observed");
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), [
+    { key: "bridge/Bridge:homekit/16.13", before: undefined, after: true },
+  ]);
+  const read16 = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/16`,
+    include: ["bridges"],
+  });
+  assert.equal(read16.entity.bridges[0].services[0].exported, true);
+
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [prepared.change_ref],
+  });
+  assert.equal(undone.results[0].status, "restored", JSON.stringify(undone));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+// A bridge exports what its child window offers: a bridge that does not
+// list the accessory has no window for it, and a service without a
+// checkbox is not exported by that bridge. The agent learns why before
+// anything is sent. Yandex's bridge offers no checkbox for a filter
+// (2026-10-14-bridge-export-write 12); the apartment's Alice bridge does
+// not list the bedside button.
+test("a service or device a bridge cannot export is refused with the reason", async (t) => {
+  const fixture = structuredClone(await loadHomeFixture("apartment"));
+  const breezer = fixture.accessories.find(({ id }) => id === 28);
+  breezer.services.push({
+    sId: 20,
+    type: "FilterMaintenance",
+    name: "Фильтр",
+    characteristics: [
+      { cId: 21, type: "FilterChangeIndication", value: 0 },
+      { cId: 22, type: "FilterLifeLevel", value: 80 },
+    ],
+  });
+  const { hub, client } = await setup(t, fixture);
+
+  const read28 = await read(hub, client, {
+    entity_ref: `${apartment}/accessory/28`,
+    include: ["bridges"],
+  });
+  const [homekit, yandex] = read28.entity.bridges;
+  assert.deepEqual(
+    homekit.services.map(({ name, option_key }) => [name, option_key]),
+    [
+      ["Бризер", "s:13"],
+      ["Фильтр", "s:20"],
+    ],
+  );
+  assert.deepEqual(yandex.services, [
+    {
+      ref: service(apartment, 28, 13),
+      name: "Бризер",
+      option_key: "s:13",
+      exported: false,
+    },
+    { ref: service(apartment, 28, 20), name: "Фильтр", exportable: false },
+  ]);
+
+  const breezerBridges = {
+    tool: "get_entity",
+    arguments: {
+      entity_ref: `${apartment}/accessory/28`,
+      include: ["bridges"],
+    },
+  };
+  const filter = {
+    operation: "window_option",
+    target_ref: yandex.window_ref,
+    option_key: "s:20",
+  };
+  for (const [name, args] of [
+    ["get_native_change_contract", filter],
+    [
+      "prepare_native_change",
+      { ...filter, value: true, reason: "Добавить фильтр в Алису" },
+    ],
+  ]) {
+    const { error, next } = await refused(client, name, args);
+    assert.equal(error.code, "bridge_service_not_exportable", name);
+    assert.match(error.message, /Яндекс Алиса/);
+    assert.match(error.message, /Фильтр/);
+    assert.match(error.message, /Бризер/);
+    assert.match(error.message, /Nothing was sent/);
+    assert.deepEqual(next, breezerBridges);
+  }
+
+  const button = {
+    operation: "window_option",
+    target_ref: childWindow(apartment, "yandex", 39),
+    option_key: "s:13",
+    value: true,
+    reason: "Добавить кнопку в Алису",
+  };
+  const { error, next } = await refused(
+    client,
+    "prepare_native_change",
+    button,
+  );
+  assert.equal(error.code, "bridge_export_unavailable");
+  assert.match(error.message, /Яндекс Алиса/);
+  assert.match(error.message, /Кнопка у кровати/);
+  assert.deepEqual(next, {
+    tool: "get_entity",
+    arguments: {
+      entity_ref: `${apartment}/accessory/39`,
+      include: ["bridges"],
+    },
+  });
+
+  assert.deepEqual(hub.writes(), []);
+  const changes = await call(client, "get_native_change", {
+    home_ref: apartment,
+  });
+  assert.deepEqual(changes.changes, []);
+});
+
+// The owner ticks the floor lamp in HomeKit in the app between prepare and
+// apply: apply writes nothing and says the baseline changed. After an
+// applied change the owner unticks it by hand: «верни как было» writes
+// nothing and says it is already as before.
+test("an owner's change of a bridge export is reported and not written over", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 16, "homekit", 13, true),
+  );
+  hub.request(exportWrite("homekit", 16, 13, true));
+  const writes = hub.writes().length;
+  const conflict = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(conflict.status, "conflict", JSON.stringify(conflict));
+  assert.equal(conflict.conflict_reason, "baseline_changed");
+  assert.equal(conflict.native_write_sent, false);
+  assert.deepEqual(writtenSince(hub, writes), []);
+  assert.equal(hub.snapshot()["bridge/Bridge:homekit/16.13"], true);
+
+  const kitchen = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 22, "homekit", 13, true),
+  );
+  const applied = await call(client, "apply_native_change", {
+    change_ref: kitchen.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  hub.request(exportWrite("homekit", 22, 13, false));
+  const beforeUndo = hub.writes().length;
+  const undone = await call(client, "restore_native_change", {
+    change_refs: [kitchen.change_ref],
+  });
+  assert.deepEqual(
+    undone.results.map(({ status, reason, already_previous, sent }) => ({
+      status,
+      reason,
+      already_previous,
+      sent,
+    })),
+    [
+      {
+        status: "skipped",
+        reason: "changed_since",
+        already_previous: true,
+        sent: false,
+      },
+    ],
+  );
+  assert.deepEqual(writtenSince(hub, beforeUndo), []);
+  assert.equal(hub.snapshot()["bridge/Bridge:homekit/22.13"], undefined);
+});
+
+// What the probe did not cover stays refused: which new accessories a
+// bridge takes (its own window's AutoAddNewAccessory). The child window's
+// checkbox is offered, the bridge's own setting is not.
+test("a bridge's own setting for new accessories is still not written", async (t) => {
+  const { hub, client } = await setup(t);
+  const childOptions = await read(hub, client, {
+    entity_ref: childWindow(apartment, "homekit", 16),
+  });
+  const flag = childOptions.entity.options.find(({ key }) => key === "s:13");
+  assert.equal(flag.native_change.supported, true);
+
+  const homekit = await read(hub, client, {
+    entity_ref: bridge(apartment, "homekit"),
+  });
+  const bridgeWindow = await read(hub, client, {
+    entity_ref: homekit.entity.options_window_ref,
+  });
+  const autoAddOption = bridgeWindow.entity.options.find(
+    ({ key }) => key === "AutoAddNewAccessory",
+  );
+  assert.equal(autoAddOption.native_change.supported, false);
+  assert.equal(autoAddOption.native_change.reason, "bridge_export_unverified");
+
   const autoAdd = {
     operation: "window_option",
     target_ref: homekit.entity.options_window_ref,
@@ -559,35 +975,27 @@ test("a bridge's export is read but not changed until a hub confirms the write",
       include: ["children"],
     },
   };
-  await refusedWith("get_native_change_contract", autoAdd, bridgeExport);
-  await refusedWith(
-    "prepare_native_change",
-    { ...autoAdd, value: true, reason: "Export new accessories to HomeKit" },
-    bridgeExport,
-  );
-
+  for (const [name, args] of [
+    ["get_native_change_contract", autoAdd],
+    [
+      "prepare_native_change",
+      { ...autoAdd, value: true, reason: "Export new accessories to HomeKit" },
+    ],
+  ]) {
+    const { error, next } = await refused(client, name, args);
+    assert.equal(error.code, "bridge_export_unverified", name);
+    assert.match(error.message, /SprutHub app/);
+    assert.deepEqual(next, bridgeExport);
+  }
   assert.deepEqual(hub.writes(), []);
-  const changes = await client.callTool({
-    name: "get_native_change",
-    arguments: { home_ref: apartment },
-  });
-  assert.equal(changes.isError, undefined, changes.content[0]?.text);
-  assert.deepEqual(changes.structuredContent.changes, []);
-
-  // Reading the export still works and shows it unchanged.
-  const after = await read(hub, client, {
-    entity_ref: floorLamp,
-    include: ["bridges"],
-  });
-  assert.equal(after.entity.bridges[0].exported, false);
 });
 
-// A bridge's export journaled before prepare refused it, by an earlier
-// version: apply of a prepared tick and restore of an applied one refuse it
-// as prepare does, before anything is sent, and the records stay as they
-// were. The records are made on the floor lamp's device setting and recast
-// onto the bridge, as such a version would have saved them.
-test("a bridge export change journaled earlier is neither applied nor restored", async (t) => {
+// A change of AutoAddNewAccessory journaled before prepare refused it, by
+// an earlier version: apply and restore refuse it as prepare does, before
+// anything is sent, and the records stay as they were. The records are
+// made on the floor lamp's device setting and recast onto the bridge, as
+// such a version would have saved them.
+test("a bridge setting change journaled earlier is neither applied nor restored", async (t) => {
   const { hub, client, stateDirectory } = await setup(t);
   const lampSetting = {
     operation: "window_option",
@@ -595,35 +1003,28 @@ test("a bridge export change journaled earlier is neither applied nor restored",
     option_key: "/11/0006_OnOff/4003_StartUpOnOff/255",
     reason: "Set how the floor lamp starts after a power cut",
   };
-  const changeTool = async (name, args) => {
-    const result = await client.callTool({ name, arguments: args });
-    assert.equal(result.isError, undefined, result.content[0]?.text);
-    return result.structuredContent;
-  };
   const prepared = async (value) =>
-    (await changeTool("prepare_native_change", { ...lampSetting, value }))
+    (await call(client, "prepare_native_change", { ...lampSetting, value }))
       .change_ref;
   const applied = async (value) => {
     const changeRef = await prepared(value);
-    const result = await changeTool("apply_native_change", {
+    const result = await call(client, "apply_native_change", {
       change_ref: changeRef,
     });
     assert.equal(result.status, "applied");
     return changeRef;
   };
-  const tickLamp = await prepared(1);
-  const autoAddOn = await prepared(0);
-  const untickClimate = await applied(1);
+  const autoAddOn = await prepared(1);
   const autoAddBack = await applied(0);
 
   const file = journalFile(hub, stateDirectory);
   const journal = JSON.parse(await readFile(file, "utf8"));
-  const recast = (changeRef, windowKey, optionKey, baseline, requested) => {
+  const recast = (changeRef, baseline, requested) => {
     const change = journal.changes[changeRef.split("/").at(-1)];
     Object.assign(change, {
-      target_ref: `${apartment}/window/${encodeURIComponent(windowKey)}`,
-      target: { kind: "window", windowKey },
-      option_key: optionKey,
+      target_ref: `${apartment}/window/${encodeURIComponent("Bridge/homekit/")}`,
+      target: { kind: "window", windowKey: "Bridge/homekit/" },
+      option_key: "AutoAddNewAccessory",
       contract: {
         type: "GenericBoolean",
         input_type: "CHECKBOX",
@@ -637,22 +1038,12 @@ test("a bridge export change journaled earlier is neither applied nor restored",
       change.observed_value = { value: requested, kind: "boolValue" };
     }
   };
-  // HomeKit does not export the floor lamp and exports the climate sensor's
-  // temperature; its AutoAddNewAccessory is off.
-  recast(tickLamp, "Bridge/homekit/Child/16/", "s:13", false, true);
-  recast(autoAddOn, "Bridge/homekit/", "AutoAddNewAccessory", false, true);
-  recast(untickClimate, "Bridge/homekit/Child/25/", "s:13", false, true);
-  recast(autoAddBack, "Bridge/homekit/", "AutoAddNewAccessory", true, false);
+  // HomeKit's AutoAddNewAccessory is off.
+  recast(autoAddOn, false, true);
+  recast(autoAddBack, true, false);
   await writeFile(file, `${JSON.stringify(journal, null, 2)}\n`);
   const writesBefore = hub.writes().length;
 
-  const accessoryExport = (aId) => ({
-    tool: "get_entity",
-    arguments: {
-      entity_ref: `${apartment}/accessory/${aId}`,
-      include: ["bridges"],
-    },
-  });
   const homekitExport = {
     tool: "get_entity",
     arguments: {
@@ -660,28 +1051,18 @@ test("a bridge export change journaled earlier is neither applied nor restored",
       include: ["children"],
     },
   };
-  for (const [name, changeRef, next] of [
-    ["apply_native_change", tickLamp, accessoryExport(16)],
-    ["apply_native_change", autoAddOn, homekitExport],
-    ["restore_native_change", untickClimate, accessoryExport(25)],
-    ["restore_native_change", autoAddBack, homekitExport],
+  for (const [name, changeRef] of [
+    ["apply_native_change", autoAddOn],
+    ["restore_native_change", autoAddBack],
   ]) {
-    const result = await client.callTool({
-      name,
-      arguments: { change_ref: changeRef },
+    const { error, next } = await refused(client, name, {
+      change_ref: changeRef,
     });
-    assert.equal(result.isError, true, result.content[0]?.text);
-    const { error } = result.structuredContent;
     assert.equal(error.code, "bridge_export_unverified", name);
     assert.match(error.message, /SprutHub app/);
-    assert.deepEqual(result.structuredContent.next, next, name);
+    assert.deepEqual(next, homekitExport, name);
   }
 
   assert.equal(hub.writes().length, writesBefore);
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), journal);
-  const climate = await read(hub, client, {
-    entity_ref: `${apartment}/accessory/25`,
-    include: ["bridges"],
-  });
-  assert.equal(climate.entity.bridges[0].services[0].exported, true);
 });

@@ -172,7 +172,7 @@ export const METHOD_EVIDENCE = {
   "log.unsubscribe": [SCHEMA_ONLY],
   "window.get": [
     OBSERVED,
-    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove for every type (2026-09-24-live-conformance-3-read-only); a BLOCK's and a GLOBAL's show the scenario's fields, a user LOGIC's Name, Desc and OnStart the last values written to the window or sent at create, a built-in LOGIC's placeholders (2026-10-13-wave4-contracts 1.2, 1.7, 1.8, 1.11); a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3)",
+    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove for every type (2026-09-24-live-conformance-3-read-only); a BLOCK's and a GLOBAL's show the scenario's fields, a user LOGIC's Name, Desc and OnStart the last values written to the window or sent at create, a built-in LOGIC's placeholders (2026-10-13-wave4-contracts 1.2, 1.7, 1.8, 1.11); a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3), none for the service types a bridge type leaves out, and Window not found for an accessory the bridge does not list (2026-10-14-bridge-export-write 3, 11, 12)",
   ],
   "window.update": [
     OBSERVED,
@@ -186,6 +186,11 @@ export const METHOD_EVIDENCE = {
   "window.update {Name, Desc, OnStart, Sync}": [
     OBSERVED,
     "applied to scenario.get and scenario.list at once for a user BLOCK, LOGIC and GLOBAL (2026-10-13-wave4-contracts 1.4, 1.8, 1.10)",
+  ],
+  // A bridge child's s:<sId> checkboxes, one or several in one update.
+  "window.update {bridge export}": [
+    OBSERVED,
+    "a temporary virtual accessory's services ticked and unticked in all four bridges, running or not: read back at once, the child in main while one is ticked (2026-10-14-bridge-export-write 4-8)",
   ],
   // No entry, so a run reports them as unsupported: window.update {Remove}
   // of a scenario window, and its Name, Desc, OnStart or Sync of a built-in
@@ -329,6 +334,9 @@ function evidenceKey(state, method, params) {
   }
   if (method === "window.update") {
     const input = params?.window?.update;
+    if (bridgeChildOfWindow(state, input?.windowKey)) {
+      return "window.update {bridge export}";
+    }
     const scenario = scenarioOfWindow(state, input?.windowKey);
     if (scenario && Array.isArray(input.options)) {
       const keys = input.options.map((option) => option?.key);
@@ -2155,7 +2163,15 @@ const HANDLERS = {
 
   "window.get": (state, { windowKey }) => {
     const window = state.windows[windowKey];
-    if (!window) return bridgeChildWindow(state, windowKey);
+    if (!window) {
+      const child = bridgeChildWindow(state, windowKey);
+      // The hub has no window for an accessory a bridge does not list
+      // (2026-10-14-bridge-export-write 11).
+      if (!child && bridgeOfChildWindowKey(state, windowKey)) {
+        throw notFound(`Window not found: '${windowKey}'`);
+      }
+      return child;
+    }
     if (windowKey === "") return withDiscoveryTime(state, window);
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
@@ -2173,7 +2189,11 @@ const HANDLERS = {
   },
   "window.update": (state, { windowKey, options }) => {
     const window = state.windows[windowKey];
-    if (!window) throw notFound(`Window ${windowKey}`);
+    if (!window) {
+      const child = bridgeChildOfWindow(state, windowKey);
+      if (child) return updateBridgeExport(child, options);
+      throw notFound(`Window ${windowKey}`);
+    }
     const scenario = scenarioOfWindow(state, windowKey);
     if (scenario) checkScenarioWindowUpdate(scenario, options);
     applyOptions(window.options, options);
@@ -3793,14 +3813,19 @@ function extensionChildren(state, extensionKey) {
 // notConnected when not, and the child's window under
 // <extensionKey with / for :>/Child/<aId>/; a new accessory shows in every
 // bridge as notConnected (owner's hub, 2026-10-13-wave4-contracts 3.2, 3.4).
-// A fixture bridge names its exported services by accessory id (exported:
-// {"16": [13]}) and the accessories it cannot export (unexportable: [39]):
-// which ones a bridge leaves out was not observed (70 to 80 of 81 there).
+// A bridge lists an accessory with at least one service it can export
+// (BRIDGE_SERVICES_LEFT_OUT; 2026-10-14-bridge-export-write 12, 13). A
+// fixture bridge names its exported services by accessory id (exported:
+// {"16": [13]}) and may leave out more accessories (unexportable: [39]).
 // The child's name and online are the accessory's (assumed).
 function bridgeChildren(state, extension) {
   const unexportable = new Set(extension.unexportable ?? []);
   return state.accessories
-    .filter(({ id }) => !unexportable.has(id))
+    .filter(
+      (accessory) =>
+        !unexportable.has(accessory.id) &&
+        bridgeExportableServices(extension, accessory).length > 0,
+    )
     .map((accessory) => ({
       extensionKey: extension.extensionKey,
       id: String(accessory.id),
@@ -3814,78 +3839,175 @@ function bridgeChildren(state, extension) {
     }));
 }
 
+// Service types whose bridge child window has no checkbox, by bridge type,
+// as read on the owner's hub; HomeKit had one for every service but the
+// accessory information. SecuritySystem was never listed by Yandex or
+// Google (2026-10-14-bridge-export-write 12, 13).
+const BRIDGE_SERVICES_LEFT_OUT = {
+  google: new Set([
+    "StatelessProgrammableSwitch",
+    "LightSensor",
+    "FilterMaintenance",
+    "C_WattMeter",
+    "C_VoltMeter",
+    "C_AmpereMeter",
+    "C_KiloWattHourMeter",
+    "C_TemperatureControl",
+    "SecuritySystem",
+  ]),
+  yandex: new Set([
+    "FilterMaintenance",
+    "C_TemperatureControl",
+    "SecuritySystem",
+  ]),
+};
+
+function bridgeExportableServices(extension, accessory) {
+  const leftOut = BRIDGE_SERVICES_LEFT_OUT[extension.type];
+  return accessory.services.filter(
+    ({ type }) => type !== "AccessoryInformation" && !leftOut?.has(type),
+  );
+}
+
 function bridgeExportedServices(extension, accessory) {
-  return new Set(extension.exported?.[accessory.id] ?? []);
+  const exportable = new Set(
+    bridgeExportableServices(extension, accessory).map(({ sId }) => sId),
+  );
+  return new Set(
+    (extension.exported?.[accessory.id] ?? []).filter((sId) =>
+      exportable.has(sId),
+    ),
+  );
 }
 
 function bridgeChildWindowKey(extension, aId) {
   return `${extension.extensionKey.replaceAll(":", "/")}/Child/${aId}/`;
 }
 
-// A bridge child's window: groups main and AccessoryGroup, the accessory as
-// a read-only ACCESSORY_LIST and a CHECKBOX s:<sId> per exportable service,
-// labelled with the service name, true when the bridge exports it; it reads
-// for a bridge that does not run too (2026-10-13-wave4-contracts 3.3). That
-// every service but the accessory information is exportable, and the
-// options' parents, are assumed.
+// The bridge whose child window key this is, listed or not.
+function bridgeOfChildWindowKey(state, windowKey) {
+  const match = /^(.+)\/Child\/\d+\/$/.exec(windowKey ?? "");
+  return match
+    ? (state.extensions.find(
+        (extension) =>
+          extension.bundleType === "BRIDGE" &&
+          extension.extensionKey.replaceAll(":", "/") === match[1],
+      ) ?? null)
+    : null;
+}
+
+// The listed bridge child whose window this is, with its bridge and
+// accessory; null otherwise.
+function bridgeChildOfWindow(state, windowKey) {
+  const extension = bridgeOfChildWindowKey(state, windowKey);
+  if (!extension) return null;
+  const child = bridgeChildren(state, extension).find(
+    ({ optionsWindow }) => optionsWindow === windowKey,
+  );
+  if (!child) return null;
+  const accessory = state.accessories.find(({ id }) => String(id) === child.id);
+  return { extension, child, accessory };
+}
+
+// A bridge child's window, in the order and form read on the owner's hub:
+// groups main and AccessoryGroup (no label, write true), the accessory as a
+// read-only ACCESSORY_LIST and a CHECKBOX s:<sId> per service the bridge
+// can export, labelled with the service name, true when it exports it; it
+// reads for a bridge that does not run too (2026-10-13-wave4-contracts 3.3;
+// 2026-10-14-bridge-export-write 3, 12).
 function bridgeChildWindow(state, windowKey) {
-  for (const extension of state.extensions) {
-    if (extension.bundleType !== "BRIDGE") continue;
-    const child = bridgeChildren(state, extension).find(
-      ({ optionsWindow }) => optionsWindow === windowKey,
-    );
-    if (!child) continue;
-    const accessory = state.accessories.find(
-      ({ id }) => String(id) === child.id,
-    );
-    const exported = bridgeExportedServices(extension, accessory);
-    const group = (key, name) => ({
-      key,
-      name,
-      type: "GenericInteger",
-      inputType: "GROUP",
-      parent: "",
-      read: true,
-      write: false,
-      value: { intValue: 0 },
-    });
-    return {
-      windowKey,
-      label: { text: accessory.name },
-      options: [
-        group("main", "Сервисы"),
-        group("AccessoryGroup", "Аксессуар"),
-        {
-          key: "Accessory",
-          name: "Аксессуар",
-          type: "GenericInteger",
-          inputType: "ACCESSORY_LIST",
-          parent: "AccessoryGroup",
-          read: true,
-          write: false,
-          events: false,
-          value: { intValue: 0 },
-          validValues: [
-            { value: { intValue: accessory.id }, name: accessory.name },
-          ],
-        },
-        ...accessory.services
-          .filter(({ type }) => type !== "AccessoryInformation")
-          .map((service) => ({
-            key: `s:${service.sId}`,
-            name: service.name,
-            type: "GenericBoolean",
-            inputType: "CHECKBOX",
-            parent: "main",
-            read: true,
-            write: true,
-            events: false,
-            value: { boolValue: exported.has(service.sId) },
-          })),
-      ],
-    };
+  const found = bridgeChildOfWindow(state, windowKey);
+  if (!found) return null;
+  const { extension, accessory } = found;
+  const exported = bridgeExportedServices(extension, accessory);
+  const group = (key) => ({
+    key,
+    name: "",
+    type: "GenericInteger",
+    inputType: "GROUP",
+    parent: "",
+    read: true,
+    write: true,
+    events: true,
+    value: { intValue: 0 },
+  });
+  return {
+    windowKey,
+    label: { text: accessory.name },
+    options: [
+      group("main"),
+      {
+        key: "Accessory",
+        name: "",
+        type: "GenericInteger",
+        inputType: "ACCESSORY_LIST",
+        parent: "AccessoryGroup",
+        read: true,
+        write: false,
+        events: true,
+        value: { intValue: 0 },
+        validValues: [
+          { value: { intValue: accessory.id }, name: accessory.name },
+        ],
+      },
+      group("AccessoryGroup"),
+      ...bridgeExportableServices(extension, accessory).map((service) => ({
+        key: `s:${service.sId}`,
+        name: service.name,
+        type: "GenericBoolean",
+        inputType: "CHECKBOX",
+        parent: "main",
+        read: true,
+        write: true,
+        events: true,
+        value: { boolValue: exported.has(service.sId) },
+      })),
+    ],
+  };
+}
+
+// window.update of a bridge child's window: each option a checkbox
+// s:<sId> with a boolValue, all applied together; the child moves to main
+// while one is ticked (2026-10-14-bridge-export-write 4-7). A write of its
+// groups was not sent to a hub.
+function updateBridgeExport({ extension, accessory }, options) {
+  if (!Array.isArray(options)) throw invalidParams("options must be an array");
+  const exportable = new Set(
+    bridgeExportableServices(extension, accessory).map(({ sId }) => sId),
+  );
+  const updates = options.map((option) => {
+    const sId = /^s:(\d+)$/.exec(option?.key ?? "")?.[1];
+    if (sId === undefined) {
+      if (["main", "AccessoryGroup", "Accessory"].includes(option?.key)) {
+        throw new SimulatorError(
+          -32601,
+          `unsupported by simulator: window.update {${option.key}} of a bridge child`,
+        );
+      }
+      throw invalidParams(`Unknown option ${option?.key}`);
+    }
+    if (!exportable.has(Number(sId))) {
+      throw invalidParams(`Unknown option ${option.key}`);
+    }
+    if (typeof option.value?.boolValue !== "boolean") {
+      throw invalidParams(`${option.key} must be a boolValue`);
+    }
+    return [Number(sId), option.value.boolValue];
+  });
+  const exported = bridgeExportedServices(extension, accessory);
+  for (const [sId, on] of updates) {
+    if (on) exported.add(sId);
+    else exported.delete(sId);
   }
-  return null;
+  extension.exported ??= {};
+  if (exported.size > 0) {
+    extension.exported[String(accessory.id)] = [...exported].sort(
+      (left, right) => left - right,
+    );
+  } else {
+    delete extension.exported[String(accessory.id)];
+  }
+  return {};
 }
 
 // An extension as the hub shows it: without what a fixture declares for
@@ -4246,7 +4368,7 @@ const CHARACTERISTIC_SETTINGS = ["hasLinks", "linkProcessing", "notify"];
 // identity and visibility, every characteristic value (the information
 // service's Name mirrors accessory/<id>/name and is left out), link settings,
 // options, logic assignments, scenario settings (BLOCK data without
-// editor/runtime fields) and virtual links. Graders diff two snapshots
+// editor/runtime fields), virtual links and bridge exports. Graders diff two snapshots
 // instead of guessing requests.
 export function homeSnapshot(state) {
   const snapshot = {};
@@ -4321,6 +4443,20 @@ export function homeSnapshot(state) {
   }
   for (const [key, links] of state.links) {
     if (links.length > 0) snapshot[`link/${key}`] = JSON.stringify(links);
+  }
+  // Each service a bridge exports. Only exported ones: a new accessory
+  // shows in every bridge unexported (2026-10-14-bridge-export-write 2),
+  // which is no change of the export.
+  for (const extension of state.extensions ?? []) {
+    if (extension.bundleType !== "BRIDGE") continue;
+    for (const { id } of bridgeChildren(state, extension)) {
+      const accessory = state.accessories.find(
+        (candidate) => String(candidate.id) === id,
+      );
+      for (const sId of bridgeExportedServices(extension, accessory)) {
+        snapshot[`bridge/${extension.extensionKey}/${id}.${sId}`] = true;
+      }
+    }
   }
   return snapshot;
 }
