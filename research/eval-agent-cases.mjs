@@ -18,6 +18,12 @@
 // home (lights of a room, devices that are on), it is derived from the
 // initial state.
 import {
+  COLOR_SCENES,
+  COLOR_SCENES_SOURCE,
+  SCENE_LAMPS_LINE,
+  withColorScenes,
+} from "../test/fixtures/homes/color-scenes.mjs";
+import {
   BEDROOM_LAMP,
   GROUP as CHANDELIER_GROUP,
   GROUP_CHARACTERISTICS,
@@ -69,9 +75,9 @@ const LEAK_LOGIC_NEW_NAME = "Протечка под мойкой";
 // code calls it. Ids and numbers no fixture uses.
 const FUMIGATOR = 50;
 const FUMIGATOR_SCENARIO = "95";
-const COLOR_SCENES = "96";
-const COLOR_SCENES_MOVIE = "97";
-const COLOR_SCENES_DINNER = "98";
+const GLOBAL_TO_DELETE = "96";
+const GLOBAL_TO_DELETE_MOVIE = "97";
+const GLOBAL_TO_DELETE_DINNER = "98";
 
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
@@ -217,6 +223,44 @@ export const CASES = {
   // unlinked colour lamp; a lamp of the same name in the bedroom's floor
   // lamp is not it. The group keeps being the same accessory (Alice
   // controls it), so nothing but links may change.
+  // The owner's colour scenes are code (research/protocol/
+  // 2026-10-23-scenario-code.md 1.1, 1.2): the lamps of every scene are a
+  // list of ids in the GLOBAL «Цветные сцены». Adding the night light is
+  // its id in that list and nothing else of the code; the stale 63 stays,
+  // since the request does not mention it.
+  "add-night-light-to-color-scenes": {
+    prompt: "Добавь ночник в цветные сцены",
+    patch: withColorScenes,
+    graders: [
+      {
+        name: "only_the_lamp_list_gains_the_night_light",
+        grade: ({ finalState }) => {
+          const data =
+            finalState.scenarios.find(({ index }) => index === COLOR_SCENES)
+              ?.data ?? "";
+          const before = COLOR_SCENES_SOURCE.split("\n");
+          const after = data.split("\n");
+          const at = before.indexOf(SCENE_LAMPS_LINE);
+          const otherLines =
+            after.length === before.length &&
+            before.every(
+              (line, index) => index === at || after[index] === line,
+            );
+          const ids = /^global\.COLOR_SCENE_LIGHTS = \[([\d,\s]*)\];$/
+            .exec(after[at] ?? "")?.[1]
+            .split(",")
+            .map((id) => Number(id.trim()))
+            .sort((a, b) => a - b);
+          return result(
+            otherLines && ids?.join() === "15,16,17,26,63",
+            `other lines unchanged=${otherLines}; list=${after[at]}`,
+          );
+        },
+      },
+      onlyChanges(({ key }) => key === `scenario/${COLOR_SCENES}/data`),
+      answerMatches("answer_names_the_night_light", /ночник/i),
+    ],
+  },
   "relink-chandelier": {
     prompt: "Я заменил лампу в люстре на кухне на новую, перевяжи",
     patch: withKitchenChandelier,
@@ -1242,7 +1286,7 @@ export const CASES = {
     patch: (fixture) => {
       fixture.scenarios.push(
         {
-          index: COLOR_SCENES,
+          index: GLOBAL_TO_DELETE,
           name: "Color scenes",
           desc: "Цветовые сцены",
           type: "GLOBAL",
@@ -1255,8 +1299,8 @@ export const CASES = {
           ].join("\n"),
         },
         ...[
-          [COLOR_SCENES_MOVIE, "Сцена кино", "кино"],
-          [COLOR_SCENES_DINNER, "Сцена ужин", "ужин"],
+          [GLOBAL_TO_DELETE_MOVIE, "Сцена кино", "кино"],
+          [GLOBAL_TO_DELETE_DINNER, "Сцена ужин", "ужин"],
         ].map(([index, name, scene]) => ({
           index,
           name,

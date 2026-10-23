@@ -13,6 +13,26 @@ export const SCENARIO_OPTION_FIELDS = ["name", "desc", "onStart", "sync"];
 
 export const LOGIC_CODE_FIELDS = ["name", "desc", "onStart", "data"];
 
+// Scenarios whose data is source code that logic_source_update writes. A
+// GLOBAL's code sets nothing but itself: its name, description and flags
+// change only in its options window (2026-10-13-wave4-contracts 1.8).
+export const CODE_SCENARIO_TYPES = ["LOGIC", "GLOBAL"];
+
+export function notCodeScenario() {
+  return new SprutHubError(
+    "unsupported_scenario_type",
+    "logic_source_update writes the code of a LOGIC or a GLOBAL; a BLOCK changes with block_data_update. Nothing was prepared.",
+    "get_native_change_contract",
+  );
+}
+
+export function isGlobalCodeChange(change) {
+  return (
+    change.kind === "logic_source_update" &&
+    change.baseline_snapshot?.type === "GLOBAL"
+  );
+}
+
 // The fields of a scenario a change sets, which are the ones it checks to
 // know it still holds. A BLOCK's data and a LOGIC's code are written apart
 // from the name, description, start on boot and sequential run, which the
@@ -25,7 +45,9 @@ export function scenarioFieldsOwned(change) {
   if (change.kind === "window_option") {
     return [SCENARIO_METADATA_OPTIONS[change.option_key].field];
   }
-  if (change.kind === "logic_source_update") return LOGIC_CODE_FIELDS;
+  if (change.kind === "logic_source_update") {
+    return isGlobalCodeChange(change) ? ["data"] : LOGIC_CODE_FIELDS;
+  }
   if (change.kind === "block_data_update") {
     // A record from before the options window wrote name and desc too.
     return [...new Set([...blockUpdateFields(change), "data"])];
@@ -91,7 +113,7 @@ export function logicScenarioSnapshot(scenario) {
     typeof scenario.active !== "boolean" ||
     typeof scenario.onStart !== "boolean" ||
     typeof scenario.sync !== "boolean" ||
-    scenario.type !== "LOGIC" ||
+    !CODE_SCENARIO_TYPES.includes(scenario.type) ||
     typeof scenario.data !== "string"
   ) {
     throw new SprutHubError(
@@ -107,7 +129,7 @@ export function logicScenarioSnapshot(scenario) {
     active: scenario.active,
     onStart: scenario.onStart,
     sync: scenario.sync,
-    type: "LOGIC",
+    type: scenario.type,
     data: scenario.data,
   };
 }
@@ -232,6 +254,11 @@ export function logicSourceObservation(change, current, snapshot) {
             source_exact_match:
               expected !== undefined && observedSource === expected.data,
           }
+        : {}),
+      // The hub's error after a code write: the stored code did not
+      // compile or run through (2026-10-23-scenario-code 3.7-3.9).
+      ...(snapshot !== "baseline" && isRecord(current.scenario)
+        ? { hub_code_error: current.scenario.error === true }
         : {}),
       ...(["requested", "restored"].includes(snapshot) &&
       current.scenario !== null
@@ -399,26 +426,46 @@ export const LOGIC_SOURCE_METADATA_INPUTS = {
   active: null,
 };
 
-export function logicSourceMetadataInput(targetRef, field) {
+// A GLOBAL's name, description, start on boot and sync are not in its
+// code: its options window changes them (2026-10-13-wave4-contracts 1.8).
+const GLOBAL_METADATA_OPTIONS = {
+  name: "Name",
+  description: "Desc",
+  on_start: "OnStart",
+  sync: "Sync",
+};
+
+export function logicSourceMetadataInput(targetRef, field, scenarioType) {
   const place = LOGIC_SOURCE_METADATA_INPUTS[field];
-  const [message, next] = place?.startsWith("info.")
+  const globalOption =
+    scenarioType === "GLOBAL" ? GLOBAL_METADATA_OPTIONS[field] : undefined;
+  const [message, next] = globalOption
     ? [
-        `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. SprutHub sets the scenario's name, description and start on boot from info in the code on every code write: write ${place} in source as a plain value.`,
-        { operation: "logic_source_update", target_ref: targetRef },
+        `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. A GLOBAL's code does not set it: prepare window_option ${globalOption} on the scenario ref.`,
+        {
+          operation: "window_option",
+          target_ref: targetRef,
+          option_key: globalOption,
+        },
       ]
-    : place
+    : place?.startsWith("info.")
       ? [
-          `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. Sync is not in the code: prepare window_option Sync on the scenario ref.`,
-          {
-            operation: "window_option",
-            target_ref: targetRef,
-            option_key: place,
-          },
+          `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. SprutHub sets the scenario's name, description and start on boot from info in the code on every code write: write ${place} in source as a plain value.`,
+          { operation: "logic_source_update", target_ref: targetRef },
         ]
-      : [
-          "logic_source_update writes only the code; nothing was prepared. Turn the scenario on or off with scenario_active.",
-          { operation: "scenario_active", target_ref: targetRef },
-        ];
+      : place
+        ? [
+            `logic_source_update writes only the code, and SprutHub ignores a scenario's ${field} sent with it; nothing was prepared. Sync is not in the code: prepare window_option Sync on the scenario ref.`,
+            {
+              operation: "window_option",
+              target_ref: targetRef,
+              option_key: place,
+            },
+          ]
+        : [
+            "logic_source_update writes only the code; nothing was prepared. Turn the scenario on or off with scenario_active.",
+            { operation: "scenario_active", target_ref: targetRef },
+          ];
   return new SprutHubError(
     "unsupported_logic_metadata",
     message,

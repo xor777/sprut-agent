@@ -2891,6 +2891,14 @@ export class SprutHubClient {
           pointer,
         });
       }
+      for (const pointer of decoded.codeActions) {
+        unchecked.push({
+          area: "block_code_action",
+          outcome: "not_analyzed",
+          scenario_ref: summary.ref,
+          pointer,
+        });
+      }
       for (const entry of decoded.unrecognized) {
         unchecked.push({
           area: "block_node",
@@ -3143,8 +3151,11 @@ export class SprutHubClient {
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
     entity.description =
       typeof scenario.desc === "string" ? scenario.desc : null;
-    // Runtime execution error is not editable configuration and must not be
-    // folded into configuration.value or treated as a failed save.
+    // SprutHub's error: the stored code did not compile, or a GLOBAL's code
+    // stopped with an error when the hub ran it at its write; an error while
+    // a BLOCK runs does not set it (2026-10-23-scenario-code 2.8-2.12, 3.7,
+    // 3.8). The code is saved all the same, so it is not folded into
+    // configuration.value.
     entity.execution_error = scenario.error === true;
     entity.summary = await this.#scenarioSummary(
       parsed.serial,
@@ -6436,7 +6447,7 @@ function codeScenarioSummary(scenario) {
 // id written as a number, or by a string that is exactly its name.
 // Comments do not count; an id held in a variable is not found. Returns
 // found_by and the first lines, or null.
-function accessoryMentions(source, { id, name }) {
+export function accessoryMentions(source, { id, name }) {
   const tokens = [];
   let line = 1;
   for (const token of jsTokens(source)) {
@@ -6810,6 +6821,12 @@ function isSensitiveContainerKey(key) {
   return /^(?:auth|authentication|authorization|connection|credentials?)$/i.test(
     key,
   );
+}
+
+// Whether answers show this scenario code only as [REDACTED]
+// (normalizeScenarioConfiguration): the agent cannot read it.
+export function codeShownRedacted(source) {
+  return redactSensitiveText(source, "javascript_source") !== source;
 }
 
 function redactSensitiveText(text, role = "data") {

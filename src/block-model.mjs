@@ -6,6 +6,7 @@ const TARGET_KINDS = [
   "scenario",
   "notify",
   "http",
+  "code",
 ];
 
 // Service actions that the preview and relations interpret.
@@ -123,6 +124,7 @@ const BLOCK_CREATE_NODE_KINDS = [
   "scenario",
   "notify",
   "http",
+  "code",
 ];
 
 const NATIVE_SCALAR_AS_STRING = {
@@ -459,6 +461,16 @@ const BLOCK_NODE_CONSTRAINTS = {
   },
   http: {
     fields: { method: HTTP_METHODS, url: HTTP_URL },
+    editor_optional: ["blockId"],
+  },
+  // An action only: SprutHub stores it as sent, compiles it when the BLOCK
+  // is saved and runs it in its place among the actions
+  // (research/protocol/2026-10-23-scenario-code.md 2.1-2.9).
+  code: {
+    fields: {
+      code: "javascript_function_body_not_empty",
+    },
+    action_only: true,
     editor_optional: ["blockId"],
   },
   // The web client offers index 0 as "All delays"; stored as sent on
@@ -941,9 +953,19 @@ export function blockAffectedRefs(data, homeRef) {
   return [...new Set(refs)];
 }
 
-// code is read only as sprut-agent's own pause condition; writers never get it.
+// Code is an action writers get; as a condition it is read only as
+// sprut-agent's own pause condition.
 function publishedChildTypes(rule) {
-  return [...rule.kinds].filter((type) => type !== "code");
+  return [...rule.kinds].filter(
+    (type) =>
+      type !== "code" || rule !== BLOCK_CHILD_FIELDS.condition.conditions,
+  );
+}
+
+// Whether a BLOCK path (validateBlockNode's) is a code action: anywhere but
+// among a condition group's conditions.
+export function isActionPath(path) {
+  return !/\.conditions\[\d+\]$/.test(path);
 }
 
 function visitBlockChild(child, path, rule, { visit, invalidChild, parent }) {

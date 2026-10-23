@@ -30,6 +30,11 @@ import {
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import { LABELS } from "../research/eval-judge-labels.mjs";
 import {
+  COLOR_SCENES,
+  COLOR_SCENES_SOURCE,
+  SCENE_LAMPS_LINE,
+} from "./fixtures/homes/color-scenes.mjs";
+import {
   GROUP_CHARACTERISTICS,
   LAMP_CHARACTERISTICS,
 } from "./fixtures/homes/kitchen-chandelier.mjs";
@@ -1134,6 +1139,62 @@ test("relink-chandelier needs the new kitchen lamp on every link of the group an
   });
   assert.equal(
     created.grade("relink-chandelier", answer).nothing_else_changed,
+    false,
+  );
+});
+
+test("add-night-light-to-color-scenes needs the night light in the scene lamp list and no other line or object changed", async (t) => {
+  const answer = "Добавил ночник в цветные сцены.";
+  const write = (session, data) =>
+    session.send({ scenario: { update: { index: COLOR_SCENES, data } } });
+  const withList = (list) =>
+    COLOR_SCENES_SOURCE.replace(
+      SCENE_LAMPS_LINE,
+      `global.COLOR_SCENE_LIGHTS = [${list}];`,
+    );
+
+  const done = await nativeSession(t, "color-scenes");
+  await write(done, withList("15, 16, 17, 63, 26"));
+  assert.deepEqual(done.grade("add-night-light-to-color-scenes", answer), {
+    only_the_lamp_list_gains_the_night_light: true,
+    nothing_else_changed: true,
+    answer_names_the_night_light: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // The stale 63 is not the request's.
+  const pruned = await nativeSession(t, "color-scenes");
+  await write(pruned, withList("15, 16, 17, 26"));
+  assert.equal(
+    pruned.grade("add-night-light-to-color-scenes", answer)
+      .only_the_lamp_list_gains_the_night_light,
+    false,
+  );
+
+  const reformatted = await nativeSession(t, "color-scenes");
+  await write(
+    reformatted,
+    withList("15, 16, 17, 63, 26").replace(
+      "  if (!palette) {",
+      "  if (!palette)  {",
+    ),
+  );
+  assert.equal(
+    reformatted.grade("add-night-light-to-color-scenes", answer)
+      .only_the_lamp_list_gains_the_night_light,
+    false,
+  );
+
+  const another = await nativeSession(t, "color-scenes");
+  await write(another, withList("15, 16, 17, 63, 26"));
+  await another.send({
+    scenario: {
+      update: { index: "81", data: JSON.stringify({ targets: [] }) },
+    },
+  });
+  assert.equal(
+    another.grade("add-night-light-to-color-scenes", answer)
+      .nothing_else_changed,
     false,
   );
 });

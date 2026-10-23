@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import { normalizeBlockRequest } from "./block-model.mjs";
 import {
+  blockPathToPointer,
   buildPauseRequestedSnapshot,
   inspectPauseOwnership,
   mergePauseOutcomes,
@@ -111,6 +112,7 @@ import {
   parseDeviceCommandTargets,
   resendDeviceCommandNext,
 } from "./device-commands.mjs";
+import { codeLineDiff, refuseHubCode } from "./hub-code.mjs";
 import {
   currentLinkIndex,
   currentMembers,
@@ -136,8 +138,10 @@ import {
   stepInEffect,
 } from "./light-group-members.mjs";
 import {
+  CODE_SCENARIO_TYPES,
   createdLogicType,
   createdLogicUnmappedRefusal,
+  isGlobalCodeChange,
   LOGIC_SOURCE_METADATA_INPUTS,
   logicAssignmentConfigurationObservation,
   logicAssignmentSnapshot,
@@ -147,6 +151,7 @@ import {
   logicSourceCreateRequest,
   logicSourceMetadataInput,
   logicSourceWithOwnershipMarker,
+  notCodeScenario,
   recordLogicTypeCheck,
   requiredLogicSource,
   scenarioFieldsOwned,
@@ -239,7 +244,12 @@ import {
   scenarioDeleteTellOwner,
   scenarioTargetsOf,
 } from "./scenario-delete.mjs";
-import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
+import {
+  accessoryMentions,
+  codeShownRedacted,
+  SprutHubError,
+  sanitizeNativeData,
+} from "./spruthub-client.mjs";
 import {
   dependenciesWithin,
   foundDependencies,
@@ -468,12 +478,15 @@ export class AutomationService {
       const target = parseScenarioRef(input.target_ref, this.hubSerial);
       const scenario = await this.client.getScenario(target.index);
       if (!scenario) throw scenarioNotFound();
+      if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
+        throw notCodeScenario();
+      }
       logicScenarioSnapshot(scenario);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
-        contract: logicSourceContract("update"),
+        contract: logicSourceContract("update", scenario.type),
         next: sdkNext(this.hubSerial),
       };
     }
@@ -1535,6 +1548,7 @@ export class AutomationService {
         configuredHomeRef(this.hubSerial),
         now,
       ),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -1659,6 +1673,7 @@ export class AutomationService {
     const change = {
       id,
       kind: "block_data_update",
+      hub_code_error_before: scenario.error === true,
       status: "prepared",
       home_ref: configuredHomeRef(this.hubSerial),
       target_ref: input.target_ref,
@@ -1676,6 +1691,7 @@ export class AutomationService {
       ...(prepared.pauseOutcomes.length > 0
         ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -2119,6 +2135,7 @@ export class AutomationService {
 
   async #prepareLogicSourceCreate(input) {
     const source = requiredLogicSource(input.source);
+    refuseHubCode(source);
     if (
       typeof input.name !== "string" ||
       typeof input.description !== "string" ||
@@ -2172,19 +2189,36 @@ export class AutomationService {
     const metadataField = Object.keys(LOGIC_SOURCE_METADATA_INPUTS).find(
       (field) => input[field] !== undefined,
     );
-    if (metadataField) {
-      throw logicSourceMetadataInput(input.target_ref, metadataField);
-    }
-    const source = requiredLogicSource(input.source);
     const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    // Where such a field changes depends on the scenario's type, so the
+    // scenario is read first.
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) throw scenarioNotFound();
+    if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
+      throw notCodeScenario();
+    }
+    if (metadataField) {
+      throw logicSourceMetadataInput(
+        input.target_ref,
+        metadataField,
+        scenario.type,
+      );
+    }
+    const source = requiredLogicSource(input.source);
     const baseline = logicScenarioSnapshot(scenario);
     if (baseline.predefined === true) {
       throw new SprutHubError(
         "predefined_logic_read_only",
         "Clone a predefined LOGIC into a new owned scenario instead of changing its source.",
         "prepare_native_change",
+      );
+    }
+    // Answers show such code only as [REDACTED]: the agent has not seen what
+    // a new source would replace.
+    if (codeShownRedacted(baseline.data)) {
+      throw new SprutHubError(
+        "hidden_code",
+        `This ${baseline.type}'s code holds credential-shaped text that sprut-agent shows only as [REDACTED], so the agent cannot read the code it would replace. Nothing was prepared. Tell the owner to change it in the SprutHub app.`,
       );
     }
     if (baseline.data === source) {
@@ -2197,12 +2231,28 @@ export class AutomationService {
         owned_change_created: false,
       };
     }
-    const effects = logicCodeInfoEffects(baseline, source);
+    refuseHubCode(source);
+    const global = baseline.type === "GLOBAL";
+    const effects = global
+      ? { snapshot: {}, codeSets: [], restoreCodeSets: [], warnings: [] }
+      : logicCodeInfoEffects(baseline, source);
+    const diff = global ? codeLineDiff(baseline.data, source) : undefined;
+    const mentions = diff
+      ? await this.#codeMentions(diff.addedText)
+      : undefined;
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
       id,
       kind: "logic_source_update",
+      hub_code_error_before: scenario.error === true,
+      ...(diff
+        ? {
+            code_diff: diff.hunks,
+            ...(diff.truncated ? { code_diff_truncated: true } : {}),
+            ...(mentions.length > 0 ? { code_mentions: mentions } : {}),
+          }
+        : {}),
       status: "prepared",
       home_ref: configuredHomeRef(this.hubSerial),
       target_ref: input.target_ref,
@@ -2228,6 +2278,42 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  // The accessories the code actions a BLOCK change adds or changes name,
+  // each with the action's pointer; code kept as stored is the owner's.
+  async #blockCodeMentions(validation) {
+    const mentions = [];
+    for (const { path, code, kept } of validation.codeActions) {
+      if (kept) continue;
+      for (const mention of await this.#codeMentions(code)) {
+        mentions.push({ pointer: blockPathToPointer(path), ...mention });
+      }
+    }
+    return mentions.length > 0 ? { code_mentions: mentions } : {};
+  }
+
+  // The accessories code names (accessoryMentions), by ref and name.
+  async #codeMentions(source) {
+    if (source.trim() === "") return [];
+    const homeRef = configuredHomeRef(this.hubSerial);
+    // The home snapshot kept in memory, read whole only when it is stale.
+    const { catalog } = await this.client.homeCatalog(
+      this.hubSerial,
+      Date.now() + this.client.timeoutMs,
+    );
+    return catalog.accessories.flatMap((accessory) => {
+      const found = accessoryMentions(source, accessory);
+      return found
+        ? [
+            {
+              accessory_ref: `${homeRef}/accessory/${accessory.id}`,
+              name: accessory.name,
+              found_by: found.found_by,
+            },
+          ]
+        : [];
+    });
   }
 
   // With anchorMayBeGone, a removed anchor accessory or service reads as
@@ -7596,9 +7682,14 @@ function withLocalState(
 }
 
 // An applied BLOCK or LOGIC change tells the agent to say what it will
-// overwrite, whether the apply or a later check found it applied.
+// overwrite, whether the apply or a later check found it applied. A GLOBAL
+// runs on no trigger of its own. Code the hub holds with error is told
+// instead (hubCodeErrorFields): nothing of it may run.
 function withOverwriteNote(change, result) {
-  return AUTOMATION_CHANGE_KINDS.has(change.kind) && result.status === "applied"
+  return AUTOMATION_CHANGE_KINDS.has(change.kind) &&
+    result.status === "applied" &&
+    !isGlobalCodeChange(change) &&
+    result.hub_code_error !== true
     ? { ...result, tell_owner: AUTOMATION_OVERWRITE_NOTE }
     : result;
 }
