@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile, spawnSync } from "node:child_process";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -76,4 +78,43 @@ test("a server under test cannot reach a hub off this machine", async (t) => {
     stderr(),
     /test isolation: refused a connection to hub\.sprut-agent-test\.invalid/,
   );
+});
+
+// A child started with its own env and no HOME would otherwise take the
+// owner's home directory from the system user database.
+const childProbe = `
+const net = require("node:net");
+let connection = "attempted";
+try {
+  net.connect(443, "hub.sprut-agent-test.invalid").on("error", () => {});
+} catch (error) {
+  connection = error.message;
+}
+console.log(JSON.stringify({ home: require("node:os").homedir(), connection }));
+process.exit(0);
+`;
+
+function assertIsolatedChild(stdout) {
+  const { home, connection } = JSON.parse(stdout);
+  assert.notEqual(path.resolve(home), path.resolve(userInfo().homedir));
+  assert.equal(home, homedir());
+  assert.match(connection, /test isolation: refused/);
+}
+
+test("a child started with its own env through execFile sees neither the owner's home nor the network", async () => {
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ["-e", childProbe],
+    { env: { PATH: process.env.PATH } },
+  );
+  assertIsolatedChild(stdout);
+});
+
+test("a child started with its own env through spawnSync sees neither the owner's home nor the network", () => {
+  const result = spawnSync(process.execPath, ["-e", childProbe], {
+    env: { PATH: process.env.PATH },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assertIsolatedChild(result.stdout);
 });
