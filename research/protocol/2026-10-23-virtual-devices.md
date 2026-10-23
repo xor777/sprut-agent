@@ -149,3 +149,50 @@ W20261023-virtual-devices, 2026-10-23. Цель — до реализации «
   комнат 13. Детей мостов 70, 80, 79, 79, в экспорте 2, 4, 22, 3, как в
   [записи экспорта](2026-10-14-bridge-export-write.md); `zz-` нигде нет.
   `AutoAddNewAccessory=false` у всех мостов до и после.
+
+## Дополнение: продуктовый путь
+
+Источник — тот же хаб владельца, MCP-сервер `src/server.mjs` ветки
+`feat/virtual-devices` на `1bc4a7e`, свой каталог состояния, подключение
+из `~/.config/sprut-agent/connection.env`. Скрипт вне Git, с охраной:
+команды и удаление — только своим аксессуарам (не из снимка «до»), свой
+BLOCK действует только на свой виртуальный выключатель. Прогон
+`zz-va-10231716`, около 1 мин, в комнате владельца.
+
+- До записи: `AutoAddNewAccessory=false` у всех четырёх мостов.
+- `virtual_device` Switch: prepare даёт `next` apply; apply — `applied` за
+  5,2 с, `device.ref` и `service_ref`, имя как просили.
+- То же имя в той же комнате ещё раз: prepare несёт `matching_devices` с
+  этим выключателем и `tell_owner`, `next` нет; не применялось.
+- `accessory_placement` переименовал выключатель — `applied`; имя сервиса
+  осталось прежним (операция меняет только имя аксессуара).
+- `virtual_device` LeakSensor (5,9 с) и свой BLOCK через `block_create`,
+  включённый: «протечка = 1 → выключатель включить».
+- `send_device_commands` LeakDetected = 1: `applied`, `observed_value` 1;
+  через 3 с выключатель включён — BLOCK сработал на записанное показание.
+  Значение 7 отклонено продуктом до записи (`invalid_device_commands`).
+  «Верни как было» этой группы вернул показание 0 (`restored`).
+- `virtual_device` кнопка и `send_device_commands` ProgrammableSwitchEvent
+  = 0 при прежнем 0: отправлено, `applied`, примечание о нажатии,
+  `restore_supported: false` (`button_press_not_undone`).
+- Отмена создания датчика, пока на него ссылается BLOCK: `conflict`,
+  `virtual_device_in_use`, BLOCK назван в `dependencies`; удаления не было.
+- `virtual_device_delete` датчика: prepare несёт `tell_owner` и
+  `dependencies.scenarios` с этим BLOCK, `next` нет. Apply (как согласие
+  владельца) — `applied`, аксессуара нет. Отмена удаления — `restored`:
+  новый аксессуар с тем же именем, комнатой и типом под новым id,
+  `not_restored` называет id и BLOCK.
+- Отмена создания BLOCK удалила его; затем `virtual_device_delete`
+  выключателя без зависимостей: prepare сразу даёт `next`, apply —
+  `applied`. Отмена создания кнопки удалила её; воссозданный датчик удалён
+  так же, без зависимостей.
+
+Не проверено на хабе: удаление устройства со связями и экспортом в мост,
+потерянный ответ на создание.
+
+Влияние на дом: 4 `accessory.create` (три создания и одно воссоздание),
+4 `accessory.delete`, 1 `accessory.update`, 1 `scenario.create` и его
+удаление, 3 записи значений (протечка, её отмена, нажатие) и одно
+включение своего выключателя самим BLOCK — только свои объекты. Снимок до и после совпал: аксессуаров 81 (`cb9a56c572cb`),
+сценариев 23 (`e1e2fd70c3bf`); детей мостов 70, 80, 79, 79, в экспорте
+2, 4, 22, 3; `zz-` нигде нет.
