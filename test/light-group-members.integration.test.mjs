@@ -487,11 +487,21 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
 
   const kitchen = await services();
 
+  // A lamp of the group is offline, so the group names the online lamps
+  // of its room that are in no group: the new lamp is one of them, the
+  // bedroom's unlinked «Лампочка» and the group's own lamps are not.
   assert.deepEqual(kitchen.get(groupRef).lamp_group, {
     lamps: [
       { name: "Лампа люстры 1", room: "Кухня", online: true },
       { name: "Лампа люстры 2", room: "Кухня", online: true },
       { name: "Лампа люстры 3", room: "Кухня", online: false },
+    ],
+    replacement_candidates: [
+      {
+        name: "Свет на кухне",
+        service_ref: `${homeRef}/accessory/22/service/13`,
+      },
+      { name: "Лампочка", service_ref: lampRef(NEW_LAMP) },
     ],
   });
   assert.deepEqual(kitchen.get(lampRef(41)).in_lamp_groups, ["Люстра"]);
@@ -528,6 +538,36 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
   );
   assert.deepEqual(after.get(lampRef(NEW_LAMP)).in_lamp_groups, ["Люстра"]);
   assert.equal(after.get(lampRef(43)).in_lamp_groups, undefined);
+  // With every lamp online there is nothing to replace.
+  assert.equal(
+    after.get(groupRef).lamp_group.replacement_candidates,
+    undefined,
+  );
+  assert.equal(after.get(groupRef).lamp_group.no_replacement_on_hub, undefined);
+});
+
+// A replaced lamp that is not on the hub yet: the group says so, and that
+// it is paired first, instead of a list the agent would take as empty.
+test("a group with an offline lamp and no free lamp in its room says the new one is to be paired", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.accessories = fixture.accessories.filter(
+      ({ id }) => id !== NEW_LAMP,
+    );
+    fixture.accessories.find(({ id }) => id === 22).online = false;
+    return fixture;
+  });
+
+  const page = await call(client, "find_devices", {
+    home_ref: homeRef,
+    query: "люстра",
+  });
+  const group = page.rooms
+    .flatMap((room) => room.devices.flatMap((device) => device.services))
+    .find(({ ref }) => ref === groupRef);
+
+  assert.equal(group.lamp_group.replacement_candidates, undefined);
+  assert.match(group.lamp_group.no_replacement_on_hub, /device_search/);
+  assert.match(group.lamp_group.no_replacement_on_hub, /Кухня/);
 });
 
 test("a lamp without colour temperature joins on what it has, and the preview says what it lacks", async (t) => {
