@@ -444,7 +444,7 @@ export function roomNameLimits() {
 // The hub's JavaScript, for every code it runs
 // (research/protocol/2026-10-23-scenario-code.md section 4).
 export const HUB_JAVASCRIPT =
-  "SprutHub runs scenario code in Nashorn: let/const, arrow functions, template strings, default parameters, for…of work; class, destructuring, ... (spread and rest), ?., ??, async/await, ** and the methods includes, padStart and Object.entries do not. Prepare refuses code with them (unsupported_javascript) or code that does not parse (invalid_javascript), with the line. Code that passes can still fail on the hub: after the write the result gives hub_code_error, and when it is true, tell_owner and an offer to restore.";
+  "SprutHub runs scenario code in Nashorn: let/const, arrow functions, template strings, default parameters, for…of work; class, destructuring, ... (spread and rest), ?., ??, async/await, ** and the methods includes, padStart, find, Object.entries and Object.assign do not. Prepare refuses code with them (unsupported_javascript) or code that does not parse (invalid_javascript), with the line. Code that passes can still fail on the hub: after the write the result gives hub_code_error, and when it is true, tell_owner and an offer to restore.";
 
 export function logicSourceContract(mode, scenarioType = "LOGIC") {
   if (scenarioType === "GLOBAL") {

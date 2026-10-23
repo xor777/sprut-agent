@@ -20,7 +20,9 @@ const UNSUPPORTED = {
   "**": "Math.pow",
   ".includes": "indexOf(…) !== -1",
   ".padStart": "a loop or slice",
+  ".find": "a loop, or filter(…)[0]",
   "Object.entries": "Object.keys",
+  "Object.assign": "copying the fields in a loop over Object.keys",
 };
 
 function constructOf(node) {
@@ -46,9 +48,12 @@ function constructOf(node) {
       return ["**", "**="].includes(node.operator) ? "**" : undefined;
     case "MemberExpression": {
       const name = node.computed ? undefined : node.property?.name;
-      if (name === "includes" || name === "padStart") return `.${name}`;
-      if (name === "entries" && node.object?.name === "Object") {
-        return "Object.entries";
+      if (["includes", "padStart", "find"].includes(name)) return `.${name}`;
+      if (
+        ["entries", "assign"].includes(name) &&
+        node.object?.name === "Object"
+      ) {
+        return `Object.${name}`;
       }
       return undefined;
     }

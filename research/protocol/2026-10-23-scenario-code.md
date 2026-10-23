@@ -92,9 +92,13 @@ GLOBAL» ([карта действий](2026-09-24-web-client-action-map.md), D8
 
 | Принято (`error: false`, строка есть) | Отказ (`error: true`, строки нет) |
 | --- | --- |
-| `let`/`const`, стрелочные функции, шаблонные строки, параметры по умолчанию, `for…of`, `Promise` | `class`, деструктуризация, `...` в массиве, `?.`, `??`, `async`/`await`, `**`, `Object.entries`, `Array.prototype.includes`, `String.prototype.padStart` |
+| `let`/`const`, стрелочные функции, шаблонные строки, параметры по умолчанию, `for…of`, `Promise`; в прогоне 4 — `String.prototype.startsWith` | `class`, деструктуризация, `...` в массиве, `?.`, `??`, `async`/`await`, `**`, `Object.entries`, `Array.prototype.includes`, `String.prototype.padStart`; в прогоне 4 — `String.prototype.includes`, `Array.prototype.find`, `Object.assign` |
 
 Синтаксис и отсутствующие методы хаб не различает: оба дают `error: true`.
+Прогон 4 (14:47Z) — один свой выключенный GLOBAL, переписанный по разу на
+каждый метод и сразу удалённый. Проверка продукта (`src/hub-code.mjs`) на
+коде владельца — 8 LOGIC, GLOBAL и 9 узлах кода BLOCK, все с
+`error: false` — ничего не отклонила (только чтение).
 С этим согласуется LOGIC владельца, написанный с `let`/`const`: у него
 `error: false`.
 
