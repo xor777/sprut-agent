@@ -6313,7 +6313,7 @@ function codeScenarioSummary(scenario) {
 // id written as a number, or by a string that is exactly its name.
 // Comments do not count; an id held in a variable is not found. Returns
 // found_by and the first lines, or null.
-function accessoryMentions(source, { id, name }) {
+export function accessoryMentions(source, { id, name }) {
   const tokens = [];
   let line = 1;
   for (const token of jsTokens(source)) {
@@ -6687,6 +6687,12 @@ function isSensitiveContainerKey(key) {
   return /^(?:auth|authentication|authorization|connection|credentials?)$/i.test(
     key,
   );
+}
+
+// Whether answers show this scenario code only as [REDACTED]
+// (normalizeScenarioConfiguration): the agent cannot read it.
+export function codeShownRedacted(source) {
+  return redactSensitiveText(source, "javascript_source") !== source;
 }
 
 function redactSensitiveText(text, role = "data") {

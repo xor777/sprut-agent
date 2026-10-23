@@ -440,7 +440,38 @@ export function roomNameLimits() {
   };
 }
 
-export function logicSourceContract(mode) {
+// The hub's JavaScript, for every code it runs
+// (research/protocol/2026-10-23-scenario-code.md section 4).
+export const HUB_JAVASCRIPT =
+  "SprutHub runs scenario code in Nashorn: let/const, arrow functions, template strings, default parameters, for…of work; class, destructuring, ... (spread and rest), ?., ??, async/await, ** and the methods includes, padStart and Object.entries do not. Prepare refuses code with them (unsupported_javascript) or code that does not parse (invalid_javascript), with the line. Code that passes can still fail on the hub: after the write the result gives hub_code_error, and when it is true, tell_owner and an offer to restore.";
+
+export function logicSourceContract(mode, scenarioType = "LOGIC") {
+  if (scenarioType === "GLOBAL") {
+    return {
+      version: "2026-10-23",
+      scenario_type: "GLOBAL",
+      mode,
+      source: {
+        format: "javascript",
+        execution_environment: "SprutHub scenario sandbox",
+        exact_readback: true,
+      },
+      editable_fields: ["source"],
+      // research/protocol/2026-10-23-scenario-code.md 3.2-3.11.
+      runs: "SprutHub runs a GLOBAL's code as soon as it is written, on or off, and again on scenario_run; what it assigns to global (functions and values that BLOCK and LOGIC code call) stays for every scenario until the hub restarts, even after a later write, an error or a delete. Its name, description and flags are not in the code: window_option changes them.",
+      prepare:
+        "Write the whole code, changing only what the request asks; the prepare lists the changed lines (code_diff) and the devices they name (code_mentions; ids in a list are not resolved).",
+      javascript: HUB_JAVASCRIPT,
+      restore: {
+        update:
+          "writes the exact saved code back while the code applied is unchanged; the hub runs it again. What the newer code assigned to global or did stays until the hub restarts (hub_memory_kept).",
+      },
+      limitations: [
+        "A code edit by hand between prepare and apply is a conflict; SprutHub has no compare-and-set, so a race remains after the check.",
+        "Code with credential-shaped text reads as [REDACTED] and is not rewritten (hidden_code).",
+      ],
+    };
+  }
   return {
     version: "2026-10-13",
     scenario_type: "LOGIC",
@@ -470,8 +501,9 @@ export function logicSourceContract(mode) {
       active:
         "turning the scenario on or off with scenario_active or in the SprutHub interface is not a change of source or metadata: restore never writes active and does not compare it with the snapshots, and restore of a create deletes a turned-off LOGIC as it does a turned-on one (see create)",
     },
+    javascript: HUB_JAVASCRIPT,
     limitations: [
-      "Source is stored and compared as exact text; it is not executed or statically analyzed locally.",
+      "Source is stored and compared as exact text; it is not executed locally.",
       "SprutHub-normalized create flags are reported separately and become the saved applied snapshot.",
       "A successful source readback does not confirm callback behavior or physical effects.",
       "SprutHub exposes no compare-and-set; a race remains after the pre-write comparison.",

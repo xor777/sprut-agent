@@ -350,7 +350,7 @@ server.registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once). Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps).",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (code of a LOGIC, whose info sets name, description and start, or of a GLOBAL). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once). Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps).",
         ),
       target_ref: z
         .string()
