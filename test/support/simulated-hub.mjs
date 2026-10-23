@@ -111,8 +111,14 @@ export const METHOD_EVIDENCE = {
     "2026-10-12-notifications-live: true and false on a virtual lamp's On, read back in accessory.get only",
   ],
   "link.list": [OBSERVED, "2026-09-11-virtual-light-group"],
-  "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
-  "link.remove": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "link.addVirtual": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; repeat, re-add after an empty OUT and the value a join copies: 2026-10-14-light-group-relink",
+  ],
+  "link.remove": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; the empty OUT left and a repeated remove: 2026-10-14-light-group-relink",
+  ],
   "logic.types": [OBSERVED, "2026-09-10-native-logic"],
   "logic.list": [
     OBSERVED,
@@ -1698,6 +1704,7 @@ const HANDLERS = {
       name,
       online: true,
       virtual: true,
+      ...VIRTUAL_IDENTITY(id),
       services: [
         virtualInformationService(id, name),
         {
@@ -1882,82 +1889,36 @@ const HANDLERS = {
       links: [...system, ...(state.links.get(characteristicKey(input)) ?? [])],
     };
   },
-  "link.addVirtual": (state, input) => {
-    requireCharacteristic(state, input);
-    requireCharacteristic(state, {
-      aId: input.tAId,
-      sId: input.tSId,
-      cId: input.tCId,
-    });
-    const key = characteristicKey(input);
-    const links = state.links.get(key) ?? [];
-    const index = `Virtual/${input.tAId}.${input.tCId}`;
-    let incoming = links.find(
-      (link) => link.type === "IN" && link.index === index,
-    );
-    if (!incoming) {
-      incoming = { index, type: "IN", characteristics: [] };
-      links.push(incoming);
-      state.links.set(key, links);
-    }
-    if (
-      !incoming.characteristics.some(
-        ({ aId, sId, cId }) =>
-          aId === input.tAId && sId === input.tSId && cId === input.tCId,
-      )
-    ) {
-      incoming.characteristics.push({
-        aId: input.tAId,
-        sId: input.tSId,
-        cId: input.tCId,
-      });
-      const outgoingKey = characteristicKey({
-        aId: input.tAId,
-        sId: input.tSId,
-        cId: input.tCId,
-      });
-      const outgoingLinks = state.links.get(outgoingKey) ?? [];
-      let outgoing = outgoingLinks.find(
-        (link) => link.type === "OUT" && link.index === index,
-      );
-      if (!outgoing) {
-        outgoing = { index, type: "OUT", characteristics: [] };
-        outgoingLinks.push(outgoing);
-        state.links.set(outgoingKey, outgoingLinks);
-      }
-      outgoing.characteristics.push({
-        aId: input.aId,
-        sId: input.sId,
-        cId: input.cId,
-      });
-    }
-    return incoming;
-  },
+  "link.addVirtual": (state, input) =>
+    structuredClone(addVirtualLink(state, input, { copyValue: true })),
+  // Removing an IN link takes the virtual characteristic out of its
+  // target's OUT link, which stays as an empty entry under the same index.
+  // A linkId the characteristic no longer has is acknowledged and changes
+  // nothing (2026-10-14-light-group-relink, 6 and 10;
+  // 2026-10-13-wave4-contracts 2.9). hasLinks is not derived from links
+  // here, unlike on the hub (wave4 2.5, 2.7): it changes only as written.
   "link.remove": (state, input) => {
+    requireCharacteristic(state, input);
     const key = characteristicKey(input);
     const links = state.links.get(key) ?? [];
     const removed = links.find(({ index }) => index === input.linkId);
-    if (!removed) throw notFound(`Link ${input.linkId}`);
-    state.links.set(
-      key,
-      links.filter(({ index }) => index !== input.linkId),
-    );
+    if (!removed) return {};
+    // The empty OUT left on a lamp stays (wave4 2.9); a non-empty OUT
+    // removed from the lamp's side was not tried.
+    if (removed.type === "OUT" && removed.characteristics.length === 0) {
+      return {};
+    }
+    const remaining = links.filter(({ index }) => index !== input.linkId);
+    state.links.set(key, remaining);
     if (removed.type === "IN") {
       for (const target of removed.characteristics) {
-        const outgoingKey = characteristicKey(target);
-        state.links.set(
-          outgoingKey,
-          (state.links.get(outgoingKey) ?? []).flatMap((link) => {
-            if (link.type !== "OUT") return [link];
-            const characteristics = link.characteristics.filter(
-              ({ aId, sId, cId }) =>
-                aId !== input.aId || sId !== input.sId || cId !== input.cId,
-            );
-            return characteristics.length > 0
-              ? [{ ...link, characteristics }]
-              : [];
-          }),
-        );
+        for (const link of state.links.get(characteristicKey(target)) ?? []) {
+          if (link.type !== "OUT") continue;
+          link.characteristics = link.characteristics.filter(
+            ({ aId, sId, cId }) =>
+              aId !== input.aId || sId !== input.sId || cId !== input.cId,
+          );
+        }
       }
     }
     return {};
@@ -2555,6 +2516,12 @@ function buildState(fixture, hubTime) {
   for (const input of fixture.accessories) {
     state.accessories.push(buildAccessory(state, input));
   }
+  // A fixture's links are as the web client's link.addVirtual leaves them,
+  // without the value the hub copies at that moment: the fixture states
+  // the values it means.
+  for (const link of fixture.links ?? []) {
+    addVirtualLink(state, link, { copyValue: false });
+  }
   for (const input of fixture.scenarios ?? []) {
     const scenario = {
       index: input.index,
@@ -2608,7 +2575,11 @@ function buildState(fixture, hubTime) {
 
 function buildAccessory(state, input) {
   const services = [];
-  if (input.manufacturer || input.model) {
+  // A virtual accessory of a fixture: as accessory.create leaves it, an
+  // information service at sId 1 and no controller.
+  if (input.virtual === true) {
+    services.push(virtualInformationService(input.id, input.name));
+  } else if (input.manufacturer || input.model) {
     const characteristics = [
       ["Identify", false],
       ["Manufacturer", input.manufacturer ?? ""],
@@ -2681,8 +2652,9 @@ function buildAccessory(state, input) {
     online: input.online !== false,
     // accessory.get of a physical accessory read virtual: false, present
     // rather than omitted (owner hub, 3.0.0, live-conformance-3-read-only).
-    virtual: false,
-    ...(input.extensionKey
+    virtual: input.virtual === true,
+    ...(input.virtual === true ? VIRTUAL_IDENTITY(input.id) : {}),
+    ...(input.extensionKey && input.virtual !== true
       ? {
           extensionKey: input.extensionKey,
           deviceId: input.deviceId ?? `device-${input.id}`,
@@ -2708,6 +2680,18 @@ function buildAccessory(state, input) {
 // other information characteristics follow a physical device's; they were
 // not read on a virtual one.
 const VIRTUAL_SERVICE_ID = 13;
+
+// accessory.list and accessory.get give a virtual accessory these fields,
+// and the list has no other sign that it is virtual (owner hub, 3.0.0, all
+// 9 virtual lamp groups, 2026-10-14-light-group-relink). Physical
+// accessories' manufacturer, model and serial are left out here.
+const VIRTUAL_IDENTITY = (id) => ({
+  manufacturer: "MakeSimple",
+  model: "Virtual",
+  manufacturerId: "MakeSimple",
+  modelId: "Virtual",
+  serial: String(id),
+});
 
 function virtualInformationService(id, name) {
   const characteristics = [
@@ -4329,11 +4313,15 @@ function applyLampLogic(state, characteristic, previous) {
   return changed;
 }
 
-// The characteristics a value written to source set through its IN links.
+// The characteristics a value written to source sets through its links:
+// a virtual characteristic's IN links pass it to their targets, a member's
+// OUT links back to the virtual one, with "last value" processing (0), and
+// no further: the other members keep theirs
+// (2026-10-14-light-group-relink, 3 and 4; 2026-09-11-virtual-light-group).
 function propagateVirtualLinks(state, source, value) {
   const changed = [];
   for (const link of state.links.get(characteristicKey(source)) ?? []) {
-    if (link.type !== "IN") continue;
+    if (link.type !== "IN" && link.type !== "OUT") continue;
     for (const target of link.characteristics) {
       const characteristic = findCharacteristic(state, target);
       if (!characteristic) continue;
@@ -4342,6 +4330,85 @@ function propagateVirtualLinks(state, source, value) {
     }
   }
   return changed;
+}
+
+// link.addVirtual on the virtual side (aId, sId, cId) to a target (tAId,
+// tSId, tCId), as on the owner's hub: one IN link per target, indexed
+// Virtual/<tAId>.<tCId>, and on the target an OUT link of the same index
+// holding the virtual characteristic, reused when an empty one was left
+// by an earlier removal; adding a link that exists returns it unchanged.
+// A new link copies the target's value to
+// the virtual characteristic, as last-value feedback: an off lamp joining
+// an on group made it read off, and the other members kept theirs
+// (2026-10-14-light-group-relink, 2, 7, 8 and runs 2 and 3; there a
+// joining Brightness of 0 left the group's level as it was, which this
+// does not model).
+function addVirtualLink(state, input, { copyValue }) {
+  const source = requireCharacteristic(state, input);
+  const target = { aId: input.tAId, sId: input.tSId, cId: input.tCId };
+  const member = requireCharacteristic(state, target);
+  const key = characteristicKey(input);
+  const links = state.links.get(key) ?? [];
+  const index = `Virtual/${input.tAId}.${input.tCId}`;
+  const existing = links.find(
+    (link) => link.type === "IN" && link.index === index,
+  );
+  if (existing) return existing;
+  const incoming = {
+    index,
+    type: "IN",
+    controller: "virtual",
+    characteristics: [target],
+  };
+  links.push(incoming);
+  state.links.set(key, links);
+  const outgoingKey = characteristicKey(target);
+  const outgoingLinks = state.links.get(outgoingKey) ?? [];
+  let outgoing = outgoingLinks.find(
+    (link) => link.type === "OUT" && link.index === index,
+  );
+  if (!outgoing) {
+    outgoing = {
+      index,
+      type: "OUT",
+      controller: "virtual",
+      characteristics: [],
+    };
+    outgoingLinks.push(outgoing);
+    state.links.set(outgoingKey, outgoingLinks);
+  }
+  outgoing.characteristics.push({
+    aId: input.aId,
+    sId: input.sId,
+    cId: input.cId,
+  });
+  if (copyValue && !sameValue(source.control.value, member.control.value)) {
+    source.control.value = structuredClone(member.control.value);
+    state.emitAfterReply?.(valueEvent(source));
+  }
+  return incoming;
+}
+
+// What a group command does through the links of a home: values written
+// one after another to target in a copy of state's accessories, links and
+// lamp logic, as the hub passes them on (writeValue). Returns the copy's
+// accessories; state is left as it is. A grader asks with it whether a
+// lamp follows its group.
+export function commandThroughLinks(state, target, values) {
+  const copy = {
+    accessories: structuredClone(state.accessories),
+    links: structuredClone(state.links),
+    logics: structuredClone(state.logics),
+  };
+  for (const value of values) {
+    const characteristic = requireCharacteristic(copy, target);
+    writeValue(
+      copy,
+      characteristic,
+      checkedValue(characteristic.control, value),
+    );
+  }
+  return copy.accessories;
 }
 
 function subscriptionUuid(state, domain) {

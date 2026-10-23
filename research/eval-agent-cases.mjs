@@ -18,7 +18,17 @@
 // home (lights of a room, devices that are on), it is derived from the
 // initial state.
 import {
+  BEDROOM_LAMP,
+  GROUP as CHANDELIER_GROUP,
+  GROUP_CHARACTERISTICS,
+  LAMP_CHARACTERISTICS,
+  NEW_LAMP,
+  OFFLINE_MEMBER,
+  withKitchenChandelier,
+} from "../test/fixtures/homes/kitchen-chandelier.mjs";
+import {
   blockRefProblems,
+  commandThroughLinks,
   evaluateRulesOnChange,
 } from "../test/support/simulated-hub.mjs";
 
@@ -187,6 +197,79 @@ export const CASES = {
         "It asks the owner which floor lamp is meant (or whether both), making clear there are two: «Торшер у дивана» and «Торшер у окна», by name or by an unmistakable description.",
       ],
     }),
+  },
+  // The owner's main-path case of 14.10.2026: a lamp of a colour group
+  // was replaced. The old one is offline, the new one is the kitchen's
+  // unlinked colour lamp; a lamp of the same name in the bedroom's floor
+  // lamp is not it. The group keeps being the same accessory (Alice
+  // controls it), so nothing but links may change.
+  "relink-chandelier": {
+    prompt: "Я заменил лампу в люстре на кухне на новую, перевяжи",
+    patch: withKitchenChandelier,
+    graders: [
+      {
+        name: "chandelier_relinked",
+        grade: ({ finalState }) => {
+          const wrong = Object.entries(GROUP_CHARACTERISTICS).flatMap(
+            ([type, cId]) => {
+              const linked = (finalState.links.get(`44.13.${cId}`) ?? [])
+                .filter((link) => link.type === "IN")
+                .flatMap((link) => link.characteristics)
+                .map(({ aId, sId, cId: lamp }) => `${aId}.${sId}.${lamp}`)
+                .sort();
+              const expected = [41, 42, NEW_LAMP]
+                .map((aId) => `${aId}.13.${LAMP_CHARACTERISTICS[type]}`)
+                .sort();
+              return linked.join() === expected.join()
+                ? []
+                : [`${type}: ${linked.join(" ") || "none"}`];
+            },
+          );
+          return result(
+            wrong.length === 0,
+            wrong.length === 0
+              ? "every group characteristic links 41, 42 and the new lamp"
+              : wrong.join("; "),
+          );
+        },
+      },
+      {
+        // Switching the group off and on through the home's links reaches
+        // the new lamp and the lamps kept, not the old or the bedroom one.
+        name: "new_lamp_follows_chandelier",
+        grade: ({ finalState }) => {
+          const accessories = commandThroughLinks(
+            finalState,
+            { ...CHANDELIER_GROUP, cId: GROUP_CHARACTERISTICS.On },
+            [{ boolValue: false }, { boolValue: true }],
+          );
+          const on = (aId) =>
+            accessories
+              .find(({ id }) => id === aId)
+              .services.find(({ sId }) => sId === 13)
+              .characteristics.find(
+                ({ cId }) => cId === LAMP_CHARACTERISTICS.On,
+              ).control.value.boolValue;
+          const lamps = {
+            new: on(NEW_LAMP),
+            kept: on(41) && on(42),
+            old: on(OFFLINE_MEMBER),
+            bedroom: on(BEDROOM_LAMP),
+          };
+          return result(
+            lamps.new && lamps.kept && !lamps.old && !lamps.bedroom,
+            JSON.stringify(lamps),
+          );
+        },
+      },
+      // Links of the group, of the new and the old lamp, and the values the
+      // group takes from a lamp that joins.
+      onlyChanges(
+        ({ key }) =>
+          /^link\/(44|43|45)\.13\.\d+$/.test(key) ||
+          /^characteristic\/44\.13\.(1[5-9])\/\w+$/.test(key),
+      ),
+    ],
   },
   "motion-light-existing": {
     prompt: "Когда в коридоре движение, включай там свет",

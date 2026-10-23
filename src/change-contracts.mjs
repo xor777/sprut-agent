@@ -76,6 +76,8 @@ export function virtualLightGroupContract() {
       "characteristic.update({aId,sId,cId,hasLinks:false})",
     ],
     scope: "one_created_virtual_light_and_explicit_member_services",
+    existing_group:
+      "To change the lamps of an existing group (find_devices marks it with lamp_group), read this contract with target_ref = the group's lamp service: it lists the group's lamps and what it links.",
     characteristics: ["On", "Brightness"],
     feedback: "LAST_VALUE",
     restore:

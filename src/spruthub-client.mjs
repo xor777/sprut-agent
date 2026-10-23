@@ -12,6 +12,13 @@ import {
 } from "./block-summary.mjs";
 import { HomeState } from "./home-state.mjs";
 import {
+  groupLamps,
+  incomingLinks,
+  lampGroupMark,
+  lampGroupMarks,
+  virtualLamps,
+} from "./light-group-members.mjs";
+import {
   inspectNativeOption,
   isSelectableNativeValidValue,
   nativeScalarContract,
@@ -36,6 +43,10 @@ const HUB_TIME_ZONE_TTL_MS = 5 * 60_000;
 // home or its changed accessories, the room list an accessory read asks
 // for, and two more for reads the state did not take.
 const HOME_READ_PASSES = 4;
+// Virtual lamps a whole read asks link.list about at once: the owner's
+// home has 9 groups, so one round (a group with an offline lamp adds up
+// to 4 more requests of its own).
+const LINK_READS_AT_ONCE = 10;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
@@ -343,10 +354,16 @@ export class SprutHubClient {
         rooms.connection === accessories.connection
           ? accessories.connection
           : null;
+      const lampGroups = await this.#readLampGroups(
+        state.serial,
+        accessories.accessories,
+        deadline,
+      );
       state.replaceWhole(
         {
           rooms: rooms.rooms,
           accessories: accessories.accessories,
+          lampGroups,
           observedAt: latestObservedAt([
             rooms.observedAt,
             accessories.observedAt,
@@ -358,6 +375,53 @@ export class SprutHubClient {
     } finally {
       state.endRead(token);
     }
+  }
+
+  // The lamp groups of a home read whole: link.list of the On of each
+  // virtual lamp, LINK_READS_AT_ONCE at a time. A failed read leaves them
+  // unknown (null), never empty.
+  async #readLampGroups(serial, accessories, deadline) {
+    const byId = new Map(accessories.map((item) => [item.id, item]));
+    const read = async ({ aId, sId, controls }) => {
+      const links = (cId) =>
+        this.listLinks({ aId, sId, cId }, { serial, deadline });
+      const lamps = groupLamps(await links(controls.On));
+      // What the group links beyond On is read only for a group with an
+      // offline lamp, for what its room's unlinked lamps lack.
+      if (!lamps.some((lamp) => byId.get(lamp.aId)?.online !== true)) {
+        return { group: { aId, sId }, lamps };
+      }
+      const others = Object.entries(controls).filter(([type]) => type !== "On");
+      const linked = await Promise.all(
+        others.map(async ([type, cId]) =>
+          incomingLinks(await links(cId)).length > 0 ? type : null,
+        ),
+      );
+      return {
+        group: { aId, sId },
+        lamps,
+        types: ["On", ...linked.filter(Boolean)],
+      };
+    };
+    const lampsOfVirtual = virtualLamps(accessories);
+    const groups = [];
+    try {
+      for (
+        let start = 0;
+        start < lampsOfVirtual.length;
+        start += LINK_READS_AT_ONCE
+      ) {
+        groups.push(
+          ...(await Promise.all(
+            lampsOfVirtual.slice(start, start + LINK_READS_AT_ONCE).map(read),
+          )),
+        );
+      }
+    } catch (error) {
+      if (error instanceof SprutHubError) return null;
+      throw error;
+    }
+    return groups.filter(({ lamps }) => lamps.length > 0);
   }
 
   async #readRoomsInto(state, deadline) {
@@ -1316,10 +1380,14 @@ export class SprutHubClient {
     }
   }
 
-  async listLinks({ aId, sId, cId }) {
+  async listLinks(
+    { aId, sId, cId },
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
     const response = await this.#request(
       { link: { list: { aId, sId, cId } } },
-      Date.now() + this.timeoutMs,
+      deadline,
+      { serial },
     );
     const links = extractNativeList(response, ["link", "list", "links"]);
     return links.map(normalizeLink);
@@ -2061,6 +2129,27 @@ export class SprutHubClient {
     };
   }
 
+  // A lamp group's lamps, or the groups a lamp is in, on each lamp service
+  // of an accessory entity, only from a home snapshot that is fresh: a
+  // device read stays one request (find_devices reads the home and marks
+  // them always).
+  #markLampGroups(serial, accessory, entity) {
+    const lamps = (accessory.services ?? []).filter(
+      ({ type }) => type === "Lightbulb",
+    );
+    if (lamps.length === 0) return;
+    const catalog = this.cachedHomeCatalog(serial);
+    if (!catalog) return;
+    const marks = lampGroupMarks(catalog, serial);
+    for (const service of lamps) {
+      const ref = serviceRef(serial, accessory.id, service.sId);
+      const entry = entity.services.find((candidate) => candidate.ref === ref);
+      if (entry) {
+        Object.assign(entry, lampGroupMark(marks, accessory.id, service.sId));
+      }
+    }
+  }
+
   async #readAccessoryEntity(parsed, requested, deadline) {
     const response = await this.#request(
       { accessory: { get: { id: parsed.accessoryId } } },
@@ -2090,6 +2179,7 @@ export class SprutHubClient {
           entity.services.flatMap(({ characteristics }) => characteristics),
         ),
       );
+      this.#markLampGroups(parsed.serial, accessory, entity);
       if (requested.has("relations")) {
         entity.relations = await this.#readAccessoryRelations(
           parsed.serial,

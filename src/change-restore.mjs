@@ -1,6 +1,10 @@
 import { valuesEqual } from "./change-contracts.mjs";
 import { nativeChangeNext } from "./change-refs.mjs";
 import { resendDeviceCommandNext } from "./device-commands.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
@@ -15,7 +19,7 @@ export function restoreItemBase(change) {
   const value = isNativeValueChange(change) ? summaryValue(change) : undefined;
   return {
     change_ref: `spruthub-change://native/${change.id}`,
-    operation: change.kind,
+    operation: changeOperation(change),
     ...(name ? { name } : {}),
     ...(typeof change.target_ref === "string"
       ? { target_ref: change.target_ref }
@@ -272,6 +276,8 @@ export function changeName(change) {
       return change.baseline_value?.value;
     case "virtual_light_group":
       return change.created_accessory_snapshot?.name ?? change.requested_name;
+    case LIGHT_GROUP_MEMBERS:
+      return change.group?.name;
     case "block_create":
     case "logic_source_create":
       return change.requested_snapshot?.name;

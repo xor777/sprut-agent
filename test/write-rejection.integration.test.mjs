@@ -334,9 +334,26 @@ test("a refused restore of every native write lifecycle keeps the change applied
   }
 });
 
+const carriesSomething = (link) =>
+  link.type !== "OUT" || link.characteristics.length > 0;
+
 function linksInUse(state) {
   return Object.fromEntries(
-    [...state.links].filter(([, links]) => links.length > 0).sort(),
+    [...state.links]
+      .map(([key, links]) => [key, links.filter(carriesSomething)])
+      .filter(([, links]) => links.length > 0)
+      .sort(),
+  );
+}
+
+// A home snapshot without the empty OUT entries of its links.
+function withoutEmptyOutLinks(snapshot) {
+  return Object.fromEntries(
+    Object.entries(snapshot).flatMap(([key, value]) => {
+      if (!key.startsWith("link/")) return [[key, value]];
+      const links = JSON.parse(value).filter(carriesSomething);
+      return links.length > 0 ? [[key, JSON.stringify(links)]] : [];
+    }),
   );
 }
 
@@ -434,13 +451,19 @@ test("a refused later step of a virtual light group reports the partial group it
       assert.deepEqual(detail.write_intent.rejection, rejection);
       assert.equal(detail.restore_supported, true);
 
-      // Restoring the partial change puts the home back as it was prepared.
+      // Restoring the partial change puts the home back as it was prepared,
+      // but for the empty OUT entry SprutHub leaves on a lamp whose group
+      // link was removed: it carries nothing, and restore reports it as a
+      // native residue (2026-10-13-wave4-contracts 2.9).
       const restored = await call(client, "restore_native_change", {
         change_ref: changeRef,
       });
       assert.equal(restored.status, "restored", JSON.stringify(restored));
       assert.deepEqual(
-        diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()),
+        diffHomeSnapshots(
+          withoutEmptyOutLinks(hub.initialSnapshot()),
+          withoutEmptyOutLinks(hub.snapshot()),
+        ),
         [],
       );
       assert.deepEqual(linksInUse(hub.state), linksInUse(hub.initialState));
