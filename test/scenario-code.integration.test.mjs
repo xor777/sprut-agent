@@ -187,6 +187,10 @@ test("GLOBAL code the hub's JavaScript does not know is refused before anything 
       ".find",
     ],
     ["var copy = Object.assign({}, PALETTES);", "Object.assign"],
+    // ES2021, later than ?? (ES2020), which the hub lacks.
+    ["global.COLOR_SCENE_LIGHTS ??= [];", "??="],
+    ["global.COLOR_SCENE_LIGHTS ||= [];", "||="],
+    ["global.COLOR_SCENE_LIGHTS &&= [];", "&&="],
   ]) {
     const refused = await prepareGlobal(
       client,
