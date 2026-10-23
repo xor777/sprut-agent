@@ -488,8 +488,9 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
   const kitchen = await services();
 
   // A lamp of the group is offline, so the group names the online lamps
-  // of its room that are in no group: the new lamp is one of them, the
-  // bedroom's unlinked «Лампочка» and the group's own lamps are not.
+  // of its room that are in no group and have every characteristic the
+  // group links: the new colour lamp, not «Свет на кухне» with only On and
+  // Brightness, not the bedroom's unlinked «Лампочка» or the group's lamps.
   assert.deepEqual(kitchen.get(groupRef).lamp_group, {
     lamps: [
       { name: "Лампа люстры 1", room: "Кухня", online: true },
@@ -497,10 +498,6 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
       { name: "Лампа люстры 3", room: "Кухня", online: false },
     ],
     replacement_candidates: [
-      {
-        name: "Свет на кухне",
-        service_ref: `${homeRef}/accessory/22/service/13`,
-      },
       { name: "Лампочка", service_ref: lampRef(NEW_LAMP) },
     ],
   });
@@ -544,6 +541,36 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
     undefined,
   );
   assert.equal(after.get(groupRef).lamp_group.no_replacement_on_hub, undefined);
+});
+
+// What a candidate must have follows the group's links, not its lamps'
+// type: a group linking only On and Brightness takes «Свет на кухне» too.
+test("a group linking on/off and brightness only takes a plain lamp as a replacement", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.links = fixture.links.filter(
+      ({ aId, cId }) =>
+        aId !== GROUP.aId ||
+        cId === GROUP_CHARACTERISTICS.On ||
+        cId === GROUP_CHARACTERISTICS.Brightness,
+    );
+    return fixture;
+  });
+
+  const page = await call(client, "find_devices", {
+    home_ref: homeRef,
+    room_ref: `${homeRef}/room/4`,
+  });
+  const group = page.rooms
+    .flatMap((room) => room.devices.flatMap((device) => device.services))
+    .find(({ ref }) => ref === groupRef);
+
+  assert.deepEqual(group.lamp_group.replacement_candidates, [
+    {
+      name: "Свет на кухне",
+      service_ref: `${homeRef}/accessory/22/service/13`,
+    },
+    { name: "Лампочка", service_ref: lampRef(NEW_LAMP) },
+  ]);
 });
 
 // A replaced lamp that is not on the hub yet: the group says so, and that
