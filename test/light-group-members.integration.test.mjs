@@ -208,9 +208,16 @@ test("a replaced lamp: the new one joins on every characteristic, the offline on
   assert.equal(memberOf(prepared, 42).change, "stays");
   assert.deepEqual(hub.writes(), [], "prepare writes nothing");
 
-  const applied = await call(client, "apply_native_change", {
-    change_ref: prepared.change_ref,
-  });
+  // «Перевяжи» asks for the change: the agent follows the next call.
+  assert.deepEqual(
+    [prepared.next?.tool, prepared.next?.arguments],
+    ["apply_native_change", { change_ref: prepared.change_ref }],
+  );
+  const applied = await call(
+    client,
+    prepared.next.tool,
+    prepared.next.arguments,
+  );
 
   assert.equal(applied.status, "applied", JSON.stringify(applied));
   assert.deepEqual(groupLinks(hub), expectedLinks([41, 42, NEW_LAMP]));

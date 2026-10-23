@@ -832,15 +832,20 @@ export function publicNativeChange(
     ...(kind.command ? { physical_effect_reversible: false } : {}),
     command_caused_observation: "unknown",
     limitations: [
-      "Readback observes the value but cannot prove this command caused it.",
-      "SprutHub exposes no native compare-and-set for this operation.",
       restoration.supported
         ? kind.command
           ? "Restore writes the previous value back only while the device still shows the value this change set and is online; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
-      "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+      // What a write leaves unproven says nothing before it is sent.
+      ...(change.status === "prepared"
+        ? []
+        : [
+            "Readback observes the value but cannot prove this command caused it.",
+            "SprutHub exposes no native compare-and-set for this operation.",
+            "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+          ]),
       ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets
         ? [
