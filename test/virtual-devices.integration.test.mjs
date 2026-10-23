@@ -597,6 +597,50 @@ test("«Удали кнопку Десерт» names the scenario it starts befo
   assert.match(JSON.stringify(restored.not_restored), /Сцена Десерт/);
 });
 
+// Code is a dependency too: a LOGIC that reads «Режим гостей» by its id is
+// named before the switch is deleted, and it stops the undo of a creation.
+test("code that names a virtual device by id is named before it is deleted", async (t) => {
+  const { hub, client, before } = await setup(t);
+  const logic = (index, aId) => ({
+    index,
+    name: `Гостевой свет ${index}`,
+    desc: "",
+    type: "LOGIC",
+    active: true,
+    data: [
+      'info = { name: "Гостевой свет", description: "", onStart: false };',
+      "function trigger(source, value, variables, options, context) {",
+      `  if (Hub.getCharacteristic(${aId}, 15).getValue()) log("гости");`,
+      "}",
+    ].join("\n"),
+  });
+  hub.state.scenarios.push(logic("30", GUEST_MODE));
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(GUEST_MODE),
+    reason: "Удалить режим гостей",
+  });
+  assert.equal(typeof prepared.tell_owner, "string");
+  assert.equal(prepared.next, undefined);
+  assert.deepEqual(
+    prepared.dependencies.code.map(({ name }) => name),
+    ["Гостевой свет 30"],
+  );
+
+  const applied = await createDevice(client, {
+    name: "Режим вечеринки",
+    type: "Switch",
+  });
+  const [device] = created(hub, before);
+  hub.state.scenarios.push(logic("31", device.id));
+  const restored = await call(client, "restore_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(restored.status, "conflict");
+  assert.equal(restored.conflict_reason, "virtual_device_in_use");
+  assert.deepEqual(writes(hub, "accessory.delete"), []);
+});
+
 // The id the change saved may now hold another device: the created one was
 // deleted and the id given to a physical device, or the owner renamed it
 // and holds it for theirs. Undo deletes neither, and the change says so.
