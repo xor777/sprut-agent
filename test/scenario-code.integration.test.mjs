@@ -9,6 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   COLOR_SCENES,
   COLOR_SCENES_SOURCE,
+  OCEAN,
   SCENE_LAMPS_LINE,
   withColorScenes,
 } from "./fixtures/homes/color-scenes.mjs";
@@ -291,4 +292,186 @@ test("a GLOBAL whose code reads as [REDACTED] is not rewritten: the agent cannot
   assert.equal(refused.error.code, "hidden_code");
   assert.deepEqual(writesSince(hub, sentBefore), []);
   assert.equal(scenarioOf(hub, COLOR_SCENES).data, keyed);
+});
+
+// A scene of the owner's kind: the bedside button held runs one code action.
+function sceneData(code) {
+  return {
+    targets: [
+      {
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            {
+              type: "characteristic",
+              aId: 39,
+              sId: 13,
+              cId: 14,
+              hs: "StatelessProgrammableSwitch",
+              hc: "ProgrammableSwitchEvent",
+              cond: "=",
+              value: "2",
+              trigger: true,
+              time: 0,
+              timeCond: "",
+            },
+          ],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [{ type: "code", code }],
+        else: [],
+        then_delay: 0,
+        else_delay: 0,
+      },
+    ],
+  };
+}
+
+function codeSteps(steps) {
+  return steps.flatMap((step) => [
+    ...(step.type === "code" ? [step] : []),
+    ...codeSteps([...(step.then ?? []), ...(step.else ?? [])]),
+  ]);
+}
+
+test("«сделай сцену Рассвет» creates a BLOCK whose action is code: stored as sent, read back as a code step, and restore removes it", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const code = 'global.colorScene("dawn");';
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "block_create",
+    target_ref: homeRef,
+    name: "Сцена Рассвет",
+    description: "",
+    active: true,
+    on_start: false,
+    sync: false,
+    data: sceneData(code),
+    reason: "Новая сцена Рассвет",
+  });
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.equal(prepared.code_mentions, undefined);
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(applied.hub_code_error, false);
+  const stored = JSON.parse(scenarioOf(hub, applied.scenario_index).data);
+  assert.equal(stored.targets[0].then[0].type, "code");
+  assert.equal(stored.targets[0].then[0].code, code);
+
+  const read = await call(client, "get_entity", {
+    entity_ref: applied.scenario_ref,
+  });
+  assert.deepEqual(
+    codeSteps(read.entity.summary.steps).map(({ type, status }) => [
+      type,
+      status,
+    ]),
+    [["code", "not_analyzed"]],
+  );
+  assert.deepEqual(read.entity.summary.unrecognized, []);
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("a code action added to an existing scene keeps its other nodes, names the device its code acts on, and restore puts the scene back", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  const sceneRef = `${homeRef}/scenario/${OCEAN}`;
+  const entity = await call(client, "get_entity", {
+    entity_ref: sceneRef,
+    include: ["configuration"],
+  });
+  const data = structuredClone(entity.entity.configuration.value);
+  data.targets[0].then.push({
+    type: "code",
+    code: "Hub.setCharacteristicValue(26, 14, true);",
+  });
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: sceneRef,
+    data,
+    reason: "Включать ночник в сцене Океан",
+  });
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.deepEqual(prepared.code_mentions, [
+    {
+      pointer: "/targets/0/then/1",
+      accessory_ref: `${homeRef}/accessory/26`,
+      name: "Ночник",
+      found_by: ["accessory_id"],
+    },
+  ]);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(applied.hub_code_error, false);
+  assert.deepEqual(
+    JSON.parse(scenarioOf(hub, OCEAN).data).targets[0].then.map(
+      ({ code }) => code,
+    ),
+    [
+      'global.colorScene("ocean");',
+      "Hub.setCharacteristicValue(26, 14, true);",
+    ],
+  );
+
+  const restored = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("BLOCK code the hub would not run is refused before anything is sent, and code in a condition stays outside the contract", async (t) => {
+  const { hub, client } = await setup(t);
+  const sentBefore = hub.requests.length;
+  const problemsOf = async (data) => {
+    const refused = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "block_create",
+        target_ref: homeRef,
+        name: "Сцена Рассвет",
+        description: "",
+        active: true,
+        on_start: false,
+        sync: false,
+        data,
+        reason: "Новая сцена Рассвет",
+      },
+    });
+    assert.equal(refused.isError, true, refused.content[0]?.text);
+    assert.equal(refused.structuredContent.error.code, "invalid_block_data");
+    return refused.structuredContent.problems;
+  };
+  const [unsupported] = await problemsOf(
+    sceneData('var scene = global.scene ?? "dawn";\nglobal.colorScene(scene);'),
+  );
+  assert.equal(unsupported.pointer, "/targets/0/then/0/code");
+  assert.equal(unsupported.construct, "??");
+  assert.equal(unsupported.line, 1);
+  const [broken] = await problemsOf(sceneData('global.colorScene("dawn"'));
+  assert.equal(broken.pointer, "/targets/0/then/0/code");
+  assert.equal(broken.line, 1);
+  const [empty] = await problemsOf(sceneData("  "));
+  assert.equal(empty.pointer, "/targets/0/then/0/code");
+  const inCondition = sceneData('global.colorScene("dawn");');
+  inCondition.targets[0].if.conditions.push({
+    type: "code",
+    code: "return true;",
+  });
+  const [condition] = await problemsOf(inCondition);
+  assert.equal(condition.pointer, "/targets/0/if/conditions/1");
+  assert.deepEqual(writesSince(hub, sentBefore), []);
 });
