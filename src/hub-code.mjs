@@ -150,11 +150,26 @@ export function refuseHubCode(source, { functionBody = false, where } = {}) {
 // code with error, the agent tells the owner and offers the restore; it is
 // an offer, not a next call.
 export function hubCodeErrorFields(change) {
-  if (typeof change.hub_code_error !== "boolean") return {};
+  const before =
+    typeof change.hub_code_error_before === "boolean"
+      ? { hub_code_error_before: change.hub_code_error_before }
+      : {};
+  if (typeof change.hub_code_error !== "boolean") return before;
   if (change.hub_code_error !== true || change.status !== "applied") {
-    return { hub_code_error: change.hub_code_error };
+    return { ...before, hub_code_error: change.hub_code_error };
+  }
+  // The scenario had error before this change: the change did not cause it,
+  // and its restore would not clear it.
+  if (change.hub_code_error_before === true) {
+    return {
+      ...before,
+      hub_code_error: true,
+      tell_owner:
+        "The scenario was already marked with error before this change, and still is: code this change did not touch does not compile or stops with an error. Tell the owner; restoring this change would not clear it.",
+    };
   }
   return {
+    ...before,
     hub_code_error: true,
     tell_owner:
       "SprutHub saved the code but marks the scenario with error: the code did not compile, or stopped with an error when the hub ran it. Tell the owner, and offer to put the previous code back (offer).",

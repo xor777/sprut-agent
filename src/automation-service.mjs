@@ -1034,6 +1034,7 @@ export class AutomationService {
     const change = {
       id,
       kind: "block_data_update",
+      hub_code_error_before: scenario.error === true,
       status: "prepared",
       home_ref: configuredHomeRef(this.hubSerial),
       target_ref: input.target_ref,
@@ -1314,6 +1315,7 @@ export class AutomationService {
     const change = {
       id,
       kind: "logic_source_update",
+      hub_code_error_before: scenario.error === true,
       ...(diff
         ? {
             code_diff: diff.hunks,
