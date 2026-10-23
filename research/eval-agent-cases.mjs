@@ -1143,6 +1143,7 @@ export const CASES = {
             { type: "cron", mode: "NONE", cron: `0 0 ${hour} ? * * *` },
           ],
         },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
         then: [
           {
             type: "service",
