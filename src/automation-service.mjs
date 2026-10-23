@@ -48,6 +48,7 @@ import {
 import {
   publicNativeChange,
   publicStoredNativeChange,
+  removedUnwritableLimitation,
 } from "./change-presentation.mjs";
 import {
   activeInsteadOfValue,
@@ -1044,9 +1045,15 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    return publicNativeChange(change, undefined, {
-      blockActionSnapshotFresh: true,
-    });
+    // Deleted nodes the agent cannot write back are the owner's to hear of
+    // before apply.
+    const [lostNodes] = removedUnwritableLimitation(change);
+    return {
+      ...publicNativeChange(change, undefined, {
+        blockActionSnapshotFresh: true,
+      }),
+      ...(lostNodes ? { tell_owner: lostNodes } : {}),
+    };
   }
 
   async #prepareBlockActionPause(input) {
