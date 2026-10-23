@@ -37,11 +37,17 @@ const homeRef = "spruthub://hub/sim-apartment-01";
 const hallLightOn = `${homeRef}/accessory/12/service/13/characteristic/14`;
 const floorLampOn = `${homeRef}/accessory/16/service/13/characteristic/14`;
 
-async function setup(t, { account: accountFields, savedToken } = {}) {
+// onRequest(request, hub) sees each request as it reaches the hub, before
+// the hub checks its token.
+async function setup(
+  t,
+  { account: accountFields, savedToken, onRequest } = {},
+) {
   // The hub reads the account at each login: a test may change it later.
   const account = { login, password, ...accountFields };
   const hub = await startSimulatedHub(await loadHomeFixture("apartment"), {
     account,
+    onRequest: (request) => onRequest?.(request, hub),
   });
   const directory = await mkdtemp(path.join(tmpdir(), "sprut-session-"));
   const configRoot = path.join(directory, "config");
@@ -195,7 +201,8 @@ test("a session that expires while the server runs is renewed once and the comma
   assert.equal(lampOn(hub, 12), true);
   assert.equal(lampOn(hub, 16), false);
   assert.equal(loginsOf(hub), 2, "one login for the expired session");
-  // Each command reached the home once: the refused attempt changed nothing.
+  // The reads before the commands met the expired session; each command
+  // went out once, with the new session.
   const applied = hub.requests.filter(
     ({ method, error, params }) =>
       method === "characteristic.update" &&
@@ -211,6 +218,76 @@ test("a session that expires while the server runs is renewed once and the comma
   assert.equal(hub.acceptsToken(renewed), true);
   assertNoSecrets(JSON.stringify(result) + (await written()));
 });
+
+// The session expires as the write itself reaches the hub: the hub refuses
+// that write, and it goes again once after the login.
+for (const { method, write } of [
+  {
+    method: "characteristic.update",
+    write: async (client) => {
+      const result = await sendCommands(client, [[hallLightOn, true]]);
+      assert.equal(result.isError, undefined, result.content[0]?.text);
+      assert.deepEqual(
+        result.structuredContent.results.map(({ status }) => status),
+        ["applied"],
+      );
+    },
+  },
+  {
+    method: "room.update",
+    write: async (client) => {
+      const prepared = await client.callTool({
+        name: "prepare_native_change",
+        arguments: {
+          operation: "room_name",
+          target_ref: `${homeRef}/room/7`,
+          value: "Офис",
+          reason: "test",
+        },
+      });
+      assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+      const { change_ref } = prepared.structuredContent;
+      const applied = await client.callTool({
+        name: "apply_native_change",
+        arguments: { change_ref },
+      });
+      assert.equal(applied.isError, undefined, applied.content[0]?.text);
+      const change = await client.callTool({
+        name: "get_native_change",
+        arguments: { change_ref },
+      });
+      assert.equal(change.structuredContent.status, "applied");
+    },
+  },
+]) {
+  test(`a ${method} refused for the expired session is sent again once after one login`, async (t) => {
+    let armed = false;
+    const { hub, client } = await setup(t, {
+      onRequest: (request, simulated) => {
+        if (armed && request.method === method) {
+          armed = false;
+          simulated.expireTokens();
+        }
+      },
+    });
+    const first = await client.callTool({
+      name: "home_overview",
+      arguments: {},
+    });
+    assert.equal(first.isError, undefined, first.content[0]?.text);
+    assert.equal(loginsOf(hub), 1);
+
+    armed = true;
+    await write(client);
+
+    const writes = hub.requests.filter((request) => request.method === method);
+    assert.deepEqual(
+      writes.map(({ error }) => error?.code ?? "carried out"),
+      [-666003, "carried out"],
+    );
+    assert.equal(loginsOf(hub), 2, "one login for the expired session");
+  });
+}
 
 test("a refused login names the account status without credentials and is not repeated", async (t) => {
   const { hub, client, written } = await setup(t, {
