@@ -13,9 +13,10 @@ import {
 import { HomeState } from "./home-state.mjs";
 import {
   groupLamps,
+  incomingLinks,
   lampGroupMark,
   lampGroupMarks,
-  virtualLampOns,
+  virtualLamps,
 } from "./light-group-members.mjs";
 import {
   inspectNativeOption,
@@ -42,8 +43,9 @@ const HUB_TIME_ZONE_TTL_MS = 5 * 60_000;
 // home or its changed accessories, the room list an accessory read asks
 // for, and two more for reads the state did not take.
 const HOME_READ_PASSES = 4;
-// link.list requests a whole read sends at once for the lamp groups: the
-// owner's home has 9 groups, so one round.
+// Virtual lamps a whole read asks link.list about at once: the owner's
+// home has 9 groups, so one round (a group with an offline lamp adds up
+// to 4 more requests of its own).
 const LINK_READS_AT_ONCE = 10;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
@@ -379,16 +381,39 @@ export class SprutHubClient {
   // virtual lamp, LINK_READS_AT_ONCE at a time. A failed read leaves them
   // unknown (null), never empty.
   async #readLampGroups(serial, accessories, deadline) {
-    const ons = virtualLampOns(accessories);
+    const byId = new Map(accessories.map((item) => [item.id, item]));
+    const read = async ({ aId, sId, controls }) => {
+      const links = (cId) =>
+        this.listLinks({ aId, sId, cId }, { serial, deadline });
+      const lamps = groupLamps(await links(controls.On));
+      // What a replacement must have is read only for a group with an
+      // offline lamp: the group's other characteristics that have a link.
+      if (!lamps.some((lamp) => byId.get(lamp.aId)?.online !== true)) {
+        return { group: { aId, sId }, lamps };
+      }
+      const others = Object.entries(controls).filter(([type]) => type !== "On");
+      const linked = await Promise.all(
+        others.map(async ([type, cId]) =>
+          incomingLinks(await links(cId)).length > 0 ? type : null,
+        ),
+      );
+      return {
+        group: { aId, sId },
+        lamps,
+        types: ["On", ...linked.filter(Boolean)],
+      };
+    };
+    const lampsOfVirtual = virtualLamps(accessories);
     const groups = [];
     try {
-      for (let start = 0; start < ons.length; start += LINK_READS_AT_ONCE) {
+      for (
+        let start = 0;
+        start < lampsOfVirtual.length;
+        start += LINK_READS_AT_ONCE
+      ) {
         groups.push(
           ...(await Promise.all(
-            ons.slice(start, start + LINK_READS_AT_ONCE).map(async (on) => ({
-              group: { aId: on.aId, sId: on.sId },
-              lamps: groupLamps(await this.listLinks(on, { serial, deadline })),
-            })),
+            lampsOfVirtual.slice(start, start + LINK_READS_AT_ONCE).map(read),
           )),
         );
       }

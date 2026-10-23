@@ -301,25 +301,36 @@ export function restoreSteps(change) {
   }));
 }
 
-// The On of each lamp of the virtual accessories in accessory.list, whose
-// link.list says whether it is a group: accessory.list has no virtual flag
-// but gives a virtual accessory model "Virtual" (owner hub, 3.0.0, all 9
-// lamp groups, 2026-10-14-light-group-relink).
-export function virtualLampOns(accessories) {
+// The lamp service of each virtual accessory in accessory.list, with its
+// lamp characteristics by type, whose On link.list says whether it is a
+// group: accessory.list has no virtual flag but gives a virtual accessory
+// model "Virtual" (owner hub, 3.0.0, all 9 lamp groups,
+// 2026-10-14-light-group-relink).
+export function virtualLamps(accessories) {
   return accessories.flatMap((accessory) =>
     accessory.model !== "Virtual"
       ? []
       : (accessory.services ?? [])
           .filter(({ type }) => type === "Lightbulb")
           .flatMap((service) => {
-            const on = service.characteristics?.find(
-              (characteristic) => controlType(characteristic) === "On",
-            );
-            return on
-              ? [{ aId: accessory.id, sId: service.sId, cId: on.cId }]
+            const controls = lampTypes(service);
+            return controls.On
+              ? [{ aId: accessory.id, sId: service.sId, controls }]
               : [];
           }),
   );
+}
+
+// A service's lamp characteristics: the cId of each type it has.
+function lampTypes(service) {
+  const types = {};
+  for (const characteristic of service.characteristics ?? []) {
+    const type = controlType(characteristic);
+    if (LAMP_GROUP_TYPES.includes(type) && !Object.hasOwn(types, type)) {
+      types[type] = characteristic.cId;
+    }
+  }
+  return types;
 }
 
 // The lamp services the links of a group's On reach.
@@ -346,7 +357,7 @@ export function lampGroupMarks(catalog, serial) {
     }
   }
   const groups = new Map();
-  for (const { group, lamps } of catalog.lampGroups) {
+  for (const { group, lamps, types } of catalog.lampGroups) {
     if (!catalog.byId.has(group.aId)) continue;
     const found = lamps.map(({ aId }) => catalog.byId.get(aId));
     const offlineRooms = new Set(
@@ -364,16 +375,24 @@ export function lampGroupMarks(catalog, serial) {
             }
           : { exists: false },
       ),
-      ...replacementOf(catalog, serial, offlineRooms, memberOf, rooms),
+      ...replacementOf(
+        catalog,
+        serial,
+        offlineRooms,
+        types ?? ["On"],
+        memberOf,
+        rooms,
+      ),
     });
   }
   return { groups, memberOf };
 }
 
 // A replaced lamp is usually on the hub already, unlinked, in the room of
-// the offline one: the online physical lamps of those rooms in no group.
-// With none, the new lamp still has to be paired.
-function replacementOf(catalog, serial, roomIds, memberOf, rooms) {
+// the offline one: the online physical lamps of those rooms in no group
+// that have every characteristic the group links (types). With none, the
+// new lamp still has to be paired.
+function replacementOf(catalog, serial, roomIds, types, memberOf, rooms) {
   if (roomIds.size === 0) return {};
   const candidates = catalog.accessories.flatMap((accessory) =>
     accessory.online === true &&
@@ -386,7 +405,8 @@ function replacementOf(catalog, serial, roomIds, memberOf, rooms) {
               service.type === "Lightbulb" &&
               !memberOf.has(
                 serviceKey({ aId: accessory.id, sId: service.sId }),
-              ),
+              ) &&
+              types.every((type) => Object.hasOwn(lampTypes(service), type)),
           )
           .map((service) => ({
             name: accessory.name,
