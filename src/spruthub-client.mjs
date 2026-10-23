@@ -3057,8 +3057,11 @@ export class SprutHubClient {
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
     entity.description =
       typeof scenario.desc === "string" ? scenario.desc : null;
-    // Runtime execution error is not editable configuration and must not be
-    // folded into configuration.value or treated as a failed save.
+    // SprutHub's error: the stored code did not compile, or a GLOBAL's code
+    // stopped with an error when the hub ran it at its write; an error while
+    // a BLOCK runs does not set it (2026-10-23-scenario-code 2.8-2.12, 3.7,
+    // 3.8). The code is saved all the same, so it is not folded into
+    // configuration.value.
     entity.execution_error = scenario.error === true;
     entity.summary = await this.#scenarioSummary(
       parsed.serial,
