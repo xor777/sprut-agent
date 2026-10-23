@@ -326,6 +326,26 @@ function walk(node, visit) {
   }
 }
 
+// The scenario numbers a BLOCK validation refused as missing, by the
+// problem validateBlockData reports for them (src/block-validation.mjs).
+export function missingScenarioTargets(error) {
+  if (!(error instanceof SprutHubError) || error.code !== "invalid_block_data")
+    return [];
+  return (error.details?.problems ?? []).flatMap(({ message }) => {
+    const match = /^scenario (.+) does not exist in this home$/.exec(
+      message ?? "",
+    );
+    return match ? [match[1]] : [];
+  });
+}
+
+// Where a scenario a target named is now, after the agent deleted it and
+// its undo created it again.
+export function recreatedTargetNote(deleted) {
+  const ref = `${deleted.home_ref}/scenario/${encodeURIComponent(deleted.recreated_index)}`;
+  return `Scenario ${deleted.target.index} was deleted and the agent's undo created it again as «${deleted.baseline_snapshot.name}» (${ref}) under a new number; to keep this target, point it at that scenario with block_data_update.`;
+}
+
 // What the agent tells the owner before a delete that breaks something.
 export function scenarioDeleteTellOwner(dependencies) {
   if (Object.keys(dependencies).length === 0) return undefined;

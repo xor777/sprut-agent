@@ -227,6 +227,8 @@ import {
   deleteSnapshot,
   highestScenarioNumber,
   isRecreatedCopy,
+  missingScenarioTargets,
+  recreatedTargetNote,
   recreateRequest,
   refuseUndeletable,
   SCENARIO_DELETE,
@@ -1455,6 +1457,28 @@ export class AutomationService {
         ? { logic_assignments: structuredClone(assignments) }
         : {}),
     };
+  }
+
+  // A scenario target that cannot be written back because its scenario was
+  // deleted and the agent's undo created it again under a new number: the
+  // error names where it is now (numbers are not translated).
+  async #withRecreatedTargets(error, homeRef) {
+    const missing = missingScenarioTargets(error);
+    if (missing.length === 0) return error;
+    const recreated = (await this.store.list()).filter(
+      (candidate) =>
+        candidate.kind === SCENARIO_DELETE &&
+        candidate.home_ref === homeRef &&
+        candidate.status === "restored" &&
+        candidate.recreated_index !== undefined &&
+        missing.includes(candidate.target?.index),
+    );
+    if (recreated.length === 0) return error;
+    error.message = [
+      error.message,
+      ...recreated.map((deleted) => recreatedTargetNote(deleted)),
+    ].join(" ");
+    return error;
   }
 
   async #knownBlockPauses(targetRef) {
@@ -6582,11 +6606,15 @@ export class AutomationService {
         // Restore writes the stored original back, so what it keeps from that
         // original passes as stored, like the nodes an edit keeps; bindings,
         // pause controllers and scenario runs are still checked.
-        await validateBlockData(prepared.data, this.client, {
-          editedFrom: change.baseline_snapshot.data,
-          allowedPauses: pauseChanges,
-          scenarioIndex: change.target.index,
-        });
+        try {
+          await validateBlockData(prepared.data, this.client, {
+            editedFrom: change.baseline_snapshot.data,
+            allowedPauses: pauseChanges,
+            scenarioIndex: change.target.index,
+          });
+        } catch (error) {
+          throw await this.#withRecreatedTargets(error, change.home_ref);
+        }
         // Validation reads current records and can outlast a short pause. Rebuild
         // from the immutable baseline immediately afterwards so that such a pause
         // is not revived by the restore write.
