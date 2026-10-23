@@ -504,7 +504,10 @@ test("the simulator refuses unknown methods and foreign tokens without touching 
     serial: hub.serial,
     params: { characteristic: { update: { aId: 16, sId: 13, cId: 14 } } },
   });
-  assert.equal(foreign.error.code, 401);
+  assert.deepEqual(foreign.error, {
+    code: -666003,
+    message: "Incorrect token",
+  });
   // An unknown method may change the home on a live hub, so it counts as a
   // write until it is placed on the read allowlist.
   assert.deepEqual(

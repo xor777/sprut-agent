@@ -47,6 +47,11 @@ export class SprutHubConnection {
   #clientPromise;
   #env;
   #homeSelectionSource;
+  // The login that renews a session the hub refused, by the refused token.
+  #renewal;
+  // When a login the hub asked to delay (ACCOUNT_RESPONSE_TOO_FAST) may be
+  // tried again: each try counts toward the hub's NO_MORE_TRIES block.
+  #loginNotBefore = 0;
   #secrets = new Set();
 
   constructor({ env = process.env } = {}) {
@@ -116,6 +121,11 @@ export class SprutHubConnection {
 
   async #createClient() {
     const setup = credentialSetup(this.#env);
+    // Where the owner set the login: with it in the launch environment the
+    // file is not read.
+    const credentialsAt = hasCompleteExplicitConnection(this.#env)
+      ? "the MCP launch environment"
+      : setup.file;
     if (!hasCompleteExplicitConnection(this.#env)) {
       this.#env = await loadCredentialFile(this.#env, setup);
     }
@@ -149,9 +159,22 @@ export class SprutHubConnection {
     const url = this.#env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL;
     const sessionFile = resolveSessionFile(this.#env);
     const accountSha256 = createHash("sha256").update(login).digest("hex");
+    const account = {
+      url,
+      login,
+      password,
+      timeoutMs,
+      sessionFile,
+      accountSha256,
+      credentialsAt,
+    };
+    const renewSession = (rejectedToken) =>
+      this.#renewSession(rejectedToken, account);
     const saved = await loadSession(sessionFile, { url, accountSha256 });
     if (saved) {
       this.#remember(saved.token);
+      // A saved session the hub no longer accepts is renewed by the client
+      // on its first request.
       const client = new SprutHubClient({
         url,
         token: saved.token,
@@ -159,6 +182,7 @@ export class SprutHubConnection {
         configuredSerial: this.#env.SPRUTHUB_SERIAL,
         cid: saved.cid,
         timeoutMs,
+        renewSession,
       });
       try {
         const catalog = await client.listHomes();
@@ -166,29 +190,11 @@ export class SprutHubConnection {
         return client;
       } catch (error) {
         await client.close();
-        if (
-          !(error instanceof SprutHubError) ||
-          error.code !== "authentication_failed"
-        ) {
-          throw error;
-        }
+        throw error;
       }
     }
 
-    const authenticated = await authenticate({
-      url,
-      login,
-      password,
-      timeoutMs,
-      remember: (...values) => this.#remember(...values),
-    });
-    await saveSession(sessionFile, {
-      version: SESSION_VERSION,
-      url,
-      account_sha256: accountSha256,
-      token: authenticated.token,
-      cid: authenticated.cid,
-    });
+    const authenticated = await this.#logIn(account);
     const serial = selectSerial(authenticated.homes, this.#env.SPRUTHUB_SERIAL);
     return new SprutHubClient({
       url,
@@ -198,7 +204,63 @@ export class SprutHubConnection {
       availableHomeCount: authenticated.homes.length,
       cid: authenticated.cid,
       timeoutMs,
+      renewSession,
     });
+  }
+
+  // One login per refused session: the requests that lost it wait for the
+  // same login. A login the hub refused is not tried again in this process,
+  // as the hub blocks an account after repeated attempts
+  // (ACCOUNT_RESPONSE_NO_MORE_TRIES); one cut short by the connection is.
+  #renewSession(rejectedToken, account) {
+    if (this.#renewal?.rejectedToken !== rejectedToken) {
+      const renewal = { rejectedToken, login: this.#logIn(account) };
+      this.#renewal = renewal;
+      renewal.login.catch((error) => {
+        if (this.#renewal === renewal && isRetryableConnectionError(error)) {
+          this.#renewal = undefined;
+        }
+      });
+    }
+    return this.#renewal.login;
+  }
+
+  async #logIn({
+    url,
+    login,
+    password,
+    timeoutMs,
+    sessionFile,
+    accountSha256,
+    credentialsAt,
+  }) {
+    const waitMs = this.#loginNotBefore - Date.now();
+    if (waitMs > 0) throw authenticationDelayed(Math.ceil(waitMs / 1000));
+    let authenticated;
+    try {
+      authenticated = await authenticate({
+        url,
+        login,
+        password,
+        timeoutMs,
+        credentialsAt,
+        remember: (...values) => this.#remember(...values),
+      });
+    } catch (error) {
+      const delay = error.details?.retry_after_seconds;
+      if (error.code === "authentication_delayed" && delay) {
+        this.#loginNotBefore = Date.now() + delay * 1000;
+      }
+      throw error;
+    }
+    await saveSession(sessionFile, {
+      version: SESSION_VERSION,
+      url,
+      account_sha256: accountSha256,
+      token: authenticated.token,
+      cid: authenticated.cid,
+    });
+    return authenticated;
   }
 
   #remember(...values) {
@@ -210,7 +272,14 @@ export class SprutHubConnection {
   }
 }
 
-async function authenticate({ url, login, password, timeoutMs, remember }) {
+async function authenticate({
+  url,
+  login,
+  password,
+  timeoutMs,
+  credentialsAt,
+  remember,
+}) {
   const deadline = Date.now() + timeoutMs;
   const cid = randomUUID();
   const socket = await connect(url, deadline);
@@ -244,7 +313,7 @@ async function authenticate({ url, login, password, timeoutMs, remember }) {
         );
         return { cid, token: account.token, homes };
       }
-      rejectAccountStatus(account);
+      rejectAccountStatus(account, credentialsAt);
       const question = account.question;
       if (!question || typeof question.type !== "string") {
         throw incompatibleAuthResponse();
@@ -278,28 +347,53 @@ async function authenticate({ url, login, password, timeoutMs, remember }) {
   }
 }
 
-function rejectAccountStatus(account) {
+// What the owner does about each account status that ends a login
+// (Account.proto, AccountResponseStatus).
+const ACCOUNT_REFUSALS = {
+  ACCOUNT_RESPONSE_FAILED: [
+    "check_credentials",
+    (where) =>
+      `SprutHub rejected the login or password. Check SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD in ${where}`,
+  ],
+  ACCOUNT_RESPONSE_FORMAT: [
+    "check_credentials",
+    (where) =>
+      `SprutHub did not accept the format of the login. Check SPRUTHUB_LOGIN in ${where}`,
+  ],
+  ACCOUNT_RESPONSE_NOT_CONFIRMED: [
+    "confirm_login",
+    () =>
+      "SprutHub has not confirmed this account or login yet. Confirm it as SprutHub asks, for example from its e-mail",
+  ],
+  ACCOUNT_RESPONSE_NOT_CONNECTED: [
+    "check_credentials",
+    (where) =>
+      `SprutHub reports this account as not connected. Check in SprutHub that the account in ${where} has access to the hub`,
+  ],
+  ACCOUNT_RESPONSE_NO_MORE_TRIES: [
+    "retry_login_later",
+    () =>
+      "SprutHub blocked logins to this account after too many attempts. Wait before logging in again",
+  ],
+};
+
+function rejectAccountStatus(account, credentialsAt) {
   if (account.status === "ACCOUNT_RESPONSE_SUCCESS") return;
   if (account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
     throw authenticationDelayed(account.question?.delay ?? 0);
   }
-  if (
-    [
-      "ACCOUNT_RESPONSE_FAILED",
-      "ACCOUNT_RESPONSE_NOT_CONFIRMED",
-      "ACCOUNT_RESPONSE_FORMAT",
-      "ACCOUNT_RESPONSE_NOT_CONNECTED",
-      "ACCOUNT_RESPONSE_NO_MORE_TRIES",
-    ].includes(account.status)
-  ) {
-    throw new SprutHubError(
-      "authentication_failed",
-      "SprutHub rejected the supplied account credentials.",
-      "check_credentials",
-      { capability_status: "insufficient_access" },
-    );
-  }
-  throw incompatibleAuthResponse();
+  const refusal = ACCOUNT_REFUSALS[account.status];
+  if (!refusal) throw incompatibleAuthResponse();
+  const [action, advice] = refusal;
+  throw new SprutHubError(
+    "authentication_failed",
+    `${advice(credentialsAt)}, then restart the MCP application.`,
+    action,
+    {
+      capability_status: "insufficient_access",
+      account_status: account.status,
+    },
+  );
 }
 
 function unsupportedQuestion(type) {

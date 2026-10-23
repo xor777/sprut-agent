@@ -28,6 +28,9 @@ const fixturesDirectory = path.join(
 // does not implement, is recorded as a write: an unknown native method may
 // change a live home, so a grader must not take it for a read.
 export const READ_METHODS = new Set([
+  // The login (startSimulatedHub's account) changes nothing in the home.
+  "account.auth",
+  "account.answer",
   "hub.list",
   "server.ping",
   "room.list",
@@ -70,6 +73,8 @@ export function isWriteMethod(method) {
 const OBSERVED = "observed";
 const SCHEMA_ONLY = "schema_only";
 export const METHOD_EVIDENCE = {
+  "account.auth": [OBSERVED, "2026-07-27; the owner's login"],
+  "account.answer": [OBSERVED, "2026-07-27; the owner's login"],
   "hub.list": [OBSERVED, "2026-09-09-home-entities"],
   "server.ping": [SCHEMA_ONLY],
   "room.list": [OBSERVED, "2026-09-09-room-reading"],
@@ -1099,6 +1104,16 @@ async function loadFixtureFile(file) {
 // onRequest({method, params}) is called as each request arrives, before
 // it waits or is handled: a test can see what the client had saved by the
 // time the request left it.
+// A request whose token the hub does not hold is refused with -666003
+// "Incorrect token", as the owner's hub refused an expired saved session
+// (2026-10-23). account {login, password, status} lets a client log in:
+// account.auth asks for the e-mail, then the password, and the right pair
+// gets a new token, the flow the login tests follow; status, when set, is
+// the account status answered after the password instead of a token
+// (ACCOUNT_RESPONSE_NO_MORE_TRIES and the like); ACCOUNT_RESPONSE_TOO_FAST
+// is answered to account.auth itself with a question delay of account.delay
+// seconds, as the login tests' hub does. hub.expireTokens() makes
+// every token held so far incorrect, as an expired session.
 export async function startSimulatedHub(
   fixture,
   {
@@ -1111,9 +1126,12 @@ export async function startSimulatedHub(
     eventEveryMs,
     latencyMs,
     onRequest,
+    account,
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
+  const tokens = new Set([token]);
+  const logins = { account, tokens, issued: 0, stages: new Map() };
   const initialState = structuredClone(state);
   state.faults = {
     delayedReadback: structuredClone(faults.delayedReadback ?? []),
@@ -1190,7 +1208,7 @@ export async function startSimulatedHub(
         reply: handleMessage(
           state,
           requests,
-          token,
+          logins,
           raw,
           refusals,
           connectionId,
@@ -1262,7 +1280,7 @@ export async function startSimulatedHub(
       if (
         requests.length > recorded &&
         requests.at(-1).serial === state.hub.serial &&
-        requests.at(-1).error?.code !== 401
+        requests.at(-1).error?.code !== INCORRECT_TOKEN
       ) {
         receivesEvents.add(socket);
       }
@@ -1447,6 +1465,11 @@ export async function startSimulatedHub(
       for (const client of server.clients) client.terminate();
       await Promise.all(closing);
     },
+    // Every token held so far, the one the hub started with and those of
+    // logins, is incorrect from now on.
+    expireTokens: () => tokens.clear(),
+    // Whether the hub holds this token now.
+    acceptsToken: (value) => tokens.has(value),
     // Applies delayed writes now, as the hub would have by the time a
     // grader looks at the home.
     settle: () => {
@@ -1494,13 +1517,56 @@ export async function startSimulatedHub(
   };
 }
 
+// One step of the login of startSimulatedHub's account, by connection.
+function accountReply(logins, message, connection) {
+  const { account, stages } = logins;
+  const operation = message.params.account.auth ? "auth" : "answer";
+  const answer = (value) => ({
+    id: message.id,
+    result: { account: { [operation]: value } },
+  });
+  const question = (type) =>
+    answer({ status: "ACCOUNT_RESPONSE_SUCCESS", question: { type } });
+  if (operation === "auth" && account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
+    return answer({
+      status: account.status,
+      question: { type: "QUESTION_TYPE_EMAIL", delay: account.delay ?? 0 },
+    });
+  }
+  if (operation === "auth") {
+    stages.set(connection, "email");
+    return question("QUESTION_TYPE_EMAIL");
+  }
+  const data = message.params.account.answer?.data;
+  const stage = stages.get(connection);
+  stages.delete(connection);
+  if (stage === "email" && data === account.login) {
+    stages.set(connection, "password");
+    return question("QUESTION_TYPE_PASSWORD");
+  }
+  if (stage === "password" && account.status) {
+    return answer({ status: account.status });
+  }
+  if (stage === "password" && data === account.password) {
+    logins.issued += 1;
+    const issued = `simulated-session-${logins.issued}`;
+    logins.tokens.add(issued);
+    return answer({ status: "ACCOUNT_RESPONSE_SUCCESS", token: issued });
+  }
+  return answer({ status: "ACCOUNT_RESPONSE_FAILED" });
+}
+
 // A queued refusal that loses the request instead (loseNext).
 const LOST_REQUEST = Symbol("lost request");
+
+// The owner's hub refused a token it no longer held with this code and
+// "Incorrect token" (2026-10-23).
+const INCORRECT_TOKEN = -666003;
 
 function handleMessage(
   state,
   requests,
-  token,
+  logins,
   raw,
   refusals,
   connection = null,
@@ -1528,8 +1594,11 @@ function handleMessage(
     entry.error = { code: error.code, message: error.message };
     return { id: message?.id ?? null, error: entry.error };
   };
-  if (message?.token !== token) {
-    return fail(new SimulatorError(401, "Unauthorized"));
+  if (logins.account && method?.startsWith("account.")) {
+    return accountReply(logins, message, connection);
+  }
+  if (!logins.tokens.has(message?.token)) {
+    return fail(new SimulatorError(INCORRECT_TOKEN, "Incorrect token"));
   }
   if (method === null) {
     return fail(new SimulatorError(-32600, "Invalid request"));

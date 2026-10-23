@@ -194,6 +194,7 @@ export class SprutHubClient {
   // Listeners of the events the hub pushes (onNativeEvent).
   #nativeEventListeners = new Set();
   #pending = new Map();
+  #renewSession;
   #socket;
   #startingObservationClient;
   #writeGeneration = 0;
@@ -206,6 +207,10 @@ export class SprutHubClient {
     availableHomeCount = null,
     cid,
     timeoutMs = 10_000,
+    // (rejectedToken) => Promise<{token, cid}>: a new session from the
+    // account's login, for a client whose session the hub may stop
+    // accepting. Without it a refused session stays an error.
+    renewSession,
   }) {
     if (!url || !token || !cid) {
       throw new SprutHubError(
@@ -224,6 +229,7 @@ export class SprutHubClient {
     this.#availableHomeCount = availableHomeCount;
     this.cid = cid;
     this.timeoutMs = timeoutMs;
+    this.#renewSession = renewSession;
   }
 
   async listHomes(deadline = Date.now() + this.timeoutMs) {
@@ -728,6 +734,7 @@ export class SprutHubClient {
       serial: this.serial,
       cid: this.cid,
       timeoutMs: this.timeoutMs,
+      renewSession: this.#renewSession,
     });
     this.#startingObservationClient = candidate;
     try {
@@ -3604,7 +3611,32 @@ export class SprutHubClient {
     }
   }
 
+  // A session the hub refuses is renewed by one login, and the request goes
+  // again once: the hub refused it before carrying it out. The requests the
+  // old session lost share that login; a failed login is the answer.
   async #send(params, deadline, serial, onReply) {
+    const token = this.token;
+    try {
+      return await this.#sendOnce(params, deadline, serial, onReply);
+    } catch (error) {
+      if (!this.#renewSession || error.code !== "authentication_failed") {
+        throw error;
+      }
+      if (this.token === token) {
+        const renewed = await this.#renewSession(token);
+        if (this.token === token) {
+          this.token = renewed.token;
+          this.cid = renewed.cid;
+          // The new session goes over a new connection, as after a login
+          // at start.
+          if (this.#socket) this.#retire(this.#socket);
+        }
+      }
+      return this.#sendOnce(params, deadline, serial, onReply);
+    }
+  }
+
+  async #sendOnce(params, deadline, serial, onReply) {
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -3770,7 +3802,9 @@ export class SprutHubClient {
 
     if (message.error) {
       let error;
-      if (message.error.code === 401) {
+      // The owner's hub refused an expired session with -666003 "Incorrect
+      // token" (2026-10-23).
+      if (message.error.code === 401 || message.error.code === -666003) {
         error = new SprutHubError(
           "authentication_failed",
           "SprutHub rejected the configured credentials.",
