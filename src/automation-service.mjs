@@ -294,6 +294,16 @@ const ROOM_HISTORY_HINT =
   "A room ref lists only changes of the room itself (its name, its creation). Changes of devices in it are under each device's accessory ref, or in the history without entity_ref.";
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
+// An undone deletion whose create went out and was not refused: a refusal
+// leaves the deletion applied, and the next undo sends the create again.
+function recreationSent(change) {
+  return (
+    nativeIntentDirection(change) === "restore" &&
+    change.native_write_sent === true &&
+    change.status !== "applied"
+  );
+}
+
 export class AutomationService {
   #writeSequence = Promise.resolve();
 
@@ -1136,9 +1146,7 @@ export class AutomationService {
 
   async #applyVirtualDeviceDelete(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
-    if (nativeIntentDirection(change) === "restore") {
-      return this.#getVirtualDeviceDelete(change);
-    }
+    if (recreationSent(change)) return this.#getVirtualDeviceDelete(change);
     const id = change.baseline_snapshot.id;
     const accessory = await this.client.getAccessoryOrNull(id);
     if (accessory === null) {
@@ -1182,7 +1190,7 @@ export class AutomationService {
     if (change.native_write_sent !== true) {
       return publicStoredNativeChange(change);
     }
-    if (nativeIntentDirection(change) === "restore") {
+    if (recreationSent(change)) {
       return this.#restoreVirtualDeviceDelete(change, { readOnly: true });
     }
     let accessory;
@@ -1231,10 +1239,7 @@ export class AutomationService {
             last_verification: freshVerification("recreated_device_observed"),
           });
     }
-    if (
-      nativeIntentDirection(change) === "restore" &&
-      change.native_write_sent
-    ) {
+    if (recreationSent(change)) {
       return this.#recordUnknownVirtualCreation(
         change,
         "uncertain",
