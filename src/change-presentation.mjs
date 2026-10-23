@@ -759,6 +759,9 @@ export function publicNativeChange(
     reason: change.reason,
     target_ref: change.target_ref,
     ...(change.window_ref ? { window_ref: change.window_ref } : {}),
+    ...(change.bridge_export
+      ? { bridge_export: structuredClone(change.bridge_export) }
+      : {}),
     diff: {
       value: {
         from: shownValue(change.baseline_value).value,

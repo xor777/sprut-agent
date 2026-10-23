@@ -20,6 +20,7 @@ export function restoreItemBase(change) {
     ...(typeof change.target_ref === "string"
       ? { target_ref: change.target_ref }
       : {}),
+    ...(change.bridge_export ? { bridge: change.bridge_export.bridge } : {}),
     ...(change.kind === "characteristic_value" && change.contract?.type
       ? { type: change.contract.type }
       : {}),
@@ -284,9 +285,9 @@ export function changeName(change) {
   }
 }
 
-// Settings whose values are short and safe to show in a history line;
-// options (which may hold codes) and long texts are read with
-// get_native_change.
+// Settings whose values are short and safe to show in a history line, and
+// a bridge export (true or false); options (which may hold codes) and long
+// texts are read with get_native_change.
 export const SUMMARY_VALUE_KINDS = new Set([
   "characteristic_value",
   "characteristic_notify",
@@ -299,7 +300,7 @@ export const SUMMARY_VALUE_KINDS = new Set([
 
 export function summaryValue(change) {
   if (
-    !SUMMARY_VALUE_KINDS.has(change.kind) ||
+    !(SUMMARY_VALUE_KINDS.has(change.kind) || change.bridge_export) ||
     !change.baseline_value ||
     !change.requested_value
   ) {

@@ -247,7 +247,7 @@ server.registerTool(
         )
         .default([])
         .describe(
-          "Extra parts, each accounted in include_resolution: configuration (a scenario's BLOCK JSON or code), options (characteristic or logic), relations (BLOCK scenarios acting on an accessory or characteristic, code scenarios naming it, its logic and links), physical_configuration and diagnostics (device window), children (an extension's devices or a bridge's exports), bridges (whether HomeKit, Alice or Google export an accessory; read only), sdk (the home's scenario SDK, read before LOGIC code).",
+          "Extra parts, each accounted in include_resolution: configuration (a scenario's BLOCK JSON or code), options (characteristic or logic), relations (BLOCK scenarios acting on an accessory or characteristic, code scenarios naming it, its logic and links), physical_configuration and diagnostics (device window), children (an extension's devices or a bridge's exports), bridges (whether HomeKit, Alice or Google export an accessory; window_option on a service's option_key in window_ref changes it), sdk (the home's scenario SDK, read before LOGIC code).",
         ),
       ...pageInputs,
     },
@@ -350,7 +350,7 @@ server.registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once). Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group.",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once). Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group.",
         ),
       target_ref: z
         .string()

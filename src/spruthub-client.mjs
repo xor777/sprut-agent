@@ -2278,13 +2278,13 @@ export class SprutHubClient {
   // The accessory's export to each bridge (HomeKit, Yandex, Google): a
   // bridge lists one child per accessory it can export, with the accessory
   // id as its id, in main when exported and in notConnected when not; the
-  // child's window has a CHECKBOX s:<sId> per exportable service, true when
-  // exported. Both read on a bridge that does not run too
-  // (2026-10-13-wave4-contracts 3.2, 3.3). A bridge's list is read whole
-  // (16-18 KB on the owner's hub): the hub's answer for one child of a
-  // bridge that cannot export it was not observed. The window is read only
-  // where the accessory is exported: a notConnected child's services were
-  // all false.
+  // child's window has a CHECKBOX s:<sId> per service that bridge can
+  // export, true when exported, and window_option on it changes the export.
+  // Both read on a bridge that does not run too (2026-10-13-wave4-contracts
+  // 3.2, 3.3; 2026-10-14-bridge-export-write 3-8, 12). A bridge's list is
+  // read whole (16-18 KB on the owner's hub). The window of every bridge
+  // that lists the accessory is read: a service without a checkbox there
+  // is one that bridge does not export.
   async #readAccessoryBridges(serial, accessory, deadline) {
     const { extensions } = await this.nativeExtensions(serial, deadline);
     const childId = String(accessory.id);
@@ -2325,11 +2325,16 @@ export class SprutHubClient {
           const child = children.find(({ id }) => id === childId);
           if (!child) return { ...entry, exported: false, exportable: false };
           const exported = bridgeChildExported(child);
-          if (exported !== true) return { ...entry, exported };
+          const listed = {
+            ...entry,
+            exported,
+            ...(typeof child.optionsWindow === "string" && child.optionsWindow
+              ? { window_ref: windowRef(serial, child.optionsWindow) }
+              : {}),
+          };
           try {
             return {
-              ...entry,
-              exported,
+              ...listed,
               services: await this.#readBridgeServices(
                 serial,
                 accessory,
@@ -2339,18 +2344,19 @@ export class SprutHubClient {
             };
           } catch (error) {
             if (!(error instanceof SprutHubError)) throw error;
-            return { ...entry, exported, services_error_code: error.code };
+            return { ...listed, services_error_code: error.code };
           }
         }),
     );
   }
 
-  // Which of these options of one window set what a bridge exports, and
-  // the read of that export; null when none. A bridge's child is an
-  // accessory, its id the accessory id, and its window
-  // <extensionKey with / for :>/Child/<aId>/ holds that accessory's export,
-  // all of its options; the bridge's own window decides with
-  // AutoAddNewAccessory whether a new accessory is exported
+  // The bridge a window belongs to, and which of these options of it stay
+  // unwritten; null for any other window. A bridge's child is an accessory,
+  // its id the accessory id, and its window
+  // <extensionKey with / for :>/Child/<aId>/ holds that accessory's export:
+  // its s:<sId> checkboxes are written (2026-10-14-bridge-export-write), its
+  // groups are not. The bridge's own window decides with
+  // AutoAddNewAccessory whether a new accessory is exported: not written
   // (2026-10-13-wave4-contracts 3.1-3.4). Only a window of that form or
   // that option costs the list of extensions: a device's window, under its
   // controller's /Child/, is keyed by the device's own id.
@@ -2362,12 +2368,17 @@ export class SprutHubClient {
     for (const extension of extensions) {
       if (extension.bundle_type !== "BRIDGE") continue;
       if (child?.[1] === extension.key.replaceAll(":", "/")) {
+        const aId = Number(child[2]);
         return {
-          keys: new Set(optionKeys),
+          extension,
+          aId,
+          withheld: new Set(
+            optionKeys.filter((key) => !BRIDGE_EXPORT_OPTION.test(key)),
+          ),
           next: {
             tool: "get_entity",
             arguments: {
-              entity_ref: accessoryRef(serial, Number(child[2])),
+              entity_ref: accessoryRef(serial, aId),
               include: ["bridges"],
             },
           },
@@ -2378,7 +2389,7 @@ export class SprutHubClient {
         extension.options_window_ref === windowRef(serial, windowKey)
       ) {
         return {
-          keys: new Set([BRIDGE_AUTO_ADD_OPTION]),
+          withheld: new Set([BRIDGE_AUTO_ADD_OPTION]),
           next: {
             tool: "get_entity",
             arguments: { entity_ref: extension.ref, include: ["children"] },
@@ -2411,27 +2422,36 @@ export class SprutHubClient {
         "SprutHub returned incomplete bridge window data.",
       );
     }
-    return window.options.flatMap((option) => {
-      const match = /^s:(\d+)$/.exec(option?.key ?? "");
-      if (!match || option.inputType !== "CHECKBOX") return [];
-      const sId = Number(match[1]);
-      const service = accessory.services?.find(
-        (candidate) => candidate.sId === sId,
-      );
-      const value = option.value?.boolValue;
-      return [
-        {
-          ref: serviceRef(serial, accessory.id, sId),
-          name:
-            service?.name ??
-            (typeof option.name === "string"
-              ? redactSensitiveText(option.name)
-              : null),
+    // Every service but the accessory information, in the accessory's
+    // order; the hub has no checkbox without a service (2026-10-14-bridge-
+    // export-write 12).
+    const checkboxes = new Map(
+      window.options
+        .filter(
+          (option) =>
+            option?.inputType === "CHECKBOX" &&
+            BRIDGE_EXPORT_OPTION.test(option.key ?? ""),
+        )
+        .map((option) => [option.key, option]),
+    );
+    return (accessory.services ?? [])
+      .filter(({ type }) => type !== "AccessoryInformation")
+      .map((service) => {
+        const optionKey = `s:${service.sId}`;
+        const option = checkboxes.get(optionKey);
+        const shown = {
+          ref: serviceRef(serial, accessory.id, service.sId),
+          name: service.name ?? null,
+        };
+        if (!option) return { ...shown, exportable: false };
+        const value = option.value?.boolValue;
+        return {
+          ...shown,
+          option_key: optionKey,
           // A value the hub did not give is unknown, not false.
           exported: typeof value === "boolean" ? value : null,
-        },
-      ];
-    });
+        };
+      });
   }
 
   async #readRelations(serial, accessory, services, characteristic, deadline) {
@@ -3352,9 +3372,10 @@ export class SprutHubClient {
     };
   }
 
-  // A bridge's export is read but not offered for writing, as window_option
-  // refuses it. When the extensions cannot be read the offer stays: the
-  // contract reads them again and refuses without them.
+  // A bridge's own settings and the groups of its child window are read
+  // but not offered for writing, as window_option refuses them. When the
+  // extensions cannot be read the offer stays: the contract reads them
+  // again and refuses without them.
   async #withholdBridgeExportWrites(parsed, normalized, deadline) {
     const writable = normalized.physical_configuration.options.filter(
       (option) => option.native_change?.supported === true,
@@ -3373,7 +3394,7 @@ export class SprutHubClient {
       return;
     }
     for (const option of writable) {
-      if (!bridgeExport?.keys.has(option.key)) continue;
+      if (!bridgeExport?.withheld.has(option.key)) continue;
       option.native_change = {
         native_write: option.native_change.native_write,
         supported: false,
@@ -4849,24 +4870,26 @@ const BRIDGE_EXPORTED_SPACE = "main";
 
 // A bridge serves its export only while it runs; one that is NOT_LOADED or
 // off keeps the setting (2026-10-13-wave4-contracts 3.1, 3.3).
-function bridgeRunning({ state, enabled }) {
+export function bridgeRunning({ state, enabled }) {
   return state === "LOADED" && enabled === true;
 }
 
-const BRIDGE_NOT_RUNNING =
+export const BRIDGE_NOT_RUNNING =
   "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.";
 const BRIDGE_LISTS_NOTHING =
   "The bridge lists no accessories, so whether it exports or can export this one is unknown; the owner can check the bridge in the SprutHub app.";
 
 const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
+const BRIDGE_EXPORT_OPTION = /^s:\d+$/;
 const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
 
-// Writing a bridge's export was never checked on a hub
-// (2026-10-13-wave4-contracts, limitations): it is read, not written.
+// Only a service's checkbox in a bridge child's window was written on a
+// hub (2026-10-14-bridge-export-write); a bridge's own settings and the
+// child window's groups are read, not written.
 export function bridgeExportUnverified(next) {
   return new SprutHubError(
     BRIDGE_EXPORT_UNVERIFIED,
-    "This option sets what a bridge (HomeKit, Yandex Alice, Google) exports. Changing a bridge's export has not been verified on a SprutHub hub yet, so nothing was prepared or sent; the owner can change it in the SprutHub app.",
+    "This option is a bridge's own setting (HomeKit, Yandex Alice, Google), not a service's export. Changing it has not been verified on a SprutHub hub, so nothing was prepared or sent; the owner can change it in the SprutHub app. A service's export is changed by its option_key from get_entity include bridges.",
     "get_entity",
     { next },
   );

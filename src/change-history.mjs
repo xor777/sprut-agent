@@ -42,6 +42,7 @@ export function changeSummary(change) {
     operation: change.kind,
     ...described,
     target_ref: change.target_ref,
+    ...(change.bridge_export ? { bridge: change.bridge_export.bridge } : {}),
     ...(value ? { value } : {}),
     recorded_status: change.status,
     ...(change.kind === "block_action_pause"
@@ -157,6 +158,11 @@ export function nativeAffectedRefs(change, homeRef) {
   if (isNativeValueChange(change)) {
     if (typeof change.window_ref === "string") refs.push(change.window_ref);
     refs.push(...canonicalAncestors(refs[0]));
+    // A bridge export is the service's and its accessory's.
+    if (change.bridge_export) {
+      const { service_ref: ref } = change.bridge_export;
+      refs.push(ref, ref.replace(/\/service\/\d+$/, ""));
+    }
   }
   if (change.kind === "accessory_placement") {
     refs.push(

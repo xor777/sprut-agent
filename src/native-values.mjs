@@ -33,12 +33,16 @@ import {
 } from "./native-option-contract.mjs";
 import { characteristicNotificationServices } from "./scenario-notifications.mjs";
 import {
+  BRIDGE_NOT_RUNNING,
   bridgeExportUnverified,
+  bridgeRunning,
   characteristicNotifyOffered,
   characteristicNotifyOn,
   HUB_TRANSPORT_ERROR_CODES,
   isSensitiveNativeNode,
   SprutHubError,
+  sanitizeNativeData,
+  serviceRef,
 } from "./spruthub-client.mjs";
 
 // Characteristics whose value is a setting rather than a momentary command:
@@ -240,6 +244,8 @@ export const NATIVE_VALUE_KINDS = {
     },
     ownerConflict: scenarioWindowOwnerConflict,
     limitations: windowOptionLimitations,
+    notes: ({ fields }) =>
+      fields.bridge_export ? { bridge_export: fields.bridge_export } : {},
   },
   logic_active: {
     restoration: scalarValueRestoration,
@@ -726,30 +732,129 @@ export async function inspectWindowOption(service, input) {
       }),
     };
   }
+  assertWindowOptionWritable(owner.windowKey);
+  const bridge =
+    typeof input.option_key === "string" && input.option_key.length > 0
+      ? await refuseBridgeExportWrite(
+          service,
+          owner.windowKey,
+          input.option_key,
+        )
+      : null;
+  if (bridge?.extension) {
+    const { option, bridgeExport, targetName } = await readBridgeExportOption(
+      service,
+      bridge,
+      owner.windowKey,
+      input.option_key,
+    );
+    return {
+      fields: {
+        option_key: input.option_key,
+        target: owner,
+        bridge_export: bridgeExport,
+        target_name: targetName,
+      },
+      ...windowOptionState(option),
+    };
+  }
   const option = await readWindowOption(
     service.client,
     owner,
     input.option_key,
   );
   await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
-  await refuseBridgeExportWrite(service, owner.windowKey, option.key);
   return {
     fields: { option_key: input.option_key, target: owner },
     ...windowOptionState(option),
   };
 }
 
-// A bridge's export is read, not written (bridgeExportUnverified): the
-// contract and prepare refuse it, and so do apply and restore of a change an
-// earlier version journaled before they did.
+// A bridge's own settings and its child window's groups are read, not
+// written (bridgeExportUnverified): the contract and prepare refuse them,
+// and so do apply and restore of a change an earlier version journaled.
+// Returns the window's bridge, if any.
 export async function refuseBridgeExportWrite(service, windowKey, optionKey) {
-  const bridgeExport = await service.client.bridgeExportOptions(
+  const bridge = await service.client.bridgeExportOptions(
     service.client.selectedSerial(),
     windowKey,
     [optionKey],
     Date.now() + service.client.timeoutMs,
   );
-  if (bridgeExport) throw bridgeExportUnverified(bridgeExport.next);
+  if (bridge?.withheld.has(optionKey))
+    throw bridgeExportUnverified(bridge.next);
+  return bridge;
+}
+
+// A service's checkbox s:<sId> in a bridge child's window, with what the
+// agent tells the owner: which device, service and bridge, and whether the
+// bridge runs. A bridge that does not list the accessory has no such
+// window, and one that does not export a service has no checkbox for it
+// (2026-10-14-bridge-export-write 11-13): both are refused before
+// anything is sent.
+async function readBridgeExportOption(service, bridge, windowKey, optionKey) {
+  const { extension, aId, next } = bridge;
+  const serial = service.client.selectedSerial();
+  const accessory = await service.client.getAccessory(aId);
+  const device = sanitizeNativeData(accessory.name);
+  const bridgeName = sanitizeNativeData(extension.name);
+  let window;
+  try {
+    window = await service.client.getWindow(windowKey);
+  } catch (error) {
+    if (
+      !(error instanceof SprutHubError) ||
+      error.protocolErrorCode !== -32603
+    ) {
+      throw error;
+    }
+    const { children } = await service.client.nativeExtensionChildren(
+      serial,
+      extension.key,
+      Date.now() + service.client.timeoutMs,
+    );
+    if (children.some(({ id }) => id === String(aId))) throw error;
+    throw new SprutHubError(
+      "bridge_export_unavailable",
+      `${bridgeName} does not list ${device}, so it cannot export it. Nothing was sent.`,
+      "get_entity",
+      { next },
+    );
+  }
+  const sId = Number(optionKey.slice(2));
+  const target = accessory.services?.find((entry) => entry.sId === sId);
+  const options = window.options.filter(({ key }) => key === optionKey);
+  if (!target || options.length === 0) {
+    const named = target ? sanitizeNativeData(target.name) : optionKey;
+    throw new SprutHubError(
+      "bridge_service_not_exportable",
+      `${bridgeName} has no checkbox for ${named} of ${device}: this bridge does not export that service. Nothing was sent.`,
+      "get_entity",
+      { next },
+    );
+  }
+  if (options.length > 1) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned the selected window option more than once.",
+      "get_entity",
+    );
+  }
+  const serviceName = sanitizeNativeData(target.name);
+  const running = bridgeRunning(extension);
+  return {
+    option: options[0],
+    targetName: `${device} / ${serviceName}`,
+    bridgeExport: {
+      device,
+      service: serviceName,
+      service_ref: serviceRef(serial, aId, sId),
+      bridge: bridgeName,
+      bridge_ref: extension.ref,
+      running,
+      ...(running ? {} : { limitation: BRIDGE_NOT_RUNNING }),
+    },
+  };
 }
 
 export async function prepareWindowOption(service, input) {
@@ -1022,6 +1127,11 @@ export async function scenarioWindowOwnerConflict(service, change) {
 }
 
 export function windowOptionLimitations(change) {
+  if (change.bridge_export) {
+    return [
+      "Window readback confirms the export SprutHub stored; what the assistant's app shows is not observed from the hub.",
+    ];
+  }
   if (change.owner_kind !== "scenario") {
     return [
       "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
