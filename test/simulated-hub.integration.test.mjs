@@ -2089,3 +2089,29 @@ test("the simulator announces renames, moves and deletions with the frames the o
     { room: { event: "EVENT_REMOVE", rooms: [{ id: 30 }] } },
   ]);
 });
+
+// An evaluation saves the hub state after the run; a GLOBAL that put a
+// function in global must not break that.
+test("the state of a hub whose GLOBAL assigned a function exports, and its error flag follows the code", async () => {
+  const hub = await startSimulatedHub(await loadHomeFixture("color-scenes"));
+  try {
+    const write = (data) =>
+      hub.request({ scenario: { update: { index: "80", data } } });
+    const stored = () =>
+      hub.state.scenarios.find(({ index }) => index === "80");
+    assert.equal(
+      write("global.answer = function () { return 42; };").error,
+      undefined,
+    );
+    assert.equal(stored().error, false);
+    assert.doesNotThrow(() => hub.exportState());
+    write("global.answer = function ( {");
+    assert.equal(stored().error, true);
+    write('throw new Error("boom");');
+    assert.equal(stored().error, true);
+    write("global.answer = 43;");
+    assert.equal(stored().error, false);
+  } finally {
+    await hub.close();
+  }
+});

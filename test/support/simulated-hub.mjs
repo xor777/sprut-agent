@@ -3790,14 +3790,20 @@ function logicInfo(source) {
 // object of this process; log lines are collected inside. error is true
 // while the stored code did not run through; the message reaches the log
 // only for a scenario that is on (3.7, 3.8). The simulator runs newer
-// JavaScript than the hub's Nashorn (section 4).
+// JavaScript than the hub's Nashorn (section 4). The shared global object
+// lives beside the state, not in it: it holds functions, and the state is
+// cloned (exportState).
+const scriptGlobals = new WeakMap();
+
 function runGlobalCode(state, scenario) {
-  state.scriptGlobal ??= vm.runInContext(
-    "({})",
-    vm.createContext(Object.create(null)),
-  );
+  if (!scriptGlobals.has(state)) {
+    scriptGlobals.set(
+      state,
+      vm.runInContext("({})", vm.createContext(Object.create(null))),
+    );
+  }
   const context = vm.createContext(Object.create(null));
-  context.global = state.scriptGlobal;
+  context.global = scriptGlobals.get(state);
   vm.runInContext(
     "GlobalVariables = global; __log = []; log = { message: function () { __log.push(Array.prototype.join.call(arguments, ' ')); } }; log.info = log.warn = log.error = log.message; console = log; Hub = {};",
     context,
