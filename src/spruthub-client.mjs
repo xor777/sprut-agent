@@ -386,8 +386,8 @@ export class SprutHubClient {
       const links = (cId) =>
         this.listLinks({ aId, sId, cId }, { serial, deadline });
       const lamps = groupLamps(await links(controls.On));
-      // What a replacement must have is read only for a group with an
-      // offline lamp: the group's other characteristics that have a link.
+      // What the group links beyond On is read only for a group with an
+      // offline lamp, for what its room's unlinked lamps lack.
       if (!lamps.some((lamp) => byId.get(lamp.aId)?.online !== true)) {
         return { group: { aId, sId }, lamps };
       }
@@ -2130,20 +2130,16 @@ export class SprutHubClient {
   }
 
   // A lamp group's lamps, or the groups a lamp is in, on each lamp service
-  // of an accessory entity, from the warm home; left out when the home
-  // cannot be read.
-  async #markLampGroups(serial, accessory, entity, deadline) {
+  // of an accessory entity, only from a home snapshot that is fresh: a
+  // device read stays one request (find_devices reads the home and marks
+  // them always).
+  #markLampGroups(serial, accessory, entity) {
     const lamps = (accessory.services ?? []).filter(
       ({ type }) => type === "Lightbulb",
     );
     if (lamps.length === 0) return;
-    let catalog;
-    try {
-      ({ catalog } = await this.homeCatalog(serial, deadline));
-    } catch (error) {
-      if (error instanceof SprutHubError) return;
-      throw error;
-    }
+    const catalog = this.cachedHomeCatalog(serial);
+    if (!catalog) return;
     const marks = lampGroupMarks(catalog, serial);
     for (const service of lamps) {
       const ref = serviceRef(serial, accessory.id, service.sId);
@@ -2183,7 +2179,7 @@ export class SprutHubClient {
           entity.services.flatMap(({ characteristics }) => characteristics),
         ),
       );
-      await this.#markLampGroups(parsed.serial, accessory, entity, deadline);
+      this.#markLampGroups(parsed.serial, accessory, entity);
       if (requested.has("relations")) {
         entity.relations = await this.#readAccessoryRelations(
           parsed.serial,

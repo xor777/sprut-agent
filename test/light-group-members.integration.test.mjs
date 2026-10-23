@@ -485,7 +485,7 @@ test("a lamp that joins switched on leaves the kept lamps out of step, and the p
 // which lamps, and which lamps are in a group, so the agent relinks a lamp
 // already on the hub instead of pairing it again.
 test("find_devices and get_entity show a lamp group with its lamps and the lamps in it", async (t) => {
-  const { client } = await setup(t);
+  const { hub, client } = await setup(t);
   const kitchen = await kitchenServices(client);
 
   // A lamp of the group is offline, so the group names the online lamps
@@ -516,8 +516,11 @@ test("find_devices and get_entity show a lamp group with its lamps and the lamps
     assert.equal(kitchen.get(ref).in_lamp_groups, undefined, ref);
     assert.equal(kitchen.get(ref).lamp_group, undefined, ref);
   }
-  // get_entity marks lamps from a home snapshot that is fresh, as it is
-  // right after find_devices; it does not read the home for them.
+  // get_entity marks lamps from a home snapshot that is fresh: read by
+  // find_devices and followed by hub events. It does not read the home for
+  // them, so a device read stays one request.
+  hub.restEvent();
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const group = await call(client, "get_entity", {
     entity_ref: `${homeRef}/accessory/${GROUP.aId}`,
   });

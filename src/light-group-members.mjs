@@ -341,9 +341,9 @@ export function groupLamps(links) {
 }
 
 // What household reads say of lamp services: a group's lamps with name,
-// room and whether online, and the names of the groups a lamp is in. Null
-// when the groups were not read. A group with an offline lamp also names
-// what may have replaced it (replacementOf).
+// room and whether online, and the groups a lamp is in (name, room, ref):
+// facts, not guesses about a replacement. Null when the groups were not
+// read. A group with an offline lamp also gives unlinkedLampsIn.
 export function lampGroupMarks(catalog, serial) {
   if (!catalog.lampGroups) return null;
   const rooms = new Map(catalog.rooms.map(({ id, name }) => [id, name]));
@@ -351,9 +351,14 @@ export function lampGroupMarks(catalog, serial) {
   for (const { group, lamps } of catalog.lampGroups) {
     const owner = catalog.byId.get(group.aId);
     if (!owner) continue;
+    const entry = {
+      name: owner.name,
+      room: rooms.get(owner.roomId) ?? null,
+      service_ref: serviceRef(serial, group.aId, group.sId),
+    };
     for (const lamp of lamps) {
       const key = serviceKey(lamp);
-      memberOf.set(key, [...(memberOf.get(key) ?? []), owner.name]);
+      memberOf.set(key, [...(memberOf.get(key) ?? []), entry]);
     }
   }
   const groups = new Map();
@@ -375,7 +380,7 @@ export function lampGroupMarks(catalog, serial) {
             }
           : { exists: false },
       ),
-      ...replacementOf(
+      ...unlinkedLampsIn(
         catalog,
         serial,
         offlineRooms,
@@ -388,13 +393,13 @@ export function lampGroupMarks(catalog, serial) {
   return { groups, memberOf };
 }
 
-// A replaced lamp is usually on the hub already, unlinked, in the room of
-// the offline one: the online physical lamps of those rooms in no group
-// that have every characteristic the group links (types). With none, the
-// new lamp still has to be paired.
-function replacementOf(catalog, serial, roomIds, types, memberOf, rooms) {
+// The online physical lamps in no group in the rooms of a group's offline
+// lamps, each with what the group links (types) that it lacks. A lamp that
+// replaced one may be among them, or in another room (a ZigBee lamp joins
+// where the hub puts it), or not paired yet; the read does not guess.
+function unlinkedLampsIn(catalog, serial, roomIds, types, memberOf, rooms) {
   if (roomIds.size === 0) return {};
-  const candidates = catalog.accessories.flatMap((accessory) =>
+  const unlinked = catalog.accessories.flatMap((accessory) =>
     accessory.online === true &&
     roomIds.has(accessory.roomId) &&
     accessory.model !== "Virtual" &&
@@ -405,19 +410,24 @@ function replacementOf(catalog, serial, roomIds, types, memberOf, rooms) {
               service.type === "Lightbulb" &&
               !memberOf.has(
                 serviceKey({ aId: accessory.id, sId: service.sId }),
-              ) &&
-              types.every((type) => Object.hasOwn(lampTypes(service), type)),
+              ),
           )
-          .map((service) => ({
-            name: accessory.name,
-            service_ref: serviceRef(serial, accessory.id, service.sId),
-          }))
+          .map((service) => {
+            const has = lampTypes(service);
+            const lacks = types.filter((type) => !Object.hasOwn(has, type));
+            return {
+              name: accessory.name,
+              service_ref: serviceRef(serial, accessory.id, service.sId),
+              ...(lacks.length > 0 ? { lacks } : {}),
+            };
+          })
       : [],
   );
-  if (candidates.length > 0) return { replacement_candidates: candidates };
+  if (unlinked.length > 0) return { unlinked_lamps_in_room: unlinked };
   const names = [...roomIds].map((id) => rooms.get(id) ?? "its room");
   return {
-    no_replacement_on_hub: `No online lamp in ${names.join(", ")} is outside lamp groups: the new lamp is not on the hub yet. Pair it first (device_search), then add it to this group.`,
+    unlinked_lamps_in_room: [],
+    no_unlinked_lamp: `No online lamp outside lamp groups in ${names.join(", ")}. A new lamp already paired may be in another room (find_devices); otherwise it has to be paired.`,
   };
 }
 
