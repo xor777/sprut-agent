@@ -467,6 +467,7 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "block_data_update",
   "block_action_pause",
   "scenario_run",
+  "scenario_delete",
   "logic_source_create",
   "logic_source_update",
 ]);

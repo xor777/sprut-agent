@@ -77,7 +77,13 @@ export function restoreItem(change, result, before) {
         };
       }
       if (intentAt !== undefined) {
-        return { ...base, status: "restored", sent, ...observed };
+        return {
+          ...base,
+          status: "restored",
+          sent,
+          ...observed,
+          ...recreatedScenario(result),
+        };
       }
       if (
         isNativeValueChange(change) &&
@@ -284,6 +290,7 @@ export function changeName(change) {
     case "block_data_update":
     case "block_action_pause":
     case "scenario_run":
+    case "scenario_delete":
     case "logic_source_update":
       return change.baseline_snapshot?.name;
     default:
@@ -315,5 +322,14 @@ export function summaryValue(change) {
   return {
     from: change.baseline_value.value,
     to: change.requested_value.value,
+  };
+}
+
+// A deleted scenario comes back under a new number: the item names it and
+// what did not come back with it.
+function recreatedScenario(result) {
+  return {
+    ...(result.recreated ? { recreated: result.recreated } : {}),
+    ...(result.not_restored ? { not_restored: result.not_restored } : {}),
   };
 }

@@ -350,7 +350,7 @@ server.registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once). Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps).",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps).",
         ),
       target_ref: z
         .string()
@@ -454,7 +454,7 @@ server.registerTool(
   {
     title: "Undo the agent's SprutHub changes",
     description:
-      "Writes to the hub. Undoes the agent's own changes: puts back a setting, a device command's previous value or a lamp group's lamps, or deletes the room, scenario, logic, logic assignment or virtual light it created. For «верни как было» pass all of that request's changes in change_refs, or the group_ref of send_device_commands. Undone newest first; a lamp gets back only its on/off. Each item reports restored, skipped with a reason and message, or failed: tell the owner what was not put back and why. Scenario runs, notifications and HTTP requests stay done. After a timeout call again: it reads back before any resend.",
+      "Writes to the hub. Undoes the agent's own changes: puts back a setting, a device command's previous value or a lamp group's lamps, or deletes the room, scenario, logic, logic assignment or virtual light it created, or creates again a scenario it deleted, under a new number. For «верни как было» pass all of that request's changes in change_refs, or the group_ref of send_device_commands. Undone newest first; a lamp gets back only its on/off. Each item reports restored, skipped with a reason and message, or failed: tell the owner what was not put back and why. Scenario runs, notifications and HTTP requests stay done. After a timeout call again: it reads back before any resend.",
     inputSchema: {
       change_ref: z
         .string()

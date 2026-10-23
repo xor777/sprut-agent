@@ -36,6 +36,7 @@ import {
   unprovenApplyLimitation,
   unprovenApplyNext,
 } from "./scenario-changes.mjs";
+import { publicScenarioDelete, SCENARIO_DELETE } from "./scenario-delete.mjs";
 import { isSensitiveNativeNode } from "./spruthub-client.mjs";
 
 export function laterChangeRef(change) {
@@ -569,6 +570,9 @@ export function publicNativeChange(
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
       ],
     };
+  }
+  if (change.kind === SCENARIO_DELETE) {
+    return publicScenarioDelete(change, verification);
   }
   if (change.kind === "scenario_run") {
     const plan = storedScenarioRunPlan(change);

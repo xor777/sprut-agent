@@ -99,6 +99,8 @@ const READ_ONLY_METHODS = new Set([
 ]);
 // Writes that change nothing the warm home state holds besides values,
 // which the hub's events carry: scenarios and a device search.
+// Accessories whose services are read for LOGIC assignments at once.
+const LOGIC_SCAN_CONCURRENCY = 8;
 const HOME_STATE_NEUTRAL_WRITES = new Set([
   "scenario.create",
   "scenario.update",
@@ -1948,9 +1950,15 @@ export class SprutHubClient {
     }
   }
 
+  // The hub lists LOGIC assignments only per service (logic.list needs aId
+  // and sId; accessory.list and scenario.get carry none, 2026-10-23), so
+  // every service of the home is read: on the owner's home 254 services
+  // took 28-60 s one by one, hence several accessories at once. An
+  // accessory deleted while the scan runs has no assignments left: its
+  // services read as Not found and are skipped once the accessory is
+  // confirmed gone.
   async findLogicAssignments(type) {
     const accessories = await this.listAccessories();
-    const assignments = [];
     for (const accessory of accessories) {
       const services = accessory.services ?? [];
       if (!Array.isArray(services)) {
@@ -1959,26 +1967,65 @@ export class SprutHubClient {
           "SprutHub did not return services needed to check LOGIC assignments.",
         );
       }
-      for (const service of services) {
-        if (!Number.isInteger(service?.sId)) {
-          throw new SprutHubError(
-            "incompatible_response",
-            "SprutHub returned a service without its native ID.",
-          );
-        }
-        const logics = await this.listLogics({
+      if (services.some((service) => !Number.isInteger(service?.sId))) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned a service without its native ID.",
+        );
+      }
+    }
+    const perAccessory = new Array(accessories.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < accessories.length) {
+        const position = next++;
+        perAccessory[position] = await this.#accessoryLogicAssignments(
+          accessories[position],
+          type,
+        );
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(LOGIC_SCAN_CONCURRENCY, accessories.length) },
+        worker,
+      ),
+    );
+    return perAccessory.flat();
+  }
+
+  async #accessoryLogicAssignments(accessory, type) {
+    const assignments = [];
+    for (const service of accessory.services ?? []) {
+      let logics;
+      try {
+        logics = await this.listLogics({
           aId: accessory.id,
           sId: service.sId,
         });
-        for (const logic of logics) {
-          if (logic?.type === type) {
-            assignments.push({
-              aId: accessory.id,
-              sId: service.sId,
-              type,
-              active: logic.active === true,
-            });
-          }
+      } catch (error) {
+        if (
+          isNativeNotFoundCandidate(error) &&
+          (await this.getAccessoryOrNull(accessory.id)) === null
+        ) {
+          return [];
+        }
+        throw error;
+      }
+      for (const logic of logics) {
+        if (logic?.type === type) {
+          assignments.push({
+            aId: accessory.id,
+            sId: service.sId,
+            type,
+            active: logic.active === true,
+            ...(typeof accessory.name === "string"
+              ? { accessoryName: accessory.name }
+              : {}),
+            ...(typeof service.name === "string"
+              ? { serviceName: service.name }
+              : {}),
+          });
         }
       }
     }
