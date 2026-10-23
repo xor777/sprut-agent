@@ -227,11 +227,13 @@ import {
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 import {
   dependenciesWithin,
+  foundDependencies,
   hasDependencies,
   notAVirtualDevice,
   ownServices,
   recreateServices,
   sameCreatedDevice,
+  unreadDependencies,
   VIRTUAL_DEVICE,
   VIRTUAL_DEVICE_DELETE,
   VIRTUAL_DEVICE_DEPENDENCIES_NOTE,
@@ -975,13 +977,16 @@ export class AutomationService {
     const changed = await this.#changedCreatedDevice(change, accessory);
     if (changed) return changed;
     const dependencies = await this.#virtualDeviceDependencies(accessory);
-    if (hasDependencies(dependencies)) {
+    if (foundDependencies(dependencies)) {
       return this.#finishNative(change, "conflict", undefined, {
         dependencies,
         conflict_reason: "virtual_device_in_use",
         last_verification: freshVerification("virtual_device_in_use"),
       });
     }
+    // Code or bridges not read are named with the result, not a stop.
+    change.dependencies = undefined;
+    change.unread = unreadDependencies(dependencies);
     await this.#persistNativeIntent(change, "restoring", "restore");
     return this.#deleteVirtualDevice(change, change.created_id, "applied");
   }
@@ -1079,7 +1084,11 @@ export class AutomationService {
         });
       }
     }
-    const bridges = await this.client.accessoryBridgeExports(accessory.id);
+    const exports = await this.client.accessoryBridgeExports(accessory.id);
+    const bridges = exports.filter(({ exported }) => exported !== null);
+    const bridgesUnread = exports
+      .filter(({ exported }) => exported === null)
+      .map(({ ref, name }) => ({ ref, name }));
     // Code scenarios that name the device; code not read is named too, as
     // it may refer to it.
     const code = await this.client.accessoryCodeMentions(accessory);
@@ -1102,6 +1111,7 @@ export class AutomationService {
         : {}),
       links,
       bridges,
+      ...(bridgesUnread.length > 0 ? { bridges_unread: bridgesUnread } : {}),
       logics,
     };
   }

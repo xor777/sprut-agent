@@ -88,7 +88,7 @@ export function virtualDeviceContract(operation) {
     duplicate:
       "a virtual device of the same name in the room is named in matching_devices with tell_owner",
     restore:
-      "deletes the created device by its id; refused (virtual_device_in_use) while scenarios, links or logic refer to it",
+      "deletes the created device by its id, unchanged since; refused (virtual_device_in_use) while scenarios, code, links, bridge exports or logic are found to refer to it. Code or bridges that could not be read are named (code_unread, bridges_unread) and do not stop it",
   };
 }
 
@@ -150,8 +150,28 @@ export function sameCreatedDevice(accessory, snapshot) {
   );
 }
 
+// What could not be read may refer to the device or not: it is named to
+// the owner before a deletion they asked for (hasDependencies), but only a
+// reference found stops a step on the agent's own (foundDependencies).
+const UNREAD = ["code_unread", "bridges_unread"];
+
 export function hasDependencies(dependencies) {
   return Object.values(dependencies ?? {}).some((list) => list.length > 0);
+}
+
+export function foundDependencies(dependencies) {
+  return Object.entries(dependencies ?? {}).some(
+    ([key, list]) => !UNREAD.includes(key) && list.length > 0,
+  );
+}
+
+export function unreadDependencies(dependencies) {
+  return Object.fromEntries(
+    UNREAD.filter((key) => dependencies?.[key]?.length > 0).map((key) => [
+      key,
+      dependencies[key],
+    ]),
+  );
 }
 
 // The services sent to create a deleted device again: each with its name
@@ -237,6 +257,7 @@ export function publicVirtualDeviceChange(change, { verification }) {
           }
         : {}),
       ...(change.dependencies ? { dependencies: change.dependencies } : {}),
+      ...(change.unread ?? {}),
       ...(change.status === "conflict" && change.observed_device
         ? { observed_device: change.observed_device }
         : {}),
@@ -308,9 +329,6 @@ export function dependenciesWithin(current, prepared) {
       ...dependencies.bridges.map(({ ref }) => `bridge ${ref}`),
       ...dependencies.logics.map(({ name }) => `logic ${name}`),
       ...(dependencies.code ?? []).map(({ ref }) => `code ${ref}`),
-      ...(dependencies.code_unread ?? []).map(
-        ({ ref, reason }) => `unread ${ref ?? reason}`,
-      ),
     ]);
   const known = keys(prepared);
   return [...keys(current)].every((key) => known.has(key));
