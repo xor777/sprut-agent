@@ -189,6 +189,9 @@ test("deletes a scenario nothing depends on and puts it back under a new number"
   assert.equal(prepared.scenario.name, "Выключить свет в кабинете");
   assert.equal(prepared.tell_owner, undefined, prepared.tell_owner);
   assert.equal(prepared.next?.tool, "apply_native_change");
+  // The delete can be undone: an agent told otherwise asks the owner again
+  // (eval delete-fumigator-scenario, Sonnet 5, 2026-10-23).
+  assert.equal(prepared.restore_supported, true);
   assert.deepEqual(writes(hub), []);
 
   const applied = await call(client, "apply_native_change", {
