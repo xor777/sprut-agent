@@ -288,7 +288,7 @@ export class HomeReads {
 
   #firstPage(base, serial, catalog, evaluated, selection, hints) {
     const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
-    const marks = lampGroupMarks(catalog);
+    const marks = lampGroupMarks(catalog, serial);
     const { listed, extras } = listedServices(
       serial,
       catalog,

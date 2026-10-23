@@ -11,7 +11,7 @@ import {
   serviceKey,
   stableNativeId,
 } from "./change-refs.mjs";
-import { SprutHubError } from "./spruthub-client.mjs";
+import { SprutHubError, serviceRef } from "./spruthub-client.mjs";
 
 export const LIGHT_GROUP_MEMBERS = "light_group_members";
 
@@ -331,33 +331,74 @@ export function groupLamps(links) {
 
 // What household reads say of lamp services: a group's lamps with name,
 // room and whether online, and the names of the groups a lamp is in. Null
-// when the groups were not read.
-export function lampGroupMarks(catalog) {
+// when the groups were not read. A group with an offline lamp also names
+// what may have replaced it (replacementOf).
+export function lampGroupMarks(catalog, serial) {
   if (!catalog.lampGroups) return null;
   const rooms = new Map(catalog.rooms.map(({ id, name }) => [id, name]));
-  const groups = new Map();
   const memberOf = new Map();
   for (const { group, lamps } of catalog.lampGroups) {
     const owner = catalog.byId.get(group.aId);
     if (!owner) continue;
-    groups.set(serviceKey(group), {
-      lamps: lamps.map(({ aId }) => {
-        const lamp = catalog.byId.get(aId);
-        return lamp
-          ? {
-              name: lamp.name,
-              room: rooms.get(lamp.roomId) ?? null,
-              online: lamp.online === true,
-            }
-          : { exists: false };
-      }),
-    });
     for (const lamp of lamps) {
       const key = serviceKey(lamp);
       memberOf.set(key, [...(memberOf.get(key) ?? []), owner.name]);
     }
   }
+  const groups = new Map();
+  for (const { group, lamps } of catalog.lampGroups) {
+    if (!catalog.byId.has(group.aId)) continue;
+    const found = lamps.map(({ aId }) => catalog.byId.get(aId));
+    const offlineRooms = new Set(
+      found
+        .filter((lamp) => lamp && lamp.online !== true)
+        .map(({ roomId }) => roomId),
+    );
+    groups.set(serviceKey(group), {
+      lamps: found.map((lamp) =>
+        lamp
+          ? {
+              name: lamp.name,
+              room: rooms.get(lamp.roomId) ?? null,
+              online: lamp.online === true,
+            }
+          : { exists: false },
+      ),
+      ...replacementOf(catalog, serial, offlineRooms, memberOf, rooms),
+    });
+  }
   return { groups, memberOf };
+}
+
+// A replaced lamp is usually on the hub already, unlinked, in the room of
+// the offline one: the online physical lamps of those rooms in no group.
+// With none, the new lamp still has to be paired.
+function replacementOf(catalog, serial, roomIds, memberOf, rooms) {
+  if (roomIds.size === 0) return {};
+  const candidates = catalog.accessories.flatMap((accessory) =>
+    accessory.online === true &&
+    roomIds.has(accessory.roomId) &&
+    accessory.model !== "Virtual" &&
+    accessory.virtual !== true
+      ? (accessory.services ?? [])
+          .filter(
+            (service) =>
+              service.type === "Lightbulb" &&
+              !memberOf.has(
+                serviceKey({ aId: accessory.id, sId: service.sId }),
+              ),
+          )
+          .map((service) => ({
+            name: accessory.name,
+            service_ref: serviceRef(serial, accessory.id, service.sId),
+          }))
+      : [],
+  );
+  if (candidates.length > 0) return { replacement_candidates: candidates };
+  const names = [...roomIds].map((id) => rooms.get(id) ?? "its room");
+  return {
+    no_replacement_on_hub: `No online lamp in ${names.join(", ")} is outside lamp groups: the new lamp is not on the hub yet. Pair it first (device_search), then add it to this group.`,
+  };
 }
 
 // The marks of one service: lamp_group on a group, in_lamp_groups on a lamp

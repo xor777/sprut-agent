@@ -2119,7 +2119,7 @@ export class SprutHubClient {
       if (error instanceof SprutHubError) return;
       throw error;
     }
-    const marks = lampGroupMarks(catalog);
+    const marks = lampGroupMarks(catalog, serial);
     for (const service of lamps) {
       const ref = serviceRef(serial, accessory.id, service.sId);
       const entry = entity.services.find((candidate) => candidate.ref === ref);

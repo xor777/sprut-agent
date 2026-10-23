@@ -501,7 +501,7 @@ server.registerTool(
   {
     title: "Open or close a SprutHub controller's network",
     description:
-      "Writes to the hub. With extension_ref opens a device controller's network for new devices until ends_at, as its Search button; with search_ref and stop closes it now (joined devices stay). Start only when the owner asks to add or connect a device that is not on the hub yet, on its controller: home_overview list=extensions marks those with device_search. A replaced lamp is often already there: read find_devices with its room_ref and kind=light first (a lamp without in_lamp_groups may be the new one); a lamp group's lamps (lamp_group) change by virtual_light_group, not by a search. While open, any device in pairing mode nearby can join. A running search is returned as is. Returns search_ref and owner_step: tell the owner to put the device into pairing mode, then wait with get_device_search. status unknown: the hub did not confirm, follow next.",
+      "Writes to the hub. With extension_ref opens a device controller's network for new devices until ends_at, as its Search button; with search_ref and stop closes it now (joined devices stay). Start only when the owner asks to add or connect a device, on its controller: home_overview list=extensions marks those with device_search. A replaced lamp may already be on the hub: read find_devices of its room first. While open, any device in pairing mode nearby can join. A running search is returned as is. Returns search_ref and owner_step: tell the owner to put the device into pairing mode, then wait with get_device_search. status unknown: the hub did not confirm, follow next.",
     inputSchema: {
       extension_ref: z
         .string()
