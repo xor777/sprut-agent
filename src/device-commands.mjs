@@ -14,6 +14,7 @@ import {
   characteristicRef,
   SprutHubError,
   sanitizeNativeData,
+  virtuallyWritable,
 } from "./spruthub-client.mjs";
 
 export function parseDeviceCommandTargets(commands, configuredSerial) {
@@ -195,9 +196,14 @@ export function commandCharacteristic(accessory, { sId, cId }) {
 
 export function inspectedCommandValue(accessory, target) {
   const { control } = commandCharacteristic(accessory, target);
+  const virtual = virtuallyWritable(accessory, target, control);
   return {
-    fields: { target },
-    contract: characteristicContract(control),
+    // virtual_write: a reading or press the hub writes only because the
+    // device is virtual; its restore reads it with the same allowance.
+    fields: { target, ...(virtual ? { virtual_write: true } : {}) },
+    contract: characteristicContract(
+      virtual ? { ...control, write: true } : control,
+    ),
     value: typedNativeValue(control.value),
   };
 }

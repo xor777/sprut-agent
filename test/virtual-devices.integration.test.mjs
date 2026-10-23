@@ -413,7 +413,7 @@ test("«сымитируй протечку» writes the virtual leak sensor, th
   const shown = page.rooms
     .flatMap((room) => room.devices)
     .find(({ name }) => name === "Тест протечки")
-    .services[0].characteristics.find(({ type }) => type === "LeakDetected");
+    .services[0].values.find(({ type }) => type === "LeakDetected");
   assert.equal(shown.writable, true);
 
   // The owner's scenario: a leak in the bathroom switches the floor lamp on.
@@ -421,7 +421,10 @@ test("«сымитируй протечку» writes the virtual leak sensor, th
     operation: "block_create",
     target_ref: homeRef,
     name: "Протечка: торшер",
+    description: "Протечка в ванной включает торшер",
     active: true,
+    on_start: false,
+    sync: false,
     data: {
       targets: [
         {

@@ -154,10 +154,29 @@ export function logicActiveValue(logic) {
 // the previous value back only while the device still shows the sent one
 // and does not reverse past physical effects), contract and prepare
 // overrides, ownerConflict, and extra limitations.
+// A virtual button's press is its ProgrammableSwitchEvent written: each
+// write is a press that scenarios on the button react to, the same value
+// included (2026-10-23-virtual-devices, 9 and 10). A press is not undone:
+// writing the earlier value back would be another press.
+export const BUTTON_PRESS_TYPE = "ProgrammableSwitchEvent";
+export const BUTTON_PRESS_NOTE =
+  "A write to a virtual button is a press: scenarios on this button ran as on a press, each time it is sent. A press is not undone.";
+const BUTTON_PRESS_RESTORATION = {
+  supported: false,
+  limitation: {
+    code: "button_press_not_undone",
+    message:
+      "A button press is not undone: writing the earlier value back would press it again.",
+  },
+};
+
 export const NATIVE_VALUE_KINDS = {
   characteristic_value: {
     command: true,
-    restoration: scalarValueRestoration,
+    restoration: (contract, baseline) =>
+      contract?.type === BUTTON_PRESS_TYPE
+        ? BUTTON_PRESS_RESTORATION
+        : scalarValueRestoration(contract, baseline),
     knownSetting: (change) =>
       isKnownCharacteristicSetting(change.contract?.type),
     inspect: inspectCharacteristicValue,
@@ -461,6 +480,8 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "accessory_placement",
   "room_create",
   "virtual_light_group",
+  "virtual_device",
+  "virtual_device_delete",
   // The lamps of an existing group (light-group-members.mjs).
   "light_group_members",
   "block_create",
@@ -679,7 +700,11 @@ export function characteristicValueState(
   control,
   { requireWrite = false } = {},
 ) {
-  const contract = characteristicContract(control, { requireWrite });
+  // A virtual device's reading or press: written though marked read-only.
+  const contract = characteristicContract(
+    change.virtual_write === true ? { ...control, write: true } : control,
+    { requireWrite },
+  );
   if (
     contract.type !== change.contract.type ||
     contract.kind !== change.contract.kind

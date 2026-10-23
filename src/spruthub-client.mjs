@@ -1182,6 +1182,40 @@ export class SprutHubClient {
 
   // The scenarios the hub's index lists for one accessory, as relations
   // read them (scenario.list {aId}); a summary without data.
+  // The bridges that export the accessory: each bridge lists it as a child
+  // in main while one of its services is exported (bridge export notes in
+  // #readAccessoryBridges). A bridge whose list cannot be read is named
+  // with exported: null.
+  async accessoryBridgeExports(aId) {
+    const deadline = Date.now() + this.timeoutMs;
+    const { extensions } = await this.nativeExtensions(this.serial, deadline);
+    const found = [];
+    for (const extension of extensions) {
+      if (extension.bundle_type !== "BRIDGE") continue;
+      let children;
+      try {
+        ({ children } = await this.nativeExtensionChildren(
+          this.serial,
+          extension.key,
+          deadline,
+        ));
+      } catch (error) {
+        if (!(error instanceof SprutHubError)) throw error;
+        found.push({
+          ref: extension.ref,
+          name: extension.name,
+          exported: null,
+        });
+        continue;
+      }
+      const child = children.find(({ id }) => id === String(aId));
+      if (child && bridgeChildExported(child) === true) {
+        found.push({ ref: extension.ref, name: extension.name });
+      }
+    }
+    return found;
+  }
+
   async listAccessoryScenarios(aId) {
     const response = await this.#request(
       { scenario: { list: { aId } } },
@@ -1347,10 +1381,13 @@ export class SprutHubClient {
     });
   }
 
+  // The owner's hub answered accessory.create in 4-9 s, against about 0.1 s
+  // for other writes (2026-10-23-virtual-devices, 3), so a creation waits
+  // twice the ordinary timeout.
   async createAccessory({ name, roomId, services }) {
     const response = await this.#request(
       { accessory: { create: { name, roomId, services } } },
-      Date.now() + this.timeoutMs,
+      Date.now() + 2 * this.timeoutMs,
     );
     const accessory = response.result?.accessory?.create;
     try {
@@ -4521,6 +4558,24 @@ export function characteristicNotifyOn(characteristic) {
   return typeof notify === "boolean" ? notify : null;
 }
 
+// A virtual device's own reading or press that the hub marks read-only but
+// writes all the same: a virtual sensor's value, a virtual button's
+// ProgrammableSwitchEvent (owner hub, 3.0.0, 2026-10-23-virtual-devices,
+// 7 and 10). accessory.get says virtual; accessory.list only gives such an
+// accessory model "Virtual". Not the hub's information service or a Name.
+export function virtuallyWritable(accessory, { sId }, control) {
+  const virtual = accessory?.virtual ?? accessory?.model === "Virtual";
+  if (virtual !== true || control?.read !== true || control.write === true) {
+    return false;
+  }
+  const service = accessory.services?.find((entry) => entry.sId === sId);
+  return (
+    service !== undefined &&
+    service.type !== "AccessoryInformation" &&
+    control.type !== "Name"
+  );
+}
+
 export function homeRef(serial) {
   return `spruthub://hub/${encodeURIComponent(serial)}`;
 }
@@ -5186,7 +5241,9 @@ function normalizeCharacteristicDetail(
     },
     capabilities: {
       read: control.read === true,
-      write: control.write === true,
+      write:
+        control.write === true ||
+        virtuallyWritable(accessory, service, control),
       events: control.events === true,
       unit: control.unit ?? null,
       min: control.minValue ?? null,

@@ -19,6 +19,7 @@ import {
   SprutHubError,
   sanitizeNativeData,
   serviceRef,
+  virtuallyWritable,
 } from "./spruthub-client.mjs";
 
 const PROBLEM_LIMIT = 10;
@@ -1021,7 +1022,10 @@ function characteristicValues(serial, accessory, service, types = null) {
         ...(control.validValues
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
-        ...(control.write === true ? { writable: true } : {}),
+        ...(control.write === true ||
+        virtuallyWritable(accessory, service, control)
+          ? { writable: true }
+          : {}),
         ref: characteristicRef(
           serial,
           accessory.id,
@@ -1044,7 +1048,8 @@ function characteristicRefs(serial, accessory, service) {
         ? { redacted: true, reason: "sensitive_native_data" }
         : {
             type: characteristic.control.type ?? characteristic.control.key,
-            ...(characteristic.control.write === true
+            ...(characteristic.control.write === true ||
+            virtuallyWritable(accessory, service, characteristic.control)
               ? { writable: true }
               : {}),
             ref: characteristicRef(

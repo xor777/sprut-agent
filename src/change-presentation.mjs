@@ -37,6 +37,11 @@ import {
   unprovenApplyNext,
 } from "./scenario-changes.mjs";
 import { isSensitiveNativeNode } from "./spruthub-client.mjs";
+import {
+  publicVirtualDeviceChange,
+  VIRTUAL_DEVICE,
+  VIRTUAL_DEVICE_DELETE,
+} from "./virtual-device.mjs";
 
 export function laterChangeRef(change) {
   return change.conflict_reason === "later_owned_change" &&
@@ -239,6 +244,9 @@ export function publicNativeChange(
           : []),
       ],
     };
+  }
+  if (change.kind === VIRTUAL_DEVICE || change.kind === VIRTUAL_DEVICE_DELETE) {
+    return publicVirtualDeviceChange(change, { verification });
   }
   if (change.kind === LIGHT_GROUP_MEMBERS) {
     return publicLampGroupChange(change, {

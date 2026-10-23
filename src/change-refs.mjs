@@ -27,6 +27,8 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "service_name",
   "service_visible",
   "virtual_light_group",
+  "virtual_device",
+  "virtual_device_delete",
 ];
 
 export function parseRoomRef(ref, configuredSerial) {
@@ -466,6 +468,7 @@ export function refuseRedactedChangeTexts(change) {
     accessory_placement: { name: requested?.name },
     room_create: { name: change.requested_name },
     virtual_light_group: { name: change.create_request?.name },
+    virtual_device: { name: change.create_request?.name },
     block_create: { name: requested?.name, description: requested?.desc },
     logic_source_create: {
       name: requested?.name,
