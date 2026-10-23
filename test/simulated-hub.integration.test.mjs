@@ -407,6 +407,37 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
   assertEveryRequestSupported(hub);
 });
 
+// «Переименуй кабинет в офис»: the request asks for the change, so the
+// prepared change names its apply as the next call, and following it is
+// what renames the room. An agent that stopped at prepare asked the owner
+// to confirm what he had already asked for.
+test("a prepared change names its apply as the next call, and following it writes the change", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "room_name",
+    target_ref: `${homeRef}/room/7`,
+    value: "Офис",
+    reason: "Переименовать кабинет в офис",
+  });
+
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(
+    [prepared.next?.tool, prepared.next?.arguments],
+    ["apply_native_change", { change_ref: prepared.change_ref }],
+  );
+  assert.deepEqual(hub.writes(), []);
+
+  const applied = await call(
+    client,
+    prepared.next.tool,
+    prepared.next.arguments,
+  );
+  assert.equal(applied.status, "applied");
+  assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
+    { key: "room/7/name", before: "Кабинет", after: "Офис" },
+  ]);
+});
+
 // «Когда в коридоре движение, включай там свет»: scenario 3 already turns
 // the corridor light on by motion and off two minutes later. A second
 // scenario would duplicate it, so the plan names it before any write.
@@ -471,6 +502,8 @@ test("a rule the home already has is named before a second scenario is written",
     },
   ]);
   assert.equal(typeof prepared.tell_owner, "string");
+  // The owner hears of scenario 3 first: apply is not offered as next.
+  assert.equal(prepared.next, undefined);
   assert.deepEqual(hub.writes(), []);
   assertEveryRequestSupported(hub);
 });
