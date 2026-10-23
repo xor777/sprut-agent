@@ -151,11 +151,11 @@ export const METHOD_EVIDENCE = {
   ],
   "scenario.create": [
     OBSERVED,
-    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9)",
+    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9) and its code run at once, on or off; error after code that does not compile or run (2026-10-23-scenario-code 2.10, 3.2, 3.7, 3.8)",
   ],
   "scenario.update": [
     OBSERVED,
-    "{index, data}: 2026-09-13-native-daily-interval; a LOGIC takes name, desc and onStart from info in its code on every code write, sync untouched; a GLOBAL's and a BLOCK's flags and name kept (2026-10-13-wave4-contracts 1.5, 1.8, 1.10)",
+    "{index, data}: 2026-09-13-native-daily-interval; a LOGIC takes name, desc and onStart from info in its code on every code write, sync untouched; a GLOBAL's and a BLOCK's flags and name kept (2026-10-13-wave4-contracts 1.5, 1.8, 1.10); a GLOBAL's code run at once, error as at create (2026-10-23-scenario-code 2.9, 2.11, 3.3, 3.7–3.9)",
   ],
   // The product no longer sends it; a run that does shows up here.
   "scenario.update {active}": [
@@ -170,7 +170,7 @@ export const METHOD_EVIDENCE = {
   "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
   "scenario.run": [
     OBSERVED,
-    "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); the simulator runs only top-level literal set actions",
+    "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); a GLOBAL's code run again, on or off (2026-10-23-scenario-code 3.4); of a BLOCK the simulator runs only top-level literal set actions, not its code",
   ],
   "scenario.sdk": [OBSERVED, "2026-09-09-automations"],
   "scenario.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
@@ -2103,6 +2103,7 @@ const HANDLERS = {
     if (scenario.type === "BLOCK") {
       scenario.data = normalizeBlockData(input.data);
       scenario.rooms = blockRooms(state, scenario.data);
+      compileBlockCode(state, scenario);
     } else if (scenario.type === "LOGIC") {
       if (typeof input.data !== "string") {
         throw invalidParams("LOGIC scenario requires source text");
@@ -2116,6 +2117,7 @@ const HANDLERS = {
         throw invalidParams("GLOBAL scenario requires source text");
       }
       scenario.data = input.data;
+      runGlobalCode(state, scenario);
     } else {
       throw invalidParams(`Scenario type ${input.type} is not supported`);
     }
@@ -2133,6 +2135,7 @@ const HANDLERS = {
       if (scenario.type === "BLOCK") {
         scenario.data = normalizeBlockData(input.data);
         scenario.rooms = blockRooms(state, scenario.data);
+        compileBlockCode(state, scenario);
       } else {
         if (typeof input.data !== "string") {
           throw invalidParams(`${scenario.type} scenario requires source text`);
@@ -2142,6 +2145,7 @@ const HANDLERS = {
         // info again, even unchanged; sync is untouched, and a GLOBAL's
         // code leaves its name alone (2026-10-13-wave4-contracts 1.5, 1.8).
         if (scenario.type === "LOGIC") applyLogicInfo(scenario);
+        if (scenario.type === "GLOBAL") runGlobalCode(state, scenario);
       }
     }
     return {};
@@ -2164,6 +2168,7 @@ const HANDLERS = {
       path: "Scenario.ScenarioBlock.Target.jBlock",
       message: `Сценарий ${index}: (TRIGGER: SCENARIO[${index}] <- MANUAL)`,
     });
+    if (scenario.type === "GLOBAL") runGlobalCode(state, scenario);
     state.runs.push(runScenario(state, scenario));
     return {};
   },
@@ -3773,6 +3778,87 @@ function logicInfo(source) {
     return isRecord(info) ? info : undefined;
   } catch {
     return undefined;
+  }
+}
+
+// The hub runs a GLOBAL's code at create, on every code write and on
+// scenario.run, on or off; what the code assigns to global stays for every
+// scenario until the hub restarts, after a later error or the scenario's
+// delete too (2026-10-23-scenario-code 3.2–3.10). Each run gets a context
+// of its own, so a top-level let runs again without a redeclaration error,
+// and all share one global object. As in logicInfo, the contexts hold no
+// object of this process; log lines are collected inside. error is true
+// while the stored code did not run through; the message reaches the log
+// only for a scenario that is on (3.7, 3.8). The simulator runs newer
+// JavaScript than the hub's Nashorn (section 4).
+function runGlobalCode(state, scenario) {
+  state.scriptGlobal ??= vm.runInContext(
+    "({})",
+    vm.createContext(Object.create(null)),
+  );
+  const context = vm.createContext(Object.create(null));
+  context.global = state.scriptGlobal;
+  vm.runInContext(
+    "GlobalVariables = global; __log = []; log = { message: function () { __log.push(Array.prototype.join.call(arguments, ' ')); } }; log.info = log.warn = log.error = log.message; console = log; Hub = {};",
+    context,
+  );
+  let failure;
+  try {
+    vm.runInContext(scenario.data, context, {
+      timeout: 100,
+      filename: "<eval>",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  const lines = JSON.parse(vm.runInContext("JSON.stringify(__log)", context));
+  for (const message of lines) {
+    appendLog(state, {
+      level: "LOG_LEVEL_INFO",
+      path: "SDK.Struct.Log",
+      message: String(message),
+    });
+  }
+  scenario.error = failure !== undefined;
+  if (failure !== undefined && scenario.active) {
+    appendLog(state, {
+      level: "LOG_LEVEL_ERROR",
+      path: "Notifiers.Notifier",
+      message: `Сценарий ${scenario.index} - ScriptException: ${String(failure?.message)}`,
+    });
+  }
+}
+
+// The hub compiles a BLOCK's code when the BLOCK is saved: code that does
+// not compile is stored as sent and sets error until a write without it
+// (2026-10-23-scenario-code 2.9–2.12). A condition's code is the body of
+// function(context,value) (2.6); an action's wrapper was not seen whole and
+// is taken to be the same. The code is only compiled here, never run.
+function compileBlockCode(state, scenario) {
+  const codes = [];
+  const walk = (value) => {
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (isRecord(value)) {
+      if (value.type === "code") codes.push(value.code);
+      Object.values(value).forEach(walk);
+    }
+  };
+  walk(JSON.parse(scenario.data));
+  let failure;
+  for (const code of codes) {
+    try {
+      new vm.Script(`(function (context, value) {\n${code}\n})`);
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  scenario.error = failure !== undefined;
+  if (failure !== undefined && scenario.active) {
+    appendLog(state, {
+      level: "LOG_LEVEL_ERROR",
+      path: "Notifiers.Notifier",
+      message: `Сценарий ${scenario.index} - ScriptException: ${failure.message}`,
+    });
   }
 }
 
