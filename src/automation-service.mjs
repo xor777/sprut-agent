@@ -1070,7 +1070,30 @@ export class AutomationService {
       }
     }
     const bridges = await this.client.accessoryBridgeExports(accessory.id);
-    return { scenarios, links, bridges, logics };
+    // Code scenarios that name the device; code not read is named too, as
+    // it may refer to it.
+    const code = await this.client.accessoryCodeMentions(accessory);
+    return {
+      scenarios,
+      code: code.mentions.map(({ scenario_ref: ref, scenario_name: name }) => ({
+        ref,
+        name,
+      })),
+      ...(code.unchecked.length > 0
+        ? {
+            code_unread: code.unchecked.map((entry) => ({
+              ...(entry.scenario_ref ? { ref: entry.scenario_ref } : {}),
+              reason: entry.outcome,
+              ...(entry.scenarios_not_read
+                ? { scenarios: entry.scenarios_not_read }
+                : {}),
+            })),
+          }
+        : {}),
+      links,
+      bridges,
+      logics,
+    };
   }
 
   // «Удали кнопку Десерт».

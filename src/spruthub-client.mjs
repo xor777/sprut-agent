@@ -2910,6 +2910,16 @@ export class SprutHubClient {
     }
   }
 
+  // The owner's code scenarios that name the accessory, as get_entity
+  // relations find them (code_mentions).
+  async accessoryCodeMentions(accessory) {
+    return this.#readCodeMentions(
+      this.serial,
+      accessory,
+      Date.now() + this.timeoutMs,
+    );
+  }
+
   // The owner's code scenarios (built-in ones are assigned to services and
   // listed as assigned logic) whose source names this accessory, each
   // source read once in this call, at most CODE_SOURCE_READS of them.

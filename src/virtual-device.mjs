@@ -71,7 +71,8 @@ export function virtualDeviceContract(operation) {
       write: "accessory.delete({id})",
       target: "a virtual accessory's ref; a physical one is refused",
       dependencies:
-        "prepare reads the scenarios that refer to the device, its links, its bridge exports and its logic. With any, the result has tell_owner: name them and apply only after the owner confirms. Scenarios stay and no longer react to it or act on it; links and exports go with it.",
+        "prepare reads what refers to the device: the BLOCK scenarios the hub lists for it, code scenarios that name it (code), its links, bridge exports and logic. With any, the result has tell_owner: name them and apply only after the owner confirms. Scenarios and code stay and no longer reach it; links and exports go with it. " +
+        CODE_DEPENDENCY_NOTE,
       restore:
         "creates the device again with the same name, room and service types: a new id, and the scenarios, links, export and logic are not put back on it (not_restored)",
     };
@@ -97,13 +98,19 @@ export function virtualDeviceContract(operation) {
   };
 }
 
+// What the search of code (#readCodeMentions in spruthub-client.mjs) finds.
+export const CODE_DEPENDENCY_NOTE =
+  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id or its exact name in a string; an id kept in an array or a variable (a global list of lights) or computed is not found.";
+
 const LIMITATIONS = {
   [VIRTUAL_DEVICE]: [
+    CODE_DEPENDENCY_NOTE,
     "SprutHub answers a creation in 4-9 s; a lost answer leaves the outcome unknown, with the new devices of this name in the room as candidate_devices, never owned or deleted by undo.",
     "New devices appear in each bridge's list as not exported; the bridges' own settings decide nothing here.",
   ],
   [VIRTUAL_DEVICE_DELETE]: [
     "A deleted device's id is gone for good: undo makes a new one, and what referred to the old one stays without it.",
+    CODE_DEPENDENCY_NOTE,
   ],
 };
 
@@ -289,6 +296,9 @@ function notRestored(dependencies) {
     ),
     ...dependencies.bridges.map(({ name }) => `export to ${name}`),
     ...dependencies.logics.map(({ name }) => `logic «${name}»`),
+    ...(dependencies.code ?? []).map(
+      ({ name }) => `code of «${name}» still names the old id`,
+    ),
   ];
 }
 
@@ -303,6 +313,10 @@ export function dependenciesWithin(current, prepared) {
       ),
       ...dependencies.bridges.map(({ ref }) => `bridge ${ref}`),
       ...dependencies.logics.map(({ name }) => `logic ${name}`),
+      ...(dependencies.code ?? []).map(({ ref }) => `code ${ref}`),
+      ...(dependencies.code_unread ?? []).map(
+        ({ ref, reason }) => `unread ${ref ?? reason}`,
+      ),
     ]);
   const known = keys(prepared);
   return [...keys(current)].every((key) => known.has(key));
