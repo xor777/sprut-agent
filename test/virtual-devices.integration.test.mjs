@@ -597,6 +597,41 @@ test("«Удали кнопку Десерт» names the scenario it starts befo
   assert.match(JSON.stringify(restored.not_restored), /Сцена Десерт/);
 });
 
+// The hub refusing to create the device again is a refusal, not a create
+// that may have happened: the deletion stays applied, and the next undo
+// sends the create again.
+test("a refused re-creation leaves the deletion applied and undo tries again", async (t) => {
+  const { hub, client, before } = await setup(t);
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(GUEST_MODE),
+    reason: "Удалить режим гостей",
+  });
+  await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  hub.refuseNext("accessory.create", {
+    code: -32602,
+    message: "Param is empty: 'name'",
+  });
+  const refused = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.change_ref },
+  });
+  assert.equal(refused.isError, true);
+  assert.equal(refused.structuredContent.hub_effect, "not_applied");
+  const seen = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(seen.status, "applied");
+  const again = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(again.status, "restored");
+  assert.equal(writes(hub, "accessory.create").length, 2);
+  assert.equal(created(hub, before).length, 1);
+});
+
 // Code is a dependency too: a LOGIC that reads «Режим гостей» by its id is
 // named before the switch is deleted, and it stops the undo of a creation.
 test("code that names a virtual device by id is named before it is deleted", async (t) => {
