@@ -259,6 +259,9 @@ test("repeated overviews and state answers come from the warm home, not from new
       .sort(),
     ["accessory.list", "room.list"],
   );
+  // A connection that has pushed no event yet is not trusted to keep the
+  // home warm; the timer's first event may come after the next call.
+  await restEvent(hub);
   const on = await call("find_devices", { state: "on" });
   assert.deepEqual(on.native, []);
   assert.deepEqual(onRefs(on.body), servicesOnInState(hub.state, home));
@@ -433,13 +436,13 @@ test("the warm home is read whole again after a quiet minute on its connection a
   });
   await busy.call("home_overview", {});
   await busy.shiftClock();
-  await settle();
+  await restEvent(busy.hub);
   assert.deepEqual(
     (await busy.call("find_devices", { state: "on" })).native,
     [],
   );
   for (let step = 0; step < 3; step += 1) await busy.shiftClock();
-  await settle();
+  await restEvent(busy.hub);
   const afterMaxAge = await busy.call("find_devices", { state: "on" });
   assert(methods(afterMaxAge.native).includes("accessory.list"));
 });
