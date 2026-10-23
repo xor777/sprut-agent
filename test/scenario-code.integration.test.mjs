@@ -482,6 +482,62 @@ test("BLOCK code the hub would not run is refused before anything is sent, and c
   assert.deepEqual(writesSince(hub, sentBefore), []);
 });
 
+// The owner's code may already carry error. An edit that leaves it does not
+// cause it, and its restore would not clear it.
+test("an error the scenario had before the edit is shown at prepare and not blamed on the edit after it", async (t) => {
+  const throwing = `${COLOR_SCENES_SOURCE}throw new Error("old");\n`;
+  const { client } = await setup(t, (fixture) => {
+    const global = fixture.scenarios.find(
+      ({ index }) => index === COLOR_SCENES,
+    );
+    global.data = throwing;
+    global.error = true;
+    const ocean = fixture.scenarios.find(({ index }) => index === OCEAN);
+    ocean.data.targets[0].then[0].code = 'global.colorScene("ocean"';
+    ocean.error = true;
+    return fixture;
+  });
+  const prepared = (
+    await prepareGlobal(
+      client,
+      throwing.replace(SCENE_LAMPS_LINE, WITH_NIGHT_LIGHT),
+    )
+  ).structuredContent;
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.equal(prepared.hub_code_error_before, true);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(applied.hub_code_error, true);
+  assert.equal(applied.hub_code_error_before, true);
+  assert.equal(typeof applied.tell_owner, "string");
+  assert.equal(applied.offer, undefined);
+
+  // A BLOCK whose stored code does not compile, edited elsewhere.
+  const sceneRef = `${homeRef}/scenario/${OCEAN}`;
+  const entity = await call(client, "get_entity", {
+    entity_ref: sceneRef,
+    include: ["configuration"],
+  });
+  const data = structuredClone(entity.entity.configuration.value);
+  data.targets[0].if.conditions[0].value = "0";
+  const edit = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: sceneRef,
+    data,
+    reason: "Сцена по одному нажатию",
+  });
+  assert.equal(edit.status, "prepared", JSON.stringify(edit));
+  assert.equal(edit.hub_code_error_before, true);
+  const written = await call(client, "apply_native_change", {
+    change_ref: edit.change_ref,
+  });
+  assert.equal(written.status, "applied", JSON.stringify(written));
+  assert.equal(written.hub_code_error, true);
+  assert.equal(written.offer, undefined);
+});
+
 // A GLOBAL's name, description and flags are not in its code: its options
 // window changes them (2026-10-13-wave4-contracts 1.8).
 test("a GLOBAL code edit that also sends a name, description or start on boot is sent to the options window, not to info in the code", async (t) => {
