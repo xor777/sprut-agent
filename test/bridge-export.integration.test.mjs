@@ -750,6 +750,39 @@ test("a device is removed from two bridges, one not running, and both are undone
   assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
 });
 
+// The owner starts Alice's bridge between prepare and apply: what apply
+// tells the agent, and the change's record, say the bridge runs now.
+test("a bridge started after prepare is told as running when the change is applied", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    await exportInput(hub, client, 16, "yandex", 13, false),
+  );
+  assert.equal(prepared.bridge_export.running, false);
+  assert.match(prepared.bridge_export.limitation, /not running/i);
+  Object.assign(
+    hub.state.extensions.find(
+      ({ extensionKey }) => extensionKey === "Bridge:yandex",
+    ),
+    { state: "LOADED", enabled: true },
+  );
+
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  for (const shown of [
+    applied,
+    await call(client, "get_native_change", {
+      change_ref: prepared.change_ref,
+    }),
+  ]) {
+    assert.equal(shown.bridge_export.running, true);
+    assert.equal(Object.hasOwn(shown.bridge_export, "limitation"), false);
+  }
+});
+
 // The hub stores the tick but its answer is lost, as once on the owner's
 // running «Yandex» (2026-10-14-bridge-export-write 10): the window read
 // decides, and an unknown outcome is not reported as nothing done.
