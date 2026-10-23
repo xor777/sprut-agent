@@ -294,6 +294,17 @@ test("a name too long, a type not offered or a missing room is refused before an
     reason: "Просьба владельца",
   });
   assert.equal(noRoom.error.code, "room_not_found");
+  // The hub dropped an emoji from a room name; a device name is held to the
+  // same rule, so a lost answer can still find the device by its name.
+  const emoji = await refused(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Вечеринка 🎉",
+    value: "Switch",
+    reason: "Просьба владельца",
+  });
+  assert.equal(emoji.error.code, "name_characters_unsupported");
   assert.deepEqual(writes(hub, "accessory.create"), []);
 });
 
