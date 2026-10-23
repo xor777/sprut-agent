@@ -3180,3 +3180,32 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
   assert.equal(lateConnect(false).harnessError, null);
   assert.match(lateConnect(true).harnessError, /not connected/);
 });
+
+test("add-floor-lamp-to-alice needs the floor lamp ticked in Alice's bridge and nothing else", async (t) => {
+  const tick = (bridgeKey, aId, sId, value) => ({
+    window: {
+      update: {
+        windowKey: `Bridge/${bridgeKey}/Child/${aId}/`,
+        options: [{ key: `s:${sId}`, value: { boolValue: value } }],
+      },
+    },
+  });
+  const right = await caseSession(t, "add-floor-lamp-to-alice");
+  await right.send(tick("yandex", 16, 13, true));
+  assert.deepEqual(right.grade("Торшер добавлен в Алису."), {
+    floor_lamp_in_alice: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const wrongBridge = await caseSession(t, "add-floor-lamp-to-alice");
+  await wrongBridge.send(tick("homekit", 16, 13, true));
+  const graded = wrongBridge.grade("Торшер добавлен.");
+  assert.equal(graded.floor_lamp_in_alice, false);
+  assert.equal(graded.nothing_else_changed, false);
+
+  const more = await caseSession(t, "add-floor-lamp-to-alice");
+  await more.send(tick("yandex", 16, 13, true));
+  await more.send(tick("yandex", 22, 13, false));
+  assert.equal(more.grade("Готово.").nothing_else_changed, false);
+});

@@ -24,6 +24,8 @@ import {
 
 const FLOOR_LAMP_ON = "characteristic/16.13.14/On";
 const FLOOR_LAMP_BRIGHTNESS = "characteristic/16.13.15/Brightness";
+// The floor lamp's light in Alice's bridge, present only while exported.
+const FLOOR_LAMP_IN_ALICE = "bridge/Bridge:yandex/16.13";
 // The living room chandelier («Люстра»), on at 80 % in both fixtures.
 const CHANDELIER = { aId: 15, sId: 13 };
 const CHANDELIER_ON = "characteristic/15.13.14/On";
@@ -934,6 +936,33 @@ export const CASES = {
         "A reason, if given, agrees with the facts: the HomeKit bridge runs and simply does not export «Торшер»; it is not off, broken or unable to export lamps.",
       ],
     }),
+  },
+  // A write to a bridge: «Яндекс Алиса» (NOT_LOADED, off) here does not
+  // export the floor lamp, whose one service is its light. Ticking it is
+  // the whole request; the bridge being off is for the answer, not a
+  // reason to stop.
+  "add-floor-lamp-to-alice": {
+    prompt: "Добавь торшер в Алису",
+    patch: (fixture) => {
+      const alice = fixture.extensions.find(
+        ({ extensionKey }) => extensionKey === "Bridge:yandex",
+      );
+      delete alice.exported["16"];
+      return fixture;
+    },
+    graders: [
+      {
+        name: "floor_lamp_in_alice",
+        grade: ({ after }) =>
+          result(
+            after[FLOOR_LAMP_IN_ALICE] === true,
+            `${FLOOR_LAMP_IN_ALICE}=${after[FLOOR_LAMP_IN_ALICE]}`,
+          ),
+      },
+      onlyChanges(
+        ({ key, after }) => key === FLOOR_LAMP_IN_ALICE && after === true,
+      ),
+    ],
   },
   // Two turns in one Claude session: the second asks to undo the first.
   // Undo puts back only a lamp's on/off (on the owner's hub a brightness
