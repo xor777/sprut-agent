@@ -126,6 +126,7 @@ import {
   linkedTypes,
   linkKeys,
   notALampGroup,
+  outOfStepLamps,
   parseLampRef,
   planGroupMembers,
   publicLampGroupMember,
@@ -4204,6 +4205,7 @@ export class AutomationService {
         owned_change_created: false,
       };
     }
+    const outOfStep = outOfStepLamps(steps, desired);
     const pick = (record) =>
       Object.fromEntries(group.types.map((type) => [type, record[type]]));
     const now = new Date().toISOString();
@@ -4220,6 +4222,7 @@ export class AutomationService {
       baseline_links: pick(group.links),
       member_service_refs: desired.map(({ ref }) => ref),
       members,
+      ...(outOfStep ? { out_of_step: outOfStep } : {}),
       steps,
       native_write_sent: false,
       native_acknowledged: false,

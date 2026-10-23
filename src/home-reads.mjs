@@ -4,6 +4,7 @@
 // names, rooms and types in the client's warm home and shows the matched
 // devices' values from it.
 import { randomBytes } from "node:crypto";
+import { lampGroupMark, lampGroupMarks } from "./light-group-members.mjs";
 import {
   accessoryRef,
   characteristicNotifyOffered,
@@ -287,6 +288,7 @@ export class HomeReads {
 
   #firstPage(base, serial, catalog, evaluated, selection, hints) {
     const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
+    const marks = lampGroupMarks(catalog);
     const { listed, extras } = listedServices(
       serial,
       catalog,
@@ -302,7 +304,10 @@ export class HomeReads {
           ...(room ? {} : { metadata_status: "missing" }),
         },
         device: deviceEntry(serial, item),
-        service: serviceEntry(serial, item, selection),
+        service: {
+          ...serviceEntry(serial, item, selection),
+          ...lampGroupMark(marks, item.accessory.id, item.service.sId),
+        },
       };
     });
     const snapshot = {

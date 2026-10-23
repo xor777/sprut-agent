@@ -301,8 +301,122 @@ export function restoreSteps(change) {
   }));
 }
 
-export function lampGroupNotes(members) {
+// The On of each lamp of the virtual accessories in accessory.list, whose
+// link.list says whether it is a group: accessory.list has no virtual flag
+// but gives a virtual accessory model "Virtual" (owner hub, 3.0.0, all 9
+// lamp groups, 2026-10-14-light-group-relink).
+export function virtualLampOns(accessories) {
+  return accessories.flatMap((accessory) =>
+    accessory.model !== "Virtual"
+      ? []
+      : (accessory.services ?? [])
+          .filter(({ type }) => type === "Lightbulb")
+          .flatMap((service) => {
+            const on = service.characteristics?.find(
+              (characteristic) => controlType(characteristic) === "On",
+            );
+            return on
+              ? [{ aId: accessory.id, sId: service.sId, cId: on.cId }]
+              : [];
+          }),
+  );
+}
+
+// The lamp services the links of a group's On reach.
+export function groupLamps(links) {
+  return currentMembers(["On"], { On: incomingLinks(links) }).map(
+    ({ target }) => target,
+  );
+}
+
+// What household reads say of lamp services: a group's lamps with name,
+// room and whether online, and the names of the groups a lamp is in. Null
+// when the groups were not read.
+export function lampGroupMarks(catalog) {
+  if (!catalog.lampGroups) return null;
+  const rooms = new Map(catalog.rooms.map(({ id, name }) => [id, name]));
+  const groups = new Map();
+  const memberOf = new Map();
+  for (const { group, lamps } of catalog.lampGroups) {
+    const owner = catalog.byId.get(group.aId);
+    if (!owner) continue;
+    groups.set(serviceKey(group), {
+      lamps: lamps.map(({ aId }) => {
+        const lamp = catalog.byId.get(aId);
+        return lamp
+          ? {
+              name: lamp.name,
+              room: rooms.get(lamp.roomId) ?? null,
+              online: lamp.online === true,
+            }
+          : { exists: false };
+      }),
+    });
+    for (const lamp of lamps) {
+      const key = serviceKey(lamp);
+      memberOf.set(key, [...(memberOf.get(key) ?? []), owner.name]);
+    }
+  }
+  return { groups, memberOf };
+}
+
+// The marks of one service: lamp_group on a group, in_lamp_groups on a lamp
+// in one; none when the groups were not read.
+export function lampGroupMark(marks, aId, sId) {
+  const key = serviceKey({ aId, sId });
+  return {
+    ...(marks?.groups.has(key) ? { lamp_group: marks.groups.get(key) } : {}),
+    ...(marks?.memberOf.has(key)
+      ? { in_lamp_groups: marks.memberOf.get(key) }
+      : {}),
+  };
+}
+
+// A lamp's on/off as SprutHub shows it, or null.
+export function lampIsOn(accessory, sId) {
+  const value = accessory?.services
+    ?.find((service) => service.sId === sId)
+    ?.characteristics?.find(
+      (characteristic) => controlType(characteristic) === "On",
+    )?.control?.value?.boolValue;
+  return typeof value === "boolean" ? value : null;
+}
+
+// A link added copies the lamp's value to the group, and a group command
+// equal to what the group shows does not reach the lamps
+// (2026-10-14-light-group-relink, 11, 12 and 14). So after the change the
+// group shows the on/off of the last lamp linked on On, and the online
+// lamps it keeps that show the other value are out of step: the next
+// «включи» or «выключи» may miss them. Null when none is.
+export function outOfStepLamps(steps, desired) {
+  const last = steps
+    .filter(({ action, type }) => action === "add" && type === "On")
+    .at(-1);
+  const joiner = last && desired.find(({ ref }) => ref === last.member_ref);
+  const shows = joiner ? lampIsOn(joiner.accessory, joiner.target.sId) : null;
+  if (shows === null) return null;
+  const lamps = desired.filter(
+    (member) =>
+      member.accessory.online === true &&
+      lampIsOn(member.accessory, member.target.sId) === !shows,
+  );
+  return lamps.length === 0
+    ? null
+    : {
+        shows,
+        joined: joiner.accessory.name,
+        lamps: lamps.map(({ accessory }) => accessory.name),
+      };
+}
+
+export function lampGroupNotes(members, outOfStep) {
   const notes = [];
+  if (outOfStep) {
+    const names = outOfStep.lamps.map((name) => `«${name}»`).join(", ");
+    notes.push(
+      `After «${outOfStep.joined}» joins, the group shows ${outOfStep.shows ? "on" : "off"} like it, while ${names} ${outOfStep.lamps.length === 1 ? "is" : "are"} ${outOfStep.shows ? "off" : "on"}. A group command equal to what the group shows does not reach them: to bring them in step, switch the group ${outOfStep.shows ? "off and on" : "on and off"} once, or switch those lamps.`,
+    );
+  }
   for (const member of members) {
     const name = member.name ? `«${member.name}»` : member.service_ref;
     if (member.change === "joins" && member.online === false) {
@@ -347,7 +461,7 @@ export function publicLampGroupChange(
   change,
   { verification, configurationMatches },
 ) {
-  const notes = lampGroupNotes(change.members);
+  const notes = lampGroupNotes(change.members, change.out_of_step);
   return {
     status: change.status,
     change_ref: `spruthub-change://native/${change.id}`,
@@ -398,7 +512,7 @@ export function lampGroupContract(group) {
       characteristics: [...member.types],
     })),
     input:
-      "prepare_native_change with this target_ref and member_service_refs: every lamp service the group should hold afterwards, the lamps it keeps included. A joining lamp is linked on each of these characteristics it has; a lamp left out is unlinked; the lamps kept are not touched.",
+      "prepare_native_change with this target_ref and member_service_refs: every lamp service the group should hold afterwards, the lamps it keeps included. A joining lamp is linked on each of these characteristics it has; a lamp left out is unlinked; the lamps kept are not touched. A new lamp that replaced one and is already on the hub (find_devices shows it, without in_lamp_groups) is linked here, not paired again.",
     write: [
       "link.addVirtual({aId,sId,cId,tAId,tSId,tCId})",
       "link.remove({aId,sId,cId,linkId})",
