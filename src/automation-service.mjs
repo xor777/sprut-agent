@@ -412,6 +412,22 @@ export class AutomationService {
   }
 
   async prepareNativeChange(input) {
+    const result = await this.#prepareOperation(input);
+    // A prepared change the request asks for is applied without asking the
+    // owner again; one the owner must hear of first (tell_owner) is not.
+    return result.status === "prepared" && result.tell_owner === undefined
+      ? {
+          ...result,
+          next: {
+            tool: "apply_native_change",
+            arguments: { change_ref: result.change_ref },
+            when: "the request asks for this change, not only to prepare or propose it",
+          },
+        }
+      : result;
+  }
+
+  async #prepareOperation(input) {
     // Text with the redaction mark is refused here; a value carrying it, with
     // the value's contract (validateCharacteristicValue).
     for (const field of ["name", "description", "source"]) {
