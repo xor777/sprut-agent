@@ -378,6 +378,7 @@ export const SCENARIO_DELETE_LIMITATIONS = [
   "Undo creates the scenario again with the same name, description, data or code, on/off, start and sync, but under a new number: scenario targets of other BLOCKs still point at the old number, a LOGIC's device assignments are not made again, and runs it missed while deleted are not made up.",
   "Dependencies cover BLOCK scenario targets, a LOGIC's device assignments, and for a GLOBAL the names its code assigns on global (global.x = …) used in BLOCK code nodes and LOGIC or GLOBAL code. Scenarios run from code and other ways code can depend on a scenario are not traced.",
   "SprutHub exposes no native compare-and-set; a race remains after the pre-delete comparison.",
+  "Undo does not look for a copy the owner made meanwhile: if they created the scenario again themselves, undo makes a second one.",
 ];
 
 export function publicScenarioDelete(change, verification) {
