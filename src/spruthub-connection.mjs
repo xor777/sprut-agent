@@ -49,6 +49,9 @@ export class SprutHubConnection {
   #homeSelectionSource;
   // The login that renews a session the hub refused, by the refused token.
   #renewal;
+  // When a login the hub asked to delay (ACCOUNT_RESPONSE_TOO_FAST) may be
+  // tried again: each try counts toward the hub's NO_MORE_TRIES block.
+  #loginNotBefore = 0;
   #secrets = new Set();
 
   constructor({ env = process.env } = {}) {
@@ -226,14 +229,25 @@ export class SprutHubConnection {
     accountSha256,
     setup,
   }) {
-    const authenticated = await authenticate({
-      url,
-      login,
-      password,
-      timeoutMs,
-      setup,
-      remember: (...values) => this.#remember(...values),
-    });
+    const waitMs = this.#loginNotBefore - Date.now();
+    if (waitMs > 0) throw authenticationDelayed(Math.ceil(waitMs / 1000));
+    let authenticated;
+    try {
+      authenticated = await authenticate({
+        url,
+        login,
+        password,
+        timeoutMs,
+        setup,
+        remember: (...values) => this.#remember(...values),
+      });
+    } catch (error) {
+      const delay = error.details?.retry_after_seconds;
+      if (error.code === "authentication_delayed" && delay) {
+        this.#loginNotBefore = Date.now() + delay * 1000;
+      }
+      throw error;
+    }
     await saveSession(sessionFile, {
       version: SESSION_VERSION,
       url,

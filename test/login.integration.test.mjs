@@ -606,6 +606,8 @@ test("an installed overview preserves a delayed login and a later user retry", a
   assert.equal(delayed.structuredContent.error.action, "retry_login_later");
   assert.equal(delayed.structuredContent.retry_after_seconds, 1);
 
+  // The user retries once the delay the hub asked for has passed.
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
   const recovered = await client.callTool({
     name: "home_overview",
     arguments: {},
@@ -1608,7 +1610,24 @@ test("a server delay allows a fresh user-initiated auth flow", async (t) => {
   assert.equal(delayed.structuredContent.error.code, "authentication_delayed");
   assert.equal(delayed.structuredContent.error.retryable, true);
   assert.equal(delayed.structuredContent.retry_after_seconds, 1);
+  const delayedAt = Date.now();
 
+  // A retry within the delay sends no login: it would count toward the
+  // hub's block.
+  const early = await client.callTool({
+    name: "home_overview",
+    arguments: {},
+  });
+  assert.equal(early.structuredContent.error.code, "authentication_delayed");
+  assert.equal(early.structuredContent.retry_after_seconds, 1);
+  assert.equal(
+    hub.requests.filter(({ params }) => params.account?.auth).length,
+    1,
+  );
+
+  await new Promise((resolve) =>
+    setTimeout(resolve, delayedAt + 1_100 - Date.now()),
+  );
   const recovered = await client.callTool({
     name: "home_overview",
     arguments: {},
