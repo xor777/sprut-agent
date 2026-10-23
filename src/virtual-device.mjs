@@ -2,6 +2,7 @@
 // creates one in a room, virtual_device_delete deletes one. What the hub
 // does with them was observed on the owner's hub, 3.0.0
 // (research/protocol/2026-10-23-virtual-devices.md).
+import { nameWithinLimit } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 export const VIRTUAL_DEVICE = "virtual_device";
@@ -33,16 +34,7 @@ export const ACCESSORY_NAME_MAX_LENGTH = 32;
 // The hub put an accessory sent with a room it lacks into another room
 // without an error (probe, 14), so the room is checked before the write.
 export function virtualDeviceName(name) {
-  const length = [...name].length;
-  if (length > ACCESSORY_NAME_MAX_LENGTH) {
-    throw new SprutHubError(
-      "name_too_long",
-      `This name has ${length} characters, and SprutHub keeps only the first ${ACCESSORY_NAME_MAX_LENGTH} of a device name. Nothing was written; suggest a name of at most ${ACCESSORY_NAME_MAX_LENGTH} characters.`,
-      "prepare_native_change",
-      { max_length: ACCESSORY_NAME_MAX_LENGTH, name_length: length },
-    );
-  }
-  return name;
+  return nameWithinLimit(name, "a device name", ACCESSORY_NAME_MAX_LENGTH);
 }
 
 export function virtualDeviceType(value) {
@@ -85,6 +77,8 @@ export function virtualDeviceContract(operation) {
       name: {
         min_length: 1,
         max_length: ACCESSORY_NAME_MAX_LENGTH,
+        refused_characters:
+          "emoji and other characters outside the Basic Multilingual Plane, as in a room name",
         note: "also the name of its service",
       },
       value: { service_type: VIRTUAL_DEVICE_TYPES },

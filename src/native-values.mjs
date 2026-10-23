@@ -1381,6 +1381,14 @@ export async function readRoomName(client, target) {
 // A name the hub would not keep whole is refused before any write instead
 // of being cut or stripped.
 export function roomNameWithinLimit(name) {
+  return nameWithinLimit(name, "a room name", ROOM_NAME_MAX_LENGTH);
+}
+
+// what: "a room name", "a device name"; both are kept to their first 32
+// characters (2026-09-24-live-conformance-3, 2026-10-23-virtual-devices).
+// Only a room name was seen losing an emoji; a device name is held to the
+// same rule, as its creation is found again by its exact name.
+export function nameWithinLimit(name, what, maxLength) {
   const characters = [...name];
   const unsupported = [
     ...new Set(
@@ -1394,17 +1402,17 @@ export function roomNameWithinLimit(name) {
   if (unsupported.length > 0) {
     throw new SprutHubError(
       "name_characters_unsupported",
-      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
+      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; in ${what} emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
       "prepare_native_change",
       { unsupported_characters: unsupported },
     );
   }
-  if (characters.length <= ROOM_NAME_MAX_LENGTH) return name;
+  if (characters.length <= maxLength) return name;
   throw new SprutHubError(
     "name_too_long",
-    `This name has ${characters.length} characters, and SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    `This name has ${characters.length} characters, and SprutHub keeps only the first ${maxLength} characters of ${what}. Nothing was written; ask the owner for a name of at most ${maxLength} characters.`,
     "prepare_native_change",
-    { max_length: ROOM_NAME_MAX_LENGTH, name_length: characters.length },
+    { max_length: maxLength, name_length: characters.length },
   );
 }
 
