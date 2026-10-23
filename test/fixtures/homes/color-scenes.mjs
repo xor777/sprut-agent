@@ -101,3 +101,7 @@ export function withColorScenes(fixture) {
   );
   return fixture;
 }
+
+export default async function build({ loadHomeFixture }) {
+  return withColorScenes(await loadHomeFixture("apartment"));
+}
