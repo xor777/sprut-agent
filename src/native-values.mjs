@@ -154,10 +154,29 @@ export function logicActiveValue(logic) {
 // the previous value back only while the device still shows the sent one
 // and does not reverse past physical effects), contract and prepare
 // overrides, ownerConflict, and extra limitations.
+// A virtual button's press is its ProgrammableSwitchEvent written: each
+// write is a press that scenarios on the button react to, the same value
+// included (2026-10-23-virtual-devices, 9 and 10). A press is not undone:
+// writing the earlier value back would be another press.
+export const BUTTON_PRESS_TYPE = "ProgrammableSwitchEvent";
+export const BUTTON_PRESS_NOTE =
+  "A write to a virtual button is a press: scenarios on this button ran as on a press, each time it is sent. A press is not undone.";
+const BUTTON_PRESS_RESTORATION = {
+  supported: false,
+  limitation: {
+    code: "button_press_not_undone",
+    message:
+      "A button press is not undone: writing the earlier value back would press it again.",
+  },
+};
+
 export const NATIVE_VALUE_KINDS = {
   characteristic_value: {
     command: true,
-    restoration: scalarValueRestoration,
+    restoration: (contract, baseline) =>
+      contract?.type === BUTTON_PRESS_TYPE
+        ? BUTTON_PRESS_RESTORATION
+        : scalarValueRestoration(contract, baseline),
     knownSetting: (change) =>
       isKnownCharacteristicSetting(change.contract?.type),
     inspect: inspectCharacteristicValue,
@@ -461,6 +480,8 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "accessory_placement",
   "room_create",
   "virtual_light_group",
+  "virtual_device",
+  "virtual_device_delete",
   // The lamps of an existing group (light-group-members.mjs).
   "light_group_members",
   "block_create",
@@ -680,7 +701,11 @@ export function characteristicValueState(
   control,
   { requireWrite = false } = {},
 ) {
-  const contract = characteristicContract(control, { requireWrite });
+  // A virtual device's reading or press: written though marked read-only.
+  const contract = characteristicContract(
+    change.virtual_write === true ? { ...control, write: true } : control,
+    { requireWrite },
+  );
   if (
     contract.type !== change.contract.type ||
     contract.kind !== change.contract.kind
@@ -1357,6 +1382,14 @@ export async function readRoomName(client, target) {
 // A name the hub would not keep whole is refused before any write instead
 // of being cut or stripped.
 export function roomNameWithinLimit(name) {
+  return nameWithinLimit(name, "a room name", ROOM_NAME_MAX_LENGTH);
+}
+
+// what: "a room name", "a device name"; both are kept to their first 32
+// characters (2026-09-24-live-conformance-3, 2026-10-23-virtual-devices).
+// Only a room name was seen losing an emoji; a device name is held to the
+// same rule, as its creation is found again by its exact name.
+export function nameWithinLimit(name, what, maxLength) {
   const characters = [...name];
   const unsupported = [
     ...new Set(
@@ -1370,17 +1403,17 @@ export function roomNameWithinLimit(name) {
   if (unsupported.length > 0) {
     throw new SprutHubError(
       "name_characters_unsupported",
-      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
+      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; in ${what} emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
       "prepare_native_change",
       { unsupported_characters: unsupported },
     );
   }
-  if (characters.length <= ROOM_NAME_MAX_LENGTH) return name;
+  if (characters.length <= maxLength) return name;
   throw new SprutHubError(
     "name_too_long",
-    `This name has ${characters.length} characters, and SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    `This name has ${characters.length} characters, and SprutHub keeps only the first ${maxLength} characters of ${what}. Nothing was written; ask the owner for a name of at most ${maxLength} characters.`,
     "prepare_native_change",
-    { max_length: ROOM_NAME_MAX_LENGTH, name_length: characters.length },
+    { max_length: maxLength, name_length: characters.length },
   );
 }
 

@@ -99,9 +99,15 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2); virtual=false, present, on a physical accessory (2026-09-24-live-conformance-3-read-only)",
   ],
-  "accessory.create": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "accessory.create": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; several services, Name per service, 32-character names, room 6 for an unknown room, the error texts: 2026-10-23-virtual-devices",
+  ],
   "accessory.update": [OBSERVED, "2026-09-11-device-placement"],
-  "accessory.delete": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "accessory.delete": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; links to and from the deleted accessory: 2026-10-23-virtual-devices",
+  ],
   "service.types": [OBSERVED, "2026-09-09-type-catalog"],
   "service.update": [
     SCHEMA_ONLY,
@@ -110,7 +116,10 @@ export const METHOD_EVIDENCE = {
   "characteristic.get": [OBSERVED, "2026-09-09-automations"],
   "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
   "characteristic.setOptions": [SCHEMA_ONLY],
-  "characteristic.update": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "characteristic.update": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; a read-only reading or press of a virtual accessory written: 2026-10-23-virtual-devices",
+  ],
   "characteristic.update {notify}": [
     OBSERVED,
     "2026-10-12-notifications-live: true and false on a virtual lamp's On, read back in accessory.get only",
@@ -539,6 +548,41 @@ const CHARACTERISTIC_TYPES = {
       ["CO2_LEVELS_ABNORMAL", 1, "Повышенный"],
     ]),
   },
+  // A created virtual SmokeSensor and OccupancySensor (owner hub, 3.0.0,
+  // 2026-10-23-virtual-devices, 6).
+  SmokeDetected: {
+    name: "Обнаружен дым",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["SMOKE_NOT_DETECTED", 0, "Нет"],
+      ["SMOKE_DETECTED", 1, "Да"],
+    ]),
+  },
+  OccupancyDetected: {
+    name: "Обнаружено присутствие",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["OCCUPANCY_NOT_DETECTED", 0, "Нет"],
+      ["OCCUPANCY_DETECTED", 1, "Да"],
+    ]),
+  },
+  StatusTampered: {
+    name: "Вскрытие",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["NOT_TAMPERED", 0, "Нет"],
+      ["TAMPERED", 1, "Да"],
+    ]),
+  },
   CarbonDioxideLevel: {
     name: "Уровень CO2",
     format: "double",
@@ -833,6 +877,11 @@ const CHARACTERISTIC_TYPES = {
   },
 };
 
+const SYSTEM_SERVICE_TYPES = new Set([
+  "AccessoryInformation",
+  "FilterMaintenance",
+]);
+
 const SERVICE_TYPES = [
   [
     "AccessoryInformation",
@@ -860,19 +909,19 @@ const SERVICE_TYPES = [
     "MotionSensor",
     "Датчик движения",
     ["MotionDetected"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "ContactSensor",
     "Датчик открытия",
     ["ContactSensorState"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "LeakSensor",
     "Датчик протечки",
     ["LeakDetected"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "TemperatureSensor",
@@ -891,6 +940,18 @@ const SERVICE_TYPES = [
     "Датчик углекислого газа",
     ["CarbonDioxideDetected"],
     ["CarbonDioxideLevel", "Name"],
+  ],
+  [
+    "SmokeSensor",
+    "Датчик дыма",
+    ["SmokeDetected"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
+  ],
+  [
+    "OccupancySensor",
+    "Датчик присутствия",
+    ["OccupancyDetected"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "LightSensor",
@@ -964,7 +1025,9 @@ const SERVICE_TYPES = [
     ["Name"],
   ],
 ].map(([type, name, required, optional]) => ({
-  system: false,
+  // System types are listed but refused by accessory.create (owner hub,
+  // 3.0.0, 2026-10-23-virtual-devices, 2 and 13).
+  system: SYSTEM_SERVICE_TYPES.has(type),
   type,
   name,
   required: required.map((item) => ({
@@ -1746,54 +1809,95 @@ const HANDLERS = {
     const accessory = state.accessories.find((item) => item.id === id);
     return accessory ? withNotify(accessory) : null;
   },
+  // As the owner's hub 3.0.0 answered (2026-10-23-virtual-devices): any
+  // number of services of non-system types; a room the home lacks, or none,
+  // puts the accessory in room 6; names keep their first 32 characters;
+  // optional characteristics a type does not list are left out; each
+  // service gets its Name characteristic right after its sId, then the
+  // required and the chosen optional ones. A blank name, an unknown or a
+  // system type is refused with the hub's -32602 texts.
   "accessory.create": (state, { name, roomId, services }) => {
-    requireRoom(state, roomId);
-    if (typeof name !== "string" || name.length === 0) {
-      throw invalidParams("Accessory name is required");
+    if (!Array.isArray(services) || services.length === 0) {
+      throw invalidParams("Param not found: 'services'");
     }
-    if (!Array.isArray(services) || services.length !== 1) {
-      throw invalidParams("Exactly one service is supported by the simulator");
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw invalidParams("Param is empty: 'name'");
     }
-    const [serviceInput] = services;
-    const catalog = SERVICE_TYPES.find(
-      ({ type }) => type === serviceInput.type,
-    );
-    if (!catalog)
-      throw invalidParams(`Unknown service type ${serviceInput.type}`);
+    const catalogs = services.map((serviceInput) => {
+      const catalog = SERVICE_TYPES.find(
+        ({ type }) => type === serviceInput?.type,
+      );
+      if (!catalog) {
+        throw invalidParams(
+          `Failed to parse:  'No enum constant com.spruthub.sdk.HS.${serviceInput?.type}'`,
+        );
+      }
+      if (catalog.system) {
+        throw invalidParams(`Invalid param: '${catalog.type}'`);
+      }
+      if (
+        Object.hasOwn(serviceInput, "name") &&
+        (typeof serviceInput.name !== "string" ||
+          serviceInput.name.trim().length === 0)
+      ) {
+        throw invalidParams("Param is empty: 'name'");
+      }
+      return catalog;
+    });
+    const room =
+      state.rooms.find((candidate) => candidate.id === roomId) ??
+      requireRoom(state, VIRTUAL_FALLBACK_ROOM_ID);
     const id = nextId(
       state.accessories.map((accessory) => accessory.id),
       100,
     );
-    const types = [
-      ...catalog.required.map(({ type }) => type),
-      ...(serviceInput.optional ?? []).filter(
-        (type) => !catalog.required.some((item) => item.type === type),
-      ),
-    ];
-    const accessory = {
-      id,
-      roomId,
-      name,
-      online: true,
-      virtual: true,
-      ...VIRTUAL_IDENTITY(id),
-      services: [
-        virtualInformationService(id, name),
-        {
-          aId: id,
-          sId: VIRTUAL_SERVICE_ID,
-          name: serviceInput.name ?? name,
-          type: serviceInput.type,
-          visible: true,
-          characteristics: types.map((type, index) =>
-            buildCharacteristic(id, VIRTUAL_SERVICE_ID, {
-              cId: VIRTUAL_SERVICE_ID + 1 + index,
+    const stored = cutName(name);
+    let sId = VIRTUAL_SERVICE_ID;
+    const created = services.map((serviceInput, index) => {
+      const catalog = catalogs[index];
+      const serviceName = cutName(serviceInput.name ?? name);
+      const optional = catalog.optional
+        .map(({ type }) => type)
+        .filter((type) => type !== "Name");
+      const types = [
+        ...catalog.required.map(({ type }) => type),
+        ...(serviceInput.optional ?? []).filter((type) =>
+          optional.includes(type),
+        ),
+      ];
+      const service = {
+        aId: id,
+        sId,
+        name: serviceName,
+        type: serviceInput.type,
+        visible: true,
+        characteristics: [
+          buildCharacteristic(id, sId, {
+            cId: sId + 1,
+            type: "Name",
+            value: serviceName,
+            control: { visible: false },
+          }),
+          ...types.map((type, offset) =>
+            buildCharacteristic(id, sId, {
+              cId: sId + 2 + offset,
               type,
               value: defaultValue(type),
             }),
           ),
-        },
-      ],
+        ],
+      };
+      sId += 2 + types.length;
+      return service;
+    });
+    const accessory = {
+      id,
+      roomId: room.id,
+      name: stored,
+      online: true,
+      virtual: true,
+      ...VIRTUAL_IDENTITY(id),
+      services: [virtualInformationService(id, stored), ...created],
     };
     state.accessories.push(accessory);
     emitAccessories(state, "EVENT_ADD", [accessory]);
@@ -1840,6 +1944,29 @@ const HANDLERS = {
     state.logics = state.logics.filter(({ aId }) => aId !== id);
     for (const key of [...state.links.keys()]) {
       if (key.startsWith(`${id}.`)) state.links.delete(key);
+    }
+    // Owner hub, 3.0.0 (2026-10-23-virtual-devices, 18 and 19): an IN link
+    // to the deleted accessory goes, and its characteristic's hasLinks turns
+    // false once it has no other; an OUT link that fed the deleted
+    // accessory stays as an empty entry, hasLinks unchanged.
+    for (const [key, links] of state.links) {
+      const kept = links.filter(
+        (link) =>
+          link.type !== "IN" ||
+          !link.characteristics.some(({ aId }) => aId === id),
+      );
+      for (const link of kept) {
+        if (link.type !== "OUT") continue;
+        link.characteristics = link.characteristics.filter(
+          ({ aId }) => aId !== id,
+        );
+      }
+      state.links.set(key, kept);
+      if (kept.length === 0 && links.length > 0) {
+        const [aId, sId, cId] = key.split(".").map(Number);
+        const characteristic = findCharacteristic(state, { aId, sId, cId });
+        if (characteristic) characteristic.hasLinks = false;
+      }
     }
     state.emitAfterReply?.({
       accessory: { event: "EVENT_REMOVE", accessories: [{ id }] },
@@ -1916,7 +2043,9 @@ const HANDLERS = {
       characteristic.notify = input.notify;
     }
     if (input.control && Object.hasOwn(input.control, "value")) {
-      const value = checkedValue(characteristic.control, input.control.value);
+      const value = checkedValue(characteristic.control, input.control.value, {
+        virtual: virtuallyWritable(state, characteristic),
+      });
       if (state.faults?.stuckActuators.has(characteristic.aId)) {
         recordFault(state, "stuck_actuator", state.currentRequest);
         return {};
@@ -2069,6 +2198,9 @@ const HANDLERS = {
   },
 
   "scenario.list": (state, { aId }) => {
+    // A deleted accessory's id: -32603 Not found (owner hub, 3.0.0,
+    // 2026-10-23-virtual-devices, 21).
+    if (aId !== undefined) requireAccessory(state, aId);
     const scenarios = state.scenarios
       .filter(
         (scenario) =>
@@ -4144,6 +4276,18 @@ function storedRoomName(name) {
     .join("");
 }
 
+// accessory.create kept the first 32 characters of an accessory's and a
+// service's name, Latin and Cyrillic alike, and put an accessory sent with
+// a room the home lacks, or with none, in room 6 (owner hub, 3.0.0,
+// 2026-10-23-virtual-devices, 14 and 15). Why room 6 there was not
+// established.
+const ACCESSORY_NAME_LIMIT = 32;
+const VIRTUAL_FALLBACK_ROOM_ID = 6;
+
+function cutName(name) {
+  return [...name].slice(0, ACCESSORY_NAME_LIMIT).join("");
+}
+
 function requireRoom(state, id) {
   const room = state.rooms.find((candidate) => candidate.id === id);
   if (!room) throw notFound(`Room ${id}`);
@@ -4214,7 +4358,24 @@ function characteristicKey({ aId, sId, cId }) {
 // string → on at 100) and refuses only an unknown characteristic
 // (2026-10-13-parallel-writes, 5). The product checks range and kind itself
 // before any write; a test of that checks that no write was sent.
-function checkedValue(control, value) {
+// The owner's hub writes a read-only characteristic of a virtual
+// accessory's own service, such as a virtual sensor's reading or a virtual
+// button's press, and its events follow (2026-10-23-virtual-devices, 7, 9).
+function virtuallyWritable(state, characteristic) {
+  const accessory = state.accessories.find(
+    ({ id }) => id === characteristic.aId,
+  );
+  const service = accessory?.services.find(
+    ({ sId }) => sId === characteristic.sId,
+  );
+  return (
+    accessory?.virtual === true &&
+    service?.type !== "AccessoryInformation" &&
+    characteristic.control.type !== "Name"
+  );
+}
+
+function checkedValue(control, value, { virtual = false } = {}) {
   const fields = isRecord(value)
     ? VALUE_FIELDS.filter((field) => Object.hasOwn(value, field))
     : [];
@@ -4222,7 +4383,7 @@ function checkedValue(control, value) {
   if (fields.length !== 1 || fields[0] !== expected) {
     throw invalidParams(`Expected ${expected} for ${control.type}`);
   }
-  if (control.write !== true) {
+  if (control.write !== true && !virtual) {
     throw new SimulatorError(-32000, `${control.type} is read-only`);
   }
   const raw = value[expected];

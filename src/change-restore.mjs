@@ -282,6 +282,8 @@ export function changeName(change) {
       return change.baseline_value?.value;
     case "virtual_light_group":
       return change.created_accessory_snapshot?.name ?? change.requested_name;
+    case "virtual_device":
+      return change.created_snapshot?.name ?? change.requested_name;
     case LIGHT_GROUP_MEMBERS:
       return change.group?.name;
     case "block_create":

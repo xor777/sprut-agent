@@ -192,6 +192,19 @@ export function nativeAffectedRefs(change, homeRef) {
     for (const ref of change.member_service_refs) {
       refs.push(...canonicalAncestors(ref));
     }
+  } else if (
+    change.kind === "virtual_device" ||
+    change.kind === "virtual_device_delete"
+  ) {
+    // The device created, deleted or made again, and its room.
+    refs.push(`${homeRef}/room/${change.room_id}`);
+    for (const id of [
+      change.created_id,
+      change.baseline_snapshot?.id,
+      change.recreated_id,
+    ]) {
+      if (id !== undefined) refs.push(`${homeRef}/accessory/${id}`);
+    }
   } else if (change.kind === LIGHT_GROUP_MEMBERS) {
     // The group and the lamps that join or leave it.
     refs.push(...canonicalAncestors(change.target_ref));

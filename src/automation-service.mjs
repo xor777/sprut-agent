@@ -154,6 +154,8 @@ import {
   sourceFingerprint,
 } from "./logic-changes.mjs";
 import {
+  BUTTON_PRESS_NOTE,
+  BUTTON_PRESS_TYPE,
   changeStillInEffect,
   characteristicValueDraft,
   characteristicValueState,
@@ -239,6 +241,24 @@ import {
 } from "./scenario-delete.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 import {
+  dependenciesWithin,
+  foundDependencies,
+  hasDependencies,
+  notAVirtualDevice,
+  ownServices,
+  recreateServices,
+  sameCreatedDevice,
+  unreadDependencies,
+  VIRTUAL_DEVICE,
+  VIRTUAL_DEVICE_DELETE,
+  VIRTUAL_DEVICE_DEPENDENCIES_NOTE,
+  VIRTUAL_DEVICE_DUPLICATE_NOTE,
+  virtualDeviceContract,
+  virtualDeviceName,
+  virtualDeviceSnapshot,
+  virtualDeviceType,
+} from "./virtual-device.mjs";
+import {
   characteristicTypeName,
   completeVirtualLightConfiguration,
   expectedTargetsForType,
@@ -291,6 +311,16 @@ const ROOM_HISTORY_HINT =
   "A room ref lists only changes of the room itself (its name, its creation). Changes of devices in it are under each device's accessory ref, or in the history without entity_ref.";
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
+// An undone deletion whose create went out and was not refused: a refusal
+// leaves the deletion applied, and the next undo sends the create again.
+function recreationSent(change) {
+  return (
+    nativeIntentDirection(change) === "restore" &&
+    change.native_write_sent === true &&
+    change.status !== "applied"
+  );
+}
+
 export class AutomationService {
   #writeSequence = Promise.resolve();
 
@@ -347,6 +377,16 @@ export class AutomationService {
           ? {}
           : { target_ref: input.target_ref }),
         contract: roomCreateContract(),
+      };
+    }
+    if (
+      input.operation === VIRTUAL_DEVICE ||
+      input.operation === VIRTUAL_DEVICE_DELETE
+    ) {
+      return {
+        status: "ok",
+        operation: input.operation,
+        contract: virtualDeviceContract(input.operation),
       };
     }
     if (input.operation === "virtual_light_group") {
@@ -495,6 +535,12 @@ export class AutomationService {
     }
     if (input.operation === "room_create") {
       return this.#prepareRoomCreate(input);
+    }
+    if (input.operation === VIRTUAL_DEVICE) {
+      return this.#prepareVirtualDevice(input);
+    }
+    if (input.operation === VIRTUAL_DEVICE_DELETE) {
+      return this.#prepareVirtualDeviceDelete(input);
     }
     if (input.operation === "virtual_light_group") {
       return isHomeRef(input.target_ref)
@@ -721,6 +767,568 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  // «Сделай виртуальный выключатель „Режим гостей“ в гостиной».
+  async #prepareVirtualDevice(input) {
+    parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+    const name = virtualDeviceName(
+      requiredNativeName(input.name, "a virtual device").trim(),
+    );
+    const type = virtualDeviceType(input.value);
+    const room = await this.#requireRoom(input.room_ref);
+    const accessories = await this.client.listAccessories();
+    const matching = await this.#virtualAccessories(
+      accessories.filter(
+        (accessory) => accessory.roomId === room.id && accessory.name === name,
+      ),
+    );
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: VIRTUAL_DEVICE,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      room_id: room.id,
+      room_name: room.name,
+      requested_name: name,
+      service_type: type,
+      create_request: {
+        name,
+        roomId: room.id,
+        services: [{ type, name, optional: [] }],
+      },
+      baseline_accessory_ids: accessories.map(({ id }) => id),
+      ...(matching.length > 0
+        ? {
+            matching: matching.map(({ id, name: found }) => ({
+              id,
+              name: found,
+            })),
+          }
+        : {}),
+      native_write_sent: false,
+      native_acknowledged: false,
+      creation_owned: false,
+      last_verification: freshVerification("baseline_absent"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return {
+      ...publicNativeChange(change),
+      ...(matching.length > 0
+        ? { tell_owner: VIRTUAL_DEVICE_DUPLICATE_NOTE }
+        : {}),
+    };
+  }
+
+  async #requireRoom(roomRef) {
+    const roomId = parseRoomRef(roomRef, this.hubSerial);
+    const room = await this.client.getRoom(roomId);
+    if (!room) {
+      throw new SprutHubError(
+        "room_not_found",
+        "The selected room was not found.",
+        "home_overview",
+      );
+    }
+    return { id: roomId, name: room.name };
+  }
+
+  // New accessories of the requested name in the requested room, not in
+  // the home before the write: after a lost create answer they may be the
+  // device, but nothing proves it.
+  async #newVirtualDeviceCandidates({ name, roomId }, baseline) {
+    const known = new Set(baseline);
+    return (await this.client.listAccessories())
+      .filter(
+        (accessory) =>
+          !known.has(accessory.id) &&
+          accessory.name === name &&
+          accessory.roomId === roomId,
+      )
+      .map(({ id, name: found }) => ({ id, name: found }));
+  }
+
+  async #recordUnknownVirtualCreation(change, status, request, baseline) {
+    let candidates;
+    try {
+      candidates = await this.#newVirtualDeviceCandidates(request, baseline);
+    } catch (error) {
+      return this.#finishNative(change, status, undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    return this.#finishNative(change, status, undefined, {
+      candidates,
+      configuration_matches: undefined,
+      conflict_reason: "virtual_device_creation_outcome_unknown",
+      last_verification: freshVerification(
+        candidates.length > 0
+          ? "unowned_matching_device_observed"
+          : "matching_device_missing",
+      ),
+    });
+  }
+
+  async #applyVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_id !== undefined) {
+      return this.#observeVirtualDevice(change);
+    }
+    if (change.native_write_sent === true && change.status !== "not_applied") {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    if (!(await this.client.getRoom(change.room_id))) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "room_missing",
+        last_verification: freshVerification("room_missing"),
+      });
+    }
+    const appeared = await this.#newVirtualDeviceCandidates(
+      change.create_request,
+      change.baseline_accessory_ids,
+    );
+    if (appeared.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        candidates: appeared,
+        conflict_reason: "matching_device_appeared",
+        last_verification: freshVerification("matching_device_appeared"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    let created;
+    try {
+      created = await this.client.createAccessory(change.create_request);
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
+      }
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    change.native_acknowledged = true;
+    change.write_intent.acknowledged = true;
+    change.created_id = created.id;
+    change.created_snapshot = virtualDeviceSnapshot(created);
+    change.creation_owned = true;
+    await this.#saveBeforeWrite(change);
+    return this.#observeVirtualDevice(change);
+  }
+
+  async #observeVirtualDevice(change) {
+    let accessory;
+    try {
+      accessory = await this.client.getAccessoryOrNull(change.created_id);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    if (accessory === null) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#finishNative(change, "restored", undefined, {
+          last_verification: freshVerification("created_device_absent"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "created_device_missing",
+        last_verification: freshVerification("created_device_missing"),
+      });
+    }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
+    return this.#finishNative(change, "applied", undefined, {
+      last_verification: freshVerification("created_device_observed"),
+    });
+  }
+
+  // The saved id holds another device than the one created: a physical
+  // one, or the created one renamed, moved or rebuilt since. It is not this
+  // change's to delete.
+  async #changedCreatedDevice(change, accessory) {
+    if (sameCreatedDevice(accessory, change.created_snapshot)) return null;
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_device: {
+        name: accessory.name,
+        room_id: accessory.roomId,
+        virtual: accessory.virtual === true,
+      },
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  async #getVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_id !== undefined) {
+      return this.#observeVirtualDevice(change);
+    }
+    if (change.native_write_sent === true && change.status !== "not_applied") {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    return publicStoredNativeChange(change);
+  }
+
+  // Undo of a creation: the created device is deleted by its id, unless
+  // scenarios, links or logic now refer to it.
+  async #restoreVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.creation_owned !== true || change.created_id === undefined) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "virtual_device_creation_not_confirmed",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    const accessory = await this.client.getAccessoryOrNull(change.created_id);
+    if (accessory === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        last_verification: freshVerification("created_device_absent"),
+      });
+    }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
+    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    if (foundDependencies(dependencies)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        dependencies,
+        conflict_reason: "virtual_device_in_use",
+        last_verification: freshVerification("virtual_device_in_use"),
+      });
+    }
+    // Code or bridges not read are named with the result, not a stop.
+    change.dependencies = undefined;
+    change.unread = unreadDependencies(dependencies);
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    return this.#deleteVirtualDevice(change, change.created_id, "applied");
+  }
+
+  // Deletes the accessory and reads it back: gone is done; still there or
+  // unread is unknown, decided by the next read.
+  async #deleteVirtualDevice(change, id, refusedStatus) {
+    try {
+      await this.client.deleteAccessory(id);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, refusedStatus, error);
+      }
+    }
+    let after;
+    try {
+      after = await this.client.getAccessoryOrNull(id);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (after === null) {
+      return this.#finishNative(
+        change,
+        change.kind === VIRTUAL_DEVICE ? "restored" : "applied",
+        undefined,
+        { last_verification: freshVerification("device_absent") },
+      );
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      configuration_matches: undefined,
+      conflict_reason: change.native_acknowledged
+        ? "ack_without_device_deletion"
+        : "device_delete_outcome_unknown",
+      last_verification: freshVerification("device_still_present"),
+    });
+  }
+
+  // What refers to a virtual device: the scenarios the hub lists for it,
+  // the devices its characteristics are linked with, the bridges that
+  // export it and the logic assigned to its services.
+  async #virtualDeviceDependencies(accessory) {
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const services = ownServices(accessory);
+    const scenarios = (
+      await this.client.listAccessoryScenarios(accessory.id)
+    ).map(({ index, name }) => ({
+      ref: `${homeRef}/scenario/${encodeURIComponent(index)}`,
+      name,
+    }));
+    const linked = [];
+    for (const service of services) {
+      for (const characteristic of service.characteristics ?? []) {
+        if (characteristic.control?.type === "Name") continue;
+        const target = {
+          aId: accessory.id,
+          sId: service.sId,
+          cId: characteristic.cId,
+        };
+        const others = (await this.client.listLinks(target))
+          .filter(({ type }) => type === "IN" || type === "OUT")
+          .flatMap(({ characteristics }) => characteristics)
+          .filter(({ aId }) => aId !== accessory.id);
+        if (others.length > 0) {
+          linked.push({ type: characteristic.control?.type, others });
+        }
+      }
+    }
+    let names = new Map();
+    if (linked.length > 0) {
+      names = new Map(
+        (await this.client.listAccessories()).map(({ id, name }) => [id, name]),
+      );
+    }
+    const links = linked.map(({ type, others }) => ({
+      characteristic: type,
+      with: [...new Set(others.map(({ aId }) => aId))].map((aId) => ({
+        ref: `${homeRef}/accessory/${aId}`,
+        name: names.get(aId) ?? null,
+      })),
+    }));
+    const logics = [];
+    for (const service of services) {
+      for (const logic of await this.client.listLogics({
+        aId: accessory.id,
+        sId: service.sId,
+      })) {
+        logics.push({
+          name:
+            typeof logic.name === "string" ? logic.name : String(logic.type),
+        });
+      }
+    }
+    const exports = await this.client.accessoryBridgeExports(accessory.id);
+    const bridges = exports.filter(({ exported }) => exported !== null);
+    const bridgesUnread = exports
+      .filter(({ exported }) => exported === null)
+      .map(({ ref, name }) => ({ ref, name }));
+    // Code scenarios that name the device; code not read is named too, as
+    // it may refer to it.
+    const code = await this.client.accessoryCodeMentions(accessory);
+    return {
+      scenarios,
+      code: code.mentions.map(({ scenario_ref: ref, scenario_name: name }) => ({
+        ref,
+        name,
+      })),
+      ...(code.unchecked.length > 0
+        ? {
+            code_unread: code.unchecked.map((entry) => ({
+              ...(entry.scenario_ref ? { ref: entry.scenario_ref } : {}),
+              reason: entry.outcome,
+              ...(entry.scenarios_not_read
+                ? { scenarios: entry.scenarios_not_read }
+                : {}),
+            })),
+          }
+        : {}),
+      links,
+      bridges,
+      ...(bridgesUnread.length > 0 ? { bridges_unread: bridgesUnread } : {}),
+      logics,
+    };
+  }
+
+  // «Удали кнопку Десерт».
+  async #prepareVirtualDeviceDelete(input) {
+    const { id } = parseAccessoryRef(input.target_ref, this.hubSerial);
+    const accessory = await this.client.getAccessory(id);
+    if (accessory.virtual !== true) throw notAVirtualDevice();
+    const [room, dependencies] = await Promise.all([
+      this.client.getRoom(accessory.roomId),
+      this.#virtualDeviceDependencies(accessory),
+    ]);
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: VIRTUAL_DEVICE_DELETE,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      room_id: accessory.roomId,
+      room_name: room?.name ?? null,
+      target_name: accessory.name,
+      baseline_snapshot: virtualDeviceSnapshot(accessory),
+      dependencies,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("device_observed"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return {
+      ...publicNativeChange(change),
+      ...(hasDependencies(dependencies)
+        ? { tell_owner: VIRTUAL_DEVICE_DEPENDENCIES_NOTE }
+        : {}),
+    };
+  }
+
+  async #applyVirtualDeviceDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (recreationSent(change)) return this.#getVirtualDeviceDelete(change);
+    const id = change.baseline_snapshot.id;
+    const accessory = await this.client.getAccessoryOrNull(id);
+    if (accessory === null) {
+      if (change.native_write_sent === true) {
+        return this.#finishNative(change, "applied", undefined, {
+          last_verification: freshVerification("device_absent"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "virtual_device_missing",
+        last_verification: freshVerification("device_missing"),
+      });
+    }
+    if (
+      !isDeepStrictEqual(
+        virtualDeviceSnapshot(accessory),
+        change.baseline_snapshot,
+      )
+    ) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    // The owner confirmed what prepare named; something new since then is
+    // theirs to hear of first.
+    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    if (!dependenciesWithin(dependencies, change.dependencies)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        dependencies,
+        conflict_reason: "dependencies_changed",
+        last_verification: freshVerification("dependencies_changed"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    return this.#deleteVirtualDevice(change, id, "not_applied");
+  }
+
+  async #getVirtualDeviceDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.native_write_sent !== true) {
+      return publicStoredNativeChange(change);
+    }
+    if (recreationSent(change)) {
+      return this.#restoreVirtualDeviceDelete(change, { readOnly: true });
+    }
+    let accessory;
+    try {
+      accessory = await this.client.getAccessoryOrNull(
+        change.baseline_snapshot.id,
+      );
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    return this.#finishNative(
+      change,
+      accessory === null ? "applied" : "uncertain",
+      undefined,
+      {
+        last_verification: freshVerification(
+          accessory === null ? "device_absent" : "device_still_present",
+        ),
+      },
+    );
+  }
+
+  // Undo of a deletion creates the device again with its name, room and
+  // service types. It is a new device: what referred to the old one is not
+  // put back on it.
+  async #restoreVirtualDeviceDelete(change, { readOnly = false } = {}) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    const snapshot = change.baseline_snapshot;
+    const request = {
+      name: snapshot.name,
+      roomId: snapshot.room_id,
+    };
+    if (change.recreated_id !== undefined) {
+      const accessory = await this.client.getAccessoryOrNull(
+        change.recreated_id,
+      );
+      return accessory === null
+        ? this.#finishNative(change, "conflict", undefined, {
+            conflict_reason: "recreated_device_missing",
+            last_verification: freshVerification("recreated_device_missing"),
+          })
+        : this.#finishNative(change, "restored", undefined, {
+            recreated_snapshot: virtualDeviceSnapshot(accessory),
+            last_verification: freshVerification("recreated_device_observed"),
+          });
+    }
+    if (recreationSent(change)) {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        request,
+        change.restore_baseline_ids,
+      );
+    }
+    if (readOnly) return publicStoredNativeChange(change);
+    if (change.status !== "applied") {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "virtual_device_deletion_not_confirmed",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    if (!(await this.client.getRoom(snapshot.room_id))) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "room_missing",
+        last_verification: freshVerification("room_missing"),
+      });
+    }
+    const [serviceTypes, accessories] = await Promise.all([
+      this.client.listServiceTypes(),
+      this.client.listAccessories(),
+    ]);
+    change.restore_baseline_ids = accessories.map(({ id }) => id);
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    let created;
+    try {
+      created = await this.client.createAccessory({
+        ...request,
+        services: recreateServices(snapshot, serviceTypes),
+      });
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "applied", error);
+      }
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        request,
+        change.restore_baseline_ids,
+      );
+    }
+    change.native_acknowledged = true;
+    change.write_intent.acknowledged = true;
+    change.recreated_id = created.id;
+    await this.#saveBeforeWrite(change);
+    return this.#restoreVirtualDeviceDelete(change);
   }
 
   async #prepareVirtualLightGroup(input) {
@@ -1678,6 +2286,12 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#applyVirtualLightGroup(change);
     }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#applyVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#applyVirtualDeviceDelete(change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#applyLampGroupMembers(change);
     }
@@ -1836,7 +2450,19 @@ export class AutomationService {
           });
           continue;
         }
-        items.push({ index, command, input, draft, name, onTarget, shown });
+        items.push({
+          index,
+          command,
+          input,
+          draft,
+          name,
+          onTarget,
+          shown,
+          ...(draft.fields.virtual_write &&
+          draft.contract.type === BUTTON_PRESS_TYPE
+            ? { note: BUTTON_PRESS_NOTE }
+            : {}),
+        });
       } catch (error) {
         if (!isDeviceCommandRejection(error)) throw error;
         invalid.push(
@@ -2469,6 +3095,12 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#getVirtualLightGroup(change);
     }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#getVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#getVirtualDeviceDelete(change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#getLampGroupMembers(change);
     }
@@ -2636,6 +3268,12 @@ export class AutomationService {
     }
     if (change.kind === "virtual_light_group") {
       return this.#restoreVirtualLightGroup(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#restoreVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#restoreVirtualDeviceDelete(change);
     }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#undoOrUnknown(change, () =>

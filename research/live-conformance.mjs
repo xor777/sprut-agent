@@ -4,8 +4,8 @@
 // It talks only through dist/plugin/dist/server.mjs over stdio. Every write
 // goes through a guard: it may create BLOCK and LOGIC scenarios whose names
 // start with the run prefix, rooms and one virtual Lightbulb without links
-// named with the short run name (the hub keeps 30 characters of an accessory
-// name and 32 of a room name), and may change or restore only objects it
+// named with the short run name (the hub keeps 32 characters of an accessory
+// or a room name), and may change or restore only objects it
 // created in this run. By the owner's
 // rules a BLOCK may act only on that virtual accessory and start only on a
 // one-date cron in FAR_FUTURE_YEAR or later or on one daily time; it is
@@ -5375,8 +5375,9 @@ async function recordProbeId(stateDirectory, record, id) {
   );
 }
 
-// The hub cuts accessory names to 30 characters (2026-09-11) and room names
-// to 32 (2026-09-24), so accessories and rooms carry this short run name.
+// The hub cuts accessory names (2026-10-23-virtual-devices) and room names
+// (2026-09-24) to 32 characters, so accessories and rooms carry this short
+// run name.
 function probeShortName(prefix) {
   return `zz-probe-${prefix.slice("zz-sprut-agent-probe-".length)}`;
 }

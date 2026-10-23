@@ -350,19 +350,19 @@ server.registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps).",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (LOGIC code; its info sets name, description and start). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps), virtual_device (a virtual switch, button or sensor: create), virtual_device_delete.",
         ),
       target_ref: z
         .string()
         .min(1)
         .describe(
-          "The entity to change; a lamp group's service to set its lamps; the home ref to create a room, BLOCK or virtual light.",
+          "The entity to change; a lamp group's service to set its lamps; the home ref to create a room, BLOCK, virtual light or device.",
         ),
       value: z
         .union([z.boolean(), z.number(), z.string()])
         .optional()
         .describe(
-          "The new value; true or false for *_active, service_visible and characteristic_notify.",
+          "The new value; true or false for *_active, service_visible and characteristic_notify; a virtual_device's service type.",
         ),
       option_key: z.string().min(1).optional().describe("For *_option."),
       name: z.string().min(1).optional(),
