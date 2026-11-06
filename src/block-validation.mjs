@@ -41,7 +41,6 @@ import {
 import {
   isRecord,
   isVerifiedRunType,
-  predefinedScenarioReadOnly,
   REDACTED_MARK,
   stableJson,
   stableNativeId,
@@ -76,15 +75,6 @@ export async function validateBlockData(
     scenarioIndex,
   },
 ) {
-  // A write to a built-in BLOCK, at prepare and at apply. Undo writes back the
-  // data it is measured against: an earlier version's change does not stay.
-  if (
-    scenarioIndex !== undefined &&
-    !isDeepStrictEqual(data, editedFrom) &&
-    (await client.getScenario(scenarioIndex))?.predefined === true
-  ) {
-    throw predefinedScenarioReadOnly();
-  }
   if (
     !isRecord(data) ||
     !Array.isArray(data.targets) ||
