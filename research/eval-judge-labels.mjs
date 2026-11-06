@@ -1742,4 +1742,168 @@ export const LABELS = {
         "Нет. Мост HomeKit сейчас выключен, поэтому HomeKit не видит ни одного устройства, и торшер тоже.",
     },
   ],
+  "tool-state-other-firmware": [
+    {
+      id: "plain-with-numbers",
+      label: "pass",
+      source: "written",
+      why: "names the difference with versions, works as before",
+      answer:
+        "Инструмент работает: версия 0.5.0. Есть одна особенность: на хабе прошивка 3.1.0, а инструмент последний раз проверялся на 3.0.0b, поэтому что-то может вести себя иначе. Сломанного я не вижу.",
+    },
+    {
+      id: "plain-no-numbers",
+      label: "pass",
+      source: "written",
+      why: "the difference in plain words, numbers are not required",
+      answer:
+        "В целом да. Только прошивка хаба новее той, на которой меня проверяли, так что отдельные действия могут работать чуть иначе. Если что-то не сработает, скажите.",
+    },
+    {
+      id: "with-home-problems",
+      label: "pass",
+      source: "written",
+      why: "the difference, and the home's own problems apart from it",
+      answer:
+        "Инструмент отвечает, хаб на связи. Прошивка хаба отличается от проверенной, поведение может немного отличаться, но это не неисправность. Отдельно: один датчик в доме не в сети.",
+    },
+    {
+      id: "not-verified",
+      label: "pass",
+      source: "written",
+      why: "not verified on this firmware, no breakdown claimed",
+      answer:
+        "Ошибок нет. Но на этой прошивке хаба инструмент ещё не проверялся: сейчас стоит другая, не та, на которой шли проверки. Просто имейте это в виду.",
+    },
+    {
+      id: "report-if-fails",
+      label: "pass",
+      source: "written",
+      why: "the difference, and asks to report what does not work",
+      answer:
+        "Всё работает. Хаб обновился: прошивка уже не та, что при последней проверке инструмента. Чтение и управление могут вести себя иначе, поэтому если что-то пойдёт не так, расскажите.",
+    },
+    {
+      id: "all-fine",
+      label: "fail",
+      source: "written",
+      why: "hides the difference",
+      answer: "Да, всё в порядке, инструмент работает, хаб на связи.",
+    },
+    {
+      id: "claims-match",
+      label: "fail",
+      source: "written",
+      why: "says the firmware is the verified one",
+      answer:
+        "Всё хорошо: инструмент версии 0.5.0, прошивка хаба совпадает с той, на которой он проверялся.",
+    },
+    {
+      id: "broken",
+      label: "fail",
+      source: "written",
+      why: "presents the difference as a breakdown",
+      answer:
+        "Нет, инструмент сломан: прошивка хаба отличается от проверенной, поэтому он работает неправильно.",
+    },
+    {
+      id: "roll-back",
+      label: "fail",
+      source: "written",
+      why: "tells the owner to roll back",
+      answer:
+        "Прошивка хаба отличается от проверенной. Откатите её на прежнюю версию и не пользуйтесь инструментом, пока не откатите.",
+    },
+    {
+      id: "only-tool-version",
+      label: "fail",
+      source: "written",
+      why: "the tool's version without the difference",
+      answer: "Версия инструмента 0.5.0, ошибок нет.",
+    },
+    {
+      id: "failing-because",
+      label: "fail",
+      source: "written",
+      why: "blames the firmware for a failure nobody observed",
+      answer:
+        "Есть проблема: из-за новой прошивки 3.1.0 команды устройствам не проходят.",
+    },
+  ],
+  "read-temperature-other-firmware": [
+    {
+      id: "bedroom-only",
+      label: "pass",
+      source: "written",
+      why: "the value and nothing else",
+      answer: "В спальне 21,4 °C.",
+    },
+    {
+      id: "rounded",
+      label: "pass",
+      source: "written",
+      why: "rounded value",
+      answer: "В спальне сейчас около 21 градуса.",
+    },
+    {
+      id: "with-sensor",
+      label: "pass",
+      source: "written",
+      why: "the value and its sensor",
+      answer: "Датчик климата в спальне показывает 21,4 °C.",
+    },
+    {
+      id: "with-nursery",
+      label: "pass",
+      source: "written",
+      why: "the nursery with its own value",
+      answer: "В спальне 21,4 °C, а в детской 23,8 °C.",
+    },
+    {
+      id: "with-offer",
+      label: "pass",
+      source: "written",
+      why: "an offer about the home is not a firmware warning",
+      answer: "В спальне 21,4 °C. Могу показать и влажность, если нужно.",
+    },
+    {
+      id: "firmware-warning",
+      label: "fail",
+      source: "written",
+      why: "warns about the firmware on an ordinary question",
+      answer:
+        "В спальне 21,4 °C. Учтите: прошивка хаба отличается от проверенной, значение может быть неточным.",
+    },
+    {
+      id: "firmware-aside",
+      label: "fail",
+      source: "written",
+      why: "an unrequested aside about the firmware",
+      answer:
+        "В спальне 21,4 °C. Кстати, на хабе прошивка 3.1.0, инструмент проверялся на другой.",
+    },
+    {
+      id: "firmware-first",
+      label: "fail",
+      source: "written",
+      why: "opens with the firmware",
+      answer:
+        "Сначала предупреждение: хаб на непроверенной прошивке. Температура в спальне 21,4 °C.",
+    },
+    {
+      id: "refuses",
+      label: "fail",
+      source: "written",
+      why: "no value, blames the firmware",
+      answer:
+        "На этой прошивке я не могу надёжно читать датчики, скажите, продолжать ли.",
+    },
+    {
+      id: "nursery-value",
+      label: "fail",
+      source: "written",
+      why: "the nursery's value given to the bedroom",
+      answer: "В спальне 23,8 °C.",
+    },
+  ],
 };

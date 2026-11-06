@@ -10,6 +10,7 @@ import {
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
+import { VERIFIED_HUB_VERSION } from "./tool-state.mjs";
 
 // SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
 // Latin alike (characters, not bytes); the room.create answer already
@@ -254,7 +255,7 @@ export function scenarioRunContract() {
     },
     restore_supported: false,
     evidence: {
-      live_hub_version: "3.0.0b (20131)",
+      live_hub_version: VERIFIED_HUB_VERSION,
       live_run:
         "active action-only BLOCK with two Lightbulb On=false targets, including an explicit repeat run",
       turned_off_run:
@@ -298,7 +299,7 @@ export function blockActionPauseContract() {
     repeat:
       "the owned controller or its direct then/0 action replaces the same pause; overlapping narrower or wider scopes are rejected",
     evidence: {
-      live_hub_version: "3.0.0b (20131)",
+      live_hub_version: VERIFIED_HUB_VERSION,
       code_condition_before_and_after_deadline: true,
       client_closed_between_evaluations: true,
       full_hub_restart: false,
