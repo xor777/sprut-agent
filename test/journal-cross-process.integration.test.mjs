@@ -28,6 +28,12 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+const offsetClock = path.join(
+  projectRoot,
+  "test",
+  "support",
+  "offset-clock.mjs",
+);
 const journalProcess = path.join(
   projectRoot,
   "test",
@@ -92,16 +98,27 @@ async function startHub(t) {
 }
 
 // One dialog: its own MCP server process on the shared state directory.
-async function startDialog(t, hub, stateDirectory, { timeoutMs = 5_000 } = {}) {
+async function startDialog(
+  t,
+  hub,
+  stateDirectory,
+  { timeoutMs = 5_000, clockOffsetMs } = {},
+) {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["src/server.mjs"],
+    args: [
+      ...(clockOffsetMs ? ["--import", offsetClock] : []),
+      "src/server.mjs",
+    ],
     cwd: projectRoot,
     env: {
       PATH: process.env.PATH,
       ...hub.connectionEnv(),
       SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
       SPRUT_AGENT_STATE_DIR: stateDirectory,
+      ...(clockOffsetMs
+        ? { SPRUT_TEST_CLOCK_OFFSET_MS: String(clockOffsetMs) }
+        : {}),
     },
     stderr: "pipe",
   });
@@ -506,6 +523,39 @@ test("a stopped process's lock gives way by its age", async (t) => {
   assert.ok(Date.now() - startedAt < 5_000, "no wait for the bound");
   const { changes } = await journalOf(stateDirectory);
   assert.equal(Object.keys(changes).length, 2);
+});
+
+// A holder that runs keeps its lock fresh, so its age never gives it away,
+// even to a process whose clock is ahead by most of the lock's limit. Without
+// that this dialog would take the lock of a live process about 25 s after it
+// was taken, and two processes would write the journal at once.
+test("a process with its clock ahead does not take a live process's lock", async (t) => {
+  const hub = await startHub(t);
+  const stateDirectory = await temporaryDirectory(t, "sprut-agent-live-");
+  const first = await startDialog(t, hub, stateDirectory);
+  const [lamp, otherLamp] = FIRST_DIALOG_LAMPS;
+  await prepareTurnOff(first.client, lamp);
+  const { file, changes: before } = await journalOf(stateDirectory);
+  const lockFile = `${file}.lock`;
+  const holder = await holdLock(t, lockFile);
+  const heldText = await readFile(lockFile, "utf8");
+  const ahead = await startDialog(t, hub, stateDirectory, {
+    clockOffsetMs: 95_000,
+  });
+
+  // The next try waits 15 s, so it spans the moment the lock would go stale.
+  await new Promise((resolve) => setTimeout(resolve, 17_000));
+  const refused = await prepareTurnOff(ahead.client, otherLamp);
+
+  assert.equal(refused.isError, true, refused.content[0]?.text);
+  assertBusy(refused.structuredContent.error);
+  assert.equal(await readFile(lockFile, "utf8"), heldText);
+  const { changes } = await journalOf(stateDirectory);
+  assert.deepEqual(Object.keys(changes), Object.keys(before));
+
+  await kill(holder);
+  const prepared = await prepareTurnOff(ahead.client, otherLamp);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
 });
 
 test("processes that find a dead process's lock together all keep their changes", async (t) => {

@@ -86,7 +86,6 @@ test("the common delivery starts outside the checkout without Codex", async (t) 
     file: path.join(configRoot, "sprut-agent", "connection.env"),
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    restart: "Restart the same MCP application after saving the file.",
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
   });

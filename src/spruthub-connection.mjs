@@ -56,6 +56,8 @@ export class SprutHubConnection {
   #homeSelectionSource;
   // The renewal of a session the hub refused, by the refused token.
   #renewal;
+  // The token and the time of this process's last login.
+  #lastLogin;
   // The login hold when no file keeps it: credentials from the launch
   // environment, or a file that could not be written.
   #loginHold;
@@ -107,7 +109,8 @@ export class SprutHubConnection {
       file: setup.file,
       field: "SPRUTHUB_SERIAL",
       permissions: setup.permissions,
-      restart: setup.restart,
+      // The home is chosen when the connection starts.
+      restart: "Restart the same MCP application after saving the file.",
     };
   }
 
@@ -141,8 +144,8 @@ export class SprutHubConnection {
 
     const account = accountOf(connection);
     const { url, sessionFile, timeoutMs } = account;
-    const renewSession = (rejectedToken) =>
-      this.#renewSession(rejectedToken, url);
+    const renewSession = (rejectedToken, everAccepted) =>
+      this.#renewSession(rejectedToken, url, everAccepted);
     const saved = await loadSession(sessionFile, account);
     if (saved) {
       this.#remember(saved.token);
@@ -201,11 +204,11 @@ export class SprutHubConnection {
   // One renewal per refused session: the requests that lost it wait for the
   // same one. A failure a later call may see differently is not kept: the
   // login hold, not this, stops repeated logins.
-  #renewSession(rejectedToken, connectedUrl) {
+  #renewSession(rejectedToken, connectedUrl, everAccepted) {
     if (this.#renewal?.rejectedToken !== rejectedToken) {
       const renewal = {
         rejectedToken,
-        login: this.#replaceSession(rejectedToken, connectedUrl),
+        login: this.#replaceSession(rejectedToken, connectedUrl, everAccepted),
       };
       this.#renewal = renewal;
       renewal.login.catch((error) => {
@@ -217,8 +220,11 @@ export class SprutHubConnection {
     return this.#renewal.login;
   }
 
-  // A session another process saved in the meantime spares a login.
-  async #replaceSession(rejectedToken, connectedUrl) {
+  // A session another process saved in the meantime spares a login, and a
+  // hub that refuses the session its login just gave gets no second login
+  // for it: each one counts towards the hub's block of the account. After a
+  // call's time the next refusal may log in again, so this does not last.
+  async #replaceSession(rejectedToken, connectedUrl, everAccepted) {
     const connection = await this.#readConnection();
     const { env, setup } = connection;
     if (
@@ -232,6 +238,15 @@ export class SprutHubConnection {
     if (saved && saved.token !== rejectedToken) {
       this.#remember(saved.token);
       return saved;
+    }
+    const sinceLogin = Date.now() - (this.#lastLogin?.at ?? 0);
+    if (
+      !everAccepted &&
+      this.#lastLogin?.token === rejectedToken &&
+      sinceLogin >= 0 &&
+      sinceLogin < account.timeoutMs
+    ) {
+      throw freshSessionRefused(account.timeoutMs - sinceLogin);
     }
     return this.#logIn(account);
   }
@@ -263,6 +278,7 @@ export class SprutHubConnection {
       token: authenticated.token,
       cid: authenticated.cid,
     });
+    this.#lastLogin = { token: authenticated.token, at: Date.now() };
     this.#loginHold = undefined;
     if (account.holdFile) await unlink(account.holdFile).catch(() => {});
     return authenticated;
@@ -274,6 +290,8 @@ export class SprutHubConnection {
     const hold =
       (holdFile && (await readLoginHold(holdFile))) ?? this.#loginHold;
     if (!hold || Date.now() >= Date.parse(hold.not_before)) return null;
+    // Dated ahead of now, it was met under a wrong clock, and so is its wait.
+    if (Date.parse(hold.refused_at) > Date.now()) return null;
     // The delay is the hub's own and holds for any credentials.
     if (hold.status === TOO_FAST) return hold;
     return hold.file?.mtime_ms === credentialFile?.mtime_ms &&
@@ -460,11 +478,24 @@ function loginHeld(hold, { credentialFile, credentialsAt }) {
   );
 }
 
+// The process and its change journal stay with one hub, so the new setting
+// takes a restart; the old one back needs none, as the next call reads the
+// file again.
 function connectionChanged(setup) {
   return new SprutHubError(
     "connection_changed",
-    `${setup.file} now sets another hub address or a ready session. This MCP process stays with the hub it connected to and sent it nothing: restart the MCP application to use the new one.`,
+    `${setup.file} now sets another hub address or a ready session, and the session with the hub this MCP process connected to has ended. No login went out. Restart the MCP application to use the new setting, or put the old setting back: the next request then logs in by itself.`,
     "restart_mcp_application",
+  );
+}
+
+function freshSessionRefused(waitMs) {
+  const seconds = Math.ceil(waitMs / 1000);
+  return new SprutHubError(
+    "authentication_delayed",
+    `SprutHub refused the session its login gave moments ago, so no second login went out. Repeat the call in ${seconds} s; if this lasts, check the hub in the official application.`,
+    "retry_login_later",
+    { retry_after_seconds: seconds },
   );
 }
 
@@ -821,14 +852,13 @@ function credentialSetup(env) {
     file,
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    restart: "Restart the same MCP application after saving the file.",
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
   };
 }
 
 function credentialSetupMessage(setup) {
-  return `Configure SprutHub locally: create ${shellQuote(setup.file)} with ${setup.required_fields.join(" and ")}, set mode ${setup.permissions}, then restart the same MCP application. Do not send credential values in chat.`;
+  return `Configure SprutHub locally: create ${shellQuote(setup.file)} with ${setup.required_fields.join(" and ")}, set mode ${setup.permissions}. The next request reads it. Do not send credential values in chat.`;
 }
 
 function shellQuote(value) {
@@ -895,7 +925,7 @@ async function loadCredentialFile(env, setup) {
   };
 }
 
-function credentialFileError({ restart: _restart, ...setup }) {
+function credentialFileError(setup) {
   const error = new SprutHubError(
     "credential_file_unavailable",
     `Cannot use local SprutHub credential file ${shellQuote(setup.file)}. Make it a regular readable file with mode ${setup.permissions}; the next request reads it again.`,
@@ -912,49 +942,47 @@ function resolveSessionFile(env) {
   return path.join(resolveConfigRoot(env), "sprut-agent", "session.json");
 }
 
+// The saved session only spares a login, so one that cannot be used is no
+// session: a power cut can leave the file empty or cut. A file that cannot be
+// read or replaced is another matter, as every call would log in.
 async function loadSession(file, expected) {
   let info;
+  let text;
   try {
     info = await stat(file);
+    text = await readFile(file, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return null;
-    throw error;
+    throw unreadableSession(file);
   }
   if ((info.mode & 0o077) !== 0) {
     throw new SprutHubError(
       "session_permissions",
-      "The saved SprutHub session must not be readable by other users.",
+      `The saved SprutHub session ${file} must not be readable by other users. Set its mode to 0600 or remove it; the next request reads it again.`,
       "restrict_session_file",
     );
   }
   let session;
   try {
-    session = JSON.parse(await readFile(file, "utf8"));
+    session = JSON.parse(text);
   } catch {
-    throw invalidSession();
-  }
-  if (
-    session.url !== expected.url ||
-    session.account_sha256 !== expected.accountSha256
-  ) {
     return null;
   }
-  if (
-    session.version !== SESSION_VERSION ||
-    typeof session.token !== "string" ||
-    session.token.length === 0 ||
-    typeof session.cid !== "string" ||
-    session.cid.length === 0
-  ) {
-    throw invalidSession();
-  }
-  return session;
+  return session?.url === expected.url &&
+    session.account_sha256 === expected.accountSha256 &&
+    session.version === SESSION_VERSION &&
+    typeof session.token === "string" &&
+    session.token.length > 0 &&
+    typeof session.cid === "string" &&
+    session.cid.length > 0
+    ? session
+    : null;
 }
 
-function invalidSession() {
+function unreadableSession(file) {
   return new SprutHubError(
     "session_invalid",
-    "The saved SprutHub session is invalid.",
+    `The saved SprutHub session ${file} cannot be read. Make it a regular readable file or remove it; the next request reads it again.`,
     "remove_saved_session",
   );
 }
@@ -971,7 +999,8 @@ async function readLoginHold(file) {
   return hold?.version === LOGIN_HOLD_VERSION &&
     (hold.status === TOO_FAST ||
       Object.hasOwn(ACCOUNT_REFUSALS, hold.status)) &&
-    !Number.isNaN(Date.parse(hold.not_before))
+    !Number.isNaN(Date.parse(hold.not_before)) &&
+    !Number.isNaN(Date.parse(hold.refused_at))
     ? hold
     : null;
 }

@@ -411,7 +411,6 @@ test("the checkout MCP config returns credential setup and reads a configured ho
     file: connectionFile,
     required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
     permissions: "0600",
-    restart: "Restart the same MCP application after saving the file.",
     secret_handling:
       "Create and fill the file locally; do not send credentials in chat.",
   };
@@ -450,7 +449,7 @@ test("the checkout MCP config returns credential setup and reads a configured ho
   assert.deepEqual(result.structuredContent.credential_setup, credentialSetup);
   assert.equal(
     result.structuredContent.error.message,
-    `Configure SprutHub locally: create '${connectionFile}' with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart the same MCP application. Do not send credential values in chat.`,
+    `Configure SprutHub locally: create '${connectionFile}' with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600. The next request reads it. Do not send credential values in chat.`,
   );
   assert.equal(JSON.stringify(result).includes("/absolute/path"), false);
 
@@ -918,7 +917,6 @@ test("a partial profile preserves safe credential guidance without reflecting cr
       file: connectionFile,
       required_fields: ["SPRUTHUB_LOGIN", "SPRUTHUB_PASSWORD"],
       permissions: "0600",
-      restart: "Restart the same MCP application after saving the file.",
       secret_handling:
         "Create and fill the file locally; do not send credentials in chat.",
     };
@@ -928,7 +926,7 @@ test("a partial profile preserves safe credential guidance without reflecting cr
       missing_field: missingField,
       error: {
         code: "configuration",
-        message: `Configure SprutHub locally: create ${shellQuote(connectionFile)} with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600, then restart the same MCP application. Do not send credential values in chat.`,
+        message: `Configure SprutHub locally: create ${shellQuote(connectionFile)} with SPRUTHUB_LOGIN and SPRUTHUB_PASSWORD, set mode 0600. The next request reads it. Do not send credential values in chat.`,
         retryable: false,
         action: "configure_credentials",
       },

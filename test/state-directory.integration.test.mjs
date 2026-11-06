@@ -3,7 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -29,10 +29,10 @@ async function temporaryDirectory(t, prefix) {
   return directory;
 }
 
-async function startClient(t, hub, { cwd, home, stateDirectory }) {
+async function startClient(t, hub, { cwd, home, stateDirectory, preload }) {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath],
+    args: [...(preload ? ["--import", preload] : []), serverPath],
     cwd,
     env: {
       PATH: process.env.PATH,
@@ -107,3 +107,71 @@ async function historySurvivesAnotherWorkingDirectory(t, stateDirectory) {
   );
   assert.deepEqual(await readdir(secondCwd), []);
 }
+
+// A network share or an exFAT disk has no hard links, and the journal's lock
+// needs them. The owner hears that and what to do; reads go on.
+test("a state directory without hard links names the reason for every write", async (t) => {
+  const hub = await startSimulatedHub(await loadHomeFixture("apartment"));
+  t.after(() => hub.close());
+  const stateDirectory = await temporaryDirectory(t, "sprut-agent-no-links-");
+  const client = await startClient(t, hub, {
+    cwd: stateDirectory,
+    home: stateDirectory,
+    stateDirectory,
+    preload: pathToFileURL(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "support",
+        "no-hard-links.mjs",
+      ),
+    ).href,
+  });
+
+  const assertNamesTheReason = (error) => {
+    assert.equal(
+      error.code,
+      "state_storage_unavailable",
+      JSON.stringify(error),
+    );
+    assert.equal(error.action, "restore_state_storage_then_retry");
+    assert.match(error.message, /hard links/i);
+    assert.ok(error.message.includes(stateDirectory), error.message);
+    assert.match(error.message, /SPRUT_AGENT_STATE_DIR/);
+  };
+
+  const overview = await call(client, "home_overview", {});
+  assert.equal(overview.home.ref, homeRef);
+
+  const room = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "room_create",
+      target_ref: homeRef,
+      name: "Кладовка",
+      reason: "Завести кладовку",
+    },
+  });
+  assert.equal(room.isError, true, room.content[0]?.text);
+  assertNamesTheReason(room.structuredContent.error);
+
+  const before = hub.requests.length;
+  const command = await call(client, "send_device_commands", {
+    home_ref: homeRef,
+    commands: [
+      {
+        target_ref: `${homeRef}/accessory/12/service/13/characteristic/14`,
+        value: true,
+      },
+    ],
+    reason: "Включить свет",
+  });
+  const [item] = command.results;
+  assert.equal(item.status, "not_sent", JSON.stringify(item));
+  assertNamesTheReason(item.error);
+  assert.deepEqual(
+    hub.requests
+      .slice(before)
+      .filter(({ method }) => method === "characteristic.update"),
+    [],
+  );
+});
