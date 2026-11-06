@@ -197,6 +197,8 @@ export class SprutHubClient {
   #nativeEventListeners = new Set();
   #pending = new Map();
   #renewSession;
+  // The last token the hub answered a request with.
+  #acceptedToken;
   #socket;
   #startingObservationClient;
   #writeGeneration = 0;
@@ -3728,12 +3730,15 @@ export class SprutHubClient {
   // refused it before carrying it out. The renewal is the session another
   // process saved, or a login; the saved one may be refused too, hence up to
   // two. The requests the old session lost share the renewal; a failed one is
-  // the answer.
+  // the answer, and is marked: it speaks of the connection, whatever its code,
+  // not of the request that met it.
   async #send(params, deadline, serial, onReply) {
     for (let renewals = 0; ; renewals += 1) {
       const token = this.token;
       try {
-        return await this.#sendOnce(params, deadline, serial, onReply);
+        const reply = await this.#sendOnce(params, deadline, serial, onReply);
+        this.#acceptedToken = token;
+        return reply;
       } catch (error) {
         if (
           !this.#renewSession ||
@@ -3743,7 +3748,13 @@ export class SprutHubClient {
           throw error;
         }
         if (this.token === token) {
-          const renewed = await this.#renewSession(token);
+          const renewed = await this.#renewSession(
+            token,
+            this.#acceptedToken === token,
+          ).catch((renewalError) => {
+            renewalError.sessionRenewalFailed = true;
+            throw renewalError;
+          });
           if (this.token === token) {
             this.token = renewed.token;
             this.cid = renewed.cid;

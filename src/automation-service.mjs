@@ -102,6 +102,7 @@ import {
   inspectedCommandValue,
   invalidDeviceCommand,
   invalidDeviceCommands,
+  isCommandRefusal,
   isLampLevelZero,
   LAMP_KEPT_OFF_NOTE,
   LAMP_LEVEL_ZERO_NOTE,
@@ -167,7 +168,6 @@ import {
   failedVerification,
   freshVerification,
   hasKnownSettingSemantics,
-  isDeviceCommandRejection,
   isNativeChange,
   isNativeValueChange,
   isRetryableNativeValueChange,
@@ -2550,7 +2550,7 @@ export class AutomationService {
             : {}),
         });
       } catch (error) {
-        if (!isDeviceCommandRejection(error)) throw error;
+        if (!isCommandRefusal(error)) throw error;
         invalid.push(
           invalidDeviceCommand(index, command, error, inspected?.contract),
         );
