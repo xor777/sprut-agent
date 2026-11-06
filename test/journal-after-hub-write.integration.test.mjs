@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync } from "node:fs";
+import { mkdirSync, rmdirSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -64,6 +64,7 @@ async function setup(t) {
     const client = new Client({ name: "after-write-test", version: "1.0.0" });
     await client.connect(transport);
     clients.push(client);
+    client.pid = transport.pid;
     return client;
   };
   t.after(async () => {
@@ -116,7 +117,7 @@ async function setup(t) {
   };
   return {
     hub,
-    stateDirectory,
+    journalFile,
     client: await startDialog(),
     startDialog,
     holdJournalWhen,
@@ -149,8 +150,12 @@ async function waitForRecord(savedRecord, changeRef, holds) {
 function assertStoppedPartWay(answer, changeRef, tool, code) {
   const text = JSON.stringify(answer);
   assert.equal(answer.isError, true, text);
-  const { error, hub_effect: effect, change_ref: ref, next } =
-    answer.structuredContent;
+  const {
+    error,
+    hub_effect: effect,
+    change_ref: ref,
+    next,
+  } = answer.structuredContent;
   assert.equal(error.code, code, text);
   assert.equal(effect, "partial", text);
   assert.equal(ref, changeRef, text);
@@ -263,63 +268,69 @@ test("the journal held after a hub step: the answer owns up and undo still works
       assert.equal(inRoster(hub, "Свет гостиной"), false);
     }),
 
-    t.test("a new group: the id reaches the journal, and another dialog undoes it", async (t) => {
-      const { hub, client, startDialog, holdJournalWhen, savedRecord } =
-        await setup(t);
-      const prepared = await prepareGroup(client);
-      const { held } = await holdJournalWhen("accessory.create");
+    t.test(
+      "a new group: the id reaches the journal, and another dialog undoes it",
+      async (t) => {
+        const { hub, client, startDialog, holdJournalWhen, savedRecord } =
+          await setup(t);
+        const prepared = await prepareGroup(client);
+        const { held } = await holdJournalWhen("accessory.create");
 
-      const stopped = await client.callTool({
-        name: "apply_native_change",
-        arguments: { change_ref: prepared.change_ref },
-      });
-      assert.equal(stopped.isError, true, JSON.stringify(stopped));
+        const stopped = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assert.equal(stopped.isError, true, JSON.stringify(stopped));
 
-      await kill(await held);
-      await waitForRecord(
-        savedRecord,
-        prepared.change_ref,
-        ({ created_accessory_id: id }) => id !== undefined,
-      );
-      const other = await startDialog();
-      const restored = await call(other, "restore_native_change", {
-        change_ref: prepared.change_ref,
-      });
-      assert.equal(restored.status, "restored", JSON.stringify(restored));
-      assert.equal(inRoster(hub, "Свет гостиной"), false);
-    }),
+        await kill(await held);
+        await waitForRecord(
+          savedRecord,
+          prepared.change_ref,
+          ({ created_accessory_id: id }) => id !== undefined,
+        );
+        const other = await startDialog();
+        const restored = await call(other, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(restored.status, "restored", JSON.stringify(restored));
+        assert.equal(inRoster(hub, "Свет гостиной"), false);
+      },
+    ),
 
-    t.test("undo of a group: the item says its steps went, and undo goes on", async (t) => {
-      const { hub, client, holdJournalWhen } = await setup(t);
-      const prepared = await prepareGroup(client);
-      const applied = await call(client, "apply_native_change", {
-        change_ref: prepared.change_ref,
-      });
-      assert.equal(applied.status, "applied", JSON.stringify(applied));
-      const { held } = await holdJournalWhen("link.remove");
+    t.test(
+      "undo of a group: the item says its steps went, and undo goes on",
+      async (t) => {
+        const { hub, client, holdJournalWhen } = await setup(t);
+        const prepared = await prepareGroup(client);
+        const applied = await call(client, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(applied.status, "applied", JSON.stringify(applied));
+        const { held } = await holdJournalWhen("link.remove");
 
-      const stopped = await call(client, "restore_native_change", {
-        change_refs: [prepared.change_ref],
-      });
+        const stopped = await call(client, "restore_native_change", {
+          change_refs: [prepared.change_ref],
+        });
 
-      const [item] = stopped.results;
-      assert.equal(item.status, "failed", JSON.stringify(item));
-      assert.equal(item.sent, true, JSON.stringify(item));
-      assert.equal(item.hub_effect, "partial");
-      assert.equal(item.error.code, "state_storage_busy");
-      assert.deepEqual(item.next, {
-        tool: "restore_native_change",
-        arguments: { change_ref: prepared.change_ref },
-      });
-      assert.doesNotMatch(item.error.message, /no write .* was sent/i);
+        const [item] = stopped.results;
+        assert.equal(item.status, "failed", JSON.stringify(item));
+        assert.equal(item.sent, true, JSON.stringify(item));
+        assert.equal(item.hub_effect, "partial");
+        assert.equal(item.error.code, "state_storage_busy");
+        assert.deepEqual(item.next, {
+          tool: "restore_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assert.doesNotMatch(item.error.message, /no write .* was sent/i);
 
-      await kill(await held);
-      const finished = await call(client, "restore_native_change", {
-        change_ref: prepared.change_ref,
-      });
-      assert.equal(finished.status, "restored", JSON.stringify(finished));
-      assert.equal(inRoster(hub, "Свет гостиной"), false);
-    }),
+        await kill(await held);
+        const finished = await call(client, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(finished.status, "restored", JSON.stringify(finished));
+        assert.equal(inRoster(hub, "Свет гостиной"), false);
+      },
+    ),
 
     t.test("undo of a new set of lamps: the answer owns up too", async (t) => {
       const { hub, client, holdJournalWhen } = await setup(t);
@@ -378,15 +389,15 @@ test("the journal held after a hub step: the answer owns up and undo still works
   ]);
 });
 
-// The same with a journal that cannot be written at all, by the file system:
-// the answer owns up, and the fixed directory gets what the hub confirmed.
-test("a state directory that stops being writable after a hub step keeps the id too", async (t) => {
-  const { hub, client, stateDirectory, whenArrives, savedRecord } =
-    await setup(t);
+// The same when the file system refuses the journal itself: the answer owns
+// up, and the journal gets what the hub confirmed once it can be written.
+test("a journal that cannot be written after a hub step keeps the id too", async (t) => {
+  const { hub, client, journalFile, whenArrives, savedRecord } = await setup(t);
   const prepared = await prepareGroup(client);
+  // The journal's temporary file: a directory in its place fails the write.
+  const temporaryFile = `${await journalFile()}.${client.pid}.tmp`;
   hub.delayReplies("accessory.create", 200);
-  whenArrives("accessory.create", () => chmodSync(stateDirectory, 0o500));
-  t.after(() => chmodSync(stateDirectory, 0o700));
+  whenArrives("accessory.create", () => mkdirSync(temporaryFile));
 
   const stopped = await client.callTool({
     name: "apply_native_change",
@@ -401,7 +412,7 @@ test("a state directory that stops being writable after a hub step keeps the id 
   );
   assert.equal(stopped.structuredContent.error.retryable, false);
 
-  chmodSync(stateDirectory, 0o700);
+  rmdirSync(temporaryFile);
   await waitForRecord(
     savedRecord,
     prepared.change_ref,
