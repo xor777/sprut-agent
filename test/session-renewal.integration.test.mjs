@@ -858,6 +858,32 @@ test("with credentials in the launch environment a refusal stays in the process 
   assert.equal(loginsOf(hub), 2);
 });
 
+test("a mistyped new password gets one login per save, however many calls follow", async (t) => {
+  const { hub, account, client, saveCredentials } = await setup(t, {
+    savedToken: expiredToken,
+  });
+  changePasswordOnHub(hub, account);
+  await overview(client);
+  assert.equal(loginsOf(hub), 1);
+
+  await saveCredentials({ password: "mistyped-new-password" });
+  const refused = await overview(client);
+  const repeated = await overview(client);
+
+  for (const answer of [refused, repeated]) {
+    assert.equal(
+      answer.structuredContent.account_status,
+      "ACCOUNT_RESPONSE_FAILED",
+    );
+  }
+  assert.equal(loginsOf(hub), 2);
+  assert.equal(
+    JSON.stringify([refused, repeated]).includes("mistyped-new-password"),
+    false,
+    "a password the owner saved after the start leaked",
+  );
+});
+
 test("a login cut by the connection is no refusal and the next call logs in", async (t) => {
   let cut = true;
   const { hub, client, filesBesideSession } = await setup(t, {

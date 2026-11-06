@@ -24,6 +24,12 @@ import {
 export const DEFAULT_SPRUTHUB_URL = "wss://beta.spruthub.ru/spruthub";
 
 const SESSION_VERSION = 1;
+const LOGIN_HOLD_VERSION = 1;
+const LOGIN_HOLD_FILE = "login-hold.json";
+// How long a refused login is not tried again unless connection.env changes:
+// the owner may have fixed the cause outside the file.
+const REFUSAL_HOLD_MS = 60 * 60 * 1000;
+const TOO_FAST = "ACCOUNT_RESPONSE_TOO_FAST";
 const MAX_AUTH_STEPS = 8;
 const MAX_ARGON_MEMORY_KIB = 256 * 1024;
 const MAX_ARGON_ITERATIONS = 10;
@@ -46,17 +52,19 @@ export function isLocalCredentialConfigurationError(error) {
 export class SprutHubConnection {
   #clientPromise;
   #env;
+  #launchEnv;
   #homeSelectionSource;
-  // The login that renews a session the hub refused, by the refused token.
+  // The renewal of a session the hub refused, by the refused token.
   #renewal;
-  // When a login the hub asked to delay (ACCOUNT_RESPONSE_TOO_FAST) may be
-  // tried again: each try counts toward the hub's NO_MORE_TRIES block.
-  #loginNotBefore = 0;
+  // The login hold when no file keeps it: credentials from the launch
+  // environment, or a file that could not be written.
+  #loginHold;
   #secrets = new Set();
 
   constructor({ env = process.env } = {}) {
     env = withoutBlankConnectionValues(env);
     this.#env = env;
+    this.#launchEnv = env;
     this.#homeSelectionSource =
       (Object.hasOwn(env, "SPRUTHUB_SERIAL") &&
         env.SPRUTHUB_SERIAL !== undefined) ||
@@ -77,7 +85,7 @@ export class SprutHubConnection {
   async localHubIdentity() {
     let env = this.#env;
     if (!hasCompleteExplicitConnection(env)) {
-      env = await loadCredentialFile(env, credentialSetup(env));
+      ({ env } = await loadCredentialFile(env, credentialSetup(env)));
     }
     return {
       url: env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL,
@@ -108,10 +116,7 @@ export class SprutHubConnection {
       const attempt = this.#createClient();
       this.#clientPromise = attempt;
       void attempt.catch((error) => {
-        if (
-          this.#clientPromise === attempt &&
-          isRetryableConnectionError(error)
-        ) {
+        if (this.#clientPromise === attempt && mayChangeByNextCall(error)) {
           this.#clientPromise = undefined;
         }
       });
@@ -120,57 +125,25 @@ export class SprutHubConnection {
   }
 
   async #createClient() {
-    const setup = credentialSetup(this.#env);
-    // Where the owner set the login: with it in the launch environment the
-    // file is not read.
-    const credentialsAt = hasCompleteExplicitConnection(this.#env)
-      ? "the MCP launch environment"
-      : setup.file;
-    if (!hasCompleteExplicitConnection(this.#env)) {
-      this.#env = await loadCredentialFile(this.#env, setup);
-    }
-    this.#remember(
-      this.#env.SPRUTHUB_LOGIN,
-      this.#env.SPRUTHUB_PASSWORD,
-      this.#env.SPRUTHUB_TOKEN,
-    );
-    const timeoutMs = parseTimeout(this.#env.SPRUTHUB_TIMEOUT_MS);
-    if (this.#env.SPRUTHUB_TOKEN) {
+    const connection = await this.#readConnection();
+    const { env } = connection;
+    this.#env = env;
+    if (env.SPRUTHUB_TOKEN) {
       return new SprutHubClient({
-        url: this.#env.SPRUTHUB_URL,
-        token: this.#env.SPRUTHUB_TOKEN,
-        serial: this.#env.SPRUTHUB_SERIAL,
-        configuredSerial: this.#env.SPRUTHUB_SERIAL,
-        cid: this.#env.SPRUTHUB_CID,
-        timeoutMs,
+        url: env.SPRUTHUB_URL,
+        token: env.SPRUTHUB_TOKEN,
+        serial: env.SPRUTHUB_SERIAL,
+        configuredSerial: env.SPRUTHUB_SERIAL,
+        cid: env.SPRUTHUB_CID,
+        timeoutMs: parseTimeout(env.SPRUTHUB_TIMEOUT_MS),
       });
     }
 
-    const login = requiredCredential(
-      this.#env.SPRUTHUB_LOGIN,
-      "SPRUTHUB_LOGIN",
-      setup,
-    );
-    const password = requiredCredential(
-      this.#env.SPRUTHUB_PASSWORD,
-      "SPRUTHUB_PASSWORD",
-      setup,
-    );
-    const url = this.#env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL;
-    const sessionFile = resolveSessionFile(this.#env);
-    const accountSha256 = createHash("sha256").update(login).digest("hex");
-    const account = {
-      url,
-      login,
-      password,
-      timeoutMs,
-      sessionFile,
-      accountSha256,
-      credentialsAt,
-    };
+    const account = accountOf(connection);
+    const { url, sessionFile, timeoutMs } = account;
     const renewSession = (rejectedToken) =>
-      this.#renewSession(rejectedToken, account);
-    const saved = await loadSession(sessionFile, { url, accountSha256 });
+      this.#renewSession(rejectedToken, url);
+    const saved = await loadSession(sessionFile, account);
     if (saved) {
       this.#remember(saved.token);
       // A saved session the hub no longer accepts is renewed by the client
@@ -179,14 +152,14 @@ export class SprutHubConnection {
         url,
         token: saved.token,
         serial: null,
-        configuredSerial: this.#env.SPRUTHUB_SERIAL,
+        configuredSerial: env.SPRUTHUB_SERIAL,
         cid: saved.cid,
         timeoutMs,
         renewSession,
       });
       try {
         const catalog = await client.listHomes();
-        client.serial = selectSerial(catalog.homes, this.#env.SPRUTHUB_SERIAL);
+        client.serial = selectSerial(catalog.homes, env.SPRUTHUB_SERIAL);
         return client;
       } catch (error) {
         await client.close();
@@ -195,12 +168,12 @@ export class SprutHubConnection {
     }
 
     const authenticated = await this.#logIn(account);
-    const serial = selectSerial(authenticated.homes, this.#env.SPRUTHUB_SERIAL);
+    const serial = selectSerial(authenticated.homes, env.SPRUTHUB_SERIAL);
     return new SprutHubClient({
       url,
       token: authenticated.token,
       serial,
-      configuredSerial: this.#env.SPRUTHUB_SERIAL,
+      configuredSerial: env.SPRUTHUB_SERIAL,
       availableHomeCount: authenticated.homes.length,
       cid: authenticated.cid,
       timeoutMs,
@@ -208,16 +181,35 @@ export class SprutHubConnection {
     });
   }
 
-  // One login per refused session: the requests that lost it wait for the
-  // same login. A login the hub refused is not tried again in this process,
-  // as the hub blocks an account after repeated attempts
-  // (ACCOUNT_RESPONSE_NO_MORE_TRIES); one cut short by the connection is.
-  #renewSession(rejectedToken, account) {
+  // What this process would use now: the launch environment wins, and the
+  // file is read anew, as the owner may have changed it since the last login.
+  async #readConnection() {
+    const setup = credentialSetup(this.#launchEnv);
+    const { env, credentialFile } = hasCompleteExplicitConnection(
+      this.#launchEnv,
+    )
+      ? { env: this.#launchEnv, credentialFile: null }
+      : await loadCredentialFile(this.#launchEnv, setup);
+    this.#remember(
+      env.SPRUTHUB_LOGIN,
+      env.SPRUTHUB_PASSWORD,
+      env.SPRUTHUB_TOKEN,
+    );
+    return { env, setup, credentialFile };
+  }
+
+  // One renewal per refused session: the requests that lost it wait for the
+  // same one. A failure a later call may see differently is not kept: the
+  // login hold, not this, stops repeated logins.
+  #renewSession(rejectedToken, connectedUrl) {
     if (this.#renewal?.rejectedToken !== rejectedToken) {
-      const renewal = { rejectedToken, login: this.#logIn(account) };
+      const renewal = {
+        rejectedToken,
+        login: this.#replaceSession(rejectedToken, connectedUrl),
+      };
       this.#renewal = renewal;
       renewal.login.catch((error) => {
-        if (this.#renewal === renewal && isRetryableConnectionError(error)) {
+        if (this.#renewal === renewal && mayChangeByNextCall(error)) {
           this.#renewal = undefined;
         }
       });
@@ -225,17 +217,30 @@ export class SprutHubConnection {
     return this.#renewal.login;
   }
 
-  async #logIn({
-    url,
-    login,
-    password,
-    timeoutMs,
-    sessionFile,
-    accountSha256,
-    credentialsAt,
-  }) {
-    const waitMs = this.#loginNotBefore - Date.now();
-    if (waitMs > 0) throw authenticationDelayed(Math.ceil(waitMs / 1000));
+  // A session another process saved in the meantime spares a login.
+  async #replaceSession(rejectedToken, connectedUrl) {
+    const connection = await this.#readConnection();
+    const { env, setup } = connection;
+    if (
+      env.SPRUTHUB_TOKEN ||
+      (env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL) !== connectedUrl
+    ) {
+      throw connectionChanged(setup);
+    }
+    const account = accountOf(connection);
+    const saved = await loadSession(account.sessionFile, account);
+    if (saved && saved.token !== rejectedToken) {
+      this.#remember(saved.token);
+      return saved;
+    }
+    return this.#logIn(account);
+  }
+
+  async #logIn(account) {
+    const { url, login, password, timeoutMs, sessionFile, accountSha256 } =
+      account;
+    const held = await this.#activeLoginHold(account);
+    if (held) throw loginHeld(held, account);
     let authenticated;
     try {
       authenticated = await authenticate({
@@ -243,24 +248,51 @@ export class SprutHubConnection {
         login,
         password,
         timeoutMs,
-        credentialsAt,
         remember: (...values) => this.#remember(...values),
       });
     } catch (error) {
-      const delay = error.details?.retry_after_seconds;
-      if (error.code === "authentication_delayed" && delay) {
-        this.#loginNotBefore = Date.now() + delay * 1000;
-      }
-      throw error;
+      const hold = loginHoldAfter(error, account);
+      if (!hold) throw error;
+      await this.#keepLoginHold(hold, account);
+      throw loginHeld(hold, account);
     }
-    await saveSession(sessionFile, {
+    await writePrivateFile(sessionFile, {
       version: SESSION_VERSION,
       url,
       account_sha256: accountSha256,
       token: authenticated.token,
       cid: authenticated.cid,
     });
+    this.#loginHold = undefined;
+    if (account.holdFile) await unlink(account.holdFile).catch(() => {});
     return authenticated;
+  }
+
+  // The hub blocks an account after repeated attempts
+  // (ACCOUNT_RESPONSE_NO_MORE_TRIES), whichever process makes them.
+  async #activeLoginHold({ holdFile, credentialFile }) {
+    const hold =
+      (holdFile && (await readLoginHold(holdFile))) ?? this.#loginHold;
+    if (!hold || Date.now() >= Date.parse(hold.not_before)) return null;
+    // The delay is the hub's own and holds for any credentials.
+    if (hold.status === TOO_FAST) return hold;
+    return hold.file?.mtime_ms === credentialFile?.mtime_ms &&
+      hold.file?.size === credentialFile?.size
+      ? hold
+      : null;
+  }
+
+  // If the file cannot be written, this process still keeps the hold; a later
+  // process may then try one login. The refusal stays the answer either way.
+  async #keepLoginHold(hold, { holdFile }) {
+    this.#loginHold = hold;
+    if (!holdFile) return;
+    await writePrivateFile(holdFile, hold).then(
+      () => {
+        this.#loginHold = undefined;
+      },
+      () => {},
+    );
   }
 
   #remember(...values) {
@@ -272,14 +304,7 @@ export class SprutHubConnection {
   }
 }
 
-async function authenticate({
-  url,
-  login,
-  password,
-  timeoutMs,
-  credentialsAt,
-  remember,
-}) {
+async function authenticate({ url, login, password, timeoutMs, remember }) {
   const deadline = Date.now() + timeoutMs;
   const cid = randomUUID();
   const socket = await connect(url, deadline);
@@ -313,7 +338,7 @@ async function authenticate({
         );
         return { cid, token: account.token, homes };
       }
-      rejectAccountStatus(account, credentialsAt);
+      rejectAccountStatus(account);
       const question = account.question;
       if (!question || typeof question.type !== "string") {
         throw incompatibleAuthResponse();
@@ -377,22 +402,69 @@ const ACCOUNT_REFUSALS = {
   ],
 };
 
-function rejectAccountStatus(account, credentialsAt) {
+function rejectAccountStatus(account) {
   if (account.status === "ACCOUNT_RESPONSE_SUCCESS") return;
-  if (account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
+  if (account.status === TOO_FAST) {
     throw authenticationDelayed(account.question?.delay ?? 0);
   }
-  const refusal = ACCOUNT_REFUSALS[account.status];
-  if (!refusal) throw incompatibleAuthResponse();
-  const [action, advice] = refusal;
+  if (!Object.hasOwn(ACCOUNT_REFUSALS, account.status)) {
+    throw incompatibleAuthResponse();
+  }
   throw new SprutHubError(
     "authentication_failed",
-    `${advice(credentialsAt)}, then restart the MCP application.`,
+    "SprutHub refused the login.",
+    ACCOUNT_REFUSALS[account.status][0],
+    { account_status: account.status },
+  );
+}
+
+// What keeps a further login from going out, when the hub's answer to this
+// one calls for it. No credential or hash of one: only the facts of the file
+// that tell the owner changed it, the status and the times.
+function loginHoldAfter(error, { credentialFile }) {
+  const now = Date.now();
+  const hold = (status, waitMs, file) => ({
+    version: LOGIN_HOLD_VERSION,
+    status,
+    refused_at: new Date(now).toISOString(),
+    not_before: new Date(now + waitMs).toISOString(),
+    file,
+  });
+  const delay = error.details?.retry_after_seconds;
+  if (error.code === "authentication_delayed" && delay) {
+    return hold(TOO_FAST, delay * 1000);
+  }
+  const status = error.details?.account_status;
+  return status ? hold(status, REFUSAL_HOLD_MS, credentialFile) : null;
+}
+
+function loginHeld(hold, { credentialFile, credentialsAt }) {
+  const waitSeconds = Math.ceil(
+    (Date.parse(hold.not_before) - Date.now()) / 1000,
+  );
+  if (hold.status === TOO_FAST) return authenticationDelayed(waitSeconds);
+  const [action, advice] = ACCOUNT_REFUSALS[hold.status];
+  const reason = advice(credentialsAt);
+  return new SprutHubError(
+    "authentication_failed",
+    credentialFile
+      ? `${reason}. No new login goes to SprutHub until ${credentialsAt} is saved again or until ${hold.not_before}, so the attempts that block an account do not add up. The next request after that logs in by itself; this MCP process keeps running.`
+      : `${reason}, then restart the MCP application. Until then no new login goes to SprutHub before ${hold.not_before}.`,
     action,
     {
       capability_status: "insufficient_access",
-      account_status: account.status,
+      account_status: hold.status,
+      retry_after_seconds: waitSeconds,
+      next_login_at: hold.not_before,
     },
+  );
+}
+
+function connectionChanged(setup) {
+  return new SprutHubError(
+    "connection_changed",
+    `${setup.file} now sets another hub address or a ready session. This MCP process stays with the hub it connected to and sent it nothing: restart the MCP application to use the new one.`,
+    "restart_mcp_application",
   );
 }
 
@@ -547,16 +619,26 @@ function connect(url, deadline) {
   });
 }
 
-function isRetryableConnectionError(error) {
+// Failures a later call works out anew: the connection and the hub's delay;
+// a refusal, which the login hold then answers without the hub; and what the
+// owner can fix in the local files. Other answers of the hub to a login
+// (enrollment and the like) stay until a restart, as each login counts.
+function mayChangeByNextCall(error) {
   return (
     error instanceof SprutHubError &&
-    [
-      "authentication_delayed",
-      "connection_closed",
-      "connection_failed",
-      "invalid_message",
-      "timeout",
-    ].includes(error.code)
+    (error.details?.account_status !== undefined ||
+      [
+        "authentication_delayed",
+        "connection_changed",
+        "connection_closed",
+        "connection_failed",
+        "invalid_message",
+        "timeout",
+        "configuration",
+        "credential_file_unavailable",
+        "session_invalid",
+        "session_permissions",
+      ].includes(error.code))
   );
 }
 
@@ -689,6 +771,32 @@ function parseTimeout(value) {
   return parsed;
 }
 
+function accountOf({ env, setup, credentialFile }) {
+  const login = requiredCredential(env.SPRUTHUB_LOGIN, "SPRUTHUB_LOGIN", setup);
+  const password = requiredCredential(
+    env.SPRUTHUB_PASSWORD,
+    "SPRUTHUB_PASSWORD",
+    setup,
+  );
+  const sessionFile = resolveSessionFile(env);
+  return {
+    url: env.SPRUTHUB_URL ?? DEFAULT_SPRUTHUB_URL,
+    login,
+    password,
+    timeoutMs: parseTimeout(env.SPRUTHUB_TIMEOUT_MS),
+    sessionFile,
+    accountSha256: createHash("sha256").update(login).digest("hex"),
+    // Where the owner set the login: with it in the launch environment the
+    // file is not read, and only a restart can change it, so a refusal stays
+    // in the process.
+    credentialsAt: credentialFile ? setup.file : "the MCP launch environment",
+    credentialFile,
+    holdFile: credentialFile
+      ? path.join(path.dirname(sessionFile), LOGIN_HOLD_FILE)
+      : null,
+  };
+}
+
 function requiredCredential(value, name, setup) {
   if (typeof value !== "string" || value.length === 0) {
     const error = new SprutHubError(
@@ -759,7 +867,7 @@ async function loadCredentialFile(env, setup) {
   try {
     info = await stat(setup.file);
   } catch (error) {
-    if (error.code === "ENOENT") return env;
+    if (error.code === "ENOENT") return { env, credentialFile: null };
     throw credentialFileError(setup);
   }
   if (!info.isFile() || (info.mode & 0o077) !== 0) {
@@ -781,13 +889,16 @@ async function loadCredentialFile(env, setup) {
       merged[name] = parsed[name];
     }
   }
-  return merged;
+  return {
+    env: merged,
+    credentialFile: { mtime_ms: info.mtimeMs, size: info.size },
+  };
 }
 
-function credentialFileError(setup) {
+function credentialFileError({ restart: _restart, ...setup }) {
   const error = new SprutHubError(
     "credential_file_unavailable",
-    `Cannot use local SprutHub credential file ${shellQuote(setup.file)}. Make it a regular readable file with mode ${setup.permissions}, then restart the same MCP application.`,
+    `Cannot use local SprutHub credential file ${shellQuote(setup.file)}. Make it a regular readable file with mode ${setup.permissions}; the next request reads it again.`,
     "fix_credential_file",
     { credential_setup: setup },
   );
@@ -848,15 +959,32 @@ function invalidSession() {
   );
 }
 
-async function saveSession(file, session) {
+// A hold that cannot be read counts as none: losing it costs one login,
+// keeping a damaged one could lock the owner out.
+async function readLoginHold(file) {
+  let hold;
+  try {
+    hold = JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    return null;
+  }
+  return hold?.version === LOGIN_HOLD_VERSION &&
+    (hold.status === TOO_FAST ||
+      Object.hasOwn(ACCOUNT_REFUSALS, hold.status)) &&
+    !Number.isNaN(Date.parse(hold.not_before))
+    ? hold
+    : null;
+}
+
+async function writePrivateFile(file, value) {
   const directory = path.dirname(file);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = path.join(
     directory,
-    `.session-${process.pid}-${randomUUID()}.tmp`,
+    `.${path.basename(file)}-${process.pid}-${randomUUID()}.tmp`,
   );
   try {
-    await writeFile(temporary, `${JSON.stringify(session)}\n`, {
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, {
       encoding: "utf8",
       mode: 0o600,
       flag: "wx",
