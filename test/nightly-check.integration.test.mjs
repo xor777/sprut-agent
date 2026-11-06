@@ -5,6 +5,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -262,24 +263,120 @@ test("a password changed on the hub is found through the saved session", async (
 });
 
 test("each refusal the owner handles differently gets its own advice", async (t) => {
-  const texts = new Map();
-  for (const [status, expected] of [
-    ["ACCOUNT_RESPONSE_NO_MORE_TRIES", /Подождите/],
-    ["ACCOUNT_RESPONSE_NOT_CONFIRMED", /подтвер/i],
-  ]) {
+  const refusals = [
+    {
+      account: { status: "ACCOUNT_RESPONSE_NO_MORE_TRIES" },
+      advice: /Подождите/,
+      next: "next_login_at",
+    },
+    {
+      account: { status: "ACCOUNT_RESPONSE_NOT_CONFIRMED" },
+      advice: /подтвер/i,
+      next: "next_login_at",
+    },
+    {
+      account: { status: "ACCOUNT_RESPONSE_NOT_CONNECTED" },
+      advice: /не подключён/,
+      next: "next_login_at",
+    },
+    {
+      account: { status: "ACCOUNT_RESPONSE_FORMAT" },
+      advice: /формат логина/,
+      next: "next_login_at",
+    },
+    // The password is right here: only waiting helps.
+    {
+      account: { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 60 },
+      advice: /Пароль менять не нужно/,
+      next: "retry_after_seconds",
+    },
+    {
+      account: { question: "QUESTION_TYPE_ENROLL" },
+      advice: /настройку пароля в официальном приложении/,
+    },
+    {
+      account: { question: "QUESTION_TYPE_TOTP" },
+      advice: /шаг, которого инструмент не умеет/,
+    },
+  ];
+  const texts = new Set();
+  for (const { account, advice, next } of refusals) {
+    const title = JSON.stringify(account);
     const mac = await ownerMac(t);
-    const { hub } = await hubWith(t, { account: { status } });
+    const { hub } = await hubWith(t, { account });
     await mac.saveLogin({ url: hub.url });
+
     const { code, sent } = await mac.night();
-    assert.equal(code, 1);
-    assert.equal(sent.length, 1);
-    assert.match(sent[0].text, expected);
-    assert.equal((await mac.summary()).account_status, status);
-    texts.set(status, sent[0].text);
+
+    assert.equal(code, 1, title);
+    assert.equal(sent.length, 1, title);
+    assert.match(sent[0].text, advice, title);
+    if (account.status !== "ACCOUNT_RESPONSE_FORMAT") {
+      assert.doesNotMatch(sent[0].text, /Исправьте/, title);
+    }
+    texts.add(sent[0].text);
+    const summary = await mac.summary();
+    assert.equal(summary.outcome, "login_refused", title);
+    if (account.status && account.status !== "ACCOUNT_RESPONSE_TOO_FAST") {
+      assert.equal(summary.account_status, account.status, title);
+    }
+    assert.equal(
+      summary.next_login_at !== undefined,
+      next === "next_login_at",
+      title,
+    );
+    assert.equal(
+      summary.retry_after_seconds !== undefined,
+      next === "retry_after_seconds",
+      title,
+    );
+    if (next === "next_login_at") {
+      assert.ok(Date.parse(summary.next_login_at) > Date.now(), title);
+    }
   }
-  assert.notEqual(
-    texts.get("ACCOUNT_RESPONSE_NO_MORE_TRIES"),
-    texts.get("ACCOUNT_RESPONSE_NOT_CONFIRMED"),
+  assert.equal(texts.size, refusals.length);
+});
+
+test("a hub asking to wait keeps the wait in the summary and is not asked again meanwhile", async (t) => {
+  const mac = await ownerMac(t);
+  const { hub, logins } = await hubWith(t, {
+    account: { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 60 },
+  });
+  await mac.saveLogin({ url: hub.url });
+
+  const first = await mac.night();
+  const firstSummary = await mac.summary();
+  assert.equal(firstSummary.error_code, "authentication_delayed");
+  assert.equal(firstSummary.retry_after_seconds, 60);
+  assert.equal(logins(), 1);
+
+  const second = await mac.night();
+  assert.equal(second.sent[0].text, first.sent[0].text);
+  const { retry_after_seconds: left } = await mac.summary();
+  assert.ok(Number.isInteger(left) && left > 0 && left <= 60, String(left));
+  assert.equal(logins(), 1, "the wait kept the second run off the hub");
+});
+
+test("a summary that cannot be saved fails the run, says so and leaves no draft", async (t) => {
+  const mac = await ownerMac(t);
+  const { hub } = await hubWith(t);
+  await mac.saveLogin({ url: hub.url });
+  // A directory where the summary goes: the rename of the draft fails.
+  await mkdir(path.join(mac.stateDirectory, "nightly-check.json"), {
+    recursive: true,
+  });
+
+  const { code, stdout, sent } = await mac.night();
+
+  assert.equal(code, 1);
+  assert.deepEqual(sent, []);
+  const line = JSON.parse(stdout);
+  assert.equal(line.outcome, "ok");
+  assert.equal(line.summary_saved, false);
+  const left = await readdir(mac.stateDirectory);
+  assert.deepEqual(
+    left.filter((name) => name.endsWith(".tmp")),
+    [],
   );
 });
 
@@ -400,7 +497,10 @@ test("a hung hub is bounded by the timeout and reported as unreachable", async (
 
   assert.equal(code, 1);
   assert.equal(sent.length, 1);
-  assert.match(sent[0].text, /Хаб не отвечает/);
+  // The same silence comes from a hung server of this tool: the hub is not
+  // the only suspect.
+  assert.match(sent[0].text, /хаб, сеть или сам инструмент/);
+  assert.doesNotMatch(sent[0].title, /хаб недоступен/);
   // ORDINARY_HUB_TIMEOUT_MS is far longer: only the check's own limit ended it.
   assert.ok(elapsedMs < 20_000, `took ${elapsedMs} ms`);
   const summary = await mac.summary();
@@ -418,6 +518,11 @@ test("another firmware warns once per revision and keeps the run successful", as
   assert.equal(warned.sent.length, 1);
   assert.match(warned.sent[0].text, /20999/);
   assert.match(warned.sent[0].text, /20131/);
+  // This run only read the home, and the proposed run changes the home.
+  assert.doesNotMatch(warned.sent[0].text, /Он работает/);
+  assert.match(warned.sent[0].text, /Чтение дома работает/);
+  assert.match(warned.sent[0].text, /conformance:live/);
+  assert.match(warned.sent[0].text, /пишет в дом/);
   const summary = await mac.summary();
   assert.equal(summary.outcome, "ok");
   assert.equal(summary.firmware_check, "differs");
