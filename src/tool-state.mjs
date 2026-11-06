@@ -13,7 +13,7 @@ export function toolState(firmware) {
     version: packageMetadata.version,
     verified_revision: VERIFIED_FIRMWARE.revision,
   };
-  const { version, revision } = firmware;
+  const { revision } = firmware;
   if (!["string", "number"].includes(typeof revision) || revision === "") {
     return {
       ...tool,
@@ -27,6 +27,7 @@ export function toolState(firmware) {
   return {
     ...tool,
     firmware_check: "differs",
-    note: `Hub firmware ${version ?? "of unknown version"} (${revision}) is not ${VERIFIED_HUB_VERSION}, the one this tool was last verified on: reads and writes may behave differently. This is not a fault; keep working. Mention it to the owner if they ask about the tool's state or something did not work.`,
+    // The note is the tool's voice: what the hub reports stays in home.firmware.
+    note: `The hub's firmware (home.firmware) is not ${VERIFIED_HUB_VERSION}, the one this tool was last verified on: reads and writes may behave differently. This is not a fault; keep working. Mention it to the owner if they ask about the tool's state or something did not work.`,
   };
 }

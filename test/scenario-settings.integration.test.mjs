@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -38,9 +38,10 @@ function scenarioRef(index) {
   return `${homeRef}/scenario/${index}`;
 }
 
-async function setup(t) {
+async function setup(t, { extraScenarios = [] } = {}) {
   const fixture = await loadHomeFixture("apartment");
   fixture.scenarios.push(
+    ...extraScenarios,
     {
       index: GLOBAL,
       name: "Переменные дома",
@@ -115,7 +116,7 @@ async function setup(t) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  return { hub, client, stateDirectory };
 }
 
 async function call(client, name, args) {
@@ -727,6 +728,220 @@ test("a built-in scenario is not turned on or off, and it still reads as before"
   });
   assert.equal(run.error.code, "scenario_run_unverified_type");
   assert.doesNotMatch(run.error.message, /scenario_active/);
+});
+
+// The agent follows what a read offers: an offer on a built-in scenario's
+// window would only lead to the refusal, so none is made.
+test("nothing in a built-in scenario's options window is offered, and the window of an ordinary one still is", async (t) => {
+  const { hub, client } = await setup(t);
+  const window = hub.state.windows[scenarioOf(hub, BUILT_IN).optionsWindow];
+  window.options.push({
+    key: "Plugin",
+    name: "Настройка расширения",
+    type: "GenericBoolean",
+    inputType: "CHECKBOX",
+    read: true,
+    write: true,
+    disabled: false,
+    value: { boolValue: false },
+  });
+
+  const builtIn = await call(client, "get_entity", {
+    entity_ref: windowRef(hub, BUILT_IN),
+  });
+  const offered = builtIn.entity.options.filter(
+    ({ native_change: nativeChange }) => nativeChange,
+  );
+  assert.deepEqual(offered.map(({ key }) => key).sort(), [
+    "Active",
+    "Desc",
+    "Name",
+    "OnStart",
+    "Plugin",
+    "Sync",
+  ]);
+  for (const { key, native_change: nativeChange } of offered) {
+    assert.deepEqual(
+      nativeChange,
+      {
+        native_write: true,
+        supported: false,
+        reason: "predefined_scenario_read_only",
+      },
+      key,
+    );
+  }
+
+  // What the read says, prepare says: also for an option of no known meaning.
+  const refused = await refusal(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: windowRef(hub, BUILT_IN),
+    option_key: "Plugin",
+    value: true,
+    reason: "Владелец попросил",
+  });
+  assert.equal(refused.error.code, "predefined_scenario_read_only");
+  assert.deepEqual(hub.writes(), []);
+
+  const ordinary = await call(client, "get_entity", {
+    entity_ref: windowRef(hub, BLOCK),
+  });
+  const onStart = ordinary.entity.options.find(({ key }) => key === "OnStart");
+  assert.equal(onStart.native_change.supported, true);
+});
+
+// «Выключи плавное включение» reached with window_option on the scenario ref:
+// the answer is the built-in one, not a pointer to the operation that refuses.
+test("window_option Active on a built-in scenario's ref answers as built-in", async (t) => {
+  const { hub, client } = await setup(t);
+  for (const name of ["get_native_change_contract", "prepare_native_change"]) {
+    const refused = await refusal(client, name, {
+      operation: "window_option",
+      target_ref: scenarioRef(BUILT_IN),
+      option_key: "Active",
+      ...(name === "prepare_native_change"
+        ? { value: false, reason: "Выключи плавное включение" }
+        : {}),
+    });
+    assert.equal(refused.error.code, "predefined_scenario_read_only", name);
+    assert.match(refused.error.message, /SprutHub app/);
+  }
+  assert.deepEqual(hub.writes(), []);
+
+  // An ordinary scenario still hears where its on/off is.
+  const ordinary = await refusal(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: scenarioRef(BLOCK),
+    option_key: "Active",
+    value: false,
+    reason: "Выключи",
+  });
+  assert.equal(ordinary.error.code, "unsupported_window_option");
+  assert.match(ordinary.error.message, /scenario_active/);
+});
+
+const BUILT_IN_BLOCK = "23";
+
+function builtInBlock() {
+  return {
+    index: BUILT_IN_BLOCK,
+    name: "Встроенные действия",
+    desc: "",
+    type: "BLOCK",
+    predefined: true,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: {
+      targets: [
+        {
+          type: "service",
+          aId: 36,
+          sId: 13,
+          hs: "Fan",
+          characteristics: [{ type: "set", cId: 14, hc: "On", value: "true" }],
+        },
+      ],
+    },
+  };
+}
+
+async function prepareBuiltInBlockEdit(client) {
+  const read = await call(client, "get_entity", {
+    entity_ref: scenarioRef(BUILT_IN_BLOCK),
+    include: ["configuration"],
+  });
+  const data = structuredClone(read.entity.configuration.value);
+  data.targets[0].characteristics[0].value = "false";
+  return {
+    operation: "block_data_update",
+    target_ref: scenarioRef(BUILT_IN_BLOCK),
+    data,
+    reason: "Владелец попросил",
+  };
+}
+
+function storedBlockWrites(hub) {
+  return hub.writes().filter(({ method }) => method === "scenario.update");
+}
+
+test("the data of a built-in BLOCK is refused like the rest of it, and a change made before is still undone", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, {
+    extraScenarios: [builtInBlock()],
+  });
+  const edit = await prepareBuiltInBlockEdit(client);
+
+  const refused = await refusal(client, "prepare_native_change", edit);
+  assert.equal(refused.error.code, "predefined_scenario_read_only");
+  assert.match(refused.error.message, /SprutHub app/);
+  assert.deepEqual(hub.writes(), []);
+
+  // What an earlier version saved for this scenario, built-in all along: the
+  // change is made while the hub's scenario does not count as one, and then
+  // both the hub and the journal say it does.
+  const countAsBuiltIn = async (builtIn) => {
+    scenarioOf(hub, BUILT_IN_BLOCK).predefined = builtIn;
+    const journal = path.join(
+      stateDirectory,
+      (await readdir(stateDirectory)).find((name) =>
+        /^automation-changes-\w+\.json$/.test(name),
+      ),
+    );
+    const saved = await readFile(journal, "utf8");
+    assert.match(saved, new RegExp(`"predefined": ${!builtIn}`));
+    await writeFile(
+      journal,
+      saved.replaceAll(`"predefined": ${!builtIn}`, `"predefined": ${builtIn}`),
+      { mode: 0o600 },
+    );
+  };
+  scenarioOf(hub, BUILT_IN_BLOCK).predefined = false;
+  const earlier = await call(client, "prepare_native_change", edit);
+  assert.equal(earlier.status, "prepared", JSON.stringify(earlier));
+
+  // Prepared then, not sent now.
+  await countAsBuiltIn(true);
+  const atApply = await refusal(client, "apply_native_change", {
+    change_ref: earlier.change_ref,
+  });
+  assert.equal(atApply.error.code, "predefined_scenario_read_only");
+  assert.deepEqual(hub.writes(), []);
+
+  // Applied then: the agent's change does not stay in the home.
+  await countAsBuiltIn(false);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: earlier.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(storedBlockWrites(hub).length, 1);
+  await countAsBuiltIn(true);
+  await restore(client, earlier);
+  assert.equal(storedBlockWrites(hub).length, 2);
+  assert.equal(
+    JSON.parse(scenarioOf(hub, BUILT_IN_BLOCK).data).targets[0]
+      .characteristics[0].value,
+    "true",
+  );
+});
+
+// The refusals that come before the scenario is read still end at the built-in
+// answer one read later, and name it.
+test("a request with flags for a built-in BLOCK ends at the built-in answer", async (t) => {
+  const { hub, client } = await setup(t, {
+    extraScenarios: [builtInBlock()],
+  });
+  const edit = await prepareBuiltInBlockEdit(client);
+
+  const refused = await refusal(client, "prepare_native_change", {
+    ...edit,
+    active: false,
+  });
+  assert.equal(refused.error.code, "unsupported_block_flags");
+  assert.match(refused.error.message, /built-in/);
+  const { tool, arguments: args } = refused.next;
+  const end = await refusal(client, tool, args);
+  assert.equal(end.error.code, "predefined_scenario_read_only");
+  assert.deepEqual(hub.writes(), []);
 });
 
 // What an earlier version, which took built-in scenarios, saved: the change

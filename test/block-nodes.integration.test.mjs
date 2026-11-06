@@ -1255,3 +1255,204 @@ test("an edit that deletes a request or notification the agent cannot write back
   assert.equal(edited.tell_owner, warning);
   assert.equal(edited.next, undefined);
 });
+
+// The owner's home holds a built-in scenario, a GLOBAL with timers and a BLOCK
+// the owner made in the SprutHub app that already switches and runs them.
+const GLOBAL_SCENARIO = "20";
+const BUILT_IN_SCENARIO = "21";
+const OWN_BLOCK = "22";
+
+function scenarioTarget(index, mode) {
+  return { type: "scenario", index, mode };
+}
+
+function withBuiltInAndGlobal(fixture) {
+  fixture.scenarios.push(
+    {
+      index: GLOBAL_SCENARIO,
+      name: "Переменные дома",
+      desc: "Общие флаги и таймеры",
+      type: "GLOBAL",
+      active: true,
+      onStart: true,
+      sync: false,
+      data: 'Cron.schedule("0 0 * * * ?", () => log.info("hourly"));',
+    },
+    {
+      index: BUILT_IN_SCENARIO,
+      name: "Плавное включение",
+      desc: "",
+      type: "LOGIC",
+      predefined: true,
+      active: true,
+      onStart: true,
+      sync: false,
+      data: 'info = { name: "Плавное включение" };\nfunction trigger() {}',
+    },
+    {
+      index: OWN_BLOCK,
+      name: "Протечка: вытяжка и переменные",
+      desc: "",
+      type: "BLOCK",
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          whenLeak([
+            fanOn(),
+            scenarioTarget(BUILT_IN_SCENARIO, "DEACTIVATE"),
+            scenarioTarget(GLOBAL_SCENARIO, "FIRE"),
+          ]),
+        ],
+      },
+    },
+  );
+}
+
+test("a new scenario target is refused on a built-in scenario and when it would run an unverified type", async (t) => {
+  const { hub, client } = await setup(t, withBuiltInAndGlobal);
+
+  for (const mode of [
+    "FIRE",
+    "ACTIVATE",
+    "DEACTIVATE",
+    "ACTIVATE_AND_FIRE",
+    "RESET",
+  ]) {
+    const refused = await prepareCreate(client, {
+      targets: [whenLeak([scenarioTarget(BUILT_IN_SCENARIO, mode)])],
+    });
+    assert.deepEqual(problemsOf(refused), ["/targets/0/then/0"], mode);
+    assert.match(refused.problems[0].message, /built-in/, mode);
+    assert.match(refused.problems[0].message, /SprutHub app/, mode);
+  }
+
+  // Every firing of the trigger would start the GLOBAL again, the risk the
+  // direct run is refused for.
+  for (const mode of ["FIRE", "ACTIVATE_AND_FIRE"]) {
+    const refused = await prepareCreate(client, {
+      targets: [whenLeak([scenarioTarget(GLOBAL_SCENARIO, mode)])],
+    });
+    assert.deepEqual(problemsOf(refused), ["/targets/0/then/0"], mode);
+    assert.match(refused.problems[0].message, /GLOBAL/, mode);
+    assert.match(refused.problems[0].message, /timers/, mode);
+  }
+
+  // What the refusal does not cover is still written.
+  for (const target of [
+    scenarioTarget(GLOBAL_SCENARIO, "ACTIVATE"),
+    scenarioTarget(GLOBAL_SCENARIO, "DEACTIVATE"),
+    scenarioTarget(GLOBAL_SCENARIO, "RESET"),
+    scenarioTarget("9", "FIRE"),
+    scenarioTarget("14", "ACTIVATE_AND_FIRE"),
+  ]) {
+    const allowed = await prepareCreate(client, {
+      targets: [whenLeak([target])],
+    });
+    assert.equal(allowed.status, "prepared", JSON.stringify(allowed));
+  }
+  assert.deepEqual(hub.writes(), []);
+});
+
+test("an edit may not add or strengthen a target on such a scenario, not even by copying a stored one", async (t) => {
+  const { hub, client } = await setup(t, withBuiltInAndGlobal);
+
+  const added = await prepareUpdate(client, "14", (data) => {
+    data.targets.push(scenarioTarget(BUILT_IN_SCENARIO, "ACTIVATE"));
+  });
+  assert.equal(added.error?.code, "invalid_block_data", JSON.stringify(added));
+  assert.match(added.problems[0].message, /built-in/);
+
+  const stronger = await prepareUpdate(client, OWN_BLOCK, (data) => {
+    data.targets[0].then[1].mode = "ACTIVATE";
+  });
+  assert.deepEqual(problemsOf(stronger), ["/targets/0/then/1"]);
+
+  const runsNow = await prepareUpdate(client, "14", (data) => {
+    data.targets.push(scenarioTarget(GLOBAL_SCENARIO, "FIRE"));
+  });
+  assert.equal(runsNow.error?.code, "invalid_block_data");
+  assert.match(runsNow.problems[0].message, /GLOBAL/);
+
+  const copied = await prepareUpdate(client, OWN_BLOCK, (data) => {
+    const { blockId: _blockId, ...copy } = data.targets[0].then[1];
+    data.targets[0].else.push(copy);
+  });
+  assert.deepEqual(problemsOf(copied), ["/targets/0/else/0"]);
+  assert.deepEqual(hub.writes(), []);
+});
+
+test("targets already stored on such a scenario do not stop the owner's edits, pauses or undo", async (t) => {
+  const { hub, client } = await setup(t, withBuiltInAndGlobal);
+  const before = storedData(hub, OWN_BLOCK);
+
+  // The owner changes what the fan does: the old targets stay as they are.
+  const edited = await prepareUpdate(client, OWN_BLOCK, (data) => {
+    data.targets[0].else.push(fanOn());
+  });
+  assert.equal(edited.status, "prepared", JSON.stringify(edited));
+  const applied = await call(client, "apply_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.deepEqual(
+    storedData(hub, OWN_BLOCK).targets[0].then,
+    before.targets[0].then,
+  );
+  assert.equal(storedData(hub, OWN_BLOCK).targets[0].else.length, 1);
+  const undone = await call(client, "restore_native_change", {
+    change_ref: edited.change_ref,
+  });
+  assert.equal(undone.status, "restored", JSON.stringify(undone));
+  assert.deepEqual(storedData(hub, OWN_BLOCK), before);
+
+  // An edit that removes a target and the undo that writes it back.
+  const removed = await prepareUpdate(client, OWN_BLOCK, (data) => {
+    data.targets[0].then.splice(1, 1);
+  });
+  assert.equal(removed.status, "prepared", JSON.stringify(removed));
+  await call(client, "apply_native_change", { change_ref: removed.change_ref });
+  assert.equal(storedData(hub, OWN_BLOCK).targets[0].then.length, 2);
+  const back = await call(client, "restore_native_change", {
+    change_ref: removed.change_ref,
+  });
+  assert.equal(back.status, "restored", JSON.stringify(back));
+  assert.deepEqual(storedData(hub, OWN_BLOCK), before);
+
+  // A pause of the fan beside them.
+  const paused = await call(client, "prepare_native_change", {
+    operation: "block_action_pause",
+    target_ref: scenarioRef(OWN_BLOCK),
+    action_pointer: "/targets/0/then/0",
+    duration_seconds: 600,
+    reason: "Не включать вытяжку десять минут",
+  });
+  assert.equal(paused.status, "prepared", JSON.stringify(paused));
+  const started = await call(client, "apply_native_change", {
+    change_ref: paused.change_ref,
+  });
+  assert.equal(started.status, "applied", JSON.stringify(started));
+  const resumed = await call(client, "restore_native_change", {
+    change_ref: paused.change_ref,
+  });
+  assert.equal(resumed.status, "restored", JSON.stringify(resumed));
+  assert.deepEqual(storedData(hub, OWN_BLOCK), before);
+});
+
+test("a target prepared before its scenario counted as built-in is not sent at apply", async (t) => {
+  const { hub, client } = await setup(t, withBuiltInAndGlobal);
+  const prepared = await prepareCreate(client, {
+    targets: [whenLeak([scenarioTarget("9", "DEACTIVATE")])],
+  });
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  hub.state.scenarios.find(({ index }) => index === "9").predefined = true;
+
+  const refused = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+
+  assert.equal(refused.error?.code, "invalid_block_data");
+  assert.match(refused.error.message, /built-in/);
+  assert.deepEqual(hub.writes(), []);
+});

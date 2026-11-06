@@ -51,6 +51,7 @@ function limit(name, fallback) {
 const LOGIN_REFUSED = new Set([
   "authentication_failed",
   "authentication_delayed",
+  "authentication_step_unsupported",
   "password_enrollment_required",
 ]);
 const NOT_CONFIGURED = new Set([
@@ -83,6 +84,11 @@ function classify(body) {
       const nextLogin = closedField(body.next_login_at, /^[\dT:.Z-]{1,40}$/);
       if (nextLogin && !Number.isNaN(Date.parse(nextLogin))) {
         failure.next_login_at = nextLogin;
+      }
+      // A hub that asks to wait says for how long, not until when.
+      const wait = body.retry_after_seconds;
+      if (!nextLogin && Number.isSafeInteger(wait) && wait > 0) {
+        failure.retry_after_seconds = wait;
       }
     } else if (NOT_CONFIGURED.has(code)) {
       failure.outcome = "login_not_configured";
@@ -169,13 +175,24 @@ async function check() {
   return { ...(await readHome(timeoutMs)), attempts: 2 };
 }
 
-const LOGIN_ADVICE = {
+// What the owner does about each refusal, first by its code: only
+// authentication_failed carries an account status. A saved file does not lift
+// the wait of authentication_delayed, so these do not send the owner to it.
+const LOGIN_ADVICE_BY_CODE = {
+  authentication_delayed:
+    "Хаб просит подождать перед новым входом: так он отвечает на частые попытки. Пароль менять не нужно, а сохранение файла входа ожидание не снимает. Следующая проверка попробует снова.",
+  password_enrollment_required:
+    "SprutHub просит завершить настройку пароля в официальном приложении. Сделайте это там: следующая проверка попробует снова.",
+  authentication_step_unsupported:
+    "SprutHub просит при входе шаг, которого инструмент не умеет. Войдите в официальном приложении и завершите его там: следующая проверка попробует снова.",
+};
+const LOGIN_ADVICE_BY_STATUS = {
   ACCOUNT_RESPONSE_NO_MORE_TRIES:
-    "Хаб временно заблокировал вход после частых попыток. Подождите и проверьте пароль: следующая проверка попробует снова.",
-  ACCOUNT_RESPONSE_TOO_FAST:
     "Хаб временно заблокировал вход после частых попыток. Подождите и проверьте пароль: следующая проверка попробует снова.",
   ACCOUNT_RESPONSE_NOT_CONFIRMED:
     "Хаб просит подтвердить аккаунт. Подтвердите его так, как просит SprutHub, например по письму.",
+  ACCOUNT_RESPONSE_NOT_CONNECTED: `SprutHub сообщает, что аккаунт не подключён к хабу. Проверьте в приложении SprutHub, что у аккаунта из ${CONNECTION_FILE} есть доступ к хабу: следующая проверка попробует снова.`,
+  ACCOUNT_RESPONSE_FORMAT: `SprutHub не принял формат логина. Исправьте логин в ${CONNECTION_FILE}: следующая проверка войдёт сама.`,
 };
 
 function problemNotice(result) {
@@ -184,7 +201,8 @@ function problemNotice(result) {
       return {
         title: "sprut-agent: нет входа в дом",
         text:
-          LOGIN_ADVICE[result.account_status] ??
+          LOGIN_ADVICE_BY_CODE[result.error_code] ??
+          LOGIN_ADVICE_BY_STATUS[result.account_status] ??
           `Хаб отклонил логин или пароль. Исправьте их в ${CONNECTION_FILE}: следующая проверка войдёт сама.`,
       };
     case "login_not_configured":
@@ -193,6 +211,14 @@ function problemNotice(result) {
         text: `Вход в дом не настроен или файл входа недоступен. Проверьте ${CONNECTION_FILE}: логин, пароль и права 600.`,
       };
     case "hub_unreachable":
+      // No answer in time looks the same from a hung hub, a broken network and
+      // a hung server of this tool.
+      if (result.error_code === "timeout") {
+        return {
+          title: "sprut-agent: проверка не дождалась ответа",
+          text: "Ответа не было в отведённое время: завис хаб, сеть или сам инструмент. Проверьте, что хаб включён и в сети, а у этого Mac есть интернет. Если всё так, попросите агента открыть обзор дома: ответ покажет причину.",
+        };
+      }
       return {
         title: "sprut-agent: хаб недоступен",
         text: "Хаб не отвечает. Проверьте, что он включён и в сети, а у этого Mac есть интернет. Следующая проверка завтра.",
@@ -208,7 +234,7 @@ function problemNotice(result) {
 function firmwareNotice({ firmware_revision: revision, verified_revision }) {
   return {
     title: "sprut-agent: другая прошивка хаба",
-    text: `На хабе ${revision ? `ревизия ${revision}` : "ревизия необычного вида"}, инструмент проверен на ${verified_revision}. Он работает, но возможны отличия. Что сделать: npm run conformance:live, см. DEVELOPMENT.md.`,
+    text: `На хабе ${revision ? `ревизия ${revision}` : "ревизия необычного вида"}, инструмент проверен на ${verified_revision}. Чтение дома работает, запись эта проверка не пробовала, возможны отличия. Проверить на этой прошивке можно через npm run conformance:live: прогон пишет в дом, создаёт и удаляет временные комнаты, сценарии и устройство, см. DEVELOPMENT.md.`,
   };
 }
 
@@ -254,10 +280,15 @@ async function readPrevious(file) {
 async function saveSummary(file, summary) {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const draft = `${file}.${process.pid}.tmp`;
-  await writeFile(draft, `${JSON.stringify(summary, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  await rename(draft, file);
+  try {
+    await writeFile(draft, `${JSON.stringify(summary, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    await rename(draft, file);
+  } catch (error) {
+    await rm(draft, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function runCheck() {
