@@ -1,8 +1,14 @@
 import { storedScenarioRunPlan } from "./block-validation.mjs";
 import { ROOM_NAME_LIMIT_NOTE, valuesEqual } from "./change-contracts.mjs";
 import { decodeReferenceSegment } from "./change-refs.mjs";
+import { hubCodeErrorFields } from "./hub-code.mjs";
+import {
+  LIGHT_GROUP_MEMBERS,
+  publicLampGroupChange,
+} from "./light-group-members.mjs";
 import {
   createdLogicMapping,
+  isGlobalCodeChange,
   logicDeleteAssignmentCheckUnproven,
   logicSourceRequestedSnapshot,
   publicLogicEditableFlags,
@@ -32,7 +38,13 @@ import {
   unprovenApplyLimitation,
   unprovenApplyNext,
 } from "./scenario-changes.mjs";
+import { publicScenarioDelete, SCENARIO_DELETE } from "./scenario-delete.mjs";
 import { isSensitiveNativeNode } from "./spruthub-client.mjs";
+import {
+  publicVirtualDeviceChange,
+  VIRTUAL_DEVICE,
+  VIRTUAL_DEVICE_DELETE,
+} from "./virtual-device.mjs";
 
 export function laterChangeRef(change) {
   return change.conflict_reason === "later_owned_change" &&
@@ -236,6 +248,15 @@ export function publicNativeChange(
       ],
     };
   }
+  if (change.kind === VIRTUAL_DEVICE || change.kind === VIRTUAL_DEVICE_DELETE) {
+    return publicVirtualDeviceChange(change, { verification });
+  }
+  if (change.kind === LIGHT_GROUP_MEMBERS) {
+    return publicLampGroupChange(change, {
+      verification,
+      configurationMatches,
+    });
+  }
   if (change.kind === "virtual_light_group") {
     return {
       status: change.status,
@@ -432,6 +453,17 @@ export function publicNativeChange(
       ...(change.warnings
         ? { warnings: structuredClone(change.warnings) }
         : {}),
+      ...(change.code_diff
+        ? { code_diff: structuredClone(change.code_diff) }
+        : {}),
+      ...(change.code_diff_truncated ? { code_diff_truncated: true } : {}),
+      ...(change.code_mentions
+        ? { code_mentions: structuredClone(change.code_mentions) }
+        : {}),
+      ...(isGlobalCodeChange(change)
+        ? { executes_on_apply: true, hub_memory_kept: true }
+        : {}),
+      ...hubCodeErrorFields(change),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent
@@ -484,6 +516,12 @@ export function publicNativeChange(
         "LOGIC creation appends a unique JavaScript ownership comment to the source sent to SprutHub.",
         "Metadata returned after a source write is observed rather than attributed to either source derivation or a concurrent edit, and becomes the guard for a later restore.",
         "Source readback confirms stored configuration, not execution or physical behavior.",
+        ...(isGlobalCodeChange(change)
+          ? [
+              "SprutHub runs a GLOBAL's code at once on every write, on or off, the write of a restore included (executes_on_apply). What the code assigned to global and what it did stay until the hub restarts (hub_memory_kept): a restore writes the old code back and runs it, it does not undo them.",
+              "hub_code_error covers compiling and the top level run at the write, not the functions the code assigns: a function other scenarios call fails only when they run it, seen in the hub log. Check a changed function by running a scenario that calls it, with the owner's consent.",
+            ]
+          : []),
         "Scenario creation, source updates, assignment, options, and activation are separate native operations.",
         "A created LOGIC's native type is its scenario index. Deletion scans the current assignments of that type across the home and the scenario targets of BLOCKs; what the scan finds blocks it, whether the LOGIC is on or off. SprutHub exposes no compare-and-set after that check.",
         ...(logicDeleteAssignmentCheckUnproven(change)
@@ -559,6 +597,9 @@ export function publicNativeChange(
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
       ],
     };
+  }
+  if (change.kind === SCENARIO_DELETE) {
+    return publicScenarioDelete(change, verification);
   }
   if (change.kind === "scenario_run") {
     const plan = storedScenarioRunPlan(change);
@@ -658,6 +699,10 @@ export function publicNativeChange(
             ),
           }
         : {}),
+      ...(change.code_mentions
+        ? { code_mentions: structuredClone(change.code_mentions) }
+        : {}),
+      ...hubCodeErrorFields(change),
       native_write_sent: change.native_write_sent,
       native_acknowledged: change.native_acknowledged,
       ...(change.write_intent
@@ -759,6 +804,9 @@ export function publicNativeChange(
     reason: change.reason,
     target_ref: change.target_ref,
     ...(change.window_ref ? { window_ref: change.window_ref } : {}),
+    ...(change.bridge_export
+      ? { bridge_export: structuredClone(change.bridge_export) }
+      : {}),
     diff: {
       value: {
         from: shownValue(change.baseline_value).value,
@@ -819,15 +867,20 @@ export function publicNativeChange(
     ...(kind.command ? { physical_effect_reversible: false } : {}),
     command_caused_observation: "unknown",
     limitations: [
-      "Readback observes the value but cannot prove this command caused it.",
-      "SprutHub exposes no native compare-and-set for this operation.",
       restoration.supported
         ? kind.command
           ? "Restore writes the previous value back only while the device still shows the value this change set and is online; past physical effects are not reversed."
           : "Restoration is allowed only while the current setting still matches this change."
         : (restoration.limitation?.message ??
           "A runtime command does not provide rollback of physical effects."),
-      "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+      // What a write leaves unproven says nothing before it is sent.
+      ...(change.status === "prepared"
+        ? []
+        : [
+            "Readback observes the value but cannot prove this command caused it.",
+            "SprutHub exposes no native compare-and-set for this operation.",
+            "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+          ]),
       ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets
         ? [

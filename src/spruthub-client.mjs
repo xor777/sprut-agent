@@ -12,6 +12,13 @@ import {
 } from "./block-summary.mjs";
 import { HomeState } from "./home-state.mjs";
 import {
+  groupLamps,
+  incomingLinks,
+  lampGroupMark,
+  lampGroupMarks,
+  virtualLamps,
+} from "./light-group-members.mjs";
+import {
   inspectNativeOption,
   isSelectableNativeValidValue,
   nativeScalarContract,
@@ -36,6 +43,10 @@ const HUB_TIME_ZONE_TTL_MS = 5 * 60_000;
 // home or its changed accessories, the room list an accessory read asks
 // for, and two more for reads the state did not take.
 const HOME_READ_PASSES = 4;
+// Virtual lamps a whole read asks link.list about at once: the owner's
+// home has 9 groups, so one round (a group with an offline lamp adds up
+// to 4 more requests of its own).
+const LINK_READS_AT_ONCE = 10;
 // How long a read waits for the home settings window when the hub's time
 // zone is not cached. The owner's hub answered in 133 ms for its 99 KB
 // window; a hub that answers later leaves that read's times in UTC rather
@@ -88,6 +99,8 @@ const READ_ONLY_METHODS = new Set([
 ]);
 // Writes that change nothing the warm home state holds besides values,
 // which the hub's events carry: scenarios and a device search.
+// Accessories whose services are read for LOGIC assignments at once.
+const LOGIC_SCAN_CONCURRENCY = 8;
 const HOME_STATE_NEUTRAL_WRITES = new Set([
   "scenario.create",
   "scenario.update",
@@ -183,6 +196,7 @@ export class SprutHubClient {
   // Listeners of the events the hub pushes (onNativeEvent).
   #nativeEventListeners = new Set();
   #pending = new Map();
+  #renewSession;
   #socket;
   #startingObservationClient;
   #writeGeneration = 0;
@@ -195,6 +209,10 @@ export class SprutHubClient {
     availableHomeCount = null,
     cid,
     timeoutMs = 10_000,
+    // (rejectedToken) => Promise<{token, cid}>: a new session from the
+    // account's login, for a client whose session the hub may stop
+    // accepting. Without it a refused session stays an error.
+    renewSession,
   }) {
     if (!url || !token || !cid) {
       throw new SprutHubError(
@@ -213,6 +231,7 @@ export class SprutHubClient {
     this.#availableHomeCount = availableHomeCount;
     this.cid = cid;
     this.timeoutMs = timeoutMs;
+    this.#renewSession = renewSession;
   }
 
   async listHomes(deadline = Date.now() + this.timeoutMs) {
@@ -343,10 +362,16 @@ export class SprutHubClient {
         rooms.connection === accessories.connection
           ? accessories.connection
           : null;
+      const lampGroups = await this.#readLampGroups(
+        state.serial,
+        accessories.accessories,
+        deadline,
+      );
       state.replaceWhole(
         {
           rooms: rooms.rooms,
           accessories: accessories.accessories,
+          lampGroups,
           observedAt: latestObservedAt([
             rooms.observedAt,
             accessories.observedAt,
@@ -358,6 +383,53 @@ export class SprutHubClient {
     } finally {
       state.endRead(token);
     }
+  }
+
+  // The lamp groups of a home read whole: link.list of the On of each
+  // virtual lamp, LINK_READS_AT_ONCE at a time. A failed read leaves them
+  // unknown (null), never empty.
+  async #readLampGroups(serial, accessories, deadline) {
+    const byId = new Map(accessories.map((item) => [item.id, item]));
+    const read = async ({ aId, sId, controls }) => {
+      const links = (cId) =>
+        this.listLinks({ aId, sId, cId }, { serial, deadline });
+      const lamps = groupLamps(await links(controls.On));
+      // What the group links beyond On is read only for a group with an
+      // offline lamp, for what its room's unlinked lamps lack.
+      if (!lamps.some((lamp) => byId.get(lamp.aId)?.online !== true)) {
+        return { group: { aId, sId }, lamps };
+      }
+      const others = Object.entries(controls).filter(([type]) => type !== "On");
+      const linked = await Promise.all(
+        others.map(async ([type, cId]) =>
+          incomingLinks(await links(cId)).length > 0 ? type : null,
+        ),
+      );
+      return {
+        group: { aId, sId },
+        lamps,
+        types: ["On", ...linked.filter(Boolean)],
+      };
+    };
+    const lampsOfVirtual = virtualLamps(accessories);
+    const groups = [];
+    try {
+      for (
+        let start = 0;
+        start < lampsOfVirtual.length;
+        start += LINK_READS_AT_ONCE
+      ) {
+        groups.push(
+          ...(await Promise.all(
+            lampsOfVirtual.slice(start, start + LINK_READS_AT_ONCE).map(read),
+          )),
+        );
+      }
+    } catch (error) {
+      if (error instanceof SprutHubError) return null;
+      throw error;
+    }
+    return groups.filter(({ lamps }) => lamps.length > 0);
   }
 
   async #readRoomsInto(state, deadline) {
@@ -664,6 +736,7 @@ export class SprutHubClient {
       serial: this.serial,
       cid: this.cid,
       timeoutMs: this.timeoutMs,
+      renewSession: this.#renewSession,
     });
     this.#startingObservationClient = candidate;
     try {
@@ -1109,6 +1182,40 @@ export class SprutHubClient {
       : null;
   }
 
+  // The bridges that export the accessory: each bridge lists it as a child
+  // in main while one of its services is exported (bridge export notes in
+  // #readAccessoryBridges). A bridge whose list cannot be read is named
+  // with exported: null.
+  async accessoryBridgeExports(aId) {
+    const deadline = Date.now() + this.timeoutMs;
+    const { extensions } = await this.nativeExtensions(this.serial, deadline);
+    const found = [];
+    for (const extension of extensions) {
+      if (extension.bundle_type !== "BRIDGE") continue;
+      let children;
+      try {
+        ({ children } = await this.nativeExtensionChildren(
+          this.serial,
+          extension.key,
+          deadline,
+        ));
+      } catch (error) {
+        if (!(error instanceof SprutHubError)) throw error;
+        found.push({
+          ref: extension.ref,
+          name: extension.name,
+          exported: null,
+        });
+        continue;
+      }
+      const child = children.find(({ id }) => id === String(aId));
+      if (child && bridgeChildExported(child) === true) {
+        found.push({ ref: extension.ref, name: extension.name });
+      }
+    }
+    return found;
+  }
+
   // The scenarios the hub's index lists for one accessory, as relations
   // read them (scenario.list {aId}); a summary without data.
   async listAccessoryScenarios(aId) {
@@ -1276,10 +1383,13 @@ export class SprutHubClient {
     });
   }
 
+  // The owner's hub answered accessory.create in 4-9 s, against about 0.1 s
+  // for other writes (2026-10-23-virtual-devices, 3), so a creation waits
+  // twice the ordinary timeout.
   async createAccessory({ name, roomId, services }) {
     const response = await this.#request(
       { accessory: { create: { name, roomId, services } } },
-      Date.now() + this.timeoutMs,
+      Date.now() + 2 * this.timeoutMs,
     );
     const accessory = response.result?.accessory?.create;
     try {
@@ -1316,10 +1426,14 @@ export class SprutHubClient {
     }
   }
 
-  async listLinks({ aId, sId, cId }) {
+  async listLinks(
+    { aId, sId, cId },
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
     const response = await this.#request(
       { link: { list: { aId, sId, cId } } },
-      Date.now() + this.timeoutMs,
+      deadline,
+      { serial },
     );
     const links = extractNativeList(response, ["link", "list", "links"]);
     return links.map(normalizeLink);
@@ -1873,9 +1987,15 @@ export class SprutHubClient {
     }
   }
 
+  // The hub lists LOGIC assignments only per service (logic.list needs aId
+  // and sId; accessory.list and scenario.get carry none, 2026-10-23), so
+  // every service of the home is read: on the owner's home 254 services
+  // took 28-60 s one by one, hence several accessories at once. An
+  // accessory deleted while the scan runs has no assignments left: its
+  // services read as Not found and are skipped once the accessory is
+  // confirmed gone.
   async findLogicAssignments(type) {
     const accessories = await this.listAccessories();
-    const assignments = [];
     for (const accessory of accessories) {
       const services = accessory.services ?? [];
       if (!Array.isArray(services)) {
@@ -1884,26 +2004,65 @@ export class SprutHubClient {
           "SprutHub did not return services needed to check LOGIC assignments.",
         );
       }
-      for (const service of services) {
-        if (!Number.isInteger(service?.sId)) {
-          throw new SprutHubError(
-            "incompatible_response",
-            "SprutHub returned a service without its native ID.",
-          );
-        }
-        const logics = await this.listLogics({
+      if (services.some((service) => !Number.isInteger(service?.sId))) {
+        throw new SprutHubError(
+          "incompatible_response",
+          "SprutHub returned a service without its native ID.",
+        );
+      }
+    }
+    const perAccessory = new Array(accessories.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < accessories.length) {
+        const position = next++;
+        perAccessory[position] = await this.#accessoryLogicAssignments(
+          accessories[position],
+          type,
+        );
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(LOGIC_SCAN_CONCURRENCY, accessories.length) },
+        worker,
+      ),
+    );
+    return perAccessory.flat();
+  }
+
+  async #accessoryLogicAssignments(accessory, type) {
+    const assignments = [];
+    for (const service of accessory.services ?? []) {
+      let logics;
+      try {
+        logics = await this.listLogics({
           aId: accessory.id,
           sId: service.sId,
         });
-        for (const logic of logics) {
-          if (logic?.type === type) {
-            assignments.push({
-              aId: accessory.id,
-              sId: service.sId,
-              type,
-              active: logic.active === true,
-            });
-          }
+      } catch (error) {
+        if (
+          isNativeNotFoundCandidate(error) &&
+          (await this.getAccessoryOrNull(accessory.id)) === null
+        ) {
+          return [];
+        }
+        throw error;
+      }
+      for (const logic of logics) {
+        if (logic?.type === type) {
+          assignments.push({
+            aId: accessory.id,
+            sId: service.sId,
+            type,
+            active: logic.active === true,
+            ...(typeof accessory.name === "string"
+              ? { accessoryName: accessory.name }
+              : {}),
+            ...(typeof service.name === "string"
+              ? { serviceName: service.name }
+              : {}),
+          });
         }
       }
     }
@@ -2061,6 +2220,27 @@ export class SprutHubClient {
     };
   }
 
+  // A lamp group's lamps, or the groups a lamp is in, on each lamp service
+  // of an accessory entity, only from a home snapshot that is fresh: a
+  // device read stays one request (find_devices reads the home and marks
+  // them always).
+  #markLampGroups(serial, accessory, entity) {
+    const lamps = (accessory.services ?? []).filter(
+      ({ type }) => type === "Lightbulb",
+    );
+    if (lamps.length === 0) return;
+    const catalog = this.cachedHomeCatalog(serial);
+    if (!catalog) return;
+    const marks = lampGroupMarks(catalog, serial);
+    for (const service of lamps) {
+      const ref = serviceRef(serial, accessory.id, service.sId);
+      const entry = entity.services.find((candidate) => candidate.ref === ref);
+      if (entry) {
+        Object.assign(entry, lampGroupMark(marks, accessory.id, service.sId));
+      }
+    }
+  }
+
   async #readAccessoryEntity(parsed, requested, deadline) {
     const response = await this.#request(
       { accessory: { get: { id: parsed.accessoryId } } },
@@ -2090,6 +2270,7 @@ export class SprutHubClient {
           entity.services.flatMap(({ characteristics }) => characteristics),
         ),
       );
+      this.#markLampGroups(parsed.serial, accessory, entity);
       if (requested.has("relations")) {
         entity.relations = await this.#readAccessoryRelations(
           parsed.serial,
@@ -2278,13 +2459,13 @@ export class SprutHubClient {
   // The accessory's export to each bridge (HomeKit, Yandex, Google): a
   // bridge lists one child per accessory it can export, with the accessory
   // id as its id, in main when exported and in notConnected when not; the
-  // child's window has a CHECKBOX s:<sId> per exportable service, true when
-  // exported. Both read on a bridge that does not run too
-  // (2026-10-13-wave4-contracts 3.2, 3.3). A bridge's list is read whole
-  // (16-18 KB on the owner's hub): the hub's answer for one child of a
-  // bridge that cannot export it was not observed. The window is read only
-  // where the accessory is exported: a notConnected child's services were
-  // all false.
+  // child's window has a CHECKBOX s:<sId> per service that bridge can
+  // export, true when exported, and window_option on it changes the export.
+  // Both read on a bridge that does not run too (2026-10-13-wave4-contracts
+  // 3.2, 3.3; 2026-10-14-bridge-export-write 3-8, 12). A bridge's list is
+  // read whole (16-18 KB on the owner's hub). The window of every bridge
+  // that lists the accessory is read: a service without a checkbox there
+  // is one that bridge does not export.
   async #readAccessoryBridges(serial, accessory, deadline) {
     const { extensions } = await this.nativeExtensions(serial, deadline);
     const childId = String(accessory.id);
@@ -2325,11 +2506,16 @@ export class SprutHubClient {
           const child = children.find(({ id }) => id === childId);
           if (!child) return { ...entry, exported: false, exportable: false };
           const exported = bridgeChildExported(child);
-          if (exported !== true) return { ...entry, exported };
+          const listed = {
+            ...entry,
+            exported,
+            ...(typeof child.optionsWindow === "string" && child.optionsWindow
+              ? { window_ref: windowRef(serial, child.optionsWindow) }
+              : {}),
+          };
           try {
             return {
-              ...entry,
-              exported,
+              ...listed,
               services: await this.#readBridgeServices(
                 serial,
                 accessory,
@@ -2339,18 +2525,19 @@ export class SprutHubClient {
             };
           } catch (error) {
             if (!(error instanceof SprutHubError)) throw error;
-            return { ...entry, exported, services_error_code: error.code };
+            return { ...listed, services_error_code: error.code };
           }
         }),
     );
   }
 
-  // Which of these options of one window set what a bridge exports, and
-  // the read of that export; null when none. A bridge's child is an
-  // accessory, its id the accessory id, and its window
-  // <extensionKey with / for :>/Child/<aId>/ holds that accessory's export,
-  // all of its options; the bridge's own window decides with
-  // AutoAddNewAccessory whether a new accessory is exported
+  // The bridge a window belongs to, and which of these options of it stay
+  // unwritten; null for any other window. A bridge's child is an accessory,
+  // its id the accessory id, and its window
+  // <extensionKey with / for :>/Child/<aId>/ holds that accessory's export:
+  // its s:<sId> checkboxes are written (2026-10-14-bridge-export-write), its
+  // groups are not. The bridge's own window decides with
+  // AutoAddNewAccessory whether a new accessory is exported: not written
   // (2026-10-13-wave4-contracts 3.1-3.4). Only a window of that form or
   // that option costs the list of extensions: a device's window, under its
   // controller's /Child/, is keyed by the device's own id.
@@ -2362,12 +2549,17 @@ export class SprutHubClient {
     for (const extension of extensions) {
       if (extension.bundle_type !== "BRIDGE") continue;
       if (child?.[1] === extension.key.replaceAll(":", "/")) {
+        const aId = Number(child[2]);
         return {
-          keys: new Set(optionKeys),
+          extension,
+          aId,
+          withheld: new Set(
+            optionKeys.filter((key) => !BRIDGE_EXPORT_OPTION.test(key)),
+          ),
           next: {
             tool: "get_entity",
             arguments: {
-              entity_ref: accessoryRef(serial, Number(child[2])),
+              entity_ref: accessoryRef(serial, aId),
               include: ["bridges"],
             },
           },
@@ -2378,7 +2570,7 @@ export class SprutHubClient {
         extension.options_window_ref === windowRef(serial, windowKey)
       ) {
         return {
-          keys: new Set([BRIDGE_AUTO_ADD_OPTION]),
+          withheld: new Set([BRIDGE_AUTO_ADD_OPTION]),
           next: {
             tool: "get_entity",
             arguments: { entity_ref: extension.ref, include: ["children"] },
@@ -2411,27 +2603,36 @@ export class SprutHubClient {
         "SprutHub returned incomplete bridge window data.",
       );
     }
-    return window.options.flatMap((option) => {
-      const match = /^s:(\d+)$/.exec(option?.key ?? "");
-      if (!match || option.inputType !== "CHECKBOX") return [];
-      const sId = Number(match[1]);
-      const service = accessory.services?.find(
-        (candidate) => candidate.sId === sId,
-      );
-      const value = option.value?.boolValue;
-      return [
-        {
-          ref: serviceRef(serial, accessory.id, sId),
-          name:
-            service?.name ??
-            (typeof option.name === "string"
-              ? redactSensitiveText(option.name)
-              : null),
+    // Every service but the accessory information, in the accessory's
+    // order; the hub has no checkbox without a service (2026-10-14-bridge-
+    // export-write 12).
+    const checkboxes = new Map(
+      window.options
+        .filter(
+          (option) =>
+            option?.inputType === "CHECKBOX" &&
+            BRIDGE_EXPORT_OPTION.test(option.key ?? ""),
+        )
+        .map((option) => [option.key, option]),
+    );
+    return (accessory.services ?? [])
+      .filter(({ type }) => type !== "AccessoryInformation")
+      .map((service) => {
+        const optionKey = `s:${service.sId}`;
+        const option = checkboxes.get(optionKey);
+        const shown = {
+          ref: serviceRef(serial, accessory.id, service.sId),
+          name: service.name ?? null,
+        };
+        if (!option) return { ...shown, exportable: false };
+        const value = option.value?.boolValue;
+        return {
+          ...shown,
+          option_key: optionKey,
           // A value the hub did not give is unknown, not false.
           exported: typeof value === "boolean" ? value : null,
-        },
-      ];
-    });
+        };
+      });
   }
 
   async #readRelations(serial, accessory, services, characteristic, deadline) {
@@ -2690,6 +2891,14 @@ export class SprutHubClient {
           pointer,
         });
       }
+      for (const pointer of decoded.codeActions) {
+        unchecked.push({
+          area: "block_code_action",
+          outcome: "not_analyzed",
+          scenario_ref: summary.ref,
+          pointer,
+        });
+      }
       for (const entry of decoded.unrecognized) {
         unchecked.push({
           area: "block_node",
@@ -2754,6 +2963,16 @@ export class SprutHubClient {
         },
       };
     }
+  }
+
+  // The owner's code scenarios that name the accessory, as get_entity
+  // relations find them (code_mentions).
+  async accessoryCodeMentions(accessory) {
+    return this.#readCodeMentions(
+      this.serial,
+      accessory,
+      Date.now() + this.timeoutMs,
+    );
   }
 
   // The owner's code scenarios (built-in ones are assigned to services and
@@ -2932,8 +3151,11 @@ export class SprutHubClient {
     const entity = normalizeScenarioSummary(parsed.serial, scenario);
     entity.description =
       typeof scenario.desc === "string" ? scenario.desc : null;
-    // Runtime execution error is not editable configuration and must not be
-    // folded into configuration.value or treated as a failed save.
+    // SprutHub's error: the stored code did not compile, or a GLOBAL's code
+    // stopped with an error when the hub ran it at its write; an error while
+    // a BLOCK runs does not set it (2026-10-23-scenario-code 2.8-2.12, 3.7,
+    // 3.8). The code is saved all the same, so it is not folded into
+    // configuration.value.
     entity.execution_error = scenario.error === true;
     entity.summary = await this.#scenarioSummary(
       parsed.serial,
@@ -3352,9 +3574,10 @@ export class SprutHubClient {
     };
   }
 
-  // A bridge's export is read but not offered for writing, as window_option
-  // refuses it. When the extensions cannot be read the offer stays: the
-  // contract reads them again and refuses without them.
+  // A bridge's own settings and the groups of its child window are read
+  // but not offered for writing, as window_option refuses them. When the
+  // extensions cannot be read the offer stays: the contract reads them
+  // again and refuses without them.
   async #withholdBridgeExportWrites(parsed, normalized, deadline) {
     const writable = normalized.physical_configuration.options.filter(
       (option) => option.native_change?.supported === true,
@@ -3373,7 +3596,7 @@ export class SprutHubClient {
       return;
     }
     for (const option of writable) {
-      if (!bridgeExport?.keys.has(option.key)) continue;
+      if (!bridgeExport?.withheld.has(option.key)) continue;
       option.native_change = {
         native_write: option.native_change.native_write,
         supported: false,
@@ -3493,7 +3716,32 @@ export class SprutHubClient {
     }
   }
 
+  // A session the hub refuses is renewed by one login, and the request goes
+  // again once: the hub refused it before carrying it out. The requests the
+  // old session lost share that login; a failed login is the answer.
   async #send(params, deadline, serial, onReply) {
+    const token = this.token;
+    try {
+      return await this.#sendOnce(params, deadline, serial, onReply);
+    } catch (error) {
+      if (!this.#renewSession || error.code !== "authentication_failed") {
+        throw error;
+      }
+      if (this.token === token) {
+        const renewed = await this.#renewSession(token);
+        if (this.token === token) {
+          this.token = renewed.token;
+          this.cid = renewed.cid;
+          // The new session goes over a new connection, as after a login
+          // at start.
+          if (this.#socket) this.#retire(this.#socket);
+        }
+      }
+      return this.#sendOnce(params, deadline, serial, onReply);
+    }
+  }
+
+  async #sendOnce(params, deadline, serial, onReply) {
     const socket = await this.#connect(deadline);
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
@@ -3659,7 +3907,9 @@ export class SprutHubClient {
 
     if (message.error) {
       let error;
-      if (message.error.code === 401) {
+      // The owner's hub refused an expired session with -666003 "Incorrect
+      // token" (2026-10-23).
+      if (message.error.code === 401 || message.error.code === -666003) {
         error = new SprutHubError(
           "authentication_failed",
           "SprutHub rejected the configured credentials.",
@@ -4376,6 +4626,33 @@ export function characteristicNotifyOn(characteristic) {
   return typeof notify === "boolean" ? notify : null;
 }
 
+// A virtual device's own reading or press that the hub marks read-only but
+// writes all the same: a virtual sensor's value, a virtual button's
+// ProgrammableSwitchEvent (owner hub, 3.0.0, 2026-10-23-virtual-devices,
+// 7 and 10). A write needs accessory.get's virtual: true; accessory.list
+// has no virtual field and gives such an accessory model "Virtual", which
+// a list read (listed) takes as the sign. Not the hub's information
+// service or a Name.
+export function virtuallyWritable(
+  accessory,
+  { sId },
+  control,
+  { listed = false } = {},
+) {
+  const virtual = listed
+    ? (accessory?.virtual ?? accessory?.model === "Virtual")
+    : accessory?.virtual;
+  if (virtual !== true || control?.read !== true || control.write === true) {
+    return false;
+  }
+  const service = accessory.services?.find((entry) => entry.sId === sId);
+  return (
+    service !== undefined &&
+    service.type !== "AccessoryInformation" &&
+    control.type !== "Name"
+  );
+}
+
 export function homeRef(serial) {
   return `spruthub://hub/${encodeURIComponent(serial)}`;
 }
@@ -4849,24 +5126,26 @@ const BRIDGE_EXPORTED_SPACE = "main";
 
 // A bridge serves its export only while it runs; one that is NOT_LOADED or
 // off keeps the setting (2026-10-13-wave4-contracts 3.1, 3.3).
-function bridgeRunning({ state, enabled }) {
+export function bridgeRunning({ state, enabled }) {
   return state === "LOADED" && enabled === true;
 }
 
-const BRIDGE_NOT_RUNNING =
+export const BRIDGE_NOT_RUNNING =
   "The bridge is not running: its export is kept, but nothing from it reaches its assistant until it runs.";
 const BRIDGE_LISTS_NOTHING =
   "The bridge lists no accessories, so whether it exports or can export this one is unknown; the owner can check the bridge in the SprutHub app.";
 
 const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
+const BRIDGE_EXPORT_OPTION = /^s:\d+$/;
 const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
 
-// Writing a bridge's export was never checked on a hub
-// (2026-10-13-wave4-contracts, limitations): it is read, not written.
+// Only a service's checkbox in a bridge child's window was written on a
+// hub (2026-10-14-bridge-export-write); a bridge's own settings and the
+// child window's groups are read, not written.
 export function bridgeExportUnverified(next) {
   return new SprutHubError(
     BRIDGE_EXPORT_UNVERIFIED,
-    "This option sets what a bridge (HomeKit, Yandex Alice, Google) exports. Changing a bridge's export has not been verified on a SprutHub hub yet, so nothing was prepared or sent; the owner can change it in the SprutHub app.",
+    "This option is a bridge's own setting (HomeKit, Yandex Alice, Google), not a service's export. Changing it has not been verified on a SprutHub hub, so nothing was prepared or sent; the owner can change it in the SprutHub app. A service's export is changed by its option_key from get_entity include bridges.",
     "get_entity",
     { next },
   );
@@ -5039,7 +5318,9 @@ function normalizeCharacteristicDetail(
     },
     capabilities: {
       read: control.read === true,
-      write: control.write === true,
+      write:
+        control.write === true ||
+        virtuallyWritable(accessory, service, control),
       events: control.events === true,
       unit: control.unit ?? null,
       min: control.minValue ?? null,
@@ -6166,7 +6447,7 @@ function codeScenarioSummary(scenario) {
 // id written as a number, or by a string that is exactly its name.
 // Comments do not count; an id held in a variable is not found. Returns
 // found_by and the first lines, or null.
-function accessoryMentions(source, { id, name }) {
+export function accessoryMentions(source, { id, name }) {
   const tokens = [];
   let line = 1;
   for (const token of jsTokens(source)) {
@@ -6540,6 +6821,12 @@ function isSensitiveContainerKey(key) {
   return /^(?:auth|authentication|authorization|connection|credentials?)$/i.test(
     key,
   );
+}
+
+// Whether answers show this scenario code only as [REDACTED]
+// (normalizeScenarioConfiguration): the agent cannot read it.
+export function codeShownRedacted(source) {
+  return redactSensitiveText(source, "javascript_source") !== source;
 }
 
 function redactSensitiveText(text, role = "data") {

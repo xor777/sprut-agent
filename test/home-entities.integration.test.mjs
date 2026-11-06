@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -669,6 +671,10 @@ function respond(states, request, behavior) {
 }
 
 async function startClient(t, hub) {
+  const stateDirectory = await mkdtemp(
+    path.join(tmpdir(), "sprut-home-entities-"),
+  );
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["src/server.mjs"],
@@ -680,6 +686,7 @@ async function startClient(t, hub) {
       SPRUTHUB_SERIAL: "home/A",
       SPRUTHUB_CID: "home-entity-test",
       SPRUTHUB_TIMEOUT_MS: String(ORDINARY_HUB_TIMEOUT_MS),
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
     },
     stderr: "pipe",
   });
@@ -1603,15 +1610,17 @@ test("get_entity relations separate proven BLOCK roles from bounded native scope
     logic_assignments: "found",
     characteristic_links: "found",
   });
+  // A code action may act on this device; what it does is not read.
   assert.deepEqual(
-    relations.unchecked.filter(({ area }) => area === "block_node"),
+    relations.unchecked.filter(({ area }) =>
+      ["block_node", "block_code_action"].includes(area),
+    ),
     [
       {
-        area: "block_node",
-        outcome: "unrecognized",
+        area: "block_code_action",
+        outcome: "not_analyzed",
         scenario_ref: blockRef,
         pointer: "/configuration/value/targets/0",
-        native_type: "code",
       },
     ],
   );

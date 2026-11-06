@@ -64,6 +64,14 @@ export class HomeState {
   #rooms = null;
   #accessories = null;
   #byId = new Map();
+  // The virtual lamp groups and the lamps they link, as the last whole read
+  // found them (SprutHubClient #readLampGroups); null when that read could
+  // not read them.
+  // Links are read only with the whole home: a link this process writes
+  // has the whole home read again; one made in the app shows within
+  // MAX_AGE_MS at the latest (whether the hub announces link changes was
+  // not checked).
+  #lampGroups = null;
   #catalogObservedAt = null;
   #builtAt = 0;
   // The record of the connection whose events the state follows; the
@@ -140,6 +148,7 @@ export class HomeState {
       rooms: this.#rooms,
       accessories: this.#accessories,
       byId: this.#byId,
+      lampGroups: this.#lampGroups,
       observedAt: this.#catalogObservedAt,
       accessoryObservedAt: new Map(this.#observedAt),
     };
@@ -178,10 +187,11 @@ export class HomeState {
 
   // The whole home as read. feed is the connection both lists came over,
   // null when they came over two.
-  replaceWhole({ rooms, accessories, observedAt, feed }, token) {
+  replaceWhole({ rooms, accessories, observedAt, feed, lampGroups }, token) {
     if (token.generation !== this.#generation) return;
     this.#rooms = rooms;
     this.#accessories = accessories;
+    this.#lampGroups = lampGroups ?? null;
     this.#byId = new Map(accessories.map((item) => [item.id, item]));
     this.#catalogObservedAt = observedAt;
     this.#builtAt = token.at;

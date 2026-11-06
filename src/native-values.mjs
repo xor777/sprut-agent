@@ -33,12 +33,16 @@ import {
 } from "./native-option-contract.mjs";
 import { characteristicNotificationServices } from "./scenario-notifications.mjs";
 import {
+  BRIDGE_NOT_RUNNING,
   bridgeExportUnverified,
+  bridgeRunning,
   characteristicNotifyOffered,
   characteristicNotifyOn,
   HUB_TRANSPORT_ERROR_CODES,
   isSensitiveNativeNode,
   SprutHubError,
+  sanitizeNativeData,
+  serviceRef,
 } from "./spruthub-client.mjs";
 
 // Characteristics whose value is a setting rather than a momentary command:
@@ -150,10 +154,29 @@ export function logicActiveValue(logic) {
 // the previous value back only while the device still shows the sent one
 // and does not reverse past physical effects), contract and prepare
 // overrides, ownerConflict, and extra limitations.
+// A virtual button's press is its ProgrammableSwitchEvent written: each
+// write is a press that scenarios on the button react to, the same value
+// included (2026-10-23-virtual-devices, 9 and 10). A press is not undone:
+// writing the earlier value back would be another press.
+export const BUTTON_PRESS_TYPE = "ProgrammableSwitchEvent";
+export const BUTTON_PRESS_NOTE =
+  "A write to a virtual button is a press: scenarios on this button ran as on a press, each time it is sent. A press is not undone.";
+const BUTTON_PRESS_RESTORATION = {
+  supported: false,
+  limitation: {
+    code: "button_press_not_undone",
+    message:
+      "A button press is not undone: writing the earlier value back would press it again.",
+  },
+};
+
 export const NATIVE_VALUE_KINDS = {
   characteristic_value: {
     command: true,
-    restoration: scalarValueRestoration,
+    restoration: (contract, baseline) =>
+      contract?.type === BUTTON_PRESS_TYPE
+        ? BUTTON_PRESS_RESTORATION
+        : scalarValueRestoration(contract, baseline),
     knownSetting: (change) =>
       isKnownCharacteristicSetting(change.contract?.type),
     inspect: inspectCharacteristicValue,
@@ -224,12 +247,20 @@ export const NATIVE_VALUE_KINDS = {
         "window",
       );
     },
-    beforeWrite: (service, change) =>
-      refuseBridgeExportWrite(
+    // The guard reads the bridges anyway; a bridge started or stopped since
+    // prepare is told as it is now, and the record saved before the write
+    // keeps that.
+    async beforeWrite(service, change) {
+      const bridge = await refuseBridgeExportWrite(
         service,
         change.target.windowKey,
         change.option_key,
-      ),
+      );
+      if (change.bridge_export && bridge?.extension) {
+        const { limitation: _, ...rest } = change.bridge_export;
+        change.bridge_export = bridgeExportState(rest, bridge.extension);
+      }
+    },
     write(service, change, value) {
       assertWindowOptionWritable(change.target.windowKey);
       return service.client.updateWindowOption({
@@ -240,6 +271,8 @@ export const NATIVE_VALUE_KINDS = {
     },
     ownerConflict: scenarioWindowOwnerConflict,
     limitations: windowOptionLimitations,
+    notes: ({ fields }) =>
+      fields.bridge_export ? { bridge_export: fields.bridge_export } : {},
   },
   logic_active: {
     restoration: scalarValueRestoration,
@@ -447,10 +480,15 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "accessory_placement",
   "room_create",
   "virtual_light_group",
+  "virtual_device",
+  "virtual_device_delete",
+  // The lamps of an existing group (light-group-members.mjs).
+  "light_group_members",
   "block_create",
   "block_data_update",
   "block_action_pause",
   "scenario_run",
+  "scenario_delete",
   "logic_source_create",
   "logic_source_update",
 ]);
@@ -663,7 +701,11 @@ export function characteristicValueState(
   control,
   { requireWrite = false } = {},
 ) {
-  const contract = characteristicContract(control, { requireWrite });
+  // A virtual device's reading or press: written though marked read-only.
+  const contract = characteristicContract(
+    change.virtual_write === true ? { ...control, write: true } : control,
+    { requireWrite },
+  );
   if (
     contract.type !== change.contract.type ||
     contract.kind !== change.contract.kind
@@ -726,30 +768,139 @@ export async function inspectWindowOption(service, input) {
       }),
     };
   }
+  assertWindowOptionWritable(owner.windowKey);
+  const bridge =
+    typeof input.option_key === "string" && input.option_key.length > 0
+      ? await refuseBridgeExportWrite(
+          service,
+          owner.windowKey,
+          input.option_key,
+        )
+      : null;
+  if (bridge?.extension) {
+    const { option, bridgeExport, targetName } = await readBridgeExportOption(
+      service,
+      bridge,
+      owner.windowKey,
+      input.option_key,
+    );
+    return {
+      fields: {
+        option_key: input.option_key,
+        target: owner,
+        bridge_export: bridgeExport,
+        target_name: targetName,
+      },
+      ...windowOptionState(option),
+    };
+  }
   const option = await readWindowOption(
     service.client,
     owner,
     input.option_key,
   );
   await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
-  await refuseBridgeExportWrite(service, owner.windowKey, option.key);
   return {
     fields: { option_key: input.option_key, target: owner },
     ...windowOptionState(option),
   };
 }
 
-// A bridge's export is read, not written (bridgeExportUnverified): the
-// contract and prepare refuse it, and so do apply and restore of a change an
-// earlier version journaled before they did.
+// A bridge's own settings and its child window's groups are read, not
+// written (bridgeExportUnverified): the contract and prepare refuse them,
+// and so do apply and restore of a change an earlier version journaled.
+// Returns the window's bridge, if any.
 export async function refuseBridgeExportWrite(service, windowKey, optionKey) {
-  const bridgeExport = await service.client.bridgeExportOptions(
+  const bridge = await service.client.bridgeExportOptions(
     service.client.selectedSerial(),
     windowKey,
     [optionKey],
     Date.now() + service.client.timeoutMs,
   );
-  if (bridgeExport) throw bridgeExportUnverified(bridgeExport.next);
+  if (bridge?.withheld.has(optionKey))
+    throw bridgeExportUnverified(bridge.next);
+  return bridge;
+}
+
+// A service's checkbox s:<sId> in a bridge child's window, with what the
+// agent tells the owner: which device, service and bridge, and whether the
+// bridge runs. A bridge that does not list the accessory has no such
+// window, and one that does not export a service has no checkbox for it
+// (2026-10-14-bridge-export-write 11-13): both are refused before
+// anything is sent.
+async function readBridgeExportOption(service, bridge, windowKey, optionKey) {
+  const { extension, aId, next } = bridge;
+  const serial = service.client.selectedSerial();
+  const accessory = await service.client.getAccessory(aId);
+  const device = sanitizeNativeData(accessory.name);
+  const bridgeName = sanitizeNativeData(extension.name);
+  let window;
+  try {
+    window = await service.client.getWindow(windowKey);
+  } catch (error) {
+    if (
+      !(error instanceof SprutHubError) ||
+      error.protocolErrorCode !== -32603
+    ) {
+      throw error;
+    }
+    const { children } = await service.client.nativeExtensionChildren(
+      serial,
+      extension.key,
+      Date.now() + service.client.timeoutMs,
+    );
+    if (children.some(({ id }) => id === String(aId))) throw error;
+    throw new SprutHubError(
+      "bridge_export_unavailable",
+      `${bridgeName} does not list ${device}, so it cannot export it. Nothing was sent.`,
+      "get_entity",
+      { next },
+    );
+  }
+  const sId = Number(optionKey.slice(2));
+  const target = accessory.services?.find((entry) => entry.sId === sId);
+  const options = window.options.filter(({ key }) => key === optionKey);
+  if (!target || options.length === 0) {
+    const named = target ? sanitizeNativeData(target.name) : optionKey;
+    throw new SprutHubError(
+      "bridge_service_not_exportable",
+      `${bridgeName} has no checkbox for ${named} of ${device}: this bridge does not export that service. Nothing was sent.`,
+      "get_entity",
+      { next },
+    );
+  }
+  if (options.length > 1) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned the selected window option more than once.",
+      "get_entity",
+    );
+  }
+  const serviceName = sanitizeNativeData(target.name);
+  return {
+    option: options[0],
+    targetName: `${device} / ${serviceName}`,
+    bridgeExport: bridgeExportState(
+      {
+        device,
+        service: serviceName,
+        service_ref: serviceRef(serial, aId, sId),
+        bridge: bridgeName,
+        bridge_ref: extension.ref,
+      },
+      extension,
+    ),
+  };
+}
+
+// Whether the bridge runs now, and what that means for the assistant.
+function bridgeExportState(fields, extension) {
+  const running = bridgeRunning(extension);
+  return {
+    ...fields,
+    running,
+    ...(running ? {} : { limitation: BRIDGE_NOT_RUNNING }),
+  };
 }
 
 export async function prepareWindowOption(service, input) {
@@ -1022,6 +1173,11 @@ export async function scenarioWindowOwnerConflict(service, change) {
 }
 
 export function windowOptionLimitations(change) {
+  if (change.bridge_export) {
+    return [
+      "Window readback confirms the export SprutHub stored; what the assistant's app shows is not observed from the hub.",
+    ];
+  }
   if (change.owner_kind !== "scenario") {
     return [
       "Window readback confirms the setting stored by SprutHub; delivery to the device and behavior after a physical power cycle remain unverified.",
@@ -1226,6 +1382,14 @@ export async function readRoomName(client, target) {
 // A name the hub would not keep whole is refused before any write instead
 // of being cut or stripped.
 export function roomNameWithinLimit(name) {
+  return nameWithinLimit(name, "a room name", ROOM_NAME_MAX_LENGTH);
+}
+
+// what: "a room name", "a device name"; both are kept to their first 32
+// characters (2026-09-24-live-conformance-3, 2026-10-23-virtual-devices).
+// Only a room name was seen losing an emoji; a device name is held to the
+// same rule, as its creation is found again by its exact name.
+export function nameWithinLimit(name, what, maxLength) {
   const characters = [...name];
   const unsupported = [
     ...new Set(
@@ -1239,17 +1403,17 @@ export function roomNameWithinLimit(name) {
   if (unsupported.length > 0) {
     throw new SprutHubError(
       "name_characters_unsupported",
-      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
+      `This name has ${unsupported.map(characterLabel).join(", ")}. SprutHub dropped an emoji from a room name; in ${what} emoji, pictographs, variation selectors and other characters outside the Basic Multilingual Plane are refused as a precaution. Nothing was written; ask the owner for a name without ${unsupported.length === 1 ? "it" : "them"}.`,
       "prepare_native_change",
       { unsupported_characters: unsupported },
     );
   }
-  if (characters.length <= ROOM_NAME_MAX_LENGTH) return name;
+  if (characters.length <= maxLength) return name;
   throw new SprutHubError(
     "name_too_long",
-    `This name has ${characters.length} characters, and SprutHub keeps only the first ${ROOM_NAME_MAX_LENGTH} characters of a room name. Nothing was written; ask the owner for a name of at most ${ROOM_NAME_MAX_LENGTH} characters.`,
+    `This name has ${characters.length} characters, and SprutHub keeps only the first ${maxLength} characters of ${what}. Nothing was written; ask the owner for a name of at most ${maxLength} characters.`,
     "prepare_native_change",
-    { max_length: ROOM_NAME_MAX_LENGTH, name_length: characters.length },
+    { max_length: maxLength, name_length: characters.length },
   );
 }
 

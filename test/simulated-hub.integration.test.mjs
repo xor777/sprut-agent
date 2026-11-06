@@ -407,6 +407,37 @@ test("a BLOCK created through prepare and apply is stored natively and restored 
   assertEveryRequestSupported(hub);
 });
 
+// «Переименуй кабинет в офис»: the request asks for the change, so the
+// prepared change names its apply as the next call, and following it is
+// what renames the room. An agent that stopped at prepare asked the owner
+// to confirm what he had already asked for.
+test("a prepared change names its apply as the next call, and following it writes the change", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "room_name",
+    target_ref: `${homeRef}/room/7`,
+    value: "Офис",
+    reason: "Переименовать кабинет в офис",
+  });
+
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(
+    [prepared.next?.tool, prepared.next?.arguments],
+    ["apply_native_change", { change_ref: prepared.change_ref }],
+  );
+  assert.deepEqual(hub.writes(), []);
+
+  const applied = await call(
+    client,
+    prepared.next.tool,
+    prepared.next.arguments,
+  );
+  assert.equal(applied.status, "applied");
+  assert.deepEqual(diffHomeSnapshots(hub.initialSnapshot(), hub.snapshot()), [
+    { key: "room/7/name", before: "Кабинет", after: "Офис" },
+  ]);
+});
+
 // «Когда в коридоре движение, включай там свет»: scenario 3 already turns
 // the corridor light on by motion and off two minutes later. A second
 // scenario would duplicate it, so the plan names it before any write.
@@ -471,6 +502,8 @@ test("a rule the home already has is named before a second scenario is written",
     },
   ]);
   assert.equal(typeof prepared.tell_owner, "string");
+  // The owner hears of scenario 3 first: apply is not offered as next.
+  assert.equal(prepared.next, undefined);
   assert.deepEqual(hub.writes(), []);
   assertEveryRequestSupported(hub);
 });
@@ -504,7 +537,10 @@ test("the simulator refuses unknown methods and foreign tokens without touching 
     serial: hub.serial,
     params: { characteristic: { update: { aId: 16, sId: 13, cId: 14 } } },
   });
-  assert.equal(foreign.error.code, 401);
+  assert.deepEqual(foreign.error, {
+    code: -666003,
+    message: "Incorrect token",
+  });
   // An unknown method may change the home on a live hub, so it counts as a
   // write until it is placed on the read allowlist.
   assert.deepEqual(
@@ -1491,6 +1527,144 @@ test("the simulator lists accessories without virtual, reads it on each accessor
   assert.equal(await roomName(7), "Кабинет с видом на старый яблоне");
 });
 
+// Owner's hub, 3.0.0, 2026-10-23-virtual-devices: what accessory.create
+// made of several services and what it refused, the room an unknown roomId
+// got, a virtual sensor's reading written, and what accessory.delete left
+// of the links on both sides.
+test("the simulator creates, writes and deletes virtual accessories as the owner's hub did", async (t) => {
+  const { send } = await rawSession(t);
+  const create = async (input) =>
+    (await send({ accessory: { create: { roomId: 3, ...input } } })).result
+      ?.accessory?.create;
+  const error = async (input) =>
+    (await send({ accessory: { create: { roomId: 3, ...input } } })).error;
+  const made = await create({
+    name: "Виртуальное устройство с очень длинным именем",
+    services: [
+      { type: "Switch", name: "Выкл A", optional: [] },
+      {
+        type: "ContactSensor",
+        name: "Контакт B",
+        optional: ["StatusLowBattery", "Brightness", "NoSuchChar"],
+      },
+    ],
+  });
+  assert.equal(made.name, "Виртуальное устройство с очень д");
+  assert.deepEqual(
+    made.services
+      .filter(({ type }) => type !== "AccessoryInformation")
+      .map(({ sId, type, characteristics }) => [
+        sId,
+        type,
+        characteristics.map(({ cId, control }) => [
+          cId,
+          control.type,
+          control.write,
+        ]),
+      ]),
+    [
+      [
+        13,
+        "Switch",
+        [
+          [14, "Name", false],
+          [15, "On", true],
+        ],
+      ],
+      [
+        16,
+        "ContactSensor",
+        [
+          [17, "Name", false],
+          [18, "ContactSensorState", false],
+          [19, "StatusLowBattery", false],
+        ],
+      ],
+    ],
+  );
+  const nowhere = await create({
+    name: "Без комнаты",
+    roomId: 999,
+    services: [{ type: "Switch", name: "x" }],
+  });
+  assert.equal(nowhere.roomId, 6);
+  for (const [input, message] of [
+    [
+      { name: " ", services: [{ type: "Switch", name: "x" }] },
+      "Param is empty: 'name'",
+    ],
+    [
+      { name: "x", services: [{ type: "Switch", name: "" }] },
+      "Param is empty: 'name'",
+    ],
+    [{ name: "x", services: [] }, "Param not found: 'services'"],
+    [
+      { name: "x", services: [{ type: "NoSuchType", name: "x" }] },
+      "Failed to parse:  'No enum constant com.spruthub.sdk.HS.NoSuchType'",
+    ],
+    [
+      { name: "x", services: [{ type: "AccessoryInformation", name: "x" }] },
+      "Invalid param: 'AccessoryInformation'",
+    ],
+  ]) {
+    assert.deepEqual(await error(input), { code: -32602, message });
+  }
+
+  // The contact reading is read-only, yet written on a virtual accessory.
+  const contact = { aId: made.id, sId: 16, cId: 18 };
+  assert.ok(
+    (
+      await send({
+        characteristic: {
+          update: { ...contact, control: { value: { intValue: 1 } } },
+        },
+      })
+    ).result,
+  );
+  const read = (await send({ characteristic: { get: contact } })).result
+    .characteristic.get;
+  assert.deepEqual(read.control.value, { intValue: 1 });
+
+  // Switch A of `made` follows nowhere's On: its IN link goes when nowhere
+  // is deleted; an OUT entry stays empty when the IN side is deleted.
+  const on = { aId: made.id, sId: 13, cId: 15 };
+  const target = { tAId: nowhere.id, tSId: 13, tCId: 15 };
+  await send({ link: { addVirtual: { ...on, ...target } } });
+  await send({ characteristic: { update: { ...on, hasLinks: true } } });
+  await send({ accessory: { delete: { id: nowhere.id } } });
+  // An empty list is an empty object, as the hub answered.
+  assert.deepEqual((await send({ link: { list: on } })).result.link.list, {});
+  assert.equal(
+    (await send({ characteristic: { get: on } })).result.characteristic.get
+      .hasLinks,
+    false,
+  );
+  const other = await create({
+    name: "Цель",
+    services: [{ type: "Switch", name: "Цель" }],
+  });
+  const otherOn = { aId: other.id, sId: 13, cId: 15 };
+  await send({
+    link: { addVirtual: { ...on, tAId: other.id, tSId: 13, tCId: 15 } },
+  });
+  await send({ accessory: { delete: { id: made.id } } });
+  assert.deepEqual(
+    (await send({ link: { list: otherOn } })).result.link.list.links,
+    [
+      {
+        index: `Virtual/${other.id}.15`,
+        type: "OUT",
+        controller: "virtual",
+        characteristics: [],
+      },
+    ],
+  );
+  assert.equal(
+    (await send({ scenario: { list: { aId: made.id } } })).error.code,
+    -32603,
+  );
+});
+
 // The BLOCK forms written from the web client's code (action map D6, D10,
 // D13, D15, D16, D17) were seen stored by a hub in live-conformance-4. A run
 // whose write carries one names that evidence for the form.
@@ -2052,4 +2226,30 @@ test("the simulator announces renames, moves and deletions with the frames the o
     { accessory: { event: "EVENT_REMOVE", accessories: [{ id }] } },
     { room: { event: "EVENT_REMOVE", rooms: [{ id: 30 }] } },
   ]);
+});
+
+// An evaluation saves the hub state after the run; a GLOBAL that put a
+// function in global must not break that.
+test("the state of a hub whose GLOBAL assigned a function exports, and its error flag follows the code", async () => {
+  const hub = await startSimulatedHub(await loadHomeFixture("color-scenes"));
+  try {
+    const write = (data) =>
+      hub.request({ scenario: { update: { index: "80", data } } });
+    const stored = () =>
+      hub.state.scenarios.find(({ index }) => index === "80");
+    assert.equal(
+      write("global.answer = function () { return 42; };").error,
+      undefined,
+    );
+    assert.equal(stored().error, false);
+    assert.doesNotThrow(() => hub.exportState());
+    write("global.answer = function ( {");
+    assert.equal(stored().error, true);
+    write('throw new Error("boom");');
+    assert.equal(stored().error, true);
+    write("global.answer = 43;");
+    assert.equal(stored().error, false);
+  } finally {
+    await hub.close();
+  }
 });

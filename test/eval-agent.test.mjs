@@ -30,6 +30,15 @@ import {
 import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import { LABELS } from "../research/eval-judge-labels.mjs";
 import {
+  COLOR_SCENES,
+  COLOR_SCENES_SOURCE,
+  SCENE_LAMPS_LINE,
+} from "./fixtures/homes/color-scenes.mjs";
+import {
+  GROUP_CHARACTERISTICS,
+  LAMP_CHARACTERISTICS,
+} from "./fixtures/homes/kitchen-chandelier.mjs";
+import {
   evaluateRulesOnChange,
   loadHomeFixture,
   startSimulatedHub,
@@ -908,6 +917,41 @@ const setOn = (aId, sId, value) => ({
   },
 });
 
+test("create-virtual-switch needs one virtual switch of that name in the living room", async (t) => {
+  const create = (session, roomId, type = "Switch") =>
+    session.send({
+      accessory: {
+        create: {
+          name: "Режим гостей",
+          roomId,
+          services: [{ type, name: "Режим гостей", optional: [] }],
+        },
+      },
+    });
+  const right = await nativeSession(t);
+  await create(right, 3);
+  assert.deepEqual(right.grade("create-virtual-switch", "Готово"), {
+    one_virtual_switch_in_living_room: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+  const kitchen = await nativeSession(t);
+  await create(kitchen, 4);
+  assert.equal(
+    kitchen.grade("create-virtual-switch", "Готово")
+      .one_virtual_switch_in_living_room,
+    false,
+  );
+  const twice = await nativeSession(t);
+  await create(twice, 3);
+  await create(twice, 3, "Outlet");
+  assert.equal(
+    twice.grade("create-virtual-switch", "Готово")
+      .one_virtual_switch_in_living_room,
+    false,
+  );
+});
+
 test("disable-scenario needs the flag of the named scenario and nothing else", async (t) => {
   assert.match(CASES["disable-scenario"].prompt, /«Ночной режим»/);
 
@@ -1007,6 +1051,151 @@ test("homekit-floor-lamp needs HomeKit's export of the floor lamp read", async (
   assert.equal(
     window.grade("homekit-floor-lamp", answer).read_bridge_export,
     true,
+  );
+});
+
+// «Перевяжи люстру»: the new kitchen lamp in every link of the group, the
+// old offline one out, nothing else changed; the bedroom lamp of the same
+// name or a lamp linked on part of the characteristics fails.
+test("relink-chandelier needs the new kitchen lamp on every link of the group and the old one out", async (t) => {
+  const answer = "Перевязал люстру: новая лампа в группе, старую убрал.";
+  const linkedTypes = Object.keys(GROUP_CHARACTERISTICS);
+  const relink = async (session, { add, remove, types = linkedTypes }) => {
+    for (const type of types) {
+      const source = { aId: 44, sId: 13, cId: GROUP_CHARACTERISTICS[type] };
+      if (add) {
+        await session.send({
+          link: {
+            addVirtual: {
+              ...source,
+              tAId: add,
+              tSId: 13,
+              tCId: LAMP_CHARACTERISTICS[type],
+            },
+          },
+        });
+      }
+      if (remove) {
+        await session.send({
+          link: {
+            remove: {
+              ...source,
+              linkId: `Virtual/${remove}.${LAMP_CHARACTERISTICS[type]}`,
+            },
+          },
+        });
+      }
+    }
+  };
+
+  const done = await nativeSession(t, "kitchen-chandelier");
+  await relink(done, { add: 45, remove: 43 });
+  assert.deepEqual(done.grade("relink-chandelier", answer), {
+    chandelier_relinked: true,
+    new_lamp_follows_chandelier: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const decoy = await nativeSession(t, "kitchen-chandelier");
+  await relink(decoy, { add: 46, remove: 43 });
+  assert.deepEqual(decoy.grade("relink-chandelier", answer), {
+    chandelier_relinked: false,
+    new_lamp_follows_chandelier: false,
+    nothing_else_changed: false,
+    answer_has_no_raw_refs: true,
+  });
+
+  const kept = await nativeSession(t, "kitchen-chandelier");
+  await relink(kept, { add: 45 });
+  assert.equal(
+    kept.grade("relink-chandelier", answer).chandelier_relinked,
+    false,
+  );
+
+  const onOff = await nativeSession(t, "kitchen-chandelier");
+  await relink(onOff, { add: 45, remove: 43, types: ["On", "Brightness"] });
+  await relink(onOff, {
+    remove: 43,
+    types: ["Hue", "Saturation", "ColorTemperature"],
+  });
+  assert.deepEqual(onOff.grade("relink-chandelier", answer), {
+    chandelier_relinked: false,
+    new_lamp_follows_chandelier: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // A new group beside the old one is not the same accessory for Alice.
+  const created = await nativeSession(t, "kitchen-chandelier");
+  await created.send({
+    accessory: {
+      create: {
+        name: "Люстра",
+        roomId: 4,
+        services: [{ type: "Lightbulb", name: "Люстра", optional: [] }],
+      },
+    },
+  });
+  assert.equal(
+    created.grade("relink-chandelier", answer).nothing_else_changed,
+    false,
+  );
+});
+
+test("add-night-light-to-color-scenes needs the night light in the scene lamp list and no other line or object changed", async (t) => {
+  const answer = "Добавил ночник в цветные сцены.";
+  const write = (session, data) =>
+    session.send({ scenario: { update: { index: COLOR_SCENES, data } } });
+  const withList = (list) =>
+    COLOR_SCENES_SOURCE.replace(
+      SCENE_LAMPS_LINE,
+      `global.COLOR_SCENE_LIGHTS = [${list}];`,
+    );
+
+  const done = await nativeSession(t, "color-scenes");
+  await write(done, withList("15, 16, 17, 63, 26"));
+  assert.deepEqual(done.grade("add-night-light-to-color-scenes", answer), {
+    only_the_lamp_list_gains_the_night_light: true,
+    nothing_else_changed: true,
+    answer_names_the_night_light: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  // The stale 63 is not the request's.
+  const pruned = await nativeSession(t, "color-scenes");
+  await write(pruned, withList("15, 16, 17, 26"));
+  assert.equal(
+    pruned.grade("add-night-light-to-color-scenes", answer)
+      .only_the_lamp_list_gains_the_night_light,
+    false,
+  );
+
+  const reformatted = await nativeSession(t, "color-scenes");
+  await write(
+    reformatted,
+    withList("15, 16, 17, 63, 26").replace(
+      "  if (!palette) {",
+      "  if (!palette)  {",
+    ),
+  );
+  assert.equal(
+    reformatted.grade("add-night-light-to-color-scenes", answer)
+      .only_the_lamp_list_gains_the_night_light,
+    false,
+  );
+
+  const another = await nativeSession(t, "color-scenes");
+  await write(another, withList("15, 16, 17, 63, 26"));
+  await another.send({
+    scenario: {
+      update: { index: "81", data: JSON.stringify({ targets: [] }) },
+    },
+  });
+  assert.equal(
+    another.grade("add-night-light-to-color-scenes", answer)
+      .nothing_else_changed,
+    false,
   );
 });
 
@@ -3179,4 +3368,40 @@ test("transcript parsers count tool calls, result bytes, tokens and harness erro
     );
   assert.equal(lateConnect(false).harnessError, null);
   assert.match(lateConnect(true).harnessError, /not connected/);
+});
+
+test("add-floor-lamp-to-alice needs the floor lamp ticked in Alice's bridge and nothing else", async (t) => {
+  const tick = (bridgeKey, aId, sId, value) => ({
+    window: {
+      update: {
+        windowKey: `Bridge/${bridgeKey}/Child/${aId}/`,
+        options: [{ key: `s:${sId}`, value: { boolValue: value } }],
+      },
+    },
+  });
+  const right = await caseSession(t, "add-floor-lamp-to-alice");
+  // Alice's bridge runs in this case, as the owner's does.
+  const { extensions } = (await right.send({ extension: { list: {} } }))
+    .extension.list;
+  const alice = extensions.find(
+    ({ extensionKey }) => extensionKey === "Bridge:yandex",
+  );
+  assert.deepEqual([alice.state, alice.enabled], ["LOADED", true]);
+  await right.send(tick("yandex", 16, 13, true));
+  assert.deepEqual(right.grade("Торшер добавлен в Алису."), {
+    floor_lamp_in_alice: true,
+    nothing_else_changed: true,
+    answer_has_no_raw_refs: true,
+  });
+
+  const wrongBridge = await caseSession(t, "add-floor-lamp-to-alice");
+  await wrongBridge.send(tick("homekit", 16, 13, true));
+  const graded = wrongBridge.grade("Торшер добавлен.");
+  assert.equal(graded.floor_lamp_in_alice, false);
+  assert.equal(graded.nothing_else_changed, false);
+
+  const more = await caseSession(t, "add-floor-lamp-to-alice");
+  await more.send(tick("yandex", 16, 13, true));
+  await more.send(tick("yandex", 22, 13, false));
+  assert.equal(more.grade("Готово.").nothing_else_changed, false);
 });

@@ -2,6 +2,10 @@ import { blockAffectedRefs } from "./block-model.mjs";
 import { publicPauseEffect } from "./change-presentation.mjs";
 import { groupRef, stableNativeId } from "./change-refs.mjs";
 import { changeName, summaryValue } from "./change-restore.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import { createdLogicMapping } from "./logic-changes.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { isLogicSourceChange } from "./scenario-changes.mjs";
@@ -39,9 +43,10 @@ export function changeSummary(change) {
   const value = summaryValue(change);
   return {
     change_ref: reference,
-    operation: change.kind,
+    operation: changeOperation(change),
     ...described,
     target_ref: change.target_ref,
+    ...(change.bridge_export ? { bridge: change.bridge_export.bridge } : {}),
     ...(value ? { value } : {}),
     recorded_status: change.status,
     ...(change.kind === "block_action_pause"
@@ -157,6 +162,11 @@ export function nativeAffectedRefs(change, homeRef) {
   if (isNativeValueChange(change)) {
     if (typeof change.window_ref === "string") refs.push(change.window_ref);
     refs.push(...canonicalAncestors(refs[0]));
+    // A bridge export is the service's and its accessory's.
+    if (change.bridge_export) {
+      const { service_ref: ref } = change.bridge_export;
+      refs.push(ref, ref.replace(/\/service\/\d+$/, ""));
+    }
   }
   if (change.kind === "accessory_placement") {
     refs.push(
@@ -181,6 +191,26 @@ export function nativeAffectedRefs(change, homeRef) {
     }
     for (const ref of change.member_service_refs) {
       refs.push(...canonicalAncestors(ref));
+    }
+  } else if (
+    change.kind === "virtual_device" ||
+    change.kind === "virtual_device_delete"
+  ) {
+    // The device created, deleted or made again, and its room.
+    refs.push(`${homeRef}/room/${change.room_id}`);
+    for (const id of [
+      change.created_id,
+      change.baseline_snapshot?.id,
+      change.recreated_id,
+    ]) {
+      if (id !== undefined) refs.push(`${homeRef}/accessory/${id}`);
+    }
+  } else if (change.kind === LIGHT_GROUP_MEMBERS) {
+    // The group and the lamps that join or leave it.
+    refs.push(...canonicalAncestors(change.target_ref));
+    for (const member of change.members) {
+      if (member.change === "stays") continue;
+      refs.push(member.service_ref, ...canonicalAncestors(member.service_ref));
     }
   }
   if (change.kind === "logic_assignment") {

@@ -1,6 +1,10 @@
 import { valuesEqual } from "./change-contracts.mjs";
 import { nativeChangeNext } from "./change-refs.mjs";
 import { resendDeviceCommandNext } from "./device-commands.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
@@ -15,11 +19,12 @@ export function restoreItemBase(change) {
   const value = isNativeValueChange(change) ? summaryValue(change) : undefined;
   return {
     change_ref: `spruthub-change://native/${change.id}`,
-    operation: change.kind,
+    operation: changeOperation(change),
     ...(name ? { name } : {}),
     ...(typeof change.target_ref === "string"
       ? { target_ref: change.target_ref }
       : {}),
+    ...(change.bridge_export ? { bridge: change.bridge_export.bridge } : {}),
     ...(change.kind === "characteristic_value" && change.contract?.type
       ? { type: change.contract.type }
       : {}),
@@ -72,7 +77,13 @@ export function restoreItem(change, result, before) {
         };
       }
       if (intentAt !== undefined) {
-        return { ...base, status: "restored", sent, ...observed };
+        return {
+          ...base,
+          status: "restored",
+          sent,
+          ...observed,
+          ...recreatedScenario(result),
+        };
       }
       if (
         isNativeValueChange(change) &&
@@ -271,12 +282,17 @@ export function changeName(change) {
       return change.baseline_value?.value;
     case "virtual_light_group":
       return change.created_accessory_snapshot?.name ?? change.requested_name;
+    case "virtual_device":
+      return change.created_snapshot?.name ?? change.requested_name;
+    case LIGHT_GROUP_MEMBERS:
+      return change.group?.name;
     case "block_create":
     case "logic_source_create":
       return change.requested_snapshot?.name;
     case "block_data_update":
     case "block_action_pause":
     case "scenario_run":
+    case "scenario_delete":
     case "logic_source_update":
       return change.baseline_snapshot?.name;
     default:
@@ -284,9 +300,9 @@ export function changeName(change) {
   }
 }
 
-// Settings whose values are short and safe to show in a history line;
-// options (which may hold codes) and long texts are read with
-// get_native_change.
+// Settings whose values are short and safe to show in a history line, and
+// a bridge export (true or false); options (which may hold codes) and long
+// texts are read with get_native_change.
 export const SUMMARY_VALUE_KINDS = new Set([
   "characteristic_value",
   "characteristic_notify",
@@ -299,7 +315,7 @@ export const SUMMARY_VALUE_KINDS = new Set([
 
 export function summaryValue(change) {
   if (
-    !SUMMARY_VALUE_KINDS.has(change.kind) ||
+    !(SUMMARY_VALUE_KINDS.has(change.kind) || change.bridge_export) ||
     !change.baseline_value ||
     !change.requested_value
   ) {
@@ -308,5 +324,14 @@ export function summaryValue(change) {
   return {
     from: change.baseline_value.value,
     to: change.requested_value.value,
+  };
+}
+
+// A deleted scenario comes back under a new number: the item names it and
+// what did not come back with it.
+function recreatedScenario(result) {
+  return {
+    ...(result.recreated ? { recreated: result.recreated } : {}),
+    ...(result.not_restored ? { not_restored: result.not_restored } : {}),
   };
 }

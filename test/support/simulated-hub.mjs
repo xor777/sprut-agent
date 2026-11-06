@@ -28,6 +28,9 @@ const fixturesDirectory = path.join(
 // does not implement, is recorded as a write: an unknown native method may
 // change a live home, so a grader must not take it for a read.
 export const READ_METHODS = new Set([
+  // The login (startSimulatedHub's account) changes nothing in the home.
+  "account.auth",
+  "account.answer",
   "hub.list",
   "server.ping",
   "room.list",
@@ -70,6 +73,8 @@ export function isWriteMethod(method) {
 const OBSERVED = "observed";
 const SCHEMA_ONLY = "schema_only";
 export const METHOD_EVIDENCE = {
+  "account.auth": [OBSERVED, "2026-07-27; the owner's login"],
+  "account.answer": [OBSERVED, "2026-07-27; the owner's login"],
   "hub.list": [OBSERVED, "2026-09-09-home-entities"],
   "server.ping": [SCHEMA_ONLY],
   "room.list": [OBSERVED, "2026-09-09-room-reading"],
@@ -94,9 +99,15 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2); virtual=false, present, on a physical accessory (2026-09-24-live-conformance-3-read-only)",
   ],
-  "accessory.create": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "accessory.create": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; several services, Name per service, 32-character names, room 6 for an unknown room, the error texts: 2026-10-23-virtual-devices",
+  ],
   "accessory.update": [OBSERVED, "2026-09-11-device-placement"],
-  "accessory.delete": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "accessory.delete": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; links to and from the deleted accessory: 2026-10-23-virtual-devices",
+  ],
   "service.types": [OBSERVED, "2026-09-09-type-catalog"],
   "service.update": [
     SCHEMA_ONLY,
@@ -105,14 +116,23 @@ export const METHOD_EVIDENCE = {
   "characteristic.get": [OBSERVED, "2026-09-09-automations"],
   "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
   "characteristic.setOptions": [SCHEMA_ONLY],
-  "characteristic.update": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "characteristic.update": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; a read-only reading or press of a virtual accessory written: 2026-10-23-virtual-devices",
+  ],
   "characteristic.update {notify}": [
     OBSERVED,
     "2026-10-12-notifications-live: true and false on a virtual lamp's On, read back in accessory.get only",
   ],
   "link.list": [OBSERVED, "2026-09-11-virtual-light-group"],
-  "link.addVirtual": [OBSERVED, "2026-09-11-virtual-light-group"],
-  "link.remove": [OBSERVED, "2026-09-11-virtual-light-group"],
+  "link.addVirtual": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; repeat, re-add after an empty OUT and the value a join copies: 2026-10-14-light-group-relink",
+  ],
+  "link.remove": [
+    OBSERVED,
+    "2026-09-11-virtual-light-group; the empty OUT left and a repeated remove: 2026-10-14-light-group-relink",
+  ],
   "logic.types": [OBSERVED, "2026-09-10-native-logic"],
   "logic.list": [
     OBSERVED,
@@ -140,11 +160,11 @@ export const METHOD_EVIDENCE = {
   ],
   "scenario.create": [
     OBSERVED,
-    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9)",
+    "2026-09-13-native-daily-interval; blockId on every node and numeric inc/dec values (owner hub, 2026-09-24); a LOGIC takes name, desc and onStart from info in its code, sync as sent; a GLOBAL accepted (2026-10-13-wave4-contracts 1.6, 1.9) and its code run at once, on or off; error after code that does not compile or run (2026-10-23-scenario-code 2.10, 3.2, 3.7, 3.8); active and sync applied as sent, a scenario target to a missing number stored (2026-10-23-scenario-delete)",
   ],
   "scenario.update": [
     OBSERVED,
-    "{index, data}: 2026-09-13-native-daily-interval; a LOGIC takes name, desc and onStart from info in its code on every code write, sync untouched; a GLOBAL's and a BLOCK's flags and name kept (2026-10-13-wave4-contracts 1.5, 1.8, 1.10)",
+    "{index, data}: 2026-09-13-native-daily-interval; a LOGIC takes name, desc and onStart from info in its code on every code write, sync untouched; a GLOBAL's and a BLOCK's flags and name kept (2026-10-13-wave4-contracts 1.5, 1.8, 1.10); a GLOBAL's code run at once, error as at create (2026-10-23-scenario-code 2.9, 2.11, 3.3, 3.7–3.9)",
   ],
   // The product no longer sends it; a run that does shows up here.
   "scenario.update {active}": [
@@ -156,10 +176,13 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "acknowledged and ignored for a BLOCK, a LOGIC and a GLOBAL; only data applies (2026-10-13-wave4-contracts 1.3)",
   ],
-  "scenario.delete": [OBSERVED, "2026-09-13-native-daily-interval"],
+  "scenario.delete": [
+    OBSERVED,
+    "2026-09-13-native-daily-interval; a BLOCK, LOGIC or GLOBAL on or off, other numbers kept, a deleted number not given out again, scenario targets of other BLOCKs left pointing at it, a LOGIC's assignments removed with it (2026-10-23-scenario-delete)",
+  ],
   "scenario.run": [
     OBSERVED,
-    "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); the simulator runs only top-level literal set actions",
+    "live scenario_run (b95e8a3); a turned-off BLOCK acknowledged and not run, a turned-on one run (2026-09-24-live-conformance-3); a GLOBAL's code run again, on or off (2026-10-23-scenario-code 3.4); of a BLOCK the simulator runs only top-level literal set actions, not its code",
   ],
   "scenario.sdk": [OBSERVED, "2026-09-09-automations"],
   "scenario.subscribe": [OBSERVED, "2026-09-11-native-event-boundary"],
@@ -172,7 +195,7 @@ export const METHOD_EVIDENCE = {
   "log.unsubscribe": [SCHEMA_ONLY],
   "window.get": [
     OBSERVED,
-    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove for every type (2026-09-24-live-conformance-3-read-only); a BLOCK's and a GLOBAL's show the scenario's fields, a user LOGIC's Name, Desc and OnStart the last values written to the window or sent at create, a built-in LOGIC's placeholders (2026-10-13-wave4-contracts 1.2, 1.7, 1.8, 1.11); a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3)",
+    "2026-09-10-window-setting; scenario options windows with main, primary, footer, Name, Active, OnStart, Sync, Desc and Remove for every type (2026-09-24-live-conformance-3-read-only); a BLOCK's and a GLOBAL's show the scenario's fields, a user LOGIC's Name, Desc and OnStart the last values written to the window or sent at create, a built-in LOGIC's placeholders (2026-10-13-wave4-contracts 1.2, 1.7, 1.8, 1.11); a bridge child's window with a CHECKBOX s:<sId> per exportable service (2026-10-13-wave4-contracts 3.3), none for the service types a bridge type leaves out, and Window not found for an accessory the bridge does not list (2026-10-14-bridge-export-write 3, 11, 12)",
   ],
   "window.update": [
     OBSERVED,
@@ -186,6 +209,11 @@ export const METHOD_EVIDENCE = {
   "window.update {Name, Desc, OnStart, Sync}": [
     OBSERVED,
     "applied to scenario.get and scenario.list at once for a user BLOCK, LOGIC and GLOBAL (2026-10-13-wave4-contracts 1.4, 1.8, 1.10)",
+  ],
+  // A bridge child's s:<sId> checkboxes, one or several in one update.
+  "window.update {bridge export}": [
+    OBSERVED,
+    "a temporary virtual accessory's services ticked and unticked in all four bridges, running or not: read back at once, the child in main while one is ticked (2026-10-14-bridge-export-write 4-8)",
   ],
   // No entry, so a run reports them as unsupported: window.update {Remove}
   // of a scenario window, and its Name, Desc, OnStart or Sync of a built-in
@@ -329,6 +357,9 @@ function evidenceKey(state, method, params) {
   }
   if (method === "window.update") {
     const input = params?.window?.update;
+    if (bridgeChildOfWindow(state, input?.windowKey)) {
+      return "window.update {bridge export}";
+    }
     const scenario = scenarioOfWindow(state, input?.windowKey);
     if (scenario && Array.isArray(input.options)) {
       const keys = input.options.map((option) => option?.key);
@@ -515,6 +546,41 @@ const CHARACTERISTIC_TYPES = {
     validValues: enumValues([
       ["CO2_LEVELS_NORMAL", 0, "Нормальный"],
       ["CO2_LEVELS_ABNORMAL", 1, "Повышенный"],
+    ]),
+  },
+  // A created virtual SmokeSensor and OccupancySensor (owner hub, 3.0.0,
+  // 2026-10-23-virtual-devices, 6).
+  SmokeDetected: {
+    name: "Обнаружен дым",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["SMOKE_NOT_DETECTED", 0, "Нет"],
+      ["SMOKE_DETECTED", 1, "Да"],
+    ]),
+  },
+  OccupancyDetected: {
+    name: "Обнаружено присутствие",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["OCCUPANCY_NOT_DETECTED", 0, "Нет"],
+      ["OCCUPANCY_DETECTED", 1, "Да"],
+    ]),
+  },
+  StatusTampered: {
+    name: "Вскрытие",
+    format: "int",
+    minValue: 0,
+    maxValue: 1,
+    minStep: 1,
+    validValues: enumValues([
+      ["NOT_TAMPERED", 0, "Нет"],
+      ["TAMPERED", 1, "Да"],
     ]),
   },
   CarbonDioxideLevel: {
@@ -811,6 +877,11 @@ const CHARACTERISTIC_TYPES = {
   },
 };
 
+const SYSTEM_SERVICE_TYPES = new Set([
+  "AccessoryInformation",
+  "FilterMaintenance",
+]);
+
 const SERVICE_TYPES = [
   [
     "AccessoryInformation",
@@ -838,19 +909,19 @@ const SERVICE_TYPES = [
     "MotionSensor",
     "Датчик движения",
     ["MotionDetected"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "ContactSensor",
     "Датчик открытия",
     ["ContactSensorState"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "LeakSensor",
     "Датчик протечки",
     ["LeakDetected"],
-    ["Name", "StatusLowBattery"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "TemperatureSensor",
@@ -869,6 +940,18 @@ const SERVICE_TYPES = [
     "Датчик углекислого газа",
     ["CarbonDioxideDetected"],
     ["CarbonDioxideLevel", "Name"],
+  ],
+  [
+    "SmokeSensor",
+    "Датчик дыма",
+    ["SmokeDetected"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
+  ],
+  [
+    "OccupancySensor",
+    "Датчик присутствия",
+    ["OccupancyDetected"],
+    ["Name", "StatusLowBattery", "StatusTampered"],
   ],
   [
     "LightSensor",
@@ -942,7 +1025,9 @@ const SERVICE_TYPES = [
     ["Name"],
   ],
 ].map(([type, name, required, optional]) => ({
-  system: false,
+  // System types are listed but refused by accessory.create (owner hub,
+  // 3.0.0, 2026-10-23-virtual-devices, 2 and 13).
+  system: SYSTEM_SERVICE_TYPES.has(type),
   type,
   name,
   required: required.map((item) => ({
@@ -1085,6 +1170,16 @@ async function loadFixtureFile(file) {
 // onRequest({method, params}) is called as each request arrives, before
 // it waits or is handled: a test can see what the client had saved by the
 // time the request left it.
+// A request whose token the hub does not hold is refused with -666003
+// "Incorrect token", as the owner's hub refused an expired saved session
+// (2026-10-23). account {login, password, status} lets a client log in:
+// account.auth asks for the e-mail, then the password, and the right pair
+// gets a new token, the flow the login tests follow; status, when set, is
+// the account status answered after the password instead of a token
+// (ACCOUNT_RESPONSE_NO_MORE_TRIES and the like); ACCOUNT_RESPONSE_TOO_FAST
+// is answered to account.auth itself with a question delay of account.delay
+// seconds, as the login tests' hub does. hub.expireTokens() makes
+// every token held so far incorrect, as an expired session.
 export async function startSimulatedHub(
   fixture,
   {
@@ -1097,9 +1192,12 @@ export async function startSimulatedHub(
     eventEveryMs,
     latencyMs,
     onRequest,
+    account,
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
+  const tokens = new Set([token]);
+  const logins = { account, tokens, issued: 0, stages: new Map() };
   const initialState = structuredClone(state);
   state.faults = {
     delayedReadback: structuredClone(faults.delayedReadback ?? []),
@@ -1176,7 +1274,7 @@ export async function startSimulatedHub(
         reply: handleMessage(
           state,
           requests,
-          token,
+          logins,
           raw,
           refusals,
           connectionId,
@@ -1248,7 +1346,7 @@ export async function startSimulatedHub(
       if (
         requests.length > recorded &&
         requests.at(-1).serial === state.hub.serial &&
-        requests.at(-1).error?.code !== 401
+        requests.at(-1).error?.code !== INCORRECT_TOKEN
       ) {
         receivesEvents.add(socket);
       }
@@ -1433,6 +1531,11 @@ export async function startSimulatedHub(
       for (const client of server.clients) client.terminate();
       await Promise.all(closing);
     },
+    // Every token held so far, the one the hub started with and those of
+    // logins, is incorrect from now on.
+    expireTokens: () => tokens.clear(),
+    // Whether the hub holds this token now.
+    acceptsToken: (value) => tokens.has(value),
     // Applies delayed writes now, as the hub would have by the time a
     // grader looks at the home.
     settle: () => {
@@ -1480,13 +1583,56 @@ export async function startSimulatedHub(
   };
 }
 
+// One step of the login of startSimulatedHub's account, by connection.
+function accountReply(logins, message, connection) {
+  const { account, stages } = logins;
+  const operation = message.params.account.auth ? "auth" : "answer";
+  const answer = (value) => ({
+    id: message.id,
+    result: { account: { [operation]: value } },
+  });
+  const question = (type) =>
+    answer({ status: "ACCOUNT_RESPONSE_SUCCESS", question: { type } });
+  if (operation === "auth" && account.status === "ACCOUNT_RESPONSE_TOO_FAST") {
+    return answer({
+      status: account.status,
+      question: { type: "QUESTION_TYPE_EMAIL", delay: account.delay ?? 0 },
+    });
+  }
+  if (operation === "auth") {
+    stages.set(connection, "email");
+    return question("QUESTION_TYPE_EMAIL");
+  }
+  const data = message.params.account.answer?.data;
+  const stage = stages.get(connection);
+  stages.delete(connection);
+  if (stage === "email" && data === account.login) {
+    stages.set(connection, "password");
+    return question("QUESTION_TYPE_PASSWORD");
+  }
+  if (stage === "password" && account.status) {
+    return answer({ status: account.status });
+  }
+  if (stage === "password" && data === account.password) {
+    logins.issued += 1;
+    const issued = `simulated-session-${logins.issued}`;
+    logins.tokens.add(issued);
+    return answer({ status: "ACCOUNT_RESPONSE_SUCCESS", token: issued });
+  }
+  return answer({ status: "ACCOUNT_RESPONSE_FAILED" });
+}
+
 // A queued refusal that loses the request instead (loseNext).
 const LOST_REQUEST = Symbol("lost request");
+
+// The owner's hub refused a token it no longer held with this code and
+// "Incorrect token" (2026-10-23).
+const INCORRECT_TOKEN = -666003;
 
 function handleMessage(
   state,
   requests,
-  token,
+  logins,
   raw,
   refusals,
   connection = null,
@@ -1514,8 +1660,11 @@ function handleMessage(
     entry.error = { code: error.code, message: error.message };
     return { id: message?.id ?? null, error: entry.error };
   };
-  if (message?.token !== token) {
-    return fail(new SimulatorError(401, "Unauthorized"));
+  if (logins.account && method?.startsWith("account.")) {
+    return accountReply(logins, message, connection);
+  }
+  if (!logins.tokens.has(message?.token)) {
+    return fail(new SimulatorError(INCORRECT_TOKEN, "Incorrect token"));
   }
   if (method === null) {
     return fail(new SimulatorError(-32600, "Invalid request"));
@@ -1660,53 +1809,95 @@ const HANDLERS = {
     const accessory = state.accessories.find((item) => item.id === id);
     return accessory ? withNotify(accessory) : null;
   },
+  // As the owner's hub 3.0.0 answered (2026-10-23-virtual-devices): any
+  // number of services of non-system types; a room the home lacks, or none,
+  // puts the accessory in room 6; names keep their first 32 characters;
+  // optional characteristics a type does not list are left out; each
+  // service gets its Name characteristic right after its sId, then the
+  // required and the chosen optional ones. A blank name, an unknown or a
+  // system type is refused with the hub's -32602 texts.
   "accessory.create": (state, { name, roomId, services }) => {
-    requireRoom(state, roomId);
-    if (typeof name !== "string" || name.length === 0) {
-      throw invalidParams("Accessory name is required");
+    if (!Array.isArray(services) || services.length === 0) {
+      throw invalidParams("Param not found: 'services'");
     }
-    if (!Array.isArray(services) || services.length !== 1) {
-      throw invalidParams("Exactly one service is supported by the simulator");
+    if (typeof name !== "string" || name.trim().length === 0) {
+      throw invalidParams("Param is empty: 'name'");
     }
-    const [serviceInput] = services;
-    const catalog = SERVICE_TYPES.find(
-      ({ type }) => type === serviceInput.type,
-    );
-    if (!catalog)
-      throw invalidParams(`Unknown service type ${serviceInput.type}`);
+    const catalogs = services.map((serviceInput) => {
+      const catalog = SERVICE_TYPES.find(
+        ({ type }) => type === serviceInput?.type,
+      );
+      if (!catalog) {
+        throw invalidParams(
+          `Failed to parse:  'No enum constant com.spruthub.sdk.HS.${serviceInput?.type}'`,
+        );
+      }
+      if (catalog.system) {
+        throw invalidParams(`Invalid param: '${catalog.type}'`);
+      }
+      if (
+        Object.hasOwn(serviceInput, "name") &&
+        (typeof serviceInput.name !== "string" ||
+          serviceInput.name.trim().length === 0)
+      ) {
+        throw invalidParams("Param is empty: 'name'");
+      }
+      return catalog;
+    });
+    const room =
+      state.rooms.find((candidate) => candidate.id === roomId) ??
+      requireRoom(state, VIRTUAL_FALLBACK_ROOM_ID);
     const id = nextId(
       state.accessories.map((accessory) => accessory.id),
       100,
     );
-    const types = [
-      ...catalog.required.map(({ type }) => type),
-      ...(serviceInput.optional ?? []).filter(
-        (type) => !catalog.required.some((item) => item.type === type),
-      ),
-    ];
-    const accessory = {
-      id,
-      roomId,
-      name,
-      online: true,
-      virtual: true,
-      services: [
-        virtualInformationService(id, name),
-        {
-          aId: id,
-          sId: VIRTUAL_SERVICE_ID,
-          name: serviceInput.name ?? name,
-          type: serviceInput.type,
-          visible: true,
-          characteristics: types.map((type, index) =>
-            buildCharacteristic(id, VIRTUAL_SERVICE_ID, {
-              cId: VIRTUAL_SERVICE_ID + 1 + index,
+    const stored = cutName(name);
+    let sId = VIRTUAL_SERVICE_ID;
+    const created = services.map((serviceInput, index) => {
+      const catalog = catalogs[index];
+      const serviceName = cutName(serviceInput.name ?? name);
+      const optional = catalog.optional
+        .map(({ type }) => type)
+        .filter((type) => type !== "Name");
+      const types = [
+        ...catalog.required.map(({ type }) => type),
+        ...(serviceInput.optional ?? []).filter((type) =>
+          optional.includes(type),
+        ),
+      ];
+      const service = {
+        aId: id,
+        sId,
+        name: serviceName,
+        type: serviceInput.type,
+        visible: true,
+        characteristics: [
+          buildCharacteristic(id, sId, {
+            cId: sId + 1,
+            type: "Name",
+            value: serviceName,
+            control: { visible: false },
+          }),
+          ...types.map((type, offset) =>
+            buildCharacteristic(id, sId, {
+              cId: sId + 2 + offset,
               type,
               value: defaultValue(type),
             }),
           ),
-        },
-      ],
+        ],
+      };
+      sId += 2 + types.length;
+      return service;
+    });
+    const accessory = {
+      id,
+      roomId: room.id,
+      name: stored,
+      online: true,
+      virtual: true,
+      ...VIRTUAL_IDENTITY(id),
+      services: [virtualInformationService(id, stored), ...created],
     };
     state.accessories.push(accessory);
     emitAccessories(state, "EVENT_ADD", [accessory]);
@@ -1753,6 +1944,29 @@ const HANDLERS = {
     state.logics = state.logics.filter(({ aId }) => aId !== id);
     for (const key of [...state.links.keys()]) {
       if (key.startsWith(`${id}.`)) state.links.delete(key);
+    }
+    // Owner hub, 3.0.0 (2026-10-23-virtual-devices, 18 and 19): an IN link
+    // to the deleted accessory goes, and its characteristic's hasLinks turns
+    // false once it has no other; an OUT link that fed the deleted
+    // accessory stays as an empty entry, hasLinks unchanged.
+    for (const [key, links] of state.links) {
+      const kept = links.filter(
+        (link) =>
+          link.type !== "IN" ||
+          !link.characteristics.some(({ aId }) => aId === id),
+      );
+      for (const link of kept) {
+        if (link.type !== "OUT") continue;
+        link.characteristics = link.characteristics.filter(
+          ({ aId }) => aId !== id,
+        );
+      }
+      state.links.set(key, kept);
+      if (kept.length === 0 && links.length > 0) {
+        const [aId, sId, cId] = key.split(".").map(Number);
+        const characteristic = findCharacteristic(state, { aId, sId, cId });
+        if (characteristic) characteristic.hasLinks = false;
+      }
     }
     state.emitAfterReply?.({
       accessory: { event: "EVENT_REMOVE", accessories: [{ id }] },
@@ -1829,7 +2043,9 @@ const HANDLERS = {
       characteristic.notify = input.notify;
     }
     if (input.control && Object.hasOwn(input.control, "value")) {
-      const value = checkedValue(characteristic.control, input.control.value);
+      const value = checkedValue(characteristic.control, input.control.value, {
+        virtual: virtuallyWritable(state, characteristic),
+      });
       if (state.faults?.stuckActuators.has(characteristic.aId)) {
         recordFault(state, "stuck_actuator", state.currentRequest);
         return {};
@@ -1874,82 +2090,36 @@ const HANDLERS = {
       links: [...system, ...(state.links.get(characteristicKey(input)) ?? [])],
     };
   },
-  "link.addVirtual": (state, input) => {
-    requireCharacteristic(state, input);
-    requireCharacteristic(state, {
-      aId: input.tAId,
-      sId: input.tSId,
-      cId: input.tCId,
-    });
-    const key = characteristicKey(input);
-    const links = state.links.get(key) ?? [];
-    const index = `Virtual/${input.tAId}.${input.tCId}`;
-    let incoming = links.find(
-      (link) => link.type === "IN" && link.index === index,
-    );
-    if (!incoming) {
-      incoming = { index, type: "IN", characteristics: [] };
-      links.push(incoming);
-      state.links.set(key, links);
-    }
-    if (
-      !incoming.characteristics.some(
-        ({ aId, sId, cId }) =>
-          aId === input.tAId && sId === input.tSId && cId === input.tCId,
-      )
-    ) {
-      incoming.characteristics.push({
-        aId: input.tAId,
-        sId: input.tSId,
-        cId: input.tCId,
-      });
-      const outgoingKey = characteristicKey({
-        aId: input.tAId,
-        sId: input.tSId,
-        cId: input.tCId,
-      });
-      const outgoingLinks = state.links.get(outgoingKey) ?? [];
-      let outgoing = outgoingLinks.find(
-        (link) => link.type === "OUT" && link.index === index,
-      );
-      if (!outgoing) {
-        outgoing = { index, type: "OUT", characteristics: [] };
-        outgoingLinks.push(outgoing);
-        state.links.set(outgoingKey, outgoingLinks);
-      }
-      outgoing.characteristics.push({
-        aId: input.aId,
-        sId: input.sId,
-        cId: input.cId,
-      });
-    }
-    return incoming;
-  },
+  "link.addVirtual": (state, input) =>
+    structuredClone(addVirtualLink(state, input, { copyValue: true })),
+  // Removing an IN link takes the virtual characteristic out of its
+  // target's OUT link, which stays as an empty entry under the same index.
+  // A linkId the characteristic no longer has is acknowledged and changes
+  // nothing (2026-10-14-light-group-relink, 6 and 10;
+  // 2026-10-13-wave4-contracts 2.9). hasLinks is not derived from links
+  // here, unlike on the hub (wave4 2.5, 2.7): it changes only as written.
   "link.remove": (state, input) => {
+    requireCharacteristic(state, input);
     const key = characteristicKey(input);
     const links = state.links.get(key) ?? [];
     const removed = links.find(({ index }) => index === input.linkId);
-    if (!removed) throw notFound(`Link ${input.linkId}`);
-    state.links.set(
-      key,
-      links.filter(({ index }) => index !== input.linkId),
-    );
+    if (!removed) return {};
+    // The empty OUT left on a lamp stays (wave4 2.9); a non-empty OUT
+    // removed from the lamp's side was not tried.
+    if (removed.type === "OUT" && removed.characteristics.length === 0) {
+      return {};
+    }
+    const remaining = links.filter(({ index }) => index !== input.linkId);
+    state.links.set(key, remaining);
     if (removed.type === "IN") {
       for (const target of removed.characteristics) {
-        const outgoingKey = characteristicKey(target);
-        state.links.set(
-          outgoingKey,
-          (state.links.get(outgoingKey) ?? []).flatMap((link) => {
-            if (link.type !== "OUT") return [link];
-            const characteristics = link.characteristics.filter(
-              ({ aId, sId, cId }) =>
-                aId !== input.aId || sId !== input.sId || cId !== input.cId,
-            );
-            return characteristics.length > 0
-              ? [{ ...link, characteristics }]
-              : [];
-          }),
-        );
+        for (const link of state.links.get(characteristicKey(target)) ?? []) {
+          if (link.type !== "OUT") continue;
+          link.characteristics = link.characteristics.filter(
+            ({ aId, sId, cId }) =>
+              aId !== input.aId || sId !== input.sId || cId !== input.cId,
+          );
+        }
       }
     }
     return {};
@@ -2028,6 +2198,9 @@ const HANDLERS = {
   },
 
   "scenario.list": (state, { aId }) => {
+    // A deleted accessory's id: -32603 Not found (owner hub, 3.0.0,
+    // 2026-10-23-virtual-devices, 21).
+    if (aId !== undefined) requireAccessory(state, aId);
     const scenarios = state.scenarios
       .filter(
         (scenario) =>
@@ -2065,6 +2238,7 @@ const HANDLERS = {
     if (scenario.type === "BLOCK") {
       scenario.data = normalizeBlockData(input.data);
       scenario.rooms = blockRooms(state, scenario.data);
+      compileBlockCode(state, scenario);
     } else if (scenario.type === "LOGIC") {
       if (typeof input.data !== "string") {
         throw invalidParams("LOGIC scenario requires source text");
@@ -2078,6 +2252,7 @@ const HANDLERS = {
         throw invalidParams("GLOBAL scenario requires source text");
       }
       scenario.data = input.data;
+      runGlobalCode(state, scenario);
     } else {
       throw invalidParams(`Scenario type ${input.type} is not supported`);
     }
@@ -2095,6 +2270,7 @@ const HANDLERS = {
       if (scenario.type === "BLOCK") {
         scenario.data = normalizeBlockData(input.data);
         scenario.rooms = blockRooms(state, scenario.data);
+        compileBlockCode(state, scenario);
       } else {
         if (typeof input.data !== "string") {
           throw invalidParams(`${scenario.type} scenario requires source text`);
@@ -2104,6 +2280,7 @@ const HANDLERS = {
         // info again, even unchanged; sync is untouched, and a GLOBAL's
         // code leaves its name alone (2026-10-13-wave4-contracts 1.5, 1.8).
         if (scenario.type === "LOGIC") applyLogicInfo(scenario);
+        if (scenario.type === "GLOBAL") runGlobalCode(state, scenario);
       }
     }
     return {};
@@ -2126,6 +2303,7 @@ const HANDLERS = {
       path: "Scenario.ScenarioBlock.Target.jBlock",
       message: `Сценарий ${index}: (TRIGGER: SCENARIO[${index}] <- MANUAL)`,
     });
+    if (scenario.type === "GLOBAL") runGlobalCode(state, scenario);
     state.runs.push(runScenario(state, scenario));
     return {};
   },
@@ -2155,7 +2333,15 @@ const HANDLERS = {
 
   "window.get": (state, { windowKey }) => {
     const window = state.windows[windowKey];
-    if (!window) return bridgeChildWindow(state, windowKey);
+    if (!window) {
+      const child = bridgeChildWindow(state, windowKey);
+      // The hub has no window for an accessory a bridge does not list
+      // (2026-10-14-bridge-export-write 11).
+      if (!child && bridgeOfChildWindowKey(state, windowKey)) {
+        throw notFound(`Window not found: '${windowKey}'`);
+      }
+      return child;
+    }
     if (windowKey === "") return withDiscoveryTime(state, window);
     const scenario = scenarioOfWindow(state, windowKey);
     if (!scenario) return window;
@@ -2173,7 +2359,11 @@ const HANDLERS = {
   },
   "window.update": (state, { windowKey, options }) => {
     const window = state.windows[windowKey];
-    if (!window) throw notFound(`Window ${windowKey}`);
+    if (!window) {
+      const child = bridgeChildOfWindow(state, windowKey);
+      if (child) return updateBridgeExport(child, options);
+      throw notFound(`Window ${windowKey}`);
+    }
     const scenario = scenarioOfWindow(state, windowKey);
     if (scenario) checkScenarioWindowUpdate(scenario, options);
     applyOptions(window.options, options);
@@ -2535,6 +2725,12 @@ function buildState(fixture, hubTime) {
   for (const input of fixture.accessories) {
     state.accessories.push(buildAccessory(state, input));
   }
+  // A fixture's links are as the web client's link.addVirtual leaves them,
+  // without the value the hub copies at that moment: the fixture states
+  // the values it means.
+  for (const link of fixture.links ?? []) {
+    addVirtualLink(state, link, { copyValue: false });
+  }
   for (const input of fixture.scenarios ?? []) {
     const scenario = {
       index: input.index,
@@ -2588,7 +2784,11 @@ function buildState(fixture, hubTime) {
 
 function buildAccessory(state, input) {
   const services = [];
-  if (input.manufacturer || input.model) {
+  // A virtual accessory of a fixture: as accessory.create leaves it, an
+  // information service at sId 1 and no controller.
+  if (input.virtual === true) {
+    services.push(virtualInformationService(input.id, input.name));
+  } else if (input.manufacturer || input.model) {
     const characteristics = [
       ["Identify", false],
       ["Manufacturer", input.manufacturer ?? ""],
@@ -2661,8 +2861,9 @@ function buildAccessory(state, input) {
     online: input.online !== false,
     // accessory.get of a physical accessory read virtual: false, present
     // rather than omitted (owner hub, 3.0.0, live-conformance-3-read-only).
-    virtual: false,
-    ...(input.extensionKey
+    virtual: input.virtual === true,
+    ...(input.virtual === true ? VIRTUAL_IDENTITY(input.id) : {}),
+    ...(input.extensionKey && input.virtual !== true
       ? {
           extensionKey: input.extensionKey,
           deviceId: input.deviceId ?? `device-${input.id}`,
@@ -2688,6 +2889,18 @@ function buildAccessory(state, input) {
 // other information characteristics follow a physical device's; they were
 // not read on a virtual one.
 const VIRTUAL_SERVICE_ID = 13;
+
+// accessory.list and accessory.get give a virtual accessory these fields,
+// and the list has no other sign that it is virtual (owner hub, 3.0.0, all
+// 9 virtual lamp groups, 2026-10-14-light-group-relink). Physical
+// accessories' manufacturer, model and serial are left out here.
+const VIRTUAL_IDENTITY = (id) => ({
+  manufacturer: "MakeSimple",
+  model: "Virtual",
+  manufacturerId: "MakeSimple",
+  modelId: "Virtual",
+  serial: String(id),
+});
 
 function virtualInformationService(id, name) {
   const characteristics = [
@@ -3703,6 +3916,93 @@ function logicInfo(source) {
   }
 }
 
+// The hub runs a GLOBAL's code at create, on every code write and on
+// scenario.run, on or off; what the code assigns to global stays for every
+// scenario until the hub restarts, after a later error or the scenario's
+// delete too (2026-10-23-scenario-code 3.2–3.10). Each run gets a context
+// of its own, so a top-level let runs again without a redeclaration error,
+// and all share one global object. As in logicInfo, the contexts hold no
+// object of this process; log lines are collected inside. error is true
+// while the stored code did not run through; the message reaches the log
+// only for a scenario that is on (3.7, 3.8). The simulator runs newer
+// JavaScript than the hub's Nashorn (section 4). The shared global object
+// lives beside the state, not in it: it holds functions, and the state is
+// cloned (exportState).
+const scriptGlobals = new WeakMap();
+
+function runGlobalCode(state, scenario) {
+  if (!scriptGlobals.has(state)) {
+    scriptGlobals.set(
+      state,
+      vm.runInContext("({})", vm.createContext(Object.create(null))),
+    );
+  }
+  const context = vm.createContext(Object.create(null));
+  context.global = scriptGlobals.get(state);
+  vm.runInContext(
+    "GlobalVariables = global; __log = []; log = { message: function () { __log.push(Array.prototype.join.call(arguments, ' ')); } }; log.info = log.warn = log.error = log.message; console = log; Hub = {};",
+    context,
+  );
+  let failure;
+  try {
+    vm.runInContext(scenario.data, context, {
+      timeout: 100,
+      filename: "<eval>",
+    });
+  } catch (error) {
+    failure = error;
+  }
+  const lines = JSON.parse(vm.runInContext("JSON.stringify(__log)", context));
+  for (const message of lines) {
+    appendLog(state, {
+      level: "LOG_LEVEL_INFO",
+      path: "SDK.Struct.Log",
+      message: String(message),
+    });
+  }
+  scenario.error = failure !== undefined;
+  if (failure !== undefined && scenario.active) {
+    appendLog(state, {
+      level: "LOG_LEVEL_ERROR",
+      path: "Notifiers.Notifier",
+      message: `Сценарий ${scenario.index} - ScriptException: ${String(failure?.message)}`,
+    });
+  }
+}
+
+// The hub compiles a BLOCK's code when the BLOCK is saved: code that does
+// not compile is stored as sent and sets error until a write without it
+// (2026-10-23-scenario-code 2.9–2.12). A condition's code is the body of
+// function(context,value) (2.6); an action's wrapper was not seen whole and
+// is taken to be the same. The code is only compiled here, never run.
+function compileBlockCode(state, scenario) {
+  const codes = [];
+  const walk = (value) => {
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (isRecord(value)) {
+      if (value.type === "code") codes.push(value.code);
+      Object.values(value).forEach(walk);
+    }
+  };
+  walk(JSON.parse(scenario.data));
+  let failure;
+  for (const code of codes) {
+    try {
+      new vm.Script(`(function (context, value) {\n${code}\n})`);
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  scenario.error = failure !== undefined;
+  if (failure !== undefined && scenario.active) {
+    appendLog(state, {
+      level: "LOG_LEVEL_ERROR",
+      path: "Notifiers.Notifier",
+      message: `Сценарий ${scenario.index} - ScriptException: ${failure.message}`,
+    });
+  }
+}
+
 function applyLogicInfo(scenario) {
   const info = logicInfo(scenario.data);
   if (typeof info?.name === "string") scenario.name = info.name;
@@ -3793,14 +4093,19 @@ function extensionChildren(state, extensionKey) {
 // notConnected when not, and the child's window under
 // <extensionKey with / for :>/Child/<aId>/; a new accessory shows in every
 // bridge as notConnected (owner's hub, 2026-10-13-wave4-contracts 3.2, 3.4).
-// A fixture bridge names its exported services by accessory id (exported:
-// {"16": [13]}) and the accessories it cannot export (unexportable: [39]):
-// which ones a bridge leaves out was not observed (70 to 80 of 81 there).
+// A bridge lists an accessory with at least one service it can export
+// (BRIDGE_SERVICES_LEFT_OUT; 2026-10-14-bridge-export-write 12, 13). A
+// fixture bridge names its exported services by accessory id (exported:
+// {"16": [13]}) and may leave out more accessories (unexportable: [39]).
 // The child's name and online are the accessory's (assumed).
 function bridgeChildren(state, extension) {
   const unexportable = new Set(extension.unexportable ?? []);
   return state.accessories
-    .filter(({ id }) => !unexportable.has(id))
+    .filter(
+      (accessory) =>
+        !unexportable.has(accessory.id) &&
+        bridgeExportableServices(extension, accessory).length > 0,
+    )
     .map((accessory) => ({
       extensionKey: extension.extensionKey,
       id: String(accessory.id),
@@ -3814,78 +4119,175 @@ function bridgeChildren(state, extension) {
     }));
 }
 
+// Service types whose bridge child window has no checkbox, by bridge type,
+// as read on the owner's hub; HomeKit had one for every service but the
+// accessory information. SecuritySystem was never listed by Yandex or
+// Google (2026-10-14-bridge-export-write 12, 13).
+const BRIDGE_SERVICES_LEFT_OUT = {
+  google: new Set([
+    "StatelessProgrammableSwitch",
+    "LightSensor",
+    "FilterMaintenance",
+    "C_WattMeter",
+    "C_VoltMeter",
+    "C_AmpereMeter",
+    "C_KiloWattHourMeter",
+    "C_TemperatureControl",
+    "SecuritySystem",
+  ]),
+  yandex: new Set([
+    "FilterMaintenance",
+    "C_TemperatureControl",
+    "SecuritySystem",
+  ]),
+};
+
+function bridgeExportableServices(extension, accessory) {
+  const leftOut = BRIDGE_SERVICES_LEFT_OUT[extension.type];
+  return accessory.services.filter(
+    ({ type }) => type !== "AccessoryInformation" && !leftOut?.has(type),
+  );
+}
+
 function bridgeExportedServices(extension, accessory) {
-  return new Set(extension.exported?.[accessory.id] ?? []);
+  const exportable = new Set(
+    bridgeExportableServices(extension, accessory).map(({ sId }) => sId),
+  );
+  return new Set(
+    (extension.exported?.[accessory.id] ?? []).filter((sId) =>
+      exportable.has(sId),
+    ),
+  );
 }
 
 function bridgeChildWindowKey(extension, aId) {
   return `${extension.extensionKey.replaceAll(":", "/")}/Child/${aId}/`;
 }
 
-// A bridge child's window: groups main and AccessoryGroup, the accessory as
-// a read-only ACCESSORY_LIST and a CHECKBOX s:<sId> per exportable service,
-// labelled with the service name, true when the bridge exports it; it reads
-// for a bridge that does not run too (2026-10-13-wave4-contracts 3.3). That
-// every service but the accessory information is exportable, and the
-// options' parents, are assumed.
+// The bridge whose child window key this is, listed or not.
+function bridgeOfChildWindowKey(state, windowKey) {
+  const match = /^(.+)\/Child\/\d+\/$/.exec(windowKey ?? "");
+  return match
+    ? (state.extensions.find(
+        (extension) =>
+          extension.bundleType === "BRIDGE" &&
+          extension.extensionKey.replaceAll(":", "/") === match[1],
+      ) ?? null)
+    : null;
+}
+
+// The listed bridge child whose window this is, with its bridge and
+// accessory; null otherwise.
+function bridgeChildOfWindow(state, windowKey) {
+  const extension = bridgeOfChildWindowKey(state, windowKey);
+  if (!extension) return null;
+  const child = bridgeChildren(state, extension).find(
+    ({ optionsWindow }) => optionsWindow === windowKey,
+  );
+  if (!child) return null;
+  const accessory = state.accessories.find(({ id }) => String(id) === child.id);
+  return { extension, child, accessory };
+}
+
+// A bridge child's window, in the order and form read on the owner's hub:
+// groups main and AccessoryGroup (no label, write true), the accessory as a
+// read-only ACCESSORY_LIST and a CHECKBOX s:<sId> per service the bridge
+// can export, labelled with the service name, true when it exports it; it
+// reads for a bridge that does not run too (2026-10-13-wave4-contracts 3.3;
+// 2026-10-14-bridge-export-write 3, 12).
 function bridgeChildWindow(state, windowKey) {
-  for (const extension of state.extensions) {
-    if (extension.bundleType !== "BRIDGE") continue;
-    const child = bridgeChildren(state, extension).find(
-      ({ optionsWindow }) => optionsWindow === windowKey,
-    );
-    if (!child) continue;
-    const accessory = state.accessories.find(
-      ({ id }) => String(id) === child.id,
-    );
-    const exported = bridgeExportedServices(extension, accessory);
-    const group = (key, name) => ({
-      key,
-      name,
-      type: "GenericInteger",
-      inputType: "GROUP",
-      parent: "",
-      read: true,
-      write: false,
-      value: { intValue: 0 },
-    });
-    return {
-      windowKey,
-      label: { text: accessory.name },
-      options: [
-        group("main", "Сервисы"),
-        group("AccessoryGroup", "Аксессуар"),
-        {
-          key: "Accessory",
-          name: "Аксессуар",
-          type: "GenericInteger",
-          inputType: "ACCESSORY_LIST",
-          parent: "AccessoryGroup",
-          read: true,
-          write: false,
-          events: false,
-          value: { intValue: 0 },
-          validValues: [
-            { value: { intValue: accessory.id }, name: accessory.name },
-          ],
-        },
-        ...accessory.services
-          .filter(({ type }) => type !== "AccessoryInformation")
-          .map((service) => ({
-            key: `s:${service.sId}`,
-            name: service.name,
-            type: "GenericBoolean",
-            inputType: "CHECKBOX",
-            parent: "main",
-            read: true,
-            write: true,
-            events: false,
-            value: { boolValue: exported.has(service.sId) },
-          })),
-      ],
-    };
+  const found = bridgeChildOfWindow(state, windowKey);
+  if (!found) return null;
+  const { extension, accessory } = found;
+  const exported = bridgeExportedServices(extension, accessory);
+  const group = (key) => ({
+    key,
+    name: "",
+    type: "GenericInteger",
+    inputType: "GROUP",
+    parent: "",
+    read: true,
+    write: true,
+    events: true,
+    value: { intValue: 0 },
+  });
+  return {
+    windowKey,
+    label: { text: accessory.name },
+    options: [
+      group("main"),
+      {
+        key: "Accessory",
+        name: "",
+        type: "GenericInteger",
+        inputType: "ACCESSORY_LIST",
+        parent: "AccessoryGroup",
+        read: true,
+        write: false,
+        events: true,
+        value: { intValue: 0 },
+        validValues: [
+          { value: { intValue: accessory.id }, name: accessory.name },
+        ],
+      },
+      group("AccessoryGroup"),
+      ...bridgeExportableServices(extension, accessory).map((service) => ({
+        key: `s:${service.sId}`,
+        name: service.name,
+        type: "GenericBoolean",
+        inputType: "CHECKBOX",
+        parent: "main",
+        read: true,
+        write: true,
+        events: true,
+        value: { boolValue: exported.has(service.sId) },
+      })),
+    ],
+  };
+}
+
+// window.update of a bridge child's window: each option a checkbox
+// s:<sId> with a boolValue, all applied together; the child moves to main
+// while one is ticked (2026-10-14-bridge-export-write 4-7). A write of its
+// groups was not sent to a hub.
+function updateBridgeExport({ extension, accessory }, options) {
+  if (!Array.isArray(options)) throw invalidParams("options must be an array");
+  const exportable = new Set(
+    bridgeExportableServices(extension, accessory).map(({ sId }) => sId),
+  );
+  const updates = options.map((option) => {
+    const sId = /^s:(\d+)$/.exec(option?.key ?? "")?.[1];
+    if (sId === undefined) {
+      if (["main", "AccessoryGroup", "Accessory"].includes(option?.key)) {
+        throw new SimulatorError(
+          -32601,
+          `unsupported by simulator: window.update {${option.key}} of a bridge child`,
+        );
+      }
+      throw invalidParams(`Unknown option ${option?.key}`);
+    }
+    if (!exportable.has(Number(sId))) {
+      throw invalidParams(`Unknown option ${option.key}`);
+    }
+    if (typeof option.value?.boolValue !== "boolean") {
+      throw invalidParams(`${option.key} must be a boolValue`);
+    }
+    return [Number(sId), option.value.boolValue];
+  });
+  const exported = bridgeExportedServices(extension, accessory);
+  for (const [sId, on] of updates) {
+    if (on) exported.add(sId);
+    else exported.delete(sId);
   }
-  return null;
+  extension.exported ??= {};
+  if (exported.size > 0) {
+    extension.exported[String(accessory.id)] = [...exported].sort(
+      (left, right) => left - right,
+    );
+  } else {
+    delete extension.exported[String(accessory.id)];
+  }
+  return {};
 }
 
 // An extension as the hub shows it: without what a fixture declares for
@@ -3966,6 +4368,18 @@ function storedRoomName(name) {
     .join("");
 }
 
+// accessory.create kept the first 32 characters of an accessory's and a
+// service's name, Latin and Cyrillic alike, and put an accessory sent with
+// a room the home lacks, or with none, in room 6 (owner hub, 3.0.0,
+// 2026-10-23-virtual-devices, 14 and 15). Why room 6 there was not
+// established.
+const ACCESSORY_NAME_LIMIT = 32;
+const VIRTUAL_FALLBACK_ROOM_ID = 6;
+
+function cutName(name) {
+  return [...name].slice(0, ACCESSORY_NAME_LIMIT).join("");
+}
+
 function requireRoom(state, id) {
   const room = state.rooms.find((candidate) => candidate.id === id);
   if (!room) throw notFound(`Room ${id}`);
@@ -4036,7 +4450,24 @@ function characteristicKey({ aId, sId, cId }) {
 // string → on at 100) and refuses only an unknown characteristic
 // (2026-10-13-parallel-writes, 5). The product checks range and kind itself
 // before any write; a test of that checks that no write was sent.
-function checkedValue(control, value) {
+// The owner's hub writes a read-only characteristic of a virtual
+// accessory's own service, such as a virtual sensor's reading or a virtual
+// button's press, and its events follow (2026-10-23-virtual-devices, 7, 9).
+function virtuallyWritable(state, characteristic) {
+  const accessory = state.accessories.find(
+    ({ id }) => id === characteristic.aId,
+  );
+  const service = accessory?.services.find(
+    ({ sId }) => sId === characteristic.sId,
+  );
+  return (
+    accessory?.virtual === true &&
+    service?.type !== "AccessoryInformation" &&
+    characteristic.control.type !== "Name"
+  );
+}
+
+function checkedValue(control, value, { virtual = false } = {}) {
   const fields = isRecord(value)
     ? VALUE_FIELDS.filter((field) => Object.hasOwn(value, field))
     : [];
@@ -4044,7 +4475,7 @@ function checkedValue(control, value) {
   if (fields.length !== 1 || fields[0] !== expected) {
     throw invalidParams(`Expected ${expected} for ${control.type}`);
   }
-  if (control.write !== true) {
+  if (control.write !== true && !virtual) {
     throw new SimulatorError(-32000, `${control.type} is read-only`);
   }
   const raw = value[expected];
@@ -4207,11 +4638,15 @@ function applyLampLogic(state, characteristic, previous) {
   return changed;
 }
 
-// The characteristics a value written to source set through its IN links.
+// The characteristics a value written to source sets through its links:
+// a virtual characteristic's IN links pass it to their targets, a member's
+// OUT links back to the virtual one, with "last value" processing (0), and
+// no further: the other members keep theirs
+// (2026-10-14-light-group-relink, 3 and 4; 2026-09-11-virtual-light-group).
 function propagateVirtualLinks(state, source, value) {
   const changed = [];
   for (const link of state.links.get(characteristicKey(source)) ?? []) {
-    if (link.type !== "IN") continue;
+    if (link.type !== "IN" && link.type !== "OUT") continue;
     for (const target of link.characteristics) {
       const characteristic = findCharacteristic(state, target);
       if (!characteristic) continue;
@@ -4220,6 +4655,85 @@ function propagateVirtualLinks(state, source, value) {
     }
   }
   return changed;
+}
+
+// link.addVirtual on the virtual side (aId, sId, cId) to a target (tAId,
+// tSId, tCId), as on the owner's hub: one IN link per target, indexed
+// Virtual/<tAId>.<tCId>, and on the target an OUT link of the same index
+// holding the virtual characteristic, reused when an empty one was left
+// by an earlier removal; adding a link that exists returns it unchanged.
+// A new link copies the target's value to
+// the virtual characteristic, as last-value feedback: an off lamp joining
+// an on group made it read off, and the other members kept theirs
+// (2026-10-14-light-group-relink, 2, 7, 8 and runs 2 and 3; there a
+// joining Brightness of 0 left the group's level as it was, which this
+// does not model).
+function addVirtualLink(state, input, { copyValue }) {
+  const source = requireCharacteristic(state, input);
+  const target = { aId: input.tAId, sId: input.tSId, cId: input.tCId };
+  const member = requireCharacteristic(state, target);
+  const key = characteristicKey(input);
+  const links = state.links.get(key) ?? [];
+  const index = `Virtual/${input.tAId}.${input.tCId}`;
+  const existing = links.find(
+    (link) => link.type === "IN" && link.index === index,
+  );
+  if (existing) return existing;
+  const incoming = {
+    index,
+    type: "IN",
+    controller: "virtual",
+    characteristics: [target],
+  };
+  links.push(incoming);
+  state.links.set(key, links);
+  const outgoingKey = characteristicKey(target);
+  const outgoingLinks = state.links.get(outgoingKey) ?? [];
+  let outgoing = outgoingLinks.find(
+    (link) => link.type === "OUT" && link.index === index,
+  );
+  if (!outgoing) {
+    outgoing = {
+      index,
+      type: "OUT",
+      controller: "virtual",
+      characteristics: [],
+    };
+    outgoingLinks.push(outgoing);
+    state.links.set(outgoingKey, outgoingLinks);
+  }
+  outgoing.characteristics.push({
+    aId: input.aId,
+    sId: input.sId,
+    cId: input.cId,
+  });
+  if (copyValue && !sameValue(source.control.value, member.control.value)) {
+    source.control.value = structuredClone(member.control.value);
+    state.emitAfterReply?.(valueEvent(source));
+  }
+  return incoming;
+}
+
+// What a group command does through the links of a home: values written
+// one after another to target in a copy of state's accessories, links and
+// lamp logic, as the hub passes them on (writeValue). Returns the copy's
+// accessories; state is left as it is. A grader asks with it whether a
+// lamp follows its group.
+export function commandThroughLinks(state, target, values) {
+  const copy = {
+    accessories: structuredClone(state.accessories),
+    links: structuredClone(state.links),
+    logics: structuredClone(state.logics),
+  };
+  for (const value of values) {
+    const characteristic = requireCharacteristic(copy, target);
+    writeValue(
+      copy,
+      characteristic,
+      checkedValue(characteristic.control, value),
+    );
+  }
+  return copy.accessories;
 }
 
 function subscriptionUuid(state, domain) {
@@ -4246,7 +4760,7 @@ const CHARACTERISTIC_SETTINGS = ["hasLinks", "linkProcessing", "notify"];
 // identity and visibility, every characteristic value (the information
 // service's Name mirrors accessory/<id>/name and is left out), link settings,
 // options, logic assignments, scenario settings (BLOCK data without
-// editor/runtime fields) and virtual links. Graders diff two snapshots
+// editor/runtime fields), virtual links and bridge exports. Graders diff two snapshots
 // instead of guessing requests.
 export function homeSnapshot(state) {
   const snapshot = {};
@@ -4321,6 +4835,20 @@ export function homeSnapshot(state) {
   }
   for (const [key, links] of state.links) {
     if (links.length > 0) snapshot[`link/${key}`] = JSON.stringify(links);
+  }
+  // Each service a bridge exports. Only exported ones: a new accessory
+  // shows in every bridge unexported (2026-10-14-bridge-export-write 2),
+  // which is no change of the export.
+  for (const extension of state.extensions ?? []) {
+    if (extension.bundleType !== "BRIDGE") continue;
+    for (const { id } of bridgeChildren(state, extension)) {
+      const accessory = state.accessories.find(
+        (candidate) => String(candidate.id) === id,
+      );
+      for (const sId of bridgeExportedServices(extension, accessory)) {
+        snapshot[`bridge/${extension.extensionKey}/${id}.${sId}`] = true;
+      }
+    }
   }
   return snapshot;
 }

@@ -4,6 +4,7 @@
 // names, rooms and types in the client's warm home and shows the matched
 // devices' values from it.
 import { randomBytes } from "node:crypto";
+import { lampGroupMark, lampGroupMarks } from "./light-group-members.mjs";
 import {
   accessoryRef,
   characteristicNotifyOffered,
@@ -18,6 +19,7 @@ import {
   SprutHubError,
   sanitizeNativeData,
   serviceRef,
+  virtuallyWritable,
 } from "./spruthub-client.mjs";
 
 const PROBLEM_LIMIT = 10;
@@ -287,6 +289,7 @@ export class HomeReads {
 
   #firstPage(base, serial, catalog, evaluated, selection, hints) {
     const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
+    const marks = lampGroupMarks(catalog, serial);
     const { listed, extras } = listedServices(
       serial,
       catalog,
@@ -302,7 +305,10 @@ export class HomeReads {
           ...(room ? {} : { metadata_status: "missing" }),
         },
         device: deviceEntry(serial, item),
-        service: serviceEntry(serial, item, selection),
+        service: {
+          ...serviceEntry(serial, item, selection),
+          ...lampGroupMark(marks, item.accessory.id, item.service.sId),
+        },
       };
     });
     const snapshot = {
@@ -1016,7 +1022,10 @@ function characteristicValues(serial, accessory, service, types = null) {
         ...(control.validValues
           ? { enum: matchEnumValue(control.validValues, typed) }
           : {}),
-        ...(control.write === true ? { writable: true } : {}),
+        ...(control.write === true ||
+        virtuallyWritable(accessory, service, control, { listed: true })
+          ? { writable: true }
+          : {}),
         ref: characteristicRef(
           serial,
           accessory.id,
@@ -1039,7 +1048,10 @@ function characteristicRefs(serial, accessory, service) {
         ? { redacted: true, reason: "sensitive_native_data" }
         : {
             type: characteristic.control.type ?? characteristic.control.key,
-            ...(characteristic.control.write === true
+            ...(characteristic.control.write === true ||
+            virtuallyWritable(accessory, service, characteristic.control, {
+              listed: true,
+            })
               ? { writable: true }
               : {}),
             ref: characteristicRef(

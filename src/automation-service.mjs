@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { AutomationStore } from "./automation-store.mjs";
 import { normalizeBlockRequest } from "./block-model.mjs";
 import {
+  blockPathToPointer,
   buildPauseRequestedSnapshot,
   inspectPauseOwnership,
   mergePauseOutcomes,
@@ -48,6 +49,7 @@ import {
 import {
   publicNativeChange,
   publicStoredNativeChange,
+  removedUnwritableLimitation,
 } from "./change-presentation.mjs";
 import {
   activeInsteadOfValue,
@@ -110,9 +112,36 @@ import {
   parseDeviceCommandTargets,
   resendDeviceCommandNext,
 } from "./device-commands.mjs";
+import { codeLineDiff, refuseHubCode } from "./hub-code.mjs";
 import {
+  currentLinkIndex,
+  currentMembers,
+  expectedAppliedKeys,
+  foreignDifferences,
+  incomingLinks,
+  isHomeRef,
+  LIGHT_GROUP_MEMBERS,
+  lampControls,
+  lampGroupContract,
+  lampGroupService,
+  lampService,
+  lampServiceRef,
+  linkedTypes,
+  linkKeys,
+  notALampGroup,
+  outOfStepLamps,
+  parseLampRef,
+  planGroupMembers,
+  publicLampGroupMember,
+  restoreSteps,
+  sameKeys,
+  stepInEffect,
+} from "./light-group-members.mjs";
+import {
+  CODE_SCENARIO_TYPES,
   createdLogicType,
   createdLogicUnmappedRefusal,
+  isGlobalCodeChange,
   LOGIC_SOURCE_METADATA_INPUTS,
   logicAssignmentConfigurationObservation,
   logicAssignmentSnapshot,
@@ -122,6 +151,7 @@ import {
   logicSourceCreateRequest,
   logicSourceMetadataInput,
   logicSourceWithOwnershipMarker,
+  notCodeScenario,
   recordLogicTypeCheck,
   requiredLogicSource,
   scenarioFieldsOwned,
@@ -129,6 +159,8 @@ import {
   sourceFingerprint,
 } from "./logic-changes.mjs";
 import {
+  BUTTON_PRESS_NOTE,
+  BUTTON_PRESS_TYPE,
   changeStillInEffect,
   characteristicValueDraft,
   characteristicValueState,
@@ -197,7 +229,45 @@ import {
   scenarioUnprovenApplyFields,
   scenarioUpdateFields,
 } from "./scenario-changes.mjs";
-import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
+import {
+  deleteFieldsDiffering,
+  deleteSnapshot,
+  highestScenarioNumber,
+  isRecreatedCopy,
+  missingScenarioTargets,
+  recreatedTargetNote,
+  recreateRequest,
+  refuseUndeletable,
+  SCENARIO_DELETE,
+  scenarioDeleteContract,
+  scenarioDeleteDependencies,
+  scenarioDeleteTellOwner,
+  scenarioTargetsOf,
+} from "./scenario-delete.mjs";
+import {
+  accessoryMentions,
+  codeShownRedacted,
+  SprutHubError,
+  sanitizeNativeData,
+} from "./spruthub-client.mjs";
+import {
+  dependenciesWithin,
+  foundDependencies,
+  hasDependencies,
+  notAVirtualDevice,
+  ownServices,
+  recreateServices,
+  sameCreatedDevice,
+  unreadDependencies,
+  VIRTUAL_DEVICE,
+  VIRTUAL_DEVICE_DELETE,
+  VIRTUAL_DEVICE_DEPENDENCIES_NOTE,
+  VIRTUAL_DEVICE_DUPLICATE_NOTE,
+  virtualDeviceContract,
+  virtualDeviceName,
+  virtualDeviceSnapshot,
+  virtualDeviceType,
+} from "./virtual-device.mjs";
 import {
   characteristicTypeName,
   completeVirtualLightConfiguration,
@@ -251,6 +321,16 @@ const ROOM_HISTORY_HINT =
   "A room ref lists only changes of the room itself (its name, its creation). Changes of devices in it are under each device's accessory ref, or in the history without entity_ref.";
 const AUTOMATION_OVERWRITE_NOTE =
   "Say in the answer what this automation will overwrite: manual settings at each run, or the behaviour it replaces. This informs; it does not ask.";
+// An undone deletion whose create went out and was not refused: a refusal
+// leaves the deletion applied, and the next undo sends the create again.
+function recreationSent(change) {
+  return (
+    nativeIntentDirection(change) === "restore" &&
+    change.native_write_sent === true &&
+    change.status !== "applied"
+  );
+}
+
 export class AutomationService {
   #writeSequence = Promise.resolve();
 
@@ -309,7 +389,26 @@ export class AutomationService {
         contract: roomCreateContract(),
       };
     }
+    if (
+      input.operation === VIRTUAL_DEVICE ||
+      input.operation === VIRTUAL_DEVICE_DELETE
+    ) {
+      return {
+        status: "ok",
+        operation: input.operation,
+        contract: virtualDeviceContract(input.operation),
+      };
+    }
     if (input.operation === "virtual_light_group") {
+      if (input.target_ref !== undefined && !isHomeRef(input.target_ref)) {
+        const group = await this.#readLampGroup(input.target_ref);
+        return {
+          status: "ok",
+          operation: input.operation,
+          target_ref: group.ref,
+          contract: lampGroupContract(group),
+        };
+      }
       if (input.target_ref !== undefined) {
         parseConfiguredHomeRef(input.target_ref, this.hubSerial);
       }
@@ -336,6 +435,19 @@ export class AutomationService {
         status: "ok",
         operation: input.operation,
         contract: blockContract(),
+      };
+    }
+    if (input.operation === SCENARIO_DELETE) {
+      if (input.target_ref !== undefined) {
+        await this.#readDeletableScenario(input.target_ref);
+      }
+      return {
+        status: "ok",
+        operation: input.operation,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
+        contract: scenarioDeleteContract(),
       };
     }
     if (input.operation === "block_action_pause") {
@@ -366,12 +478,15 @@ export class AutomationService {
       const target = parseScenarioRef(input.target_ref, this.hubSerial);
       const scenario = await this.client.getScenario(target.index);
       if (!scenario) throw scenarioNotFound();
+      if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
+        throw notCodeScenario();
+      }
       logicScenarioSnapshot(scenario);
       return {
         status: "ok",
         operation: input.operation,
         target_ref: input.target_ref,
-        contract: logicSourceContract("update"),
+        contract: logicSourceContract("update", scenario.type),
         next: sdkNext(this.hubSerial),
       };
     }
@@ -379,6 +494,22 @@ export class AutomationService {
   }
 
   async prepareNativeChange(input) {
+    const result = await this.#prepareOperation(input);
+    // A prepared change the request asks for is applied without asking the
+    // owner again; one the owner must hear of first (tell_owner) is not.
+    return result.status === "prepared" && result.tell_owner === undefined
+      ? {
+          ...result,
+          next: {
+            tool: "apply_native_change",
+            arguments: { change_ref: result.change_ref },
+            when: "the request asks for this change, not only to prepare or propose it",
+          },
+        }
+      : result;
+  }
+
+  async #prepareOperation(input) {
     // Text with the redaction mark is refused here; a value carrying it, with
     // the value's contract (validateCharacteristicValue).
     for (const field of ["name", "description", "source"]) {
@@ -400,6 +531,9 @@ export class AutomationService {
     if (input.operation === "scenario_run") {
       return this.#prepareScenarioRun(input);
     }
+    if (input.operation === SCENARIO_DELETE) {
+      return this.#prepareScenarioDelete(input);
+    }
     if (input.operation === "logic_source_create") {
       return this.#prepareLogicSourceCreate(input);
     }
@@ -415,8 +549,16 @@ export class AutomationService {
     if (input.operation === "room_create") {
       return this.#prepareRoomCreate(input);
     }
+    if (input.operation === VIRTUAL_DEVICE) {
+      return this.#prepareVirtualDevice(input);
+    }
+    if (input.operation === VIRTUAL_DEVICE_DELETE) {
+      return this.#prepareVirtualDeviceDelete(input);
+    }
     if (input.operation === "virtual_light_group") {
-      return this.#prepareVirtualLightGroup(input);
+      return isHomeRef(input.target_ref)
+        ? this.#prepareVirtualLightGroup(input)
+        : this.#prepareLampGroupMembers(input);
     }
     throw unsupportedNativeOperation();
   }
@@ -640,6 +782,568 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
+  // «Сделай виртуальный выключатель „Режим гостей“ в гостиной».
+  async #prepareVirtualDevice(input) {
+    parseConfiguredHomeRef(input.target_ref, this.hubSerial);
+    const name = virtualDeviceName(
+      requiredNativeName(input.name, "a virtual device").trim(),
+    );
+    const type = virtualDeviceType(input.value);
+    const room = await this.#requireRoom(input.room_ref);
+    const accessories = await this.client.listAccessories();
+    const matching = await this.#virtualAccessories(
+      accessories.filter(
+        (accessory) => accessory.roomId === room.id && accessory.name === name,
+      ),
+    );
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: VIRTUAL_DEVICE,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      room_id: room.id,
+      room_name: room.name,
+      requested_name: name,
+      service_type: type,
+      create_request: {
+        name,
+        roomId: room.id,
+        services: [{ type, name, optional: [] }],
+      },
+      baseline_accessory_ids: accessories.map(({ id }) => id),
+      ...(matching.length > 0
+        ? {
+            matching: matching.map(({ id, name: found }) => ({
+              id,
+              name: found,
+            })),
+          }
+        : {}),
+      native_write_sent: false,
+      native_acknowledged: false,
+      creation_owned: false,
+      last_verification: freshVerification("baseline_absent"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return {
+      ...publicNativeChange(change),
+      ...(matching.length > 0
+        ? { tell_owner: VIRTUAL_DEVICE_DUPLICATE_NOTE }
+        : {}),
+    };
+  }
+
+  async #requireRoom(roomRef) {
+    const roomId = parseRoomRef(roomRef, this.hubSerial);
+    const room = await this.client.getRoom(roomId);
+    if (!room) {
+      throw new SprutHubError(
+        "room_not_found",
+        "The selected room was not found.",
+        "home_overview",
+      );
+    }
+    return { id: roomId, name: room.name };
+  }
+
+  // New accessories of the requested name in the requested room, not in
+  // the home before the write: after a lost create answer they may be the
+  // device, but nothing proves it.
+  async #newVirtualDeviceCandidates({ name, roomId }, baseline) {
+    const known = new Set(baseline);
+    return (await this.client.listAccessories())
+      .filter(
+        (accessory) =>
+          !known.has(accessory.id) &&
+          accessory.name === name &&
+          accessory.roomId === roomId,
+      )
+      .map(({ id, name: found }) => ({ id, name: found }));
+  }
+
+  async #recordUnknownVirtualCreation(change, status, request, baseline) {
+    let candidates;
+    try {
+      candidates = await this.#newVirtualDeviceCandidates(request, baseline);
+    } catch (error) {
+      return this.#finishNative(change, status, undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    return this.#finishNative(change, status, undefined, {
+      candidates,
+      configuration_matches: undefined,
+      conflict_reason: "virtual_device_creation_outcome_unknown",
+      last_verification: freshVerification(
+        candidates.length > 0
+          ? "unowned_matching_device_observed"
+          : "matching_device_missing",
+      ),
+    });
+  }
+
+  async #applyVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_id !== undefined) {
+      return this.#observeVirtualDevice(change);
+    }
+    if (change.native_write_sent === true && change.status !== "not_applied") {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    if (!(await this.client.getRoom(change.room_id))) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "room_missing",
+        last_verification: freshVerification("room_missing"),
+      });
+    }
+    const appeared = await this.#newVirtualDeviceCandidates(
+      change.create_request,
+      change.baseline_accessory_ids,
+    );
+    if (appeared.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        candidates: appeared,
+        conflict_reason: "matching_device_appeared",
+        last_verification: freshVerification("matching_device_appeared"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    let created;
+    try {
+      created = await this.client.createAccessory(change.create_request);
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
+      }
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    change.native_acknowledged = true;
+    change.write_intent.acknowledged = true;
+    change.created_id = created.id;
+    change.created_snapshot = virtualDeviceSnapshot(created);
+    change.creation_owned = true;
+    await this.#saveBeforeWrite(change);
+    return this.#observeVirtualDevice(change);
+  }
+
+  async #observeVirtualDevice(change) {
+    let accessory;
+    try {
+      accessory = await this.client.getAccessoryOrNull(change.created_id);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    if (accessory === null) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#finishNative(change, "restored", undefined, {
+          last_verification: freshVerification("created_device_absent"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "created_device_missing",
+        last_verification: freshVerification("created_device_missing"),
+      });
+    }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
+    return this.#finishNative(change, "applied", undefined, {
+      last_verification: freshVerification("created_device_observed"),
+    });
+  }
+
+  // The saved id holds another device than the one created: a physical
+  // one, or the created one renamed, moved or rebuilt since. It is not this
+  // change's to delete.
+  async #changedCreatedDevice(change, accessory) {
+    if (sameCreatedDevice(accessory, change.created_snapshot)) return null;
+    return this.#finishNative(change, "conflict", undefined, {
+      observed_device: {
+        name: accessory.name,
+        room_id: accessory.roomId,
+        virtual: accessory.virtual === true,
+      },
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  async #getVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.created_id !== undefined) {
+      return this.#observeVirtualDevice(change);
+    }
+    if (change.native_write_sent === true && change.status !== "not_applied") {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        change.create_request,
+        change.baseline_accessory_ids,
+      );
+    }
+    return publicStoredNativeChange(change);
+  }
+
+  // Undo of a creation: the created device is deleted by its id, unless
+  // scenarios, links or logic now refer to it.
+  async #restoreVirtualDevice(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.creation_owned !== true || change.created_id === undefined) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "virtual_device_creation_not_confirmed",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    const accessory = await this.client.getAccessoryOrNull(change.created_id);
+    if (accessory === null) {
+      return this.#finishNative(change, "restored", undefined, {
+        last_verification: freshVerification("created_device_absent"),
+      });
+    }
+    const changed = await this.#changedCreatedDevice(change, accessory);
+    if (changed) return changed;
+    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    if (foundDependencies(dependencies)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        dependencies,
+        conflict_reason: "virtual_device_in_use",
+        last_verification: freshVerification("virtual_device_in_use"),
+      });
+    }
+    // Code or bridges not read are named with the result, not a stop.
+    change.dependencies = undefined;
+    change.unread = unreadDependencies(dependencies);
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    return this.#deleteVirtualDevice(change, change.created_id, "applied");
+  }
+
+  // Deletes the accessory and reads it back: gone is done; still there or
+  // unread is unknown, decided by the next read.
+  async #deleteVirtualDevice(change, id, refusedStatus) {
+    try {
+      await this.client.deleteAccessory(id);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, refusedStatus, error);
+      }
+    }
+    let after;
+    try {
+      after = await this.client.getAccessoryOrNull(id);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (after === null) {
+      return this.#finishNative(
+        change,
+        change.kind === VIRTUAL_DEVICE ? "restored" : "applied",
+        undefined,
+        { last_verification: freshVerification("device_absent") },
+      );
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      configuration_matches: undefined,
+      conflict_reason: change.native_acknowledged
+        ? "ack_without_device_deletion"
+        : "device_delete_outcome_unknown",
+      last_verification: freshVerification("device_still_present"),
+    });
+  }
+
+  // What refers to a virtual device: the scenarios the hub lists for it,
+  // the devices its characteristics are linked with, the bridges that
+  // export it and the logic assigned to its services.
+  async #virtualDeviceDependencies(accessory) {
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const services = ownServices(accessory);
+    const scenarios = (
+      await this.client.listAccessoryScenarios(accessory.id)
+    ).map(({ index, name }) => ({
+      ref: `${homeRef}/scenario/${encodeURIComponent(index)}`,
+      name,
+    }));
+    const linked = [];
+    for (const service of services) {
+      for (const characteristic of service.characteristics ?? []) {
+        if (characteristic.control?.type === "Name") continue;
+        const target = {
+          aId: accessory.id,
+          sId: service.sId,
+          cId: characteristic.cId,
+        };
+        const others = (await this.client.listLinks(target))
+          .filter(({ type }) => type === "IN" || type === "OUT")
+          .flatMap(({ characteristics }) => characteristics)
+          .filter(({ aId }) => aId !== accessory.id);
+        if (others.length > 0) {
+          linked.push({ type: characteristic.control?.type, others });
+        }
+      }
+    }
+    let names = new Map();
+    if (linked.length > 0) {
+      names = new Map(
+        (await this.client.listAccessories()).map(({ id, name }) => [id, name]),
+      );
+    }
+    const links = linked.map(({ type, others }) => ({
+      characteristic: type,
+      with: [...new Set(others.map(({ aId }) => aId))].map((aId) => ({
+        ref: `${homeRef}/accessory/${aId}`,
+        name: names.get(aId) ?? null,
+      })),
+    }));
+    const logics = [];
+    for (const service of services) {
+      for (const logic of await this.client.listLogics({
+        aId: accessory.id,
+        sId: service.sId,
+      })) {
+        logics.push({
+          name:
+            typeof logic.name === "string" ? logic.name : String(logic.type),
+        });
+      }
+    }
+    const exports = await this.client.accessoryBridgeExports(accessory.id);
+    const bridges = exports.filter(({ exported }) => exported !== null);
+    const bridgesUnread = exports
+      .filter(({ exported }) => exported === null)
+      .map(({ ref, name }) => ({ ref, name }));
+    // Code scenarios that name the device; code not read is named too, as
+    // it may refer to it.
+    const code = await this.client.accessoryCodeMentions(accessory);
+    return {
+      scenarios,
+      code: code.mentions.map(({ scenario_ref: ref, scenario_name: name }) => ({
+        ref,
+        name,
+      })),
+      ...(code.unchecked.length > 0
+        ? {
+            code_unread: code.unchecked.map((entry) => ({
+              ...(entry.scenario_ref ? { ref: entry.scenario_ref } : {}),
+              reason: entry.outcome,
+              ...(entry.scenarios_not_read
+                ? { scenarios: entry.scenarios_not_read }
+                : {}),
+            })),
+          }
+        : {}),
+      links,
+      bridges,
+      ...(bridgesUnread.length > 0 ? { bridges_unread: bridgesUnread } : {}),
+      logics,
+    };
+  }
+
+  // «Удали кнопку Десерт».
+  async #prepareVirtualDeviceDelete(input) {
+    const { id } = parseAccessoryRef(input.target_ref, this.hubSerial);
+    const accessory = await this.client.getAccessory(id);
+    if (accessory.virtual !== true) throw notAVirtualDevice();
+    const [room, dependencies] = await Promise.all([
+      this.client.getRoom(accessory.roomId),
+      this.#virtualDeviceDependencies(accessory),
+    ]);
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: VIRTUAL_DEVICE_DELETE,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      reason: input.reason,
+      target_ref: input.target_ref,
+      room_id: accessory.roomId,
+      room_name: room?.name ?? null,
+      target_name: accessory.name,
+      baseline_snapshot: virtualDeviceSnapshot(accessory),
+      dependencies,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("device_observed"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return {
+      ...publicNativeChange(change),
+      ...(hasDependencies(dependencies)
+        ? { tell_owner: VIRTUAL_DEVICE_DEPENDENCIES_NOTE }
+        : {}),
+    };
+  }
+
+  async #applyVirtualDeviceDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (recreationSent(change)) return this.#getVirtualDeviceDelete(change);
+    const id = change.baseline_snapshot.id;
+    const accessory = await this.client.getAccessoryOrNull(id);
+    if (accessory === null) {
+      if (change.native_write_sent === true) {
+        return this.#finishNative(change, "applied", undefined, {
+          last_verification: freshVerification("device_absent"),
+        });
+      }
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "virtual_device_missing",
+        last_verification: freshVerification("device_missing"),
+      });
+    }
+    if (
+      !isDeepStrictEqual(
+        virtualDeviceSnapshot(accessory),
+        change.baseline_snapshot,
+      )
+    ) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        last_verification: freshVerification("conflict"),
+      });
+    }
+    // The owner confirmed what prepare named; something new since then is
+    // theirs to hear of first.
+    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    if (!dependenciesWithin(dependencies, change.dependencies)) {
+      return this.#finishNative(change, "conflict", undefined, {
+        dependencies,
+        conflict_reason: "dependencies_changed",
+        last_verification: freshVerification("dependencies_changed"),
+      });
+    }
+    await this.#persistNativeIntent(change, "applying", "apply");
+    return this.#deleteVirtualDevice(change, id, "not_applied");
+  }
+
+  async #getVirtualDeviceDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (change.native_write_sent !== true) {
+      return publicStoredNativeChange(change);
+    }
+    if (recreationSent(change)) {
+      return this.#restoreVirtualDeviceDelete(change, { readOnly: true });
+    }
+    let accessory;
+    try {
+      accessory = await this.client.getAccessoryOrNull(
+        change.baseline_snapshot.id,
+      );
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    return this.#finishNative(
+      change,
+      accessory === null ? "applied" : "uncertain",
+      undefined,
+      {
+        last_verification: freshVerification(
+          accessory === null ? "device_absent" : "device_still_present",
+        ),
+      },
+    );
+  }
+
+  // Undo of a deletion creates the device again with its name, room and
+  // service types. It is a new device: what referred to the old one is not
+  // put back on it.
+  async #restoreVirtualDeviceDelete(change, { readOnly = false } = {}) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    const snapshot = change.baseline_snapshot;
+    const request = {
+      name: snapshot.name,
+      roomId: snapshot.room_id,
+    };
+    if (change.recreated_id !== undefined) {
+      const accessory = await this.client.getAccessoryOrNull(
+        change.recreated_id,
+      );
+      return accessory === null
+        ? this.#finishNative(change, "conflict", undefined, {
+            conflict_reason: "recreated_device_missing",
+            last_verification: freshVerification("recreated_device_missing"),
+          })
+        : this.#finishNative(change, "restored", undefined, {
+            recreated_snapshot: virtualDeviceSnapshot(accessory),
+            last_verification: freshVerification("recreated_device_observed"),
+          });
+    }
+    if (recreationSent(change)) {
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        request,
+        change.restore_baseline_ids,
+      );
+    }
+    if (readOnly) return publicStoredNativeChange(change);
+    if (change.status !== "applied") {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "virtual_device_deletion_not_confirmed",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    if (!(await this.client.getRoom(snapshot.room_id))) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "room_missing",
+        last_verification: freshVerification("room_missing"),
+      });
+    }
+    const [serviceTypes, accessories] = await Promise.all([
+      this.client.listServiceTypes(),
+      this.client.listAccessories(),
+    ]);
+    change.restore_baseline_ids = accessories.map(({ id }) => id);
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    let created;
+    try {
+      created = await this.client.createAccessory({
+        ...request,
+        services: recreateServices(snapshot, serviceTypes),
+      });
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "applied", error);
+      }
+      return this.#recordUnknownVirtualCreation(
+        change,
+        "uncertain",
+        request,
+        change.restore_baseline_ids,
+      );
+    }
+    change.native_acknowledged = true;
+    change.write_intent.acknowledged = true;
+    change.recreated_id = created.id;
+    await this.#saveBeforeWrite(change);
+    return this.#restoreVirtualDeviceDelete(change);
+  }
+
   async #prepareVirtualLightGroup(input) {
     parseConfiguredHomeRef(input.target_ref, this.hubSerial);
     const name = requiredNativeName(input.name, "virtual light group").trim();
@@ -844,6 +1548,7 @@ export class AutomationService {
         configuredHomeRef(this.hubSerial),
         now,
       ),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -968,6 +1673,7 @@ export class AutomationService {
     const change = {
       id,
       kind: "block_data_update",
+      hub_code_error_before: scenario.error === true,
       status: "prepared",
       home_ref: configuredHomeRef(this.hubSerial),
       target_ref: input.target_ref,
@@ -985,6 +1691,7 @@ export class AutomationService {
       ...(prepared.pauseOutcomes.length > 0
         ? { pause_outcomes: prepared.pauseOutcomes }
         : {}),
+      ...(await this.#blockCodeMentions(validation)),
       native_write_sent: false,
       native_acknowledged: false,
       last_verification: freshVerification("baseline"),
@@ -993,9 +1700,15 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    return publicNativeChange(change, undefined, {
-      blockActionSnapshotFresh: true,
-    });
+    // Deleted nodes the agent cannot write back are the owner's to hear of
+    // before apply.
+    const [lostNodes] = removedUnwritableLimitation(change);
+    return {
+      ...publicNativeChange(change, undefined, {
+        blockActionSnapshotFresh: true,
+      }),
+      ...(lostNodes ? { tell_owner: lostNodes } : {}),
+    };
   }
 
   async #prepareBlockActionPause(input) {
@@ -1101,6 +1814,297 @@ export class AutomationService {
     return publicNativeChange(change);
   }
 
+  async #readDeletableScenario(targetRef) {
+    const target = parseScenarioRef(targetRef, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    const snapshot = deleteSnapshot(scenario);
+    refuseUndeletable(snapshot);
+    return { target, snapshot };
+  }
+
+  // The scenario as it is, and what stops working without it. With any
+  // dependency the owner hears of it first (tell_owner, no next call).
+  async #prepareScenarioDelete(input) {
+    const { target, snapshot } = await this.#readDeletableScenario(
+      input.target_ref,
+    );
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const dependencies = await scenarioDeleteDependencies(
+      this.client,
+      homeRef,
+      snapshot,
+    );
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: SCENARIO_DELETE,
+      status: "prepared",
+      home_ref: homeRef,
+      target_ref: input.target_ref,
+      target,
+      reason: input.reason,
+      baseline_snapshot: snapshot,
+      dependencies,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    const tellOwner = scenarioDeleteTellOwner(dependencies);
+    return {
+      ...publicNativeChange(change),
+      ...(tellOwner ? { tell_owner: tellOwner } : {}),
+    };
+  }
+
+  async #applyScenarioDelete(change) {
+    if (
+      !["prepared", "not_applied", "applying", "uncertain"].includes(
+        change.status,
+      ) ||
+      nativeIntentDirection(change) === "restore"
+    ) {
+      return this.#getScenarioDelete(change);
+    }
+    const pending = ["applying", "uncertain"].includes(change.status);
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      if (!pending) throw error;
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return pending
+        ? this.#finishNative(change, "applied", undefined, {
+            last_verification: freshVerification("scenario_absent"),
+          })
+        : this.#finishNative(change, "conflict", undefined, {
+            conflict_reason: "scenario_missing",
+            last_verification: freshVerification("scenario_missing"),
+          });
+    }
+    const snapshot = deleteSnapshot(current);
+    const differing = deleteFieldsDiffering(change.baseline_snapshot, snapshot);
+    if (differing.length > 0) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "manual_change",
+        configuration_differences: differing,
+        last_verification: freshVerification("baseline_changed"),
+      });
+    }
+    // What undo brings back: the scenario as it is right before the delete.
+    change.deleted_snapshot = snapshot;
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.deleteScenario(change.target.index);
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "not_applied", error);
+      }
+    }
+    return this.#settleScenarioDelete(change);
+  }
+
+  // Whether the scenario is gone decides the delete, answered or not.
+  async #settleScenarioDelete(change) {
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (current === null) {
+      return this.#finishNative(change, "applied", undefined, {
+        last_verification: freshVerification("scenario_absent"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      conflict_reason: change.native_acknowledged
+        ? "ack_without_deletion"
+        : undefined,
+      last_verification: freshVerification("scenario_still_present"),
+    });
+  }
+
+  async #getScenarioDelete(change) {
+    if (["applying", "uncertain", "restoring"].includes(change.status)) {
+      return nativeIntentDirection(change) === "restore"
+        ? this.#settleScenarioRecreate(change)
+        : this.#settleScenarioDelete(change);
+    }
+    if (change.status !== "applied") return publicStoredNativeChange(change);
+    let current;
+    try {
+      current = await this.client.getScenario(change.target.index);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    // The hub may give the number out again after its counter is reset.
+    return this.#recordNativeObservation(
+      change,
+      undefined,
+      current === null ? "scenario_absent" : "scenario_number_in_use",
+    );
+  }
+
+  // Undo: the scenario is created again from what it held at the delete,
+  // under a new number.
+  async #restoreScenarioDelete(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (
+      ["restoring", "uncertain"].includes(change.status) &&
+      nativeIntentDirection(change) === "restore"
+    ) {
+      return this.#settleScenarioRecreate(change);
+    }
+    if (["applying", "uncertain"].includes(change.status)) {
+      const settled = await this.#settleScenarioDelete(change);
+      if (change.status !== "applied") return settled;
+    }
+    if (change.status !== "applied") {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    change.restore_ceiling = highestScenarioNumber(
+      await this.client.listScenarios(),
+    );
+    await this.#persistNativeIntent(change, "restoring", "restore");
+    try {
+      const created = await this.client.createScenario(
+        recreateRequest(change.deleted_snapshot),
+      );
+      change.recreated_index = created.index;
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        throw await this.#finishRefusedWrite(change, "applied", error);
+      }
+    }
+    return this.#settleScenarioRecreate(change);
+  }
+
+  // The recreated scenario by its number, or after a lost reply the one new
+  // scenario (numbered above the highest before the create) that holds the
+  // same content. None or several leave the undo unknown; it is never sent
+  // again, so no second copy is made.
+  async #settleScenarioRecreate(change) {
+    const saved = change.deleted_snapshot;
+    let found;
+    try {
+      if (change.recreated_index !== undefined) {
+        const scenario = await this.client.getScenario(change.recreated_index);
+        found = scenario ? [scenario] : [];
+      } else {
+        const candidates = (await this.client.listScenarios()).filter(
+          ({ index, type }) =>
+            type === saved.type && Number(index) > change.restore_ceiling,
+        );
+        found = [];
+        for (const { index } of candidates) {
+          const scenario = await this.client.getScenario(index);
+          if (isRecreatedCopy(saved, scenario)) found.push(scenario);
+        }
+      }
+    } catch (error) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(error),
+      });
+    }
+    if (found.length !== 1) {
+      return this.#finishNative(change, "uncertain", undefined, {
+        conflict_reason:
+          found.length === 0
+            ? "recreated_scenario_not_found"
+            : "several_recreated_candidates",
+        last_verification: freshVerification(
+          found.length === 0
+            ? "recreated_scenario_missing"
+            : "several_recreated_candidates",
+        ),
+      });
+    }
+    const [scenario] = found;
+    change.recreated_index = scenario.index;
+    const differing = deleteFieldsDiffering(saved, deleteSnapshot(scenario));
+    return this.#finishNative(change, "restored", undefined, {
+      configuration_differences: differing.length > 0 ? differing : undefined,
+      not_restored: await this.#notRestoredAfterRecreate(change),
+      last_verification: freshVerification(
+        differing.length > 0
+          ? "recreated_scenario_differs"
+          : "recreated_scenario_observed",
+      ),
+    });
+  }
+
+  // What the recreated scenario did not get back: scenario targets that
+  // still point at the old number, read again now (as prepared when the
+  // read fails), and a LOGIC's device assignments.
+  async #notRestoredAfterRecreate(change) {
+    let targets = change.dependencies?.scenario_targets ?? [];
+    try {
+      const blocks = [];
+      for (const summary of await this.client.listScenarios()) {
+        if (summary.type !== "BLOCK") continue;
+        const scenario = await this.client.getScenario(summary.index);
+        if (scenario && typeof scenario.data === "string")
+          blocks.push(scenario);
+      }
+      targets = scenarioTargetsOf(blocks, change.home_ref, change.target.index);
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+    }
+    const assignments = change.dependencies?.logic_assignments ?? [];
+    return {
+      ...(targets.length > 0 ? { scenario_targets: targets } : {}),
+      ...(assignments.length > 0
+        ? { logic_assignments: structuredClone(assignments) }
+        : {}),
+    };
+  }
+
+  // A scenario target that cannot be written back because its scenario was
+  // deleted and the agent's undo created it again under a new number: the
+  // error names where it is now (numbers are not translated).
+  async #withRecreatedTargets(error, homeRef) {
+    const missing = missingScenarioTargets(error);
+    if (missing.length === 0) return error;
+    const recreated = (await this.store.list()).filter(
+      (candidate) =>
+        candidate.kind === SCENARIO_DELETE &&
+        candidate.home_ref === homeRef &&
+        candidate.status === "restored" &&
+        candidate.recreated_index !== undefined &&
+        missing.includes(candidate.target?.index),
+    );
+    if (recreated.length === 0) return error;
+    error.message = [
+      error.message,
+      ...recreated.map((deleted) => recreatedTargetNote(deleted)),
+    ].join(" ");
+    return error;
+  }
+
   async #knownBlockPauses(targetRef) {
     try {
       parseConfiguredHomeRef(targetRef, this.hubSerial);
@@ -1131,6 +2135,7 @@ export class AutomationService {
 
   async #prepareLogicSourceCreate(input) {
     const source = requiredLogicSource(input.source);
+    refuseHubCode(source);
     if (
       typeof input.name !== "string" ||
       typeof input.description !== "string" ||
@@ -1184,19 +2189,36 @@ export class AutomationService {
     const metadataField = Object.keys(LOGIC_SOURCE_METADATA_INPUTS).find(
       (field) => input[field] !== undefined,
     );
-    if (metadataField) {
-      throw logicSourceMetadataInput(input.target_ref, metadataField);
-    }
-    const source = requiredLogicSource(input.source);
     const target = parseScenarioRef(input.target_ref, this.hubSerial);
+    // Where such a field changes depends on the scenario's type, so the
+    // scenario is read first.
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) throw scenarioNotFound();
+    if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
+      throw notCodeScenario();
+    }
+    if (metadataField) {
+      throw logicSourceMetadataInput(
+        input.target_ref,
+        metadataField,
+        scenario.type,
+      );
+    }
+    const source = requiredLogicSource(input.source);
     const baseline = logicScenarioSnapshot(scenario);
     if (baseline.predefined === true) {
       throw new SprutHubError(
         "predefined_logic_read_only",
         "Clone a predefined LOGIC into a new owned scenario instead of changing its source.",
         "prepare_native_change",
+      );
+    }
+    // Answers show such code only as [REDACTED]: the agent has not seen what
+    // a new source would replace.
+    if (codeShownRedacted(baseline.data)) {
+      throw new SprutHubError(
+        "hidden_code",
+        `This ${baseline.type}'s code holds credential-shaped text that sprut-agent shows only as [REDACTED], so the agent cannot read the code it would replace. Nothing was prepared. Tell the owner to change it in the SprutHub app.`,
       );
     }
     if (baseline.data === source) {
@@ -1209,12 +2231,28 @@ export class AutomationService {
         owned_change_created: false,
       };
     }
-    const effects = logicCodeInfoEffects(baseline, source);
+    refuseHubCode(source);
+    const global = baseline.type === "GLOBAL";
+    const effects = global
+      ? { snapshot: {}, codeSets: [], restoreCodeSets: [], warnings: [] }
+      : logicCodeInfoEffects(baseline, source);
+    const diff = global ? codeLineDiff(baseline.data, source) : undefined;
+    const mentions = diff
+      ? await this.#codeMentions(diff.addedText)
+      : undefined;
     const id = this.store.newId();
     const now = new Date().toISOString();
     const change = {
       id,
       kind: "logic_source_update",
+      hub_code_error_before: scenario.error === true,
+      ...(diff
+        ? {
+            code_diff: diff.hunks,
+            ...(diff.truncated ? { code_diff_truncated: true } : {}),
+            ...(mentions.length > 0 ? { code_mentions: mentions } : {}),
+          }
+        : {}),
       status: "prepared",
       home_ref: configuredHomeRef(this.hubSerial),
       target_ref: input.target_ref,
@@ -1240,6 +2278,42 @@ export class AutomationService {
     };
     await this.store.save(change);
     return publicNativeChange(change);
+  }
+
+  // The accessories the code actions a BLOCK change adds or changes name,
+  // each with the action's pointer; code kept as stored is the owner's.
+  async #blockCodeMentions(validation) {
+    const mentions = [];
+    for (const { path, code, kept } of validation.codeActions) {
+      if (kept) continue;
+      for (const mention of await this.#codeMentions(code)) {
+        mentions.push({ pointer: blockPathToPointer(path), ...mention });
+      }
+    }
+    return mentions.length > 0 ? { code_mentions: mentions } : {};
+  }
+
+  // The accessories code names (accessoryMentions), by ref and name.
+  async #codeMentions(source) {
+    if (source.trim() === "") return [];
+    const homeRef = configuredHomeRef(this.hubSerial);
+    // The home snapshot kept in memory, read whole only when it is stale.
+    const { catalog } = await this.client.homeCatalog(
+      this.hubSerial,
+      Date.now() + this.client.timeoutMs,
+    );
+    return catalog.accessories.flatMap((accessory) => {
+      const found = accessoryMentions(source, accessory);
+      return found
+        ? [
+            {
+              accessory_ref: `${homeRef}/accessory/${accessory.id}`,
+              name: accessory.name,
+              found_by: found.found_by,
+            },
+          ]
+        : [];
+    });
   }
 
   // With anchorMayBeGone, a removed anchor accessory or service reads as
@@ -1298,11 +2372,23 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#applyVirtualLightGroup(change);
     }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#applyVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#applyVirtualDeviceDelete(change);
+    }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#applyLampGroupMembers(change);
+    }
     if (change.kind === "logic_assignment") {
       return this.#applyLogicAssignment(change);
     }
     if (change.kind === "scenario_run") {
       return this.#applyScenarioRun(change);
+    }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#applyScenarioDelete(change);
     }
     if (isLogicSourceChange(change)) {
       return this.#applyScenarioChange(change);
@@ -1450,7 +2536,19 @@ export class AutomationService {
           });
           continue;
         }
-        items.push({ index, command, input, draft, name, onTarget, shown });
+        items.push({
+          index,
+          command,
+          input,
+          draft,
+          name,
+          onTarget,
+          shown,
+          ...(draft.fields.virtual_write &&
+          draft.contract.type === BUTTON_PRESS_TYPE
+            ? { note: BUTTON_PRESS_NOTE }
+            : {}),
+        });
       } catch (error) {
         if (!isDeviceCommandRejection(error)) throw error;
         invalid.push(
@@ -2083,11 +3181,23 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#getVirtualLightGroup(change);
     }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#getVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#getVirtualDeviceDelete(change);
+    }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#getLampGroupMembers(change);
+    }
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
     if (change.kind === "scenario_run") {
       return this.#getScenarioRun(change);
+    }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#getScenarioDelete(change);
     }
     if (isLogicSourceChange(change)) {
       return this.#getScenarioChange(change);
@@ -2245,6 +3355,17 @@ export class AutomationService {
     if (change.kind === "virtual_light_group") {
       return this.#restoreVirtualLightGroup(change);
     }
+    if (change.kind === VIRTUAL_DEVICE) {
+      return this.#restoreVirtualDevice(change);
+    }
+    if (change.kind === VIRTUAL_DEVICE_DELETE) {
+      return this.#restoreVirtualDeviceDelete(change);
+    }
+    if (change.kind === LIGHT_GROUP_MEMBERS) {
+      return this.#undoOrUnknown(change, () =>
+        this.#restoreLampGroupMembers(change),
+      );
+    }
     const valueKind = nativeValueKind(change.kind);
     if (valueKind) {
       // A command's restorability follows only its saved type and baseline.
@@ -2263,6 +3384,11 @@ export class AutomationService {
     }
     if (change.kind === "logic_assignment") {
       return this.#restoreLogicAssignment(change);
+    }
+    if (change.kind === SCENARIO_DELETE) {
+      return this.#undoOrUnknown(change, () =>
+        this.#restoreScenarioDelete(change),
+      );
     }
     if (change.kind === "scenario_run") {
       throw new SprutHubError(
@@ -3986,6 +5112,488 @@ export class AutomationService {
     });
     change.history.push({ status: change.status, at: now });
     await this.#saveBeforeWrite(change);
+  }
+
+  // An existing virtual lamp group as the owner knows it: its lamp service,
+  // name and room, the characteristics it links, the IN links of each and
+  // the lamps they reach, with names, rooms and whether they are online.
+  async #readLampGroup(ref) {
+    const parsed = parseLampRef(ref, this.hubSerial);
+    const accessory = await this.client.getAccessoryOrNull(parsed.aId);
+    if (!accessory) throw notALampGroup(ref);
+    const service = lampGroupService(accessory, parsed.sId, ref);
+    const controls = lampControls(accessory, service);
+    const links = Object.fromEntries(
+      await Promise.all(
+        Object.entries(controls).map(async ([type, target]) => [
+          type,
+          incomingLinks(await this.client.listLinks(target)),
+        ]),
+      ),
+    );
+    const types = linkedTypes(controls, links);
+    const rooms = new Map(
+      (await this.#listRoomRecords()).map(({ id, name }) => [id, name]),
+    );
+    const accessories = new Map([[accessory.id, accessory]]);
+    const members = [];
+    for (const member of currentMembers(types, links)) {
+      const lamp = await this.#lampAccessory(accessories, member.target.aId);
+      members.push({
+        service_ref: lampServiceRef(
+          configuredHomeRef(this.hubSerial),
+          member.target,
+        ),
+        target: member.target,
+        ...(lamp
+          ? {
+              name: lamp.name,
+              room: rooms.get(lamp.roomId) ?? null,
+              online: lamp.online === true,
+            }
+          : { exists: false }),
+        types: member.types,
+      });
+    }
+    return {
+      ref: lampServiceRef(configuredHomeRef(this.hubSerial), {
+        aId: accessory.id,
+        sId: service.sId,
+      }),
+      target: { aId: accessory.id, sId: service.sId },
+      name: accessory.name,
+      room: rooms.get(accessory.roomId) ?? null,
+      controls,
+      links,
+      types,
+      members,
+      rooms,
+      accessories,
+    };
+  }
+
+  async #lampAccessory(accessories, aId) {
+    if (!accessories.has(aId)) {
+      accessories.set(aId, await this.client.getAccessoryOrNull(aId));
+    }
+    return accessories.get(aId);
+  }
+
+  // «Перевяжи группу»: one change that gives the group exactly the named
+  // lamps. Lamps it keeps are not touched; a joining one is linked on each
+  // characteristic the group links that it has; links to a lamp left out
+  // are removed.
+  async #prepareLampGroupMembers(input) {
+    const group = await this.#readLampGroup(input.target_ref);
+    if (
+      !Array.isArray(input.member_service_refs) ||
+      input.member_service_refs.length === 0
+    ) {
+      throw new SprutHubError(
+        "group_members_required",
+        "Name in member_service_refs every lamp the group should hold, the ones it keeps included.",
+        "get_native_change_contract",
+      );
+    }
+    const homeRef = configuredHomeRef(this.hubSerial);
+    const desired = [];
+    for (const ref of input.member_service_refs) {
+      const parsed = parseLampRef(ref, this.hubSerial);
+      const accessory = await this.#lampAccessory(
+        group.accessories,
+        parsed.aId,
+      );
+      if (!accessory) {
+        throw new SprutHubError(
+          "group_member_not_found",
+          `${ref} is not in the home. Find the lamp with find_devices.`,
+          "find_devices",
+        );
+      }
+      const service = lampService(accessory, parsed.sId, ref);
+      const target = { aId: accessory.id, sId: service.sId };
+      if (serviceKey(target) === serviceKey(group.target)) {
+        throw new SprutHubError(
+          "group_member_is_group",
+          "The group cannot be one of its own lamps.",
+          "get_native_change_contract",
+        );
+      }
+      if (
+        desired.some(
+          (member) => serviceKey(member.target) === serviceKey(target),
+        )
+      ) {
+        throw new SprutHubError(
+          "duplicate_group_member",
+          `${ref} is named twice.`,
+          "get_native_change_contract",
+        );
+      }
+      desired.push({
+        ref: lampServiceRef(homeRef, target),
+        target,
+        accessory,
+        controls: lampControls(accessory, service),
+      });
+    }
+    const { steps, changes } = planGroupMembers({
+      homeRef,
+      types: group.types,
+      links: group.links,
+      desired,
+    });
+    const linked = new Set(
+      group.members.map((member) => serviceKey(member.target)),
+    );
+    const kept = new Set(desired.map((member) => serviceKey(member.target)));
+    const members = [
+      ...desired.map((member) => {
+        const planned = changes.get(serviceKey(member.target));
+        const stays = linked.has(serviceKey(member.target));
+        return {
+          service_ref: member.ref,
+          name: member.accessory.name,
+          room: group.rooms.get(member.accessory.roomId) ?? null,
+          online: member.accessory.online === true,
+          change: stays ? "stays" : "joins",
+          links_added: planned.added,
+          lacks: !stays || planned.added.length > 0 ? planned.lacks : [],
+        };
+      }),
+      ...group.members
+        .filter((member) => !kept.has(serviceKey(member.target)))
+        .map((member) => ({
+          service_ref: member.service_ref,
+          ...(member.exists === false
+            ? { exists: false }
+            : { name: member.name, room: member.room, online: member.online }),
+          change: "leaves",
+          links_removed: member.types,
+        })),
+    ];
+    const lampGroup = { ref: group.ref, name: group.name, room: group.room };
+    if (steps.length === 0) {
+      return {
+        status: "already_desired",
+        operation: input.operation,
+        target_ref: group.ref,
+        lamp_group: lampGroup,
+        characteristics: [...group.types],
+        members: members.map(publicLampGroupMember),
+        native_write_sent: false,
+        owned_change_created: false,
+      };
+    }
+    const outOfStep = outOfStepLamps(steps, desired);
+    const pick = (record) =>
+      Object.fromEntries(group.types.map((type) => [type, record[type]]));
+    const now = new Date().toISOString();
+    const change = {
+      id: this.store.newId(),
+      kind: LIGHT_GROUP_MEMBERS,
+      status: "prepared",
+      home_ref: homeRef,
+      target_ref: group.ref,
+      reason: input.reason,
+      group: { ...group.target, name: group.name, room: group.room },
+      linked_types: [...group.types],
+      group_controls: pick(group.controls),
+      baseline_links: pick(group.links),
+      member_service_refs: desired.map(({ ref }) => ref),
+      members,
+      ...(outOfStep ? { out_of_step: outOfStep } : {}),
+      steps,
+      native_write_sent: false,
+      native_acknowledged: false,
+      last_verification: freshVerification("baseline_links_observed"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    return publicNativeChange(change);
+  }
+
+  async #observeLampGroup(change) {
+    const accessory = await this.client.getAccessoryOrNull(change.group.aId);
+    if (!accessory) return { absent: true };
+    const links = {};
+    for (const type of change.linked_types) {
+      links[type] = incomingLinks(
+        await this.client.listLinks(change.group_controls[type]),
+      );
+    }
+    return { absent: false, links };
+  }
+
+  // A group gone, or links that differ where this change sent nothing: the
+  // change stops there and names what it saw.
+  async #lampGroupObstacle(change, observed) {
+    if (observed.absent) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: "lamp_group_missing",
+        last_verification: freshVerification("lamp_group_missing"),
+      });
+    }
+    const differences = foreignDifferences(change, observed, change.home_ref);
+    if (differences.length === 0) return null;
+    return this.#finishNative(change, "conflict", undefined, {
+      conflict_reason: "manual_change",
+      observed_differences: differences,
+      last_verification: freshVerification("conflict"),
+    });
+  }
+
+  // What the group's links now mean for this change.
+  async #recordLampGroupState(change, observed) {
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    const keys = linkKeys(observed.links);
+    const settled = { observed_differences: undefined };
+    if (sameKeys(keys, expectedAppliedKeys(change))) {
+      return this.#finishNative(change, "applied", undefined, {
+        ...settled,
+        configuration_matches: true,
+        last_verification: freshVerification("group_links_observed"),
+      });
+    }
+    if (sameKeys(keys, linkKeys(change.baseline_links))) {
+      if (nativeIntentDirection(change) === "restore") {
+        return this.#finishNative(change, "restored", undefined, {
+          ...settled,
+          last_verification: freshVerification("baseline_links_observed"),
+        });
+      }
+      if (!change.steps.some(({ sent }) => sent)) {
+        return publicNativeChange(change, undefined, {
+          verification: freshVerification("baseline_links_observed"),
+        });
+      }
+      return this.#finishNative(change, "uncertain", undefined, {
+        ...settled,
+        conflict_reason: "link_write_outcome_unknown",
+        last_verification: freshVerification("sent_link_not_observed"),
+      });
+    }
+    return this.#finishNative(change, "uncertain", undefined, {
+      ...settled,
+      conflict_reason: "partial_lamp_group_change",
+      last_verification: freshVerification("owned_partial_group_observed"),
+    });
+  }
+
+  async #getLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    let observed;
+    try {
+      observed = await this.#observeLampGroup(change);
+    } catch (error) {
+      return publicNativeChange(change, undefined, {
+        verification: failedVerification(error),
+      });
+    }
+    return this.#recordLampGroupState(change, observed);
+  }
+
+  async #applyLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    const observed = await this.#observeLampGroup(change);
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    if (!change.steps.some(({ sent }) => sent)) {
+      await this.#validateLampGroupJoiners(change);
+    }
+    const stopped = await this.#writeLampGroupSteps(
+      change,
+      change.steps,
+      "apply",
+      observed,
+    );
+    if (stopped) return stopped;
+    change.native_acknowledged = change.steps.every(
+      ({ acknowledged }) => acknowledged,
+    );
+    return this.#recordLampGroupState(
+      change,
+      await this.#observeLampGroup(change),
+    );
+  }
+
+  async #restoreLampGroupMembers(change) {
+    if (change.status === "restored") return publicStoredNativeChange(change);
+    if (!change.steps.some(({ sent }) => sent)) {
+      return this.#finishNative(change, "not_owned", undefined, {
+        conflict_reason: "change_was_not_applied",
+        last_verification: savedVerification(change.last_verification),
+      });
+    }
+    const observed = await this.#observeLampGroup(change);
+    const obstacle = await this.#lampGroupObstacle(change, observed);
+    if (obstacle) return obstacle;
+    // Derived again each time from what apply sent: a step already undone
+    // is seen in the links and not written again.
+    change.restore_steps = restoreSteps(change);
+    await this.#saveBeforeWrite(change);
+    const stopped = await this.#writeLampGroupSteps(
+      change,
+      change.restore_steps,
+      "restore",
+      observed,
+    );
+    if (stopped) return stopped;
+    // The previous links seen after an undo are its result, whether or not
+    // it had to write anything for them.
+    const after = await this.#observeLampGroup(change);
+    if (
+      !after.absent &&
+      sameKeys(linkKeys(after.links), linkKeys(change.baseline_links))
+    ) {
+      return this.#finishNative(change, "restored", undefined, {
+        observed_differences: undefined,
+        last_verification: freshVerification("baseline_links_observed"),
+      });
+    }
+    return this.#recordLampGroupState(change, after);
+  }
+
+  // The lamps an apply links have not changed since prepare.
+  async #validateLampGroupJoiners(change) {
+    const accessories = new Map();
+    for (const step of change.steps) {
+      if (step.action !== "add") continue;
+      const accessory = await this.#lampAccessory(accessories, step.target.aId);
+      const characteristic =
+        accessory && findNativeCharacteristic(accessory, step.target);
+      if (
+        characteristic?.control?.type !== step.type ||
+        characteristic.control.read !== true ||
+        characteristic.control.write !== true
+      ) {
+        throw new SprutHubError(
+          "binding_changed",
+          "A lamp to join changed after preparation. Nothing was written; prepare again.",
+          "prepare_native_change",
+        );
+      }
+    }
+  }
+
+  // Each step not yet seen in the group's links is written, recorded
+  // before and checked after by reading that characteristic's links again.
+  // Adding a link that exists and removing one that is gone change nothing
+  // on the hub (2026-10-14-light-group-relink, 8 and 10), so a step whose
+  // earlier send is unknown is sent again once the read shows it missing.
+  // Returns a finished result when a write is not confirmed.
+  async #writeLampGroupSteps(change, steps, direction, observed) {
+    for (const step of steps) {
+      if (stepInEffect(step, linkKeys(observed.links))) {
+        if (!step.completed) {
+          step.completed = true;
+          if (step.sent && !step.acknowledged) {
+            change.recovered_after_uncertain_write = true;
+          }
+          await this.#saveBeforeWrite(change);
+        }
+        continue;
+      }
+      const source = change.group_controls[step.type];
+      const linkId =
+        step.action === "remove"
+          ? currentLinkIndex(observed.links, step)
+          : undefined;
+      await this.#persistVirtualLightStep(
+        change,
+        step.action === "add" ? "adding_link" : "removing_link",
+        { characteristic_type: step.type, member_ref: step.member_ref },
+        direction,
+      );
+      Object.assign(step, {
+        sent: true,
+        acknowledged: false,
+        completed: false,
+      });
+      await this.#saveBeforeWrite(change);
+      try {
+        if (step.action === "add") {
+          await this.client.addVirtualLink({
+            ...source,
+            ...virtualLinkTarget(step.target),
+          });
+        } else {
+          await this.client.removeLink({ ...source, linkId });
+        }
+        step.acknowledged = true;
+        change.write_intent.acknowledged = true;
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          step.sent = false;
+          throw await this.#finishRefusedLampGroupStep(
+            change,
+            direction,
+            error,
+          );
+        }
+      }
+      observed.links[step.type] = incomingLinks(
+        await this.client.listLinks(source),
+      );
+      if (!stepInEffect(step, linkKeys(observed.links))) {
+        return this.#finishNative(change, "uncertain", undefined, {
+          configuration_matches: undefined,
+          conflict_reason: step.acknowledged
+            ? "ack_without_link_result"
+            : "link_write_outcome_unknown",
+          last_verification: freshVerification("sent_link_not_observed"),
+        });
+      }
+      step.completed = true;
+      if (!step.acknowledged) change.recovered_after_uncertain_write = true;
+      await this.#saveBeforeWrite(change);
+    }
+    return null;
+  }
+
+  // A link write the hub refused. Before anything of this change took
+  // effect on apply, nothing changed; otherwise the group holds part of it,
+  // recorded as get_native_change sees it, and the error says so.
+  async #finishRefusedLampGroupStep(change, direction, error) {
+    const steps =
+      direction === "apply" ? change.steps : (change.restore_steps ?? []);
+    const partial = steps.some(({ completed }) => completed);
+    if (direction === "apply" && !partial) {
+      return this.#finishRefusedWrite(change, "not_applied", error);
+    }
+    const rejection = writeRejection(error);
+    if (rejection) change.write_intent = { ...change.write_intent, rejection };
+    let recorded;
+    try {
+      recorded = await this.#recordLampGroupState(
+        change,
+        await this.#observeLampGroup(change),
+      );
+    } catch (readError) {
+      recorded = await this.#finishNative(change, "uncertain", undefined, {
+        configuration_matches: undefined,
+        last_verification: failedVerification(readError),
+      });
+    }
+    const changeRef = `spruthub-change://native/${change.id}`;
+    error.details = {
+      ...error.details,
+      change_ref: changeRef,
+      hub_effect: partial ? "partial" : "not_applied",
+      ...(rejection ? { rejection } : {}),
+      change: recorded,
+      next:
+        direction === "apply"
+          ? {
+              tool: "restore_native_change",
+              arguments: { change_ref: changeRef },
+            }
+          : nativeChangeNext(changeRef),
+    };
+    return error;
   }
 
   async listNativeChanges({
@@ -5722,11 +7330,15 @@ export class AutomationService {
         // Restore writes the stored original back, so what it keeps from that
         // original passes as stored, like the nodes an edit keeps; bindings,
         // pause controllers and scenario runs are still checked.
-        await validateBlockData(prepared.data, this.client, {
-          editedFrom: change.baseline_snapshot.data,
-          allowedPauses: pauseChanges,
-          scenarioIndex: change.target.index,
-        });
+        try {
+          await validateBlockData(prepared.data, this.client, {
+            editedFrom: change.baseline_snapshot.data,
+            allowedPauses: pauseChanges,
+            scenarioIndex: change.target.index,
+          });
+        } catch (error) {
+          throw await this.#withRecreatedTargets(error, change.home_ref);
+        }
         // Validation reads current records and can outlast a short pause. Rebuild
         // from the immutable baseline immediately afterwards so that such a pause
         // is not revived by the restore write.
@@ -6070,9 +7682,14 @@ function withLocalState(
 }
 
 // An applied BLOCK or LOGIC change tells the agent to say what it will
-// overwrite, whether the apply or a later check found it applied.
+// overwrite, whether the apply or a later check found it applied. A GLOBAL
+// runs on no trigger of its own. Code the hub holds with error is told
+// instead (hubCodeErrorFields): nothing of it may run.
 function withOverwriteNote(change, result) {
-  return AUTOMATION_CHANGE_KINDS.has(change.kind) && result.status === "applied"
+  return AUTOMATION_CHANGE_KINDS.has(change.kind) &&
+    result.status === "applied" &&
+    !isGlobalCodeChange(change) &&
+    result.hub_code_error !== true
     ? { ...result, tell_owner: AUTOMATION_OVERWRITE_NOTE }
     : result;
 }

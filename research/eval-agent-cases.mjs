@@ -18,12 +18,30 @@
 // home (lights of a room, devices that are on), it is derived from the
 // initial state.
 import {
+  COLOR_SCENES,
+  COLOR_SCENES_SOURCE,
+  SCENE_LAMPS_LINE,
+  withColorScenes,
+} from "../test/fixtures/homes/color-scenes.mjs";
+import {
+  BEDROOM_LAMP,
+  GROUP as CHANDELIER_GROUP,
+  GROUP_CHARACTERISTICS,
+  LAMP_CHARACTERISTICS,
+  NEW_LAMP,
+  OFFLINE_MEMBER,
+  withKitchenChandelier,
+} from "../test/fixtures/homes/kitchen-chandelier.mjs";
+import {
   blockRefProblems,
+  commandThroughLinks,
   evaluateRulesOnChange,
 } from "../test/support/simulated-hub.mjs";
 
 const FLOOR_LAMP_ON = "characteristic/16.13.14/On";
 const FLOOR_LAMP_BRIGHTNESS = "characteristic/16.13.15/Brightness";
+// The floor lamp's light in Alice's bridge, present only while exported.
+const FLOOR_LAMP_IN_ALICE = "bridge/Bridge:yandex/16.13";
 // The living room chandelier («Люстра»), on at 80 % in both fixtures.
 const CHANDELIER = { aId: 15, sId: 13 };
 const CHANDELIER_ON = "characteristic/15.13.14/On";
@@ -41,11 +59,25 @@ const BATHROOM = 8;
 // starts.
 const NEW_LEAK_SENSOR = 900;
 const NEW_LEAK_SENSOR_JOIN_MS = 3_000;
+// A virtual scene button and the one BLOCK it starts, as the owner's
+// «Дом» buttons do; ids free in both homes.
+const SCENE_BUTTON = 950;
+const SCENE_BUTTON_BLOCK = "950";
+const SCENE_BUTTON_BLOCK_NAME = "Свет к десерту";
 // The LOGIC scenario of both fixtures and the name rename-logic-scenario
 // asks for.
 const LEAK_LOGIC = "9";
 const LEAK_LOGIC_NAME = "Защита от протечки";
 const LEAK_LOGIC_NEW_NAME = "Протечка под мойкой";
+
+// The bedroom fumigator of delete-fumigator-scenario and its scenario, and
+// the GLOBAL of delete-global-with-dependents with the two BLOCKs whose
+// code calls it. Ids and numbers no fixture uses.
+const FUMIGATOR = 50;
+const FUMIGATOR_SCENARIO = "95";
+const GLOBAL_TO_DELETE = "96";
+const GLOBAL_TO_DELETE_MOVIE = "97";
+const GLOBAL_TO_DELETE_DINNER = "98";
 
 // Switch services named like these are lights of their room.
 const LIGHT_SWITCH_NAME =
@@ -185,6 +217,117 @@ export const CASES = {
         "It asks the owner which floor lamp is meant (or whether both), making clear there are two: «Торшер у дивана» and «Торшер у окна», by name or by an unmistakable description.",
       ],
     }),
+  },
+  // The owner's main-path case of 14.10.2026: a lamp of a colour group
+  // was replaced. The old one is offline, the new one is the kitchen's
+  // unlinked colour lamp; a lamp of the same name in the bedroom's floor
+  // lamp is not it. The group keeps being the same accessory (Alice
+  // controls it), so nothing but links may change.
+  // The owner's colour scenes are code (research/protocol/
+  // 2026-10-23-scenario-code.md 1.1, 1.2): the lamps of every scene are a
+  // list of ids in the GLOBAL «Цветные сцены». Adding the night light is
+  // its id in that list and nothing else of the code; the stale 63 stays,
+  // since the request does not mention it.
+  "add-night-light-to-color-scenes": {
+    prompt: "Добавь ночник в цветные сцены",
+    patch: withColorScenes,
+    graders: [
+      {
+        name: "only_the_lamp_list_gains_the_night_light",
+        grade: ({ finalState }) => {
+          const data =
+            finalState.scenarios.find(({ index }) => index === COLOR_SCENES)
+              ?.data ?? "";
+          const before = COLOR_SCENES_SOURCE.split("\n");
+          const after = data.split("\n");
+          const at = before.indexOf(SCENE_LAMPS_LINE);
+          const otherLines =
+            after.length === before.length &&
+            before.every(
+              (line, index) => index === at || after[index] === line,
+            );
+          const ids = /^global\.COLOR_SCENE_LIGHTS = \[([\d,\s]*)\];$/
+            .exec(after[at] ?? "")?.[1]
+            .split(",")
+            .map((id) => Number(id.trim()))
+            .sort((a, b) => a - b);
+          return result(
+            otherLines && ids?.join() === "15,16,17,26,63",
+            `other lines unchanged=${otherLines}; list=${after[at]}`,
+          );
+        },
+      },
+      onlyChanges(({ key }) => key === `scenario/${COLOR_SCENES}/data`),
+      answerMatches("answer_names_the_night_light", /ночник/i),
+    ],
+  },
+  "relink-chandelier": {
+    prompt: "Я заменил лампу в люстре на кухне на новую, перевяжи",
+    patch: withKitchenChandelier,
+    graders: [
+      {
+        name: "chandelier_relinked",
+        grade: ({ finalState }) => {
+          const wrong = Object.entries(GROUP_CHARACTERISTICS).flatMap(
+            ([type, cId]) => {
+              const linked = (finalState.links.get(`44.13.${cId}`) ?? [])
+                .filter((link) => link.type === "IN")
+                .flatMap((link) => link.characteristics)
+                .map(({ aId, sId, cId: lamp }) => `${aId}.${sId}.${lamp}`)
+                .sort();
+              const expected = [41, 42, NEW_LAMP]
+                .map((aId) => `${aId}.13.${LAMP_CHARACTERISTICS[type]}`)
+                .sort();
+              return linked.join() === expected.join()
+                ? []
+                : [`${type}: ${linked.join(" ") || "none"}`];
+            },
+          );
+          return result(
+            wrong.length === 0,
+            wrong.length === 0
+              ? "every group characteristic links 41, 42 and the new lamp"
+              : wrong.join("; "),
+          );
+        },
+      },
+      {
+        // Switching the group off and on through the home's links reaches
+        // the new lamp and the lamps kept, not the old or the bedroom one.
+        name: "new_lamp_follows_chandelier",
+        grade: ({ finalState }) => {
+          const accessories = commandThroughLinks(
+            finalState,
+            { ...CHANDELIER_GROUP, cId: GROUP_CHARACTERISTICS.On },
+            [{ boolValue: false }, { boolValue: true }],
+          );
+          const on = (aId) =>
+            accessories
+              .find(({ id }) => id === aId)
+              .services.find(({ sId }) => sId === 13)
+              .characteristics.find(
+                ({ cId }) => cId === LAMP_CHARACTERISTICS.On,
+              ).control.value.boolValue;
+          const lamps = {
+            new: on(NEW_LAMP),
+            kept: on(41) && on(42),
+            old: on(OFFLINE_MEMBER),
+            bedroom: on(BEDROOM_LAMP),
+          };
+          return result(
+            lamps.new && lamps.kept && !lamps.old && !lamps.bedroom,
+            JSON.stringify(lamps),
+          );
+        },
+      },
+      // Links of the group, of the new and the old lamp, and the values the
+      // group takes from a lamp that joins.
+      onlyChanges(
+        ({ key }) =>
+          /^link\/(44|43|45)\.13\.\d+$/.test(key) ||
+          /^characteristic\/44\.13\.(1[5-9])\/\w+$/.test(key),
+      ),
+    ],
   },
   "motion-light-existing": {
     prompt: "Когда в коридоре движение, включай там свет",
@@ -935,6 +1078,81 @@ export const CASES = {
       ],
     }),
   },
+  // A write to a bridge: here «Яндекс Алиса» runs, as the owner's does,
+  // and does not export the floor lamp, whose one service is its light.
+  // Ticking it is the whole request.
+  "add-floor-lamp-to-alice": {
+    prompt: "Добавь торшер в Алису",
+    patch: (fixture) => {
+      const alice = fixture.extensions.find(
+        ({ extensionKey }) => extensionKey === "Bridge:yandex",
+      );
+      Object.assign(alice, { state: "LOADED", enabled: true });
+      delete alice.exported["16"];
+      return fixture;
+    },
+    graders: [
+      {
+        name: "floor_lamp_in_alice",
+        grade: ({ after }) =>
+          result(
+            after[FLOOR_LAMP_IN_ALICE] === true,
+            `${FLOOR_LAMP_IN_ALICE}=${after[FLOOR_LAMP_IN_ALICE]}`,
+          ),
+      },
+      onlyChanges(
+        ({ key, after }) => key === FLOOR_LAMP_IN_ALICE && after === true,
+      ),
+    ],
+  },
+  // One new virtual accessory in the living room, of the one Switch
+  // service, under the asked name; nothing of the home changes.
+  "create-virtual-switch": {
+    prompt: "Сделай виртуальный выключатель «Режим гостей» в гостиной",
+    graders: [
+      {
+        name: "one_virtual_switch_in_living_room",
+        grade: ({ finalState, initialState }) => {
+          const known = new Set(initialState.accessories.map(({ id }) => id));
+          const created = finalState.accessories.filter(
+            ({ id }) => !known.has(id),
+          );
+          const services = created.flatMap(({ services }) =>
+            services
+              .filter(({ type }) => type !== "AccessoryInformation")
+              .map(({ type }) => type),
+          );
+          return result(
+            created.length === 1 &&
+              /^режим гостей$/i.test(created[0].name) &&
+              created[0].roomId === LIVING_ROOM &&
+              created[0].virtual === true &&
+              services.join() === "Switch",
+            created
+              .map(
+                ({ name, roomId, virtual }) =>
+                  `${name} room ${roomId} virtual=${virtual} [${services}]`,
+              )
+              .join("; ") || "nothing created",
+          );
+        },
+      },
+      onlyChanges(({ before }) => before === undefined),
+    ],
+  },
+  // «Удали кнопку …»: the button starts a scenario, so nothing is deleted
+  // before the owner hears of it, and the answer names that scenario.
+  "delete-scene-button": {
+    prompt: "Удали кнопку Десерт",
+    patch: withSceneButton,
+    graders: [
+      noWrites(),
+      answerMatches(
+        "answer_names_the_scenario",
+        new RegExp(SCENE_BUTTON_BLOCK_NAME, "i"),
+      ),
+    ],
+  },
   // Two turns in one Claude session: the second asks to undo the first.
   // Undo puts back only a lamp's on/off (on the owner's hub a brightness
   // write switches an off lamp on), so the floor lamp stays at 30 % and the
@@ -985,6 +1203,127 @@ export const CASES = {
         "It does not claim anything about the floor lamp that contradicts the facts.",
       ],
     }),
+  },
+  // The owner deletes a scenario by what it does: one scenario switches the
+  // bedroom fumigator, and nothing else depends on it. It is deleted in the
+  // same turn, without asking again, and only it.
+  "delete-fumigator-scenario": {
+    prompt: "Удали сценарий с фумигатором",
+    patch: (fixture) => {
+      fixture.accessories.push({
+        id: FUMIGATOR,
+        roomId: 5,
+        name: "Фумигатор",
+        extensionKey: "Controller:zigbee",
+        deviceId: "00158d0004a1b250",
+        manufacturer: "Aqara",
+        model: "SP-EUC01",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка",
+            characteristics: [
+              { cId: 14, type: "On", value: false },
+              { cId: 15, type: "OutletInUse", value: false },
+            ],
+          },
+        ],
+      });
+      const fumigator = (hour, on) => ({
+        type: "if",
+        mode: "EVERY",
+        if: {
+          type: "condition",
+          mode: "AND",
+          conditions: [
+            { type: "cron", mode: "NONE", cron: `0 0 ${hour} ? * * *` },
+          ],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: SprutHub's native BLOCK schema requires this key.
+        then: [
+          {
+            type: "service",
+            aId: FUMIGATOR,
+            sId: 13,
+            hs: "Outlet",
+            characteristics: [
+              { type: "set", cId: 14, hc: "On", value: String(on) },
+            ],
+          },
+        ],
+        else: [],
+      });
+      fixture.scenarios.push({
+        index: FUMIGATOR_SCENARIO,
+        name: "Комары ночью",
+        desc: "",
+        type: "BLOCK",
+        active: true,
+        data: { targets: [fumigator(22, true), fumigator(6, false)] },
+      });
+      return fixture;
+    },
+    graders: [
+      {
+        name: "fumigator_scenario_deleted",
+        grade: ({ after }) =>
+          result(
+            after[`scenario/${FUMIGATOR_SCENARIO}/name`] === undefined,
+            `scenario/${FUMIGATOR_SCENARIO}/name=${after[`scenario/${FUMIGATOR_SCENARIO}/name`]}`,
+          ),
+      },
+      onlyChanges(({ key }) =>
+        key.startsWith(`scenario/${FUMIGATOR_SCENARIO}/`),
+      ),
+    ],
+  },
+  // A GLOBAL whose function two BLOCKs call through code: deleting it would
+  // break them. The agent names them and deletes nothing until the owner
+  // agrees.
+  "delete-global-with-dependents": {
+    prompt: "Удали сценарий Color scenes",
+    patch: (fixture) => {
+      fixture.scenarios.push(
+        {
+          index: GLOBAL_TO_DELETE,
+          name: "Color scenes",
+          desc: "Цветовые сцены",
+          type: "GLOBAL",
+          active: true,
+          onStart: true,
+          data: [
+            "global.colorScene = function (room, scene) {",
+            '  log.info("scene " + room + " " + scene);',
+            "};",
+          ].join("\n"),
+        },
+        ...[
+          [GLOBAL_TO_DELETE_MOVIE, "Сцена кино", "кино"],
+          [GLOBAL_TO_DELETE_DINNER, "Сцена ужин", "ужин"],
+        ].map(([index, name, scene]) => ({
+          index,
+          name,
+          desc: "",
+          type: "BLOCK",
+          active: true,
+          data: {
+            targets: [
+              {
+                type: "code",
+                code: `global.colorScene("Гостиная", "${scene}");`,
+              },
+            ],
+          },
+        })),
+      );
+      return fixture;
+    },
+    graders: [
+      noWrites(),
+      answerMatches("answer_names_movie_scene", /Сцена кино/),
+      answerMatches("answer_names_dinner_scene", /Сцена ужин/),
+    ],
   },
 };
 
@@ -1381,6 +1720,78 @@ function withValues(fixture, values) {
     }
     characteristic.value = value;
   }
+  return fixture;
+}
+
+// The owner's kind of scene button: a virtual button «Десерт» in the
+// living room whose single press starts the BLOCK «Свет к десерту», which
+// dims the chandelier.
+function withSceneButton(fixture) {
+  fixture.accessories.push({
+    id: SCENE_BUTTON,
+    roomId: LIVING_ROOM,
+    name: "Десерт",
+    virtual: true,
+    services: [
+      {
+        sId: 13,
+        type: "StatelessProgrammableSwitch",
+        name: "Десерт",
+        characteristics: [
+          { cId: 14, type: "Name", value: "Десерт" },
+          { cId: 15, type: "ProgrammableSwitchEvent", value: 0 },
+        ],
+      },
+    ],
+  });
+  fixture.scenarios.push({
+    index: SCENE_BUTTON_BLOCK,
+    name: SCENE_BUTTON_BLOCK_NAME,
+    desc: "",
+    type: "BLOCK",
+    active: true,
+    data: {
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [
+              {
+                type: "characteristic",
+                aId: SCENE_BUTTON,
+                sId: 13,
+                cId: 15,
+                hs: "StatelessProgrammableSwitch",
+                hc: "ProgrammableSwitchEvent",
+                cond: "=",
+                value: "0",
+                trigger: true,
+                time: 0,
+                timeCond: "",
+              },
+            ],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: native SprutHub BLOCK key.
+          then: [
+            {
+              type: "service",
+              ...CHANDELIER,
+              hs: "Lightbulb",
+              characteristics: [
+                { type: "set", cId: 15, hc: "Brightness", value: "30" },
+              ],
+            },
+          ],
+          else: [],
+          then_delay: 0,
+          else_delay: 0,
+        },
+      ],
+    },
+  });
   return fixture;
 }
 

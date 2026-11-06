@@ -1250,4 +1250,8 @@ test("an edit that deletes a request or notification the agent cannot write back
   );
   assert.equal(JSON.stringify(edited).includes("secret@"), false);
   assert.equal(JSON.stringify(edited).includes("/relay/0"), false);
+  // The owner hears of what is lost before apply: apply is not the next
+  // call, so the agent does not delete the owner's request silently.
+  assert.equal(edited.tell_owner, warning);
+  assert.equal(edited.next, undefined);
 });

@@ -72,6 +72,7 @@ export function decodeBlock(data, context) {
     triggers: [],
     unrecognized: [],
     codeConditions: [],
+    codeActions: [],
     records: [],
     usesTime: false,
   };
@@ -92,6 +93,7 @@ export function decodeBlock(data, context) {
     triggers: state.triggers,
     unrecognized: state.unrecognized,
     codeConditions: state.codeConditions,
+    codeActions: state.codeActions,
     records: state.records,
     usesTime: state.usesTime,
   };
@@ -161,6 +163,12 @@ function decodeStep(node, pointer, chain, delay, state) {
     return [decodeScenarioRun(node, state)];
   }
   if (node.type === "notify") return [decodeNotify(node)];
+  // Its devices and effects are not read from the code; the text is in
+  // the configuration.
+  if (node.type === "code") {
+    state.codeActions.push(pointer);
+    return [{ type: "code", status: "not_analyzed", pointer }];
+  }
   if (node.type === "http") {
     // A key may sit anywhere after the host: only scheme and host are shown
     // (shownHttpUrl), here and when withShownHttpUrls already cut the URL.

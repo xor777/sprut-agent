@@ -188,7 +188,7 @@ async function startHub() {
       } else if (params.accessory?.create) {
         const createInput = structuredClone(params.accessory.create);
         if (state.behavior.normalizeNextAccessoryName) {
-          createInput.name = createInput.name.slice(0, 30);
+          createInput.name = createInput.name.slice(0, 32);
           state.behavior.normalizeNextAccessoryName = false;
         }
         const created = createVirtualAccessory(
@@ -1629,7 +1629,7 @@ test("an acknowledged normalized accessory name keeps ownership and reports both
   assert.equal(applied.structuredContent.requested_name, requestedName);
   assert.equal(
     applied.structuredContent.observed_name,
-    requestedName.slice(0, 30),
+    requestedName.slice(0, 32),
   );
   assert.equal(applied.structuredContent.name_normalized, true);
 });
