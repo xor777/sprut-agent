@@ -253,6 +253,111 @@ test("a device command the hub refuses counts as an error of the call", async (t
   assert.equal(line.hub_code, -32603);
 });
 
+// The owner reads the log after something went wrong: a write nobody can
+// confirm must stand out as a refusal does, whichever tool sent it.
+test("a write the reply does not confirm is an error of the call, by the status it ended with", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startStateClient(t, hub, stateDirectory);
+  const lamp = { aId: 16, sId: 13, cId: 15 };
+  const seen = async () => (await logLines(stateDirectory)).at(-1);
+  const prepare = async (value) => {
+    const prepared = await client.callTool({
+      name: "prepare_native_change",
+      arguments: {
+        operation: "characteristic_value",
+        target_ref: dimmableLamp,
+        value,
+        reason: "Приглушить торшер",
+      },
+    });
+    assert.equal(prepared.isError, undefined, prepared.content[0].text);
+    assert.equal((await seen()).outcome, "ok");
+    return prepared.structuredContent.change_ref;
+  };
+  const apply = (changeRef) =>
+    client.callTool({
+      name: "apply_native_change",
+      arguments: { change_ref: changeRef },
+    });
+  const restore = (changeRef) =>
+    client.callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    });
+  const expectLine = async (result, status) => {
+    assert.equal(result.isError, undefined, result.content[0].text);
+    assert.equal(result.structuredContent.status, status);
+    const line = await seen();
+    assert.equal(line.outcome, "error", status);
+    assert.equal(line.error_code, status);
+    assert.equal(line.hub_code, undefined);
+    assert.deepEqual(
+      Object.keys(line).filter((key) => !LOG_FIELDS.has(key)),
+      [],
+    );
+  };
+  const expectFine = async (result, status) => {
+    assert.equal(result.isError, undefined, result.content[0].text);
+    assert.equal(result.structuredContent.status, status);
+    const line = await seen();
+    assert.equal(line.outcome, "ok", status);
+    assert.equal(line.error_code, undefined);
+  };
+
+  // The answer to the write is lost.
+  const lost = await prepare(21);
+  hub.loseNext("characteristic.update");
+  await expectLine(await apply(lost), "uncertain");
+
+  // The same loss through the other way of sending a command.
+  hub.loseNext("characteristic.update");
+  const sent = await client.callTool({
+    name: "send_device_commands",
+    arguments: {
+      home_ref: homeRef,
+      commands: [{ target_ref: dimmableLamp, value: 22 }],
+      reason: "Приглушить торшер",
+    },
+  });
+  assert.equal(sent.structuredContent.status, "incomplete");
+  assert.equal((await seen()).outcome, "error");
+  assert.equal((await seen()).error_code, "uncertain");
+
+  // Reading how such a write ended is a read that worked.
+  await expectFine(
+    await client.callTool({
+      name: "get_native_change",
+      arguments: { change_ref: lost },
+    }),
+    "uncertain",
+  );
+
+  // The owner moved the lamp between prepare and apply.
+  const movedBeforeApply = await prepare(23);
+  hub.changeByHand({ ...lamp, value: { intValue: 77 } });
+  await expectLine(await apply(movedBeforeApply), "conflict");
+
+  // A confirmed write and its confirmed undo stay ordinary lines.
+  const confirmed = await prepare(24);
+  await expectFine(await apply(confirmed), "applied");
+  await expectFine(await restore(confirmed), "restored");
+
+  // Applying what was undone sends nothing and does not put the value back.
+  await expectLine(await apply(confirmed), "restored");
+
+  // The undo's answer is lost.
+  const lostUndo = await prepare(25);
+  await expectFine(await apply(lostUndo), "applied");
+  hub.loseNext("characteristic.update");
+  await expectLine(await restore(lostUndo), "uncertain");
+
+  // The owner moved the lamp, so the undo does not write over it.
+  const movedBeforeUndo = await prepare(26);
+  await expectFine(await apply(movedBeforeUndo), "applied");
+  hub.changeByHand({ ...lamp, value: { intValue: 77 } });
+  await expectLine(await restore(movedBeforeUndo), "conflict");
+});
+
 test("the log carries no content of the home, the request or the connection", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const reason = "Приглушить торшер для гостей Иванова";
