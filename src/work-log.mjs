@@ -16,6 +16,18 @@ const MAX_LOG_BYTES = 1024 * 1024;
 const STALE_LOCK_MS = 60_000;
 const currentCall = new AsyncLocalStorage();
 
+// The statuses that prove what a write tool was called for. Every other one is
+// logged as an error under its own name: uncertain (the answer was lost),
+// conflict (changed meanwhile), not_applied, not_owned, skipped, and restored
+// when applying was asked. get_native_change only reads, and is not here.
+const CONFIRMED_WRITE = {
+  prepare_native_change: new Set(["prepared", "already_desired"]),
+  apply_native_change: new Set(["applied", "completed", "superseded"]),
+  // A completed pause has run out: nothing is left to undo.
+  restore_native_change: new Set(["restored", "ok", "completed"]),
+};
+const SETTLED_ITEM = new Set(["applied", "already_desired", "restored"]);
+
 // One line per tool call. It watches the MCP messages rather than the tool
 // handlers: the SDK refuses invalid arguments before a handler runs, and those
 // are the calls where an agent stumbles. Only the closed fields below are ever
@@ -121,17 +133,31 @@ function callOutcome(message, call) {
   // A batch answers normally and reports what failed in its items.
   if (data?.status === "incomplete") {
     const failed = data.results?.find((item) => item.error);
+    const unsettled = data.results?.find(
+      (item) => !SETTLED_ITEM.has(item.status),
+    );
     return {
-      error_code: errorCode(failed?.error.code ?? "incomplete"),
+      error_code: errorCode(
+        failed?.error.code ?? unsettled?.status ?? "incomplete",
+      ),
       hub_code: hubCode(failed?.rejection?.protocol_code),
       response_bytes,
     };
+  }
+  // These answer normally too when the write is not confirmed. An undo that
+  // skips a change keeps the change's own status beside restore_outcome.
+  const confirmed = CONFIRMED_WRITE[call.tool];
+  const status = data?.restore_outcome?.status ?? data?.status;
+  if (confirmed && !confirmed.has(status)) {
+    return { error_code: errorCode(status), response_bytes };
   }
   return { response_bytes };
 }
 
 function errorCode(code) {
-  return /^[a-z0-9_]{1,64}$/.test(code) ? code : "other_error";
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code)
+    ? code
+    : "other_error";
 }
 
 function hubCode(code) {

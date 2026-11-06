@@ -259,13 +259,17 @@ test("a write the reply does not confirm is an error of the call, by the status 
   const { hub, stateDirectory } = await setup(t);
   const client = await startStateClient(t, hub, stateDirectory);
   const lamp = { aId: 16, sId: 13, cId: 15 };
+  // Undo writes these back; a lamp's level it never does.
+  const thermostat = `${homeRef}/accessory/19/service/13/characteristic/17`;
+  const curtain = { aId: 18, sId: 13, cId: 16 };
+  const curtainRef = `${homeRef}/accessory/18/service/13/characteristic/16`;
   const seen = async () => (await logLines(stateDirectory)).at(-1);
-  const prepare = async (value) => {
+  const prepare = async (value, target = dimmableLamp) => {
     const prepared = await client.callTool({
       name: "prepare_native_change",
       arguments: {
         operation: "characteristic_value",
-        target_ref: dimmableLamp,
+        target_ref: target,
         value,
         reason: "Приглушить торшер",
       },
@@ -284,12 +288,12 @@ test("a write the reply does not confirm is an error of the call, by the status 
       name: "restore_native_change",
       arguments: { change_ref: changeRef },
     });
-  const expectLine = async (result, status) => {
+  const expectLine = async (result, status, code = status) => {
     assert.equal(result.isError, undefined, result.content[0].text);
     assert.equal(result.structuredContent.status, status);
     const line = await seen();
     assert.equal(line.outcome, "error", status);
-    assert.equal(line.error_code, status);
+    assert.equal(line.error_code, code);
     assert.equal(line.hub_code, undefined);
     assert.deepEqual(
       Object.keys(line).filter((key) => !LOG_FIELDS.has(key)),
@@ -338,7 +342,7 @@ test("a write the reply does not confirm is an error of the call, by the status 
   await expectLine(await apply(movedBeforeApply), "conflict");
 
   // A confirmed write and its confirmed undo stay ordinary lines.
-  const confirmed = await prepare(24);
+  const confirmed = await prepare(20, thermostat);
   await expectFine(await apply(confirmed), "applied");
   await expectFine(await restore(confirmed), "restored");
 
@@ -346,16 +350,21 @@ test("a write the reply does not confirm is an error of the call, by the status 
   await expectLine(await apply(confirmed), "restored");
 
   // The undo's answer is lost.
-  const lostUndo = await prepare(25);
+  const lostUndo = await prepare(21, thermostat);
   await expectFine(await apply(lostUndo), "applied");
   hub.loseNext("characteristic.update");
   await expectLine(await restore(lostUndo), "uncertain");
 
-  // The owner moved the lamp, so the undo does not write over it.
-  const movedBeforeUndo = await prepare(26);
+  // The owner moved the curtain, so the undo does not write over it.
+  const movedBeforeUndo = await prepare(50, curtainRef);
   await expectFine(await apply(movedBeforeUndo), "applied");
-  hub.changeByHand({ ...lamp, value: { intValue: 77 } });
+  hub.changeByHand({ ...curtain, value: { intValue: 30 } });
   await expectLine(await restore(movedBeforeUndo), "conflict");
+
+  // The undo skips a lamp's level: the change stays applied, nothing undone.
+  const level = await prepare(55);
+  await expectFine(await apply(level), "applied");
+  await expectLine(await restore(level), "applied", "skipped");
 });
 
 test("the log carries no content of the home, the request or the connection", async (t) => {

@@ -46,14 +46,21 @@ node ./dist/plugin/dist/server.mjs
 становится `work-log.jsonl.1`, прежний предыдущий заменяется.
 
 ```sh
-# Отказы последних вызовов; повреждённые строки пропускаются.
+# Отказы и неподтверждённые записи последних вызовов; повреждённые строки пропускаются.
 jq -Rc 'fromjson? | select(.outcome == "error")' work-log.jsonl
 ```
 
 Поля: `time` (начало), `version`, `tool`, `operation` (значение перечисления
 операций), `outcome`, `error_code`, `hub_code`, `duration_ms`, `response_bytes`
-(текст ответа агенту). `outcome: "error"` также у пакетного ответа
-`status: "incomplete"`. Коды вне ответов инструментов: `invalid_arguments`
+(текст ответа агенту). `outcome: "error"` также у записи, которую ответ не
+подтвердил, хотя инструмент ответил без ошибки. У `prepare_native_change`,
+`apply_native_change` и `restore_native_change` `error_code` тогда равен статусу
+ответа: `uncertain` (ответ хаба потерян, запись могла пройти), `conflict`
+(значение изменили руками), `not_applied`, `not_owned`, `skipped` (отмена
+пропущена) и другие; у `restored` на `apply_native_change` запись не выполнялась.
+У пакетного ответа `status: "incomplete"` это код первой неудачи или статус
+первого неудачного элемента, например тот же `uncertain`. `get_native_change`
+только читает: такой статус у него остаётся `ok`. Коды вне ответов инструментов: `invalid_arguments`
 (аргументы отклонены до запуска инструмента), `unknown_tool` (и
 `tool: "unknown"`: имя от клиента не пишется), `protocol_error`, `cancelled`
 (клиент отменил вызов), `interrupted` (клиент отключился во время вызова).
