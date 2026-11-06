@@ -3716,28 +3716,35 @@ export class SprutHubClient {
     }
   }
 
-  // A session the hub refuses is renewed by one login, and the request goes
-  // again once: the hub refused it before carrying it out. The requests the
-  // old session lost share that login; a failed login is the answer.
+  // A session the hub refuses is renewed, and the request goes again: the hub
+  // refused it before carrying it out. The renewal is the session another
+  // process saved, or a login; the saved one may be refused too, hence up to
+  // two. The requests the old session lost share the renewal; a failed one is
+  // the answer.
   async #send(params, deadline, serial, onReply) {
-    const token = this.token;
-    try {
-      return await this.#sendOnce(params, deadline, serial, onReply);
-    } catch (error) {
-      if (!this.#renewSession || error.code !== "authentication_failed") {
-        throw error;
-      }
-      if (this.token === token) {
-        const renewed = await this.#renewSession(token);
+    for (let renewals = 0; ; renewals += 1) {
+      const token = this.token;
+      try {
+        return await this.#sendOnce(params, deadline, serial, onReply);
+      } catch (error) {
+        if (
+          !this.#renewSession ||
+          error.code !== "authentication_failed" ||
+          renewals === 2
+        ) {
+          throw error;
+        }
         if (this.token === token) {
-          this.token = renewed.token;
-          this.cid = renewed.cid;
-          // The new session goes over a new connection, as after a login
-          // at start.
-          if (this.#socket) this.#retire(this.#socket);
+          const renewed = await this.#renewSession(token);
+          if (this.token === token) {
+            this.token = renewed.token;
+            this.cid = renewed.cid;
+            // The new session goes over a new connection, as after a login
+            // at start.
+            if (this.#socket) this.#retire(this.#socket);
+          }
         }
       }
-      return this.#sendOnce(params, deadline, serial, onReply);
     }
   }
 
