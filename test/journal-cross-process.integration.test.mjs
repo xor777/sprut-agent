@@ -29,18 +29,15 @@ const journalProcess = path.join(
 const run = promisify(execFile);
 const homeRef = "spruthub://hub/sim-house-01";
 const LIVING_ROOM = 3;
-const LEVEL = { sId: 13, cId: 15 };
-// Eight dimmable lamps per dialog, each dialog with its own.
+const LIGHT = { sId: 13, cId: 14 };
+// Eight lamps, all on, per dialog; each dialog changes its own.
 const lamps = (first) =>
-  Array.from({ length: 8 }, (_, index) => ({
-    aId: first + index,
-    level: 20 + index,
-  }));
+  Array.from({ length: 8 }, (_, index) => ({ aId: first + index }));
 const FIRST_DIALOG_LAMPS = lamps(901);
 const SECOND_DIALOG_LAMPS = lamps(921);
 
-function levelRef({ aId }) {
-  return `${homeRef}/accessory/${aId}/service/${LEVEL.sId}/characteristic/${LEVEL.cId}`;
+function onRef({ aId }) {
+  return `${homeRef}/accessory/${aId}/service/${LIGHT.sId}/characteristic/${LIGHT.cId}`;
 }
 
 async function houseWithLamps() {
@@ -49,26 +46,21 @@ async function houseWithLamps() {
     ...fixture,
     accessories: [
       ...fixture.accessories,
-      ...[...FIRST_DIALOG_LAMPS, ...SECOND_DIALOG_LAMPS].map(
-        ({ aId, level }) => ({
-          id: aId,
-          roomId: LIVING_ROOM,
-          name: `Лампа ${aId}`,
-          extensionKey: "Controller:zigbee",
-          deviceId: `00158d0009${aId.toString(16).padStart(6, "0")}`,
-          services: [
-            {
-              sId: LEVEL.sId,
-              type: "Lightbulb",
-              name: "Свет",
-              characteristics: [
-                { cId: 14, type: "On", value: true },
-                { cId: LEVEL.cId, type: "Brightness", value: level },
-              ],
-            },
-          ],
-        }),
-      ),
+      ...[...FIRST_DIALOG_LAMPS, ...SECOND_DIALOG_LAMPS].map(({ aId }) => ({
+        id: aId,
+        roomId: LIVING_ROOM,
+        name: `Лампа ${aId}`,
+        extensionKey: "Controller:zigbee",
+        deviceId: `00158d0009${aId.toString(16).padStart(6, "0")}`,
+        services: [
+          {
+            sId: LIGHT.sId,
+            type: "Lightbulb",
+            name: "Свет",
+            characteristics: [{ cId: LIGHT.cId, type: "On", value: true }],
+          },
+        ],
+      })),
     ],
   };
 }
@@ -111,27 +103,27 @@ async function call(client, name, args) {
   return result.structuredContent;
 }
 
-function setLevel(client, lamp, value) {
+function turnOff(client, lamp) {
   return client.callTool({
     name: "send_device_commands",
     arguments: {
       home_ref: homeRef,
-      commands: [{ target_ref: levelRef(lamp), value }],
-      reason: `Яркость лампы ${lamp.aId}`,
+      commands: [{ target_ref: onRef(lamp), value: false }],
+      reason: `Выключить лампу ${lamp.aId}`,
     },
   });
 }
 
 // As the hub holds it, independent of the product.
-function hubLevel(hub, { aId }) {
+function hubOn(hub, { aId }) {
   const control = hub.state.accessories
     .find(({ id }) => id === aId)
-    .services.find(({ sId }) => sId === LEVEL.sId)
-    .characteristics.find(({ cId }) => cId === LEVEL.cId).control;
+    .services.find(({ sId }) => sId === LIGHT.sId)
+    .characteristics.find(({ cId }) => cId === LIGHT.cId).control;
   return Object.values(control.value)[0];
 }
 
-function levelWritesOf(hub, from, lamp) {
+function lightWritesOf(hub, from, lamp) {
   return hub.requests
     .slice(from)
     .filter(
@@ -215,7 +207,7 @@ test("changes made in two dialogs at once are each undone from the other dialog"
   const second = await startDialog(t, hub, stateDirectory);
 
   const change = async (dialog, lamp) => {
-    const result = await setLevel(dialog.client, lamp, lamp.level + 40);
+    const result = await turnOff(dialog.client, lamp);
     assert.equal(result.isError, undefined, result.content[0]?.text);
     assert.equal(
       result.structuredContent.status,
@@ -234,7 +226,7 @@ test("changes made in two dialogs at once are each undone from the other dialog"
     sequentially(second, SECOND_DIALOG_LAMPS),
   ]);
   for (const lamp of [...FIRST_DIALOG_LAMPS, ...SECOND_DIALOG_LAMPS]) {
-    assert.equal(hubLevel(hub, lamp), lamp.level + 40);
+    assert.equal(hubOn(hub, lamp), false);
   }
 
   // Both dialogs see every change of the other.
@@ -257,7 +249,7 @@ test("changes made in two dialogs at once are each undone from the other dialog"
   await Promise.all([undo(first, secondRefs), undo(second, firstRefs)]);
 
   for (const lamp of [...FIRST_DIALOG_LAMPS, ...SECOND_DIALOG_LAMPS]) {
-    assert.equal(hubLevel(hub, lamp), lamp.level, `lamp ${lamp.aId} is back`);
+    assert.equal(hubOn(hub, lamp), true, `lamp ${lamp.aId} is back`);
   }
   // The dialog that made a change sees it undone by the other one, and so
   // does the other one.
@@ -278,7 +270,7 @@ test("a status check in one dialog does not bring back a change the other dialog
   const second = await startDialog(t, hub, stateDirectory);
   const lamp = FIRST_DIALOG_LAMPS[0];
 
-  const sent = await setLevel(first.client, lamp, 90);
+  const sent = await turnOff(first.client, lamp);
   assert.equal(sent.structuredContent.status, "ok", sent.content[0]?.text);
   const ref = sent.structuredContent.results[0].change_ref;
 
@@ -302,7 +294,7 @@ test("a status check in one dialog does not bring back a change the other dialog
   assert.equal(restored.status, "restored");
   await check;
 
-  assert.equal(hubLevel(hub, lamp), lamp.level);
+  assert.equal(hubOn(hub, lamp), true);
   for (const { client } of [first, second]) {
     const seen = await call(client, "get_native_change", { change_ref: ref });
     assert.equal(seen.status, "restored");
@@ -310,7 +302,7 @@ test("a status check in one dialog does not bring back a change the other dialog
   // Undoing again sends nothing: the journal still knows it is undone.
   const writes = hub.requests.length;
   await call(first.client, "restore_native_change", { change_ref: ref });
-  assert.deepEqual(levelWritesOf(hub, writes, lamp), []);
+  assert.deepEqual(lightWritesOf(hub, writes, lamp), []);
 });
 
 test("a write waits a bounded time for another dialog's write and says what to do, then a dead dialog frees it", async (t) => {
@@ -326,7 +318,7 @@ test("a write waits a bounded time for another dialog's write and says what to d
   // The first dialog's command is under way: the hub takes long to answer.
   const from = hub.requests.length;
   hub.delayReplies("accessory.get", 20_000);
-  const underWay = setLevel(first.client, firstLamp, 90).catch(() => null);
+  const underWay = turnOff(first.client, firstLamp).catch(() => null);
   await waitFor(
     () =>
       hub.requests.slice(from).some(({ method }) => method === "accessory.get"),
@@ -335,7 +327,7 @@ test("a write waits a bounded time for another dialog's write and says what to d
   hub.delayReplies("accessory.get", 0);
 
   const startedAt = Date.now();
-  const refused = await setLevel(second.client, secondLamp, 90);
+  const refused = await turnOff(second.client, secondLamp);
   const waited = Date.now() - startedAt;
   assert.equal(refused.isError, true, refused.content[0]?.text);
   const { error } = refused.structuredContent;
@@ -345,22 +337,22 @@ test("a write waits a bounded time for another dialog's write and says what to d
   assert.match(error.message, /another open dialog/i);
   assert.match(error.message, /not sent/i);
   assert.ok(waited < 20_000, `waited ${waited} ms`);
-  assert.deepEqual(levelWritesOf(hub, from, secondLamp), []);
-  assert.equal(hubLevel(hub, secondLamp), secondLamp.level);
+  assert.deepEqual(lightWritesOf(hub, from, secondLamp), []);
+  assert.equal(hubOn(hub, secondLamp), true);
 
   // The first dialog's process dies with its command unfinished: the same
   // call now goes through, without waiting for the bound again.
   process.kill(first.pid, "SIGKILL");
   await underWay;
   const retriedAt = Date.now();
-  const retried = await setLevel(second.client, secondLamp, 90);
+  const retried = await turnOff(second.client, secondLamp);
   assert.equal(retried.isError, undefined, retried.content[0]?.text);
   assert.equal(retried.structuredContent.status, "ok");
   assert.ok(Date.now() - retriedAt < 5_000, "no second wait");
-  assert.equal(hubLevel(hub, secondLamp), 90);
+  assert.equal(hubOn(hub, secondLamp), false);
 
   await call(second.client, "restore_native_change", {
     change_ref: retried.structuredContent.results[0].change_ref,
   });
-  assert.equal(hubLevel(hub, secondLamp), secondLamp.level);
+  assert.equal(hubOn(hub, secondLamp), true);
 });
