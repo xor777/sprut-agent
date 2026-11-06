@@ -107,6 +107,16 @@ export class AutomationStore {
   // The journal is read and replaced as a whole, so the read and the replace
   // of one process must not overlap another's.
   async #write(batch) {
+    try {
+      await this.#writeUnderLock(batch);
+    } catch (error) {
+      throw error instanceof SprutHubError
+        ? error
+        : journalUnavailable(this.directory, error);
+    }
+  }
+
+  async #writeUnderLock(batch) {
     const unsaved = new Map(this.#unsaved);
     if (batch.size === 0 && unsaved.size === 0) return;
     const release = await acquireStateLock(this.journalLock);
@@ -156,6 +166,22 @@ export class AutomationStore {
       };
     }
   }
+}
+
+const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM"]);
+
+// Why the journal could not be saved and what the owner does about it. A call
+// that sent steps before this adds that to it.
+function journalUnavailable(directory, error) {
+  const reason =
+    error.syscall === "link" && NO_HARD_LINKS.has(error.code)
+      ? "its file system has no hard links, which the journal's lock needs"
+      : `the file system answered ${error.code ?? "with an error"}`;
+  return new SprutHubError(
+    "state_storage_unavailable",
+    `Could not save this home's change journal in ${directory}: ${reason}. Make that directory writable on a local disk, or set SPRUT_AGENT_STATE_DIR to such a directory and restart the MCP server.`,
+    "restore_state_storage_then_retry",
+  );
 }
 
 export function hubStateFingerprint(hubUrl, hubSerial) {

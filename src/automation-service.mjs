@@ -637,7 +637,7 @@ export class AutomationService {
       updated_at: now,
       history: [{ status: "prepared", at: now }],
     };
-    await this.#saveBeforeWrite(change);
+    await this.store.save(change);
     return change;
   }
 
@@ -6538,7 +6538,7 @@ export class AutomationService {
       updated_at: now,
     });
     change.history.push({ status, at: now });
-    await this.#saveBeforeWrite(change);
+    await this.store.save(change);
   }
 
   async #applyScenarioRun(change) {
@@ -7639,19 +7639,6 @@ export class AutomationService {
     }
   }
 
-  async #saveBeforeWrite(change) {
-    try {
-      await this.store.save(change);
-    } catch (error) {
-      if (error.code === "state_storage_busy") throw error;
-      throw new SprutHubError(
-        "state_storage_unavailable",
-        "Could not save the recovery state required before writing to SprutHub.",
-        "restore_state_storage_then_retry",
-      );
-    }
-  }
-
   // The saves of a change of several steps, one write after another. The
   // journal runs behind the home once a step went: the record before that
   // step stays true, so a failure before the next one sends nothing and
@@ -7661,7 +7648,7 @@ export class AutomationService {
     const sent = hubStepsSent(change, direction);
     if (step) step.sent = true;
     try {
-      await this.#saveBeforeWrite(change);
+      await this.store.save(change);
     } catch (error) {
       throw sent ? stoppedAfterHubSteps(change, direction, error) : error;
     }
@@ -7673,7 +7660,7 @@ export class AutomationService {
   // without the journal.
   async #saveAfterStep(change, direction) {
     try {
-      await this.#saveBeforeWrite(change);
+      await this.store.save(change);
     } catch (error) {
       if (!hubStepsSent(change, direction)) throw error;
       this.store.keepUnsaved(change);
