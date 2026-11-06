@@ -40,6 +40,7 @@ import {
 } from "./change-contracts.mjs";
 import {
   isRecord,
+  isVerifiedRunType,
   REDACTED_MARK,
   stableJson,
   stableNativeId,
@@ -192,6 +193,15 @@ export async function validateBlockData(
     }
   }
 
+  // A pause wraps and unwraps nodes of the stored data it names here, with
+  // no edit to pair them by, and adds no target of its own.
+  const storedTargets = new Set(
+    edit === null && isRecord(allowUnknownFrom)
+      ? blockScenarioTargets(allowUnknownFrom).map(scenarioTargetKey)
+      : [],
+  );
+  const isStoredTarget = (run) =>
+    run.kept || storedTargets.has(scenarioTargetKey(run));
   const scenarios = new Map();
   for (const run of context.scenarioRuns) {
     // A BLOCK that fires itself would rerun its own targets without end;
@@ -208,6 +218,13 @@ export async function validateBlockData(
     // Also for a kept target: an index could name another scenario by now.
     if (!record) {
       report(run.path, `scenario ${run.index} does not exist in this home`);
+      continue;
+    }
+    // A stored target stays: its refusal would keep the owner from editing the
+    // rest of a scenario made in the SprutHub app, and undo writes it back.
+    const refusal = isStoredTarget(run) ? null : newTargetRefusal(run, record);
+    if (refusal) {
+      report(run.path, refusal);
       continue;
     }
     run.scenario = {
@@ -298,6 +315,21 @@ export async function validateBlockData(
     );
   }
   return context;
+}
+
+function scenarioTargetKey({ index, mode }) {
+  return JSON.stringify([index, mode]);
+}
+
+// What the direct refusals say (predefinedScenarioReadOnly,
+// unverifiedScenarioRunType), for a target that would do it on every run.
+function newTargetRefusal({ index, mode }, record) {
+  if (record.predefined === true) {
+    return `scenario ${index} is a built-in SprutHub scenario, which sprut-agent does not change or run, so a new target on it is refused. The owner can change it or add this target in the SprutHub app.`;
+  }
+  if (!scenarioTargetRuns(mode) || isVerifiedRunType(record)) return null;
+  const type = /^[A-Z_]{1,32}$/.test(record.type) ? record.type : "unknown";
+  return `a ${mode} target would run scenario ${index}, of type ${type}, on every run of this BLOCK, and a manual run of that type has not been verified on a SprutHub hub: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run; ACTIVATE, DEACTIVATE and RESET stay possible. The owner can add this target in the SprutHub app.`;
 }
 
 // Finds what an edit keeps from stored BLOCK data. A requested subtree is
@@ -1775,7 +1807,12 @@ export function validateBlockNode(node, kind, path, context) {
       );
     }
     if (valid) {
-      context.scenarioRuns.push({ path, index: node.index, mode: node.mode });
+      context.scenarioRuns.push({
+        path,
+        index: node.index,
+        mode: node.mode,
+        kept,
+      });
     }
     return;
   }
