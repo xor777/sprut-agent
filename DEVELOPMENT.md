@@ -78,23 +78,32 @@ jq -Rc 'fromjson? | select(.outcome == "error")' work-log.jsonl
 неудачном прогоне, при другой прошивке один раз на ревизию и один раз при
 восстановлении. Когда всё в порядке, уведомлений нет. Перед тревогой о
 недоступности прогон через минуту смотрит ещё раз: после пробуждения сеть
-появляется не сразу. Код выхода 1 означает, что инструмент не работает; другая
-прошивка не считается отказом.
+появляется не сразу. Код выхода 1 означает, что прогон не прошёл или его итог не
+сохранился (тогда в выводе `summary_saved: false`, а инструмент может быть
+исправен); другая прошивка не считается отказом. Когда хаб не ответил за
+отведённое время, текст не винит только хаб: так же выглядит зависший сервер
+инструмента. Проверка доказывает вход и чтение, а не запись; предложенный при
+другой прошивке `npm run conformance:live` пишет в дом (см. «Соответствие
+настоящему хабу»).
 
 ```sh
 node scripts/nightly-check.mjs install    # launchd, ежедневно в 9:00
 node scripts/nightly-check.mjs uninstall  # снять
 node scripts/nightly-check.mjs            # один прогон вручную
 
-# Показывает ли macOS уведомления от osascript на этом Mac.
-osascript -e 'display notification "Проверка" with title "sprut-agent"'
+# Показывает ли macOS уведомления от osascript на этом Mac: та же форма вызова,
+# что у скрипта; текст идёт аргументами, а не исходником AppleScript.
+osascript -e 'on run argv' \
+  -e 'display notification (item 1 of argv) with title (item 2 of argv)' \
+  -e 'end run' -- 'Проверка' 'sprut-agent'
 ```
 
 Пропущенный из-за сна запуск launchd выполняет при пробуждении. Итог последнего
 прогона лежит в `nightly-check.json` рядом с журналом работы (см. выше), вывод
 запусков по расписанию в `~/Library/Logs/sprut-agent/nightly-check.log`. В
 итоге только закрытые поля: `outcome`, `error_code`, `account_status`,
-`next_login_at`, ревизии, `notifications` с `delivered`. Недоставленное
+следующий вход (`next_login_at` или, когда хаб просит подождать,
+`retry_after_seconds`), ревизии, `notifications` с `delivered`. Недоставленное
 уведомление о прошивке и восстановлении повторит следующий прогон.
 `SPRUT_AGENT_NIGHTLY_TIMEOUT_MS` и `SPRUT_AGENT_NIGHTLY_RETRY_MS` сокращают
 ограничение попытки (120 с) и паузу перед второй (60 с).
