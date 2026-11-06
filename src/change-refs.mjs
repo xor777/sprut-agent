@@ -411,11 +411,14 @@ export function isVerifiedRunType(snapshot) {
 }
 
 export function unverifiedScenarioRunType(snapshot) {
-  const kind =
-    snapshot.predefined === true ? "built-in" : String(snapshot.type);
+  const builtIn = snapshot.predefined === true;
+  const kind = builtIn ? "built-in" : String(snapshot.type);
+  const onOff = builtIn
+    ? ""
+    : "scenario_active can turn this scenario on or off. ";
   return new SprutHubError(
     "scenario_run_unverified_type",
-    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. scenario_active can turn this scenario on or off; to run it now, ask the owner to run it in the SprutHub app.`,
+    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. ${onOff}To run it now, ask the owner to run it in the SprutHub app.`,
   );
 }
 

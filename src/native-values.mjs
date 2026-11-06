@@ -351,6 +351,13 @@ export const NATIVE_VALUE_KINDS = {
         ...state,
       };
     },
+    // Earlier versions prepared this for a built-in scenario too. Only apply
+    // is refused: a read still settles a write already sent, and undoing an
+    // apply the same readback proved takes the agent's change out of the home.
+    async recheck(service, change) {
+      const scenario = await service.client.getScenario(change.target.index);
+      if (scenario?.predefined === true) throw predefinedScenarioReadOnly();
+    },
     // The write goes to the options window this read found, so a change
     // journaled before the window path gets it on its first read too.
     async read(service, change, { requireWrite = false } = {}) {
@@ -389,7 +396,8 @@ export const NATIVE_VALUE_KINDS = {
     prepare: prepareRoomName,
     // A change prepared by an earlier version may carry a name the hub
     // would not keep.
-    recheck: (change) => roomNameWithinLimit(change.requested_value.value),
+    recheck: (_service, change) =>
+      roomNameWithinLimit(change.requested_value.value),
     read: (service, change) => readRoomName(service.client, change.target),
     write: (service, change, value) =>
       service.client.renameRoom(change.target.id, value.value),
@@ -1132,6 +1140,9 @@ export async function rejectDirectScenarioMetadataWindow(
       (scenario) => scenario.optionsWindow === windowKey,
     );
     if (owners.length === 0) return;
+    if (owners.length === 1 && owners[0].predefined === true) {
+      throw predefinedScenarioReadOnly();
+    }
     throw scenarioActiveOwnerRequired(
       owners.length === 1
         ? `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(owners[0].index)}`
@@ -1226,7 +1237,8 @@ export async function readLogicActive(client, target) {
 }
 
 // beforeChangeRef is the scenario ref of a contract or prepare read: no change
-// exists yet, so a mismatch points to that scenario instead of the change.
+// exists yet, so a built-in scenario is refused here and a mismatch points to
+// that scenario instead of the change.
 export async function readScenarioActive(
   client,
   target,
@@ -1234,6 +1246,9 @@ export async function readScenarioActive(
 ) {
   const scenario = await client.getScenario(target.index);
   if (!scenario) throw scenarioNotFound();
+  if (beforeChangeRef !== undefined && scenario.predefined === true) {
+    throw predefinedScenarioReadOnly();
+  }
   if (typeof scenario.active !== "boolean") {
     throw new SprutHubError(
       "incompatible_response",

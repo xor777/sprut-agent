@@ -2912,7 +2912,7 @@ export class AutomationService {
       if (phase === "right_lost") return publicStoredNativeChange(change);
       return this.#observeProvenNativeValue(change, current);
     }
-    nativeValueKind(change.kind).recheck?.(change);
+    await nativeValueKind(change.kind).recheck?.(this, change);
     const { value: current, contract } =
       currentState ??
       (await this.#readNativeValueState(change, {
