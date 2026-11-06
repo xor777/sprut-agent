@@ -328,7 +328,7 @@ export function unsupportedBlockFlags(input) {
         : undefined;
   return new SprutHubError(
     "unsupported_block_flags",
-    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active; a built-in scenario changes only in the SprutHub app.",
+    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active.",
     "get_native_change_contract",
     {
       next: {
