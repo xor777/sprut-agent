@@ -704,8 +704,7 @@ test("a built-in scenario is not turned on or off, and it still reads as before"
   assert.equal(entity.entity.active, true);
   const overview = await call(client, "home_overview", { list: "scenarios" });
   assert.equal(
-    overview.scenarios.items.find(({ ref }) => ref === scenarioRef(BUILT_IN))
-      ?.name,
+    overview.scenarios.find(({ ref }) => ref === scenarioRef(BUILT_IN))?.name,
     "Плавное включение",
   );
 

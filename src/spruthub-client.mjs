@@ -3618,6 +3618,14 @@ export class SprutHubClient {
       }),
     ).filter(({ optionsWindow }) => optionsWindow === parsed.windowKey);
     if (owners.length === 0) return;
+    if (owners.length === 1 && owners[0].predefined === true) {
+      option.native_change = {
+        native_write: option.native_change.native_write,
+        supported: false,
+        reason: "predefined_scenario_read_only",
+      };
+      return;
+    }
     option.native_change = {
       native_write: option.native_change.native_write,
       supported: false,
