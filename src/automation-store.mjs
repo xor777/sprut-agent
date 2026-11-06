@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { SprutHubError } from "./spruthub-client.mjs";
+import { acquireStateLock } from "./state-lock.mjs";
 
 export class AutomationStore {
   #writes = Promise.resolve();
@@ -17,6 +19,8 @@ export class AutomationStore {
       this.directory,
       `automation-changes-${this.hubFingerprint.slice(0, 24)}.json`,
     );
+    this.journalLock = `${this.file}.lock`;
+    this.operationLock = `${this.file}.operation.lock`;
   }
 
   newId() {
@@ -49,15 +53,43 @@ export class AutomationStore {
     await this.#writes;
   }
 
+  // Runs operation while no other process of this state directory runs one:
+  // what it read from the journal stays current until it saves. Held across
+  // hub requests, unlike the lock of a write. A directory that cannot be
+  // written gives no lock, and the operation still runs: its reads are
+  // useful, and a write to the hub needs a journal save first, which fails.
+  async exclusive(operation) {
+    let release = async () => {};
+    try {
+      release = await acquireStateLock(this.operationLock);
+    } catch (error) {
+      if (error instanceof SprutHubError) throw error;
+    }
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
+  }
+
+  // The journal is read and replaced as a whole, so the read and the replace
+  // of one process must not overlap another's.
   async #write(batch) {
-    const state = await this.#readFile();
-    for (const [id, change] of batch) state.changes[id] = change;
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const release = await acquireStateLock(this.journalLock);
     const temporaryFile = `${this.file}.${process.pid}.tmp`;
-    await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await rename(temporaryFile, this.file);
+    try {
+      const state = await this.#readFile();
+      for (const [id, change] of batch) state.changes[id] = change;
+      await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      await rename(temporaryFile, this.file);
+    } catch (error) {
+      await unlink(temporaryFile).catch(() => {});
+      throw error;
+    } finally {
+      await release();
+    }
   }
 
   async #readFile() {

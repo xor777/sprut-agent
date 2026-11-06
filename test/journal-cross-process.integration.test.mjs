@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -25,6 +33,12 @@ const journalProcess = path.join(
   "test",
   "support",
   "journal-process.mjs",
+);
+const holdStateLock = path.join(
+  projectRoot,
+  "test",
+  "support",
+  "hold-state-lock.mjs",
 );
 const run = promisify(execFile);
 const homeRef = "spruthub://hub/sim-house-01";
@@ -132,6 +146,49 @@ function lightWritesOf(hub, from, lamp) {
         params.characteristic.update.control &&
         params.characteristic.update.aId === lamp.aId,
     );
+}
+
+function prepareTurnOff(client, lamp) {
+  return client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: onRef(lamp),
+      value: false,
+      reason: `Выключить лампу ${lamp.aId}`,
+    },
+  });
+}
+
+async function journalOf(stateDirectory) {
+  const name = (await readdir(stateDirectory)).find((entry) =>
+    /^automation-changes-[0-9a-f]+\.json$/.test(entry),
+  );
+  const file = path.join(stateDirectory, name);
+  return { file, changes: JSON.parse(await readFile(file, "utf8")).changes };
+}
+
+// Another live process holding a lock of the state directory.
+async function holdLock(t, lockFile) {
+  const holder = spawn(process.execPath, [holdStateLock, lockFile], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  t.after(() => holder.kill("SIGKILL"));
+  const [line] = await once(holder.stdout, "data");
+  assert.equal(String(line), "held\n");
+  return holder;
+}
+
+async function kill(holder) {
+  const exited = once(holder, "exit");
+  holder.kill("SIGKILL");
+  await exited;
+}
+
+function assertBusy(error) {
+  assert.equal(error?.code, "state_storage_busy", JSON.stringify(error));
+  assert.equal(error.action, "retry_in_a_few_seconds");
+  assert.match(error.message, /no write .* was sent to the hub/i);
 }
 
 async function waitFor(condition, message) {
@@ -335,7 +392,7 @@ test("a write waits a bounded time for another dialog's write and says what to d
   assert.equal(error.action, "retry_in_a_few_seconds");
   assert.equal(error.retryable, true);
   assert.match(error.message, /another open dialog/i);
-  assert.match(error.message, /not sent/i);
+  assert.match(error.message, /no write .* was sent to the hub/i);
   assert.ok(waited < 20_000, `waited ${waited} ms`);
   assert.deepEqual(lightWritesOf(hub, from, secondLamp), []);
   assert.equal(hubOn(hub, secondLamp), true);
@@ -355,4 +412,124 @@ test("a write waits a bounded time for another dialog's write and says what to d
     change_ref: retried.structuredContent.results[0].change_ref,
   });
   assert.equal(hubOn(hub, secondLamp), true);
+});
+
+test("while another process holds the journal nothing reaches the hub, and the same call works once it dies", {
+  concurrency: 2,
+}, async (t) => {
+  await Promise.all([
+    t.test("apply and prepare", async (t) => {
+      const hub = await startHub(t);
+      const stateDirectory = await temporaryDirectory(t, "sprut-agent-held-");
+      const { client } = await startDialog(t, hub, stateDirectory);
+      const [lamp, otherLamp] = FIRST_DIALOG_LAMPS;
+      const prepared = (await prepareTurnOff(client, lamp)).structuredContent;
+      const { file } = await journalOf(stateDirectory);
+      const holder = await holdLock(t, `${file}.lock`);
+
+      const from = hub.requests.length;
+      const [applied, another] = await Promise.all([
+        client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        }),
+        prepareTurnOff(client, otherLamp),
+      ]);
+      assert.equal(applied.isError, true, applied.content[0]?.text);
+      assertBusy(applied.structuredContent.error);
+      assert.equal(applied.structuredContent.error.retryable, true);
+      assert.equal(another.isError, true, another.content[0]?.text);
+      assertBusy(another.structuredContent.error);
+      assert.deepEqual(lightWritesOf(hub, from, lamp), []);
+      assert.equal(hubOn(hub, lamp), true);
+      // Nothing counts as sent: the record is as it was before the call.
+      const { changes } = await journalOf(stateDirectory);
+      assert.deepEqual(
+        Object.values(changes).map(({ status }) => status),
+        ["prepared"],
+      );
+
+      await kill(holder);
+      const retried = await call(client, "apply_native_change", {
+        change_ref: prepared.change_ref,
+      });
+      assert.equal(retried.status, "applied");
+      assert.equal(hubOn(hub, lamp), false);
+      await call(client, "restore_native_change", {
+        change_ref: prepared.change_ref,
+      });
+      assert.equal(hubOn(hub, lamp), true);
+    }),
+    t.test("device commands", async (t) => {
+      const hub = await startHub(t);
+      const stateDirectory = await temporaryDirectory(t, "sprut-agent-held-");
+      const { client } = await startDialog(t, hub, stateDirectory);
+      const [lamp, otherLamp] = FIRST_DIALOG_LAMPS;
+      await prepareTurnOff(client, otherLamp);
+      const { file } = await journalOf(stateDirectory);
+      const holder = await holdLock(t, `${file}.lock`);
+
+      const from = hub.requests.length;
+      const refused = await turnOff(client, lamp);
+      const [item] = refused.structuredContent.results;
+      assert.equal(item.status, "not_sent", refused.content[0]?.text);
+      assert.equal(item.sent, false);
+      assertBusy(item.error);
+      assert.deepEqual(lightWritesOf(hub, from, lamp), []);
+      assert.equal(hubOn(hub, lamp), true);
+
+      await kill(holder);
+      const retried = await turnOff(client, lamp);
+      assert.equal(retried.structuredContent.status, "ok");
+      assert.equal(hubOn(hub, lamp), false);
+    }),
+  ]);
+});
+
+test("a stopped process's lock gives way by its age", async (t) => {
+  const hub = await startHub(t);
+  const stateDirectory = await temporaryDirectory(t, "sprut-agent-aged-");
+  const { client } = await startDialog(t, hub, stateDirectory);
+  const [lamp, otherLamp] = FIRST_DIALOG_LAMPS;
+  await prepareTurnOff(client, lamp);
+  const { file } = await journalOf(stateDirectory);
+  const lockFile = `${file}.lock`;
+  // Its pid stays alive, as a dead holder's pid taken by another program does.
+  const holder = await holdLock(t, lockFile);
+  holder.kill("SIGSTOP");
+  const longAgo = new Date(Date.now() - 60 * 60_000);
+  await utimes(lockFile, longAgo, longAgo);
+
+  const startedAt = Date.now();
+  const prepared = await prepareTurnOff(client, otherLamp);
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.ok(Date.now() - startedAt < 5_000, "no wait for the bound");
+  const { changes } = await journalOf(stateDirectory);
+  assert.equal(Object.keys(changes).length, 2);
+});
+
+test("processes that find a dead process's lock together all keep their changes", async (t) => {
+  const directory = await temporaryDirectory(t, "sprut-agent-dead-");
+  const identity = { hubUrl: "wss://hub.test/spruthub", hubSerial: "sim-1" };
+  const fingerprint = hubStateFingerprint(identity.hubUrl, identity.hubSerial);
+  const journal = path.join(
+    directory,
+    `automation-changes-${fingerprint.slice(0, 24)}.json`,
+  );
+  await kill(await holdLock(t, `${journal}.lock`));
+
+  const tags = ["a", "b", "c", "d"];
+  const count = 40;
+  await Promise.all(
+    tags.map((tag) =>
+      run(process.execPath, [
+        journalProcess,
+        JSON.stringify({ directory, ...identity, tag, count }),
+      ]),
+    ),
+  );
+
+  const { changes } = JSON.parse(await readFile(journal, "utf8"));
+  assert.equal(Object.keys(changes).length, tags.length * count);
+  assert.deepEqual(await readdir(directory), [path.basename(journal)]);
 });

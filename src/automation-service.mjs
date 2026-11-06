@@ -3165,10 +3165,14 @@ export class AutomationService {
     );
   }
 
+  // A check saves what it observes on the record it read, so it runs like a
+  // write: an undo in another dialog must not end up under its older copy.
   async getNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
-    const change = await this.#requireNativeChange(id);
-    return withOverwriteNote(change, await this.#getNative(change));
+    return this.#exclusiveWrite(async () => {
+      const change = await this.#requireNativeChange(id);
+      return withOverwriteNote(change, await this.#getNative(change));
+    });
   }
 
   async #getNative(change) {
@@ -5606,8 +5610,7 @@ export class AutomationService {
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     if (entityRef !== undefined) requireEntityHome(entityRef, this.hubSerial);
     const selection = historySelection(homeRef, entityRef, limit, cursor);
-    const storedChanges = await this.store.list();
-    await this.#reconcileHistoryScenario(storedChanges, entityRef);
+    const storedChanges = await this.#reconciledHistory(entityRef);
     const all = storedChanges
       .filter(
         (change) =>
@@ -5649,21 +5652,29 @@ export class AutomationService {
     };
   }
 
+  async #reconciledHistory(entityRef) {
+    const changes = await this.store.list();
+    if (
+      entityRef === undefined ||
+      unplacedScenarioCreates(changes).length === 0
+    ) {
+      return changes;
+    }
+    return this.#exclusiveWrite(async () => {
+      const current = await this.store.list();
+      await this.#reconcileHistoryScenario(current, entityRef);
+      return current;
+    });
+  }
+
   async #reconcileHistoryScenario(changes, entityRef) {
-    if (entityRef === undefined) return;
     let target;
     try {
       target = parseScenarioRef(entityRef, this.hubSerial);
     } catch {
       return;
     }
-    const candidates = changes.filter(
-      (change) =>
-        ["block_create", "logic_source_create"].includes(change.kind) &&
-        !change.scenario_index &&
-        ["applying", "uncertain"].includes(change.status) &&
-        nativeIntentDirection(change) === "apply",
-    );
+    const candidates = unplacedScenarioCreates(changes);
     if (candidates.length === 0) return;
     const scenario = await this.client.getScenario(target.index);
     if (!scenario) return;
@@ -7621,7 +7632,8 @@ export class AutomationService {
   async #saveBeforeWrite(change) {
     try {
       await this.store.save(change);
-    } catch {
+    } catch (error) {
+      if (error.code === "state_storage_busy") throw error;
       throw new SprutHubError(
         "state_storage_unavailable",
         "Could not save the recovery state required before writing to SprutHub.",
@@ -7643,10 +7655,22 @@ export class AutomationService {
   }
 
   async #exclusiveWrite(operation) {
-    const current = this.#writeSequence.catch(() => {}).then(operation);
+    const current = this.#writeSequence
+      .catch(() => {})
+      .then(() => this.store.exclusive(operation));
     this.#writeSequence = current;
     return current;
   }
+}
+
+function unplacedScenarioCreates(changes) {
+  return changes.filter(
+    (change) =>
+      ["block_create", "logic_source_create"].includes(change.kind) &&
+      !change.scenario_index &&
+      ["applying", "uncertain"].includes(change.status) &&
+      nativeIntentDirection(change) === "apply",
+  );
 }
 
 // An undo of change rewrites what other set: the same setting, or a field

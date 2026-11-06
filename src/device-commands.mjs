@@ -280,7 +280,8 @@ export function deviceCommandFailure(change, error) {
   if (
     change === undefined ||
     change.status === "prepared" ||
-    code === "state_storage_unavailable"
+    code === "state_storage_unavailable" ||
+    code === "state_storage_busy"
   ) {
     status = "not_sent";
   } else if (change.status === "not_applied") {
