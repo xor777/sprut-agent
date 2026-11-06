@@ -792,6 +792,7 @@ function toToolError(error) {
           "invalid_message",
           "authentication_delayed",
           "timeout",
+          "state_storage_busy",
         ].includes(error.code),
         ...(error.action ? { action: error.action } : {}),
       },
