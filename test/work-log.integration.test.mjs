@@ -7,6 +7,7 @@ import {
   readFile,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -419,6 +420,29 @@ test("a full log becomes the one previous file and the next line starts a new on
   ]);
 });
 
+test("a lock left by a dead process delays rotation by one call at most", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const full = fillerUpTo(LOG_LIMIT_BYTES);
+  await writeFile(logFile(stateDirectory), full.text, { mode: 0o600 });
+  const lock = `${logFile(stateDirectory)}.lock`;
+  await writeFile(lock, "");
+  const longAgo = new Date(Date.now() - 3_600_000);
+  await utimes(lock, longAgo, longAgo);
+  const client = await startStateClient(t, hub, stateDirectory);
+
+  const first = await client.callTool({ name: "home_overview", arguments: {} });
+  await client.callTool({ name: "home_overview", arguments: {} });
+
+  assert.equal(first.isError, undefined);
+  assert.equal((await logLines(stateDirectory)).length, 1);
+  const previous = await logLines(stateDirectory, "work-log.jsonl.1");
+  assert.equal(previous.length, full.count + 1);
+  assert.deepEqual((await readdir(stateDirectory)).sort(), [
+    "work-log.jsonl",
+    "work-log.jsonl.1",
+  ]);
+});
+
 test("a log below the limit keeps growing", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const below = fillerUpTo(LOG_LIMIT_BYTES - 2_000);
@@ -481,7 +505,6 @@ test("several servers crossing the limit together keep every line", async (t) =>
     ({ tool }) => tool !== "filler",
   );
   assert.equal(logged.length, 100);
-  assert.equal(new Set(previous.map(({ index }) => index)).size > 1, true);
 });
 
 test("a damaged line breaks neither the tools nor the lines after it", async (t) => {

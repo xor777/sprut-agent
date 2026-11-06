@@ -37,6 +37,29 @@ node ./dist/plugin/dist/server.mjs
 `.codex-plugin/mcp.json` использует `./dist/server.mjs` с `cwd: "."`: Codex
 запускает процесс из папки плагина.
 
+## Журнал работы
+
+Каждый вызов инструмента дописывает строку в `work-log.jsonl` каталога
+состояния: `SPRUT_AGENT_STATE_DIR`, иначе на macOS
+`~/Library/Application Support/sprut-agent`, на Linux
+`$XDG_STATE_HOME/sprut-agent` или `~/.local/state/sprut-agent`. Около 1 МБ файл
+становится `work-log.jsonl.1`, прежний предыдущий заменяется.
+
+```sh
+# Отказы последних вызовов; повреждённые строки пропускаются.
+jq -Rc 'fromjson? | select(.outcome == "error")' work-log.jsonl
+```
+
+Поля: `time` (начало), `version`, `tool`, `operation` (значение перечисления
+операций), `outcome`, `error_code`, `hub_code`, `duration_ms`, `response_bytes`
+(текст ответа агенту). `outcome: "error"` также у пакетного ответа
+`status: "incomplete"`. Коды вне ответов инструментов: `invalid_arguments`
+(аргументы отклонены до запуска инструмента), `unknown_tool` (и
+`tool: "unknown"`: имя от клиента не пишется), `protocol_error`, `cancelled`
+(клиент отменил вызов), `interrupted` (клиент отключился во время вызова).
+Запись и её ошибки на ответ не влияют; при аварийном завершении сервера
+незаконченный вызов строки не оставит.
+
 ## Голосовой стенд владельца
 
 На `sprut.spaoasis.ru` работает отдельный голосовой прототип из `voice/`.
