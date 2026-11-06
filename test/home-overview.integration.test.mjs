@@ -619,7 +619,7 @@ test("another firmware refuses nothing and adds no question", async (t) => {
     ],
     reason: "another firmware",
   });
-  assert.equal(sent.status, "completed");
+  assert.equal(sent.status, "ok");
   assert.equal(hub.writes().length, 1);
 
   const contract = await call("get_native_change_contract", {
