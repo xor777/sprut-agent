@@ -8,6 +8,7 @@ import {
   readFile,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -960,4 +961,223 @@ test("a running server does not move to another hub address: it asks for the res
   assert.equal(loginsOf(hub), 1);
   assert.equal(loginsOf(otherHub), 0, "no credentials sent from this process");
   assertNoSecrets(JSON.stringify(result));
+});
+
+// A clock wrong at the moment of a refusal must not keep what it wrote: the
+// wait it computed never ends on the right clock, and saving the file does
+// not lift the hub's delay.
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60_000;
+for (const refusal of [
+  { status: "ACCOUNT_RESPONSE_TOO_FAST", delay: 60 },
+  { status: "ACCOUNT_RESPONSE_FAILED" },
+]) {
+  test(`a ${refusal.status} met under a clock 30 days ahead does not hold once the clock is right`, async (t) => {
+    const { hub, account, client, startServer } = await setup(t, {
+      account: refusal,
+      savedToken: expiredToken,
+      firstServer: { clockOffsetMs: THIRTY_DAYS_MS },
+    });
+    await overview(client);
+    assert.equal(loginsOf(hub), 1, "the refusal happened");
+
+    delete account.status;
+    delete account.delay;
+    const corrected = await startServer();
+    const result = await overview(corrected);
+
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    assert.equal(loginsOf(hub), 2);
+  });
+}
+
+// The hub refuses every ordinary request as an incorrect token, though it
+// goes on giving tokens to a login and answers the login's own list of homes.
+function refuseAllSessions() {
+  const state = { refusing: false };
+  let loggingIn = false;
+  return {
+    state,
+    onRequest: (request, simulated) => {
+      if (request.method.startsWith("account.")) {
+        loggingIn = true;
+      } else if (loggingIn && request.method === "hub.list") {
+        loggingIn = false;
+      } else if (state.refusing) {
+        simulated.expireTokens();
+      }
+    },
+  };
+}
+
+test("a hub that goes on refusing after a fresh login gets one login per call, not two", async (t) => {
+  const { state, onRequest } = refuseAllSessions();
+  const { hub, client } = await setup(t, {
+    onRequest,
+    firstServer: { clockStepMs: 60_000 },
+  });
+  assert.equal((await overview(client)).isError, undefined);
+  assert.equal(loginsOf(hub), 1);
+  state.refusing = true;
+
+  for (const round of [1, 2, 3]) {
+    const before = loginsOf(hub);
+    const answer = await sendCommands(client, [[hallLightOn, true]]);
+    assert.match(JSON.stringify(answer), /authentication_(failed|delayed)/);
+    assert.ok(
+      loginsOf(hub) - before <= 1,
+      `call ${round}: ${loginsOf(hub) - before} logins`,
+    );
+  }
+  assert.equal(lampOn(hub, 12), false);
+
+  // Not for good: past a call's time the next refusal may log in again, and
+  // a hub that recovered works without a restart.
+  await client.shiftClock();
+  const before = loginsOf(hub);
+  await sendCommands(client, [[hallLightOn, true]]);
+  assert.equal(loginsOf(hub), before + 1);
+  state.refusing = false;
+  await client.shiftClock();
+  const recovered = await sendCommands(client, [[hallLightOn, true]]);
+  assert.equal(recovered.structuredContent.status, "ok");
+  assert.equal(lampOn(hub, 12), true);
+});
+
+test("the login that starts a server is the call's one login when the hub refuses what follows", async (t) => {
+  const { state, onRequest } = refuseAllSessions();
+  state.refusing = true;
+  const { hub, client } = await setup(t, { onRequest });
+
+  const answer = await overview(client);
+
+  assert.equal(answer.isError, true, JSON.stringify(answer));
+  assert.equal(answer.structuredContent.error.code, "authentication_delayed");
+  assert.equal(answer.structuredContent.error.retryable, true);
+  assert.ok(answer.structuredContent.retry_after_seconds > 0);
+  assert.equal(loginsOf(hub), 1);
+});
+
+// The session is renewed on the way to a device read. What stops it is not
+// the command's fault, and "fix every command" sends the agent the wrong way.
+for (const { name, code, breakIt } of [
+  {
+    name: "another hub address saved",
+    code: "connection_changed",
+    breakIt: ({ saveCredentials }) =>
+      saveCredentials({ url: "ws://127.0.0.1:9/spruthub" }),
+  },
+  {
+    name: "a credential file open to others",
+    code: "credential_file_unavailable",
+    breakIt: ({ credentialFile }) => chmod(credentialFile, 0o644),
+  },
+  {
+    name: "a credential file without the login",
+    code: "configuration",
+    breakIt: ({ hub, credentialFile }) =>
+      writeFile(credentialFile, `SPRUTHUB_URL=${hub.url}\n`, { mode: 0o600 }),
+  },
+  {
+    name: "a saved session open to others",
+    code: "session_permissions",
+    breakIt: ({ sessionFile }) => chmod(sessionFile, 0o644),
+  },
+  {
+    name: "a login answer this client does not know",
+    code: "incompatible_response",
+    breakIt: ({ account }) => {
+      account.status = "ACCOUNT_RESPONSE_FROM_THE_FUTURE";
+    },
+  },
+]) {
+  test(`send_device_commands names ${name} when the session is renewed`, async (t) => {
+    const context = await setup(t);
+    const { hub, client } = context;
+    assert.equal((await overview(client)).isError, undefined);
+    hub.expireTokens();
+    await breakIt(context);
+
+    const answer = await sendCommands(client, [[hallLightOn, true]]);
+
+    assert.equal(answer.isError, true, JSON.stringify(answer));
+    const { error, invalid_commands: invalid } = answer.structuredContent;
+    assert.equal(error.code, code, JSON.stringify(answer));
+    assert.equal(invalid, undefined);
+    assert.doesNotMatch(error.message, /fix every command/i);
+    assert.equal(lampOn(hub, 12), false);
+  });
+}
+
+// A power cut can leave the session file empty: it only saves a login.
+for (const [name, text] of [
+  ["empty", ""],
+  ["null", "null"],
+  ["a list", "[]"],
+  ["cut in the middle", '{"version":1,"url":'],
+]) {
+  test(`a session file that is ${name} costs one login, at start and in a running server`, async (t) => {
+    const { hub, sessionFile, client, startServer } = await setup(t);
+    assert.equal((await overview(client)).isError, undefined);
+    assert.equal(loginsOf(hub), 1);
+
+    await writeFile(sessionFile, text, { mode: 0o600 });
+    const started = await overview(await startServer());
+    assert.equal(started.isError, undefined, started.content[0]?.text);
+    assert.equal(loginsOf(hub), 2);
+    assert.equal(hub.acceptsToken(await savedToken(sessionFile)), true);
+
+    await writeFile(sessionFile, text, { mode: 0o600 });
+    hub.expireTokens();
+    const running = await sendCommands(client, [[hallLightOn, true]]);
+    assert.equal(running.structuredContent.status, "ok");
+    assert.equal(loginsOf(hub), 3);
+    assert.equal(hub.acceptsToken(await savedToken(sessionFile)), true);
+  });
+}
+
+test("a saved session that cannot be read or is open to others names the file", async (t) => {
+  const { sessionFile, startServer } = await setup(t, {
+    savedToken: expiredToken,
+  });
+  await chmod(sessionFile, 0o644);
+  const open = await overview(await startServer());
+  assert.equal(open.structuredContent.error.code, "session_permissions");
+  assert.ok(open.structuredContent.error.message.includes(sessionFile));
+
+  await unlink(sessionFile);
+  await mkdir(sessionFile);
+  const unreadable = await overview(await startServer());
+  assert.equal(unreadable.structuredContent.error.code, "session_invalid");
+  assert.ok(unreadable.structuredContent.error.message.includes(sessionFile));
+});
+
+test("a server started before connection.env exists uses it from the next request, no restart", async (t) => {
+  const { hub, credentialFile, saveCredentials, startServer } = await setup(t);
+  await unlink(credentialFile);
+  const client = await startServer();
+
+  const missing = await overview(client);
+  assert.equal(missing.structuredContent.error.code, "configuration");
+  assert.doesNotMatch(missing.structuredContent.error.message, /restart/i);
+  assert.equal(missing.structuredContent.credential_setup.restart, undefined);
+
+  await saveCredentials();
+  const configured = await overview(client);
+  assert.equal(configured.isError, undefined, configured.content[0]?.text);
+  assert.equal(loginsOf(hub), 1);
+});
+
+test("after another hub address, putting the old one back works without the restart", async (t) => {
+  const { hub, client, saveCredentials } = await setup(t);
+  assert.equal((await overview(client)).isError, undefined);
+  hub.expireTokens();
+  await saveCredentials({ url: "ws://127.0.0.1:9/spruthub" });
+  const changed = await overview(client);
+  assert.equal(changed.structuredContent.error.code, "connection_changed");
+  assert.match(changed.structuredContent.error.message, /put .* back/i);
+
+  await saveCredentials();
+  const back = await overview(client);
+  assert.equal(back.isError, undefined, back.content[0]?.text);
+  assert.equal(loginsOf(hub), 2);
 });
