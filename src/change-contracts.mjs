@@ -10,7 +10,6 @@ import {
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
-import { VERIFIED_HUB_VERSION } from "./tool-state.mjs";
 
 // SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
 // Latin alike (characters, not bytes); the room.create answer already
@@ -254,8 +253,9 @@ export function scenarioRunContract() {
         "fresh values are reported separately and do not prove physical or atomic delivery",
     },
     restore_supported: false,
+    // The hub these runs were observed on, not the last verified one.
     evidence: {
-      live_hub_version: VERIFIED_HUB_VERSION,
+      live_hub_version: "3.0.0b (20131)",
       live_run:
         "active action-only BLOCK with two Lightbulb On=false targets, including an explicit repeat run",
       turned_off_run:
@@ -298,8 +298,10 @@ export function blockActionPauseContract() {
       "remove_only_the_owned_unchanged_controller_and_keep_its_current_action",
     repeat:
       "the owned controller or its direct then/0 action replaces the same pause; overlapping narrower or wider scopes are rejected",
+    // research/protocol/2026-09-12-block-action-pause.md: the live conformance
+    // run does not cover this operation, so a new firmware does not change it.
     evidence: {
-      live_hub_version: VERIFIED_HUB_VERSION,
+      live_hub_version: "3.0.0b (20131)",
       code_condition_before_and_after_deadline: true,
       client_closed_between_evaluations: true,
       full_hub_restart: false,

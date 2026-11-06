@@ -1751,12 +1751,12 @@ function changedPaths(before, after, prefix = "") {
   );
 }
 
-// Sets characteristic values of a fixture before the hub starts.
 function withOtherFirmware(fixture) {
   Object.assign(fixture.hub, OTHER_FIRMWARE);
   return fixture;
 }
 
+// Sets characteristic values of a fixture before the hub starts.
 function withValues(fixture, values) {
   for (const [aId, sId, cId, value] of values) {
     const characteristic = fixture.accessories
