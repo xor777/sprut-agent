@@ -70,6 +70,7 @@ import {
   parseRoomRef,
   parseScenarioRef,
   parseServiceRef,
+  predefinedScenarioReadOnly,
   refuseRedactedChangeTexts,
   refuseRedactionMark,
   requireEntityHome,
@@ -451,9 +452,7 @@ export class AutomationService {
       };
     }
     if (input.operation === "block_action_pause") {
-      const target = parseScenarioRef(input.target_ref, this.hubSerial);
-      const scenario = await this.client.getScenario(target.index);
-      if (!scenario) throw scenarioNotFound();
+      const { scenario } = await this.#readChangeableScenario(input.target_ref);
       if (scenarioSnapshot(scenario).type !== "BLOCK")
         throw unsupportedScenarioType();
       return {
@@ -475,9 +474,7 @@ export class AutomationService {
       };
     }
     if (input.operation === "logic_source_update") {
-      const target = parseScenarioRef(input.target_ref, this.hubSerial);
-      const scenario = await this.client.getScenario(target.index);
-      if (!scenario) throw scenarioNotFound();
+      const { scenario } = await this.#readChangeableScenario(input.target_ref);
       if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
         throw notCodeScenario();
       }
@@ -569,6 +566,8 @@ export class AutomationService {
       input.value === undefined &&
       typeof input.active === "boolean"
     ) {
+      // What the call this answer names would refuse is refused first.
+      await kind.inspect(this, input);
       throw activeInsteadOfValue(input);
     }
     const draft = kind.prepare
@@ -1611,7 +1610,21 @@ export class AutomationService {
     return rules;
   }
 
+  // A scenario an edit prepares from. A built-in one is answered here, before
+  // anything else in the request: every other answer would point to a write
+  // that refuses it too.
+  async #readChangeableScenario(targetRef) {
+    const target = parseScenarioRef(targetRef, this.hubSerial);
+    const scenario = await this.client.getScenario(target.index);
+    if (!scenario) throw scenarioNotFound();
+    if (scenario.predefined === true) throw predefinedScenarioReadOnly();
+    return { target, scenario };
+  }
+
   async #prepareBlockUpdate(input) {
+    const { target, scenario } = await this.#readChangeableScenario(
+      input.target_ref,
+    );
     if (
       typeof input.name === "string" ||
       typeof input.description === "string"
@@ -1642,9 +1655,6 @@ export class AutomationService {
         },
       );
     }
-    const target = parseScenarioRef(input.target_ref, this.hubSerial);
-    const scenario = await this.client.getScenario(target.index);
-    if (!scenario) throw scenarioNotFound();
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
     const pauseChanges = await this.#knownBlockPauses(input.target_ref);
@@ -1712,6 +1722,9 @@ export class AutomationService {
   }
 
   async #prepareBlockActionPause(input) {
+    const { target, scenario } = await this.#readChangeableScenario(
+      input.target_ref,
+    );
     if (
       typeof input.action_pointer !== "string" ||
       !Number.isSafeInteger(input.duration_seconds) ||
@@ -1724,9 +1737,6 @@ export class AutomationService {
         "get_native_change_contract",
       );
     }
-    const target = parseScenarioRef(input.target_ref, this.hubSerial);
-    const scenario = await this.client.getScenario(target.index);
-    if (!scenario) throw scenarioNotFound();
     const baseline = scenarioSnapshot(scenario);
     if (baseline.type !== "BLOCK") throw unsupportedScenarioType();
     const pauseChanges = await this.#knownBlockPauses(input.target_ref);
@@ -2189,11 +2199,11 @@ export class AutomationService {
     const metadataField = Object.keys(LOGIC_SOURCE_METADATA_INPUTS).find(
       (field) => input[field] !== undefined,
     );
-    const target = parseScenarioRef(input.target_ref, this.hubSerial);
     // Where such a field changes depends on the scenario's type, so the
     // scenario is read first.
-    const scenario = await this.client.getScenario(target.index);
-    if (!scenario) throw scenarioNotFound();
+    const { target, scenario } = await this.#readChangeableScenario(
+      input.target_ref,
+    );
     if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
       throw notCodeScenario();
     }
@@ -2206,13 +2216,6 @@ export class AutomationService {
     }
     const source = requiredLogicSource(input.source);
     const baseline = logicScenarioSnapshot(scenario);
-    if (baseline.predefined === true) {
-      throw new SprutHubError(
-        "predefined_logic_read_only",
-        "Clone a predefined LOGIC into a new owned scenario instead of changing its source.",
-        "prepare_native_change",
-      );
-    }
     // Answers show such code only as [REDACTED]: the agent has not seen what
     // a new source would replace.
     if (codeShownRedacted(baseline.data)) {
@@ -6805,6 +6808,11 @@ export class AutomationService {
         conflict_reason: "baseline_changed",
         ...baseline.fields,
       });
+    }
+    // Prepared before it counted as built-in: not sent now. Undo stays open,
+    // since it leads the data back and the agent's change does not stay.
+    if (current.scenario?.predefined === true) {
+      throw predefinedScenarioReadOnly();
     }
 
     if (
