@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import packageMetadata from "../package.json" with { type: "json" };
 import { scaledHome } from "./fixtures/homes/scaled.mjs";
 import {
   loadHomeFixture,
@@ -521,4 +522,109 @@ test("home_overview pages long lists and query matches past the first ten", asyn
     tool: "home_overview",
     arguments: { home_ref: home, list: "scenarios", active: false },
   });
+});
+
+function withFirmware(fixture, firmware) {
+  return { ...fixture, hub: { ...fixture.hub, ...firmware } };
+}
+
+// After a hub update the owner learns that behaviour may differ: the agent
+// reads which tool it is and whether the hub runs the firmware the tool was
+// last verified on, and only a difference carries a note to pass on.
+test("home_overview tells the tool's version and whether the hub runs the verified firmware", async (t) => {
+  const apartment = await loadHomeFixture("apartment");
+  const answerFor = async (firmware) => {
+    const { client } = await setup(t, withFirmware(apartment, firmware));
+    return (await overview(client)).body;
+  };
+
+  const same = await answerFor({ version: "3.0.0b", revision: "20131" });
+  assert.deepEqual(same.tool, {
+    version: packageMetadata.version,
+    verified_revision: "20131",
+    firmware_check: "matches",
+  });
+
+  // The hub may report the revision as a number; it is the same revision.
+  const sameAsNumber = await answerFor({ revision: 20131 });
+  assert.equal(sameAsNumber.tool.firmware_check, "matches");
+  assert.equal(Object.hasOwn(sameAsNumber.tool, "note"), false);
+
+  // Newer and older alike: neither was verified.
+  for (const [version, revision] of [
+    ["3.1.0", "20456"],
+    ["2.9.9", "19000"],
+  ]) {
+    const { tool, home } = await answerFor({ version, revision });
+    assert.equal(tool.version, packageMetadata.version);
+    assert.equal(tool.verified_revision, "20131");
+    assert.equal(tool.firmware_check, "differs");
+    assert.ok(tool.note.includes(`${version} (${revision})`), tool.note);
+    assert.ok(tool.note.includes("3.0.0b (20131)"), tool.note);
+    assert.match(tool.note, /behave differently/);
+    assert.match(tool.note, /Mention it/);
+    assert.deepEqual(home.firmware, { version, revision });
+  }
+
+  // No revision, no claim either way.
+  const unknown = await answerFor({ revision: null });
+  assert.equal(unknown.home.firmware.revision, null);
+  assert.equal(unknown.tool.version, packageMetadata.version);
+  assert.equal(unknown.tool.verified_revision, "20131");
+  assert.equal(unknown.tool.firmware_check, "unknown");
+  assert.match(unknown.tool.note, /did not report/);
+});
+
+// The list and query answers stay about what they list.
+test("home_overview says the tool's state only in the overview itself", async (t) => {
+  const { client } = await setup(
+    t,
+    withFirmware(await loadHomeFixture("apartment"), { revision: "20456" }),
+  );
+
+  assert.equal((await overview(client)).body.tool.firmware_check, "differs");
+  for (const args of [{ list: "rooms" }, { query: "кухня" }]) {
+    const { body } = await overview(client, args);
+    assert.equal(Object.hasOwn(body, "tool"), false, JSON.stringify(args));
+  }
+});
+
+// A note, not a gate: on another firmware reads and writes go on as before,
+// and the contracts still name the firmware their evidence comes from.
+test("another firmware refuses nothing and adds no question", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    withFirmware(await loadHomeFixture("apartment"), {
+      version: "3.1.0",
+      revision: "20456",
+    }),
+  );
+  const home = "spruthub://hub/sim-apartment-01";
+  const call = async (name, args) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return result.structuredContent;
+  };
+
+  assert.equal((await overview(client)).body.tool.firmware_check, "differs");
+  const found = await call("find_devices", { query: "торшер" });
+  assert.equal(found.status, "ok");
+  const sent = await call("send_device_commands", {
+    home_ref: home,
+    commands: [
+      {
+        target_ref: `${home}/accessory/16/service/13/characteristic/14`,
+        value: true,
+      },
+    ],
+    reason: "another firmware",
+  });
+  assert.equal(sent.status, "completed");
+  assert.equal(hub.writes().length, 1);
+
+  const contract = await call("get_native_change_contract", {
+    operation: "scenario_run",
+    target_ref: `${home}/scenario/5`,
+  });
+  assert.equal(contract.contract.evidence.live_hub_version, "3.0.0b (20131)");
 });

@@ -2679,7 +2679,8 @@ function buildState(fixture, hubTime) {
     version: {
       current: {
         version: fixture.hub.version ?? "3.0.0",
-        revision: fixture.hub.revision ?? "20131",
+        revision:
+          fixture.hub.revision === undefined ? "20131" : fixture.hub.revision,
       },
     },
   };
