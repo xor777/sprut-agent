@@ -3563,7 +3563,7 @@ export class SprutHubClient {
       requested.has("diagnostics"),
       response.responseReceivedAt,
     );
-    await this.#offerScenarioActive(parsed, normalized, deadline);
+    await this.#offerScenarioOptions(parsed, normalized, deadline);
     await this.#withholdBridgeExportWrites(parsed, normalized, deadline);
     return {
       kind: "window",
@@ -3605,13 +3605,14 @@ export class SprutHubClient {
     }
   }
 
-  // Active in a scenario's options window is that scenario's on/off flag;
-  // window_option refuses it, and scenario_active also checks scenario.get.
-  async #offerScenarioActive(parsed, normalized, deadline) {
-    const option = normalized.physical_configuration.options.find(
-      ({ key, redacted }) => key === "Active" && redacted !== true,
-    );
-    if (!option) return;
+  // A scenario's options window. Nothing in a built-in scenario's is written
+  // here (rejectDirectScenarioMetadataWindow). Otherwise Active is that
+  // scenario's on/off flag; window_option refuses it, and scenario_active also
+  // checks scenario.get. Other windows have none of these keys, and are not
+  // worth reading the scenario list for.
+  async #offerScenarioOptions(parsed, normalized, deadline) {
+    const { options } = normalized.physical_configuration;
+    if (!options.some(({ key }) => SCENARIO_WINDOW_KEYS.has(key))) return;
     const owners = extractScenarioCatalog(
       await this.#request({ scenario: { list: {} } }, deadline, {
         serial: parsed.serial,
@@ -3619,13 +3620,20 @@ export class SprutHubClient {
     ).filter(({ optionsWindow }) => optionsWindow === parsed.windowKey);
     if (owners.length === 0) return;
     if (owners.length === 1 && owners[0].predefined === true) {
-      option.native_change = {
-        native_write: option.native_change.native_write,
-        supported: false,
-        reason: "predefined_scenario_read_only",
-      };
+      for (const candidate of options) {
+        if (!candidate.native_change) continue;
+        candidate.native_change = {
+          native_write: candidate.native_change.native_write,
+          supported: false,
+          reason: "predefined_scenario_read_only",
+        };
+      }
       return;
     }
+    const option = options.find(
+      ({ key, redacted }) => key === "Active" && redacted !== true,
+    );
+    if (!option) return;
     option.native_change = {
       native_write: option.native_change.native_write,
       supported: false,
@@ -5153,6 +5161,8 @@ const BRIDGE_LISTS_NOTHING =
 const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
 const BRIDGE_EXPORT_OPTION = /^s:\d+$/;
 const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
+// Keys only a scenario's options window has; Name and Desc are not among them.
+const SCENARIO_WINDOW_KEYS = new Set(["Active", "OnStart", "Sync"]);
 
 // Only a service's checkbox in a bridge child's window was written on a
 // hub (2026-10-14-bridge-export-write); a bridge's own settings and the

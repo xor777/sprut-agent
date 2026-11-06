@@ -204,6 +204,14 @@ export function parseWindowOptionOwner(ref, configuredSerial) {
   return { kind: "window", ...parseWindowRef(ref, configuredSerial) };
 }
 
+export function predefinedScenarioReadOnly() {
+  return new SprutHubError(
+    "predefined_scenario_read_only",
+    "This is a built-in SprutHub scenario: its name, flags and content come from SprutHub's own code and its options window shows placeholders, so it is not changed here and nothing was sent. The owner can change it in the SprutHub app.",
+    "get_entity",
+  );
+}
+
 export function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
   return new SprutHubError(
     "scenario_owner_required",
@@ -320,7 +328,7 @@ export function unsupportedBlockFlags(input) {
         : undefined;
   return new SprutHubError(
     "unsupported_block_flags",
-    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active.",
+    "block_data_update writes only data; omit active, on_start and sync. Change OnStart (run when the hub starts) or Sync (run actions one after another) with window_option on the scenario ref, and turn the scenario on or off with scenario_active; a built-in scenario changes only in the SprutHub app.",
     "get_native_change_contract",
     {
       next: {

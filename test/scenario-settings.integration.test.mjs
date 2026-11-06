@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -116,7 +116,7 @@ async function setup(t, { extraScenarios = [] } = {}) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  return { hub, client, stateDirectory };
 }
 
 async function call(client, name, args) {
@@ -866,7 +866,7 @@ function storedBlockWrites(hub) {
 }
 
 test("the data of a built-in BLOCK is refused like the rest of it, and a change made before is still undone", async (t) => {
-  const { hub, client } = await setup(t, {
+  const { hub, client, stateDirectory } = await setup(t, {
     extraScenarios: [builtInBlock()],
   });
   const edit = await prepareBuiltInBlockEdit(client);
@@ -876,11 +876,31 @@ test("the data of a built-in BLOCK is refused like the rest of it, and a change 
   assert.match(refused.error.message, /SprutHub app/);
   assert.deepEqual(hub.writes(), []);
 
-  // Prepared by an earlier version, while it did not yet count as built-in.
+  // What an earlier version saved for this scenario, built-in all along: the
+  // change is made while the hub's scenario does not count as one, and then
+  // both the hub and the journal say it does.
+  const countAsBuiltIn = async (builtIn) => {
+    scenarioOf(hub, BUILT_IN_BLOCK).predefined = builtIn;
+    const journal = path.join(
+      stateDirectory,
+      (await readdir(stateDirectory)).find((name) =>
+        /^automation-changes-\w+\.json$/.test(name),
+      ),
+    );
+    const saved = await readFile(journal, "utf8");
+    assert.match(saved, new RegExp(`"predefined": ${!builtIn}`));
+    await writeFile(
+      journal,
+      saved.replaceAll(`"predefined": ${!builtIn}`, `"predefined": ${builtIn}`),
+      { mode: 0o600 },
+    );
+  };
   scenarioOf(hub, BUILT_IN_BLOCK).predefined = false;
   const earlier = await call(client, "prepare_native_change", edit);
   assert.equal(earlier.status, "prepared", JSON.stringify(earlier));
-  scenarioOf(hub, BUILT_IN_BLOCK).predefined = true;
+
+  // Prepared then, not sent now.
+  await countAsBuiltIn(true);
   const atApply = await refusal(client, "apply_native_change", {
     change_ref: earlier.change_ref,
   });
@@ -888,13 +908,13 @@ test("the data of a built-in BLOCK is refused like the rest of it, and a change 
   assert.deepEqual(hub.writes(), []);
 
   // Applied then: the agent's change does not stay in the home.
-  scenarioOf(hub, BUILT_IN_BLOCK).predefined = false;
+  await countAsBuiltIn(false);
   const applied = await call(client, "apply_native_change", {
     change_ref: earlier.change_ref,
   });
   assert.equal(applied.status, "applied", JSON.stringify(applied));
   assert.equal(storedBlockWrites(hub).length, 1);
-  scenarioOf(hub, BUILT_IN_BLOCK).predefined = true;
+  await countAsBuiltIn(true);
   await restore(client, earlier);
   assert.equal(storedBlockWrites(hub).length, 2);
   assert.equal(
