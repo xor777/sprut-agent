@@ -40,7 +40,7 @@ const REPLY_DELAY_MS = 3_000;
 // Long enough for anything a stopped dialog still wrote by itself to show.
 const SETTLE_MS = 6_000;
 
-async function setup(t) {
+async function setup(t, { timeoutMs = 30_000 } = {}) {
   let arrived = () => {};
   const holders = [];
   const clients = [];
@@ -59,7 +59,7 @@ async function setup(t) {
       env: {
         PATH: process.env.PATH,
         ...hub.connectionEnv(),
-        SPRUTHUB_TIMEOUT_MS: "30000",
+        SPRUTHUB_TIMEOUT_MS: String(timeoutMs),
         SPRUT_AGENT_STATE_DIR: stateDirectory,
       },
       stderr: "pipe",
@@ -107,6 +107,15 @@ async function setup(t) {
     });
     return { held };
   };
+  const holdLock = async (lockFile) => {
+    const holder = spawn(process.execPath, [holdStateLock, lockFile], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    holders.push(holder);
+    const [line] = await once(holder.stdout, "data");
+    assert.equal(String(line), "held\n");
+    return holder;
+  };
   const whenArrives = (method, action) => {
     arrived = (request) => {
       if (request.method !== method) return;
@@ -124,6 +133,7 @@ async function setup(t) {
     client: await startDialog(),
     startDialog,
     holdJournalWhen,
+    holdLock,
     whenArrives,
     savedRecord,
   };
@@ -157,8 +167,11 @@ function assertStoppedPartWay(answer, changeRef, tool, code) {
   assert.equal(ref, changeRef, text);
   assert.deepEqual(next, { tool, arguments: { change_ref: changeRef } }, text);
   // It says what happened, not the answer of a call that sent nothing.
-  assert.doesNotMatch(error.message, /no write .* was sent/i);
+  assert.doesNotMatch(text, /no write .* was sent/i);
+  assert.doesNotMatch(text, /nothing was (written|sent)/i);
   assert.match(error.message, /already went to the hub/i);
+  // A repeat settles from the hub first: it may not go on from there.
+  assert.match(error.message, /checks the hub first/i);
 }
 
 function prepareGroup(client) {
@@ -481,7 +494,9 @@ test("the journal held after a hub step: the answer owns up and undo still works
           change_ref: prepared.change_ref,
         });
         assert.equal(undo.status, "not_owned", JSON.stringify(undo));
-        assert.deepEqual(candidateNames(undo.candidate_devices), ["Режим гостей"]);
+        assert.deepEqual(candidateNames(undo.candidate_devices), [
+          "Режим гостей",
+        ]);
         assert.equal(inRoster(hub, "Режим гостей"), true);
 
         const repeat = await call(client, "apply_native_change", {
@@ -492,7 +507,9 @@ test("the journal held after a hub step: the answer owns up and undo still works
           repeat.conflict_reason,
           "virtual_device_creation_outcome_unknown",
         );
-        assert.deepEqual(candidateNames(repeat.candidate_devices), ["Режим гостей"]);
+        assert.deepEqual(candidateNames(repeat.candidate_devices), [
+          "Режим гостей",
+        ]);
         assert.equal(creations(hub), 1);
       },
     ),
@@ -536,4 +553,510 @@ test("a journal that cannot be written after a hub step: the next call settles i
   });
   assert.equal(undo.status, "not_owned", JSON.stringify(undo));
   assert.equal(inRoster(hub, "Свет гостиной"), true);
+});
+
+const REFUSED = { code: -32000, message: "busy" };
+const APPLY = "apply_native_change";
+const RESTORE = "restore_native_change";
+
+// Whatever stops a change after a step of it went, the answer owns up to that
+// step and the same call finishes the change.
+const STOPPED_AFTER_A_STEP = [
+  {
+    name: "apply of a group, after a link",
+    prepare: prepareGroup,
+    tool: APPLY,
+  },
+  {
+    name: "apply of a group, after a setting",
+    prepare: prepareGroup,
+    tool: APPLY,
+    write: "characteristic.update",
+    read: "accessory.get",
+  },
+  {
+    name: "apply of lamps, after a link",
+    prepare: prepareMembers,
+    tool: APPLY,
+  },
+  {
+    name: "undo of a group, after a link",
+    prepare: prepareGroup,
+    tool: RESTORE,
+    write: "link.remove",
+  },
+  {
+    name: "undo of a group, after a setting",
+    prepare: prepareGroup,
+    tool: RESTORE,
+    write: "characteristic.update",
+    read: "accessory.get",
+  },
+  {
+    name: "undo of a group, after its deletion",
+    prepare: prepareGroup,
+    tool: RESTORE,
+    write: "accessory.delete",
+    read: "accessory.get",
+  },
+  {
+    name: "undo of lamps, after a link",
+    prepare: prepareMembers,
+    tool: RESTORE,
+  },
+];
+
+const finalStatus = { [APPLY]: "applied", [RESTORE]: "restored" };
+
+test("a read refused after a step went: the answer owns up, and the same call finishes", {
+  concurrency: 8,
+}, async (t) => {
+  await Promise.all(
+    STOPPED_AFTER_A_STEP.map(
+      ({
+        name,
+        prepare,
+        tool,
+        write = "link.addVirtual",
+        read = "link.list",
+      }) =>
+        t.test(name, async (t) => {
+          const { hub, client, whenArrives } = await setup(t);
+          const prepared = await prepare(client);
+          if (tool === RESTORE) {
+            await call(client, APPLY, { change_ref: prepared.change_ref });
+          }
+          const before = hub.writes().length;
+          whenArrives(write, () => hub.refuseNext(read, REFUSED));
+
+          const stopped = await client.callTool({
+            name: tool,
+            arguments: { change_ref: prepared.change_ref },
+          });
+
+          assertStoppedPartWay(
+            stopped,
+            prepared.change_ref,
+            tool,
+            "request_rejected",
+          );
+          assert.equal(hub.writes().at(-1).method, write);
+          assert.ok(hub.writes().length > before);
+
+          const finished = await call(client, tool, {
+            change_ref: prepared.change_ref,
+          });
+          assert.equal(
+            finished.status,
+            finalStatus[tool],
+            JSON.stringify(finished),
+          );
+        }),
+    ),
+  );
+});
+
+test("a read lost after a step went owns up too", {
+  concurrency: 2,
+}, async (t) => {
+  await Promise.all(
+    [
+      { name: "apply of a group", prepare: prepareGroup, tool: APPLY },
+      { name: "undo of lamps", prepare: prepareMembers, tool: RESTORE },
+    ].map(({ name, prepare, tool }) =>
+      t.test(name, async (t) => {
+        const { hub, client, whenArrives } = await setup(t, {
+          timeoutMs: 2_000,
+        });
+        const prepared = await prepare(client);
+        if (tool === RESTORE) {
+          await call(client, APPLY, { change_ref: prepared.change_ref });
+        }
+        whenArrives("link.addVirtual", () => hub.loseNext("link.list"));
+
+        const stopped = await client.callTool({
+          name: tool,
+          arguments: { change_ref: prepared.change_ref },
+        });
+
+        assertStoppedPartWay(stopped, prepared.change_ref, tool, "timeout");
+        const finished = await call(client, tool, {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(
+          finished.status,
+          finalStatus[tool],
+          JSON.stringify(finished),
+        );
+      }),
+    ),
+  );
+});
+
+test("an item of a restore owns up to a refused read too", async (t) => {
+  const { hub, client, whenArrives } = await setup(t);
+  const prepared = await prepareMembers(client);
+  await call(client, APPLY, { change_ref: prepared.change_ref });
+  whenArrives("link.addVirtual", () => hub.refuseNext("link.list", REFUSED));
+
+  const { results } = await call(client, RESTORE, {
+    change_refs: [prepared.change_ref],
+  });
+
+  const [item] = results;
+  assert.equal(item.status, "failed", JSON.stringify(item));
+  assert.equal(item.sent, true, JSON.stringify(item));
+  assert.equal(item.hub_effect, "partial");
+  assert.deepEqual(item.next, {
+    tool: RESTORE,
+    arguments: { change_ref: prepared.change_ref },
+  });
+  assert.doesNotMatch(JSON.stringify(item), /nothing was written/i);
+});
+
+test("a virtual device's undo whose delete went owns up to a refused read", async (t) => {
+  const { hub, client } = await setup(t, { timeoutMs: 2_000 });
+  const prepared = await prepareDevice(client);
+  await call(client, APPLY, { change_ref: prepared.change_ref });
+
+  hub.loseNext("accessory.delete");
+  const unknown = await call(client, RESTORE, {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(unknown.status, "uncertain", JSON.stringify(unknown));
+
+  hub.refuseNext("accessory.get", REFUSED);
+  const stopped = await client.callTool({
+    name: RESTORE,
+    arguments: { change_ref: prepared.change_ref },
+  });
+  assertStoppedPartWay(
+    stopped,
+    prepared.change_ref,
+    RESTORE,
+    "request_rejected",
+  );
+
+  const finished = await call(client, RESTORE, {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(finished.status, "restored", JSON.stringify(finished));
+  assert.equal(inRoster(hub, "Режим гостей"), false);
+});
+
+// The undo of a deletion creates the device again: the same lost id.
+test("the undo of a deletion whose new id was not saved: no third device", async (t) => {
+  const { hub, client, journalFile, whenArrives } = await setup(t);
+  const made = await prepareDevice(client);
+  const { device } = await call(client, APPLY, { change_ref: made.change_ref });
+  const removal = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: device.ref,
+    reason: "Убрать выключатель",
+  });
+  await call(client, APPLY, { change_ref: removal.change_ref });
+  assert.equal(inRoster(hub, "Режим гостей"), false);
+
+  const temporaryFile = `${await journalFile()}.${client.pid}.tmp`;
+  hub.delayReplies("accessory.create", 200);
+  whenArrives("accessory.create", () => mkdirSync(temporaryFile));
+  const stopped = await client.callTool({
+    name: RESTORE,
+    arguments: { change_ref: removal.change_ref },
+  });
+  rmdirSync(temporaryFile);
+
+  assertStoppedPartWay(
+    stopped,
+    removal.change_ref,
+    RESTORE,
+    "state_storage_unavailable",
+  );
+  assert.equal(inRoster(hub, "Режим гостей"), true);
+  const repeat = await call(client, RESTORE, {
+    change_ref: removal.change_ref,
+  });
+  assert.equal(repeat.status, "uncertain", JSON.stringify(repeat));
+  assert.deepEqual(candidateNames(repeat.candidate_devices), ["Режим гостей"]);
+  assert.equal(creations(hub), 2);
+});
+
+// Another dialog's long write holds the operation lock when a repeat comes.
+test("a repeat that cannot start owns up to the steps an earlier call sent", {
+  concurrency: 2,
+}, async (t) => {
+  await Promise.all(
+    [
+      { name: "apply of a group", tool: APPLY },
+      { name: "undo of a group", tool: RESTORE, write: "link.remove" },
+    ].map(({ name, tool, write = "link.addVirtual" }) =>
+      t.test(name, async (t) => {
+        const { hub, client, journalFile, whenArrives, holdLock } =
+          await setup(t);
+        const prepared = await prepareGroup(client);
+        if (tool === RESTORE) {
+          await call(client, APPLY, { change_ref: prepared.change_ref });
+        }
+        whenArrives(write, () => hub.refuseNext("link.list", REFUSED));
+        await client.callTool({
+          name: tool,
+          arguments: { change_ref: prepared.change_ref },
+        });
+
+        const holder = await holdLock(`${await journalFile()}.operation.lock`);
+        const stopped = await client.callTool({
+          name: tool,
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assertStoppedPartWay(
+          stopped,
+          prepared.change_ref,
+          tool,
+          "state_storage_busy",
+        );
+
+        await kill(holder);
+        const finished = await call(client, tool, {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(
+          finished.status,
+          finalStatus[tool],
+          JSON.stringify(finished),
+        );
+      }),
+    ),
+  );
+});
+
+// The id reached the journal and the read after it did not: the record holds
+// only the id, and it is shown as it is.
+test("a new group whose first read failed still answers and finishes", async (t) => {
+  const { hub, client, whenArrives } = await setup(t);
+  const prepared = await prepareGroup(client);
+  whenArrives("accessory.create", () =>
+    hub.refuseNext("accessory.get", REFUSED),
+  );
+
+  const stopped = await client.callTool({
+    name: APPLY,
+    arguments: { change_ref: prepared.change_ref },
+  });
+  assert.equal(stopped.isError, undefined, JSON.stringify(stopped));
+  assert.equal(stopped.structuredContent.status, "uncertain");
+  assert.equal(
+    stopped.structuredContent.conflict_reason,
+    "created_accessory_readback_failed",
+  );
+
+  const finished = await call(client, APPLY, {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(finished.status, "applied", JSON.stringify(finished));
+  assert.equal(creations(hub), 1);
+});
+
+function assertSentNothing(answer) {
+  const text = JSON.stringify(answer);
+  assert.equal(answer.isError, true, text);
+  assert.equal(answer.structuredContent.hub_effect, undefined, text);
+  assert.equal(answer.structuredContent.next, undefined, text);
+  assert.doesNotMatch(text, /already went to the hub/i);
+}
+
+const PREPARE_EACH = [
+  { name: "a group", prepare: prepareGroup },
+  { name: "lamps", prepare: prepareMembers },
+  { name: "a virtual device", prepare: prepareDevice },
+];
+
+// A step is marked in the journal before it goes. When that save fails, the
+// step did not go: nothing is claimed, and the next call starts clean.
+test("a journal that refuses the first mark: nothing is claimed, and the next call works", {
+  concurrency: 6,
+}, async (t) => {
+  await Promise.all(
+    PREPARE_EACH.flatMap(({ name, prepare }) =>
+      [APPLY, RESTORE].map((tool) =>
+        t.test(`${tool} of ${name}`, async (t) => {
+          const { hub, client, journalFile } = await setup(t);
+          const prepared = await prepare(client);
+          if (tool === RESTORE) {
+            await call(client, APPLY, { change_ref: prepared.change_ref });
+          }
+          const writes = hub.writes().length;
+          const temporaryFile = `${await journalFile()}.${client.pid}.tmp`;
+          mkdirSync(temporaryFile);
+
+          const refused = await client.callTool({
+            name: tool,
+            arguments: { change_ref: prepared.change_ref },
+          });
+
+          rmdirSync(temporaryFile);
+          assertSentNothing(refused);
+          assert.equal(
+            refused.structuredContent.error.code,
+            "state_storage_unavailable",
+          );
+          assert.equal(hub.writes().length, writes);
+          const finished = await call(client, tool, {
+            change_ref: prepared.change_ref,
+          });
+          assert.equal(
+            finished.status,
+            finalStatus[tool],
+            JSON.stringify(finished),
+          );
+        }),
+      ),
+    ),
+  );
+});
+
+test("a read refused before any step of this direction: the answer stays as it was", {
+  concurrency: 4,
+}, async (t) => {
+  await Promise.all([
+    t.test("apply of a group", async (t) => {
+      const { hub, client } = await setup(t);
+      const prepared = await prepareGroup(client);
+      hub.refuseNext("accessory.list", REFUSED);
+      const answer = await client.callTool({
+        name: APPLY,
+        arguments: { change_ref: prepared.change_ref },
+      });
+      assertSentNothing(answer);
+      assert.deepEqual(hub.writes(), []);
+    }),
+
+    t.test("undo of lamps says nothing was written", async (t) => {
+      const { hub, client } = await setup(t);
+      const prepared = await prepareMembers(client);
+      await call(client, APPLY, { change_ref: prepared.change_ref });
+      const writes = hub.writes().length;
+      hub.refuseNext("accessory.get", REFUSED);
+      const answer = await call(client, RESTORE, {
+        change_ref: prepared.change_ref,
+      });
+      assert.equal(answer.hub_effect, undefined);
+      assert.match(answer.restore_outcome.message, /nothing was written/i);
+      assert.equal(hub.writes().length, writes);
+    }),
+
+    t.test("undo of a group", async (t) => {
+      const { hub, client } = await setup(t);
+      const prepared = await prepareGroup(client);
+      await call(client, APPLY, { change_ref: prepared.change_ref });
+      const writes = hub.writes().length;
+      hub.refuseNext("accessory.get", REFUSED);
+      const answer = await client.callTool({
+        name: RESTORE,
+        arguments: { change_ref: prepared.change_ref },
+      });
+      assertSentNothing(answer);
+      assert.equal(hub.writes().length, writes);
+    }),
+
+    t.test("undo of a virtual device", async (t) => {
+      const { hub, client } = await setup(t);
+      const prepared = await prepareDevice(client);
+      await call(client, APPLY, { change_ref: prepared.change_ref });
+      const writes = hub.writes().length;
+      hub.refuseNext("accessory.get", REFUSED);
+      const answer = await client.callTool({
+        name: RESTORE,
+        arguments: { change_ref: prepared.change_ref },
+      });
+      assertSentNothing(answer);
+      assert.equal(hub.writes().length, writes);
+    }),
+  ]);
+});
+
+// A finished change holds no part of anything: its repeat that cannot read
+// says only that.
+test("a repeat of a finished apply whose read is refused does not call it partial", {
+  concurrency: 2,
+}, async (t) => {
+  await Promise.all(
+    [
+      { name: "a group", prepare: prepareGroup },
+      { name: "lamps", prepare: prepareMembers },
+    ].map(({ name, prepare }) =>
+      t.test(name, async (t) => {
+        const { hub, client } = await setup(t);
+        const prepared = await prepare(client);
+        await call(client, APPLY, { change_ref: prepared.change_ref });
+        hub.refuseNext("accessory.get", REFUSED);
+        const answer = await client.callTool({
+          name: APPLY,
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assertSentNothing(answer);
+      }),
+    ),
+  );
+});
+
+// A write the hub refused did not go: a repeat that cannot read claims nothing.
+test("a refused creation followed by a refused read claims nothing", {
+  concurrency: 2,
+}, async (t) => {
+  await Promise.all(
+    [
+      {
+        name: "a group",
+        prepare: prepareGroup,
+        read: "accessory.list",
+      },
+      {
+        name: "a virtual device",
+        prepare: prepareDevice,
+        read: "room.get",
+      },
+    ].map(({ name, prepare, read }) =>
+      t.test(name, async (t) => {
+        const { hub, client } = await setup(t);
+        const prepared = await prepare(client);
+        hub.refuseNext("accessory.create", REFUSED);
+        const refused = await client.callTool({
+          name: APPLY,
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assert.equal(
+          refused.structuredContent.hub_effect,
+          "not_applied",
+          JSON.stringify(refused),
+        );
+
+        hub.refuseNext(read, REFUSED);
+        const answer = await client.callTool({
+          name: APPLY,
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assertSentNothing(answer);
+      }),
+    ),
+  );
+});
+
+// An answer that already carries the hub's refusal keeps it.
+test("a step the hub refused after earlier steps keeps its own answer", async (t) => {
+  const { hub, client, whenArrives } = await setup(t);
+  const prepared = await prepareMembers(client);
+  // The first link goes; the second is refused as it arrives.
+  whenArrives("link.addVirtual", () =>
+    whenArrives("link.addVirtual", () =>
+      hub.refuseNext("link.addVirtual", REFUSED),
+    ),
+  );
+  const answer = await client.callTool({
+    name: APPLY,
+    arguments: { change_ref: prepared.change_ref },
+  });
+  const { hub_effect: effect, rejection, next } = answer.structuredContent;
+  assert.equal(effect, "partial", JSON.stringify(answer));
+  assert.ok(rejection, JSON.stringify(answer));
+  assert.equal(next.tool, RESTORE);
 });
