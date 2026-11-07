@@ -97,7 +97,7 @@ export const METHOD_EVIDENCE = {
   ],
   "accessory.get": [
     OBSERVED,
-    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2); virtual=false, present, on a physical accessory (2026-09-24-live-conformance-3-read-only)",
+    "2026-09-11-device-placement; service visible seen in an owner-hub read on 2026-09-24; virtual=true on a created virtual accessory (2026-09-24-live-conformance-2); virtual=false, present, on a physical accessory (2026-09-24-live-conformance-3-read-only); lastUpdate in Unix milliseconds, not in accessory.list (2026-11-07-history-app)",
   ],
   "accessory.create": [
     OBSERVED,
@@ -1812,7 +1812,9 @@ const HANDLERS = {
   }),
   "accessory.get": (state, { id }) => {
     const accessory = state.accessories.find((item) => item.id === id);
-    return accessory ? withNotify(accessory) : null;
+    if (!accessory) return null;
+    const { lastUpdate, ...reply } = withNotify(accessory);
+    return lastUpdate === null ? reply : { ...reply, lastUpdate };
   },
   // As the owner's hub 3.0.0 answered (2026-10-23-virtual-devices): any
   // number of services of non-system types; a room the home lacks, or none,
@@ -1901,6 +1903,9 @@ const HANDLERS = {
       name: stored,
       online: true,
       virtual: true,
+      // An untouched virtual button shows its creation time
+      // (2026-11-07-history-app).
+      lastUpdate: hubNow(state),
       ...VIRTUAL_IDENTITY(id),
       services: [virtualInformationService(id, stored), ...created],
     };
@@ -2606,6 +2611,7 @@ function completeJoin(state, extension, device, child) {
       ...(input.deviceWindow ?? []),
     ],
   });
+  accessory.lastUpdate = hubNow(state);
   state.accessories.push(accessory);
   const {
     description: _description,
@@ -2729,7 +2735,10 @@ function buildState(fixture, hubTime) {
     nextSubscription: 1,
   };
   for (const input of fixture.accessories) {
-    state.accessories.push(buildAccessory(state, input));
+    state.accessories.push({
+      ...buildAccessory(state, input),
+      lastUpdate: fixtureLastUpdate(input, startedAt, utcOffsetMinutes),
+    });
   }
   // A fixture's links are as the web client's link.addVirtual leaves them,
   // without the value the hub copies at that moment: the fixture states
@@ -3061,6 +3070,24 @@ function atHubTime(wallClock, utcOffsetMinutes, now) {
       minutes,
       seconds,
     ) - offsetMs
+  );
+}
+
+// When the hub last heard from a fixture's device, as Unix milliseconds. All
+// 82 devices of the owner's hub had a value, from seconds to 176 days old
+// (2026-11-07-history-app), so a device without one in its fixture gets a
+// recent one of its own. A fixture may give milliseconds, or day (calendar
+// offset from the start's hub-local date) and time (hub-local wall clock) as
+// a log entry does; null leaves the field out of accessory.get, and any other
+// value is sent as it is.
+function fixtureLastUpdate({ id, lastUpdate }, startedAt, utcOffsetMinutes) {
+  if (lastUpdate === undefined) {
+    return startedAt - ((id % 97) + 1) * 7 * 60_000;
+  }
+  if (typeof lastUpdate?.time !== "string") return lastUpdate;
+  return (
+    atHubTime(lastUpdate.time, utcOffsetMinutes, startedAt) +
+    lastUpdate.day * 86_400_000
   );
 }
 
@@ -4310,9 +4337,15 @@ function extensionView(extension) {
 
 // accessory.list on the owner's hub (3.0.0, 2026-09-24) had no virtual
 // field for any accessory; accessory.get has it. Nor has it notify
-// (2026-10-12-notifications-live).
+// (2026-10-12-notifications-live) or lastUpdate, with or without expand
+// (2026-11-07-history-app).
 function projectAccessory(accessory, expand) {
-  const { services, virtual: _virtual, ...summary } = accessory;
+  const {
+    services,
+    virtual: _virtual,
+    lastUpdate: _lastUpdate,
+    ...summary
+  } = accessory;
   if (!expandIncludes(expand, "services")) return summary;
   return {
     ...summary,
@@ -4573,8 +4606,17 @@ function writeValue(state, characteristic, value) {
   }
   changed.push(...applyLampLogic(state, characteristic, previous));
   for (const item of new Set(changed)) {
+    reportFrom(state, item.aId);
     state.emitAfterReply?.(valueEvent(item));
   }
+}
+
+// A device whose value was written reports back. The hub also moves
+// lastUpdate with no value changing (2026-11-07-history-app); a command the
+// device does not answer was not observed.
+function reportFrom(state, aId) {
+  const accessory = state.accessories.find(({ id }) => id === aId);
+  if (accessory) accessory.lastUpdate = hubNow(state);
 }
 
 function emitRooms(state, event, rooms) {
