@@ -9,8 +9,9 @@
 // source: reviewer (examples from the review that rejected the regex
 // graders; abbreviated ones completed around the quoted part), author (the
 // examples of the regex graders' tests, relabelled where the regex was
-// wrong), saved-run (answers of real eval runs, 2026-09-24), written (added
-// to cover lists, tables, headings, hedges and confident wrong answers).
+// wrong), saved-run (answers of real eval runs, 2026-09-24 unless why says
+// otherwise), written (added to cover lists, tables, headings, hedges and
+// confident wrong answers).
 // ambiguous: reasonable graders could disagree; reported apart.
 // sent: native requests the run sent the hub before its answer; calibration
 // sends them to the case's hub first, so the judge gets the facts of that
@@ -1904,6 +1905,252 @@ export const LABELS = {
       source: "written",
       why: "the nursery's value given to the bedroom",
       answer: "В спальне 23,8 °C.",
+    },
+  ],
+  "why-lights-off-yesterday": [
+    {
+      id: "sonnet-run",
+      label: "pass",
+      source: "saved-run",
+      why: "one Sonnet run of 2026-11-07, before the lamps were spaced: reports, a marked cause and what the hub cannot confirm; its seconds and date do not decide",
+      answer:
+        "Скорее всего, свет в гостиной вчера вечером выключил сценарий «Гостиная на ночь». Он выключает сразу люстру, торшер и светодиодную ленту каждый день в 21:47. Что это подтверждает: Люстра, торшер и лента в последний раз выходили на связь с хабом вчера, 6 ноября, в 21:47:03–21:47:04. Это совпадает со временем сценария. Хаб не хранит старые события, так что самого выключения в журнале нет. Это вывод по совпадению времени, а не прямое подтверждение. Вручную свет мог выключить кто-то в то же время, но следов этого я не вижу.",
+    },
+    {
+      id: "good",
+      label: "pass",
+      source: "written",
+      why: "reports, marked cause, nothing to confirm it with",
+      answer:
+        "Люстра, торшер и лента последний раз отправляли сообщение хабу вчера около 21:47, с разницей в несколько секунд. Похоже, их выключил сценарий «Гостиная на ночь»: он гасит их каждый день в 21:47. Подтвердить нечем, вчерашних событий хаб не хранит.",
+    },
+    {
+      id: "conditional",
+      label: "pass",
+      source: "written",
+      why: "the cause on a condition is marked",
+      answer:
+        "Хаб последний раз слышал все три лампы вчера в 21:47. Если сработал сценарий «Гостиная на ночь», это объясняет совпадение, он настроен именно на это время. Записей о вчерашних событиях на хабе нет, так что точно сказать нельзя.",
+    },
+    {
+      id: "with-other-possibility",
+      label: "pass",
+      source: "written",
+      why: "names a person as another possibility beside the likely scenario",
+      answer:
+        "Вчера в 21:47 от люстры, торшера и ленты пришли последние сообщения на хаб. Вероятнее всего, это «Гостиная на ночь», у него то же время, хотя мог выключить и кто-то вручную. История вчерашнего дня на хабе не хранится.",
+    },
+    {
+      id: "list-form",
+      label: "pass",
+      source: "written",
+      why: "known and inferred apart, as a list",
+      answer:
+        "Известно:\n- люстра, торшер и лента последний раз вышли на связь с хабом вчера в 21:47;\n- сейчас они выключены.\n\nПредположение: их выключил сценарий «Гостиная на ночь», он срабатывает в 21:47. Журнал хаба вчерашний день не хранит, поэтому проверить нельзя.",
+    },
+    {
+      id: "overstated",
+      label: "fail",
+      source: "written",
+      why: "the scenario stated as fact, even beside the caveat",
+      answer:
+        "Свет выключил сценарий «Гостиная на ночь» вчера в 21:47: люстра, торшер и лента сообщили хабу в это время. Журнал хаба вчерашний день не хранит.",
+    },
+    {
+      id: "scenario-only",
+      label: "fail",
+      source: "written",
+      why: "never mentions a report: the scenario's read alone gives this",
+      answer:
+        "Вероятно, это сценарий «Гостиная на ночь»: он каждый день в 21:47 выключает люстру, торшер и ленту. Хаб не хранит вчерашних событий, так что подтвердить это нельзя.",
+    },
+    {
+      id: "switched-off-as-fact",
+      label: "fail",
+      source: "written",
+      why: "the lamps switched off at that time as fact; a report may change nothing",
+      answer:
+        "Лампы выключились вчера в 21:47, это видно по последним сообщениям на хаб. Возможно, причина в «Гостиная на ночь». Подтвердить нечем, вчерашних событий на хабе нет.",
+    },
+    {
+      id: "no-limit-said",
+      label: "fail",
+      source: "written",
+      why: "does not say that nothing confirms it",
+      answer:
+        "Люстра, торшер и лента последний раз вышли на связь вчера в 21:47. Похоже, их выключил сценарий «Гостиная на ночь».",
+    },
+    {
+      id: "wrong-scenario",
+      label: "fail",
+      source: "written",
+      why: "the night mode acts at 23:00, after the reports",
+      answer:
+        "Лампы последний раз сообщали хабу вчера в 21:47. Скорее всего, их выключил «Ночной режим». Вчерашних событий хаб не хранит, поэтому точно сказать нельзя.",
+    },
+  ],
+  "why-lights-off-no-scenario": [
+    {
+      id: "good",
+      label: "pass",
+      source: "written",
+      why: "time as a report, cause unknown, no scenario blamed",
+      answer:
+        "Люстра, торшер и лента последний раз отправляли сообщение хабу вчера около 20:13, почти одновременно. Сценария на это время нет, так что причина неизвестна: вчерашних событий хаб не хранит.",
+    },
+    {
+      id: "night-mode-does-not-fit",
+      label: "pass",
+      source: "written",
+      why: "a scenario named only as not fitting",
+      answer:
+        "Хаб последний раз слышал эти лампы вчера в 20:13. «Ночной режим» срабатывает только в 23:00, это не он. Почему они выключились, установить не могу: событий за вчера на хабе нет.",
+    },
+    {
+      id: "possibilities",
+      label: "pass",
+      source: "written",
+      why: "«Всё выключить» as one possibility beside a person",
+      answer:
+        "Последний раз лампы вышли на связь вчера в 20:13. Причину установить нельзя: это мог быть выключатель, приложение или кто-то запустил «Всё выключить». Вчерашних записей на хабе нет.",
+    },
+    {
+      id: "marked-guess",
+      label: "pass",
+      source: "written",
+      why: "a marked guess that they went off then, cause unknown",
+      answer:
+        "Сообщения от всех трёх ламп пришли на хаб вчера в 20:13, видимо, тогда они и выключились. Почему, неизвестно: подходящего сценария нет, а истории событий хаб не хранит.",
+    },
+    {
+      id: "list-form",
+      label: "pass",
+      source: "written",
+      why: "known and unknown apart",
+      answer:
+        "Известно: люстра, торшер и лента последний раз сообщили хабу вчера в 20:13.\nНеизвестно: что их выключило. Ни один сценарий не действует в это время, журнал так далеко не хранит.",
+    },
+    {
+      id: "blames-night-mode",
+      label: "fail",
+      source: "written",
+      why: "a scenario of another time named as the likely cause",
+      answer:
+        "Лампы последний раз сообщали хабу вчера в 20:13. Скорее всего, их выключил «Ночной режим». Вчерашних событий хаб не хранит.",
+    },
+    {
+      id: "blames-all-off",
+      label: "fail",
+      source: "written",
+      why: "«Всё выключить» stated as the cause though nothing starts it",
+      answer:
+        "Свет выключил сценарий «Всё выключить»: люстра, торшер и лента последний раз вышли на связь вчера в 20:13.",
+    },
+    {
+      id: "switched-off-as-fact",
+      label: "fail",
+      source: "written",
+      why: "the lamps switched off at that time as fact",
+      answer:
+        "Свет в гостиной выключился вчера ровно в 20:13. Причина неизвестна, сценария на это время нет.",
+    },
+    {
+      id: "no-time",
+      label: "fail",
+      source: "written",
+      why: "no last report at all",
+      answer:
+        "Не могу сказать почему: хаб не хранит вчерашних событий, а сценария на вечер, который гасит весь этот свет, нет.",
+    },
+    {
+      id: "cause-not-said-unknown",
+      label: "fail",
+      source: "written",
+      why: "gives the time and stops: it does not say the cause is unknown",
+      answer:
+        "Люстра, торшер и лента последний раз сообщили хабу вчера в 20:13.",
+    },
+  ],
+  "motion-last-report": [
+    {
+      id: "good",
+      label: "pass",
+      source: "written",
+      why: "the time as a report, and that it need not be motion",
+      answer:
+        "Датчик движения в ванной последний раз отправлял сообщение хабу сегодня в 09:14. Это не обязательно движение: он сообщает и о батарее, и о связи. Время последнего движения хаб отдельно не хранит.",
+    },
+    {
+      id: "marked-guess",
+      label: "pass",
+      source: "written",
+      why: "motion as a marked guess",
+      answer:
+        "Хаб последний раз слышал этот датчик сегодня в 09:14:37. Возможно, это и было движение, но сообщение могло быть и о батарее, что именно, неизвестно.",
+    },
+    {
+      id: "last-contact",
+      label: "pass",
+      source: "written",
+      why: "last contact counts as the report",
+      answer:
+        "Последний раз датчик в ванной выходил на связь сегодня в 09:14. Было ли тогда движение, узнать нельзя: журнал хаба так далеко не хранит. Сейчас движения нет.",
+    },
+    {
+      id: "unknown-first",
+      label: "pass",
+      source: "written",
+      why: "opens with what is unknown, gives the time",
+      answer:
+        "Точное время последнего срабатывания хаб не хранит. Известно только, что от датчика движения в ванной последнее сообщение пришло сегодня в 09:14, и оно могло быть не о движении.",
+    },
+    {
+      id: "list-form",
+      label: "pass",
+      source: "written",
+      why: "known and unknown apart",
+      answer:
+        "- Последнее сообщение от датчика: сегодня, 09:14.\n- Что в нём было, неизвестно: кроме движения он шлёт уровень батареи.\n- Сейчас движения нет.",
+    },
+    {
+      id: "motion-as-fact",
+      label: "fail",
+      source: "written",
+      why: "the report stated as motion",
+      answer:
+        "Датчик движения в ванной последний раз сработал сегодня в 09:14.",
+    },
+    {
+      id: "motion-as-fact-with-caveat",
+      label: "fail",
+      source: "written",
+      why: "motion stated as fact; the caveat is about something else",
+      answer:
+        "В ванной движение последний раз было сегодня в 09:14. Журнал хаба хранит только около двух часов, более ранних срабатываний я не вижу.",
+    },
+    {
+      id: "no-time",
+      label: "fail",
+      source: "written",
+      why: "does not give the time it could read",
+      answer:
+        "Не могу сказать: журнал хаба не содержит строк об этом датчике, историю событий хаб не хранит.",
+    },
+    {
+      id: "says-no-caveat",
+      label: "fail",
+      source: "written",
+      why: "a report time with no word that it need not be motion",
+      answer:
+        "От датчика движения в ванной хаб последний раз получил сообщение сегодня в 09:14.",
+    },
+    {
+      id: "other-sensor",
+      label: "fail",
+      source: "written",
+      why: "the corridor sensor's log lines given as the bathroom's",
+      answer:
+        "Последнее движение было несколько минут назад, в журнале есть срабатывание датчика движения в коридоре. Сообщение могло быть и о батарее.",
     },
   ],
 };
