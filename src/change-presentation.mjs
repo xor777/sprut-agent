@@ -278,13 +278,18 @@ export function publicNativeChange(
       ...(change.created_accessory_id !== undefined
         ? {
             virtual_accessory_ref: `${change.home_ref}/accessory/${change.created_accessory_id}`,
-            characteristics: change.characteristic_types.map((type) => {
-              const target = change.virtual_target.characteristics[type];
-              return {
-                type,
-                ref: `${change.home_ref}/accessory/${target.aId}/service/${target.sId}/characteristic/${target.cId}`,
-              };
-            }),
+            // A stop right after the creation leaves only the id.
+            ...(change.virtual_target
+              ? {
+                  characteristics: change.characteristic_types.map((type) => {
+                    const target = change.virtual_target.characteristics[type];
+                    return {
+                      type,
+                      ref: `${change.home_ref}/accessory/${target.aId}/service/${target.sId}/characteristic/${target.cId}`,
+                    };
+                  }),
+                }
+              : {}),
           }
         : {}),
       ...(change.candidate_accessories

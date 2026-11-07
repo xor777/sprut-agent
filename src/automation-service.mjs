@@ -938,7 +938,7 @@ export class AutomationService {
     change.created_id = created.id;
     change.created_snapshot = virtualDeviceSnapshot(created);
     change.creation_owned = true;
-    await this.#saveAfterStep(change, "apply");
+    await this.store.save(change);
     return this.#observeVirtualDevice(change);
   }
 
@@ -1368,7 +1368,7 @@ export class AutomationService {
     change.native_acknowledged = true;
     change.write_intent.acknowledged = true;
     change.recreated_id = created.id;
-    await this.#saveAfterStep(change, "restore");
+    await this.store.save(change);
     return this.#restoreVirtualDeviceDelete(change);
   }
 
@@ -2388,10 +2388,27 @@ export class AutomationService {
 
   async applyNativeChange(changeReference) {
     const id = parseNativeChangeRef(changeReference);
-    return this.#exclusiveWrite(async () => {
+    return this.#exclusiveChangeWrite(id, "apply", async () => {
       const change = await this.#requireNativeChange(id);
-      return withOverwriteNote(change, await this.#applyNative(change));
+      return withOverwriteNote(
+        change,
+        await this.#ownUpToSentSteps(change, "apply", () =>
+          this.#applyNative(change),
+        ),
+      );
     });
+  }
+
+  // The one place a change of several steps says it stopped part way, whatever
+  // stopped it: a journal busy or unavailable, a refused read, a lost
+  // connection. What an answer says of the home is decided here, from the
+  // steps marked as sent, not by each step's own save or read.
+  async #ownUpToSentSteps(change, direction, run) {
+    try {
+      return await run();
+    } catch (error) {
+      throw stoppedPartWay(change, direction, error);
+    }
   }
 
   async #applyNative(change) {
@@ -3302,7 +3319,7 @@ export class AutomationService {
   async restoreNativeChange(changeReference) {
     const { type, id } = parseRestoreRef(changeReference);
     if (type === "group") return this.restoreChanges([changeReference]);
-    return this.#exclusiveWrite(async () =>
+    return this.#exclusiveChangeWrite(id, "restore", async () =>
       this.#restoreNative(await this.#requireNativeChange(id)),
     );
   }
@@ -3381,7 +3398,13 @@ export class AutomationService {
     }
   }
 
-  async #restoreNative(change) {
+  #restoreNative(change) {
+    return this.#ownUpToSentSteps(change, "restore", () =>
+      this.#restoreByKind(change),
+    );
+  }
+
+  async #restoreByKind(change) {
     if (change.kind === "accessory_placement") {
       return this.#restoreAccessoryPlacement(change);
     }
@@ -3448,7 +3471,8 @@ export class AutomationService {
   // before its write throws (the later changes it settles pass their
   // failed check on as that error), and a check of an unknown write of its
   // own leaves the change uncertain with the failure as its last
-  // verification.
+  // verification. An undo of several steps that already sent one is not this
+  // case: it stops as #ownUpToSentSteps says.
   async #undoOrUnknown(change, undo) {
     try {
       const result = await undo();
@@ -3457,7 +3481,7 @@ export class AutomationService {
         ? withRestoreAgainNext(result, change)
         : result;
     } catch (error) {
-      if (!isUnreadError(error)) throw error;
+      if (!isUnreadError(error) || hubStepsSent(change, "restore")) throw error;
       return withRestoreAgainNext(
         {
           ...publicNativeChange(change, undefined, {
@@ -4162,8 +4186,13 @@ export class AutomationService {
       refuseRedactedChangeTexts(change);
       await this.#validateVirtualLightPreparation(change);
       await this.#validatePhysicalLinkBaselines(change);
-      await this.#persistVirtualLightStep(change, "creating_accessory");
-      await this.#saveBeforeStep(change, "apply", change.progress.creation);
+      await this.#persistVirtualLightStep(
+        change,
+        "creating_accessory",
+        {},
+        "apply",
+        change.progress.creation,
+      );
       let created;
       try {
         created = await this.client.createAccessory(change.create_request);
@@ -4177,10 +4206,10 @@ export class AutomationService {
       }
       change.created_accessory_id = created.id;
       change.virtual_accessory_creation_owned = true;
-      await this.#saveAfterStep(change, "apply");
+      await this.store.save(change);
     }
 
-    const unread = await this.#readCreatedVirtualLight(change, "apply");
+    const unread = await this.#readCreatedVirtualLight(change);
     if (unread) return unread;
 
     const current = await this.#observeVirtualLightGroup(change);
@@ -4259,7 +4288,7 @@ export class AutomationService {
           });
         }
         if (!link.acknowledged) change.recovered_after_uncertain_write = true;
-        await this.#saveAfterStep(change, "apply");
+        await this.store.save(change);
         continue;
       }
       if (link.sent) {
@@ -4269,11 +4298,16 @@ export class AutomationService {
           last_verification: freshVerification("sent_link_missing"),
         });
       }
-      await this.#persistVirtualLightStep(change, "adding_link", {
-        characteristic_type: link.type,
-        member_ref: link.member_ref,
-      });
-      await this.#saveBeforeStep(change, "apply", link);
+      await this.#persistVirtualLightStep(
+        change,
+        "adding_link",
+        {
+          characteristic_type: link.type,
+          member_ref: link.member_ref,
+        },
+        "apply",
+        link,
+      );
       try {
         await this.client.addVirtualLink({
           ...source,
@@ -4311,7 +4345,7 @@ export class AutomationService {
         });
       }
       if (!link.acknowledged) change.recovered_after_uncertain_write = true;
-      await this.#saveAfterStep(change, "apply");
+      await this.store.save(change);
     }
 
     for (const setting of change.progress.settings) {
@@ -4332,13 +4366,16 @@ export class AutomationService {
         setting.completed = true;
         if (!setting.acknowledged)
           change.recovered_after_uncertain_write = true;
-        await this.#saveAfterStep(change, "apply");
+        await this.store.save(change);
         continue;
       }
-      await this.#persistVirtualLightStep(change, "configuring_links", {
-        characteristic_type: setting.type,
-      });
-      await this.#saveBeforeStep(change, "apply", setting);
+      await this.#persistVirtualLightStep(
+        change,
+        "configuring_links",
+        { characteristic_type: setting.type },
+        "apply",
+        setting,
+      );
       try {
         await this.client.updateCharacteristicLinks({
           ...target,
@@ -4363,7 +4400,7 @@ export class AutomationService {
       }
       setting.completed = true;
       if (!setting.acknowledged) change.recovered_after_uncertain_write = true;
-      await this.#saveAfterStep(change, "apply");
+      await this.store.save(change);
     }
 
     const applied = await this.#observeVirtualLightGroup(change);
@@ -4396,8 +4433,10 @@ export class AutomationService {
   // What the record holds of the accessory it created, read once from the
   // hub. A stop right after the creation leaves only its id. Returns a
   // finished result when the accessory cannot be read or is not the lamp
-  // this change asked for; an accessory gone is for the caller to see.
-  async #readCreatedVirtualLight(change, direction) {
+  // this change asked for; an accessory gone is for the caller to see. What
+  // it reads can be read again, so a save that fails loses nothing and stops
+  // nothing here.
+  async #readCreatedVirtualLight(change) {
     if (change.virtual_target) return null;
     let created;
     try {
@@ -4432,7 +4471,7 @@ export class AutomationService {
       selected.target,
       change.characteristic_types,
     );
-    await this.#saveAfterStep(change, direction);
+    await this.#trySave(change);
     return null;
   }
 
@@ -4443,7 +4482,7 @@ export class AutomationService {
         ? this.#recordUnownedVirtualLightCandidates(change)
         : publicNativeChange(change);
     }
-    const unread = await this.#readCreatedVirtualLight(change, "apply");
+    const unread = await this.#readCreatedVirtualLight(change);
     if (unread) return unread;
     let current;
     try {
@@ -4519,7 +4558,7 @@ export class AutomationService {
           : null,
       );
     }
-    const unread = await this.#readCreatedVirtualLight(change, "restore");
+    const unread = await this.#readCreatedVirtualLight(change);
     if (unread) return unread;
     const current = await this.#observeVirtualLightGroup(change);
     if (current.absent) {
@@ -4569,7 +4608,7 @@ export class AutomationService {
           completed: false,
         })),
       };
-      await this.#saveBeforeStep(change, "restore");
+      await this.store.save(change);
     }
     for (const removal of change.progress.cleanup.links) {
       const source = change.virtual_target.characteristics[removal.type];
@@ -4589,7 +4628,7 @@ export class AutomationService {
         if (removal.sent && !removal.acknowledged) {
           change.recovered_after_uncertain_write = true;
         }
-        await this.#saveAfterStep(change, "restore");
+        await this.store.save(change);
         continue;
       }
       // A lost send may not have reached the hub. Only the exact persisted IN
@@ -4625,8 +4664,8 @@ export class AutomationService {
           ...(retryingUncertainRemoval ? { uncertain_retry: true } : {}),
         },
         "restore",
+        removal,
       );
-      await this.#saveBeforeStep(change, "restore", removal);
       try {
         await this.client.removeLink({ ...source, linkId: removal.link_id });
         removal.acknowledged = true;
@@ -4660,7 +4699,7 @@ export class AutomationService {
       );
       removal.completed = true;
       if (!removal.acknowledged) change.recovered_after_uncertain_write = true;
-      await this.#saveAfterStep(change, "restore");
+      await this.store.save(change);
       const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change, {
         onlyCleanup: removal,
         deferOwnedResidues: true,
@@ -4681,7 +4720,7 @@ export class AutomationService {
         if (setting.sent && !setting.acknowledged) {
           change.recovered_after_uncertain_write = true;
         }
-        await this.#saveAfterStep(change, "restore");
+        await this.store.save(change);
         continue;
       }
       if (setting.sent) {
@@ -4696,8 +4735,8 @@ export class AutomationService {
         "disabling_links",
         { characteristic_type: setting.type },
         "restore",
+        setting,
       );
-      await this.#saveBeforeStep(change, "restore", setting);
       try {
         await this.client.updateCharacteristicLinks({
           ...target,
@@ -4727,7 +4766,7 @@ export class AutomationService {
       }
       setting.completed = true;
       if (!setting.acknowledged) change.recovered_after_uncertain_write = true;
-      await this.#saveAfterStep(change, "restore");
+      await this.store.save(change);
     }
     const cleanupFailure = await this.#verifyPhysicalLinkCleanup(change);
     if (cleanupFailure) return cleanupFailure;
@@ -4739,12 +4778,13 @@ export class AutomationService {
         last_verification: freshVerification("created_accessory_still_present"),
       });
     }
-    change.progress.deletion = { sent: true, acknowledged: false };
+    change.progress.deletion = { sent: false, acknowledged: false };
     await this.#persistVirtualLightStep(
       change,
       "deleting_accessory",
       {},
       "restore",
+      change.progress.deletion,
     );
     try {
       await this.client.deleteAccessory(change.created_accessory_id);
@@ -5138,12 +5178,9 @@ export class AutomationService {
     }
   }
 
-  async #persistVirtualLightStep(
-    change,
-    phase,
-    detail = {},
-    direction = "apply",
-  ) {
+  // Records the step about to go, with its mark as sent. A save that fails
+  // leaves the step unsent: it did not go.
+  async #persistVirtualLightStep(change, phase, detail, direction, step) {
     const now = new Date().toISOString();
     Object.assign(change, {
       status: direction === "restore" ? "restoring" : "applying",
@@ -5160,7 +5197,14 @@ export class AutomationService {
       updated_at: now,
     });
     change.history.push({ status: change.status, at: now });
-    await this.#saveBeforeStep(change, direction);
+    const wasSent = step.sent;
+    step.sent = true;
+    try {
+      await this.store.save(change);
+    } catch (error) {
+      step.sent = wasSent;
+      throw error;
+    }
   }
 
   // An existing virtual lamp group as the owner knows it: its lamp service,
@@ -5485,7 +5529,7 @@ export class AutomationService {
     // steps is kept apart from their marks, which start over.
     change.restore_steps_sent ||= hubStepsSent(change, "restore");
     change.restore_steps = restoreSteps(change);
-    await this.#saveBeforeStep(change, "restore");
+    await this.store.save(change);
     const stopped = await this.#writeLampGroupSteps(
       change,
       change.restore_steps,
@@ -5544,7 +5588,7 @@ export class AutomationService {
           if (step.sent && !step.acknowledged) {
             change.recovered_after_uncertain_write = true;
           }
-          await this.#saveAfterStep(change, direction);
+          await this.store.save(change);
         }
         continue;
       }
@@ -5553,17 +5597,17 @@ export class AutomationService {
         step.action === "remove"
           ? currentLinkIndex(observed.links, step)
           : undefined;
+      Object.assign(step, {
+        acknowledged: false,
+        completed: false,
+      });
       await this.#persistVirtualLightStep(
         change,
         step.action === "add" ? "adding_link" : "removing_link",
         { characteristic_type: step.type, member_ref: step.member_ref },
         direction,
+        step,
       );
-      Object.assign(step, {
-        acknowledged: false,
-        completed: false,
-      });
-      await this.#saveBeforeStep(change, direction, step);
       try {
         if (step.action === "add") {
           await this.client.addVirtualLink({
@@ -5599,7 +5643,7 @@ export class AutomationService {
       }
       step.completed = true;
       if (!step.acknowledged) change.recovered_after_uncertain_write = true;
-      await this.#saveAfterStep(change, direction);
+      await this.store.save(change);
     }
     return null;
   }
@@ -6557,7 +6601,10 @@ export class AutomationService {
     // first; a change prepared by an earlier version may carry the mark.
     if (direction === "apply") refuseRedactedChangeTexts(change);
     const now = new Date().toISOString();
-    Object.assign(change, {
+    // A save that fails leaves the change as the journal holds it: the write
+    // did not go, and the call's answer must see that.
+    const intended = {
+      ...change,
       status,
       native_write_sent: true,
       native_acknowledged: false,
@@ -6572,9 +6619,10 @@ export class AutomationService {
         at: now,
       },
       updated_at: now,
-    });
-    change.history.push({ status, at: now });
-    await this.store.save(change);
+      history: [...change.history, { status, at: now }],
+    };
+    await this.store.save(intended);
+    Object.assign(change, intended);
   }
 
   async #applyScenarioRun(change) {
@@ -7680,34 +7728,6 @@ export class AutomationService {
     }
   }
 
-  // The saves of a change of several steps, one write after another. The
-  // journal runs behind the home once a step went: the record before that
-  // step stays true, so a failure before the next one sends nothing and
-  // loses nothing. step, when given, is marked sent only for this save, and
-  // only a step that went counts in the answer.
-  async #saveBeforeStep(change, direction, step) {
-    const sent = hubStepsSent(change, direction);
-    if (step) step.sent = true;
-    try {
-      await this.store.save(change);
-    } catch (error) {
-      throw sent ? stoppedAfterHubSteps(change, direction, error) : error;
-    }
-  }
-
-  // The journal is the only record of a change. A save that fails leaves it at
-  // the mark made before the step: the step's outcome is unknown, as after a
-  // lost answer, and the next call settles it from the hub. No further step
-  // goes without the journal.
-  async #saveAfterStep(change, direction) {
-    try {
-      await this.store.save(change);
-    } catch (error) {
-      if (!hubStepsSent(change, direction)) throw error;
-      throw stoppedAfterHubSteps(change, direction, error);
-    }
-  }
-
   async #readJournalBeforeWrite() {
     try {
       return await this.store.list();
@@ -7720,6 +7740,18 @@ export class AutomationService {
     }
   }
 
+  // Another dialog's long write stops a repeat before it has read its record:
+  // the journal can still be read, and it tells what an earlier call sent.
+  async #exclusiveChangeWrite(id, direction, operation) {
+    try {
+      return await this.#exclusiveWrite(operation);
+    } catch (error) {
+      if (error.code !== "state_storage_busy") throw error;
+      const saved = await this.store.get(id).catch(() => null);
+      throw saved ? stoppedPartWay(saved, direction, error) : error;
+    }
+  }
+
   async #exclusiveWrite(operation) {
     const current = this.#writeSequence
       .catch(() => {})
@@ -7729,42 +7761,70 @@ export class AutomationService {
   }
 }
 
-// Whether a write of this change in this direction has gone to the hub. A
-// change of one write saves after a step only once it went.
+// Whether a step of this change in this direction has gone to the hub, with
+// its outcome known or not, and the direction is not finished: an apply that
+// reached its end holds no part of anything. The marks are made before a step
+// goes, and only once saved; a change of one write marks that by its intent.
 function hubStepsSent(change, direction) {
-  let steps;
+  if (direction === "apply" && change.status === "applied") return false;
   if (change.kind === LIGHT_GROUP_MEMBERS) {
     if (direction === "restore" && change.restore_steps_sent) return true;
-    steps = direction === "apply" ? change.steps : (change.restore_steps ?? []);
-  } else if (change.kind === "virtual_light_group") {
-    const { creation, links, settings, cleanup } = change.progress;
-    steps =
+    const steps =
+      direction === "apply" ? change.steps : (change.restore_steps ?? []);
+    return steps.some(({ sent }) => sent === true);
+  }
+  if (change.kind === "virtual_light_group") {
+    const { creation, links, settings, cleanup, deletion } = change.progress;
+    const steps =
       direction === "apply"
         ? [creation, ...links, ...settings]
-        : [...(cleanup?.links ?? []), ...(cleanup?.settings ?? [])];
-  } else {
-    return true;
+        : [
+            ...(cleanup?.links ?? []),
+            ...(cleanup?.settings ?? []),
+            ...(deletion ? [deletion] : []),
+          ];
+    return steps.some(({ sent }) => sent === true);
   }
-  return steps.some(({ sent }) => sent === true);
+  if (change.kind === VIRTUAL_DEVICE || change.kind === VIRTUAL_DEVICE_DELETE) {
+    const createdBy =
+      direction === "apply" ? change.created_id : change.recreated_id;
+    return (
+      createdBy !== undefined ||
+      (["applying", "restoring", "uncertain"].includes(change.status) &&
+        nativeIntentDirection(change) === direction)
+    );
+  }
+  return false;
 }
 
-// The one answer when a journal failure stops a change whose steps already
-// went: "nothing was sent" would be false, and the same call goes on from
-// where it stopped.
-function stoppedAfterHubSteps(change, direction, error) {
-  const busy = error.code === "state_storage_busy";
+// The answer when something stops a change whose steps already went: "nothing
+// was sent" would be false, and the same call settles it from the hub. Any
+// other stop, and an answer that already says what the hub did, stays as it
+// is.
+function stoppedPartWay(change, direction, error) {
+  if (error.details?.hub_effect || !hubStepsSent(change, direction)) {
+    return error;
+  }
+  const known = error instanceof SprutHubError;
+  const busy = known && error.code === "state_storage_busy";
+  const storage = known && error.code === "state_storage_unavailable";
   const changeRef = `spruthub-change://native/${change.id}`;
+  const cause = busy
+    ? "Another open dialog's sprut-agent process holds this home's change journal."
+    : known
+      ? error.message
+      : "An internal error of sprut-agent stopped this call.";
+  const repeat = busy
+    ? "In a few seconds repeat"
+    : storage
+      ? "Once the journal works again, repeat"
+      : "Repeat";
   return new SprutHubError(
-    error.code,
-    `${
-      busy
-        ? "Another open dialog's sprut-agent process holds this home's change journal."
-        : error.message
-    } This change stopped there: steps of it already went to the hub, so the home may hold part of it or all of it. Nothing more was sent. ${
-      busy ? "In a few seconds repeat" : "Once the journal can be saved, repeat"
-    } next: it checks the hub first and does not send again what took effect. It goes on from there, or names what it found if it cannot tell that as this change's own.`,
-    error.action,
+    known ? error.code : "internal_error",
+    `${cause} This change stopped there: steps of it already went to the hub, so the home may hold part of it or all of it. Nothing more was sent. ${repeat} next: it checks the hub first and does not send again what took effect. It goes on from there; what it cannot prove this change's own it names and leaves alone.`,
+    known ? error.action : undefined,
     {
+      ...(known ? error.details : {}),
       change_ref: changeRef,
       hub_effect: "partial",
       next: {
