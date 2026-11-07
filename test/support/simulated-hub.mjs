@@ -3076,18 +3076,19 @@ function atHubTime(wallClock, utcOffsetMinutes, now) {
 // When the hub last heard from a fixture's device, as Unix milliseconds. All
 // 82 devices of the owner's hub had a value, from seconds to 176 days old
 // (2026-11-07-history-app), so a device without one in its fixture gets a
-// recent one of its own. A fixture may give milliseconds, or day (calendar
-// offset from the start's hub-local date) and time (hub-local wall clock) as
-// a log entry does; null leaves the field out of accessory.get, and any other
-// value is sent as it is.
+// recent one of its own, minutes from any other's so that no two look
+// simultaneous. A fixture may give milliseconds, or day (calendar offset from
+// the start's hub-local date), time (hub-local wall clock) and optional ms;
+// null leaves the field out of accessory.get, and any other value is sent as
+// it is. The time does not move on a write: whether a command moves it was not
+// observed.
 function fixtureLastUpdate({ id, lastUpdate }, startedAt, utcOffsetMinutes) {
-  if (lastUpdate === undefined) {
-    return startedAt - ((id % 97) + 1) * 7 * 60_000;
-  }
+  if (lastUpdate === undefined) return startedAt - (id + 1) * 7 * 60_000;
   if (typeof lastUpdate?.time !== "string") return lastUpdate;
   return (
     atHubTime(lastUpdate.time, utcOffsetMinutes, startedAt) +
-    lastUpdate.day * 86_400_000
+    lastUpdate.day * 86_400_000 +
+    (lastUpdate.ms ?? 0)
   );
 }
 
@@ -4606,17 +4607,8 @@ function writeValue(state, characteristic, value) {
   }
   changed.push(...applyLampLogic(state, characteristic, previous));
   for (const item of new Set(changed)) {
-    reportFrom(state, item.aId);
     state.emitAfterReply?.(valueEvent(item));
   }
-}
-
-// A device whose value was written reports back. The hub also moves
-// lastUpdate with no value changing (2026-11-07-history-app); a command the
-// device does not answer was not observed.
-function reportFrom(state, aId) {
-  const accessory = state.accessories.find(({ id }) => id === aId);
-  if (accessory) accessory.lastUpdate = hubNow(state);
 }
 
 function emitRooms(state, event, rooms) {

@@ -301,6 +301,7 @@ test("find_devices with last_report marks the devices that reported at about the
 // device's moment by id, those without one left out.
 async function momentsOf(t, reports) {
   const home = await startHub(t, (fixture) => {
+    for (const device of fixture.accessories) delete device.lastUpdate;
     for (const [id, time] of Object.entries(reports)) {
       fixture.accessories.find(
         (device) => device.id === Number(id),

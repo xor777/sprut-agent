@@ -41,10 +41,10 @@ const NOTIFY_READ_CONCURRENCY = 8;
 // after this many request timeouts. The rest show status not_read.
 const LAST_REPORT_READS = 100;
 const LAST_REPORT_READ_TIMEOUTS = 2;
-// Last reports this close count as one moment, measured from the newest of
-// them, so a run of steady reporters does not chain into one long moment.
-// The live read saw the lamps of one group show one time
-// (2026-11-07-history-app); how far apart they may lie was not measured.
+// Neighbours in time this close belong to one moment. One chandelier of the
+// owner's hub (07.11.2026): seven lamps within 5.6 s, the widest gap between
+// neighbours 4.7 s; measuring from the newest report split it in two and
+// let an unrelated device decide where. Neighbours can chain.
 const REPORTED_TOGETHER_SECONDS = 5;
 const NOT_EVALUATED_LIMIT = 10;
 const SWITCH_LIMIT = 10;
@@ -1105,7 +1105,7 @@ function reportedTogether(timed) {
     let end = start + 1;
     while (
       end < timed.length &&
-      timed[start].time - timed[end].time <= REPORTED_TOGETHER_SECONDS * 1_000
+      timed[end - 1].time - timed[end].time <= REPORTED_TOGETHER_SECONDS * 1_000
     ) {
       end += 1;
     }
@@ -1123,7 +1123,7 @@ function reportedTogether(timed) {
 function lastReportLimitations(counts, timed, timeZone) {
   return [
     `${LAST_REPORT_MEANING} So say when the hub last heard from a device, not what the device did then.`,
-    `reported_together: last reports within ${REPORTED_TOGETHER_SECONDS} seconds. That suggests the devices acted together and does not show why; a device that reports often can fall in by chance.`,
+    `reported_together: a run of last reports, each within ${REPORTED_TOGETHER_SECONDS} seconds of the next. That suggests the devices acted together and does not show why; a device that reports often can fall in by chance.`,
     ...(timed && timeZone === null ? [UTC_TIMES_LIMITATION] : []),
     ...(counts.not_read > 0
       ? [

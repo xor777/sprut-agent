@@ -2268,7 +2268,6 @@ export class SprutHubClient {
       );
       Object.assign(
         entity,
-        await this.#lastReport(parsed.serial, accessory, deadline),
         optionsNext(
           entity.services.flatMap(({ characteristics }) => characteristics),
         ),
@@ -2307,6 +2306,12 @@ export class SprutHubClient {
           ),
         );
       }
+      // After the includes, which a hub slow to give its settings window
+      // then does not hold back.
+      Object.assign(
+        entity,
+        await this.#lastReport(parsed.serial, accessory, deadline),
+      );
       return { entity, ownerContext };
     }
     const service = accessory.services?.find(
@@ -4391,15 +4396,21 @@ export const UTC_TIMES_LIMITATION =
 // Beside every last report the agent reads: the field is easy to take for
 // the time of a state change, which the hub does not record.
 export const LAST_REPORT_MEANING =
-  "The last report the hub got from this device: it may have changed nothing and is not the time of a state change. Earlier events are not kept.";
+  "The last report the hub got from this device: it may have changed nothing and is not the time of a state change. This does not show earlier events; read_hub_log covers the last hours.";
 
 // lastUpdate of accessory.get, Unix milliseconds; accessory.list does not
-// give it (research/protocol/2026-11-07-history-app.md). No value, zero or a
-// time before any hub existed is no known report, not a date near 1970.
+// give it (research/protocol/2026-11-07-history-app.md). No value, zero, a
+// time before any hub existed or ahead of now is no known report, not a
+// date; a day's margin leaves room for a hub's clock ahead of this machine's.
 const EARLIEST_REPORT_MS = Date.UTC(2000, 0, 1);
+const REPORT_CLOCK_MARGIN_MS = 86_400_000;
 
 export function lastReportMs({ lastUpdate: time }) {
-  return Number.isSafeInteger(time) && time >= EARLIEST_REPORT_MS ? time : null;
+  return Number.isSafeInteger(time) &&
+    time >= EARLIEST_REPORT_MS &&
+    time <= Date.now() + REPORT_CLOCK_MARGIN_MS
+    ? time
+    : null;
 }
 
 // An instant as ISO 8601 on the wall clock of timeZone with that zone's
