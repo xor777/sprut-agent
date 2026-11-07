@@ -150,6 +150,10 @@ for (const [label, lastUpdate] of [
   ["a few seconds after 1970", 5_000],
   ["negative", -1],
   ["not a number", "2026-11-06"],
+  ["far future", Date.UTC(2099, 0, 1)],
+  ["microseconds instead of milliseconds", 1_793_000_000_000_000],
+  ["beyond any date", 9e15],
+  ["two days ahead", Date.now() + 2 * 86_400_000],
 ]) {
   test(`get_entity shows a ${label} lastUpdate as unknown, not as a date`, async (t) => {
     const home = await startHub(t, (fixture) => {
@@ -170,8 +174,35 @@ for (const [label, lastUpdate] of [
       home.hub.requests.filter(({ method }) => method === "window.get").length,
       0,
     );
+
+    // find_devices treats it the same: not a time, not read, not sorted in.
+    const page = await call(client, "find_devices", {
+      room_ref: LIVING_ROOM,
+      last_report: true,
+    });
+    assert.deepEqual(page.devices.at(-1).ref, accessory(CHANDELIER));
+    assert.equal(page.devices.at(-1).last_report_at, null);
+    assert.equal(page.devices.at(-1).last_report_status, "unknown");
+    assert.equal(page.reads.unknown, 1);
+    assert.equal(page.reads.read, 5);
+    assert.equal(page.devices[0].ref, accessory(AIR_CONDITIONER));
   });
 }
+
+test("a last report within a day ahead of this machine's clock stays a time: the hub's clock may run ahead", async (t) => {
+  const ahead = Date.now() + 3_600_000;
+  const home = await startHub(t, (fixture) => {
+    fixture.accessories.find(({ id }) => id === CHANDELIER).lastUpdate = ahead;
+  });
+  const client = await startClient(t, home);
+
+  const { entity } = await call(client, "get_entity", {
+    entity_ref: accessory(CHANDELIER),
+  });
+
+  assert.equal(entity.last_report_status, undefined);
+  assert.equal(Date.parse(entity.last_report_at), ahead);
+});
 
 test("a plain find_devices reads no device one by one", async (t) => {
   const home = await startHub(t);
@@ -264,6 +295,121 @@ test("find_devices with last_report marks the devices that reported at about the
     "Шторы в гостиной": undefined,
     "Розетка телевизора": undefined,
   });
+});
+
+// The whole-home answer with these devices' last reports: each listed
+// device's moment by id, those without one left out.
+async function momentsOf(t, reports) {
+  const home = await startHub(t, (fixture) => {
+    for (const [id, time] of Object.entries(reports)) {
+      fixture.accessories.find(
+        (device) => device.id === Number(id),
+      ).lastUpdate = at(time);
+    }
+  });
+  const client = await startClient(t, home);
+  const { devices } = await call(client, "find_devices", {
+    last_report: true,
+    limit: 100,
+  });
+  return Object.fromEntries(
+    devices
+      .filter(({ reported_together: moment }) => moment !== undefined)
+      .map(({ ref, reported_together }) => [
+        Number(ref.split("/").at(-1)),
+        reported_together,
+      ]),
+  );
+}
+
+// One chandelier of the owner's hub, 07.11.2026: seven lamps within 5.6 s,
+// the widest gap between neighbours 4.7 s.
+test("the lamps of one chandelier with the owner's real spacing are one moment", async (t) => {
+  const moment = { group: 1, devices: 7 };
+  assert.deepEqual(
+    await momentsOf(t, {
+      15: "2026-11-06T22:06:05.350+03:00",
+      16: "2026-11-06T22:06:05.124+03:00",
+      17: "2026-11-06T22:06:04.997+03:00",
+      22: "2026-11-06T22:06:04.997+03:00",
+      26: "2026-11-06T22:06:04.413+03:00",
+      30: "2026-11-06T22:05:59.755+03:00",
+      32: "2026-11-06T22:05:59.753+03:00",
+    }),
+    {
+      15: moment,
+      16: moment,
+      17: moment,
+      22: moment,
+      26: moment,
+      30: moment,
+      32: moment,
+    },
+  );
+});
+
+test("a device just ahead of two lamps does not split them", async (t) => {
+  const lamps = {
+    [CHANDELIER]: "2026-11-06T21:47:03.001+03:00",
+    [FLOOR_LAMP]: "2026-11-06T21:47:02.999+03:00",
+  };
+  const pair = { group: 1, devices: 2 };
+  assert.deepEqual(
+    await momentsOf(t, {
+      ...lamps,
+      [AIR_CONDITIONER]: "2026-11-06T21:47:08.100+03:00",
+    }),
+    { [CHANDELIER]: pair, [FLOOR_LAMP]: pair },
+  );
+  // Within reach of the nearer lamp it joins them, which the limitation warns
+  // of; both lamps stay together.
+  const three = { group: 1, devices: 3 };
+  assert.deepEqual(
+    await momentsOf(t, {
+      ...lamps,
+      [AIR_CONDITIONER]: "2026-11-06T21:47:08.000+03:00",
+    }),
+    { [AIR_CONDITIONER]: three, [CHANDELIER]: three, [FLOOR_LAMP]: three },
+  );
+});
+
+test("devices 5 seconds apart are one moment, a millisecond more are two", async (t) => {
+  const together = { group: 1, devices: 2 };
+  assert.deepEqual(
+    await momentsOf(t, {
+      [CHANDELIER]: "2026-11-06T21:47:05.000+03:00",
+      [FLOOR_LAMP]: "2026-11-06T21:47:00.000+03:00",
+    }),
+    { [CHANDELIER]: together, [FLOOR_LAMP]: together },
+  );
+  assert.deepEqual(
+    await momentsOf(t, {
+      [CHANDELIER]: "2026-11-06T21:47:05.001+03:00",
+      [FLOOR_LAMP]: "2026-11-06T21:47:00.000+03:00",
+    }),
+    {},
+  );
+});
+
+test("relations get their time before the hub's time zone is asked for", async (t) => {
+  const home = await startHub(t);
+  const client = await startClient(t, home);
+  await call(client, "home_overview", {});
+  // A slow settings window and relations that need more than is left after
+  // waiting for it.
+  home.hub.delayReplies("window.get", 2_500);
+  home.hub.delayReplies("scenario.list", 1_500);
+
+  const { entity } = await call(client, "get_entity", {
+    entity_ref: accessory(CHANDELIER),
+    include: ["relations"],
+  });
+
+  assert.deepEqual(entity.include_resolution.unread ?? [], []);
+  assert(entity.relations.scenario_roles.length > 0);
+  // The zone did not come in time: the time stands as UTC and says so.
+  assert.equal(entity.last_report_at, "2026-11-06T18:47:03.120Z");
+  assert.match(entity.last_report_note, /\bUTC\b/);
 });
 
 test("find_devices with last_report keeps a device the hub gave no time for, and says so", async (t) => {
@@ -442,6 +588,11 @@ test("whole-home last_report reads a bounded number of devices and names those i
   );
   assert.equal(notRead.length, reads.not_read);
   assert.equal(new Set(listed.map(refOf)).size, listed.length);
+  // Unrelated devices of the simulator's default do not appear simultaneous.
+  assert.deepEqual(
+    listed.filter(({ reported_together: moment }) => moment !== undefined),
+    [],
+  );
   // Those read come first, those not read last.
   assert.equal(listed.at(-1).last_report_status, "not_read");
   assert.equal(listed[0].last_report_status, undefined);
