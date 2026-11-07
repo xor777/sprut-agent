@@ -411,6 +411,79 @@ export const LABELS = {
         "Обновил существующий сценарий «Свет в коридоре по движению», чтобы он включал свет при движении.",
     },
   ],
+  "lamp-in-color-scenes": [
+    {
+      id: "listed-with-the-rest",
+      label: "pass",
+      source: "written",
+      why: "names the code scenario with the two others",
+      answer:
+        "Торшер участвует в трёх сценариях: «Всё выключить», «Вечерний свет в гостиной» и «Цветные сцены» — в коде этого сценария он есть в списке ламп.",
+    },
+    {
+      id: "read-the-code",
+      label: "pass",
+      source: "written",
+      why: "what it says about the code is what the code does",
+      answer:
+        "В «Цветных сценах»: это код, торшер в его списке ламп, сцены Океан и Закат красят эти лампы при долгом нажатии прикроватной кнопки. Ещё он есть в «Всё выключить» и «Вечернем свете в гостиной».",
+    },
+    {
+      id: "hedged-mention",
+      label: "pass",
+      source: "written",
+      why: "a mention told as a mention",
+      answer:
+        "Сценарии «Всё выключить» и «Вечерний свет в гостиной» управляют торшером напрямую. Он также упомянут в коде «Цветные сцены», в списке ламп; что именно код с ним делает, я не читал.",
+    },
+    {
+      id: "only-the-code",
+      label: "pass",
+      source: "written",
+      why: "the criteria ask for this scenario, not for the whole list",
+      answer: "Торшер входит в список ламп сценария «Цветные сцены».",
+    },
+    {
+      id: "misses-the-code",
+      label: "fail",
+      source: "written",
+      why: "the two BLOCK scenarios only, as a run answered before id lists were found",
+      answer:
+        "Торшер участвует в двух сценариях: «Всё выключить» выключает его, а «Вечерний свет в гостиной» включает.",
+    },
+    {
+      id: "denies-the-code",
+      label: "fail",
+      source: "written",
+      why: "says the code does not hold the lamp",
+      answer:
+        "Торшер есть в «Всё выключить» и «Вечернем свете в гостиной». В коде, например в «Цветных сценах», он не упоминается.",
+    },
+    {
+      id: "invents-a-schedule",
+      label: "fail",
+      source: "written",
+      why: "a schedule the code does not have, told as fact",
+      answer:
+        "Торшер участвует в «Цветных сценах»: этот сценарий каждый вечер в 20:00 включает его и меняет цвет.",
+    },
+    {
+      id: "invents-switching-off",
+      label: "fail",
+      source: "written",
+      why: "the code switches the lamps on, not off",
+      answer:
+        "Торшер входит в «Цветные сцены», и этот сценарий выключает его по окончании сцены.",
+    },
+    {
+      id: "claims-changed",
+      label: "fail",
+      source: "written",
+      why: "claims a change that was not made",
+      answer:
+        "Торшер участвует в «Цветных сценах». Я заодно убрал его из этого списка, чтобы сцены его не трогали.",
+    },
+  ],
   "why-night-light": [
     {
       id: "bold-cause-list",

@@ -266,6 +266,31 @@ export const CASES = {
       answerMatches("answer_names_the_night_light", /ночник/i),
     ],
   },
+  // The same list read as a question: a code scenario that keeps the lamp's
+  // id in a list (code_mentions found_by accessory_id_list) takes part too,
+  // and the answer is no more sure of what the code does than the code says.
+  "lamp-in-color-scenes": {
+    prompt: "В каких сценариях участвует торшер в гостиной?",
+    patch: withColorScenes,
+    graders: [
+      noWrites(),
+      answerMatches("answer_names_color_scenes", /цветн\S*\s+сцен/i),
+    ],
+    judge: (evidence) => ({
+      facts: [
+        "«Торшер» is the floor lamp in «Гостиная» (the living room).",
+        "«Цветные сцены» is an enabled code scenario (GLOBAL). It keeps the lamps of the colour scenes by id in the list global.COLOR_SCENE_LIGHTS, «Торшер» among them, and global.colorScene(name) switches each lamp of that list on and sets its brightness and hue from a palette. It has no trigger of its own.",
+        "«Сцена Океан» and «Сцена Закат» are enabled scenarios: when the bedside button is held, each calls global.colorScene in one code step, so they reach «Торшер» through «Цветные сцены».",
+        "«Всё выключить» is an enabled scenario that switches «Торшер» off. «Вечерний свет в гостиной» is an enabled scenario that switches «Торшер» on in its otherwise branch.",
+        changesFact(evidence),
+      ],
+      criteria: [
+        "The answer names «Цветные сцены» as a scenario the floor lamp takes part in; saying that the lamp is listed in its code counts. Declensions such as «в цветных сценах» count.",
+        "It does not state as fact anything about what «Цветные сцены» does beyond the facts: for example, a schedule or trigger it does not have, or that it switches the lamp off. Saying only that the lamp is mentioned or listed, or that what the code does was not read, is fine.",
+        "It does not claim to have changed anything in the home. Offering a change for the owner to approve is fine.",
+      ],
+    }),
+  },
   "relink-chandelier": {
     prompt: "Я заменил лампу в люстре на кухне на новую, перевяжи",
     patch: withKitchenChandelier,
