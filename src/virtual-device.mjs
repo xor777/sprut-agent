@@ -94,7 +94,7 @@ export function virtualDeviceContract(operation) {
 
 // What the search of code (#readCodeMentions in spruthub-client.mjs) finds.
 export const CODE_DEPENDENCY_NOTE =
-  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id or its exact name in a string; an id kept in an array or a variable (a global list of lights) or computed is not found.";
+  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id, its id in an array of plain numbers (a global list of lights) in code that also passes Hub calls a computed id, or its exact name in a string; an id kept in a variable or computed is not found.";
 
 const LIMITATIONS = {
   [VIRTUAL_DEVICE]: [

@@ -23,6 +23,7 @@ import {
   isSelectableNativeValidValue,
   nativeScalarContract,
 } from "./native-option-contract.mjs";
+import { parseScript, walk } from "./parse-script.mjs";
 
 const VALUE_FIELDS = [
   "boolValue",
@@ -4937,7 +4938,7 @@ function relationFailure(area, read) {
 }
 
 const RELATIONS_LIMITATION =
-  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue) or by its exact name in a string: a mention, not proof of what the code does; code that finds it otherwise is missed. Past the search limit, the home_overview lists named for the rest also show the searched and built-in scenarios, so which were not searched is unknown. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue), by its id in an array of plain numbers in code that also passes those calls a computed id (accessory_id_list), or by its exact name in a string: a mention, not proof of what the code does; an id in a variable, or code that finds it otherwise, is missed, and a source that does not parse is not searched for arrays. Past the search limit, the home_overview lists named for the rest also show the searched and built-in scenarios, so which were not searched is unknown. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&
@@ -6478,12 +6479,18 @@ function codeScenarioSummary(scenario) {
   };
 }
 
-// Where a code source names an accessory, by the Hub methods of the
-// hub's scenario.sdk that take its id first (ACCESSORY_ID_METHODS) with the
-// id written as a number, or by a string that is exactly its name.
-// Comments do not count; an id held in a variable is not found. Returns
-// found_by and the first lines, or null.
-export function accessoryMentions(source, { id, name }) {
+// Where a code source names an accessory: by the Hub methods of the hub's
+// scenario.sdk that take its id first (ACCESSORY_ID_METHODS) with the id
+// written as a number, by its id in a list of ids (idListLines), or by a
+// string that is exactly its name. Comments do not count; an id held in a
+// variable is not found: numeric variables also hold characteristic ids
+// that equal accessory ids on the owner's hub. Returns found_by and the
+// first lines, or null.
+export function accessoryMentions(
+  source,
+  { id, name },
+  idLists = idListLines(source),
+) {
   const tokens = [];
   let line = 1;
   for (const token of jsTokens(source)) {
@@ -6515,13 +6522,45 @@ export function accessoryMentions(source, { id, name }) {
     if (byName) foundBy.add("accessory_name");
     if (byId || byName) lines.add(token.line);
   });
+  for (const line of idLists.get(id) ?? []) {
+    foundBy.add("accessory_id_list");
+    lines.add(line);
+  }
   if (foundBy.size === 0) return null;
   return {
-    found_by: ["accessory_id", "accessory_name"].filter((kind) =>
-      foundBy.has(kind),
+    found_by: ["accessory_id", "accessory_id_list", "accessory_name"].filter(
+      (kind) => foundBy.has(kind),
     ),
     lines: [...lines].sort((a, b) => a - b).slice(0, 10),
   };
+}
+
+// The numbers of a source's lists of ids, with their lines: arrays of plain
+// numbers, in code that also calls a Hub id method with a first argument
+// other than a number, so it looks ids up as it runs. Empty for a source
+// that does not parse, a fragment of changed lines among them.
+export function idListLines(source) {
+  const lists = new Map();
+  let looksUpIds = false;
+  walk(parseScript(source), (node) => {
+    if (
+      node.type === "ArrayExpression" &&
+      node.elements.every((element) => element?.type === "NumericLiteral")
+    ) {
+      for (const { value, loc } of node.elements) {
+        lists.set(value, [...(lists.get(value) ?? []), loc.start.line]);
+      }
+    }
+    looksUpIds ||=
+      node.type === "CallExpression" &&
+      node.callee.type === "MemberExpression" &&
+      !node.callee.computed &&
+      node.callee.object.name === "Hub" &&
+      ACCESSORY_ID_METHODS.has(node.callee.property.name) &&
+      node.arguments.length > 0 &&
+      node.arguments[0].type !== "NumericLiteral";
+  });
+  return looksUpIds ? lists : new Map();
 }
 
 // Hub methods whose first argument is an accessory id, as the owner hub's

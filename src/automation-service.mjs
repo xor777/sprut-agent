@@ -248,6 +248,7 @@ import {
 import {
   accessoryMentions,
   codeShownRedacted,
+  idListLines,
   SprutHubError,
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
@@ -2334,8 +2335,9 @@ export class AutomationService {
       this.hubSerial,
       Date.now() + this.client.timeoutMs,
     );
+    const idLists = idListLines(source);
     return catalog.accessories.flatMap((accessory) => {
-      const found = accessoryMentions(source, accessory);
+      const found = accessoryMentions(source, accessory, idLists);
       return found
         ? [
             {
