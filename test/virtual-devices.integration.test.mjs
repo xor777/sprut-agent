@@ -687,6 +687,51 @@ test("code that names a virtual device by id is named before it is deleted", asy
   assert.deepEqual(writes(hub, "accessory.delete"), []);
 });
 
+// A shared list of lamps is code that reaches the device too: the code is
+// named before the delete and stops the undo of a creation.
+test("code that keeps a virtual device in its list of ids is named before it is deleted", async (t) => {
+  const { hub, client, before } = await setup(t);
+  const scenes = (index, aId) => ({
+    index,
+    name: `Сцены ${index}`,
+    desc: "",
+    type: "GLOBAL",
+    active: true,
+    data: [
+      `global.SCENE_LIGHTS = [15, ${aId}];`,
+      "global.scene = function () {",
+      "  global.SCENE_LIGHTS.forEach(function (id) {",
+      "    Hub.getAccessory(id);",
+      "  });",
+      "};",
+    ].join("\n"),
+  });
+  hub.state.scenarios.push(scenes("30", GUEST_MODE));
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(GUEST_MODE),
+    reason: "Удалить режим гостей",
+  });
+  assert.equal(typeof prepared.tell_owner, "string");
+  assert.deepEqual(
+    prepared.dependencies.code.map(({ name }) => name),
+    ["Сцены 30"],
+  );
+
+  const applied = await createDevice(client, {
+    name: "Режим вечеринки",
+    type: "Switch",
+  });
+  const [device] = created(hub, before);
+  hub.state.scenarios.push(scenes("31", device.id));
+  const restored = await call(client, "restore_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(restored.status, "conflict");
+  assert.equal(restored.conflict_reason, "virtual_device_in_use");
+  assert.deepEqual(writes(hub, "accessory.delete"), []);
+});
+
 // A home with more code scenarios than one search reads: what was not read
 // is named, but only a reference found stops the undo of a creation.
 test("code left unread does not stop the undo of a creation", async (t) => {

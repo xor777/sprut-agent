@@ -278,6 +278,165 @@ test("a GLOBAL edit names the devices its changed lines act on", async (t) => {
   assert.equal(unchanged.code_mentions, undefined);
 });
 
+function codeScenario(index, name, data) {
+  return {
+    index,
+    name,
+    desc: "",
+    type: "GLOBAL",
+    active: true,
+    onStart: true,
+    sync: false,
+    data,
+  };
+}
+
+async function codeMentions(client, accessory) {
+  const read = await call(client, "get_entity", {
+    entity_ref: `${homeRef}/accessory/${accessory}`,
+    include: ["relations"],
+  });
+  return read.entity.relations.code_mentions;
+}
+
+// «В каких сценариях участвует торшер?»: the scenes keep their lamps by id
+// in one list and look each up as they run.
+test("relations name the code scenario that keeps the lamp in its list of ids, with the line", async (t) => {
+  const { hub, client } = await setup(t);
+  const initial = hub.snapshot();
+  assert.deepEqual(await codeMentions(client, 16), [
+    {
+      scenario_ref: globalRef,
+      scenario_name: "Цветные сцены",
+      scenario_type: "GLOBAL",
+      active: true,
+      found_by: ["accessory_id_list"],
+      lines: [2],
+      next: {
+        tool: "get_entity",
+        arguments: { entity_ref: globalRef, include: ["configuration"] },
+      },
+    },
+  ]);
+  // The night light is not in the list.
+  assert.deepEqual(await codeMentions(client, 26), []);
+  assert.deepEqual(diffHomeSnapshots(initial, hub.snapshot()), []);
+});
+
+test("a list of ids spread over lines, next to a literal Hub call, and in code that does not parse", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.scenarios.push(
+      codeScenario(
+        "90",
+        "По строкам",
+        [
+          "var lamps = [",
+          "  15,",
+          "  16,",
+          "];",
+          "lamps.forEach(function (id) {",
+          "  Hub.setCharacteristicValue(id, 14, true);",
+          "});",
+        ].join("\n"),
+      ),
+      codeScenario(
+        "91",
+        "И вызов, и список",
+        "Hub.getAccessory(16);\nvar lamps = [16];\nHub.getAccessory(lamps[0]);",
+      ),
+      // Not valid JavaScript: what the tokens find stays, the list is unseen.
+      codeScenario(
+        "92",
+        "Не разбирается",
+        "Hub.getAccessory(16);\nvar lamps = [16, 17;\nHub.getAccessory(lamps[0]);",
+      ),
+    );
+    return fixture;
+  });
+  const mentions = await codeMentions(client, 16);
+  assert.deepEqual(
+    mentions.map(({ scenario_name, found_by, lines }) => [
+      scenario_name,
+      found_by,
+      lines,
+    ]),
+    [
+      ["Цветные сцены", ["accessory_id_list"], [2]],
+      ["По строкам", ["accessory_id_list"], [3]],
+      ["И вызов, и список", ["accessory_id", "accessory_id_list"], [1, 2]],
+      ["Не разбирается", ["accessory_id"], [1]],
+    ],
+  );
+});
+
+test("a number equal to the id is no mention outside a list of plain numbers in code that looks ids up", async (t) => {
+  const lookup = "Hub.getAccessory(global.next());";
+  const sources = {
+    "Список без поиска по id":
+      "global.LIGHTS = [15, 16, 17];\nHub.getAccessory(15);",
+    "Поиск только на другом объекте":
+      "global.LIGHTS = [15, 16, 17];\nlight.getCharacteristic(global.next());",
+    "Смешанный список": `var row = [15, 16, "свет"];\n${lookup}`,
+    "Список с вложенным значением": `var row = [15, 16, { hue: 16 }];\n${lookup}`,
+    "Отрицательное число в списке": `var row = [-1, 16];\n${lookup}`,
+    "Свойство объекта": `var color = { hue: 16 };\n${lookup}`,
+    Комментарий: `// [15, 16, 17]\n/* [16] */\n${lookup}`,
+    Строка: `var text = "[15, 16, 17]";\n${lookup}`,
+    Переменная: `var LAMP = 16;\n${lookup}`,
+    "Индекс массива": `var value = names[16];\n${lookup}`,
+  };
+  const { client } = await setup(t, (fixture) => {
+    Object.entries(sources).forEach(([name, data], position) => {
+      fixture.scenarios.push(codeScenario(String(90 + position), name, data));
+    });
+    return fixture;
+  });
+  // The scenes' own list still counts, so the search did reach these sources.
+  assert.deepEqual(
+    (await codeMentions(client, 16)).map(({ scenario_name }) => scenario_name),
+    ["Цветные сцены"],
+  );
+});
+
+test("code a BLOCK change adds names the lamps of its own list of ids before it is applied", async (t) => {
+  const { client } = await setup(t);
+  const sceneRef = `${homeRef}/scenario/${OCEAN}`;
+  const entity = await call(client, "get_entity", {
+    entity_ref: sceneRef,
+    include: ["configuration"],
+  });
+  const data = structuredClone(entity.entity.configuration.value);
+  data.targets[0].then.push({
+    type: "code",
+    code: "var lamps = [16, 26];\nlamps.forEach(function (id) {\n  Hub.setCharacteristicValue(id, 14, true);\n});",
+  });
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "block_data_update",
+    target_ref: sceneRef,
+    data,
+    reason: "Включать лампы в сцене Океан",
+  });
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.deepEqual(prepared.code_mentions, [
+    {
+      pointer: "/targets/0/then/1",
+      accessory_ref: `${homeRef}/accessory/16`,
+      name: "Торшер",
+      found_by: ["accessory_id_list"],
+    },
+    {
+      pointer: "/targets/0/then/1",
+      accessory_ref: `${homeRef}/accessory/26`,
+      name: "Ночник",
+      found_by: ["accessory_id_list"],
+    },
+  ]);
+  const shown = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.deepEqual(shown.code_mentions, prepared.code_mentions);
+});
+
 test("a GLOBAL whose code reads as [REDACTED] is not rewritten: the agent cannot see what it would replace", async (t) => {
   const keyed = [
     'global.CAMERA = "http://camera.local/snapshot?token=f81d4fae7dec";',
