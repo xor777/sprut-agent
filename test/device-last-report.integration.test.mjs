@@ -478,11 +478,14 @@ test("last_report with state lists and reads only the devices in that state", as
     last_report: true,
   });
 
+  // The socket that is on stands beside the lamps, the strip that is off is
+  // neither listed nor read.
   assert.deepEqual(page.devices.map(refOf).sort(), [
     accessory(CHANDELIER),
     accessory(FLOOR_LAMP),
+    accessory(TV_SOCKET),
   ]);
-  assert.equal(deviceReads(home.hub, before).length, 2);
+  assert.equal(deviceReads(home.hub, before).length, 3);
 });
 
 test("last_report for lights also covers a room's relays and sockets, which may drive lamps", async (t) => {

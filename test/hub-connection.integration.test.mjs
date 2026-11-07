@@ -345,12 +345,14 @@ test(
       floorLampOn,
     );
     // The second read's home list was already on the quiet connection and got
-    // its answer there; its device read went over a new connection.
+    // its answer there; its device read went over a new connection. The first
+    // device read also asked for the time zone of its last report.
     const [old, fresh, ...more] = relay.connections;
     const methods = (requests) => requests.map(({ method }) => method);
     assert.deepEqual(methods(old.requests), [
       "hub.list",
       "accessory.get",
+      "window.get",
       "hub.list",
       "hub.list",
     ]);
