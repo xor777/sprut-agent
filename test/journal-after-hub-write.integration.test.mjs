@@ -17,9 +17,10 @@ import {
 
 // A change of several steps saves its record after each step the hub took.
 // When that save cannot happen, the step is already in the home: the answer
-// must not say otherwise, what the hub confirmed must not be lost, and undo
-// must still work. The lock is held at the moment the record is due, by a
-// real other process, as a stuck dialog holds it.
+// must not say otherwise, and undo must still work. The journal stays the only
+// record: what it did not take is an outcome the next call settles from the
+// hub, as after a lost answer. The lock is held at the moment the record is
+// due, by a real other process, as a stuck dialog holds it.
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -36,6 +37,8 @@ const groupServiceRef = lampRef(44);
 const NEW_LAMP_GROUP = [41, 42, 45];
 // Long enough for the holder to be running when the hub's answer comes.
 const REPLY_DELAY_MS = 3_000;
+// Long enough for anything a stopped dialog still wrote by itself to show.
+const SETTLE_MS = 6_000;
 
 async function setup(t) {
   let arrived = () => {};
@@ -132,19 +135,12 @@ async function call(client, name, args) {
   return result.structuredContent;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function kill(holder) {
   const exited = once(holder, "exit");
   holder.kill("SIGKILL");
   await exited;
-}
-
-// The record reaches the journal by itself once the journal is free.
-async function waitForRecord(savedRecord, changeRef, holds) {
-  const deadline = Date.now() + 15_000;
-  while (!holds(await savedRecord(changeRef))) {
-    assert.ok(Date.now() < deadline, "the record never reached the journal");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
 }
 
 function assertStoppedPartWay(answer, changeRef, tool, code) {
@@ -200,6 +196,11 @@ function prepareDevice(client) {
 const inRoster = (hub, name) =>
   hub.state.accessories.some((accessory) => accessory.name === name);
 
+const creations = (hub) =>
+  hub.requests.filter(({ method }) => method === "accessory.create").length;
+
+const candidateNames = (candidates) => candidates.map(({ name }) => name);
+
 function groupLinkCount(hub) {
   return Object.values(GROUP_CHARACTERISTICS)
     .flatMap((cId) => hub.state.links.get(`44.13.${cId}`) ?? [])
@@ -242,37 +243,55 @@ test("the journal held after a hub step: the answer owns up and undo still works
       assert.equal(restored.status, "restored", JSON.stringify(restored));
     }),
 
-    t.test("a new group: undo removes the device it created", async (t) => {
-      const { hub, client, holdJournalWhen } = await setup(t);
-      const prepared = await prepareGroup(client);
-      const { held } = await holdJournalWhen("accessory.create");
+    t.test(
+      "a new group whose id was not saved: no second device, and undo names it",
+      async (t) => {
+        const { hub, client, holdJournalWhen } = await setup(t);
+        const prepared = await prepareGroup(client);
+        const { held } = await holdJournalWhen("accessory.create");
 
-      const stopped = await client.callTool({
-        name: "apply_native_change",
-        arguments: { change_ref: prepared.change_ref },
-      });
+        const stopped = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
 
-      assertStoppedPartWay(
-        stopped,
-        prepared.change_ref,
-        "apply_native_change",
-        "state_storage_busy",
-      );
-      assert.equal(inRoster(hub, "Свет гостиной"), true);
+        assertStoppedPartWay(
+          stopped,
+          prepared.change_ref,
+          "apply_native_change",
+          "state_storage_busy",
+        );
+        assert.equal(inRoster(hub, "Свет гостиной"), true);
 
-      await kill(await held);
-      const restored = await call(client, "restore_native_change", {
-        change_ref: prepared.change_ref,
-      });
-      assert.equal(restored.status, "restored", JSON.stringify(restored));
-      assert.equal(inRoster(hub, "Свет гостиной"), false);
-    }),
+        await kill(await held);
+        const undo = await call(client, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(undo.status, "not_owned", JSON.stringify(undo));
+        assert.deepEqual(candidateNames(undo.candidate_accessories), [
+          "Свет гостиной",
+        ]);
+        assert.equal(inRoster(hub, "Свет гостиной"), true);
+
+        const repeat = await call(client, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(repeat.status, "uncertain", JSON.stringify(repeat));
+        assert.equal(
+          repeat.conflict_reason,
+          "virtual_accessory_creation_outcome_unknown",
+        );
+        assert.deepEqual(candidateNames(repeat.candidate_accessories), [
+          "Свет гостиной",
+        ]);
+        assert.equal(creations(hub), 1);
+      },
+    ),
 
     t.test(
-      "a new group: the id reaches the journal, and another dialog undoes it",
+      "a new group whose id was not saved: another dialog knows as much",
       async (t) => {
-        const { hub, client, startDialog, holdJournalWhen, savedRecord } =
-          await setup(t);
+        const { hub, client, startDialog, holdJournalWhen } = await setup(t);
         const prepared = await prepareGroup(client);
         const { held } = await holdJournalWhen("accessory.create");
 
@@ -283,17 +302,93 @@ test("the journal held after a hub step: the answer owns up and undo still works
         assert.equal(stopped.isError, true, JSON.stringify(stopped));
 
         await kill(await held);
-        await waitForRecord(
-          savedRecord,
-          prepared.change_ref,
-          ({ created_accessory_id: id }) => id !== undefined,
-        );
         const other = await startDialog();
+        const seen = await call(other, "get_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(seen.status, "uncertain", JSON.stringify(seen));
+        assert.deepEqual(candidateNames(seen.candidate_accessories), [
+          "Свет гостиной",
+        ]);
+        const undo = await call(other, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(undo.status, "not_owned", JSON.stringify(undo));
+        assert.equal(inRoster(hub, "Свет гостиной"), true);
+        assert.equal(creations(hub), 1);
+      },
+    ),
+
+    t.test(
+      "a group another dialog finished keeps its record, and undo works",
+      async (t) => {
+        const { hub, client, startDialog, holdJournalWhen, savedRecord } =
+          await setup(t);
+        const other = await startDialog();
+        const prepared = await prepareGroup(client);
+        const { held } = await holdJournalWhen("link.addVirtual");
+
+        const stopped = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assert.equal(stopped.isError, true, JSON.stringify(stopped));
+
+        await kill(await held);
+        const finished = await call(other, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(finished.status, "applied", JSON.stringify(finished));
+
+        await sleep(SETTLE_MS);
+        assert.equal(
+          (await savedRecord(prepared.change_ref)).status,
+          "applied",
+        );
+        const retried = await call(client, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(retried.status, "applied", JSON.stringify(retried));
         const restored = await call(other, "restore_native_change", {
           change_ref: prepared.change_ref,
         });
         assert.equal(restored.status, "restored", JSON.stringify(restored));
         assert.equal(inRoster(hub, "Свет гостиной"), false);
+      },
+    ),
+
+    t.test(
+      "lamps another dialog relinked keep their record, and undo works",
+      async (t) => {
+        const { hub, client, startDialog, holdJournalWhen, savedRecord } =
+          await setup(t);
+        const links = groupLinkCount(hub);
+        const other = await startDialog();
+        const prepared = await prepareMembers(client);
+        const { held } = await holdJournalWhen("link.addVirtual");
+
+        const stopped = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
+        assert.equal(stopped.isError, true, JSON.stringify(stopped));
+
+        await kill(await held);
+        const finished = await call(other, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(finished.status, "applied", JSON.stringify(finished));
+
+        await sleep(SETTLE_MS);
+        assert.equal(
+          (await savedRecord(prepared.change_ref)).status,
+          "applied",
+        );
+        const restored = await call(other, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(restored.status, "restored", JSON.stringify(restored));
+        assert.equal(groupLinkCount(hub), links);
       },
     ),
 
@@ -361,38 +456,53 @@ test("the journal held after a hub step: the answer owns up and undo still works
       assert.equal(groupLinkCount(hub), links);
     }),
 
-    t.test("a virtual device: its id is not lost either", async (t) => {
-      const { hub, client, holdJournalWhen } = await setup(t);
-      const prepared = await prepareDevice(client);
-      const { held } = await holdJournalWhen("accessory.create");
+    t.test(
+      "a virtual device whose id was not saved: no second one, and undo names it",
+      async (t) => {
+        const { hub, client, holdJournalWhen } = await setup(t);
+        const prepared = await prepareDevice(client);
+        const { held } = await holdJournalWhen("accessory.create");
 
-      const stopped = await client.callTool({
-        name: "apply_native_change",
-        arguments: { change_ref: prepared.change_ref },
-      });
+        const stopped = await client.callTool({
+          name: "apply_native_change",
+          arguments: { change_ref: prepared.change_ref },
+        });
 
-      assertStoppedPartWay(
-        stopped,
-        prepared.change_ref,
-        "apply_native_change",
-        "state_storage_busy",
-      );
-      assert.equal(inRoster(hub, "Режим гостей"), true);
+        assertStoppedPartWay(
+          stopped,
+          prepared.change_ref,
+          "apply_native_change",
+          "state_storage_busy",
+        );
+        assert.equal(inRoster(hub, "Режим гостей"), true);
 
-      await kill(await held);
-      const restored = await call(client, "restore_native_change", {
-        change_ref: prepared.change_ref,
-      });
-      assert.equal(restored.status, "restored", JSON.stringify(restored));
-      assert.equal(inRoster(hub, "Режим гостей"), false);
-    }),
+        await kill(await held);
+        const undo = await call(client, "restore_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(undo.status, "not_owned", JSON.stringify(undo));
+        assert.deepEqual(candidateNames(undo.candidate_devices), ["Режим гостей"]);
+        assert.equal(inRoster(hub, "Режим гостей"), true);
+
+        const repeat = await call(client, "apply_native_change", {
+          change_ref: prepared.change_ref,
+        });
+        assert.equal(repeat.status, "uncertain", JSON.stringify(repeat));
+        assert.equal(
+          repeat.conflict_reason,
+          "virtual_device_creation_outcome_unknown",
+        );
+        assert.deepEqual(candidateNames(repeat.candidate_devices), ["Режим гостей"]);
+        assert.equal(creations(hub), 1);
+      },
+    ),
   ]);
 });
 
 // The same when the file system refuses the journal itself: the answer owns
-// up, and the journal gets what the hub confirmed once it can be written.
-test("a journal that cannot be written after a hub step keeps the id too", async (t) => {
-  const { hub, client, journalFile, whenArrives, savedRecord } = await setup(t);
+// up, and once the journal can be written the next call settles it from the hub.
+test("a journal that cannot be written after a hub step: the next call settles it", async (t) => {
+  const { hub, client, journalFile, whenArrives } = await setup(t);
   const prepared = await prepareGroup(client);
   // The journal's temporary file: a directory in its place fails the write.
   const temporaryFile = `${await journalFile()}.${client.pid}.tmp`;
@@ -413,14 +523,17 @@ test("a journal that cannot be written after a hub step keeps the id too", async
   assert.equal(stopped.structuredContent.error.retryable, false);
 
   rmdirSync(temporaryFile);
-  await waitForRecord(
-    savedRecord,
-    prepared.change_ref,
-    ({ created_accessory_id: id }) => id !== undefined,
-  );
-  const restored = await call(client, "restore_native_change", {
+  const repeat = await call(client, "apply_native_change", {
     change_ref: prepared.change_ref,
   });
-  assert.equal(restored.status, "restored", JSON.stringify(restored));
-  assert.equal(inRoster(hub, "Свет гостиной"), false);
+  assert.equal(repeat.status, "uncertain", JSON.stringify(repeat));
+  assert.deepEqual(candidateNames(repeat.candidate_accessories), [
+    "Свет гостиной",
+  ]);
+  assert.equal(creations(hub), 1);
+  const undo = await call(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(undo.status, "not_owned", JSON.stringify(undo));
+  assert.equal(inRoster(hub, "Свет гостиной"), true);
 });
