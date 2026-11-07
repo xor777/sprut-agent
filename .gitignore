@@ -8,6 +8,8 @@ node_modules/
 .stryker-tmp/
 reports/
 coverage/
+# Temporary copies of subagents.
+/.claude/worktrees/
 
 # Raw WebSocket captures contain account and smart-home data.
 research/captures/raw/
