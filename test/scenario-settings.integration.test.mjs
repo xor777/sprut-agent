@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -38,9 +38,10 @@ function scenarioRef(index) {
   return `${homeRef}/scenario/${index}`;
 }
 
-async function setup(t) {
+async function setup(t, { extraScenarios = [] } = {}) {
   const fixture = await loadHomeFixture("apartment");
   fixture.scenarios.push(
+    ...extraScenarios,
     {
       index: GLOBAL,
       name: "Переменные дома",
@@ -115,7 +116,7 @@ async function setup(t) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client };
+  return { hub, client, stateDirectory };
 }
 
 async function call(client, name, args) {
@@ -656,6 +657,610 @@ test("built-in scenarios are refused before anything is sent", async (t) => {
   });
   assert.equal(contract.error.code, "predefined_scenario_read_only");
   assert.deepEqual(hub.writes(), []);
+});
+
+// The owner asks to turn a built-in scenario off: SprutHub's own scenario is
+// not changed here, and the owner is told to switch it in the app.
+test("a built-in scenario is not turned on or off, and it still reads as before", async (t) => {
+  const { hub, client } = await setup(t);
+  const refusals = [
+    await refusal(client, "get_native_change_contract", {
+      operation: "scenario_active",
+      target_ref: scenarioRef(BUILT_IN),
+    }),
+    // The value it already has is refused too: no change would come of it,
+    // and an "already as asked" would read as if this were possible.
+    ...(await Promise.all(
+      [false, true].map((value) =>
+        refusal(client, "prepare_native_change", {
+          operation: "scenario_active",
+          target_ref: scenarioRef(BUILT_IN),
+          value,
+          reason: "Выключи плавное включение",
+        }),
+      ),
+    )),
+    // Through its options window it gets the same answer, not a pointer to
+    // the operation that refuses it.
+    await refusal(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: windowRef(hub, BUILT_IN),
+      option_key: "Active",
+      value: false,
+      reason: "Выключи плавное включение",
+    }),
+  ];
+  for (const refused of refusals) {
+    assert.equal(refused.error.code, "predefined_scenario_read_only");
+    assert.match(refused.error.message, /nothing was sent/);
+    assert.match(refused.error.message, /SprutHub app/);
+  }
+  assert.deepEqual(hub.writes(), []);
+  assert.equal(scenarioOf(hub, BUILT_IN).active, true);
+
+  const entity = await call(client, "get_entity", {
+    entity_ref: scenarioRef(BUILT_IN),
+  });
+  assert.equal(entity.entity.name, "Плавное включение");
+  assert.equal(entity.entity.active, true);
+  const overview = await call(client, "home_overview", { list: "scenarios" });
+  assert.equal(
+    overview.scenarios.find(({ ref }) => ref === scenarioRef(BUILT_IN))?.name,
+    "Плавное включение",
+  );
+
+  // Neither its window nor a refused run offers the switch it does not have.
+  const window = await call(client, "get_entity", {
+    entity_ref: windowRef(hub, BUILT_IN),
+  });
+  assert.deepEqual(
+    window.entity.options.find(({ key }) => key === "Active").native_change,
+    {
+      native_write: true,
+      supported: false,
+      reason: "predefined_scenario_read_only",
+    },
+  );
+  const run = await refusal(client, "prepare_native_change", {
+    operation: "scenario_run",
+    target_ref: scenarioRef(BUILT_IN),
+    reason: "Запусти плавное включение",
+  });
+  assert.equal(run.error.code, "scenario_run_unverified_type");
+  assert.doesNotMatch(run.error.message, /scenario_active/);
+});
+
+// The agent follows what a read offers: an offer on a built-in scenario's
+// window would only lead to the refusal, so none is made.
+test("nothing in a built-in scenario's options window is offered, and the window of an ordinary one still is", async (t) => {
+  const { hub, client } = await setup(t);
+  const window = hub.state.windows[scenarioOf(hub, BUILT_IN).optionsWindow];
+  window.options.push({
+    key: "Plugin",
+    name: "Настройка расширения",
+    type: "GenericBoolean",
+    inputType: "CHECKBOX",
+    read: true,
+    write: true,
+    disabled: false,
+    value: { boolValue: false },
+  });
+
+  const builtIn = await call(client, "get_entity", {
+    entity_ref: windowRef(hub, BUILT_IN),
+  });
+  const offered = builtIn.entity.options.filter(
+    ({ native_change: nativeChange }) => nativeChange,
+  );
+  assert.deepEqual(offered.map(({ key }) => key).sort(), [
+    "Active",
+    "Desc",
+    "Name",
+    "OnStart",
+    "Plugin",
+    "Sync",
+  ]);
+  for (const { key, native_change: nativeChange } of offered) {
+    assert.deepEqual(
+      nativeChange,
+      {
+        native_write: true,
+        supported: false,
+        reason: "predefined_scenario_read_only",
+      },
+      key,
+    );
+  }
+
+  // What the read says, prepare says: also for an option of no known meaning.
+  const refused = await refusal(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: windowRef(hub, BUILT_IN),
+    option_key: "Plugin",
+    value: true,
+    reason: "Владелец попросил",
+  });
+  assert.equal(refused.error.code, "predefined_scenario_read_only");
+  assert.deepEqual(hub.writes(), []);
+
+  const ordinary = await call(client, "get_entity", {
+    entity_ref: windowRef(hub, BLOCK),
+  });
+  const onStart = ordinary.entity.options.find(({ key }) => key === "OnStart");
+  assert.equal(onStart.native_change.supported, true);
+});
+
+// «Выключи плавное включение» reached with window_option on the scenario ref:
+// the answer is the built-in one, not a pointer to the operation that refuses.
+test("window_option Active on a built-in scenario's ref answers as built-in", async (t) => {
+  const { hub, client } = await setup(t);
+  for (const name of ["get_native_change_contract", "prepare_native_change"]) {
+    const refused = await refusal(client, name, {
+      operation: "window_option",
+      target_ref: scenarioRef(BUILT_IN),
+      option_key: "Active",
+      ...(name === "prepare_native_change"
+        ? { value: false, reason: "Выключи плавное включение" }
+        : {}),
+    });
+    assert.equal(refused.error.code, "predefined_scenario_read_only", name);
+    assert.match(refused.error.message, /SprutHub app/);
+  }
+  assert.deepEqual(hub.writes(), []);
+
+  // An ordinary scenario still hears where its on/off is.
+  const ordinary = await refusal(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: scenarioRef(BLOCK),
+    option_key: "Active",
+    value: false,
+    reason: "Выключи",
+  });
+  assert.equal(ordinary.error.code, "unsupported_window_option");
+  assert.match(ordinary.error.message, /scenario_active/);
+});
+
+const BUILT_IN_BLOCK = "23";
+
+function builtInBlock() {
+  return {
+    index: BUILT_IN_BLOCK,
+    name: "Встроенные действия",
+    desc: "",
+    type: "BLOCK",
+    predefined: true,
+    active: true,
+    onStart: false,
+    sync: false,
+    data: {
+      targets: [
+        {
+          type: "service",
+          aId: 36,
+          sId: 13,
+          hs: "Fan",
+          characteristics: [{ type: "set", cId: 14, hc: "On", value: "true" }],
+        },
+      ],
+    },
+  };
+}
+
+async function prepareBuiltInBlockEdit(client) {
+  const read = await call(client, "get_entity", {
+    entity_ref: scenarioRef(BUILT_IN_BLOCK),
+    include: ["configuration"],
+  });
+  const data = structuredClone(read.entity.configuration.value);
+  data.targets[0].characteristics[0].value = "false";
+  return {
+    operation: "block_data_update",
+    target_ref: scenarioRef(BUILT_IN_BLOCK),
+    data,
+    reason: "Владелец попросил",
+  };
+}
+
+function storedBlockWrites(hub) {
+  return hub.writes().filter(({ method }) => method === "scenario.update");
+}
+
+// What an earlier version saved for a scenario, built-in all along: the change
+// is made while the hub's scenario does not count as one, and then both the
+// hub and the journal say it does.
+async function journalAndHubCountAsBuiltIn(
+  { hub, stateDirectory },
+  index,
+  builtIn,
+) {
+  scenarioOf(hub, index).predefined = builtIn;
+  const journal = path.join(
+    stateDirectory,
+    (await readdir(stateDirectory)).find((name) =>
+      /^automation-changes-\w+\.json$/.test(name),
+    ),
+  );
+  const saved = await readFile(journal, "utf8");
+  assert.match(saved, new RegExp(`"predefined": ${!builtIn}`));
+  await writeFile(
+    journal,
+    saved.replaceAll(`"predefined": ${!builtIn}`, `"predefined": ${builtIn}`),
+    { mode: 0o600 },
+  );
+}
+
+test("the data of a built-in BLOCK is refused like the rest of it, and a change made before is still undone", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, {
+    extraScenarios: [builtInBlock()],
+  });
+  const edit = await prepareBuiltInBlockEdit(client);
+
+  const refused = await refusal(client, "prepare_native_change", edit);
+  assert.equal(refused.error.code, "predefined_scenario_read_only");
+  assert.match(refused.error.message, /SprutHub app/);
+  assert.deepEqual(hub.writes(), []);
+
+  const countAsBuiltIn = (builtIn) =>
+    journalAndHubCountAsBuiltIn(
+      { hub, stateDirectory },
+      BUILT_IN_BLOCK,
+      builtIn,
+    );
+  scenarioOf(hub, BUILT_IN_BLOCK).predefined = false;
+  const earlier = await call(client, "prepare_native_change", edit);
+  assert.equal(earlier.status, "prepared", JSON.stringify(earlier));
+
+  // Prepared then, not sent now.
+  await countAsBuiltIn(true);
+  const atApply = await refusal(client, "apply_native_change", {
+    change_ref: earlier.change_ref,
+  });
+  assert.equal(atApply.error.code, "predefined_scenario_read_only");
+  assert.deepEqual(hub.writes(), []);
+
+  // Applied then: the agent's change does not stay in the home.
+  await countAsBuiltIn(false);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: earlier.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(storedBlockWrites(hub).length, 1);
+  await countAsBuiltIn(true);
+  await restore(client, earlier);
+  assert.equal(storedBlockWrites(hub).length, 2);
+  assert.equal(
+    JSON.parse(scenarioOf(hub, BUILT_IN_BLOCK).data).targets[0]
+      .characteristics[0].value,
+    "true",
+  );
+});
+
+function pauseOfBlockAction() {
+  return {
+    operation: "block_action_pause",
+    target_ref: scenarioRef(BLOCK),
+    action_pointer: "/targets/0/then/0",
+    duration_seconds: 600,
+    reason: "Не выключать свет десять минут",
+  };
+}
+
+// «Не выключай свет десять минут» on a BLOCK that is SprutHub's own: a pause
+// rewrites its data, so it is refused like any other change of it.
+test("an action of a built-in BLOCK is not paused, also when prepared before, and nothing is sent", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t);
+  scenarioOf(hub, BLOCK).predefined = true;
+
+  for (const [name, args] of [
+    ["get_native_change_contract", pauseOfBlockAction()],
+    ["prepare_native_change", pauseOfBlockAction()],
+    // An incomplete request gets the same answer, not a pointer to a retry.
+    [
+      "prepare_native_change",
+      { ...pauseOfBlockAction(), action_pointer: undefined },
+    ],
+  ]) {
+    const refused = await refusal(client, name, args);
+    assert.equal(refused.error.code, "predefined_scenario_read_only", name);
+    assert.match(refused.error.message, /SprutHub app/);
+  }
+  assert.deepEqual(hub.writes(), []);
+
+  // Prepared when it did not count as built-in: not sent now, on any attempt.
+  scenarioOf(hub, BLOCK).predefined = false;
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    pauseOfBlockAction(),
+  );
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  await journalAndHubCountAsBuiltIn({ hub, stateDirectory }, BLOCK, true);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const refused = await refusal(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(refused.error.code, "predefined_scenario_read_only");
+    assert.deepEqual(hub.writes(), []);
+  }
+  const read = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(read.status, "prepared");
+  assert.equal(read.native_write_sent, false);
+  assert.deepEqual(hub.writes(), []);
+});
+
+// The agent's pause does not stay in the home: taking it off leads the data
+// back to what was stored, so it is not a new change of the scenario.
+test("a pause already standing on a built-in BLOCK is still taken off", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t);
+  const stored = JSON.parse(scenarioOf(hub, BLOCK).data);
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    pauseOfBlockAction(),
+  );
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  assert.equal(storedBlockWrites(hub).length, 1);
+  assert.notDeepEqual(JSON.parse(scenarioOf(hub, BLOCK).data), stored);
+
+  await journalAndHubCountAsBuiltIn({ hub, stateDirectory }, BLOCK, true);
+  await restore(client, prepared);
+  assert.equal(storedBlockWrites(hub).length, 2);
+  assert.deepEqual(JSON.parse(scenarioOf(hub, BLOCK).data), stored);
+});
+
+// A refusal that names another write would only lead to this answer one call
+// later, so on a built-in scenario this answer comes first: on the LOGIC every
+// built-in scenario of an observed hub is, and on a BLOCK.
+test("a built-in scenario answers as built-in whatever else the request holds", async (t) => {
+  const { hub, client } = await setup(t, {
+    extraScenarios: [builtInBlock()],
+  });
+  const extras = [
+    {},
+    { active: false },
+    { on_start: true },
+    { sync: true },
+    { name: "Своё имя" },
+    { description: "Своё описание" },
+  ];
+  const data = builtInBlock().data;
+  data.targets[0].characteristics[0].value = "false";
+  for (const index of [BUILT_IN, BUILT_IN_BLOCK]) {
+    const target_ref = scenarioRef(index);
+    const reason = "Владелец попросил";
+    const requests = [
+      ...extras.flatMap((extra) => [
+        { operation: "block_data_update", target_ref, reason, data, ...extra },
+        { operation: "block_data_update", target_ref, reason, ...extra },
+        {
+          operation: "logic_source_update",
+          target_ref,
+          reason,
+          source: "function trigger() {}",
+          ...extra,
+        },
+      ]),
+      { operation: "scenario_active", target_ref, reason, active: false },
+    ];
+    for (const request of requests) {
+      const refused = await refusal(client, "prepare_native_change", request);
+      const { data: _data, ...shown } = request;
+      assert.equal(
+        refused.error.code,
+        "predefined_scenario_read_only",
+        JSON.stringify(shown),
+      );
+      assert.match(refused.error.message, /SprutHub app/);
+      assert.equal(refused.next, undefined, JSON.stringify(shown));
+    }
+    const contract = await refusal(client, "get_native_change_contract", {
+      operation: "logic_source_update",
+      target_ref,
+    });
+    assert.equal(contract.error.code, "predefined_scenario_read_only");
+  }
+  assert.deepEqual(hub.writes(), []);
+});
+
+// The same requests on the owner's own scenarios still say where each belongs.
+test("an ordinary scenario still hears where such a request belongs", async (t) => {
+  const { hub, client } = await setup(t);
+  const reason = "Владелец попросил";
+  const blockUpdate = { operation: "block_data_update", reason };
+  const logicUpdate = {
+    operation: "logic_source_update",
+    reason,
+    source: "function trigger() {}",
+  };
+  for (const [index, request, code, next] of [
+    [
+      BLOCK,
+      { ...blockUpdate, active: false },
+      "unsupported_block_flags",
+      { operation: "scenario_active" },
+    ],
+    [
+      BLOCK,
+      { ...blockUpdate, on_start: true },
+      "unsupported_block_flags",
+      { operation: "window_option", option_key: "OnStart" },
+    ],
+    [
+      BLOCK,
+      { ...blockUpdate, sync: true },
+      "unsupported_block_flags",
+      { operation: "window_option", option_key: "Sync" },
+    ],
+    [
+      BLOCK,
+      { ...blockUpdate, name: "Другое имя" },
+      "unsupported_block_metadata",
+      { operation: "window_option", option_key: "Name" },
+    ],
+    [
+      LOGIC,
+      { ...logicUpdate, name: "Другое имя" },
+      "unsupported_logic_metadata",
+      { operation: "logic_source_update" },
+    ],
+    [
+      LOGIC,
+      { ...logicUpdate, sync: true },
+      "unsupported_logic_metadata",
+      { operation: "window_option", option_key: "Sync" },
+    ],
+    [
+      LOGIC,
+      { ...logicUpdate, active: false },
+      "unsupported_logic_metadata",
+      { operation: "scenario_active" },
+    ],
+    [
+      GLOBAL,
+      { ...logicUpdate, on_start: true },
+      "unsupported_logic_metadata",
+      { operation: "window_option", option_key: "OnStart" },
+    ],
+  ]) {
+    const target_ref = scenarioRef(index);
+    const refused = await refusal(client, "prepare_native_change", {
+      ...request,
+      target_ref,
+    });
+    assert.equal(refused.error.code, code, JSON.stringify(request));
+    assert.equal(refused.next.tool, "get_native_change_contract");
+    assert.deepEqual(refused.next.arguments, { ...next, target_ref });
+  }
+
+  // An on/off in the wrong field is answered with the call that does it, and
+  // that call works.
+  const wrongField = await refusal(client, "prepare_native_change", {
+    operation: "scenario_active",
+    target_ref: scenarioRef(BLOCK),
+    active: false,
+    reason,
+  });
+  assert.equal(wrongField.error.code, "invalid_native_value");
+  assert.equal(wrongField.next.tool, "prepare_native_change");
+  assert.equal(wrongField.next.arguments.value, false);
+  const prepared = await call(
+    client,
+    "prepare_native_change",
+    wrongField.next.arguments,
+  );
+  assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+  assert.deepEqual(hub.writes(), []);
+});
+
+// What an earlier version, which took built-in scenarios, saved: the change
+// is made while the hub's scenario does not yet count as built-in.
+async function prepareBuiltInActive(hub, client) {
+  scenarioOf(hub, BUILT_IN).predefined = false;
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "scenario_active",
+    target_ref: scenarioRef(BUILT_IN),
+    value: false,
+    reason: "Выключи плавное включение",
+  });
+  assert.equal(prepared.status, "prepared");
+  return prepared;
+}
+
+function activeWrites(hub) {
+  return hub
+    .writes()
+    .filter(({ method }) => method === "window.update")
+    .map(({ params }) => params.window.update.options);
+}
+
+test("a change an earlier version prepared on a built-in scenario is refused at apply with nothing sent", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await prepareBuiltInActive(hub, client);
+  scenarioOf(hub, BUILT_IN).predefined = true;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const refused = await refusal(client, "apply_native_change", {
+      change_ref: prepared.change_ref,
+    });
+    assert.equal(refused.error.code, "predefined_scenario_read_only");
+    assert.deepEqual(hub.writes(), []);
+  }
+  assert.equal(scenarioOf(hub, BUILT_IN).active, true);
+
+  const read = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(read.status, "prepared");
+  assert.equal(read.native_write_sent, false);
+  assert.deepEqual(hub.writes(), []);
+});
+
+// The write this undoes was confirmed on this very scenario by scenario.get
+// and its window, so the agent's change does not stay in the home for the
+// owner to find.
+test("a change an earlier version applied to a built-in scenario is still read and undone", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await prepareBuiltInActive(hub, client);
+  const applied = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(scenarioOf(hub, BUILT_IN).active, false);
+  scenarioOf(hub, BUILT_IN).predefined = true;
+
+  const read = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(read.status, "applied");
+  assert.deepEqual(read.observed_value, { value: false, kind: "boolValue" });
+  assert.equal(read.verification.fresh, true);
+
+  // The hub refuses: said as it is, and the change can be undone later.
+  hub.refuseNext("window.update", { code: -32603, message: "Internal error" });
+  const refused = await refusal(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(refused.hub_effect, "not_applied");
+  assert.equal(scenarioOf(hub, BUILT_IN).active, false);
+
+  await restore(client, prepared);
+  assert.equal(scenarioOf(hub, BUILT_IN).active, true);
+  assert.deepEqual(activeWrites(hub).at(-1), [
+    { key: "Active", value: { boolValue: true } },
+  ]);
+});
+
+test("an unknown write to a built-in scenario is settled by reads and never sent again", async (t) => {
+  const { hub, client } = await setup(t);
+  const prepared = await prepareBuiltInActive(hub, client);
+  hub.loseNext("window.update");
+  const lost = await call(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(lost.status, "uncertain");
+  scenarioOf(hub, BUILT_IN).predefined = true;
+  const sent = activeWrites(hub).length;
+
+  const refused = await refusal(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(refused.error.code, "predefined_scenario_read_only");
+  assert.equal(activeWrites(hub).length, sent);
+  assert.equal(scenarioOf(hub, BUILT_IN).active, true);
+
+  // It turns out to have reached the hub after all.
+  ownerWritesWindow(hub, BUILT_IN, "Active", { boolValue: false });
+  const settled = await call(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(settled.status, "applied");
+  await restore(client, prepared);
+  assert.equal(scenarioOf(hub, BUILT_IN).active, true);
 });
 
 test("a scenario's options window written by its window ref points to the scenario ref", async (t) => {

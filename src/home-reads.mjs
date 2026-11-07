@@ -21,6 +21,7 @@ import {
   serviceRef,
   virtuallyWritable,
 } from "./spruthub-client.mjs";
+import { toolState } from "./tool-state.mjs";
 
 const PROBLEM_LIMIT = 10;
 const MATCH_LIMIT = 10;
@@ -170,6 +171,7 @@ export class HomeReads {
           ? { options_window_ref: home.options_window_ref }
           : {}),
       },
+      tool: toolState(home.firmware),
       ...selection,
       rooms: roomList,
       scenarios: {

@@ -25,7 +25,7 @@ export function parseDeviceCommandTargets(commands, configuredSerial) {
     try {
       target = parseCharacteristicRef(command.target_ref, configuredSerial);
     } catch (error) {
-      if (!isDeviceCommandRejection(error)) throw error;
+      if (!isCommandRefusal(error)) throw error;
       invalid.push(invalidDeviceCommand(index, command, error));
       return null;
     }
@@ -44,6 +44,12 @@ export function parseDeviceCommandTargets(commands, configuredSerial) {
   });
   if (invalid.length > 0) throw invalidDeviceCommands(invalid);
   return targets;
+}
+
+// A failed renewal of the session stops the call for what it is: it may carry
+// any code, and the commands have nothing to fix.
+export function isCommandRefusal(error) {
+  return isDeviceCommandRejection(error) && !error.sessionRenewalFailed;
 }
 
 export function invalidDeviceCommand(index, command, error, contract) {
@@ -280,7 +286,8 @@ export function deviceCommandFailure(change, error) {
   if (
     change === undefined ||
     change.status === "prepared" ||
-    code === "state_storage_unavailable"
+    code === "state_storage_unavailable" ||
+    code === "state_storage_busy"
   ) {
     status = "not_sent";
   } else if (change.status === "not_applied") {

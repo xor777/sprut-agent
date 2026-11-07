@@ -204,6 +204,14 @@ export function parseWindowOptionOwner(ref, configuredSerial) {
   return { kind: "window", ...parseWindowRef(ref, configuredSerial) };
 }
 
+export function predefinedScenarioReadOnly() {
+  return new SprutHubError(
+    "predefined_scenario_read_only",
+    "This is a built-in SprutHub scenario: its name, flags and content come from SprutHub's own code and its options window shows placeholders, so it is not changed here and nothing was sent. The owner can change it in the SprutHub app.",
+    "get_entity",
+  );
+}
+
 export function scenarioOwnerRequired(scenarioRef, optionKey = "Name") {
   return new SprutHubError(
     "scenario_owner_required",
@@ -411,11 +419,14 @@ export function isVerifiedRunType(snapshot) {
 }
 
 export function unverifiedScenarioRunType(snapshot) {
-  const kind =
-    snapshot.predefined === true ? "built-in" : String(snapshot.type);
+  const builtIn = snapshot.predefined === true;
+  const kind = builtIn ? "built-in" : String(snapshot.type);
+  const onOff = builtIn
+    ? ""
+    : "scenario_active can turn this scenario on or off. ";
   return new SprutHubError(
     "scenario_run_unverified_type",
-    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. scenario_active can turn this scenario on or off; to run it now, ask the owner to run it in the SprutHub app.`,
+    `A manual run of a ${kind} scenario has not been verified on a SprutHub hub yet, so it is not sent: a GLOBAL run may execute its code again and register its timers and subscriptions a second time. Only BLOCK and user LOGIC scenarios are run. ${onOff}To run it now, ask the owner to run it in the SprutHub app.`,
   );
 }
 

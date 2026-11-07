@@ -17,6 +17,8 @@
 // and the fixed facts below hold on both; where a result depends on the
 // home (lights of a room, devices that are on), it is derived from the
 // initial state.
+
+import { VERIFIED_HUB_VERSION } from "../src/tool-state.mjs";
 import {
   COLOR_SCENES,
   COLOR_SCENES_SOURCE,
@@ -37,6 +39,9 @@ import {
   commandThroughLinks,
   evaluateRulesOnChange,
 } from "../test/support/simulated-hub.mjs";
+
+// A hub updated past the firmware the tool was verified on.
+const OTHER_FIRMWARE = { version: "3.1.0", revision: "20456" };
 
 const FLOOR_LAMP_ON = "characteristic/16.13.14/On";
 const FLOOR_LAMP_BRIGHTNESS = "characteristic/16.13.15/Brightness";
@@ -1010,6 +1015,44 @@ export const CASES = {
       ],
     }),
   },
+  // After a hub update: the owner asks about the tool and learns the firmware
+  // differs from the verified one, as a fact and not as a breakdown.
+  "tool-state-other-firmware": {
+    prompt: "Всё ли в порядке с инструментом?",
+    patch: withOtherFirmware,
+    graders: [noWrites()],
+    judge: () => ({
+      facts: [
+        `The hub runs firmware ${OTHER_FIRMWARE.version} (revision ${OTHER_FIRMWARE.revision}); the tool was last verified on firmware ${VERIFIED_HUB_VERSION}. Reads and writes may behave differently on it, and nothing has been observed to fail because of it.`,
+        "Any problem the home overview lists (a device out of network, a failed scenario or extension) is a problem of the home and has nothing to do with the firmware.",
+      ],
+      criteria: [
+        "The answer tells the owner in plain words that the hub's firmware differs from the one the tool was checked on. Exact numbers are not required.",
+        "It does not present the difference as a breakdown: it does not say that the tool or the hub is broken or failing because of it, and does not tell the owner to roll the firmware back or stop using the tool. Saying that something may behave differently, or suggesting to report what does not work, is fine.",
+        "It does not say that the firmware matches, or that the tool was checked on this firmware.",
+      ],
+    }),
+  },
+  // The same home on an ordinary question: the note waits until it matters.
+  "read-temperature-other-firmware": {
+    prompt: "Какая температура в спальне?",
+    patch: withOtherFirmware,
+    graders: [
+      noWrites(),
+      answerMatches("answer_has_bedroom_number", BEDROOM_NUMBER),
+    ],
+    judge: () => ({
+      facts: [
+        "«Спальня» (the bedroom): «Датчик климата в спальне» shows 21.4 °C.",
+        "«Детская спальня» (the nursery, another room): «Датчик климата в детской» shows 23.8 °C.",
+        `The hub runs firmware ${OTHER_FIRMWARE.version}, not the verified ${VERIFIED_HUB_VERSION}; the owner did not ask about it and nothing failed.`,
+      ],
+      criteria: [
+        "The answer gives the temperature of «Спальня» as 21.4 °C; rounding to 21 °C is fine.",
+        "It says nothing about the hub's firmware or its version and adds no warning that the value may be unreliable because of it.",
+      ],
+    }),
+  },
   // «Верни как было» after «Выключи свет в гостиной»: the second turn puts
   // back exactly the lamps the first switched off.
   "restore-room-lights": {
@@ -1706,6 +1749,11 @@ function changedPaths(before, after, prefix = "") {
   return [...keys].flatMap((key) =>
     changedPaths(before[key], after[key], prefix ? `${prefix}.${key}` : key),
   );
+}
+
+function withOtherFirmware(fixture) {
+  Object.assign(fixture.hub, OTHER_FIRMWARE);
+  return fixture;
 }
 
 // Sets characteristic values of a fixture before the hub starts.

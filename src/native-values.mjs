@@ -21,6 +21,7 @@ import {
   parseScenarioRef,
   parseServiceRef,
   parseWindowOptionOwner,
+  predefinedScenarioReadOnly,
   SCENARIO_METADATA_KEYS,
   scenarioActiveOwnerRequired,
   scenarioNotFound,
@@ -351,6 +352,13 @@ export const NATIVE_VALUE_KINDS = {
         ...state,
       };
     },
+    // Earlier versions prepared this for a built-in scenario too. Only apply
+    // is refused: a read still settles a write already sent, and undoing an
+    // apply the same readback proved takes the agent's change out of the home.
+    async recheck(service, change) {
+      const scenario = await service.client.getScenario(change.target.index);
+      if (scenario?.predefined === true) throw predefinedScenarioReadOnly();
+    },
     // The write goes to the options window this read found, so a change
     // journaled before the window path gets it on its first read too.
     async read(service, change, { requireWrite = false } = {}) {
@@ -389,7 +397,8 @@ export const NATIVE_VALUE_KINDS = {
     prepare: prepareRoomName,
     // A change prepared by an earlier version may carry a name the hub
     // would not keep.
-    recheck: (change) => roomNameWithinLimit(change.requested_value.value),
+    recheck: (_service, change) =>
+      roomNameWithinLimit(change.requested_value.value),
     read: (service, change) => readRoomName(service.client, change.target),
     write: (service, change, value) =>
       service.client.renameRoom(change.target.id, value.value),
@@ -1052,6 +1061,9 @@ export async function readScenarioMetadataOption(
   optionKey,
   scenarioRef,
 ) {
+  const scenario = await client.getScenario(owner.index);
+  if (!scenario) throw scenarioNotFound();
+  if (scenario.predefined === true) throw predefinedScenarioReadOnly();
   if (!SCENARIO_METADATA_KEYS.has(optionKey)) {
     throw new SprutHubError(
       "unsupported_window_option",
@@ -1059,9 +1071,6 @@ export async function readScenarioMetadataOption(
       "get_entity",
     );
   }
-  const scenario = await client.getScenario(owner.index);
-  if (!scenario) throw scenarioNotFound();
-  if (scenario.predefined === true) throw predefinedScenarioReadOnly();
   if (!SCENARIO_METADATA_TYPES.has(scenario.type)) {
     throw new SprutHubError(
       "unsupported_scenario_type",
@@ -1088,14 +1097,6 @@ export async function readScenarioMetadataOption(
     optionKey,
   );
   return { scenario, option, windowKey: scenario.optionsWindow };
-}
-
-export function predefinedScenarioReadOnly() {
-  return new SprutHubError(
-    "predefined_scenario_read_only",
-    "This is a built-in SprutHub scenario: its name and flags come from SprutHub's own code and its options window shows placeholders, so it is not changed here and nothing was sent. The owner can change it in the SprutHub app.",
-    "get_entity",
-  );
 }
 
 // A change prepared on the scenario ref reads its value from scenario.get
@@ -1126,26 +1127,26 @@ export async function rejectDirectScenarioMetadataWindow(
   windowKey,
   option,
 ) {
+  const matches = (await service.client.listScenarios()).filter(
+    (scenario) => scenario.optionsWindow === windowKey,
+  );
+  // Answered as on its scenario ref (readScenarioMetadataOption), for every
+  // option of its window as get_entity offers them.
+  if (matches.length === 1 && matches[0].predefined === true) {
+    throw predefinedScenarioReadOnly();
+  }
   if (option.key === "Active") {
     // window_option confirms only the window, not scenario.get.
-    const owners = (await service.client.listScenarios()).filter(
-      (scenario) => scenario.optionsWindow === windowKey,
-    );
-    if (owners.length === 0) return;
+    if (matches.length === 0) return;
     throw scenarioActiveOwnerRequired(
-      owners.length === 1
-        ? `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(owners[0].index)}`
+      matches.length === 1
+        ? `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`
         : undefined,
     );
   }
   if (!SCENARIO_METADATA_KEYS.has(option.key)) return;
   // The window shows a LOGIC's stale values, and its code sets them back.
-  const matches = (await service.client.listScenarios()).filter(
-    (scenario) => scenario.optionsWindow === windowKey,
-  );
   if (matches.length !== 1) return;
-  // Answered as on its scenario ref (readScenarioMetadataOption).
-  if (matches[0].predefined === true) throw predefinedScenarioReadOnly();
   const scenarioRef = `${configuredHomeRef(service.hubSerial)}/scenario/${encodeURIComponent(matches[0].index)}`;
   if (matches[0].type === "LOGIC" && option.key !== "Sync") {
     // The list carries no code; the scenario read does.
@@ -1226,7 +1227,8 @@ export async function readLogicActive(client, target) {
 }
 
 // beforeChangeRef is the scenario ref of a contract or prepare read: no change
-// exists yet, so a mismatch points to that scenario instead of the change.
+// exists yet, so a built-in scenario is refused here and a mismatch points to
+// that scenario instead of the change.
 export async function readScenarioActive(
   client,
   target,
@@ -1234,6 +1236,9 @@ export async function readScenarioActive(
 ) {
   const scenario = await client.getScenario(target.index);
   if (!scenario) throw scenarioNotFound();
+  if (beforeChangeRef !== undefined && scenario.predefined === true) {
+    throw predefinedScenarioReadOnly();
+  }
   if (typeof scenario.active !== "boolean") {
     throw new SprutHubError(
       "incompatible_response",

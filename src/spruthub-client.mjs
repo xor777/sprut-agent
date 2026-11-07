@@ -197,6 +197,8 @@ export class SprutHubClient {
   #nativeEventListeners = new Set();
   #pending = new Map();
   #renewSession;
+  // The last token the hub answered a request with.
+  #acceptedToken;
   #socket;
   #startingObservationClient;
   #writeGeneration = 0;
@@ -3563,7 +3565,7 @@ export class SprutHubClient {
       requested.has("diagnostics"),
       response.responseReceivedAt,
     );
-    await this.#offerScenarioActive(parsed, normalized, deadline);
+    await this.#offerScenarioOptions(parsed, normalized, deadline);
     await this.#withholdBridgeExportWrites(parsed, normalized, deadline);
     return {
       kind: "window",
@@ -3605,19 +3607,35 @@ export class SprutHubClient {
     }
   }
 
-  // Active in a scenario's options window is that scenario's on/off flag;
-  // window_option refuses it, and scenario_active also checks scenario.get.
-  async #offerScenarioActive(parsed, normalized, deadline) {
-    const option = normalized.physical_configuration.options.find(
-      ({ key, redacted }) => key === "Active" && redacted !== true,
-    );
-    if (!option) return;
+  // A scenario's options window. Nothing in a built-in scenario's is written
+  // here (rejectDirectScenarioMetadataWindow). Otherwise Active is that
+  // scenario's on/off flag; window_option refuses it, and scenario_active also
+  // checks scenario.get. Other windows have none of these keys, and are not
+  // worth reading the scenario list for.
+  async #offerScenarioOptions(parsed, normalized, deadline) {
+    const { options } = normalized.physical_configuration;
+    if (!options.some(({ key }) => SCENARIO_WINDOW_KEYS.has(key))) return;
     const owners = extractScenarioCatalog(
       await this.#request({ scenario: { list: {} } }, deadline, {
         serial: parsed.serial,
       }),
     ).filter(({ optionsWindow }) => optionsWindow === parsed.windowKey);
     if (owners.length === 0) return;
+    if (owners.length === 1 && owners[0].predefined === true) {
+      for (const candidate of options) {
+        if (!candidate.native_change) continue;
+        candidate.native_change = {
+          native_write: candidate.native_change.native_write,
+          supported: false,
+          reason: "predefined_scenario_read_only",
+        };
+      }
+      return;
+    }
+    const option = options.find(
+      ({ key, redacted }) => key === "Active" && redacted !== true,
+    );
+    if (!option) return;
     option.native_change = {
       native_write: option.native_change.native_write,
       supported: false,
@@ -3716,28 +3734,44 @@ export class SprutHubClient {
     }
   }
 
-  // A session the hub refuses is renewed by one login, and the request goes
-  // again once: the hub refused it before carrying it out. The requests the
-  // old session lost share that login; a failed login is the answer.
+  // A session the hub refuses is renewed, and the request goes again: the hub
+  // refused it before carrying it out. The renewal is the session another
+  // process saved, or a login; the saved one may be refused too, hence up to
+  // two. The requests the old session lost share the renewal; a failed one is
+  // the answer, and is marked: it speaks of the connection, whatever its code,
+  // not of the request that met it.
   async #send(params, deadline, serial, onReply) {
-    const token = this.token;
-    try {
-      return await this.#sendOnce(params, deadline, serial, onReply);
-    } catch (error) {
-      if (!this.#renewSession || error.code !== "authentication_failed") {
-        throw error;
-      }
-      if (this.token === token) {
-        const renewed = await this.#renewSession(token);
+    for (let renewals = 0; ; renewals += 1) {
+      const token = this.token;
+      try {
+        const reply = await this.#sendOnce(params, deadline, serial, onReply);
+        this.#acceptedToken = token;
+        return reply;
+      } catch (error) {
+        if (
+          !this.#renewSession ||
+          error.code !== "authentication_failed" ||
+          renewals === 2
+        ) {
+          throw error;
+        }
         if (this.token === token) {
-          this.token = renewed.token;
-          this.cid = renewed.cid;
-          // The new session goes over a new connection, as after a login
-          // at start.
-          if (this.#socket) this.#retire(this.#socket);
+          const renewed = await this.#renewSession(
+            token,
+            this.#acceptedToken === token,
+          ).catch((renewalError) => {
+            renewalError.sessionRenewalFailed = true;
+            throw renewalError;
+          });
+          if (this.token === token) {
+            this.token = renewed.token;
+            this.cid = renewed.cid;
+            // The new session goes over a new connection, as after a login
+            // at start.
+            if (this.#socket) this.#retire(this.#socket);
+          }
         }
       }
-      return this.#sendOnce(params, deadline, serial, onReply);
     }
   }
 
@@ -5138,6 +5172,8 @@ const BRIDGE_LISTS_NOTHING =
 const BRIDGE_AUTO_ADD_OPTION = "AutoAddNewAccessory";
 const BRIDGE_EXPORT_OPTION = /^s:\d+$/;
 const BRIDGE_EXPORT_UNVERIFIED = "bridge_export_unverified";
+// Keys only a scenario's options window has; Name and Desc are not among them.
+const SCENARIO_WINDOW_KEYS = new Set(["Active", "OnStart", "Sync"]);
 
 // Only a service's checkbox in a bridge child's window was written on a
 // hub (2026-10-14-bridge-export-write); a bridge's own settings and the
