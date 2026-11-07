@@ -7731,10 +7731,10 @@ export class AutomationService {
   async #readJournalBeforeWrite() {
     try {
       return await this.store.list();
-    } catch {
+    } catch (error) {
       throw new SprutHubError(
         "state_storage_unavailable",
-        "Could not read the recovery state required before writing to SprutHub, so nothing was sent.",
+        `${error.message} The recovery state is required before writing to SprutHub, so nothing was sent.`,
         "restore_state_storage_then_retry",
       );
     }

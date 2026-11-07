@@ -802,7 +802,8 @@ function toToolError(error) {
     status: "error",
     error: {
       code: "internal_error",
-      message: "Could not read the SprutHub room.",
+      message:
+        "sprut-agent could not finish this call because of an internal error. A write this call was making may have reached the hub: read the result before repeating it.",
       retryable: false,
     },
   };
