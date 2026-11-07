@@ -6,6 +6,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { collectEvidence, startCaseHub } from "../research/eval-agent.mjs";
+import { CASES, gradeCase } from "../research/eval-agent-cases.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -550,4 +552,70 @@ test("find_devices last_report keeps the time UTC and says so when the hub's zon
     "2026-11-06T18:47:03.120Z",
   );
   assert(page.limitations.some((line) => /\bUTC\b/.test(line)));
+});
+
+// The eval case's home gives the agent what its question needs through the
+// public tools, in both homes: three lamps with one moment yesterday evening
+// on the hub's clock, and the scenario of that time.
+test("why-lights-off-yesterday: its home shows the shared moment and the scenario that fits, and an honest idle answer passes its graders", async (t) => {
+  const definition = CASES["why-lights-off-yesterday"];
+  // The hub runs on Moscow time.
+  const yesterday = new Date(Date.now() + 3 * 3_600_000 - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  for (const fixture of ["apartment", "house"]) {
+    const hub = await startCaseHub(definition, fixture);
+    const stateDirectory = await mkdtemp(
+      path.join(tmpdir(), "sprut-agent-last-report-"),
+    );
+    t.after(async () => {
+      await hub.close();
+      await rm(stateDirectory, { recursive: true, force: true });
+    });
+    const client = await startClient(t, { hub, stateDirectory });
+
+    const home = `spruthub://hub/${hub.serial}`;
+    const { devices } = await call(client, "find_devices", {
+      room_ref: `${home}/room/3`,
+      last_report: true,
+    });
+    const together = devices.filter(
+      ({ reported_together: moment }) => moment !== undefined,
+    );
+    assert.deepEqual(
+      together.map(({ ref, last_report_at }) => [ref, last_report_at]),
+      [
+        [`${home}/accessory/${LED_STRIP}`, `${yesterday}T21:47:04.000+03:00`],
+        [`${home}/accessory/${CHANDELIER}`, `${yesterday}T21:47:03.000+03:00`],
+        [`${home}/accessory/${FLOOR_LAMP}`, `${yesterday}T21:47:03.000+03:00`],
+      ],
+      fixture,
+    );
+    const { entity: scenario } = await call(client, "get_entity", {
+      entity_ref: `${home}/scenario/91`,
+    });
+    assert.equal(scenario.name, "Гостиная на ночь");
+    assert.match(JSON.stringify(scenario.summary), /21:47/);
+
+    const grades = (answer) =>
+      Object.fromEntries(
+        gradeCase(definition, collectEvidence(hub, answer)).map(
+          ({ name, pass }) => [name, pass],
+        ),
+      );
+    assert.deepEqual(
+      grades(
+        "Люстра, торшер и лента вчера в 21:47 последний раз отправили хабу сообщение почти одновременно. Похоже, их погасил сценарий «Гостиная на ночь», но хаб не хранит вчерашних событий, так что подтвердить это нельзя.",
+      ),
+      {
+        no_writes: true,
+        answer_has_report_time: true,
+        answer_has_no_raw_refs: true,
+      },
+    );
+    const leaky = grades(`В 21:47 см. ${accessory(CHANDELIER)}`);
+    assert.equal(leaky.answer_has_no_raw_refs, false);
+    assert.equal(grades("Не знаю.").answer_has_report_time, false);
+    assert(definition.judge(collectEvidence(hub, "")).criteria.length > 0);
+  }
 });
