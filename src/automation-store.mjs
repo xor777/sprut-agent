@@ -5,18 +5,12 @@ import path from "node:path";
 import { SprutHubError } from "./spruthub-client.mjs";
 import { acquireStateLock } from "./state-lock.mjs";
 
-// How often a record the journal could not take is tried again.
-const UNSAVED_RETRY_MS = 5_000;
-
 export class AutomationStore {
   #writes = Promise.resolve();
   // Changes saved while a write is under way, written together by the next
   // one: every write rewrites the whole file, and a command call to many
   // devices saves its changes at once.
   #batch = null;
-  // Records the hub is already ahead of, whose save failed (keepUnsaved).
-  #unsaved = new Map();
-  #unsavedRetry = null;
 
   constructor({ directory, hubUrl, hubSerial }) {
     this.directory = stateDirectory(directory);
@@ -35,18 +29,12 @@ export class AutomationStore {
 
   async get(id) {
     await this.#writes.catch(() => {});
-    const unsaved = this.#unsaved.get(id);
-    if (unsaved) return structuredClone(unsaved);
     return (await this.#readFile()).changes[id] ?? null;
   }
 
   async list() {
     await this.#writes.catch(() => {});
-    const { changes } = await this.#readFile();
-    return Object.values({
-      ...changes,
-      ...structuredClone(Object.fromEntries(this.#unsaved)),
-    });
+    return Object.values((await this.#readFile()).changes);
   }
 
   // Resolves once a write that holds the change is done.
@@ -63,26 +51,6 @@ export class AutomationStore {
     }
     this.#batch.set(change.id, change);
     await this.#writes;
-  }
-
-  // A record that holds what the hub already did and could not be saved. It
-  // is what this process reads from now on, it goes with the next write, and
-  // it is tried again by itself so other dialogs see it once the journal is
-  // free. Only a restart before that loses it: the journal then still says
-  // the write went, with its outcome unknown.
-  keepUnsaved(change) {
-    this.#unsaved.set(change.id, structuredClone(change));
-    this.#retryUnsaved();
-  }
-
-  #retryUnsaved() {
-    if (this.#unsavedRetry) return;
-    this.#unsavedRetry = setTimeout(async () => {
-      await this.#write(new Map()).catch(() => {});
-      this.#unsavedRetry = null;
-      if (this.#unsaved.size > 0) this.#retryUnsaved();
-    }, UNSAVED_RETRY_MS);
-    this.#unsavedRetry.unref();
   }
 
   // Runs operation while no other process of this state directory runs one:
@@ -117,26 +85,15 @@ export class AutomationStore {
   }
 
   async #writeUnderLock(batch) {
-    const unsaved = new Map(this.#unsaved);
-    if (batch.size === 0 && unsaved.size === 0) return;
     const release = await acquireStateLock(this.journalLock);
     const temporaryFile = `${this.file}.${process.pid}.tmp`;
     try {
       const state = await this.#readFile();
-      for (const [id, change] of unsaved) {
-        // An undo another dialog finished meanwhile is not brought back.
-        if (state.changes[id]?.status !== "restored") {
-          state.changes[id] = change;
-        }
-      }
       for (const [id, change] of batch) state.changes[id] = change;
       await writeFile(temporaryFile, `${JSON.stringify(state, null, 2)}\n`, {
         mode: 0o600,
       });
       await rename(temporaryFile, this.file);
-      for (const [id, change] of unsaved) {
-        if (this.#unsaved.get(id) === change) this.#unsaved.delete(id);
-      }
     } catch (error) {
       await unlink(temporaryFile).catch(() => {});
       throw error;

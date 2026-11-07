@@ -1006,10 +1006,18 @@ export class AutomationService {
   async #restoreVirtualDevice(change) {
     if (change.status === "restored") return publicStoredNativeChange(change);
     if (change.creation_owned !== true || change.created_id === undefined) {
-      return this.#finishNative(change, "not_owned", undefined, {
-        conflict_reason: "virtual_device_creation_not_confirmed",
-        last_verification: savedVerification(change.last_verification),
-      });
+      return this.#refuseUnownedCreation(
+        change,
+        "virtual_device_creation_not_confirmed",
+        "candidates",
+        change.native_write_sent === true && change.status !== "not_applied"
+          ? () =>
+              this.#newVirtualDeviceCandidates(
+                change.create_request,
+                change.baseline_accessory_ids,
+              )
+          : null,
+      );
     }
     const accessory = await this.client.getAccessoryOrNull(change.created_id);
     if (accessory === null) {
@@ -1032,6 +1040,27 @@ export class AutomationService {
     change.unread = unreadDependencies(dependencies);
     await this.#persistNativeIntent(change, "restoring", "restore");
     return this.#deleteVirtualDevice(change, change.created_id, "applied");
+  }
+
+  // An undo of a creation this record cannot prove its own: it deletes nothing
+  // and names what the hub shows when that creation went out with its outcome
+  // unknown. The owner decides about those.
+  async #refuseUnownedCreation(change, conflictReason, field, readCandidates) {
+    const findings = {
+      conflict_reason: conflictReason,
+      last_verification: savedVerification(change.last_verification),
+    };
+    if (readCandidates) {
+      try {
+        findings[field] = await readCandidates();
+        findings.last_verification = freshVerification(
+          "unowned_candidates_observed",
+        );
+      } catch (error) {
+        findings.last_verification = failedVerification(error);
+      }
+    }
+    return this.#finishNative(change, "not_owned", undefined, findings);
   }
 
   // Deletes the accessory and reads it back: gone is done; still there or
@@ -4481,10 +4510,14 @@ export class AutomationService {
       change.virtual_accessory_creation_owned !== true ||
       change.created_accessory_id === undefined
     ) {
-      return this.#finishNative(change, "not_owned", undefined, {
-        conflict_reason: "virtual_accessory_creation_not_confirmed",
-        last_verification: savedVerification(change.last_verification),
-      });
+      return this.#refuseUnownedCreation(
+        change,
+        "virtual_accessory_creation_not_confirmed",
+        "candidate_accessories",
+        change.progress.creation.sent
+          ? () => this.#matchingVirtualLightCandidates(change, true)
+          : null,
+      );
     }
     const unread = await this.#readCreatedVirtualLight(change, "restore");
     if (unread) return unread;
@@ -7662,16 +7695,15 @@ export class AutomationService {
     }
   }
 
-  // What the hub just confirmed may be known nowhere else (the id of the
-  // device it created), so a save that fails leaves it with the store, which
-  // reads it back and writes it as soon as it can. No further step goes
-  // without the journal.
+  // The journal is the only record of a change. A save that fails leaves it at
+  // the mark made before the step: the step's outcome is unknown, as after a
+  // lost answer, and the next call settles it from the hub. No further step
+  // goes without the journal.
   async #saveAfterStep(change, direction) {
     try {
       await this.store.save(change);
     } catch (error) {
       if (!hubStepsSent(change, direction)) throw error;
-      this.store.keepUnsaved(change);
       throw stoppedAfterHubSteps(change, direction, error);
     }
   }
@@ -7728,9 +7760,9 @@ function stoppedAfterHubSteps(change, direction, error) {
       busy
         ? "Another open dialog's sprut-agent process holds this home's change journal."
         : error.message
-    } This change stopped there: steps of it already went to the hub, and the home holds part of it or all of it. Nothing more was sent. What the hub confirmed stays with this process and reaches the journal as soon as it can. ${
+    } This change stopped there: steps of it already went to the hub, so the home may hold part of it or all of it. Nothing more was sent. ${
       busy ? "In a few seconds repeat" : "Once the journal can be saved, repeat"
-    } next: it goes on from where this stopped and does not send again what took effect.`,
+    } next: it checks the hub first and does not send again what took effect. It goes on from there, or names what it found if it cannot tell that as this change's own.`,
     error.action,
     {
       change_ref: changeRef,
