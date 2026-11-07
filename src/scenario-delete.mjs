@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
-import { parse } from "@babel/parser";
 import { blockScenarioTargets, canonicalBlock } from "./block-model.mjs";
 import { isRecord } from "./change-refs.mjs";
 import { mapWithConcurrency } from "./device-commands.mjs";
+import { parseScript, walk } from "./parse-script.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 // Deleting a scenario the owner names (scenario_delete). On SprutHub 3.0.0
@@ -299,31 +299,6 @@ function globalMemberName(node) {
     return node.property.value;
   }
   return undefined;
-}
-
-function parseScript(source) {
-  try {
-    return parse(source, {
-      sourceType: "script",
-      allowReturnOutsideFunction: true,
-    }).program;
-  } catch {
-    return null;
-  }
-}
-
-function walk(node, visit) {
-  if (Array.isArray(node)) {
-    for (const child of node) walk(child, visit);
-    return;
-  }
-  if (!isRecord(node) || typeof node.type !== "string") return;
-  visit(node);
-  for (const [key, child] of Object.entries(node)) {
-    if (["loc", "extra", "leadingComments", "trailingComments"].includes(key))
-      continue;
-    if (child !== null && typeof child === "object") walk(child, visit);
-  }
 }
 
 // The scenario numbers a BLOCK validation refused as missing, by the
