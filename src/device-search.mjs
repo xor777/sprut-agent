@@ -12,6 +12,7 @@
 // watch is kept in the state directory beside it (device-search-store.mjs),
 // so a server started anew for the owner's reply still knows it.
 import { createHash, randomUUID } from "node:crypto";
+import { OTHER_STATE_DIRECTORY } from "./automation-store.mjs";
 import { DeviceSearchStore } from "./device-search-store.mjs";
 import { serviceKind } from "./home-reads.mjs";
 import {
@@ -1092,8 +1093,7 @@ async function keepState(step, notKept) {
   }
 }
 
-const FIX_STATE_DIRECTORY =
-  "Make that directory writable, or set SPRUT_AGENT_STATE_DIR to a writable directory and restart the MCP server";
+const FIX_STATE_DIRECTORY = `Make that directory writable, or ${OTHER_STATE_DIRECTORY}`;
 
 // A start that sent nothing because the state directory could not be
 // written. The network is as it was: running says whether the controller

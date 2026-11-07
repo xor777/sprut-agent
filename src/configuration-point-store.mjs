@@ -8,7 +8,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { hubStateFingerprint, stateDirectory } from "./automation-store.mjs";
+import {
+  hubStateFingerprint,
+  OTHER_STATE_DIRECTORY,
+  stateDirectory,
+  stateFailureReason,
+} from "./automation-store.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
 export const CONFIGURATION_POINT_FORMAT_VERSION = 1;
@@ -38,10 +43,10 @@ export class ConfigurationPointStore {
     const write = this.#writes
       .catch(() => {})
       .then(async () => {
-        await mkdir(this.pointsDirectory, { recursive: true, mode: 0o700 });
         const file = this.fileFor(point.id);
         const temporaryFile = `${file}.${process.pid}.tmp`;
         try {
+          await mkdir(this.pointsDirectory, { recursive: true, mode: 0o700 });
           await writeFile(
             temporaryFile,
             `${JSON.stringify(point, null, 2)}\n`,
@@ -52,7 +57,7 @@ export class ConfigurationPointStore {
           await rename(temporaryFile, file);
         } catch (error) {
           await unlink(temporaryFile).catch(() => {});
-          throw error;
+          throw pointsUnavailable("save", this.pointsDirectory, error);
         }
       });
     this.#writes = write;
@@ -66,7 +71,7 @@ export class ConfigurationPointStore {
       text = await readFile(this.fileFor(id), "utf8");
     } catch (error) {
       if (error.code === "ENOENT") return null;
-      throw corruptConfigurationPoint(id, this.hubSerial);
+      throw pointsUnavailable("read", this.pointsDirectory, error);
     }
     return parseStoredPoint(text, id, this.hubFingerprint, this.hubSerial);
   }
@@ -78,7 +83,7 @@ export class ConfigurationPointStore {
       names = await readdir(this.pointsDirectory);
     } catch (error) {
       if (error.code === "ENOENT") return { points: [], unavailable: [] };
-      throw error;
+      throw pointsUnavailable("read", this.pointsDirectory, error);
     }
     const points = [];
     const unavailable = [];
@@ -89,14 +94,10 @@ export class ConfigurationPointStore {
         const point = await this.get(id);
         if (point) points.push(point);
       } catch (error) {
-        if (
-          !(error instanceof SprutHubError) ||
-          error.code !== "corrupt_configuration_point"
-        ) {
-          throw error;
-        }
+        if (!(error instanceof SprutHubError)) throw error;
+        // One point that fails does not hide the others.
         unavailable.push({
-          reason: "corrupt_configuration_point",
+          reason: error.code,
           ...(isPointId(id)
             ? {
                 point_ref:
@@ -156,6 +157,14 @@ export function parseConfigurationPointRef(ref) {
 
 function isPointId(id) {
   return /^[a-f0-9]{24}$/.test(id);
+}
+
+function pointsUnavailable(doing, directory, error) {
+  return new SprutHubError(
+    "state_storage_unavailable",
+    `Could not ${doing} configuration points in ${directory}: ${stateFailureReason(error)}. Make that directory readable and writable on a local disk, or ${OTHER_STATE_DIRECTORY}.`,
+    "restore_state_storage_then_retry",
+  );
 }
 
 function corruptConfigurationPoint(id, hubSerial) {
