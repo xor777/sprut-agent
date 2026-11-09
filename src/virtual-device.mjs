@@ -94,7 +94,7 @@ export function virtualDeviceContract(operation) {
 
 // What the search of code (#readCodeMentions in spruthub-client.mjs) finds.
 export const CODE_DEPENDENCY_NOTE =
-  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id, its id in an array of plain numbers (a global list of lights) in code that also passes Hub calls a computed id, or its exact name in a string; an id kept in a variable or computed is not found.";
+  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id, its id in an array of plain numbers (a global list of lights) in code that also passes Hub calls a computed id, or its exact name in a string; an id kept in a variable or computed is not found. A number in such an array (found_by accessory_id_list) may only coincide with the id, and code that does not parse is named as unread (not_parsed).";
 
 const LIMITATIONS = {
   [VIRTUAL_DEVICE]: [
@@ -112,7 +112,7 @@ export const VIRTUAL_DEVICE_DUPLICATE_NOTE =
   "A virtual device of this name is already in this room (matching_devices). Tell the owner; apply only if they want a second one.";
 
 export const VIRTUAL_DEVICE_DEPENDENCIES_NOTE =
-  "Things refer to this device (dependencies). Name them to the owner and apply only after they confirm: its scenarios stay but no longer react to it or act on it, its links, bridge export and logic go, and undo brings back only a new device of the same name and type.";
+  "Things refer to this device (dependencies). Name them to the owner and apply only after they confirm: its scenarios stay but no longer react to it or act on it, its links, bridge export and logic go, and undo brings back only a new device of the same name and type. Code with found_by accessory_id_list holds its id as a number in a list, which may only coincide.";
 
 // The device's own services: the information service is the hub's.
 export function ownServices(accessory) {

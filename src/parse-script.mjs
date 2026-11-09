@@ -13,16 +13,26 @@ export function parseScript(source) {
   }
 }
 
-export function walk(node, visit) {
-  if (Array.isArray(node)) {
-    for (const child of node) walk(child, visit);
-    return;
-  }
-  if (typeof node?.type !== "string") return;
-  visit(node);
-  for (const [key, child] of Object.entries(node)) {
-    if (["loc", "extra", "leadingComments", "trailingComments"].includes(key))
+// Every node of a program, parents first. Iterative: a chain of calls nests
+// as deep as it is long, and the owner's code may overflow the call stack.
+export function walk(root, visit) {
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (Array.isArray(node)) {
+      for (let index = node.length - 1; index >= 0; index -= 1) {
+        pending.push(node[index]);
+      }
       continue;
-    if (child !== null && typeof child === "object") walk(child, visit);
+    }
+    if (typeof node?.type !== "string") continue;
+    visit(node);
+    const children = Object.entries(node);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const [key, child] = children[index];
+      if (["loc", "extra", "leadingComments", "trailingComments"].includes(key))
+        continue;
+      if (child !== null && typeof child === "object") pending.push(child);
+    }
   }
 }

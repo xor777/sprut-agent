@@ -3065,7 +3065,15 @@ export class SprutHubClient {
         });
         return;
       }
-      const found = accessoryMentions(read.value, accessory);
+      const idLists = idListLines(read.value);
+      if (idLists === null) {
+        unchecked.push({
+          area: "scenario_code",
+          outcome: "not_parsed",
+          scenario_ref: scenario.ref,
+        });
+      }
+      const found = accessoryMentions(read.value, accessory, idLists);
       if (!found) return;
       mentions.push({
         scenario_ref: scenario.ref,
@@ -4981,7 +4989,7 @@ function relationFailure(area, read) {
 }
 
 const RELATIONS_LIMITATION =
-  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue), by its id in an array of plain numbers in code that also passes those calls a computed id (accessory_id_list), or by its exact name in a string: a mention, not proof of what the code does; an id in a variable, or code that finds it otherwise, is missed, and a source that does not parse is not searched for arrays. Past the search limit, the home_overview lists named for the rest also show the searched and built-in scenarios, so which were not searched is unknown. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
+  "Roles come from the BLOCK scenarios that the hub's scenario index lists for this accessory; that index is not proven complete. code_mentions are the owner's code scenarios whose source names this accessory by its id in a Hub call (getAccessory, getCharacteristic, get/set/toggleCharacteristicValue), by its id in an array of plain numbers in code that also passes those calls a computed id (accessory_id_list), or by its exact name in a string: a mention, not proof of what the code does; an id in a variable, or code that finds it otherwise, is missed, and a source that does not parse is not searched for arrays (unchecked: not_parsed). Past the search limit, the home_overview lists named for the rest also show the searched and built-in scenarios, so which were not searched is unknown. Code conditions and code steps of BLOCKs and extensions are not analyzed, and stored configuration does not prove that a command ran.";
 
 function extensionKey(extension) {
   return typeof extension?.extensionKey === "string" &&
@@ -6565,7 +6573,7 @@ export function accessoryMentions(
     if (byName) foundBy.add("accessory_name");
     if (byId || byName) lines.add(token.line);
   });
-  for (const line of idLists.get(id) ?? []) {
+  for (const line of idLists?.get(id) ?? []) {
     foundBy.add("accessory_id_list");
     lines.add(line);
   }
@@ -6580,18 +6588,21 @@ export function accessoryMentions(
 
 // The numbers of a source's lists of ids, with their lines: arrays of plain
 // numbers, in code that also calls a Hub id method with a first argument
-// other than a number, so it looks ids up as it runs. Empty for a source
-// that does not parse, a fragment of changed lines among them.
+// other than a number, so it looks ids up as it runs. null for a source that
+// does not parse, a fragment of changed lines among them.
 export function idListLines(source) {
+  const program = parseScript(source);
+  if (program === null) return null;
   const lists = new Map();
   let looksUpIds = false;
-  walk(parseScript(source), (node) => {
+  walk(program, (node) => {
     if (
       node.type === "ArrayExpression" &&
       node.elements.every((element) => element?.type === "NumericLiteral")
     ) {
       for (const { value, loc } of node.elements) {
-        lists.set(value, [...(lists.get(value) ?? []), loc.start.line]);
+        if (!lists.has(value)) lists.set(value, []);
+        lists.get(value).push(loc.start.line);
       }
     }
     looksUpIds ||=

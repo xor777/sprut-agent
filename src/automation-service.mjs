@@ -1167,10 +1167,13 @@ export class AutomationService {
     const code = await this.client.accessoryCodeMentions(accessory);
     return {
       scenarios,
-      code: code.mentions.map(({ scenario_ref: ref, scenario_name: name }) => ({
-        ref,
-        name,
-      })),
+      code: code.mentions.map(
+        ({ scenario_ref: ref, scenario_name: name, found_by }) => ({
+          ref,
+          name,
+          found_by,
+        }),
+      ),
       ...(code.unchecked.length > 0
         ? {
             code_unread: code.unchecked.map((entry) => ({
