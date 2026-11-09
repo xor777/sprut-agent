@@ -154,8 +154,10 @@ test("an accessory's bridges say where it is exported and which of its services"
       },
     ],
   });
-  // The services are read from the window of each bridge that lists it.
+  // The services are read from the window of each bridge that lists it; the
+  // settings window gives the time zone of the device's last report.
   assert.deepEqual(childWindowReads(floorLamp.native).sort(), [
+    "",
     "Bridge/homekit/Child/16/",
     "Bridge/yandex/Child/16/",
   ]);
@@ -457,7 +459,8 @@ test("bridge reads stay bounded by the question as the home grows", async (t) =>
   assert.ok(bridgesBytes < 2_000, `${bridgesBytes} bytes`);
   assert.ok(Math.abs(largeRead.bytes - smallRead.bytes) < 64);
   // The list of extensions, each bridge's children and the window of each
-  // bridge that lists it: no request per accessory of the home.
+  // bridge that lists it, and the settings window for the time zone of the
+  // device's last report: no request per accessory of the home.
   const methods = (native) =>
     native
       .map(({ method }) => method)
@@ -468,6 +471,7 @@ test("bridge reads stay bounded by the question as the home grows", async (t) =>
     "extension.list",
     "extensionChild.list",
     "extensionChild.list",
+    "window.get",
     "window.get",
     "window.get",
   ]);

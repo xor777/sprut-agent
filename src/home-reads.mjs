@@ -13,13 +13,17 @@ import {
   extractTypedValue,
   homeRef,
   isSensitiveNativeNode,
+  LAST_REPORT_MEANING,
+  lastReportMs,
   matchEnumValue,
   parseEntityRef,
   roomRef,
   SprutHubError,
   sanitizeNativeData,
   serviceRef,
+  UTC_TIMES_LIMITATION,
   virtuallyWritable,
+  zonedTimestamp,
 } from "./spruthub-client.mjs";
 import { toolState } from "./tool-state.mjs";
 
@@ -32,6 +36,16 @@ const DEFAULT_MAX_BYTES = 16_000;
 // A notification answer reads every matched accessory with accessory.get,
 // this many at a time.
 const NOTIFY_READ_CONCURRENCY = 8;
+// A last report answer reads each listed device the same way, at most this
+// many (the owner's 81 accessory.get took about 9 s), and starts no read
+// after this many request timeouts. The rest show status not_read.
+const LAST_REPORT_READS = 100;
+const LAST_REPORT_READ_TIMEOUTS = 2;
+// Neighbours in time this close belong to one moment. One chandelier of the
+// owner's hub (07.11.2026): seven lamps within 5.6 s, the widest gap between
+// neighbours 4.7 s; measuring from the newest report split it in two and
+// let an unrelated device decide where. Neighbours can chain.
+const REPORTED_TOGETHER_SECONDS = 5;
 const NOT_EVALUATED_LIMIT = 10;
 const SWITCH_LIMIT = 10;
 const REMAINING_ROOM_LIMIT = 10;
@@ -206,7 +220,7 @@ export class HomeReads {
       return this.#continuePage(
         selection,
         input.cursor,
-        selection.notify ? buildListPage : buildPage,
+        selection.notify || selection.lastReport ? buildListPage : buildPage,
       );
     }
     const deadline = Date.now() + client.timeoutMs;
@@ -232,6 +246,7 @@ export class HomeReads {
       summary ||
       selection.state !== null ||
       selection.notify ||
+      selection.lastReport ||
       selection.values !== "none" ||
       selection.roomId !== null;
     let values = needValues ? catalog.byId : null;
@@ -277,6 +292,16 @@ export class HomeReads {
     const switches = switchCandidates(catalog, selection, candidates)
       .map((candidate) => evaluateCandidate(candidate, values))
       .filter((item) => keepsSwitch(item, selection.state));
+    if (selection.lastReport) {
+      return this.#firstLastReportPage(
+        base,
+        serial,
+        catalog,
+        evaluated,
+        switches,
+        selection,
+      );
+    }
     return this.#firstPage(
       base,
       serial,
@@ -410,6 +435,76 @@ export class HomeReads {
     return page;
   }
 
+  // «Когда последний раз…», «почему вчера…»: one entry per listed device,
+  // newest report first. Only accessory.get gives the time, so all the reads
+  // and the order are settled here and next pages continue the same snapshot.
+  // A light question lists the relays too: one of them may drive the lamp.
+  async #firstLastReportPage(
+    base,
+    serial,
+    catalog,
+    evaluated,
+    switches,
+    selection,
+  ) {
+    const client = this.#client;
+    const { listed, extras } = listedServices(
+      serial,
+      catalog,
+      evaluated,
+      selection,
+    );
+    const devices = devicesOf([...listed, ...switches]);
+    const reads = await readLastReports(
+      client,
+      serial,
+      devices.slice(0, LAST_REPORT_READS).map(({ id }) => id),
+    );
+    const reports = devices.map((device) =>
+      lastReportOf(device, reads.get(device.id)),
+    );
+    const timed = reports.some(({ time }) => time !== undefined);
+    // Read after the devices, which a hub slow to give its settings window
+    // then does not hold back.
+    const timeZone = timed
+      ? await client.hubTimeZone(serial, Date.now() + client.timeoutMs)
+      : null;
+    const entries = lastReportEntries(serial, catalog, reports, timeZone);
+    const count = (status) =>
+      entries.filter((entry) => entry.last_report_status === status).length;
+    const counts = {
+      devices: entries.length,
+      read: reports.filter(({ time }) => time !== undefined).length,
+      unknown: count("unknown"),
+      failed: count("read_failed"),
+      not_read: count("not_read"),
+    };
+    const snapshot = {
+      id: randomBytes(8).toString("hex"),
+      scope: selection.scope,
+      expiresAt: Date.now() + SNAPSHOT_TTL_MS,
+      size: entries.length,
+      base: {
+        ...base,
+        observed_at: latest([
+          base.observed_at,
+          ...[...reads.values()].map(({ observedAt }) => observedAt),
+        ]),
+        time_zone: timeZone,
+      },
+      key: "devices",
+      entries,
+      extras: {
+        ...extras,
+        reads: counts,
+        limitations: lastReportLimitations(counts, timed, timeZone),
+      },
+    };
+    const page = buildListPage(snapshot, 0, selection);
+    if (page.next) this.#remember(snapshot);
+    return page;
+  }
+
   // The first page of a home_overview list or query; next pages continue
   // the same snapshot.
   #firstListPage(selection, { base, key, entries, extras }) {
@@ -460,6 +555,13 @@ export class HomeReads {
 
 function findSelection(input, serial) {
   const home = homeRef(serial);
+  if (input.notify === true && input.lastReport === true) {
+    throw new SprutHubError(
+      "invalid_find_filters",
+      "notify and last_report answer different questions: ask for one of them in a call.",
+      "change_find_filters",
+    );
+  }
   let roomId = null;
   if (input.roomRef !== undefined) {
     let parsed;
@@ -496,6 +598,7 @@ function findSelection(input, serial) {
     ...(input.state === undefined ? {} : { state: input.state }),
     ...(input.values === undefined ? {} : { values: input.values }),
     ...(input.notify === true ? { notify: true } : {}),
+    ...(input.lastReport === true ? { last_report: true } : {}),
     ...(input.includeTechnical === true ? { include_technical: true } : {}),
     ...(limit === DEFAULT_LIMIT ? {} : { limit }),
     ...(maxBytes === DEFAULT_MAX_BYTES ? {} : { max_bytes: maxBytes }),
@@ -532,6 +635,7 @@ function findSelection(input, serial) {
           : "on_off",
     // A device's offline notification sits in its information service.
     notify: input.notify === true,
+    lastReport: input.lastReport === true,
     includeTechnical: input.includeTechnical === true || input.notify === true,
     // A notification answer lists offline notifications one by one only on
     // request; otherwise it counts them by room.
@@ -543,7 +647,8 @@ function findSelection(input, serial) {
       roomId !== null ||
       input.kind !== undefined ||
       input.state !== undefined ||
-      input.notify === true,
+      input.notify === true ||
+      input.lastReport === true,
   };
 }
 
@@ -877,6 +982,155 @@ async function readEachAccessory(client, serial, ids) {
     ),
   );
   return reads;
+}
+
+// The devices of listed services, each once, with the names of its services
+// that were listed.
+function devicesOf(items) {
+  const devices = new Map();
+  for (const { accessory, service, available } of items) {
+    const device = devices.get(accessory.id) ?? {
+      id: accessory.id,
+      name: accessory.name,
+      roomId: accessory.roomId,
+      available,
+      services: [],
+    };
+    device.services.push(service.name);
+    devices.set(accessory.id, device);
+  }
+  return [...devices.values()];
+}
+
+// accessory.get of each device, as readEachAccessory, but one failed read
+// costs only its own device: the map holds its error, and has no entry for a
+// device whose read was not started.
+async function readLastReports(client, serial, ids) {
+  const reads = new Map();
+  const stopAt = Date.now() + LAST_REPORT_READ_TIMEOUTS * client.timeoutMs;
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length && Date.now() < stopAt) {
+      const id = ids[next++];
+      try {
+        reads.set(
+          id,
+          await client.nativeAccessory(
+            serial,
+            id,
+            Date.now() + client.timeoutMs,
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof SprutHubError)) throw error;
+        reads.set(id, { error });
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(NOTIFY_READ_CONCURRENCY, ids.length) },
+      worker,
+    ),
+  );
+  return reads;
+}
+
+// A device with its read's outcome: time when the hub gave one, else why not.
+function lastReportOf(device, read) {
+  if (read === undefined) return { device, status: "not_read" };
+  if (read.error) {
+    return { device, status: "read_failed", readError: read.error.code };
+  }
+  if (read.accessory === null) {
+    return { device, status: "read_failed", readError: "entity_not_found" };
+  }
+  const time = lastReportMs(read.accessory);
+  return time === null ? { device, status: "unknown" } : { device, time };
+}
+
+// Devices with a time, newest first, then the others: unknown, failed, not
+// read. The order is fixed before paging, and a moment's count covers the
+// whole answer, so a page that splits a moment does not hide its devices.
+function lastReportEntries(serial, catalog, reports, timeZone) {
+  const roomsById = new Map(catalog.rooms.map((room) => [room.id, room]));
+  const timed = reports
+    .filter(({ time }) => time !== undefined)
+    .sort((left, right) => right.time - left.time);
+  const moments = reportedTogether(timed);
+  const identity = ({ id, name, roomId, available, services }) => ({
+    ref: accessoryRef(serial, id),
+    name,
+    room: roomsById.get(roomId)?.name ?? null,
+    ...(available === null ? {} : { available }),
+    services,
+  });
+  const ofStatus = (status) =>
+    reports
+      .filter((report) => report.status === status)
+      .map(({ device, readError }) => {
+        const ref = accessoryRef(serial, device.id);
+        return {
+          ...identity(device),
+          last_report_at: null,
+          last_report_status: status,
+          ...(readError === undefined
+            ? {}
+            : {
+                read_error: readError,
+                next: { tool: "get_entity", arguments: { entity_ref: ref } },
+              }),
+        };
+      });
+  return [
+    ...timed.map((report) => ({
+      ...identity(report.device),
+      last_report_at: zonedTimestamp(report.time, timeZone),
+      ...(moments.has(report)
+        ? { reported_together: moments.get(report) }
+        : {}),
+    })),
+    ...ofStatus("unknown"),
+    ...ofStatus("read_failed"),
+    ...ofStatus("not_read"),
+  ];
+}
+
+// Reports newest first to the moments of two or more devices they belong to:
+// their number among such moments and how many devices each has.
+function reportedTogether(timed) {
+  const moments = new Map();
+  let group = 0;
+  for (let start = 0; start < timed.length; ) {
+    let end = start + 1;
+    while (
+      end < timed.length &&
+      timed[end - 1].time - timed[end].time <= REPORTED_TOGETHER_SECONDS * 1_000
+    ) {
+      end += 1;
+    }
+    if (end - start > 1) {
+      group += 1;
+      for (const report of timed.slice(start, end)) {
+        moments.set(report, { group, devices: end - start });
+      }
+    }
+    start = end;
+  }
+  return moments;
+}
+
+function lastReportLimitations(counts, timed, timeZone) {
+  return [
+    `${LAST_REPORT_MEANING} So say when the hub last heard from a device, not what the device did then.`,
+    `reported_together: a run of last reports, each within ${REPORTED_TOGETHER_SECONDS} seconds of the next. That suggests the devices acted together and does not show why; a device that reports often can fall in by chance.`,
+    ...(timed && timeZone === null ? [UTC_TIMES_LIMITATION] : []),
+    ...(counts.not_read > 0
+      ? [
+          `One call reads at most ${LAST_REPORT_READS} devices and stops on a slow hub. For those with status not_read, narrow by room_ref, kind or query.`,
+        ]
+      : []),
+  ];
 }
 
 // What decides a matched service: its kind, availability and on/off from
