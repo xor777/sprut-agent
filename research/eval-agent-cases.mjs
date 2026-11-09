@@ -284,7 +284,7 @@ export const CASES = {
     judge: (evidence) => ({
       facts: [
         "«Торшер» is the floor lamp in «Гостиная» (the living room).",
-        "«Цветные сцены» is an enabled code scenario (GLOBAL). It keeps the lamps of the colour scenes by id in the list global.COLOR_SCENE_LIGHTS, «Торшер» among them, and global.colorScene(name) switches each lamp of that list on and sets its brightness and hue from a palette. It has no trigger of its own.",
+        "«Цветные сцены» is an enabled code scenario (GLOBAL). It keeps the lamps of the colour scenes by id in the list global.COLOR_SCENE_LIGHTS, «Торшер» among them, and global.colorScene(name) switches each lamp of that list on and sets its brightness from a palette, and its hue if the lamp has one. «Торшер» has no hue, only on/off and brightness, so for it the scenes set brightness only. It has no trigger of its own.",
         "«Сцена Океан» and «Сцена Закат» are enabled scenarios: when the bedside button is held, each calls global.colorScene in one code step, so they reach «Торшер» through «Цветные сцены».",
         "«Всё выключить» is an enabled scenario that switches «Торшер» off. «Вечерний свет в гостиной» is an enabled scenario that switches «Торшер» on in its otherwise branch.",
         changesFact(evidence),
