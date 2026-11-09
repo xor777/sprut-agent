@@ -369,6 +369,64 @@ test("a list of ids spread over lines, next to a literal Hub call, and in code t
   );
 });
 
+// Babel nests a chain of calls as deep as it is long.
+test("relations survive code nested too deep to walk recursively and still find its mentions", async (t) => {
+  const chain = `var chained = start${".next()".repeat(4000)};`;
+  const { client } = await setup(t, (fixture) => {
+    fixture.scenarios.push(
+      codeScenario(
+        "90",
+        "Длинная цепочка",
+        `Hub.getAccessory(16);\nvar lamps = [16];\nHub.getAccessory(lamps[0]);\n${chain}`,
+      ),
+    );
+    return fixture;
+  });
+  const mentions = await codeMentions(client, 16);
+  assert.deepEqual(
+    mentions.find(({ scenario_name }) => scenario_name === "Длинная цепочка")
+      ?.found_by,
+    ["accessory_id", "accessory_id_list"],
+  );
+});
+
+// «for each» is Nashorn's own syntax: the hub runs it, the parser refuses it.
+test("code the parser refuses is named as not parsed, and what the tokens find stays", async (t) => {
+  const refused = "for each (var id in lamps) { Hub.getAccessory(id); }";
+  const { client } = await setup(t, (fixture) => {
+    fixture.scenarios.push(
+      codeScenario("90", "Только for each", `var lamps = [26];\n${refused}`),
+      codeScenario(
+        "91",
+        "for each и вызов",
+        `Hub.getAccessory(26);\nvar lamps = [26];\n${refused}`,
+      ),
+    );
+    return fixture;
+  });
+  const read = await call(client, "get_entity", {
+    entity_ref: `${homeRef}/accessory/26`,
+    include: ["relations"],
+  });
+  const { relations } = read.entity;
+  assert.deepEqual(
+    relations.code_mentions.map(({ scenario_name, found_by, lines }) => [
+      scenario_name,
+      found_by,
+      lines,
+    ]),
+    [["for each и вызов", ["accessory_id"], [1]]],
+  );
+  assert.deepEqual(
+    relations.unchecked.filter(({ outcome }) => outcome === "not_parsed"),
+    ["90", "91"].map((index) => ({
+      area: "scenario_code",
+      outcome: "not_parsed",
+      scenario_ref: `${homeRef}/scenario/${index}`,
+    })),
+  );
+});
+
 test("a number equal to the id is no mention outside a list of plain numbers in code that looks ids up", async (t) => {
   const lookup = "Hub.getAccessory(global.next());";
   const sources = {
@@ -384,6 +442,7 @@ test("a number equal to the id is no mention outside a list of plain numbers in 
     Строка: `var text = "[15, 16, 17]";\n${lookup}`,
     Переменная: `var LAMP = 16;\n${lookup}`,
     "Индекс массива": `var value = names[16];\n${lookup}`,
+    "Другой метод Hub": "var row = [16];\nHub.getAccessories(x);",
   };
   const { client } = await setup(t, (fixture) => {
     Object.entries(sources).forEach(([name, data], position) => {

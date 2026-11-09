@@ -714,8 +714,8 @@ test("code that keeps a virtual device in its list of ids is named before it is 
   });
   assert.equal(typeof prepared.tell_owner, "string");
   assert.deepEqual(
-    prepared.dependencies.code.map(({ name }) => name),
-    ["Сцены 30"],
+    prepared.dependencies.code.map(({ name, found_by }) => [name, found_by]),
+    [["Сцены 30", ["accessory_id_list"]]],
   );
 
   const applied = await createDevice(client, {
@@ -755,6 +755,43 @@ test("code left unread does not stop the undo of a creation", async (t) => {
   });
   assert.equal(restored.status, "restored", JSON.stringify(restored));
   assert.ok(restored.code_unread?.length > 0, JSON.stringify(restored));
+  assert.equal(writes(hub, "accessory.delete").length, 1);
+});
+
+// The parser refuses Nashorn's «for each», so a list in that code stays
+// unseen: named as unread, and it stops no undo.
+test("code the parser refuses is named as unread before a delete and does not stop the undo of a creation", async (t) => {
+  const { hub, client } = await setup(t);
+  hub.state.scenarios.push({
+    index: "30",
+    name: "Сцены for each",
+    desc: "",
+    type: "GLOBAL",
+    active: true,
+    data: `var lamps = [${GUEST_MODE}];\nfor each (var id in lamps) { Hub.getAccessory(id); }`,
+  });
+  const notParsed = {
+    ref: `${homeRef}/scenario/30`,
+    reason: "not_parsed",
+  };
+  const prepared = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(GUEST_MODE),
+    reason: "Удалить режим гостей",
+  });
+  assert.deepEqual(prepared.dependencies.code, []);
+  assert.deepEqual(prepared.dependencies.code_unread, [notParsed]);
+  assert.equal(typeof prepared.tell_owner, "string");
+
+  const applied = await createDevice(client, {
+    name: "Режим вечеринки",
+    type: "Switch",
+  });
+  const restored = await call(client, "restore_native_change", {
+    change_ref: applied.change_ref,
+  });
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.deepEqual(restored.code_unread, [notParsed]);
   assert.equal(writes(hub, "accessory.delete").length, 1);
 });
 
