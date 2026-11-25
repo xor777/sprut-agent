@@ -316,6 +316,7 @@ import {
   WINDOW_BUTTON,
   windowButtonTellOwner,
 } from "./window-buttons.mjs";
+import { mergeCreatedAccessoryRefs } from "./xiaomi-join.mjs";
 
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
@@ -3495,7 +3496,9 @@ export class AutomationService {
         "restore_unsupported",
         change.button_kind === "physical_device_remove"
           ? "Removing a physical device from its controller network cannot be undone with restore_native_change; bringing the device back requires physical re-pairing."
-          : "A window button press cannot be undone automatically; restoring its journal entry does not reverse what the button triggered.",
+          : change.button_kind === "xiaomi_join"
+            ? "Joining a physical Xiaomi device has no automatic undo with restore_native_change; if the owner asks to remove it from SprutHub, use window_button Remove on the child window."
+            : "A window button press cannot be undone automatically; restoring its journal entry does not reverse what the button triggered.",
         "get_native_change",
       );
     }
@@ -6707,7 +6710,9 @@ export class AutomationService {
     const now = new Date().toISOString();
     const targetName = deviceRemoveAudit?.summary.child_name
       ? `${deviceRemoveAudit.summary.child_name} / ${inspected.buttonName}`
-      : inspected.targetName;
+      : inspected.xiaomiJoin?.child_name
+        ? `${inspected.xiaomiJoin.child_name} / ${inspected.buttonName}`
+        : inspected.targetName;
     const change = {
       id,
       kind: WINDOW_BUTTON,
@@ -6728,6 +6733,7 @@ export class AutomationService {
             device_remove_baseline: deviceRemoveAudit.baseline,
           }
         : {}),
+      ...(inspected.xiaomiJoin ? { xiaomi_join: inspected.xiaomiJoin } : {}),
       requires_confirmation: inspected.requiresConfirmation,
       payload: inspected.payload,
       reason: input.reason,
@@ -6756,9 +6762,16 @@ export class AutomationService {
     ) {
       const { observedEffect, readbackError, verification } =
         await observeWindowButtonEffect(this.client, change);
+      const createdAccessoryRefs = mergeCreatedAccessoryRefs(
+        change,
+        observedEffect,
+      );
       return this.#finishNative(change, "uncertain", undefined, {
         observed_effect: observedEffect,
         readback_error: readbackError,
+        ...(createdAccessoryRefs
+          ? { created_accessory_refs: createdAccessoryRefs }
+          : {}),
         last_verification: verification,
       });
     }
@@ -6770,6 +6783,9 @@ export class AutomationService {
         configuration_matches: false,
         last_verification: freshVerification(check.conflict_reason),
       });
+    }
+    if (check.xiaomiJoin) {
+      change.xiaomi_join = check.xiaomiJoin;
     }
     if (change.button_kind === "physical_device_remove") {
       const currentAudit = await auditPhysicalDeviceRemove({
@@ -6829,17 +6845,31 @@ export class AutomationService {
         this.client,
         change,
       );
+      const createdAccessoryRefs = mergeCreatedAccessoryRefs(
+        change,
+        observedEffect,
+      );
       return this.#finishNative(change, "uncertain", undefined, {
         observed_effect: observedEffect,
         readback_error: readbackError,
+        ...(createdAccessoryRefs
+          ? { created_accessory_refs: createdAccessoryRefs }
+          : {}),
         last_verification: failedVerification(error),
       });
     }
     const { observedEffect, readbackError, verification } =
       await observeWindowButtonEffect(this.client, change);
+    const createdAccessoryRefs = mergeCreatedAccessoryRefs(
+      change,
+      observedEffect,
+    );
     return this.#finishNative(change, "applied", undefined, {
       observed_effect: observedEffect,
       readback_error: readbackError,
+      ...(createdAccessoryRefs
+        ? { created_accessory_refs: createdAccessoryRefs }
+        : {}),
       configuration_matches: true,
       last_verification: verification,
     });
@@ -6861,9 +6891,16 @@ export class AutomationService {
     }
     const { observedEffect, readbackError, verification } =
       await observeWindowButtonEffect(this.client, change);
+    const createdAccessoryRefs = mergeCreatedAccessoryRefs(
+      change,
+      observedEffect,
+    );
     Object.assign(change, {
       observed_effect: observedEffect,
       readback_error: readbackError,
+      ...(createdAccessoryRefs
+        ? { created_accessory_refs: createdAccessoryRefs }
+        : {}),
       last_verification: verification,
       updated_at: new Date().toISOString(),
     });

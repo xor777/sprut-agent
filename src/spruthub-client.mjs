@@ -5844,6 +5844,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
     window.label.status.trim().length > 0
       ? redactSensitiveText(window.label.status)
       : undefined;
+  const hasLinkedAccessories = windowLinkedAccessoryIds(window).ids.length > 0;
   return {
     physical_configuration: {
       ref: windowRef(serial, window.windowKey),
@@ -5867,6 +5868,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
             window.windowKey,
             option,
             window,
+            { hasLinkedAccessories },
           );
           const hasNativeConfirm = option.validValues?.some(
             ({ confirm }) => typeof confirm === "string" && confirm.length > 0,

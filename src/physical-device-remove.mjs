@@ -237,7 +237,7 @@ function unreadDependenciesWithin(current, prepared) {
   return [...keys(current)].every((key) => known.has(key));
 }
 
-async function readRoomOrNull(client, roomId) {
+export async function readRoomOrNull(client, roomId) {
   if (typeof roomId !== "number") return null;
   try {
     return await client.getRoom(roomId);

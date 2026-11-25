@@ -16,10 +16,16 @@ import {
   THERMOSTAT_VALVE_CALIBRATION_STATUS_PATTERN,
 } from "./native-option-contract.mjs";
 import {
+  homeRef as configuredHomeRef,
   isSensitiveNativeNode,
   SprutHubError,
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
+import {
+  inspectXiaomiJoin,
+  observeXiaomiJoinEffect,
+  xiaomiDeviceAlreadyJoined,
+} from "./xiaomi-join.mjs";
 
 export const WINDOW_BUTTON = "window_button";
 
@@ -229,6 +235,13 @@ export function windowButtonContract(inspected = null) {
         buttons:
           "/<ep>/<cluster>_<name>/<attr>_ThermostatValveCalibration/<arg>",
       },
+      xiaomi_join: {
+        window: "Controller/xiaomi_<id>/Child/<child>/",
+        buttons: {
+          joinButton:
+            "joins an unpaired Xiaomi discovery child (optionally set joinRoom via window_option first); refuses already-joined main/linked children",
+        },
+      },
       physical_device_remove: {
         window: "Controller/(zigbee|xiaomi)_<id>/Child/<child>/",
         buttons: {
@@ -280,28 +293,48 @@ export async function inspectWindowButton(
     throw zigbeeCoordinatorProtected();
   }
   const matches = window.options.filter(({ key }) => key === optionKey);
-  if (matches.length !== 1) {
+  if (matches.length > 1) {
     throw new SprutHubError(
-      matches.length === 0
-        ? "window_button_not_found"
-        : "incompatible_response",
-      matches.length === 0
-        ? "The selected window button was not found."
-        : "SprutHub returned the selected window button more than once.",
+      "incompatible_response",
+      "SprutHub returned the selected window button more than once.",
+      "get_entity",
+    );
+  }
+  if (matches.length === 1) {
+    if (isSensitiveNativeNode(matches[0])) {
+      throw new SprutHubError(
+        "sensitive_native_data",
+        "The selected window control contains sensitive native data.",
+        "get_entity",
+      );
+    }
+    if (!rule || matches[0].inputType !== rule.inputType) {
+      throw unsupportedWindowButton();
+    }
+  }
+  let xiaomiJoin = null;
+  if (rule?.id === "xiaomi_join") {
+    const inspectedJoin = await inspectXiaomiJoin({
+      client,
+      window,
+      homeRef: configuredHomeRef(hubSerial),
+      hubSerial,
+      extensionKey: rule.extensionKey,
+      childId: rule.childId,
+    });
+    if (inspectedJoin.alreadyJoined) {
+      throw xiaomiDeviceAlreadyJoined();
+    }
+    xiaomiJoin = inspectedJoin.summary;
+  }
+  if (matches.length === 0) {
+    throw new SprutHubError(
+      "window_button_not_found",
+      "The selected window button was not found.",
       "get_entity",
     );
   }
   const option = matches[0];
-  if (isSensitiveNativeNode(option)) {
-    throw new SprutHubError(
-      "sensitive_native_data",
-      "The selected window control contains sensitive native data.",
-      "get_entity",
-    );
-  }
-  if (!rule || option.inputType !== rule.inputType) {
-    throw unsupportedWindowButton();
-  }
   if (option.visible === false) {
     throw new SprutHubError(
       "window_button_hidden",
@@ -364,12 +397,16 @@ export async function inspectWindowButton(
     requiresConfirmation: rule.requiresConfirmation || hasNativeConfirm,
     extensionKey: rule.extensionKey,
     childId: rule.childId,
+    ...(xiaomiJoin ? { xiaomiJoin } : {}),
   };
 }
 
 export async function reverifyWindowButtonBeforeApply(client, change) {
   let window;
-  if (change.button_kind === "physical_device_remove") {
+  if (
+    change.button_kind === "physical_device_remove" ||
+    change.button_kind === "xiaomi_join"
+  ) {
     try {
       window = await client.nativeWindow(
         client.selectedSerial(),
@@ -388,11 +425,30 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
     if (window === null) {
       return { ok: false, conflict_reason: "window_button_not_found" };
     }
-    if (isZigbeeCoordinatorWindow(window)) {
+    if (
+      change.button_kind === "physical_device_remove" &&
+      isZigbeeCoordinatorWindow(window)
+    ) {
       throw zigbeeCoordinatorProtected();
     }
   } else {
     window = await client.getWindow(change.target.windowKey);
+  }
+  let xiaomiJoin = null;
+  if (change.button_kind === "xiaomi_join") {
+    const currentJoin = await inspectXiaomiJoin({
+      client,
+      window,
+      homeRef: change.home_ref,
+      hubSerial: client.selectedSerial(),
+      extensionKey: change.extension_key,
+      childId: change.xiaomi_join?.child_id,
+      failOnReadError: true,
+    });
+    if (currentJoin.alreadyJoined) {
+      return { ok: false, conflict_reason: "xiaomi_device_already_joined" };
+    }
+    xiaomiJoin = currentJoin.summary;
   }
   const matches = window.options.filter(({ key }) => key === change.option_key);
   if (matches.length === 0) {
@@ -436,7 +492,7 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
   if (rule.requiresTelegramToken && !hasNonEmptyTelegramToken(window)) {
     return { ok: false, conflict_reason: "telegram_token_missing" };
   }
-  return { ok: true, window };
+  return { ok: true, window, ...(xiaomiJoin ? { xiaomiJoin } : {}) };
 }
 
 export function windowButtonTellOwner(inspected) {
@@ -632,6 +688,13 @@ export async function observeWindowButtonEffect(client, change) {
     return { observedEffect, readbackError, verification };
   }
 
+  if (change.button_kind === "xiaomi_join") {
+    return observeXiaomiJoinEffect(client, change, {
+      checkedAt,
+      readbackErrorSummary,
+    });
+  }
+
   // Thermostat valve calibration readback.
   let window = null;
   let windowError = null;
@@ -668,6 +731,7 @@ export function publicWindowButtonChange(change, { verification } = {}) {
     verification !== undefined ? verification : change.last_verification;
   const isCalibration = change.button_kind === "thermostat_valve_calibration";
   const isDeviceRemove = change.button_kind === "physical_device_remove";
+  const isXiaomiJoin = change.button_kind === "xiaomi_join";
   const isUncertain = change.status === "uncertain";
   return {
     status: change.status,
@@ -684,6 +748,9 @@ export function publicWindowButtonChange(change, { verification } = {}) {
     },
     ...(change.device_remove
       ? { device_remove: structuredClone(change.device_remove) }
+      : {}),
+    ...(change.xiaomi_join
+      ? { xiaomi_join: structuredClone(change.xiaomi_join) }
       : {}),
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
@@ -715,16 +782,22 @@ export function publicWindowButtonChange(change, { verification } = {}) {
             "Scenarios and code still mentioning removed accessory IDs remain on the hub and will no longer reach the device.",
             CODE_DEPENDENCY_NOTE,
           ]
-        : [
-            "A window button press cannot be undone automatically with restore_native_change.",
-            ...(isCalibration
-              ? [
-                  "Valve calibration runs physically on the thermostat valve after SprutHub acknowledges the button press; window readback only reflects what the hub currently reports and does not prove mechanical calibration completed.",
-                ]
-              : [
-                  "An acknowledged Telegram Login or Logout button press triggers asynchronous hub state changes; observed_effect reflects the subsequent readback and may still be settling.",
-                ]),
-          ]),
+        : isXiaomiJoin
+          ? [
+              "Joining a physical Xiaomi device cannot be undone automatically with restore_native_change; if the owner asks to remove it from SprutHub later, use window_button Remove on the child window.",
+              "Live SprutHub response and events for pressing joinButton on a Xiaomi discovery child have not yet been observed on a live hub (the owner's discovery child was offline).",
+              "Offline Xiaomi devices may fail to join or remain unjoined in discovery until reachable; observed_effect reflects the subsequent readback and may still be settling.",
+            ]
+          : [
+              "A window button press cannot be undone automatically with restore_native_change.",
+              ...(isCalibration
+                ? [
+                    "Valve calibration runs physically on the thermostat valve after SprutHub acknowledges the button press; window readback only reflects what the hub currently reports and does not prove mechanical calibration completed.",
+                  ]
+                : [
+                    "An acknowledged Telegram Login or Logout button press triggers asynchronous hub state changes; observed_effect reflects the subsequent readback and may still be settling.",
+                  ]),
+            ]),
       ...readbackErrorLimitation(change),
       "An unknown outcome after a lost reply is never resent automatically; check get_native_change before preparing a new press.",
     ],
@@ -762,7 +835,7 @@ export function zigbeeCoordinatorProtected() {
 function unsupportedWindowButton() {
   return new SprutHubError(
     "unsupported_window_button",
-    "Only allowlisted window buttons (Telegram Login/Logout, ZigBee thermostat valve calibration, and ZigBee/Xiaomi controller child Remove) are supported; extension-level Remove, destructive hub/controller buttons, debug buttons, and other window buttons are refused.",
+    "Only allowlisted window buttons (Telegram Login/Logout, ZigBee thermostat valve calibration, Xiaomi child joinButton, and ZigBee/Xiaomi controller child Remove) are supported; extension-level Remove, destructive hub/controller buttons, debug buttons, and other window buttons are refused.",
     "get_entity",
   );
 }

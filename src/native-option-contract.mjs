@@ -23,6 +23,8 @@ export const TELEGRAM_SAFE_TEXT_KEYS = new Set([
 ]);
 export const ZIGBEE_CHILD_WINDOW_KEY_PATTERN =
   /^Controller\/zigbee_[^/]+\/Child\/[^/]+\/$/;
+export const XIAOMI_CHILD_WINDOW_KEY_PATTERN =
+  /^Controller\/xiaomi_[^/]+\/Child\/[^/]+\/$/;
 export const CONTROLLER_CHILD_WINDOW_KEY_PATTERN =
   /^Controller\/((?:zigbee|xiaomi)_[^/]+)\/Child\/([^/]+)\/$/;
 export const THERMOSTAT_VALVE_CALIBRATION_PATTERN =
@@ -32,7 +34,7 @@ export const THERMOSTAT_VALVE_CALIBRATION_STATUS_PATTERN =
 const HTML_LINE_BREAK_PATTERN = /<br\s*\/?>|<\/?(?:p|div|li|tr)\b[^>]*>/gi;
 const HTML_TAG_PATTERN = /<\/?[a-z][^>]*>/gi;
 const ZIGBEE_COORDINATOR_ADDRESS_PATTERN =
-  /(?:^|\r?\n)\s*Address\s*:\s*[^\s/\r\n]+\s*\/\s*(?:0x)?0000(?:\b|$)/i;
+  /(?:^|\r?\n)[ \t]*Address[ \t]*:[ \t]*[^\s/\r\n]+[ \t]*\/[ \t]*(?:0x)?0000(?:\b|$)/i;
 const BUTTON_INPUT_TYPES = new Set(["BUTTON", "BUTTON_DANGER"]);
 
 function normalizeHtmlInfoText(text) {
@@ -149,6 +151,19 @@ export function matchAllowedWindowButton(windowKey, optionKey) {
         childId: null,
       };
     }
+    if (
+      XIAOMI_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
+      optionKey === "joinButton"
+    ) {
+      return {
+        id: "xiaomi_join",
+        inputType: "BUTTON",
+        requiresConfirmation: false,
+        requiresTelegramToken: false,
+        extensionKey: controllerChild.extensionKey,
+        childId: controllerChild.childId,
+      };
+    }
     if (optionKey === "Remove") {
       return {
         id: "physical_device_remove",
@@ -195,13 +210,19 @@ export function extractButtonPayload(option) {
   return null;
 }
 
-export function publicWindowButtonNativeChange(windowKey, option, window) {
+export function publicWindowButtonNativeChange(
+  windowKey,
+  option,
+  window,
+  { hasLinkedAccessories = false } = {},
+) {
   const rule = matchAllowedWindowButton(windowKey, option?.key);
   if (
     !rule ||
     option.inputType !== rule.inputType ||
     (rule.id === "physical_device_remove" &&
       isZigbeeCoordinatorWindow(window)) ||
+    (rule.id === "xiaomi_join" && hasLinkedAccessories) ||
     option.visible === false ||
     option.disabled === true ||
     option.write !== true ||

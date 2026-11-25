@@ -218,13 +218,19 @@ export function nativeAffectedRefs(change, homeRef) {
     if (typeof change.extension_key === "string") {
       const extRef = `${homeRef}/extension/${encodeURIComponent(change.extension_key)}`;
       refs.push(extRef);
-      if (typeof change.device_remove?.child_id === "string") {
-        refs.push(
-          `${extRef}/child/${encodeURIComponent(change.device_remove.child_id)}`,
-        );
+      const childId =
+        change.device_remove?.child_id ?? change.xiaomi_join?.child_id;
+      if (typeof childId === "string") {
+        refs.push(`${extRef}/child/${encodeURIComponent(childId)}`);
       }
     }
     for (const accessory of change.device_remove?.linked_accessories ?? []) {
+      if (typeof accessory?.ref === "string") refs.push(accessory.ref);
+    }
+    for (const ref of change.created_accessory_refs ?? []) {
+      if (typeof ref === "string") refs.push(ref);
+    }
+    for (const accessory of change.observed_effect?.created_accessories ?? []) {
       if (typeof accessory?.ref === "string") refs.push(accessory.ref);
     }
   } else if (change.kind === "logic_assignment") {
