@@ -688,6 +688,90 @@ export class SprutHubClient {
     return window;
   }
 
+  // Starts preparing a downloadable hub backup archive in the hub's temporary
+  // area (works without an external SD card; 2026-11-25 B4).
+  async nativeFileBackups(serial, deadline) {
+    const response = await this.#request({ file: { backups: {} } }, deadline, {
+      serial,
+    });
+    const backups = response.result?.file?.backups;
+    if (
+      !isPlainObject(backups) ||
+      typeof backups.path !== "string" ||
+      backups.path.length === 0 ||
+      (backups.loc !== undefined &&
+        (typeof backups.loc !== "string" || backups.loc.length === 0)) ||
+      (backups.scope !== undefined &&
+        (typeof backups.scope !== "string" || backups.scope.length === 0))
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible backup-prepare response.",
+      );
+    }
+    return {
+      path: backups.path,
+      ...(backups.loc !== undefined ? { loc: backups.loc } : {}),
+      ...(backups.scope !== undefined ? { scope: backups.scope } : {}),
+    };
+  }
+
+  // Reads one base64 chunk of a prepared hub archive (2026-11-25 B5).
+  async nativeFilePart(
+    serial,
+    { loc, path: filePath, start, length, scope },
+    deadline,
+  ) {
+    const response = await this.#request(
+      {
+        file: {
+          filePart: {
+            ...(loc !== undefined ? { loc } : {}),
+            path: filePath,
+            start,
+            length,
+            ...(scope !== undefined ? { scope } : {}),
+          },
+        },
+      },
+      deadline,
+      { serial },
+    );
+    const part = response.result?.file?.filePart;
+    if (!isPlainObject(part) || typeof part.data !== "string") {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible backup-part response.",
+      );
+    }
+    return { data: part.data };
+  }
+
+  // Cleans up the temporary hub archive created by file.backups (2026-11-25 B6).
+  async nativeFileComplete(serial, { loc, path: filePath, scope }, deadline) {
+    const response = await this.#request(
+      {
+        file: {
+          complete: {
+            ...(loc !== undefined ? { loc } : {}),
+            path: filePath,
+            ...(scope !== undefined ? { scope } : {}),
+          },
+        },
+      },
+      deadline,
+      { serial },
+    );
+    const container = response.result?.file;
+    if (!isPlainObject(container) || !Object.hasOwn(container, "complete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge backup cleanup.",
+      );
+    }
+    return { observedAt: response.responseReceivedAt };
+  }
+
   // The hub's time zone for times shown on its clock; null keeps UTC.
   hubTimeZone(serial, deadline) {
     return this.#hubTimeZone(serial, deadline);
