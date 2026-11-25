@@ -23,10 +23,15 @@ export const TELEGRAM_SAFE_TEXT_KEYS = new Set([
 ]);
 export const ZIGBEE_CHILD_WINDOW_KEY_PATTERN =
   /^Controller\/zigbee_[^/]+\/Child\/[^/]+\/$/;
+export const CONTROLLER_CHILD_WINDOW_KEY_PATTERN =
+  /^Controller\/((?:zigbee|xiaomi)_[^/]+)\/Child\/([^/]+)\/$/;
 export const THERMOSTAT_VALVE_CALIBRATION_PATTERN =
   /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/;
 export const THERMOSTAT_VALVE_CALIBRATION_STATUS_PATTERN =
   /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/;
+const ZIGBEE_COORDINATOR_ADDRESS_PATTERN =
+  /Address:\s*[^<\s/]+\/0000(?:\b|<|$)/i;
+const BUTTON_INPUT_TYPES = new Set(["BUTTON", "BUTTON_DANGER"]);
 
 export function isTelegramWindowKey(windowKey) {
   return (
@@ -40,6 +45,43 @@ export function telegramExtensionKeyFromWindowKey(windowKey) {
   return match ? `Notification:${match[1]}` : null;
 }
 
+export function parseControllerChildWindowKey(windowKey) {
+  if (typeof windowKey !== "string") return null;
+  const match = CONTROLLER_CHILD_WINDOW_KEY_PATTERN.exec(windowKey);
+  if (!match) return null;
+  return {
+    extensionKey: `Controller:${match[1]}`,
+    childId: match[2],
+  };
+}
+
+// On SprutHub, the ZigBee coordinator appears as a normal ZigBee child window
+// with a visible Remove button, identified by short network address 0x0000 in
+// its Info HTML ("Address: <ieee>/0000<br>...").
+export function isZigbeeCoordinatorWindow(window) {
+  if (
+    !window ||
+    typeof window !== "object" ||
+    !ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(window.windowKey) ||
+    !Array.isArray(window.options)
+  ) {
+    return false;
+  }
+  return window.options.some((option) => {
+    if (
+      !option ||
+      typeof option !== "object" ||
+      (option.key !== "Info" && option.inputType !== "HTML")
+    ) {
+      return false;
+    }
+    const text = option.value?.stringValue;
+    return (
+      typeof text === "string" && ZIGBEE_COORDINATOR_ADDRESS_PATTERN.test(text)
+    );
+  });
+}
+
 export function isAllowedTelegramTextOption(windowKey, optionKey) {
   return (
     isTelegramWindowKey(windowKey) && TELEGRAM_SAFE_TEXT_KEYS.has(optionKey)
@@ -50,7 +92,7 @@ export function isAllowedWindowButtonWindowKey(windowKey) {
   return (
     typeof windowKey === "string" &&
     (TELEGRAM_WINDOW_KEY_PATTERN.test(windowKey) ||
-      ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey))
+      CONTROLLER_CHILD_WINDOW_KEY_PATTERN.test(windowKey))
   );
 }
 
@@ -63,40 +105,63 @@ export function matchAllowedWindowButton(windowKey, optionKey) {
     if (optionKey === "Login") {
       return {
         id: "telegram_login",
+        inputType: "BUTTON",
         requiresConfirmation: false,
         requiresTelegramToken: true,
         extensionKey: `Notification:${telegram[1]}`,
+        childId: null,
       };
     }
     if (optionKey === "Logout") {
       return {
         id: "telegram_logout",
+        inputType: "BUTTON",
         requiresConfirmation: true,
         requiresTelegramToken: false,
         extensionKey: `Notification:${telegram[1]}`,
+        childId: null,
       };
     }
     return null;
   }
-  if (
-    ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
-    THERMOSTAT_VALVE_CALIBRATION_PATTERN.test(optionKey)
-  ) {
-    return {
-      id: "thermostat_valve_calibration",
-      requiresConfirmation: false,
-      requiresTelegramToken: false,
-      extensionKey: null,
-    };
+  const controllerChild = parseControllerChildWindowKey(windowKey);
+  if (controllerChild) {
+    if (
+      ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
+      THERMOSTAT_VALVE_CALIBRATION_PATTERN.test(optionKey)
+    ) {
+      return {
+        id: "thermostat_valve_calibration",
+        inputType: "BUTTON",
+        requiresConfirmation: false,
+        requiresTelegramToken: false,
+        extensionKey: null,
+        childId: null,
+      };
+    }
+    if (optionKey === "Remove") {
+      return {
+        id: "physical_device_remove",
+        inputType: "BUTTON_DANGER",
+        requiresConfirmation: true,
+        requiresTelegramToken: false,
+        extensionKey: controllerChild.extensionKey,
+        childId: controllerChild.childId,
+      };
+    }
   }
   return null;
 }
 
-// Live wire contract (SprutHub 3.0.0 rev 20131): pressing a single BUTTON sends
-// its current typed scalar envelope when read=true (C1), or validValues[0].value
-// when write=true && read!==true and validValues has length 1 (C3).
+// Live wire contract (SprutHub 3.0.0 rev 20131): pressing a single BUTTON or
+// BUTTON_DANGER sends its current typed scalar envelope when read=true (C1), or
+// validValues[0].value when write=true && read!==true and validValues has length 1 (C3).
 export function extractButtonPayload(option) {
-  if (!option || typeof option !== "object" || option.inputType !== "BUTTON") {
+  if (
+    !option ||
+    typeof option !== "object" ||
+    !BUTTON_INPUT_TYPES.has(option.inputType)
+  ) {
     return null;
   }
   if (option.read === true) {
@@ -120,11 +185,13 @@ export function extractButtonPayload(option) {
   return null;
 }
 
-export function publicWindowButtonNativeChange(windowKey, option) {
+export function publicWindowButtonNativeChange(windowKey, option, window) {
   const rule = matchAllowedWindowButton(windowKey, option?.key);
   if (
     !rule ||
-    option.inputType !== "BUTTON" ||
+    option.inputType !== rule.inputType ||
+    (rule.id === "physical_device_remove" &&
+      isZigbeeCoordinatorWindow(window)) ||
     option.visible === false ||
     option.disabled === true ||
     option.write !== true ||

@@ -712,7 +712,13 @@ test("ZigBee child Remove audits BLOCK, code id lists, code_unread, links, bridg
 });
 
 test("ZigBee child with 0 dependencies and 0000_Basic cluster in Info is allowed and STILL requires mandatory tell_owner confirmation", async (t) => {
-  const { hub, client } = await setup(t);
+  const { hub, client } = await setup(t, {
+    patch: (fixture) => {
+      fixture.scenarios = fixture.scenarios.filter(
+        ({ index }) => index !== "52",
+      );
+    },
+  });
   const cleanWinRef = windowRef(ZIGBEE_CLEAN_WINDOW);
 
   // Normal device with 0000_Basic cluster and non-zero short address /73AF is NOT mistaken for coordinator.
@@ -780,7 +786,7 @@ test("pre-write drift guard catches new dependencies, linked-accessory drift, an
     desc: "",
     type: "BLOCK",
     active: true,
-    data: {
+    data: JSON.stringify({
       targets: [
         {
           type: "service",
@@ -790,7 +796,7 @@ test("pre-write drift guard catches new dependencies, linked-accessory drift, an
           characteristics: [{ type: "set", cId: 15, hc: "On", value: "true" }],
         },
       ],
-    },
+    }),
   });
   const drift1 = await callOk(client, "apply_native_change", {
     change_ref: prep1.change_ref,

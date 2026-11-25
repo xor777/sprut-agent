@@ -216,9 +216,16 @@ export function nativeAffectedRefs(change, homeRef) {
   }
   if (change.kind === WINDOW_BUTTON) {
     if (typeof change.extension_key === "string") {
-      refs.push(
-        `${homeRef}/extension/${encodeURIComponent(change.extension_key)}`,
-      );
+      const extRef = `${homeRef}/extension/${encodeURIComponent(change.extension_key)}`;
+      refs.push(extRef);
+      if (typeof change.device_remove?.child_id === "string") {
+        refs.push(
+          `${extRef}/child/${encodeURIComponent(change.device_remove.child_id)}`,
+        );
+      }
+    }
+    for (const accessory of change.device_remove?.linked_accessories ?? []) {
+      if (typeof accessory?.ref === "string") refs.push(accessory.ref);
     }
   } else if (change.kind === "logic_assignment") {
     refs.push(...canonicalAncestors(refs[0]));

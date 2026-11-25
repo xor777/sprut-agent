@@ -197,6 +197,11 @@ import {
   writeOutcomeUnknown,
 } from "./native-values.mjs";
 import {
+  auditPhysicalDeviceRemove,
+  physicalDeviceRemoveDrifted,
+  physicalDeviceRemoveTellOwner,
+} from "./physical-device-remove.mjs";
+import {
   accessoryPlacementMatches,
   accessoryPlacementSnapshot,
   placementOwnedSinceApply,
@@ -1052,7 +1057,7 @@ export class AutomationService {
     }
     const changed = await this.#changedCreatedDevice(change, accessory);
     if (changed) return changed;
-    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    const dependencies = await this.#accessoryDependencies(accessory);
     if (foundDependencies(dependencies)) {
       return this.#finishNative(change, "conflict", undefined, {
         dependencies,
@@ -1126,10 +1131,10 @@ export class AutomationService {
     });
   }
 
-  // What refers to a virtual device: the scenarios the hub lists for it,
+  // What refers to an accessory: the scenarios the hub lists for it,
   // the devices its characteristics are linked with, the bridges that
-  // export it and the logic assigned to its services.
-  async #virtualDeviceDependencies(accessory) {
+  // export it, the logic assigned to its services, and code mentions.
+  async #accessoryDependencies(accessory) {
     const homeRef = configuredHomeRef(this.hubSerial);
     const services = ownServices(accessory);
     const scenarios = (
@@ -1223,7 +1228,7 @@ export class AutomationService {
     if (accessory.virtual !== true) throw notAVirtualDevice();
     const [room, dependencies] = await Promise.all([
       this.client.getRoom(accessory.roomId),
-      this.#virtualDeviceDependencies(accessory),
+      this.#accessoryDependencies(accessory),
     ]);
     const now = new Date().toISOString();
     const change = {
@@ -1283,7 +1288,7 @@ export class AutomationService {
     }
     // The owner confirmed what prepare named; something new since then is
     // theirs to hear of first.
-    const dependencies = await this.#virtualDeviceDependencies(accessory);
+    const dependencies = await this.#accessoryDependencies(accessory);
     if (!dependenciesWithin(dependencies, change.dependencies)) {
       return this.#finishNative(change, "conflict", undefined, {
         dependencies,
@@ -3487,7 +3492,9 @@ export class AutomationService {
     if (change.kind === WINDOW_BUTTON) {
       throw new SprutHubError(
         "restore_unsupported",
-        "A window button press cannot be undone automatically; restoring its journal entry does not reverse what the button triggered.",
+        change.button_kind === "physical_device_remove"
+          ? "Removing a physical device from its controller network cannot be undone with restore_native_change; bringing the device back requires physical re-pairing."
+          : "A window button press cannot be undone automatically; restoring its journal entry does not reverse what the button triggered.",
         "get_native_change",
       );
     }
@@ -6681,21 +6688,44 @@ export class AutomationService {
         "prepare_native_change",
       );
     }
+    const homeRef = configuredHomeRef(this.hubSerial);
+    let deviceRemoveAudit = null;
+    if (inspected.rule.id === "physical_device_remove") {
+      deviceRemoveAudit = await auditPhysicalDeviceRemove({
+        client: this.client,
+        window: inspected.window,
+        homeRef,
+        hubSerial: this.hubSerial,
+        extensionKey: inspected.extensionKey,
+        childId: inspected.childId,
+        readAccessoryDependencies: (accessory) =>
+          this.#accessoryDependencies(accessory),
+      });
+    }
     const id = this.store.newId();
     const now = new Date().toISOString();
+    const targetName = deviceRemoveAudit?.summary.child_name
+      ? `${deviceRemoveAudit.summary.child_name} / ${inspected.buttonName}`
+      : inspected.targetName;
     const change = {
       id,
       kind: WINDOW_BUTTON,
       status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
+      home_ref: homeRef,
       target_ref: input.target_ref,
       target: { windowKey: inspected.windowKey },
       option_key: inspected.optionKey,
       button_kind: inspected.rule.id,
       button_name: inspected.buttonName,
-      target_name: inspected.targetName,
+      target_name: targetName,
       ...(inspected.extensionKey
         ? { extension_key: inspected.extensionKey }
+        : {}),
+      ...(deviceRemoveAudit
+        ? {
+            device_remove: deviceRemoveAudit.summary,
+            device_remove_baseline: deviceRemoveAudit.baseline,
+          }
         : {}),
       requires_confirmation: inspected.requiresConfirmation,
       payload: inspected.payload,
@@ -6709,7 +6739,9 @@ export class AutomationService {
       history: [{ status: "prepared", at: now }],
     };
     await this.store.save(change);
-    const tellOwner = windowButtonTellOwner(inspected);
+    const tellOwner = deviceRemoveAudit
+      ? physicalDeviceRemoveTellOwner(deviceRemoveAudit.summary)
+      : windowButtonTellOwner(inspected);
     return {
       ...publicNativeChange(change),
       ...(tellOwner ? { tell_owner: tellOwner } : {}),
@@ -6737,6 +6769,31 @@ export class AutomationService {
         configuration_matches: false,
         last_verification: freshVerification(check.conflict_reason),
       });
+    }
+    if (change.button_kind === "physical_device_remove") {
+      const currentAudit = await auditPhysicalDeviceRemove({
+        client: this.client,
+        window: check.window,
+        homeRef: change.home_ref,
+        hubSerial: this.hubSerial,
+        extensionKey: change.extension_key,
+        childId: change.device_remove?.child_id,
+        readAccessoryDependencies: (accessory) =>
+          this.#accessoryDependencies(accessory),
+      });
+      if (
+        physicalDeviceRemoveDrifted(
+          currentAudit.baseline,
+          change.device_remove_baseline,
+        )
+      ) {
+        change.device_remove = currentAudit.summary;
+        return this.#finishNative(change, "conflict", undefined, {
+          conflict_reason: "dependencies_changed",
+          configuration_matches: false,
+          last_verification: freshVerification("dependencies_changed"),
+        });
+      }
     }
     change.button_delivery = { status: "unknown" };
     await this.#persistNativeIntent(change, "applying", "apply");

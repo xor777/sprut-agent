@@ -4074,12 +4074,18 @@ function extensionChildren(state, extensionKey) {
     online: child.online ?? true,
     optionsWindow: child.optionsWindow ?? "",
   }));
-  const devices = state.accessories
-    .filter(
-      (accessory) =>
-        accessory.extensionKey === extensionKey && accessory.virtual !== true,
-    )
-    .map((accessory) => ({
+  const seenDeviceIds = new Set(declared.map(({ id }) => id));
+  const devices = [];
+  for (const accessory of state.accessories) {
+    if (
+      accessory.extensionKey !== extensionKey ||
+      accessory.virtual === true ||
+      seenDeviceIds.has(accessory.deviceId)
+    ) {
+      continue;
+    }
+    seenDeviceIds.add(accessory.deviceId);
+    devices.push({
       extensionKey,
       id: accessory.deviceId,
       spaceKey: "main",
@@ -4088,7 +4094,8 @@ function extensionChildren(state, extensionKey) {
       optionsWindow: accessory.deviceWindow ?? "",
       description: `Устройство ${accessory.deviceId}`,
       status: accessory.online ? "В сети" : "Не в сети",
-    }));
+    });
+  }
   const joining = state.joining
     .filter((child) => child.extensionKey === extensionKey)
     .map((child) => structuredClone(child));

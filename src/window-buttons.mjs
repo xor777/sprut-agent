@@ -4,10 +4,12 @@ import {
   REDACTED_MARK,
   writeRejection,
 } from "./change-refs.mjs";
+import { CODE_DEPENDENCY_NOTE } from "./code-device-refs.mjs";
 import {
   extractButtonPayload,
   isAllowedTelegramTextOption,
   isAllowedWindowButtonWindowKey,
+  isZigbeeCoordinatorWindow,
   matchAllowedWindowButton,
   scalarEnvelope,
   THERMOSTAT_VALVE_CALIBRATION_PATTERN,
@@ -198,7 +200,8 @@ export function windowButtonContract(inspected = null) {
     write: "window.update({windowKey, options: [{key, value}]})",
     fields: {
       target_ref: "window ref from get_entity",
-      option_key: "allowlisted BUTTON key from physical_configuration.commands",
+      option_key:
+        "allowlisted BUTTON/BUTTON_DANGER key from physical_configuration.commands",
       reason: "why the owner asked",
       value: "omit; button payload comes from the hub option",
     },
@@ -226,6 +229,13 @@ export function windowButtonContract(inspected = null) {
         buttons:
           "/<ep>/<cluster>_<name>/<attr>_ThermostatValveCalibration/<arg>",
       },
+      physical_device_remove: {
+        window: "Controller/(zigbee|xiaomi)_<id>/Child/<child>/",
+        buttons: {
+          Remove:
+            "BUTTON_DANGER; audits linked accessories and dependencies (BLOCK, code/id lists, links, bridges, logics), always returns tell_owner for one owner confirmation, refuses ZigBee coordinator (short address 0000); requires physical re-pairing to bring back",
+        },
+      },
     },
     repeat:
       "one send per prepared change; prepare a new change for each explicit button press",
@@ -237,7 +247,7 @@ export function windowButtonContract(inspected = null) {
     },
     restore_supported: false,
     limitations: [
-      "Only allowlisted buttons are pressed; destructive, debug, and hub-settings buttons are refused.",
+      "Only allowlisted buttons are pressed; extension-level Remove, DeleteAllAccessories, debug, and hub-settings buttons are refused.",
       "Button presses cannot be undone with restore_native_change.",
       "An unknown outcome after a lost reply is never resent automatically; check get_native_change first.",
     ],
@@ -262,6 +272,13 @@ export async function inspectWindowButton(
     throw unsupportedWindowButton();
   }
   const window = await client.getWindow(windowKey);
+  const rule = matchAllowedWindowButton(windowKey, optionKey);
+  if (
+    rule?.id === "physical_device_remove" &&
+    isZigbeeCoordinatorWindow(window)
+  ) {
+    throw zigbeeCoordinatorProtected();
+  }
   const matches = window.options.filter(({ key }) => key === optionKey);
   if (matches.length !== 1) {
     throw new SprutHubError(
@@ -282,8 +299,7 @@ export async function inspectWindowButton(
       "get_entity",
     );
   }
-  const rule = matchAllowedWindowButton(windowKey, optionKey);
-  if (!rule || option.inputType !== "BUTTON") {
+  if (!rule || option.inputType !== rule.inputType) {
     throw unsupportedWindowButton();
   }
   if (option.visible === false) {
@@ -337,7 +353,9 @@ export async function inspectWindowButton(
       ? sanitizeNativeData(window.label.text)
       : null;
   return {
+    window,
     windowKey,
+    windowName,
     optionKey,
     rule,
     payload,
@@ -345,11 +363,37 @@ export async function inspectWindowButton(
     targetName: windowName ? `${windowName} / ${buttonName}` : buttonName,
     requiresConfirmation: rule.requiresConfirmation || hasNativeConfirm,
     extensionKey: rule.extensionKey,
+    childId: rule.childId,
   };
 }
 
 export async function reverifyWindowButtonBeforeApply(client, change) {
-  const window = await client.getWindow(change.target.windowKey);
+  let window;
+  if (change.button_kind === "physical_device_remove") {
+    try {
+      window = await client.nativeWindow(
+        client.selectedSerial(),
+        change.target.windowKey,
+        Date.now() + client.timeoutMs,
+      );
+    } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        (error.code === "request_rejected" || error.code === "not_found")
+      ) {
+        return { ok: false, conflict_reason: "window_button_not_found" };
+      }
+      throw error;
+    }
+    if (window === null) {
+      return { ok: false, conflict_reason: "window_button_not_found" };
+    }
+    if (isZigbeeCoordinatorWindow(window)) {
+      throw zigbeeCoordinatorProtected();
+    }
+  } else {
+    window = await client.getWindow(change.target.windowKey);
+  }
   const matches = window.options.filter(({ key }) => key === change.option_key);
   if (matches.length === 0) {
     return { ok: false, conflict_reason: "window_button_not_found" };
@@ -372,7 +416,7 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
   if (
     !rule ||
     rule.id !== change.button_kind ||
-    option.inputType !== "BUTTON"
+    option.inputType !== rule.inputType
   ) {
     return { ok: false, conflict_reason: "window_button_changed" };
   }
@@ -392,7 +436,7 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
   if (rule.requiresTelegramToken && !hasNonEmptyTelegramToken(window)) {
     return { ok: false, conflict_reason: "telegram_token_missing" };
   }
-  return { ok: true };
+  return { ok: true, window };
 }
 
 export function windowButtonTellOwner(inspected) {
@@ -483,6 +527,102 @@ export async function observeWindowButtonEffect(client, change) {
     return { observedEffect, readbackError, verification };
   }
 
+  if (change.button_kind === "physical_device_remove") {
+    let windowAbsent = null;
+    let windowError = null;
+    try {
+      const window = await client.nativeWindow(
+        client.selectedSerial(),
+        change.target.windowKey,
+        Date.now() + client.timeoutMs,
+      );
+      windowAbsent = window === null;
+    } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        (error.code === "request_rejected" || error.code === "not_found")
+      ) {
+        // Live temp-scenario probe on SprutHub 3.0.0 rev 20131 (25.11.2026)
+        // returned request_rejected on window.get after Remove.
+        windowAbsent = true;
+      } else {
+        windowError = readbackErrorSummary(error);
+      }
+    }
+
+    let childAbsent = null;
+    let childError = null;
+    const childId = change.device_remove?.child_id;
+    if (
+      typeof change.extension_key === "string" &&
+      typeof childId === "string"
+    ) {
+      try {
+        const { children } = await client.nativeExtensionChildren(
+          client.selectedSerial(),
+          change.extension_key,
+          Date.now() + client.timeoutMs,
+        );
+        childAbsent = !children.some((entry) => entry.id === childId);
+      } catch (error) {
+        childError = readbackErrorSummary(error);
+      }
+    }
+
+    const accessoriesAbsent = [];
+    const accessoriesRemaining = [];
+    const accessoryErrors = [];
+    const homeRef = change.home_ref;
+    for (const id of change.device_remove_baseline?.linked_accessory_ids ??
+      []) {
+      const ref = `${homeRef}/accessory/${id}`;
+      try {
+        const accessory = await client.getAccessoryOrNull(id);
+        if (accessory === null) {
+          accessoriesAbsent.push(ref);
+        } else {
+          accessoriesRemaining.push(ref);
+        }
+      } catch (error) {
+        accessoryErrors.push({ ref, ...readbackErrorSummary(error) });
+      }
+    }
+
+    const observedEffect = {
+      window_absent: windowAbsent,
+      child_absent: childAbsent,
+      accessories_absent: accessoriesAbsent,
+      accessories_remaining: accessoriesRemaining,
+    };
+    const readbackError =
+      windowError || childError || accessoryErrors.length > 0
+        ? {
+            ...(windowError ? { window: windowError } : {}),
+            ...(childError ? { extension_children: childError } : {}),
+            ...(accessoryErrors.length > 0
+              ? { accessories: accessoryErrors }
+              : {}),
+          }
+        : undefined;
+    const verification = readbackError
+      ? {
+          checked_at: checkedAt,
+          fresh: false,
+          result: "readback_incomplete",
+          error:
+            windowError?.code ??
+            childError?.code ??
+            accessoryErrors[0]?.code ??
+            "readback_failed",
+        }
+      : {
+          checked_at: checkedAt,
+          fresh: true,
+          result: "device_removal_observed",
+        };
+    return { observedEffect, readbackError, verification };
+  }
+
   // Thermostat valve calibration readback.
   let window = null;
   let windowError = null;
@@ -518,6 +658,7 @@ export function publicWindowButtonChange(change, { verification } = {}) {
   const effectiveVerification =
     verification !== undefined ? verification : change.last_verification;
   const isCalibration = change.button_kind === "thermostat_valve_calibration";
+  const isDeviceRemove = change.button_kind === "physical_device_remove";
   const isUncertain = change.status === "uncertain";
   return {
     status: change.status,
@@ -532,6 +673,9 @@ export function publicWindowButtonChange(change, { verification } = {}) {
       kind: change.button_kind,
       requires_confirmation: change.requires_confirmation === true,
     },
+    ...(change.device_remove
+      ? { device_remove: structuredClone(change.device_remove) }
+      : {}),
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
     ...(isUncertain ? { hub_effect: "unknown" } : {}),
@@ -555,13 +699,22 @@ export function publicWindowButtonChange(change, { verification } = {}) {
     restore_supported: false,
     limitations: [
       "Preparation and read-only inspection do not press the button.",
-      "A window button press cannot be undone automatically with restore_native_change.",
-      ...(isCalibration
+      ...(isDeviceRemove
         ? [
-            "Valve calibration runs physically on the thermostat valve after SprutHub acknowledges the button press; window readback only reflects what the hub currently reports and does not prove mechanical calibration completed.",
+            "Removing a physical device cannot be undone automatically with restore_native_change; bringing it back requires physical re-pairing.",
+            "Live SprutHub response and events for removing a physical ZigBee or Xiaomi child have not yet been observed on a live hub (only the Remove button wire format was observed live on a temporary scenario on 25.11.2026).",
+            "Scenarios and code still mentioning removed accessory IDs remain on the hub and will no longer reach the device.",
+            CODE_DEPENDENCY_NOTE,
           ]
         : [
-            "An acknowledged Telegram Login or Logout button press triggers asynchronous hub state changes; observed_effect reflects the subsequent readback and may still be settling.",
+            "A window button press cannot be undone automatically with restore_native_change.",
+            ...(isCalibration
+              ? [
+                  "Valve calibration runs physically on the thermostat valve after SprutHub acknowledges the button press; window readback only reflects what the hub currently reports and does not prove mechanical calibration completed.",
+                ]
+              : [
+                  "An acknowledged Telegram Login or Logout button press triggers asynchronous hub state changes; observed_effect reflects the subsequent readback and may still be settling.",
+                ]),
           ]),
       ...readbackErrorLimitation(change),
       "An unknown outcome after a lost reply is never resent automatically; check get_native_change before preparing a new press.",
@@ -589,10 +742,18 @@ function readbackErrorLimitation(change) {
   ];
 }
 
+export function zigbeeCoordinatorProtected() {
+  return new SprutHubError(
+    "zigbee_coordinator_protected",
+    "This ZigBee child is the ZigBee network coordinator (short address 0000) and cannot be removed. Removing the coordinator would break the ZigBee network. Nothing was written.",
+    "get_entity",
+  );
+}
+
 function unsupportedWindowButton() {
   return new SprutHubError(
     "unsupported_window_button",
-    "Only allowlisted window buttons (Telegram Login/Logout and ZigBee thermostat valve calibration) are supported; destructive, debug, and hub-settings buttons are refused.",
+    "Only allowlisted window buttons (Telegram Login/Logout, ZigBee thermostat valve calibration, and ZigBee/Xiaomi controller child Remove) are supported; extension-level Remove, destructive hub/controller buttons, debug buttons, and other window buttons are refused.",
     "get_entity",
   );
 }

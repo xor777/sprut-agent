@@ -2,8 +2,11 @@
 // creates one in a room, virtual_device_delete deletes one. What the hub
 // does with them was observed on the owner's hub, 3.0.0
 // (research/protocol/2026-10-23-virtual-devices.md).
+import { CODE_DEPENDENCY_NOTE } from "./code-device-refs.mjs";
 import { nameWithinLimit } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
+
+export { CODE_DEPENDENCY_NOTE };
 
 export const VIRTUAL_DEVICE = "virtual_device";
 export const VIRTUAL_DEVICE_DELETE = "virtual_device_delete";
@@ -91,10 +94,6 @@ export function virtualDeviceContract(operation) {
       "deletes the created device by its id, unchanged since; refused (virtual_device_in_use) while scenarios, code, links, bridge exports or logic are found to refer to it. Code or bridges that could not be read are named (code_unread, bridges_unread) and do not stop it",
   };
 }
-
-// What the search of code (#readCodeMentions in spruthub-client.mjs) finds.
-export const CODE_DEPENDENCY_NOTE =
-  "Code is searched as get_entity relations search it (code_mentions): a Hub call with the device's id, its id in an array of plain numbers (a global list of lights) in code that also passes Hub calls a computed id, or its exact name in a string; an id kept in a variable or computed is not found. A number in such an array (found_by accessory_id_list) may only coincide with the id, and code that does not parse is named as unread (not_parsed).";
 
 const LIMITATIONS = {
   [VIRTUAL_DEVICE]: [
