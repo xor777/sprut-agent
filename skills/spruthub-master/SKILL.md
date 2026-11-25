@@ -31,9 +31,13 @@ description: Справка к MCP-серверу sprut-agent для дома н
   сначала переключи `ProxyType`; `Token`, `ProxyLogin` и `ProxyPassword`
   владелец вводит сам в приложении SprutHub). `window_button` нажимает только
   разрешённые кнопки: Telegram `Login` (при непустом токене), `Logout` (всегда
-  подтверди у владельца по `tell_owner`) и калибровку клапана ZigBee-термоголовки
-  (`ThermostatValveCalibration`); нажатия кнопок не отменяются через
-  `restore_native_change`.
+  подтверди у владельца по `tell_owner`), калибровку клапана ZigBee-термоголовки
+  (`ThermostatValveCalibration`) и `Remove` в окне ребёнка ZigBee или Xiaomi
+  (проверяет зависимости — BLOCK, код со списками id, связи, мосты, logic — и
+  всегда требует одного подтверждения владельца по `tell_owner`; координатор
+  ZigBee с коротким адресом `0000` защищён); нажатия кнопок не отменяются через
+  `restore_native_change`, а удалённое физическое устройство возвращается только
+  повторным физическим сопряжением.
 - Правило «когда A, то B»: сначала `get_entity` с `include: ["relations"]`
   на устройстве-цели покажет сценарии, которые уже им управляют; новое
   правило — `prepare_native_change` с `block_create` по контракту операции.

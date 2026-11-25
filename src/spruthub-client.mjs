@@ -5866,6 +5866,7 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
           const nativeChange = publicWindowButtonNativeChange(
             window.windowKey,
             option,
+            window,
           );
           const hasNativeConfirm = option.validValues?.some(
             ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
