@@ -1948,39 +1948,7 @@ const HANDLERS = {
   },
   "accessory.delete": (state, { id }) => {
     requireAccessory(state, id);
-    state.accessories = state.accessories.filter(
-      (accessory) => accessory.id !== id,
-    );
-    state.logics = state.logics.filter(({ aId }) => aId !== id);
-    for (const key of [...state.links.keys()]) {
-      if (key.startsWith(`${id}.`)) state.links.delete(key);
-    }
-    // Owner hub, 3.0.0 (2026-10-23-virtual-devices, 18 and 19): an IN link
-    // to the deleted accessory goes, and its characteristic's hasLinks turns
-    // false once it has no other; an OUT link that fed the deleted
-    // accessory stays as an empty entry, hasLinks unchanged.
-    for (const [key, links] of state.links) {
-      const kept = links.filter(
-        (link) =>
-          link.type !== "IN" ||
-          !link.characteristics.some(({ aId }) => aId === id),
-      );
-      for (const link of kept) {
-        if (link.type !== "OUT") continue;
-        link.characteristics = link.characteristics.filter(
-          ({ aId }) => aId !== id,
-        );
-      }
-      state.links.set(key, kept);
-      if (kept.length === 0 && links.length > 0) {
-        const [aId, sId, cId] = key.split(".").map(Number);
-        const characteristic = findCharacteristic(state, { aId, sId, cId });
-        if (characteristic) characteristic.hasLinks = false;
-      }
-    }
-    state.emitAfterReply?.({
-      accessory: { event: "EVENT_REMOVE", accessories: [{ id }] },
-    });
+    deleteAccessoryFromState(state, id);
     return {};
   },
 
@@ -2344,6 +2312,9 @@ const HANDLERS = {
   "window.get": (state, { windowKey }) => {
     const window = state.windows[windowKey];
     if (!window) {
+      if (state.removedWindows?.has(windowKey)) {
+        throw notFound(`Window not found: '${windowKey}'`);
+      }
       const child = bridgeChildWindow(state, windowKey);
       // The hub has no window for an accessory a bridge does not list
       // (2026-10-14-bridge-export-write 11).
@@ -2716,6 +2687,7 @@ function buildState(fixture, hubTime) {
       }),
       ...bridgeWindows(fixture.extensions ?? []),
     },
+    removedWindows: new Set(),
     extensions: structuredClone(fixture.extensions ?? []),
     // The hub's DiscoveryTime and the devices in pairing mode (see
     // startDiscovery); joining holds devices announced and not yet paired.
@@ -4097,7 +4069,7 @@ function extensionChildren(state, extensionKey) {
   const declared = (extension?.children ?? []).map((child) => ({
     extensionKey,
     id: child.id,
-    spaceKey: "main",
+    spaceKey: child.spaceKey ?? "main",
     name: child.name,
     online: child.online ?? true,
     optionsWindow: child.optionsWindow ?? "",
@@ -4593,31 +4565,139 @@ function applyWindowEffects(state, windowKey, window, updates) {
     }
     return;
   }
-  if (/^Controller\/zigbee_[^/]+\/Child\/[^/]+\/$/.test(windowKey)) {
-    for (const { key } of updates) {
-      const calibration =
-        /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/.exec(
-          key,
-        );
-      if (!calibration) continue;
-      const statusOption =
-        window.options.find(
-          (option) =>
-            option.key.startsWith(calibration[1]) &&
+  const controllerChild =
+    /^Controller\/((?:zigbee|xiaomi)_[^/]+)\/Child\/([^/]+)\/$/.exec(windowKey);
+  if (controllerChild) {
+    if (controllerChild[1].startsWith("zigbee_")) {
+      for (const { key } of updates) {
+        const calibration =
+          /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/.exec(
+            key,
+          );
+        if (!calibration) continue;
+        const statusOption =
+          window.options.find(
+            (option) =>
+              option.key.startsWith(calibration[1]) &&
+              /^\/\d+\/[0-9A-Fa-f]+_[^/]+\/[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/.test(
+                option.key,
+              ),
+          ) ??
+          window.options.find((option) =>
             /^\/\d+\/[0-9A-Fa-f]+_[^/]+\/[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/.test(
               option.key,
             ),
-        ) ??
-        window.options.find((option) =>
-          /^\/\d+\/[0-9A-Fa-f]+_[^/]+\/[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/.test(
-            option.key,
-          ),
-        );
-      if (statusOption && Object.hasOwn(statusOption.value ?? {}, "intValue")) {
-        statusOption.value = { intValue: 1 };
+          );
+        if (
+          statusOption &&
+          Object.hasOwn(statusOption.value ?? {}, "intValue")
+        ) {
+          statusOption.value = { intValue: 1 };
+        }
+      }
+    }
+    if (
+      updates.some(
+        ({ key, value }) => key === "Remove" && value?.boolValue === true,
+      )
+    ) {
+      removeControllerChild(state, {
+        windowKey,
+        window,
+        extensionKey: `Controller:${controllerChild[1]}`,
+        childId: controllerChild[2],
+      });
+    }
+  }
+}
+
+function deleteAccessoryFromState(state, id) {
+  state.accessories = state.accessories.filter(
+    (accessory) => accessory.id !== id,
+  );
+  state.logics = state.logics.filter(({ aId }) => aId !== id);
+  for (const extension of state.extensions) {
+    if (extension?.exported && Object.hasOwn(extension.exported, String(id))) {
+      delete extension.exported[String(id)];
+    }
+  }
+  for (const key of [...state.links.keys()]) {
+    if (key.startsWith(`${id}.`)) state.links.delete(key);
+  }
+  // Owner hub, 3.0.0 (2026-10-23-virtual-devices, 18 and 19): an IN link
+  // to the deleted accessory goes, and its characteristic's hasLinks turns
+  // false once it has no other; an OUT link that fed the deleted
+  // accessory stays as an empty entry, hasLinks unchanged.
+  for (const [key, links] of state.links) {
+    const kept = links.filter(
+      (link) =>
+        link.type !== "IN" ||
+        !link.characteristics.some(({ aId }) => aId === id),
+    );
+    for (const link of kept) {
+      if (link.type !== "OUT") continue;
+      link.characteristics = link.characteristics.filter(
+        ({ aId }) => aId !== id,
+      );
+    }
+    state.links.set(key, kept);
+    if (kept.length === 0 && links.length > 0) {
+      const [aId, sId, cId] = key.split(".").map(Number);
+      const characteristic = findCharacteristic(state, { aId, sId, cId });
+      if (characteristic) characteristic.hasLinks = false;
+    }
+  }
+  state.emitAfterReply?.({
+    accessory: { event: "EVENT_REMOVE", accessories: [{ id }] },
+  });
+}
+
+function removeControllerChild(
+  state,
+  { windowKey, window, extensionKey, childId },
+) {
+  const linkedIds = new Set();
+  for (const option of window.options ?? []) {
+    if (
+      option?.inputType === "ACCESSORY_LIST" &&
+      option.read === true &&
+      option.write !== true &&
+      Array.isArray(option.validValues)
+    ) {
+      for (const candidate of option.validValues) {
+        const id = candidate?.value?.intValue;
+        if (Number.isInteger(id) && id > 0) linkedIds.add(id);
       }
     }
   }
+  for (const accessory of state.accessories) {
+    if (
+      accessory.virtual !== true &&
+      ((accessory.extensionKey === extensionKey &&
+        accessory.deviceId === childId) ||
+        accessory.deviceWindow === windowKey)
+    ) {
+      linkedIds.add(accessory.id);
+    }
+  }
+  for (const id of linkedIds) {
+    if (state.accessories.some((accessory) => accessory.id === id)) {
+      deleteAccessoryFromState(state, id);
+    }
+  }
+  const extension = state.extensions.find(
+    (candidate) => candidate.extensionKey === extensionKey,
+  );
+  if (extension && Array.isArray(extension.children)) {
+    extension.children = extension.children.filter(
+      (child) => child.id !== childId,
+    );
+  }
+  state.joining = state.joining.filter(
+    (child) => !(child.extensionKey === extensionKey && child.id === childId),
+  );
+  delete state.windows[windowKey];
+  state.removedWindows.add(windowKey);
 }
 
 function withFixtureFaults(fixture, faults) {
