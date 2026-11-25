@@ -1,5 +1,6 @@
 import {
   isHubReadFailure,
+  SprutHubError,
   sanitizeNativeData,
   windowLinkedAccessoryIds,
 } from "./spruthub-client.mjs";
@@ -10,6 +11,8 @@ import {
   unreadDependencies,
 } from "./virtual-device.mjs";
 
+const PERSISTENT_CODE_UNREAD_REASONS = new Set(["not_parsed", "not_read"]);
+
 export async function auditPhysicalDeviceRemove({
   client,
   window,
@@ -18,7 +21,12 @@ export async function auditPhysicalDeviceRemove({
   extensionKey,
   childId,
   readAccessoryDependencies,
+  failOnReadError = false,
 }) {
+  const linked = windowLinkedAccessoryIds(window);
+  const hasConfirmedIds =
+    linked.status === "confirmed" && linked.ids.length > 0;
+
   let child = null;
   let childUnread = false;
   try {
@@ -29,7 +37,9 @@ export async function auditPhysicalDeviceRemove({
     );
     child = children.find((entry) => entry.id === childId) ?? null;
   } catch (error) {
-    if (!isHubReadFailure(error)) throw error;
+    if (!isHubReadFailure(error) || (failOnReadError && !hasConfirmedIds)) {
+      throw error;
+    }
     childUnread = true;
   }
 
@@ -48,14 +58,13 @@ export async function auditPhysicalDeviceRemove({
       : windowName;
   const online = typeof child?.online === "boolean" ? child.online : null;
 
-  const linked = windowLinkedAccessoryIds(window);
   const linkedAccessories = [];
   const perAccessory = [];
   const dependenciesByAccessory = {};
   let linkedIds = [];
   let linkedAccessoriesUnconfirmed = false;
 
-  if (linked.status === "confirmed" && linked.ids.length > 0) {
+  if (hasConfirmedIds) {
     linkedIds = [...linked.ids].sort((left, right) => left - right);
     for (const id of linkedIds) {
       const ref = `${homeRef}/accessory/${id}`;
@@ -74,9 +83,7 @@ export async function auditPhysicalDeviceRemove({
           continue;
         }
         const [room, rawDependencies] = await Promise.all([
-          typeof accessory.roomId === "number"
-            ? client.getRoom(accessory.roomId)
-            : Promise.resolve(null),
+          readRoomOrNull(client, accessory.roomId),
           readAccessoryDependencies(accessory),
         ]);
         const name =
@@ -114,7 +121,7 @@ export async function auditPhysicalDeviceRemove({
           dependencies: sanitizedDeps,
         });
       } catch (error) {
-        if (!isHubReadFailure(error)) throw error;
+        if (failOnReadError || !isHubReadFailure(error)) throw error;
         linkedAccessoriesUnconfirmed = true;
         linkedAccessories.push({
           ref,
@@ -156,6 +163,40 @@ export async function auditPhysicalDeviceRemove({
   };
 }
 
+export function assertNoNewTransientUnread(current, prepared) {
+  if (!prepared || !current) return;
+  for (const id of current.linked_accessory_ids ?? []) {
+    const key = String(id);
+    const prev = prepared.dependencies_by_accessory?.[key];
+    const next = current.dependencies_by_accessory?.[key];
+    if (!prev || !next) continue;
+    const prevCodeKeys = new Set(
+      (prev.code_unread ?? []).map(unreadCodeEntryKey),
+    );
+    const newTransientCode = (next.code_unread ?? []).filter(
+      (entry) =>
+        !PERSISTENT_CODE_UNREAD_REASONS.has(entry.reason) &&
+        !prevCodeKeys.has(unreadCodeEntryKey(entry)),
+    );
+    const prevBridgeRefs = new Set(
+      (prev.bridges_unread ?? []).map(({ ref }) => ref),
+    );
+    const newUnreadBridge = (next.bridges_unread ?? []).some(
+      ({ ref }) => !prevBridgeRefs.has(ref),
+    );
+    if (newTransientCode.length > 0 || newUnreadBridge) {
+      const timedOut = newTransientCode.some(
+        ({ reason }) => reason === "timed_out",
+      );
+      throw new SprutHubError(
+        timedOut ? "timeout" : "connection_failed",
+        "Could not re-verify code or bridge dependencies before removing the physical device; retry apply_native_change.",
+        "apply_native_change",
+      );
+    }
+  }
+}
+
 export function physicalDeviceRemoveDrifted(current, prepared) {
   if (!prepared || !current) return true;
   if (
@@ -181,19 +222,29 @@ export function physicalDeviceRemoveDrifted(current, prepared) {
   return false;
 }
 
+function unreadCodeEntryKey(entry) {
+  return `${entry.ref ?? ""}\0${entry.reason}\0${JSON.stringify(entry.scenarios ?? null)}`;
+}
+
 function unreadDependenciesWithin(current, prepared) {
   const keys = (dependencies) =>
-    new Set([
-      ...(dependencies.code_unread ?? []).map(
-        (entry) =>
-          `code_unread ${entry.ref ?? ""}\0${entry.reason}\0${JSON.stringify(entry.scenarios ?? null)}`,
-      ),
-      ...(dependencies.bridges_unread ?? []).map(
-        ({ ref }) => `bridges_unread ${ref}`,
-      ),
-    ]);
+    new Set(
+      (dependencies.code_unread ?? [])
+        .filter((entry) => PERSISTENT_CODE_UNREAD_REASONS.has(entry.reason))
+        .map((entry) => `code_unread ${unreadCodeEntryKey(entry)}`),
+    );
   const known = keys(prepared);
   return [...keys(current)].every((key) => known.has(key));
+}
+
+async function readRoomOrNull(client, roomId) {
+  if (typeof roomId !== "number") return null;
+  try {
+    return await client.getRoom(roomId);
+  } catch (error) {
+    if (!isHubReadFailure(error)) throw error;
+    return null;
+  }
 }
 
 export function physicalDeviceRemoveTellOwner(deviceRemove) {

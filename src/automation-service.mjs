@@ -197,6 +197,7 @@ import {
   writeOutcomeUnknown,
 } from "./native-values.mjs";
 import {
+  assertNoNewTransientUnread,
   auditPhysicalDeviceRemove,
   physicalDeviceRemoveDrifted,
   physicalDeviceRemoveTellOwner,
@@ -6780,7 +6781,12 @@ export class AutomationService {
         childId: change.device_remove?.child_id,
         readAccessoryDependencies: (accessory) =>
           this.#accessoryDependencies(accessory),
+        failOnReadError: true,
       });
+      assertNoNewTransientUnread(
+        currentAudit.baseline,
+        change.device_remove_baseline,
+      );
       if (
         physicalDeviceRemoveDrifted(
           currentAudit.baseline,

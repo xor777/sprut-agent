@@ -29,9 +29,18 @@ export const THERMOSTAT_VALVE_CALIBRATION_PATTERN =
   /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/;
 export const THERMOSTAT_VALVE_CALIBRATION_STATUS_PATTERN =
   /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/;
+const HTML_LINE_BREAK_PATTERN = /<br\s*\/?>|<\/?(?:p|div|li|tr)\b[^>]*>/gi;
+const HTML_TAG_PATTERN = /<\/?[a-z][^>]*>/gi;
 const ZIGBEE_COORDINATOR_ADDRESS_PATTERN =
-  /Address:\s*[^<\s/]+\/0000(?:\b|<|$)/i;
+  /(?:^|\r?\n)\s*Address\s*:\s*[^\s/\r\n]+\s*\/\s*(?:0x)?0000(?:\b|$)/i;
 const BUTTON_INPUT_TYPES = new Set(["BUTTON", "BUTTON_DANGER"]);
+
+function normalizeHtmlInfoText(text) {
+  return text
+    .replace(HTML_LINE_BREAK_PATTERN, "\n")
+    .replace(HTML_TAG_PATTERN, "")
+    .replace(/&nbsp;/gi, " ");
+}
 
 export function isTelegramWindowKey(windowKey) {
   return (
@@ -77,7 +86,8 @@ export function isZigbeeCoordinatorWindow(window) {
     }
     const text = option.value?.stringValue;
     return (
-      typeof text === "string" && ZIGBEE_COORDINATOR_ADDRESS_PATTERN.test(text)
+      typeof text === "string" &&
+      ZIGBEE_COORDINATOR_ADDRESS_PATTERN.test(normalizeHtmlInfoText(text))
     );
   });
 }

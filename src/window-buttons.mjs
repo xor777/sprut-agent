@@ -618,7 +618,16 @@ export async function observeWindowButtonEffect(client, change) {
       : {
           checked_at: checkedAt,
           fresh: true,
-          result: "device_removal_observed",
+          result:
+            windowAbsent === true &&
+            childAbsent !== false &&
+            accessoriesRemaining.length === 0
+              ? "device_removal_observed"
+              : windowAbsent === true ||
+                  childAbsent === true ||
+                  accessoriesAbsent.length > 0
+                ? "device_removal_partial"
+                : "device_still_present",
         };
     return { observedEffect, readbackError, verification };
   }
