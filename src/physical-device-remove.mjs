@@ -1,3 +1,4 @@
+import { readRoomOrNull } from "./change-refs.mjs";
 import {
   isHubReadFailure,
   SprutHubError,
@@ -235,16 +236,6 @@ function unreadDependenciesWithin(current, prepared) {
     );
   const known = keys(prepared);
   return [...keys(current)].every((key) => known.has(key));
-}
-
-export async function readRoomOrNull(client, roomId) {
-  if (typeof roomId !== "number") return null;
-  try {
-    return await client.getRoom(roomId);
-  } catch (error) {
-    if (!isHubReadFailure(error)) throw error;
-    return null;
-  }
 }
 
 export function physicalDeviceRemoveTellOwner(deviceRemove) {

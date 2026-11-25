@@ -1,6 +1,6 @@
 import { valuesEqual } from "./change-contracts.mjs";
+import { readRoomOrNull } from "./change-refs.mjs";
 import { scalarEnvelope } from "./native-option-contract.mjs";
-import { readRoomOrNull } from "./physical-device-remove.mjs";
 import {
   isHubReadFailure,
   isSensitiveNativeNode,
