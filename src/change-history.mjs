@@ -11,6 +11,7 @@ import { isNativeValueChange } from "./native-values.mjs";
 import { isLogicSourceChange } from "./scenario-changes.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 import { WINDOW_BUTTON } from "./window-buttons.mjs";
+import { canOwnCreatedAccessories } from "./xiaomi-join.mjs";
 
 // When a change was first applied: its first apply intent, else (a draft)
 // when it was recorded.
@@ -227,11 +228,14 @@ export function nativeAffectedRefs(change, homeRef) {
     for (const accessory of change.device_remove?.linked_accessories ?? []) {
       if (typeof accessory?.ref === "string") refs.push(accessory.ref);
     }
-    for (const ref of change.created_accessory_refs ?? []) {
-      if (typeof ref === "string") refs.push(ref);
-    }
-    for (const accessory of change.observed_effect?.created_accessories ?? []) {
-      if (typeof accessory?.ref === "string") refs.push(accessory.ref);
+    if (canOwnCreatedAccessories(change)) {
+      for (const ref of change.created_accessory_refs ?? []) {
+        if (typeof ref === "string") refs.push(ref);
+      }
+      for (const accessory of change.observed_effect?.created_accessories ??
+        []) {
+        if (typeof accessory?.ref === "string") refs.push(accessory.ref);
+      }
     }
   } else if (change.kind === "logic_assignment") {
     refs.push(...canonicalAncestors(refs[0]));

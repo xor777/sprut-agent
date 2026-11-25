@@ -24,7 +24,9 @@ import {
 import {
   inspectXiaomiJoin,
   observeXiaomiJoinEffect,
-  xiaomiDeviceAlreadyJoined,
+  resolveMissingXiaomiJoinWindow,
+  xiaomiJoinRefusalError,
+  xiaomiJoinRoomDrifted,
 } from "./xiaomi-join.mjs";
 
 export const WINDOW_BUTTON = "window_button";
@@ -313,6 +315,7 @@ export async function inspectWindowButton(
     }
   }
   let xiaomiJoin = null;
+  let xiaomiJoinBaseline = null;
   if (rule?.id === "xiaomi_join") {
     const inspectedJoin = await inspectXiaomiJoin({
       client,
@@ -322,10 +325,14 @@ export async function inspectWindowButton(
       extensionKey: rule.extensionKey,
       childId: rule.childId,
     });
-    if (inspectedJoin.alreadyJoined) {
-      throw xiaomiDeviceAlreadyJoined();
+    if (!inspectedJoin.ok) {
+      throw xiaomiJoinRefusalError(
+        inspectedJoin.reason,
+        inspectedJoin.spaceKey,
+      );
     }
     xiaomiJoin = inspectedJoin.summary;
+    xiaomiJoinBaseline = inspectedJoin.baseline;
   }
   if (matches.length === 0) {
     throw new SprutHubError(
@@ -397,16 +404,13 @@ export async function inspectWindowButton(
     requiresConfirmation: rule.requiresConfirmation || hasNativeConfirm,
     extensionKey: rule.extensionKey,
     childId: rule.childId,
-    ...(xiaomiJoin ? { xiaomiJoin } : {}),
+    ...(xiaomiJoin ? { xiaomiJoin, xiaomiJoinBaseline } : {}),
   };
 }
 
 export async function reverifyWindowButtonBeforeApply(client, change) {
   let window;
-  if (
-    change.button_kind === "physical_device_remove" ||
-    change.button_kind === "xiaomi_join"
-  ) {
+  if (change.button_kind === "physical_device_remove") {
     try {
       window = await client.nativeWindow(
         client.selectedSerial(),
@@ -425,18 +429,36 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
     if (window === null) {
       return { ok: false, conflict_reason: "window_button_not_found" };
     }
-    if (
-      change.button_kind === "physical_device_remove" &&
-      isZigbeeCoordinatorWindow(window)
-    ) {
+    if (isZigbeeCoordinatorWindow(window)) {
       throw zigbeeCoordinatorProtected();
+    }
+  } else if (change.button_kind === "xiaomi_join") {
+    try {
+      window = await client.nativeWindow(
+        client.selectedSerial(),
+        change.target.windowKey,
+        Date.now() + client.timeoutMs,
+      );
+    } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        ((error.code === "request_rejected" &&
+          error.protocolErrorCode === -32603) ||
+          error.code === "not_found")
+      ) {
+        return resolveMissingXiaomiJoinWindow(client, change, error);
+      }
+      throw error;
+    }
+    if (window === null) {
+      return resolveMissingXiaomiJoinWindow(client, change, null);
     }
   } else {
     window = await client.getWindow(change.target.windowKey);
   }
-  let xiaomiJoin = null;
+  let currentXiaomiJoin = null;
   if (change.button_kind === "xiaomi_join") {
-    const currentJoin = await inspectXiaomiJoin({
+    currentXiaomiJoin = await inspectXiaomiJoin({
       client,
       window,
       homeRef: change.home_ref,
@@ -445,10 +467,9 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
       childId: change.xiaomi_join?.child_id,
       failOnReadError: true,
     });
-    if (currentJoin.alreadyJoined) {
-      return { ok: false, conflict_reason: "xiaomi_device_already_joined" };
+    if (!currentXiaomiJoin.ok) {
+      return { ok: false, conflict_reason: currentXiaomiJoin.reason };
     }
-    xiaomiJoin = currentJoin.summary;
   }
   const matches = window.options.filter(({ key }) => key === change.option_key);
   if (matches.length === 0) {
@@ -492,7 +513,22 @@ export async function reverifyWindowButtonBeforeApply(client, change) {
   if (rule.requiresTelegramToken && !hasNonEmptyTelegramToken(window)) {
     return { ok: false, conflict_reason: "telegram_token_missing" };
   }
-  return { ok: true, window, ...(xiaomiJoin ? { xiaomiJoin } : {}) };
+  if (
+    currentXiaomiJoin &&
+    xiaomiJoinRoomDrifted(
+      currentXiaomiJoin.baseline,
+      change.xiaomi_join_baseline,
+      currentXiaomiJoin.summary.selected_room,
+      change.xiaomi_join?.selected_room,
+    )
+  ) {
+    return { ok: false, conflict_reason: "join_room_changed" };
+  }
+  return {
+    ok: true,
+    window,
+    ...(currentXiaomiJoin ? { xiaomiJoin: currentXiaomiJoin.summary } : {}),
+  };
 }
 
 export function windowButtonTellOwner(inspected) {

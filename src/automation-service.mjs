@@ -6733,7 +6733,12 @@ export class AutomationService {
             device_remove_baseline: deviceRemoveAudit.baseline,
           }
         : {}),
-      ...(inspected.xiaomiJoin ? { xiaomi_join: inspected.xiaomiJoin } : {}),
+      ...(inspected.xiaomiJoin
+        ? {
+            xiaomi_join: inspected.xiaomiJoin,
+            xiaomi_join_baseline: inspected.xiaomiJoinBaseline,
+          }
+        : {}),
       requires_confirmation: inspected.requiresConfirmation,
       payload: inspected.payload,
       reason: input.reason,

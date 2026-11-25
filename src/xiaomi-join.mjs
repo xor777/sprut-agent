@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { valuesEqual } from "./change-contracts.mjs";
 import { readRoomOrNull } from "./change-refs.mjs";
 import { scalarEnvelope } from "./native-option-contract.mjs";
@@ -17,15 +18,63 @@ export function xiaomiDeviceAlreadyJoined() {
   );
 }
 
-export function readSelectedJoinRoom(window) {
+export function xiaomiChildNotFound() {
+  return new SprutHubError(
+    "xiaomi_child_not_found",
+    "The selected Xiaomi controller child was not found in SprutHub. Nothing was written.",
+    "get_entity",
+  );
+}
+
+export function xiaomiChildNotInDiscovery(spaceKey) {
+  const spaceNote = spaceKey
+    ? `current space: ${spaceKey}`
+    : "unknown or empty space";
+  return new SprutHubError(
+    "xiaomi_child_not_in_discovery",
+    `The selected Xiaomi child is not in the discovery space (${spaceNote}). Only unpaired discovery children can be joined. Nothing was written.`,
+    "get_entity",
+  );
+}
+
+export function xiaomiJoinRefusalError(reason, spaceKey) {
+  if (reason === "xiaomi_child_not_found") return xiaomiChildNotFound();
+  if (reason === "xiaomi_child_not_in_discovery") {
+    return xiaomiChildNotInDiscovery(spaceKey);
+  }
+  return xiaomiDeviceAlreadyJoined();
+}
+
+function hashJoinRoomScalar(typed) {
+  return createHash("sha256")
+    .update(JSON.stringify([typed.kind, typed.value]))
+    .digest("hex");
+}
+
+export function readJoinRoomSnapshot(window) {
   const option = (window?.options ?? []).find(
     (entry) => entry?.key === "joinRoom",
   );
-  if (option?.read !== true || isSensitiveNativeNode(option)) {
-    return null;
+  if (option?.read !== true || option.visible === false) {
+    return {
+      selectedRoom: null,
+      baseline: { present: false, value_sha256: null },
+    };
   }
   const typed = scalarEnvelope(option.value);
-  if (!typed) return null;
+  if (!typed) {
+    return {
+      selectedRoom: null,
+      baseline: { present: false, value_sha256: null },
+    };
+  }
+  const baseline = {
+    present: true,
+    value_sha256: hashJoinRoomScalar(typed),
+  };
+  if (isSensitiveNativeNode(option)) {
+    return { selectedRoom: null, baseline };
+  }
   let name = null;
   if (Array.isArray(option.validValues)) {
     const matched = option.validValues.find((candidate) => {
@@ -36,11 +85,34 @@ export function readSelectedJoinRoom(window) {
       name = sanitizeNativeData(matched.name);
     }
   }
-  if (typed.value === "" && name === null) return null;
+  if (typed.value === "" && name === null) {
+    return { selectedRoom: null, baseline };
+  }
   return {
-    value: sanitizeNativeData(typed.value),
-    name,
+    selectedRoom: {
+      value: sanitizeNativeData(typed.value),
+      name,
+    },
+    baseline,
   };
+}
+
+export function xiaomiJoinRoomDrifted(
+  currentBaseline,
+  preparedBaseline,
+  currentRoom,
+  preparedRoom,
+) {
+  if (preparedBaseline) {
+    return (
+      currentBaseline.present !== preparedBaseline.present ||
+      currentBaseline.value_sha256 !== preparedBaseline.value_sha256
+    );
+  }
+  return (
+    (currentRoom?.value ?? null) !== (preparedRoom?.value ?? null) ||
+    (currentRoom?.name ?? null) !== (preparedRoom?.name ?? null)
+  );
 }
 
 export async function inspectXiaomiJoin({
@@ -54,7 +126,11 @@ export async function inspectXiaomiJoin({
 }) {
   const linked = windowLinkedAccessoryIds(window);
   if (linked.status === "confirmed" && linked.ids.length > 0) {
-    return { alreadyJoined: true, summary: null };
+    return {
+      ok: false,
+      reason: "xiaomi_device_already_joined",
+      spaceKey: null,
+    };
   }
 
   let child = null;
@@ -77,8 +153,25 @@ export async function inspectXiaomiJoin({
     typeof child?.spaceKey === "string" && child.spaceKey.trim().length > 0
       ? sanitizeNativeData(child.spaceKey)
       : null;
-  if (spaceKey === "main") {
-    return { alreadyJoined: true, summary: null };
+
+  if (!childUnread) {
+    if (child === null) {
+      return { ok: false, reason: "xiaomi_child_not_found", spaceKey: null };
+    }
+    if (spaceKey === "main") {
+      return {
+        ok: false,
+        reason: "xiaomi_device_already_joined",
+        spaceKey,
+      };
+    }
+    if (spaceKey !== "discovery") {
+      return {
+        ok: false,
+        reason: "xiaomi_child_not_in_discovery",
+        spaceKey,
+      };
+    }
   }
 
   const windowName =
@@ -91,10 +184,10 @@ export async function inspectXiaomiJoin({
       ? sanitizeNativeData(child.name)
       : windowName;
   const online = typeof child?.online === "boolean" ? child.online : null;
-  const selectedRoom = readSelectedJoinRoom(window);
+  const { selectedRoom, baseline } = readJoinRoomSnapshot(window);
 
   return {
-    alreadyJoined: false,
+    ok: true,
     summary: {
       controller_ref: `${homeRef}/extension/${encodeURIComponent(extensionKey)}`,
       extension_key: extensionKey,
@@ -105,7 +198,47 @@ export async function inspectXiaomiJoin({
       selected_room: selectedRoom,
       child_unread: childUnread,
     },
+    baseline,
   };
+}
+
+export async function resolveMissingXiaomiJoinWindow(
+  client,
+  change,
+  originalError,
+) {
+  const childId = change.xiaomi_join?.child_id;
+  if (typeof change.extension_key !== "string" || typeof childId !== "string") {
+    if (originalError) throw originalError;
+    return { ok: false, conflict_reason: "window_button_not_found" };
+  }
+  let children;
+  try {
+    ({ children } = await client.nativeExtensionChildren(
+      client.selectedSerial(),
+      change.extension_key,
+      Date.now() + client.timeoutMs,
+    ));
+  } catch (error) {
+    if (originalError) throw originalError;
+    throw error;
+  }
+  const child = children.find((entry) => entry.id === childId) ?? null;
+  if (child === null) {
+    return { ok: false, conflict_reason: "window_button_not_found" };
+  }
+  const spaceKey =
+    typeof child.spaceKey === "string" && child.spaceKey.trim().length > 0
+      ? sanitizeNativeData(child.spaceKey)
+      : null;
+  if (spaceKey === "main") {
+    return { ok: false, conflict_reason: "xiaomi_device_already_joined" };
+  }
+  if (spaceKey === "discovery") {
+    if (originalError) throw originalError;
+    return { ok: false, conflict_reason: "window_button_not_found" };
+  }
+  return { ok: false, conflict_reason: "xiaomi_child_not_in_discovery" };
 }
 
 export async function observeXiaomiJoinEffect(
@@ -258,7 +391,16 @@ export async function observeXiaomiJoinEffect(
   return { observedEffect, readbackError, verification };
 }
 
+export function canOwnCreatedAccessories(change) {
+  return (
+    change?.native_write_sent === true &&
+    change.status !== "not_applied" &&
+    change.status !== "conflict"
+  );
+}
+
 export function mergeCreatedAccessoryRefs(change, observedEffect) {
+  if (!canOwnCreatedAccessories(change)) return change.created_accessory_refs;
   const observed = (observedEffect?.created_accessories ?? [])
     .map((entry) => entry?.ref)
     .filter((ref) => typeof ref === "string");
