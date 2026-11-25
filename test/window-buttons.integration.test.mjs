@@ -1434,3 +1434,228 @@ test("window_button contract stays compact and MCP tool count/metadata budgets s
   );
   assert.equal(contract.contract.restore_supported, false);
 });
+
+test("Telegram safe-TEXT rejects control/whitespace smuggling, URL/credential ProxyHost, bad/secret Name, and redacts uppercase /BOT token paths", async (t) => {
+  const { hub, client, stateDirectory } = await setup(t, {
+    telegramOptions: { proxyType: "SOCKS5" },
+  });
+  const tgRef = windowRef(TELEGRAM_WINDOW);
+  const extraSecrets = [
+    "alice:secret99",
+    "ProxyHostSecretValue123",
+    "NameSecretToken999",
+    "NamePasswordSecret888",
+  ];
+
+  // Uppercase /BOT<id>:<token> in window.label.error must be redacted in get_entity.
+  hub.state.windows[TELEGRAM_WINDOW].label.error =
+    `HTTP 401 https://api.telegram.org/BOT${TELEGRAM_BOT_TOKEN}/getMe`;
+  const tgEntity = await callOk(client, "get_entity", { entity_ref: tgRef });
+  assertNoSecrets(tgEntity, extraSecrets);
+  assert.equal(tgEntity.entity.error, "[REDACTED]");
+
+  // BotApiUrl rejects CRLF, tab, control chars, whitespace, and uppercase /BOT token URLs.
+  for (const badUrl of [
+    "https://api.telegram.org/\r\nX-Injected: 1",
+    "https://api.telegram.org/\tpath",
+    "https://api.telegram.org/\u0000foo",
+    "https://api.telegram.org/path with space",
+    `https://api.telegram.org/BOT${TELEGRAM_BOT_TOKEN}/getMe`,
+  ]) {
+    const err = await callError(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: tgRef,
+      option_key: "BotApiUrl",
+      value: badUrl,
+      reason: "Проверить строгую валидацию BotApiUrl",
+    });
+    assert.equal(err.error.code, "invalid_native_value", badUrl);
+    assertNoSecrets(err, extraSecrets);
+  }
+
+  // ProxyHost rejects credentials, @, URL syntax, whitespace, control chars, and secret-shaped text.
+  for (const badHost of [
+    "alice:secret99@proxy.example.com",
+    "alice@proxy.example.com",
+    "http://proxy.example.com",
+    "proxy.example.com/path",
+    "proxy.example.com?x=1",
+    "proxy.example.com#frag",
+    "proxy\tinjected",
+    "proxy\u0007bell",
+    "   ",
+    " proxy.example.com ",
+    "token=ProxyHostSecretValue123",
+  ]) {
+    const err = await callError(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: tgRef,
+      option_key: "ProxyHost",
+      value: badHost,
+      reason: "Проверить строгую валидацию ProxyHost",
+    });
+    assert.equal(err.error.code, "invalid_native_value", badHost);
+    assertNoSecrets(err, extraSecrets);
+  }
+
+  // Name rejects empty/whitespace-only, control characters, and credential-shaped strings.
+  for (const badName of [
+    "",
+    "   ",
+    "Telegram\nInjected",
+    "Telegram\tTab",
+    "Telegram\u0000Null",
+    "Bot Bearer NameSecretToken999",
+    "password=NamePasswordSecret888",
+  ]) {
+    const err = await callError(client, "prepare_native_change", {
+      operation: "window_option",
+      target_ref: tgRef,
+      option_key: "Name",
+      value: badName,
+      reason: "Проверить строгую валидацию Name",
+    });
+    assert.equal(err.error.code, "invalid_native_value", badName);
+    assertNoSecrets(err, extraSecrets);
+  }
+
+  // Zero writes sent and zero secrets persisted on disk.
+  assert.deepEqual(hub.writes(), []);
+  assertNoSecrets(await readAllStateText(stateDirectory), extraSecrets);
+
+  // Plain IPv6 literal ProxyHost remains accepted.
+  const ipv6Prep = await callOk(client, "prepare_native_change", {
+    operation: "window_option",
+    target_ref: tgRef,
+    option_key: "ProxyHost",
+    value: "[::1]",
+    reason: "Задать локальный IPv6 прокси",
+  });
+  assert.equal(ipv6Prep.status, "prepared");
+});
+
+test("window_button readback_error limitations stay honest when unacknowledged or unsent", async (t) => {
+  // Case 1: Lost reply (uncertain) + failed readback must NOT claim ACK.
+  let failAfterLostUpdate = false;
+  const { hub, client } = await setup(t, {
+    faults: {
+      droppedReply: [{ method: "window.update", times: 1, applied: true }],
+    },
+    onRequest: ({ method }) => {
+      if (failAfterLostUpdate && method === "window.update") {
+        failAfterLostUpdate = false;
+        hub.refuseNext("extension.get", {
+          code: -32603,
+          message: "Extension read failed after timeout",
+        });
+        hub.refuseNext("window.get", {
+          code: -32603,
+          message: "Window read failed after timeout",
+        });
+      }
+    },
+    timeoutMs: 350,
+  });
+  const tgRef = windowRef(TELEGRAM_WINDOW);
+
+  // Also check prepared change + get_native_change readback failure: must NOT claim sent or ACK.
+  const prepUnsent = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: tgRef,
+    option_key: "Login",
+    reason: "Проверить get_native_change при сбое чтения до отправки",
+  });
+  hub.refuseNext("extension.get", {
+    code: -32603,
+    message: "Temporary extension read failure",
+  });
+  const readFailedPrepared = await callOk(client, "get_native_change", {
+    change_ref: prepUnsent.change_ref,
+  });
+  assert.equal(readFailedPrepared.status, "prepared");
+  assert.equal(readFailedPrepared.native_write_sent, false);
+  assert.equal(readFailedPrepared.native_acknowledged, false);
+  assert.ok(readFailedPrepared.readback_error?.extension);
+  assert.equal(
+    readFailedPrepared.limitations.some((line) =>
+      /acknowledged the button press|was sent/i.test(line),
+    ),
+    false,
+    `unsent readback_error must not claim ACK or send: ${JSON.stringify(readFailedPrepared.limitations)}`,
+  );
+
+  // Now apply with lost reply + failed readback.
+  failAfterLostUpdate = true;
+  const uncertainWithReadErr = await callOk(client, "apply_native_change", {
+    change_ref: prepUnsent.change_ref,
+  });
+  assert.equal(uncertainWithReadErr.status, "uncertain");
+  assert.equal(uncertainWithReadErr.hub_effect, "unknown");
+  assert.equal(uncertainWithReadErr.native_write_sent, true);
+  assert.equal(uncertainWithReadErr.native_acknowledged, false);
+  assert.ok(uncertainWithReadErr.readback_error?.extension);
+  assert.ok(uncertainWithReadErr.readback_error?.window);
+  assert.equal(
+    uncertainWithReadErr.limitations.some((line) =>
+      /acknowledged the button press/i.test(line),
+    ),
+    false,
+    `uncertain readback_error must not claim ACK: ${JSON.stringify(uncertainWithReadErr.limitations)}`,
+  );
+  assert.ok(
+    uncertainWithReadErr.limitations.some((line) =>
+      /without a confirmed hub reply/i.test(line),
+    ),
+  );
+});
+
+test("get_entity keeps requires_confirmation consistent on Telegram Logout with empty validValues, and Login refuses literal [REDACTED] Token", async (t) => {
+  const { hub, client } = await setup(t, {
+    telegramOptions: { loggedIn: true, error: "" },
+  });
+  const tgRef = windowRef(TELEGRAM_WINDOW);
+
+  // Standard protobuf empty repeated field validValues: [] on Logout must still report
+  // top-level requires_confirmation: true matching native_change.requires_confirmation: true.
+  hub.state.windows[TELEGRAM_WINDOW].options.find(
+    ({ key }) => key === "Logout",
+  ).validValues = [];
+  const tg = await callOk(client, "get_entity", { entity_ref: tgRef });
+  const logoutCmd = tg.entity.commands.find(({ key }) => key === "Logout");
+  assert.equal(logoutCmd.requires_confirmation, true);
+  assert.equal(logoutCmd.native_change.requires_confirmation, true);
+
+  // Literal "[REDACTED]" in Token must be treated as missing on prepare AND pre-write apply drift.
+  hub.state.windows[TELEGRAM_WINDOW] = telegramWindow({
+    token: "[REDACTED]",
+    loggedIn: false,
+  });
+  const redactedTokenPrep = await callError(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: tgRef,
+    option_key: "Login",
+    reason: "Войти с [REDACTED] токеном",
+  });
+  assert.equal(redactedTokenPrep.error.code, "telegram_token_missing");
+
+  hub.state.windows[TELEGRAM_WINDOW] = telegramWindow({
+    token: TELEGRAM_BOT_TOKEN,
+    loggedIn: false,
+  });
+  const prepValid = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: tgRef,
+    option_key: "Login",
+    reason: "Войти в Telegram",
+  });
+  hub.state.windows[TELEGRAM_WINDOW].options.find(
+    ({ key }) => key === "Token",
+  ).value.stringValue = "[REDACTED]";
+  const driftConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepValid.change_ref,
+  });
+  assert.equal(driftConflict.status, "conflict");
+  assert.equal(driftConflict.conflict_reason, "telegram_token_missing");
+  assert.equal(driftConflict.native_write_sent, false);
+  assert.deepEqual(hub.writes(), []);
+});
