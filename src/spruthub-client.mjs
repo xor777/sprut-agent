@@ -5867,13 +5867,17 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
             window.windowKey,
             option,
           );
+          const hasNativeConfirm = option.validValues?.some(
+            ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
+          );
+          const requiresConfirmation =
+            nativeChange?.requires_confirmation === true
+              ? true
+              : hasNativeConfirm;
           return {
             ...normalizeWindowControl(option),
             ...(option.disabled === true ? { disabled: true } : {}),
-            requires_confirmation: option.validValues?.some(
-              ({ confirm }) =>
-                typeof confirm === "string" && confirm.length > 0,
-            ),
+            requires_confirmation: requiresConfirmation,
             ...(nativeChange ? { native_change: nativeChange } : {}),
           };
         }),
@@ -7008,7 +7012,7 @@ function redactSensitiveText(text, role = "data") {
     // A URL with a user name and password, as in a BLOCK request.
     /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i.test(text) ||
     // A Telegram Bot API URL path carrying a bot token (/bot<id>:<secret>).
-    /\/bot\d{5,}:[A-Za-z0-9_-]{20,}/.test(text) ||
+    /\/bot\d{5,}:[A-Za-z0-9_-]{20,}/i.test(text) ||
     // A link whose query carries a login code, token or key, as the hub
     // user's login link …/user/login?code=… (owner's hub, 2026-10-12).
     /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]*[?&;](?:code|token|access_token|auth|key|api_?key|secret|password|passwd|pass|pin)=[^&\s"'<>#]/i.test(

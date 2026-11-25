@@ -1,5 +1,9 @@
 import { valuesEqual } from "./change-contracts.mjs";
-import { parseWindowRef, writeRejection } from "./change-refs.mjs";
+import {
+  parseWindowRef,
+  REDACTED_MARK,
+  writeRejection,
+} from "./change-refs.mjs";
 import {
   extractButtonPayload,
   isAllowedTelegramTextOption,
@@ -67,7 +71,7 @@ export function telegramTextContractFields(windowKey, optionKey) {
   if (optionKey === "BotApiUrl") {
     return {
       allowed_format:
-        "empty string or absolute http:// or https:// URL without embedded credentials",
+        "empty string or absolute http:// or https:// URL without whitespace, control characters, or embedded credentials",
     };
   }
   if (optionKey === "ProxyPort") {
@@ -75,7 +79,27 @@ export function telegramTextContractFields(windowKey, optionKey) {
       allowed_format: "empty string or TCP port integer string from 1 to 65535",
     };
   }
+  if (optionKey === "ProxyHost") {
+    return {
+      allowed_format:
+        "empty string or plain host name or IP address without whitespace, control characters, URL syntax, or credentials",
+    };
+  }
+  if (optionKey === "Name") {
+    return {
+      allowed_format:
+        "non-empty plain display name without control characters or credentials",
+    };
+  }
   return {};
+}
+
+function hasAsciiControlChar(text) {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
 }
 
 export function validateTelegramTextOptionValue(windowKey, optionKey, value) {
@@ -83,10 +107,10 @@ export function validateTelegramTextOptionValue(windowKey, optionKey, value) {
   if (typeof value !== "string") return;
   if (optionKey === "BotApiUrl") {
     if (value === "") return;
-    if (value !== value.trim()) {
+    if (hasAsciiControlChar(value) || /\s/.test(value)) {
       throw new SprutHubError(
         "invalid_native_value",
-        "BotApiUrl must be an empty string or a valid http:// or https:// URL without surrounding whitespace or embedded credentials.",
+        "BotApiUrl must be an empty string or a valid http:// or https:// URL without whitespace, control characters, or embedded credentials.",
       );
     }
     let parsed;
@@ -113,7 +137,10 @@ export function validateTelegramTextOptionValue(windowKey, optionKey, value) {
         "BotApiUrl must not contain an embedded username or password.",
       );
     }
-    if (sanitizeNativeData(value) !== value) {
+    if (
+      sanitizeNativeData(value) !== value ||
+      sanitizeNativeData(parsed.href) !== parsed.href
+    ) {
       throw new SprutHubError(
         "invalid_native_value",
         "BotApiUrl must not contain embedded credentials or tokens.",
@@ -136,10 +163,31 @@ export function validateTelegramTextOptionValue(windowKey, optionKey, value) {
     return;
   }
   if (optionKey === "ProxyHost") {
-    if (/[\r\n]/.test(value) || sanitizeNativeData(value) !== value) {
+    if (value === "") return;
+    if (
+      hasAsciiControlChar(value) ||
+      /\s/.test(value) ||
+      /[/@?#]/.test(value) ||
+      sanitizeNativeData(value) !== value
+    ) {
       throw new SprutHubError(
         "invalid_native_value",
-        "ProxyHost must be a plain host name or IP address without credentials or line breaks.",
+        "ProxyHost must be an empty string or a plain host name or IP address without whitespace, control characters, URL syntax, or credentials.",
+      );
+    }
+    return;
+  }
+  if (optionKey === "Name") {
+    if (value.trim().length === 0 || hasAsciiControlChar(value)) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "Name must be a non-empty plain display name without control characters.",
+      );
+    }
+    if (sanitizeNativeData(value) !== value) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "Name must not contain credentials, tokens, or secret-shaped text.",
       );
     }
   }
@@ -515,14 +563,30 @@ export function publicWindowButtonChange(change, { verification } = {}) {
         : [
             "An acknowledged Telegram Login or Logout button press triggers asynchronous hub state changes; observed_effect reflects the subsequent readback and may still be settling.",
           ]),
-      ...(change.readback_error
-        ? [
-            "SprutHub acknowledged the button press, but post-ACK readback failed or was incomplete (see readback_error). Do not assume nothing was sent; check get_native_change to refresh observed_effect.",
-          ]
-        : []),
+      ...readbackErrorLimitation(change),
       "An unknown outcome after a lost reply is never resent automatically; check get_native_change before preparing a new press.",
     ],
   };
+}
+
+function readbackErrorLimitation(change) {
+  if (!change.readback_error) return [];
+  if (change.native_acknowledged === true) {
+    return [
+      "SprutHub acknowledged the button press, but post-ACK readback failed or was incomplete (see readback_error). Do not assume nothing was sent; check get_native_change to refresh observed_effect.",
+    ];
+  }
+  if (
+    change.native_write_sent === true &&
+    (change.status === "uncertain" || change.status === "applying")
+  ) {
+    return [
+      "The button press was sent without a confirmed hub reply, and reading back the current state also failed or was incomplete (see readback_error). The hub effect is unknown; check get_native_change later instead of blindly resending.",
+    ];
+  }
+  return [
+    "Refreshing the current window or extension state failed or was incomplete (see readback_error). This read did not send or acknowledge a button press; check get_native_change again later.",
+  ];
 }
 
 function unsupportedWindowButton() {
@@ -537,7 +601,8 @@ function hasNonEmptyTelegramToken(window) {
   const tokenOption = window.options.find(({ key }) => key === "Token");
   return (
     typeof tokenOption?.value?.stringValue === "string" &&
-    tokenOption.value.stringValue.trim().length > 0
+    tokenOption.value.stringValue.trim().length > 0 &&
+    !tokenOption.value.stringValue.includes(REDACTED_MARK)
   );
 }
 

@@ -3028,7 +3028,7 @@ export class AutomationService {
   // with current as observed and is thrown; true when the hub acknowledged
   // the write, false when its outcome is left to the read back.
   async #writeRecordedValue(change, current) {
-    await this.#beforeNativeValueWrite(change);
+    await this.#beforeNativeValueWrite(change, "apply");
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.#writeNativeValue(change, change.requested_value);
@@ -6217,8 +6217,8 @@ export class AutomationService {
 
   // A refusal here comes before the intent is saved, so the record stays as
   // it was and nothing counts as sent.
-  async #beforeNativeValueWrite(change) {
-    await nativeValueKind(change.kind).beforeWrite?.(this, change);
+  async #beforeNativeValueWrite(change, direction = "apply") {
+    await nativeValueKind(change.kind).beforeWrite?.(this, change, direction);
   }
 
   async #writeNativeValue(change, value) {
@@ -6323,7 +6323,7 @@ export class AutomationService {
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
     await this.#settleLaterUnknownWrites(change);
-    await this.#beforeNativeValueWrite(change);
+    await this.#beforeNativeValueWrite(change, "restore");
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);

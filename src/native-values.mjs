@@ -299,12 +299,14 @@ export const NATIVE_VALUE_KINDS = {
     // The guard reads the bridges anyway; a bridge started or stopped since
     // prepare is told as it is now, and the record saved before the write
     // keeps that.
-    async beforeWrite(service, change) {
-      validateTelegramTextOptionValue(
-        change.target.windowKey,
-        change.option_key,
-        change.requested_value.value,
-      );
+    async beforeWrite(service, change, direction = "apply") {
+      if (direction === "apply") {
+        validateTelegramTextOptionValue(
+          change.target.windowKey,
+          change.option_key,
+          change.requested_value.value,
+        );
+      }
       const bridge = await refuseBridgeExportWrite(
         service,
         change.target.windowKey,
