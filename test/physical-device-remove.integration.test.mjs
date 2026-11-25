@@ -1408,3 +1408,278 @@ test("multi-accessory controller child aggregates and tags dependencies across a
     );
   }
 });
+
+test("room.get failure preserves dependencies on prepare, while transient read failures on apply keep change prepared and retryable", async (t) => {
+  const { hub, client } = await setup(t, { timeoutMs: 350 });
+  const busyWinRef = windowRef(ZIGBEE_BUSY_WINDOW);
+  const cleanWinRef = windowRef(ZIGBEE_CLEAN_WINDOW);
+  const discWinRef = windowRef(XIAOMI_DISC_WINDOW);
+
+  // 1. Cosmetic room.get failure on prepare must keep room_name: null while
+  //    preserving linked accessory identity and ALL discovered dependencies.
+  hub.refuseNext("room.get", {
+    code: -32603,
+    message: "Temporary room read failure",
+  });
+  const prepBusy = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: busyWinRef,
+    option_key: "Remove",
+    reason: "Удалить лампу при сбое room.get",
+  });
+  assert.equal(prepBusy.status, "prepared");
+  assert.equal(prepBusy.device_remove.linked_accessories_unconfirmed, false);
+  assert.deepEqual(prepBusy.device_remove.linked_accessories, [
+    {
+      ref: accessoryRef(ZIGBEE_BUSY_ACC),
+      name: "Лампа у кровати",
+      room_ref: roomRef(BEDROOM),
+      room_name: null,
+      services: [{ type: "Lightbulb", name: "Лампа у кровати" }],
+    },
+  ]);
+  assert.deepEqual(
+    prepBusy.device_remove.dependencies.scenarios.map(({ name }) => name),
+    ["Ночной свет у кровати"],
+  );
+  assert.deepEqual(
+    prepBusy.device_remove.dependencies.code.map(({ name }) => name),
+    ["Цветные сцены"],
+  );
+  assert.equal(prepBusy.device_remove.dependencies.links.length, 1);
+  assert.equal(prepBusy.device_remove.dependencies.bridges.length, 1);
+  assert.equal(prepBusy.device_remove.dependencies.logics.length, 1);
+
+  // 2. Transient scenario.list failure during apply must throw error, send zero
+  //    writes, leave change prepared (not conflict), and let retry succeed!
+  hub.refuseNext("scenario.list", {
+    code: -32603,
+    message: "Temporary scenario.list failure",
+  });
+  const applyScenarioErr = await callError(client, "apply_native_change", {
+    change_ref: prepBusy.change_ref,
+  });
+  assert.equal(applyScenarioErr.error.code, "request_rejected");
+  assert.deepEqual(hub.writes(), []);
+  const stillPreparedBusy = await callOk(client, "get_native_change", {
+    change_ref: prepBusy.change_ref,
+  });
+  assert.equal(stillPreparedBusy.status, "prepared");
+  assert.equal(
+    stillPreparedBusy.device_remove.dependencies.scenarios.length,
+    1,
+  );
+  const retriedBusy = await callOk(client, "apply_native_change", {
+    change_ref: prepBusy.change_ref,
+  });
+  assert.equal(retriedBusy.status, "applied");
+
+  // 3. Transient accessory.get timeout during apply returns retryable timeout,
+  //    sends zero writes, keeps change prepared, and retry succeeds!
+  const prepClean = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: cleanWinRef,
+    option_key: "Remove",
+    reason: "Удалить розетку при временном таймауте accessory.get",
+  });
+  const writesBeforeClean = hub.writes().length;
+  hub.state.faults.droppedReply.push({
+    method: "accessory.get",
+    remaining: 1,
+    applied: false,
+  });
+  const applyAccErr = await callError(client, "apply_native_change", {
+    change_ref: prepClean.change_ref,
+  });
+  assert.equal(applyAccErr.error.code, "timeout");
+  assert.equal(applyAccErr.error.retryable, true);
+  assert.equal(hub.writes().length, writesBeforeClean);
+  const stillPreparedClean = await callOk(client, "get_native_change", {
+    change_ref: prepClean.change_ref,
+  });
+  assert.equal(stillPreparedClean.status, "prepared");
+
+  // 4. Genuine accessory absence (accessory === null) between prepare and apply
+  //    MUST still trigger conflict: dependencies_changed with zero writes.
+  hub.state.accessories = hub.state.accessories.filter(
+    ({ id }) => id !== ZIGBEE_CLEAN_ACC,
+  );
+  const missingDrift = await callOk(client, "apply_native_change", {
+    change_ref: prepClean.change_ref,
+  });
+  assert.equal(missingDrift.status, "conflict");
+  assert.equal(missingDrift.conflict_reason, "dependencies_changed");
+  assert.equal(hub.writes().length, writesBeforeClean);
+
+  // 5. Transient extensionChild.list timeout during apply on discovery child
+  //    (no confirmed linked IDs) keeps change prepared and retry succeeds!
+  const prepDisc = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: discWinRef,
+    option_key: "Remove",
+    reason: "Удалить discovery-ребёнка Xiaomi при сбое extensionChild.list",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "extensionChild.list",
+    remaining: 1,
+    applied: false,
+  });
+  const applyDiscErr = await callError(client, "apply_native_change", {
+    change_ref: prepDisc.change_ref,
+  });
+  assert.equal(applyDiscErr.error.code, "timeout");
+  assert.equal(applyDiscErr.error.retryable, true);
+  assert.equal(hub.writes().length, writesBeforeClean);
+  const retriedDisc = await callOk(client, "apply_native_change", {
+    change_ref: prepDisc.change_ref,
+  });
+  assert.equal(retriedDisc.status, "applied");
+});
+
+test("observeWindowButtonEffect reports device_still_present, device_removal_partial, and device_removal_observed honestly", async (t) => {
+  const { hub, client } = await setup(t, { timeoutMs: 350 });
+  const busyWinRef = windowRef(ZIGBEE_BUSY_WINDOW);
+  const cleanWinRef = windowRef(ZIGBEE_CLEAN_WINDOW);
+
+  // 1. Prepared change read back via get_native_change -> device_still_present.
+  const prep = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: busyWinRef,
+    option_key: "Remove",
+    reason: "Проверить честный verification.result до удаления",
+  });
+  const readPrepared = await callOk(client, "get_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(readPrepared.status, "prepared");
+  assert.deepEqual(readPrepared.observed_effect, {
+    window_absent: false,
+    child_absent: false,
+    accessories_absent: [],
+    accessories_remaining: [accessoryRef(ZIGBEE_BUSY_ACC)],
+  });
+  assert.equal(readPrepared.verification.fresh, true);
+  assert.equal(readPrepared.verification.result, "device_still_present");
+
+  // 2. Uncertain change whose write never reached the hub (applied: false) ->
+  //    get_native_change MUST report device_still_present (never device_removal_observed).
+  const prepLost = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: cleanWinRef,
+    option_key: "Remove",
+    reason: "Проверить честный verification.result при потере запроса",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "window.update",
+    remaining: 1,
+    applied: false,
+  });
+  const uncertain = await callOk(client, "apply_native_change", {
+    change_ref: prepLost.change_ref,
+  });
+  assert.equal(uncertain.status, "uncertain");
+  const readUncertain = await callOk(client, "get_native_change", {
+    change_ref: prepLost.change_ref,
+  });
+  assert.equal(readUncertain.status, "uncertain");
+  assert.deepEqual(readUncertain.observed_effect, {
+    window_absent: false,
+    child_absent: false,
+    accessories_absent: [],
+    accessories_remaining: [accessoryRef(ZIGBEE_CLEAN_ACC)],
+  });
+  assert.equal(readUncertain.verification.fresh, true);
+  assert.equal(readUncertain.verification.result, "device_still_present");
+
+  // 3. Partial removal (window removed while accessory/child still exist) -> device_removal_partial.
+  delete hub.state.windows[ZIGBEE_CLEAN_WINDOW];
+  hub.state.removedWindows.add(ZIGBEE_CLEAN_WINDOW);
+  const readPartial = await callOk(client, "get_native_change", {
+    change_ref: prepLost.change_ref,
+  });
+  assert.equal(readPartial.observed_effect.window_absent, true);
+  assert.equal(readPartial.observed_effect.child_absent, false);
+  assert.deepEqual(readPartial.observed_effect.accessories_remaining, [
+    accessoryRef(ZIGBEE_CLEAN_ACC),
+  ]);
+  assert.equal(readPartial.verification.fresh, true);
+  assert.equal(readPartial.verification.result, "device_removal_partial");
+
+  // 4. Full removal -> device_removal_observed.
+  const applied = await callOk(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.fresh, true);
+  assert.equal(applied.verification.result, "device_removal_observed");
+});
+
+test("isZigbeeCoordinatorWindow catches HTML-wrapped and 0x0000 coordinator Info while allowing normal devices with ParentAddress .../0000", async (t) => {
+  const { hub, client } = await setup(t);
+  const coordRef = windowRef(ZIGBEE_COORD_WINDOW);
+  const cleanRef = windowRef(ZIGBEE_CLEAN_WINDOW);
+
+  // 1. Coordinator Info variants wrapped in inline HTML tags / &nbsp; / 0x0000 MUST be blocked.
+  const coordinatorHtmlVariants = [
+    `<b>Address:</b> ${ZIGBEE_COORD_ID}/0000<br>Type: Coordinator`,
+    `<b>Address</b>:&nbsp;<span>${ZIGBEE_COORD_ID}</span> / <b>0x0000</b>`,
+    `<div>Address: ${ZIGBEE_COORD_ID}/0000</div><div>Clusters: 0000_Basic</div>`,
+    `<table><tr><td>Address:</td><td>${ZIGBEE_COORD_ID}/0000</td></tr></table>`,
+  ];
+  for (const html of coordinatorHtmlVariants) {
+    hub.state.windows[ZIGBEE_COORD_WINDOW].options.find(
+      ({ key }) => key === "Info",
+    ).value.stringValue = html;
+    const entity = await callOk(client, "get_entity", { entity_ref: coordRef });
+    const removeCmd = entity.entity.commands.find(
+      ({ key }) => key === "Remove",
+    );
+    assert.equal(
+      Object.hasOwn(removeCmd, "native_change"),
+      false,
+      `coordinator HTML must suppress native_change: ${html}`,
+    );
+    const err = await callError(client, "prepare_native_change", {
+      operation: "window_button",
+      target_ref: coordRef,
+      option_key: "Remove",
+      reason: "Проверить защиту координатора с HTML",
+    });
+    assert.equal(err.error.code, "zigbee_coordinator_protected", html);
+    assert.equal(err.error.retryable, false, html);
+  }
+
+  // 2. Normal ZigBee device with ParentAddress / Parent Address pointing to coordinator /0000
+  //    MUST NOT false-positive as coordinator!
+  const parentAddressVariants = [
+    `Address: ${ZIGBEE_CLEAN_ID}/73AF<br>ParentAddress: ${ZIGBEE_COORD_ID}/0000<br>Clusters: 0000_Basic`,
+    `<b>Parent Address:</b> ${ZIGBEE_COORD_ID}/0000<br><b>Address:</b> ${ZIGBEE_CLEAN_ID}/73AF`,
+  ];
+  for (const html of parentAddressVariants) {
+    hub.state.windows[ZIGBEE_CLEAN_WINDOW].options.find(
+      ({ key }) => key === "Info",
+    ).value.stringValue = html;
+    const entity = await callOk(client, "get_entity", { entity_ref: cleanRef });
+    const removeCmd = entity.entity.commands.find(
+      ({ key }) => key === "Remove",
+    );
+    assert.deepEqual(
+      removeCmd.native_change,
+      {
+        native_write: true,
+        supported: true,
+        operation: "window_button",
+        requires_confirmation: true,
+      },
+      `ParentAddress must not suppress normal device native_change: ${html}`,
+    );
+    const prep = await callOk(client, "prepare_native_change", {
+      operation: "window_button",
+      target_ref: cleanRef,
+      option_key: "Remove",
+      reason: "Проверить отсутствие ложного срабатывания на ParentAddress",
+    });
+    assert.equal(prep.status, "prepared", html);
+  }
+  assert.deepEqual(hub.writes(), []);
+});
