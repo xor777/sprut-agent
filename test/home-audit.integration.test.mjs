@@ -528,3 +528,42 @@ test("home_overview survives scenario.get failure, timeout, unparseable JS, deep
     assert.equal(Object.hasOwn(entry, "next"), false);
   }
 });
+
+test("home_overview still succeeds when every audited code scenario fails to read", async (t) => {
+  const { hub, client } = await setup(
+    t,
+    structuredClone(await loadHomeFixture("apartment")),
+    { timeoutMs: 1200 },
+  );
+
+  // apartment has one user code scenario (index "9"): refusing its scenario.get
+  // leaves zero successful code reads and must not turn home_overview into an error.
+  hub.refuseNext("scenario.get", { code: -32000, message: "Busy" });
+  const refused = await overview(client);
+  assert.equal(refused.body.status, "ok");
+  assert.match(refused.body.observed_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(refused.body.problems_total, 2);
+  assert.deepEqual(refused.body.problems_unchecked, [
+    {
+      area: "scenario_code",
+      outcome: "failed",
+      error_code: "request_rejected",
+      scenario_ref: `${home}/scenario/9`,
+    },
+  ]);
+
+  // Same when the sole user code scenario read times out.
+  hub.loseNext("scenario.get");
+  const timedOut = await overview(client);
+  assert.equal(timedOut.body.status, "ok");
+  assert.match(timedOut.body.observed_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(timedOut.body.problems_total, 2);
+  assert.deepEqual(timedOut.body.problems_unchecked, [
+    {
+      area: "scenario_code",
+      outcome: "failed",
+      error_code: "timeout",
+      scenario_ref: `${home}/scenario/9`,
+    },
+  ]);
+});
