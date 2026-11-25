@@ -302,6 +302,7 @@ export const CASES = {
   "home-audit": {
     prompt: "Что в доме не так?",
     patch: withHomeAudit,
+    allowedMissingIds: [63],
     graders: [noWrites()],
     judge: (evidence) => ({
       facts: [
@@ -1512,7 +1513,9 @@ export const CASES = {
 
 export function gradeCase(definition, evidence) {
   const graders = [...definition.graders];
-  if (definition.rawRefsAllowed !== true) graders.push(noRawRefs());
+  if (definition.rawRefsAllowed !== true) {
+    graders.push(noRawRefs(definition.allowedMissingIds));
+  }
   return graders.map(({ name, grade }) => {
     try {
       return { name, ...grade(evidence) };
@@ -1603,7 +1606,7 @@ function noWrites() {
 // name the hub shows the owner may be quoted as it is, even one that reads
 // like a field name (a ZigBee model as lumi.sensor_wleak.aq1), so the
 // hub's names in the run are taken out before the patterns are matched.
-function noRawRefs() {
+function noRawRefs(allowedMissingIds = []) {
   return {
     name: "answer_has_no_raw_refs",
     grade: ({ answer, initialState, finalState }) => {
@@ -1611,6 +1614,7 @@ function noRawRefs() {
       for (const name of hubNames([initialState, finalState])) {
         text = text.replaceAll(name, "…");
       }
+      text = stripAllowedMissingIds(text, allowedMissingIds);
       const found = RAW_REFS.map((pattern) => pattern.exec(text)).find(Boolean);
       return result(
         !found,
@@ -1618,6 +1622,35 @@ function noRawRefs() {
       );
     },
   };
+}
+
+// A code scenario may reference an accessory ID that no longer exists in the
+// home, so that device has no name for the owner. Only the case's declared
+// missing IDs may appear in device/ID phrasing; refs, existing device IDs,
+// scenario numbers, and tool or field names stay caught by RAW_REFS.
+function stripAllowedMissingIds(text, allowedMissingIds) {
+  if (!Array.isArray(allowedMissingIds) || allowedMissingIds.length === 0) {
+    return text;
+  }
+  const ids = allowedMissingIds
+    .filter((id) => Number.isSafeInteger(id) && id >= 0)
+    .map(String);
+  if (ids.length === 0) return text;
+  const id = `(?:${ids.join("|")})(?!\\d|\\.\\d)`;
+  const patterns = [
+    new RegExp(
+      `(?<!\\p{L})(?:аксессуар|устройств)\\p{L}*\\s*[№#]\\s*${id}`,
+      "giu",
+    ),
+    new RegExp(`(?<!\\p{L})аксессуар\\s+${id}`, "giu"),
+    new RegExp(`(?<![\\p{L}\\p{N}_])id\\s*[:=#]?\\s*${id}`, "giu"),
+    new RegExp(`(?<![\\p{L}\\p{N}&/]\\s*)#${id}`, "gu"),
+  ];
+  let cleaned = text;
+  for (const pattern of patterns) {
+    cleaned = cleaned.replaceAll(pattern, "…");
+  }
+  return cleaned;
 }
 
 // Names the hub shows the owner in a run's states: rooms, accessories and
