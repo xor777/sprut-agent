@@ -4604,6 +4604,19 @@ function applyWindowEffects(state, windowKey, window, updates) {
       }
     }
     if (
+      controllerChild[1].startsWith("xiaomi_") &&
+      updates.some(
+        ({ key, value }) => key === "joinButton" && value?.boolValue === true,
+      )
+    ) {
+      joinXiaomiChild(state, {
+        windowKey,
+        window,
+        extensionKey: `Controller:${controllerChild[1]}`,
+        childId: controllerChild[2],
+      });
+    }
+    if (
       updates.some(
         ({ key, value }) => key === "Remove" && value?.boolValue === true,
       )
@@ -4705,6 +4718,103 @@ function removeControllerChild(
   );
   delete state.windows[windowKey];
   state.removedWindows.add(windowKey);
+}
+
+function resolveJoinRoom(state, window) {
+  const joinRoomOption = (window.options ?? []).find(
+    (option) => option.key === "joinRoom",
+  );
+  const raw = joinRoomOption?.value?.stringValue;
+  if (typeof raw === "string" && raw.length > 0) {
+    const byId = state.rooms.find((room) => String(room.id) === raw);
+    if (byId) return byId;
+    const byName = state.rooms.find((room) => room.name === raw);
+    if (byName) return byName;
+    const matched = (joinRoomOption?.validValues ?? []).find(
+      (candidate) => candidate?.value?.stringValue === raw,
+    );
+    if (typeof matched?.name === "string") {
+      const byLabel = state.rooms.find((room) => room.name === matched.name);
+      if (byLabel) return byLabel;
+    }
+  }
+  return state.rooms[0];
+}
+
+function joinXiaomiChild(state, { windowKey, window, extensionKey, childId }) {
+  const extension = state.extensions.find(
+    (candidate) => candidate.extensionKey === extensionKey,
+  );
+  const child = extension?.children?.find((entry) => entry.id === childId);
+  if (child?.spaceKey === "main" || child?.joinDeferred === true) return;
+  const room = resolveJoinRoom(state, window);
+  const id = nextId(state.accessories.map((accessory) => accessory.id));
+  const name = child?.name ?? window.label?.text ?? childId;
+  const accessory = buildAccessory(state, {
+    id,
+    name,
+    roomId: room.id,
+    online: child?.online !== false,
+    virtual: false,
+    extensionKey,
+    deviceId: childId,
+    manufacturer: "Xiaomi",
+    model: "Xiaomi Device",
+    services: [
+      {
+        sId: 13,
+        type: "Switch",
+        name,
+        characteristics: [
+          { cId: 14, type: "Name", value: name },
+          { cId: 15, type: "On", value: false },
+        ],
+      },
+    ],
+  });
+  accessory.deviceWindow = windowKey;
+  accessory.lastUpdate = hubNow(state);
+  state.accessories.push(accessory);
+  if (child) {
+    child.spaceKey = "main";
+    child.optionsWindow = windowKey;
+  }
+  window.options = (window.options ?? []).filter(
+    ({ key }) => key !== "joinRoom" && key !== "joinButton",
+  );
+  const accessoriesList = window.options.find(
+    (option) =>
+      option?.inputType === "ACCESSORY_LIST" &&
+      option.read === true &&
+      option.write !== true,
+  );
+  const linkedEntry = {
+    name: accessory.name,
+    value: { intValue: accessory.id },
+  };
+  if (accessoriesList) {
+    accessoriesList.validValues = [
+      ...(Array.isArray(accessoriesList.validValues)
+        ? accessoriesList.validValues
+        : []),
+      linkedEntry,
+    ];
+  } else {
+    window.options.unshift({
+      key: "AccessoriesList",
+      name: "Аксессуары",
+      type: "GenericInteger",
+      inputType: "ACCESSORY_LIST",
+      parent: "",
+      read: true,
+      write: false,
+      disabled: false,
+      visible: true,
+      value: { intValue: 0 },
+      validValues: [linkedEntry],
+    });
+  }
+  emitAccessories(state, "EVENT_ADD", [accessory]);
 }
 
 function withFixtureFaults(fixture, faults) {

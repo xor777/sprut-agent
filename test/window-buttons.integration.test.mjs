@@ -21,6 +21,7 @@ const TELEGRAM_EXTENSION_KEY = "Notification:telegram_1";
 const TELEGRAM_WINDOW = "Notification/telegram_1/";
 const ZIGBEE_CONTROLLER_WINDOW = "Controller/zigbee_1/";
 const ZIGBEE_THERMOSTAT_WINDOW = "Controller/zigbee_1/Child/0x1234/";
+const XIAOMI_CONTROLLER_WINDOW = "Controller/xiaomi_1/";
 const XIAOMI_CHILD_WINDOW = "Controller/xiaomi_1/Child/mi_01/";
 const CALIBRATION_KEY =
   "/1/FCC0_ManufacturerSpecific/00F4_ThermostatValveCalibration/false";
@@ -311,6 +312,21 @@ function zigbeeControllerWindow() {
   };
 }
 
+function xiaomiControllerWindow() {
+  return {
+    windowKey: XIAOMI_CONTROLLER_WINDOW,
+    label: { text: "Xiaomi" },
+    options: [
+      optionEntry("Login", "Войти", "GenericBoolean", "BUTTON", {
+        boolValue: true,
+      }),
+      optionEntry("Logout", "Выйти", "GenericBoolean", "BUTTON", {
+        boolValue: true,
+      }),
+    ],
+  };
+}
+
 function xiaomiChildWindow() {
   return {
     windowKey: XIAOMI_CHILD_WINDOW,
@@ -357,6 +373,7 @@ async function setup(
   hub.state.windows[ZIGBEE_THERMOSTAT_WINDOW] =
     zigbeeThermostatWindow(thermostatOptions);
   hub.state.windows[ZIGBEE_CONTROLLER_WINDOW] = zigbeeControllerWindow();
+  hub.state.windows[XIAOMI_CONTROLLER_WINDOW] = xiaomiControllerWindow();
   hub.state.windows[XIAOMI_CHILD_WINDOW] = xiaomiChildWindow();
   // Add hub-window buttons so refusals on "" can be exercised too.
   hub.state.windows[""].options.push(
@@ -613,7 +630,7 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
     [CALIBRATION_KEY, "Repair", "readAllAttributes", "Remove"],
   );
 
-  // 5. Xiaomi child window: joinRoom TEXT-with-validValues is supported; plain TEXT ip is not.
+  // 5. Xiaomi child window: joinRoom TEXT-with-validValues and joinButton are supported; plain TEXT ip is not.
   const xiaomi = await callOk(client, "get_entity", {
     entity_ref: windowRef(XIAOMI_CHILD_WINDOW),
   });
@@ -625,12 +642,14 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
   assert.equal(joinRoomOpt.native_change.operation, "window_option");
   assert.equal(ipOpt.native_change.supported, false);
   assert.equal(ipOpt.native_change.reason, "unsupported_input_type");
-  assert.equal(
-    Object.hasOwn(
-      xiaomi.entity.commands.find(({ key }) => key === "joinButton"),
-      "native_change",
-    ),
-    false,
+  assert.deepEqual(
+    xiaomi.entity.commands.find(({ key }) => key === "joinButton")
+      .native_change,
+    {
+      native_write: true,
+      supported: true,
+      operation: "window_button",
+    },
   );
 });
 
@@ -1178,9 +1197,15 @@ test("window_button enforces strict allowlist refusals, hidden/disabled/token ch
     ],
     ["Scenario Remove", scenarioWinRef, "Remove", "unsupported_window_button"],
     [
-      "Xiaomi joinButton (not allowlisted)",
-      windowRef(XIAOMI_CHILD_WINDOW),
-      "joinButton",
+      "Xiaomi controller Login (refused)",
+      windowRef(XIAOMI_CONTROLLER_WINDOW),
+      "Login",
+      "unsupported_window_button",
+    ],
+    [
+      "Xiaomi controller Logout (refused)",
+      windowRef(XIAOMI_CONTROLLER_WINDOW),
+      "Logout",
       "unsupported_window_button",
     ],
     ["Hidden allowlisted Logout", tgRef, "Logout", "window_button_hidden"],
