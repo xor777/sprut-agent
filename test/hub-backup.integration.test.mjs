@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -698,5 +699,257 @@ test("configuration_point rejects invalid hub_backup combinations before contact
   assert.ok(
     instructions.length <= 2_048,
     `instructions exceeded 2048 chars: ${instructions.length}`,
+  );
+});
+
+test("multi-chunk hub_backup=create does not trigger home_changing on concurrent find_devices(refresh) or invalidate warm HomeState", async (t) => {
+  const zipBuffer = createMinimalZipBuffer(1_200_000);
+  const { hub, client } = await setup(t, {
+    backup: { bytes: zipBuffer },
+    timeoutMs: 5_000,
+  });
+
+  // 1. Overlap 10 file.filePart chunks with an in-flight find_devices(refresh: true).
+  await callOk(client, "find_devices", {});
+  hub.restEvent();
+  hub.delayReplies("file.filePart", 40);
+  hub.delayReplies("accessory.list", 75);
+  const [created, refreshed] = await Promise.all([
+    callOk(client, "configuration_point", { hub_backup: "create" }),
+    callOk(client, "find_devices", { refresh: true }),
+  ]);
+  assert.equal(created.status, "ok");
+  assert.equal(created.backup.size_bytes, zipBuffer.length);
+  assert.equal(refreshed.status, "ok");
+
+  // 2. Sequential hub_backup=create on a warm HomeState must not bust warm cache.
+  hub.delayReplies("file.filePart", 0);
+  hub.delayReplies("accessory.list", 0);
+  hub.restEvent();
+  const readsBeforeBackup = hub.requests.filter(
+    ({ method }) => method === "accessory.list",
+  ).length;
+  const sequential = await callOk(client, "configuration_point", {
+    hub_backup: "create",
+  });
+  assert.equal(sequential.status, "ok");
+  assert.equal(sequential.backup.size_bytes, zipBuffer.length);
+  const followUp = await callOk(client, "find_devices", {});
+  assert.equal(followUp.status, "ok");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "accessory.list").length,
+    readsBeforeBackup,
+    "hub_backup=create must not invalidate warm HomeState",
+  );
+});
+
+test("hub_backup=create refuses read-only backup directories without chmod-enabling writes and sends 0 file.backups requests", async (t) => {
+  const zipBuffer = createMinimalZipBuffer(8_192);
+
+  // 1. Read-only <stateDir>/backups (0o500)
+  {
+    const { hub, client, stateDirectory } = await setup(t, {
+      backup: { bytes: zipBuffer },
+    });
+    const backupsRoot = path.join(stateDirectory, "backups");
+    await mkdir(backupsRoot, { mode: 0o700 });
+    await chmod(backupsRoot, 0o500);
+    t.after(async () => {
+      await chmod(backupsRoot, 0o700).catch(() => {});
+    });
+
+    const failed = await callError(client, "configuration_point", {
+      hub_backup: "create",
+    });
+    assert.equal(failed.error.code, "state_storage_unavailable");
+    assert.equal(
+      (await stat(backupsRoot)).mode & 0o777,
+      0o500,
+      "must never re-enable write bit on read-only backups root",
+    );
+    assert.equal(
+      hub.requests.filter(({ method }) => method === "file.backups").length,
+      0,
+    );
+  }
+
+  // 2. Read-only <stateDir>/backups/<fp> (0o500) and 0o555
+  for (const mode of [0o500, 0o555]) {
+    const { hub, client, stateDirectory } = await setup(t, {
+      backup: { bytes: zipBuffer },
+    });
+    const hubDir = backupsDirFor(stateDirectory, hub.url, hub.serial);
+    await mkdir(hubDir, { recursive: true, mode: 0o700 });
+    await chmod(hubDir, mode);
+    t.after(async () => {
+      await chmod(hubDir, 0o700).catch(() => {});
+    });
+
+    const failed = await callError(client, "configuration_point", {
+      hub_backup: "create",
+    });
+    assert.equal(failed.error.code, "state_storage_unavailable");
+    assert.equal(
+      (await stat(hubDir)).mode & 0o777,
+      mode,
+      `must never modify read-only ${mode.toString(8)} hub backup directory`,
+    );
+    assert.equal(
+      hub.requests.filter(({ method }) => method === "file.backups").length,
+      0,
+    );
+  }
+
+  // 3. Existing writable 0o755 backup dir is tightened to 0o700 and succeeds.
+  {
+    const { hub, client, stateDirectory } = await setup(t, {
+      backup: { bytes: zipBuffer },
+    });
+    const hubDir = backupsDirFor(stateDirectory, hub.url, hub.serial);
+    await mkdir(hubDir, { recursive: true, mode: 0o755 });
+    await chmod(path.dirname(hubDir), 0o755);
+    await chmod(hubDir, 0o755);
+
+    const created = await callOk(client, "configuration_point", {
+      hub_backup: "create",
+    });
+    assert.equal(created.status, "ok");
+    assert.equal((await stat(path.dirname(hubDir))).mode & 0o777, 0o700);
+    assert.equal((await stat(hubDir)).mode & 0o777, 0o700);
+  }
+});
+
+test("configuration_point rejects hub_backup combined with pointer, offset, or version before contacting the hub", async (t) => {
+  const { hub, client } = await setup(t);
+  const pagingCombos = [
+    { hub_backup: "create", pointer: "/backup" },
+    { hub_backup: "create", offset: 0 },
+    { hub_backup: "create", version: "v1" },
+    { hub_backup: "list", pointer: "/local_backups" },
+    { hub_backup: "list", offset: 0 },
+    { hub_backup: "list", version: "v1" },
+  ];
+  for (const args of pagingCombos) {
+    const failed = await callError(client, "configuration_point", args);
+    assert.equal(failed.error.code, "invalid_point_call", JSON.stringify(args));
+    assert.equal(failed.error.action, "configuration_point");
+  }
+  assert.equal(hub.requests.length, 0);
+});
+
+test("hub_backup=list works without hub credentials, surfaces unreadable connection.env, and rejects foreign/malformed home_ref before login", async (t) => {
+  const zipBuffer = createMinimalZipBuffer(8_192);
+  const { hub, client, stateDirectory } = await setup(t, {
+    backup: { bytes: zipBuffer },
+  });
+  const created = await callOk(client, "configuration_point", {
+    hub_backup: "create",
+  });
+
+  // 1. Fresh server with SPRUTHUB_URL + SPRUTHUB_SERIAL and NO credentials lists local backups.
+  const emptyConfigRoot = await mkdtemp(
+    path.join(tmpdir(), "sprut-agent-empty-config-"),
+  );
+  t.after(async () => {
+    await rm(emptyConfigRoot, { recursive: true, force: true });
+  });
+  const noCreds = await connectServer(t, {
+    env: {
+      SPRUTHUB_URL: hub.url,
+      SPRUTHUB_SERIAL: hub.serial,
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
+      XDG_CONFIG_HOME: emptyConfigRoot,
+    },
+  });
+  const listedNoCreds = await callOk(noCreds.client, "configuration_point", {
+    hub_backup: "list",
+  });
+  assert.equal(listedNoCreds.status, "ok");
+  assert.equal(listedNoCreds.hub_backups_unread, true);
+  assert.deepEqual(listedNoCreds.hub_backups, []);
+  assert.equal(listedNoCreds.local_backups.length, 1);
+  assert.equal(
+    listedNoCreds.local_backups[0].file_name,
+    created.backup.file_name,
+  );
+
+  // 2. Unreadable / wrong-mode connection.env (0o644) still surfaces credential_file_unavailable.
+  const badConfigRoot = await mkdtemp(
+    path.join(tmpdir(), "sprut-agent-bad-config-"),
+  );
+  t.after(async () => {
+    await rm(badConfigRoot, { recursive: true, force: true });
+  });
+  const badEnvDir = path.join(badConfigRoot, "sprut-agent");
+  await mkdir(badEnvDir, { recursive: true });
+  const badEnvFile = path.join(badEnvDir, "connection.env");
+  await writeFile(badEnvFile, "SPRUTHUB_LOGIN=owner@example.invalid\n", {
+    mode: 0o644,
+  });
+  await chmod(badEnvFile, 0o644);
+  const badConfigServer = await connectServer(t, {
+    env: {
+      SPRUTHUB_URL: hub.url,
+      SPRUTHUB_SERIAL: hub.serial,
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
+      XDG_CONFIG_HOME: badConfigRoot,
+    },
+  });
+  const badConfigError = await callError(
+    badConfigServer.client,
+    "configuration_point",
+    { hub_backup: "list" },
+  );
+  assert.equal(badConfigError.error.code, "credential_file_unavailable");
+
+  // 3. Foreign or malformed home_ref under SPRUTHUB_LOGIN/SPRUTHUB_PASSWORD
+  //    rejects locally with ZERO hub requests (no account.auth / hub.list).
+  const loginFixture = await loadHomeFixture("apartment");
+  const loginHub = await startSimulatedHub(loginFixture, {
+    account: {
+      login: "owner@example.invalid",
+      password: "correct-password-123",
+    },
+  });
+  t.after(async () => {
+    await loginHub.close().catch(() => {});
+  });
+  const loginServer = await connectServer(t, {
+    env: {
+      SPRUTHUB_URL: loginHub.url,
+      SPRUTHUB_SERIAL: loginHub.serial,
+      SPRUTHUB_LOGIN: "owner@example.invalid",
+      SPRUTHUB_PASSWORD: "correct-password-123",
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
+      XDG_CONFIG_HOME: emptyConfigRoot,
+    },
+  });
+
+  for (const [args, expectedCode] of [
+    [
+      { hub_backup: "create", home_ref: "spruthub://hub/foreign-home" },
+      "wrong_home",
+    ],
+    [
+      { hub_backup: "list", home_ref: "spruthub://hub/foreign-home" },
+      "wrong_home",
+    ],
+    [{ hub_backup: "create", home_ref: "not-a-home-ref" }, "invalid_home_ref"],
+    [
+      { hub_backup: "list", home_ref: `${HOME_REF}/room/1` },
+      "invalid_home_ref",
+    ],
+  ]) {
+    const failed = await callError(
+      loginServer.client,
+      "configuration_point",
+      args,
+    );
+    assert.equal(failed.error.code, expectedCode, JSON.stringify(args));
+  }
+  assert.equal(
+    loginHub.requests.length,
+    0,
+    "foreign/malformed home_ref must reject locally before any hub login/RPC",
   );
 });
