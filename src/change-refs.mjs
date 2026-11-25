@@ -588,3 +588,13 @@ export function writeRejection(error) {
       : {}),
   };
 }
+
+export async function readRoomOrNull(client, roomId) {
+  if (typeof roomId !== "number") return null;
+  try {
+    return await client.getRoom(roomId);
+  } catch (error) {
+    if (!isHubReadFailure(error)) throw error;
+    return null;
+  }
+}
