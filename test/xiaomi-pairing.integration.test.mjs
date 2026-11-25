@@ -1315,3 +1315,468 @@ test("Xiaomi joinButton redacts secrets in metadata/responses/journal files and 
     "general window_button contract must stay <= 4096 bytes",
   );
 });
+
+test("joinRoom drift between prepare and apply conflicts without writing, preserves prepared room, and detects drift across redacted room values", async (t) => {
+  const secretRoomA = "RoomSecretAlpha111";
+  const secretRoomB = "RoomSecretBeta222";
+  const secretChildId = "mi_room_drift_10";
+  const secretWindowKey = `Controller/xiaomi_1/Child/${secretChildId}/`;
+  const { hub, client, stateDirectory } = await setup(t, {
+    patch: (fixture) => {
+      const xiaomi = fixture.extensions.find(
+        ({ extensionKey }) => extensionKey === XIAOMI_EXT_KEY,
+      );
+      xiaomi.children.push({
+        id: secretChildId,
+        name: "Датчик с секретной комнатой",
+        spaceKey: "discovery",
+        online: true,
+        optionsWindow: secretWindowKey,
+      });
+    },
+  });
+
+  // 1. Plain joinRoom change (Living Room -> Kitchen) between prepare and apply -> conflict join_room_changed, 0 writes.
+  const winRef = windowRef(XIAOMI_ONLINE_WINDOW);
+  const prepRoomDrift = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Подключить увлажнитель в гостиной",
+  });
+  assert.deepEqual(prepRoomDrift.xiaomi_join.selected_room, {
+    value: String(LIVING_ROOM),
+    name: "Гостиная",
+  });
+  hub.state.windows[XIAOMI_ONLINE_WINDOW].options.find(
+    ({ key }) => key === "joinRoom",
+  ).value.stringValue = String(KITCHEN);
+
+  const conflictRoom = await callOk(client, "apply_native_change", {
+    change_ref: prepRoomDrift.change_ref,
+  });
+  assert.equal(conflictRoom.status, "conflict");
+  assert.equal(conflictRoom.conflict_reason, "join_room_changed");
+  assert.equal(conflictRoom.native_write_sent, false);
+  // Prepared selected_room MUST stay intact rather than being overwritten!
+  assert.deepEqual(conflictRoom.xiaomi_join.selected_room, {
+    value: String(LIVING_ROOM),
+    name: "Гостиная",
+  });
+  assert.deepEqual(hub.writes(), []);
+
+  // 2. joinRoom disappearing between prepare and apply -> conflict join_room_changed, 0 writes.
+  const prepDisappear = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Подключить увлажнитель на кухне",
+  });
+  hub.state.windows[XIAOMI_ONLINE_WINDOW].options = hub.state.windows[
+    XIAOMI_ONLINE_WINDOW
+  ].options.filter(({ key }) => key !== "joinRoom");
+  const conflictDisappear = await callOk(client, "apply_native_change", {
+    change_ref: prepDisappear.change_ref,
+  });
+  assert.equal(conflictDisappear.status, "conflict");
+  assert.equal(conflictDisappear.conflict_reason, "join_room_changed");
+  assert.equal(conflictDisappear.native_write_sent, false);
+  assert.deepEqual(hub.writes(), []);
+
+  // 3. Two distinct credential-shaped joinRoom values both redact to [REDACTED], yet SHA-256 baseline still detects drift!
+  hub.state.windows[secretWindowKey] = xiaomiDiscoveryWindow(
+    secretWindowKey,
+    "Датчик с секретной комнатой",
+    {
+      selectedRoom: `token=${secretRoomA}`,
+      roomValidValues: [
+        {
+          name: `Комната token=${secretRoomA}`,
+          value: { stringValue: `token=${secretRoomA}` },
+        },
+        {
+          name: `Комната token=${secretRoomB}`,
+          value: { stringValue: `token=${secretRoomB}` },
+        },
+      ],
+    },
+  );
+  const prepSecretDrift = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(secretWindowKey),
+    option_key: "joinButton",
+    reason: "Подключить датчик Xiaomi",
+  });
+  assertNoSecrets(prepSecretDrift, [secretRoomA, secretRoomB]);
+  assert.equal(prepSecretDrift.xiaomi_join.selected_room.value, "[REDACTED]");
+
+  hub.state.windows[secretWindowKey].options.find(
+    ({ key }) => key === "joinRoom",
+  ).value.stringValue = `token=${secretRoomB}`;
+  const conflictSecret = await callOk(client, "apply_native_change", {
+    change_ref: prepSecretDrift.change_ref,
+  });
+  assert.equal(conflictSecret.status, "conflict");
+  assert.equal(conflictSecret.conflict_reason, "join_room_changed");
+  assert.equal(conflictSecret.native_write_sent, false);
+  assertNoSecrets(conflictSecret, [secretRoomA, secretRoomB]);
+  assertNoSecrets(await readAllStateText(stateDirectory), [
+    secretRoomA,
+    secretRoomB,
+  ]);
+  assert.deepEqual(hub.writes(), []);
+
+  // 4. Unchanged joinRoom while online metadata flips false -> true succeeds and refreshes online.
+  const purifierRef = windowRef(XIAOMI_ROOM_ERR_WINDOW);
+  const xiaomiExt = hub.state.extensions.find(
+    ({ extensionKey }) => extensionKey === XIAOMI_EXT_KEY,
+  );
+  const purifierChild = xiaomiExt.children.find(
+    ({ id }) => id === XIAOMI_ROOM_ERR_ID,
+  );
+  purifierChild.online = false;
+  const prepSameRoom = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: purifierRef,
+    option_key: "joinButton",
+    reason: "Подключить очиститель Xiaomi",
+  });
+  assert.equal(prepSameRoom.xiaomi_join.online, false);
+  purifierChild.online = true;
+  const appliedSameRoom = await callOk(client, "apply_native_change", {
+    change_ref: prepSameRoom.change_ref,
+  });
+  assert.equal(appliedSameRoom.status, "applied");
+  assert.equal(appliedSameRoom.xiaomi_join.online, true);
+  assert.equal(appliedSameRoom.verification.result, "xiaomi_join_observed");
+});
+
+test("confirmed-missing child and non-discovery spaceKey are refused on prepare and conflict on apply", async (t) => {
+  const missingChildId = "mi_missing_11";
+  const missingWindowKey = `Controller/xiaomi_1/Child/${missingChildId}/`;
+  const ignoredChildId = "mi_ignored_12";
+  const ignoredWindowKey = `Controller/xiaomi_1/Child/${ignoredChildId}/`;
+  const emptySpaceChildId = "mi_empty_space_13";
+  const emptySpaceWindowKey = `Controller/xiaomi_1/Child/${emptySpaceChildId}/`;
+
+  const { hub, client } = await setup(t, {
+    patch: (fixture) => {
+      const xiaomi = fixture.extensions.find(
+        ({ extensionKey }) => extensionKey === XIAOMI_EXT_KEY,
+      );
+      xiaomi.children.push(
+        {
+          id: ignoredChildId,
+          name: "Игнорируемое устройство Xiaomi",
+          spaceKey: "ignored",
+          online: true,
+          optionsWindow: ignoredWindowKey,
+        },
+        {
+          id: emptySpaceChildId,
+          name: "Устройство без вкладки",
+          spaceKey: "",
+          online: true,
+          optionsWindow: emptySpaceWindowKey,
+        },
+      );
+    },
+  });
+
+  hub.state.windows[missingWindowKey] = xiaomiDiscoveryWindow(
+    missingWindowKey,
+    "Отсутствующий ребёнок Xiaomi",
+  );
+  hub.state.windows[ignoredWindowKey] = xiaomiDiscoveryWindow(
+    ignoredWindowKey,
+    "Игнорируемое устройство Xiaomi",
+  );
+  hub.state.windows[emptySpaceWindowKey] = xiaomiDiscoveryWindow(
+    emptySpaceWindowKey,
+    "Устройство без вкладки",
+  );
+
+  // 1. Confirmed missing child -> xiaomi_child_not_found (retryable: false, no inline contract).
+  const missingErr = await callError(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(missingWindowKey),
+    option_key: "joinButton",
+    reason: "Подключить отсутствующего ребёнка Xiaomi",
+  });
+  assert.equal(missingErr.error.code, "xiaomi_child_not_found");
+  assert.equal(missingErr.error.retryable, false);
+  assert.equal(missingErr.contract, undefined);
+
+  // 2. Unexpected spaceKey ("ignored" and "") -> xiaomi_child_not_in_discovery (retryable: false, no contract).
+  for (const [label, key] of [
+    ["ignored space", ignoredWindowKey],
+    ["empty space", emptySpaceWindowKey],
+  ]) {
+    const spaceErr = await callError(client, "prepare_native_change", {
+      operation: "window_button",
+      target_ref: windowRef(key),
+      option_key: "joinButton",
+      reason: `Подключить устройство (${label})`,
+    });
+    assert.equal(spaceErr.error.code, "xiaomi_child_not_in_discovery", label);
+    assert.equal(spaceErr.error.retryable, false, label);
+    assert.equal(spaceErr.contract, undefined, label);
+  }
+
+  // 3. Child vanishes from extensionChild.list between prepare and apply -> conflict xiaomi_child_not_found, 0 writes.
+  const prepVanish = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(XIAOMI_ONLINE_WINDOW),
+    option_key: "joinButton",
+    reason: "Подключить увлажнитель перед исчезновением из списка детей",
+  });
+  const xiaomiExt = hub.state.extensions.find(
+    ({ extensionKey }) => extensionKey === XIAOMI_EXT_KEY,
+  );
+  xiaomiExt.children = xiaomiExt.children.filter(
+    ({ id }) => id !== XIAOMI_ONLINE_ID,
+  );
+  const vanishConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepVanish.change_ref,
+  });
+  assert.equal(vanishConflict.status, "conflict");
+  assert.equal(vanishConflict.conflict_reason, "xiaomi_child_not_found");
+  assert.equal(vanishConflict.native_write_sent, false);
+
+  // 4. Child moves to non-discovery spaceKey between prepare and apply -> conflict xiaomi_child_not_in_discovery, 0 writes.
+  const prepSpaceDrift = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(XIAOMI_ROOM_ERR_WINDOW),
+    option_key: "joinButton",
+    reason: "Подключить очиститель перед сменой вкладки",
+  });
+  xiaomiExt.children.find(({ id }) => id === XIAOMI_ROOM_ERR_ID).spaceKey =
+    "notConnected";
+  const spaceConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepSpaceDrift.change_ref,
+  });
+  assert.equal(spaceConflict.status, "conflict");
+  assert.equal(spaceConflict.conflict_reason, "xiaomi_child_not_in_discovery");
+  assert.equal(spaceConflict.native_write_sent, false);
+
+  // 5. prepare tolerates transient extensionChild.list failure (child_unread: true),
+  //    then apply enforces confirmed discovery spaceKey and conflicts if missing!
+  hub.refuseNext("extensionChild.list", {
+    code: -32603,
+    message: "Temporary child list error on prepare",
+  });
+  const prepUnreadMissing = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(missingWindowKey),
+    option_key: "joinButton",
+    reason: "Подготовить при сбое extensionChild.list",
+  });
+  assert.equal(prepUnreadMissing.status, "prepared");
+  assert.equal(prepUnreadMissing.xiaomi_join.child_unread, true);
+  const applyMissingConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepUnreadMissing.change_ref,
+  });
+  assert.equal(applyMissingConflict.status, "conflict");
+  assert.equal(applyMissingConflict.conflict_reason, "xiaomi_child_not_found");
+  assert.equal(applyMissingConflict.native_write_sent, false);
+
+  assert.deepEqual(hub.writes(), []);
+});
+
+test("transient window.get request_rejected (-32603 / -32000) during apply keeps xiaomi_join prepared, while closed window after join/removal conflicts accurately", async (t) => {
+  const { hub, client } = await setup(t);
+  const winRef = windowRef(XIAOMI_ONLINE_WINDOW);
+  const purifierRef = windowRef(XIAOMI_ROOM_ERR_WINDOW);
+  const xiaomiExt = hub.state.extensions.find(
+    ({ extensionKey }) => extensionKey === XIAOMI_EXT_KEY,
+  );
+
+  // 1. Transient window.get -32603 while child is still in discovery -> rethrows error, 0 writes, stays prepared!
+  const prep = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Подключить увлажнитель при временной ошибке window.get",
+  });
+  hub.refuseNext("window.get", {
+    code: -32603,
+    message: "Temporary internal window error",
+  });
+  const err32603 = await callError(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(err32603.error.code, "request_rejected");
+  assert.deepEqual(hub.writes(), []);
+
+  // 2. Transient window.get -32000 (hub busy) -> rethrows error, 0 writes, stays prepared!
+  hub.refuseNext("window.get", {
+    code: -32000,
+    message: "Hub busy",
+  });
+  const err32000 = await callError(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(err32000.error.code, "request_rejected");
+  assert.deepEqual(hub.writes(), []);
+
+  // 3. Transient window.get -32603 AND extensionChild.list also fails -> rethrows original error, stays prepared!
+  hub.refuseNext("window.get", {
+    code: -32603,
+    message: "Temporary window error during outage",
+  });
+  hub.refuseNext("extensionChild.list", {
+    code: -32603,
+    message: "Temporary child list error during outage",
+  });
+  const errBoth = await callError(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(errBoth.error.code, "request_rejected");
+  assert.deepEqual(hub.writes(), []);
+
+  // Verify status is STILL prepared and retrying apply succeeds!
+  const stillPrepared = await callOk(client, "get_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(stillPrepared.status, "prepared");
+  const appliedRetry = await callOk(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(appliedRetry.status, "applied");
+  assert.equal(appliedRetry.verification.result, "xiaomi_join_observed");
+  const writesAfterRetry = hub.writes().length;
+
+  // 4. Closed/removed window after child moved to main -> conflict xiaomi_device_already_joined, 0 writes!
+  const prepClosedMain = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: purifierRef,
+    option_key: "joinButton",
+    reason: "Проверить закрытое окно после переноса в main",
+  });
+  xiaomiExt.children.find(({ id }) => id === XIAOMI_ROOM_ERR_ID).spaceKey =
+    "main";
+  delete hub.state.windows[XIAOMI_ROOM_ERR_WINDOW];
+  hub.state.removedWindows.add(XIAOMI_ROOM_ERR_WINDOW);
+  const closedMainConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepClosedMain.change_ref,
+  });
+  assert.equal(closedMainConflict.status, "conflict");
+  assert.equal(
+    closedMainConflict.conflict_reason,
+    "xiaomi_device_already_joined",
+  );
+  assert.equal(closedMainConflict.native_write_sent, false);
+  assert.equal(hub.writes().length, writesAfterRetry);
+
+  // 5. Closed/removed window after child vanished from extensionChild.list -> conflict window_button_not_found, 0 writes!
+  const prepClosedMissing = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: windowRef(XIAOMI_OFFLINE_WINDOW),
+    option_key: "joinButton",
+    reason: "Проверить закрытое окно после удаления ребёнка",
+  });
+  xiaomiExt.children = xiaomiExt.children.filter(
+    ({ id }) => id !== XIAOMI_OFFLINE_ID,
+  );
+  delete hub.state.windows[XIAOMI_OFFLINE_WINDOW];
+  hub.state.removedWindows.add(XIAOMI_OFFLINE_WINDOW);
+  const closedMissingConflict = await callOk(client, "apply_native_change", {
+    change_ref: prepClosedMissing.change_ref,
+  });
+  assert.equal(closedMissingConflict.status, "conflict");
+  assert.equal(
+    closedMissingConflict.conflict_reason,
+    "window_button_not_found",
+  );
+  assert.equal(closedMissingConflict.native_write_sent, false);
+  assert.equal(hub.writes().length, writesAfterRetry);
+});
+
+test("get_native_change on unsent, rejected, or conflicted xiaomi_join changes never indexes them under a later-created accessory", async (t) => {
+  const { hub, client } = await setup(t);
+  const winRef = windowRef(XIAOMI_ONLINE_WINDOW);
+
+  // Prepare 4 changes targeting the same Xiaomi discovery child:
+  // A: stays prepared (unsent)
+  // B: gets rejected by hub (not_applied)
+  // C: conflicts due to joinRoom drift (conflict)
+  // D: actually joins the Xiaomi child and creates the accessory (applied)
+  const changeA = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Черновик A (не отправлен)",
+  });
+  const changeB = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Попытка B (отказ хаба)",
+  });
+  hub.refuseNext("window.update", {
+    code: -32603,
+    message: "Rejected by hub",
+  });
+  await callError(client, "apply_native_change", {
+    change_ref: changeB.change_ref,
+  });
+
+  const changeC = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Попытка C (конфликт до записи)",
+  });
+  const joinBtn = hub.state.windows[XIAOMI_ONLINE_WINDOW].options.find(
+    ({ key }) => key === "joinButton",
+  );
+  joinBtn.disabled = true;
+  const conflictedC = await callOk(client, "apply_native_change", {
+    change_ref: changeC.change_ref,
+  });
+  assert.equal(conflictedC.status, "conflict");
+  joinBtn.disabled = false;
+
+  const changeD = await callOk(client, "prepare_native_change", {
+    operation: "window_button",
+    target_ref: winRef,
+    option_key: "joinButton",
+    reason: "Попытка D (успешное подключение)",
+  });
+  const appliedD = await callOk(client, "apply_native_change", {
+    change_ref: changeD.change_ref,
+  });
+  assert.equal(appliedD.status, "applied");
+  const createdRef = appliedD.observed_effect.created_accessories[0].ref;
+
+  // Now call get_native_change on A (prepared), B (not_applied), and C (conflict) AFTER D created the accessory.
+  for (const ref of [
+    changeA.change_ref,
+    changeB.change_ref,
+    changeC.change_ref,
+  ]) {
+    await callOk(client, "get_native_change", { change_ref: ref });
+  }
+
+  // History for the created accessory MUST include D and MUST NOT include A, B, or C!
+  const accHistory = await callOk(client, "get_native_change", {
+    home_ref: HOME_REF,
+    entity_ref: createdRef,
+  });
+  const historyRefs = accHistory.changes.map(({ change_ref }) => change_ref);
+  assert.ok(
+    historyRefs.includes(changeD.change_ref),
+    `created accessory history must include applied change D (${changeD.change_ref})`,
+  );
+  for (const [label, ref] of [
+    ["unsent prepared A", changeA.change_ref],
+    ["rejected not_applied B", changeB.change_ref],
+    ["conflicted C", changeC.change_ref],
+  ]) {
+    assert.equal(
+      historyRefs.includes(ref),
+      false,
+      `created accessory history must NOT include ${label} (${ref})`,
+    );
+  }
+});
