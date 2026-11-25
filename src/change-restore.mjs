@@ -7,6 +7,7 @@ import {
 } from "./light-group-members.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
+import { WINDOW_BUTTON } from "./window-buttons.mjs";
 
 export function restoreIntentTime(change) {
   return change.write_intent?.direction === "restore"
@@ -261,7 +262,7 @@ export function restoreChangesResult(homeRef, results) {
     limitations: [
       "Results are in the order the changes were undone: newest first. Each item was checked against the home right before its own write.",
       "skipped changed_since: the value or configuration changed after the agent's change (by hand, in the app or by a scenario) and was left as it is; already_previous=true means it is already as before. later_change: undo later_change_ref first, or together. device_unavailable: the device is offline; try again when it is back. lamp_level_not_restored: undo puts back only a lamp's on/off, never its brightness, hue, saturation or color temperature, as on the hub's lamps a brightness write switches an off lamp on; a lamp is any service with On and such a level.",
-      "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, sent notifications and HTTP requests cannot be undone.",
+      "A device command is put back as a value; what happened meanwhile (light, movement, a scenario it triggered) is not undone. Scenario runs, window button presses, sent notifications and HTTP requests cannot be undone.",
     ],
   };
 }
@@ -295,6 +296,8 @@ export function changeName(change) {
     case "scenario_delete":
     case "logic_source_update":
       return change.baseline_snapshot?.name;
+    case WINDOW_BUTTON:
+      return change.button_name ?? change.option_key;
     default:
       return undefined;
   }

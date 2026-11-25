@@ -59,6 +59,8 @@ function optionEntry(key, name, type, inputType, value, extra = {}) {
 function telegramExtension() {
   return {
     extensionKey: TELEGRAM_EXTENSION_KEY,
+    type: "telegram",
+    index: "telegram_1",
     bundleType: "NOTIFICATION",
     name: "Telegram",
     state: "FAILED",
@@ -463,7 +465,7 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
     entity_ref: windowRef(TELEGRAM_WINDOW),
   });
   assertNoSecrets(tg);
-  const tgConfig = tg.entity.physical_configuration;
+  const tgConfig = tg.entity;
   assert.equal(tgConfig.error, "Ошибка загрузки");
   assert.equal(tgConfig.status, "Подключение не активно");
 
@@ -525,7 +527,7 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
   const tgLoggedIn = await callOk(client, "get_entity", {
     entity_ref: windowRef(TELEGRAM_WINDOW),
   });
-  const tgInConfig = tgLoggedIn.entity.physical_configuration;
+  const tgInConfig = tgLoggedIn.entity;
   assert.equal(Object.hasOwn(tgInConfig, "error"), false);
   assert.equal(Object.hasOwn(tgInConfig, "status"), false);
   assert.deepEqual(
@@ -554,7 +556,7 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
   const tgDisabled = await callOk(client, "get_entity", {
     entity_ref: windowRef(TELEGRAM_WINDOW),
   });
-  const disabledLogout = tgDisabled.entity.physical_configuration.commands.find(
+  const disabledLogout = tgDisabled.entity.commands.find(
     ({ key }) => key === "Logout",
   );
   assert.equal(disabledLogout.disabled, true);
@@ -565,7 +567,7 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
   const trv = await callOk(client, "get_entity", {
     entity_ref: windowRef(ZIGBEE_THERMOSTAT_WINDOW),
   });
-  const trvCommands = trv.entity.physical_configuration.commands;
+  const trvCommands = trv.entity.commands;
   assert.deepEqual(
     trvCommands.map(({ key }) => key),
     [CALIBRATION_KEY, "Repair", "readAllAttributes", "Remove"],
@@ -586,25 +588,38 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
     );
   }
 
+  // Also verify accessory get_entity with include=["physical_configuration"] filters hidden buttons
+  // and redacts credential-shaped window.label.error.
+  const acc = hub.state.accessories[0];
+  acc.deviceWindow = ZIGBEE_THERMOSTAT_WINDOW;
+  hub.state.windows[ZIGBEE_THERMOSTAT_WINDOW].label.error =
+    `Error calling https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`;
+  const accEntity = await callOk(client, "get_entity", {
+    entity_ref: `${HOME_REF}/accessory/${acc.id}`,
+    include: ["physical_configuration"],
+  });
+  assertNoSecrets(accEntity);
+  assert.equal(accEntity.entity.physical_configuration.error, "[REDACTED]");
+  assert.deepEqual(
+    accEntity.entity.physical_configuration.commands.map(({ key }) => key),
+    [CALIBRATION_KEY, "Repair", "readAllAttributes", "Remove"],
+  );
+
   // 5. Xiaomi child window: joinRoom TEXT-with-validValues is supported; plain TEXT ip is not.
   const xiaomi = await callOk(client, "get_entity", {
     entity_ref: windowRef(XIAOMI_CHILD_WINDOW),
   });
-  const joinRoomOpt = xiaomi.entity.physical_configuration.options.find(
+  const joinRoomOpt = xiaomi.entity.options.find(
     ({ key }) => key === "joinRoom",
   );
-  const ipOpt = xiaomi.entity.physical_configuration.options.find(
-    ({ key }) => key === "ip",
-  );
+  const ipOpt = xiaomi.entity.options.find(({ key }) => key === "ip");
   assert.equal(joinRoomOpt.native_change.supported, true);
   assert.equal(joinRoomOpt.native_change.operation, "window_option");
   assert.equal(ipOpt.native_change.supported, false);
   assert.equal(ipOpt.native_change.reason, "unsupported_input_type");
   assert.equal(
     Object.hasOwn(
-      xiaomi.entity.physical_configuration.commands.find(
-        ({ key }) => key === "joinButton",
-      ),
+      xiaomi.entity.commands.find(({ key }) => key === "joinButton"),
       "native_change",
     ),
     false,

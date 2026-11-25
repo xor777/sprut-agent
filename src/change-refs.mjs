@@ -10,6 +10,7 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "characteristic_value",
   "characteristic_option",
   "window_option",
+  "window_button",
   "characteristic_notify",
   "logic_assignment",
   "logic_active",

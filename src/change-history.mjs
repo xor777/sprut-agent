@@ -10,6 +10,7 @@ import { createdLogicMapping } from "./logic-changes.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
 import { isLogicSourceChange } from "./scenario-changes.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
+import { WINDOW_BUTTON } from "./window-buttons.mjs";
 
 // When a change was first applied: its first apply intent, else (a draft)
 // when it was recorded.
@@ -213,7 +214,13 @@ export function nativeAffectedRefs(change, homeRef) {
       refs.push(member.service_ref, ...canonicalAncestors(member.service_ref));
     }
   }
-  if (change.kind === "logic_assignment") {
+  if (change.kind === WINDOW_BUTTON) {
+    if (typeof change.extension_key === "string") {
+      refs.push(
+        `${homeRef}/extension/${encodeURIComponent(change.extension_key)}`,
+      );
+    }
+  } else if (change.kind === "logic_assignment") {
     refs.push(...canonicalAncestors(refs[0]));
   } else if (
     [

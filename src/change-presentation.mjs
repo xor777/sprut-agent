@@ -45,6 +45,7 @@ import {
   VIRTUAL_DEVICE,
   VIRTUAL_DEVICE_DELETE,
 } from "./virtual-device.mjs";
+import { publicWindowButtonChange, WINDOW_BUTTON } from "./window-buttons.mjs";
 
 export function laterChangeRef(change) {
   return change.conflict_reason === "later_owned_change" &&
@@ -602,6 +603,9 @@ export function publicNativeChange(
         "SprutHub exposes no native compare-and-set; a race remains after the pre-write comparison.",
       ],
     };
+  }
+  if (change.kind === WINDOW_BUTTON) {
+    return publicWindowButtonChange(change, { verification });
   }
   if (change.kind === SCENARIO_DELETE) {
     return publicScenarioDelete(change, verification);
