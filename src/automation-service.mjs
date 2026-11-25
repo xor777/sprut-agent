@@ -24,6 +24,7 @@ import {
 } from "./block-validation.mjs";
 import {
   accessoryPlacementContract,
+  attachInlineContract,
   blockActionPauseContract,
   blockContract,
   groupValuesEqual,
@@ -492,7 +493,14 @@ export class AutomationService {
   }
 
   async prepareNativeChange(input) {
-    const result = await this.#prepareOperation(input);
+    let result;
+    try {
+      result = await this.#prepareOperation(input);
+    } catch (error) {
+      throw await attachInlineContract(error, input, (request) =>
+        this.getNativeChangeContract(request),
+      );
+    }
     // A prepared change the request asks for is applied without asking the
     // owner again; one the owner must hear of first (tell_owner) is not.
     return result.status === "prepared" && result.tell_owner === undefined
