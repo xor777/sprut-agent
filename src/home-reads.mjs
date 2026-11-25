@@ -4,9 +4,12 @@
 // names, rooms and types in the client's warm home and shows the matched
 // devices' values from it.
 import { randomBytes } from "node:crypto";
+import { findMissingCodeAccessoryIds } from "./code-device-refs.mjs";
+import { mapWithConcurrency } from "./device-commands.mjs";
 import { lampGroupMark, lampGroupMarks } from "./light-group-members.mjs";
 import {
   accessoryRef,
+  CODE_SOURCE_READS,
   characteristicNotifyOffered,
   characteristicNotifyOn,
   characteristicRef,
@@ -17,6 +20,7 @@ import {
   lastReportMs,
   matchEnumValue,
   parseEntityRef,
+  relationFailure,
   roomRef,
   SprutHubError,
   sanitizeNativeData,
@@ -28,6 +32,8 @@ import {
 import { toolState } from "./tool-state.mjs";
 
 const PROBLEM_LIMIT = 10;
+const CODE_PROBLEM_ITEM_LIMIT = 10;
+const CODE_SOURCE_READ_CONCURRENCY = 8;
 const MATCH_LIMIT = 10;
 const LIST_LIMIT = 50;
 const LIST_PAGE_BYTES = 16_000;
@@ -145,6 +151,14 @@ export class HomeReads {
       });
     }
 
+    const codeAudit = await auditCodeScenarios(
+      client,
+      serial,
+      scenarios.scenarios,
+      catalog.accessories,
+      deadline,
+    );
+    const overviewObservedAt = latest([observedAt, codeAudit.observedAt]);
     const problems = [
       ...extensions.extensions
         .filter(isExtensionProblem)
@@ -162,6 +176,7 @@ export class HomeReads {
           ref: summary.ref,
           name: summary.name,
         })),
+      ...codeAudit.problems,
       ...catalog.accessories
         .filter(({ online }) => online === false)
         .map((accessory) => ({
@@ -202,7 +217,10 @@ export class HomeReads {
       extensions: extensions.extensions.map(extensionSummary),
       problems: problems.slice(0, PROBLEM_LIMIT),
       problems_total: problems.length,
-      observed_at: observedAt,
+      ...(codeAudit.unchecked.length > 0
+        ? { problems_unchecked: codeAudit.unchecked }
+        : {}),
+      observed_at: overviewObservedAt,
     };
   }
 
@@ -1783,6 +1801,80 @@ function isExtensionProblem({ state, enabled }) {
     state === "FAILED" ||
     (enabled === true && typeof state === "string" && state !== "LOADED")
   );
+}
+
+// Audits user code scenarios (non-BLOCK, non-predefined) for references to
+// accessory IDs absent from the home. Reads at most CODE_SOURCE_READS sources
+// with bounded concurrency; read/parse failures and any scenarios beyond the
+// cap are reported honestly in unchecked rather than failing home_overview.
+async function auditCodeScenarios(
+  client,
+  serial,
+  scenarios,
+  accessories,
+  deadline,
+) {
+  const code = scenarios.filter(
+    ({ native }) => native.type !== "BLOCK" && native.predefined !== true,
+  );
+  if (code.length === 0) {
+    return { problems: [], unchecked: [], observedAt: null };
+  }
+  const existingIds = new Set(accessories.map(({ id }) => id));
+  const searched = code.slice(0, CODE_SOURCE_READS);
+  const reads = await mapWithConcurrency(
+    searched,
+    CODE_SOURCE_READ_CONCURRENCY,
+    ({ native }) => client.codeScenarioSource(serial, native.index, deadline),
+  );
+  const problems = [];
+  const unchecked = [];
+  reads.forEach((read, position) => {
+    const { summary } = searched[position];
+    if (!read.ok) {
+      unchecked.push({
+        ...relationFailure("scenario_code", read),
+        scenario_ref: summary.ref,
+      });
+      return;
+    }
+    const found = findMissingCodeAccessoryIds(read.value, existingIds);
+    if (!found.parsed) {
+      unchecked.push({
+        area: "scenario_code",
+        outcome: "not_parsed",
+        scenario_ref: summary.ref,
+      });
+      return;
+    }
+    if (found.missing_ids.length === 0) return;
+    problems.push({
+      kind: "code_missing_device",
+      ref: summary.ref,
+      name: summary.name,
+      scenario_type: summary.type,
+      missing_ids: found.missing_ids.slice(0, CODE_PROBLEM_ITEM_LIMIT),
+      ...(found.missing_ids.length > CODE_PROBLEM_ITEM_LIMIT
+        ? { missing_ids_total: found.missing_ids.length }
+        : {}),
+      lines: found.lines.slice(0, CODE_PROBLEM_ITEM_LIMIT),
+      found_by: found.found_by,
+    });
+  });
+  const rest = code.slice(searched.length);
+  if (rest.length > 0) {
+    unchecked.push({
+      area: "scenario_code",
+      outcome: "not_read",
+      limit: CODE_SOURCE_READS,
+      scenarios_not_read: rest.length,
+    });
+  }
+  return {
+    problems,
+    unchecked,
+    observedAt: latest(reads.map(({ observedAt }) => observedAt)),
+  };
 }
 
 // Russian names are matched by word stems: the query "в спальне" finds
