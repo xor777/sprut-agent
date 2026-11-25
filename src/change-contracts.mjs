@@ -3,7 +3,7 @@ import {
   publishedBlockNodes,
   TIME_TRIGGER,
 } from "./block-model.mjs";
-import { refuseRedactionMark } from "./change-refs.mjs";
+import { REDACTED_MARK, refuseRedactionMark } from "./change-refs.mjs";
 import {
   isSelectableNativeValidValue,
   nativeScalarContract,
@@ -515,4 +515,93 @@ export function logicSourceContract(mode, scenarioType = "LOGIC") {
       "SprutHub exposes no compare-and-set; a race remains after the pre-write comparison.",
     ],
   };
+}
+
+export const INLINE_CONTRACT_MAX_BYTES = 4_096;
+
+// Caller field/value validation error codes where returning the operation's
+// compact contract lets the agent fix fields and retry without an extra
+// get_native_change_contract round-trip. Refusals (built-in scenarios,
+// sensitive/redacted data, missing entities, read-only/disabled/unsupported
+// targets, conflicts, auth/transport/storage errors) are excluded.
+const INLINE_CONTRACT_ERROR_CODES = new Set([
+  "invalid_native_change",
+  "invalid_native_value",
+  "invalid_value",
+  "invalid_block_data",
+  "invalid_javascript",
+  "unsupported_javascript",
+  "invalid_room_name",
+  "name_required",
+  "name_too_long",
+  "name_characters_unsupported",
+  "target_required",
+  "option_key_required",
+  "group_members_required",
+  "duplicate_group_member",
+  "group_member_is_group",
+  "unsupported_virtual_device_type",
+]);
+
+function isCallerFieldValidationError(error) {
+  if (!(error instanceof SprutHubError)) return false;
+  if (error.details?.contract !== undefined) return false;
+  if (!INLINE_CONTRACT_ERROR_CODES.has(error.code)) return false;
+  // Redaction refusals share invalid_native_value / invalid_block_data; never
+  // attach a contract to a refusal caused by [REDACTED] text.
+  if (
+    typeof error.message === "string" &&
+    error.message.includes(REDACTED_MARK)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export async function attachInlineContract(error, input, readContract) {
+  if (
+    !isCallerFieldValidationError(error) ||
+    typeof input?.operation !== "string"
+  ) {
+    return error;
+  }
+  const request = {
+    operation: input.operation,
+    ...(typeof input.target_ref === "string" && input.target_ref.length > 0
+      ? { target_ref: input.target_ref }
+      : {}),
+    ...(typeof input.option_key === "string" && input.option_key.length > 0
+      ? { option_key: input.option_key }
+      : {}),
+  };
+  let response;
+  try {
+    response = await readContract(request);
+  } catch {
+    return error;
+  }
+  const contract = response?.contract;
+  if (contract === undefined) return error;
+  const serialized = JSON.stringify(contract);
+  if (typeof serialized !== "string") return error;
+  if (Buffer.byteLength(serialized, "utf8") <= INLINE_CONTRACT_MAX_BYTES) {
+    error.details = { ...(error.details ?? {}), contract };
+    return error;
+  }
+  if (error.details?.next === undefined) {
+    const nextArguments = {
+      operation: response.operation ?? input.operation,
+      ...(typeof response.target_ref === "string"
+        ? { target_ref: response.target_ref }
+        : {}),
+      ...(typeof response.option_key === "string"
+        ? { option_key: response.option_key }
+        : {}),
+    };
+    error.details = {
+      ...(error.details ?? {}),
+      next: { tool: "get_native_change_contract", arguments: nextArguments },
+    };
+  }
+  return error;
 }
