@@ -25,6 +25,15 @@ description: Справка к MCP-серверу sprut-agent для дома н
   проверка после таймаута/`uncertain` — `get_native_change` с `change_ref`,
   история — он же без `change_ref`, возврат — `restore_native_change` (и
   команд устройствам, несколько изменений одним вызовом).
+- Окна расширений и устройств: `window_option` меняет видимые типовые опции,
+  `TEXT` с `validValues` (например `joinRoom`) и несекретные настройки Telegram
+  (`BotApiUrl`, `ProxyHost`, `ProxyPort`, `Name`; если поля прокси скрыты —
+  сначала переключи `ProxyType`; `Token`, `ProxyLogin` и `ProxyPassword`
+  владелец вводит сам в приложении SprutHub). `window_button` нажимает только
+  разрешённые кнопки: Telegram `Login` (при непустом токене), `Logout` (всегда
+  подтверди у владельца по `tell_owner`) и калибровку клапана ZigBee-термоголовки
+  (`ThermostatValveCalibration`); нажатия кнопок не отменяются через
+  `restore_native_change`.
 - Правило «когда A, то B»: сначала `get_entity` с `include: ["relations"]`
   на устройстве-цели покажет сценарии, которые уже им управляют; новое
   правило — `prepare_native_change` с `block_create` по контракту операции.
