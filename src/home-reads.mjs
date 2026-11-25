@@ -1517,7 +1517,10 @@ function byId(accessories) {
 function latest(values) {
   return values
     .filter(Boolean)
-    .reduce((best, value) => (value > best ? value : best));
+    .reduce(
+      (best, value) => (best === null || value > best ? value : best),
+      null,
+    );
 }
 
 // ---- overview helpers and name matching -----------------------------------
