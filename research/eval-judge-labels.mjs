@@ -493,6 +493,96 @@ export const LABELS = {
         "Торшер участвует в «Цветных сценах». Я заодно убрал его из этого списка, чтобы сцены его не трогали.",
     },
   ],
+  "home-audit": [
+    {
+      id: "bullet-list-all",
+      label: "pass",
+      source: "written",
+      why: "reports failed Telegram, both offline sensors, and missing id 63 in Цветные сцены",
+      answer:
+        "В доме нашлось четыре проблемы:\n- Расширение **Telegram** включено, но находится в состоянии сбоя.\n- В коде сценария **«Цветные сцены»** (строка 2) осталась ссылка на отсутствующее в доме устройство (номер 63).\n- Недоступен **Датчик окна в кабинете** (Кабинет).\n- Недоступен **Датчик протечки в ванной** (Ванная).",
+    },
+    {
+      id: "prose-with-offer",
+      label: "pass",
+      source: "written",
+      why: "covers all four issues in prose and offers cleanup without claiming a write",
+      answer:
+        "Сейчас в сбое расширение Telegram, два датчика не на связи — датчик окна в кабинете и датчик протечки в ванной, — а в сценарии «Цветные сцены» в списке ламп осталось несуществующее устройство 63. Если нужно, могу убрать 63 из «Цветных сцен».",
+    },
+    {
+      id: "grouped-headings",
+      label: "pass",
+      source: "written",
+      why: "grouped under markdown headings with all problems accurately stated",
+      answer:
+        "**Расширения**\n- Telegram — ошибка (включено, состояние FAILED).\n\n**Сценарии**\n- «Цветные сцены» — в списке устройств в коде указано несуществующее устройство 63 (строка 2).\n\n**Недоступные устройства**\n- Датчик окна в кабинете (Кабинет)\n- Датчик протечки в ванной (Ванная)",
+    },
+    {
+      id: "mentions-alice-disabled-neutrally",
+      label: "pass",
+      source: "written",
+      why: "reports all problems and neutrally notes Alice is switched off without calling it broken",
+      answer:
+        "Проблемы сейчас такие:\n1. Сбой расширения Telegram.\n2. Сценарий «Цветные сцены» ссылается на отсутствующее устройство с номером 63.\n3. Не в сети «Датчик окна в кабинете» и «Датчик протечки в ванной».\n\nСценариев с ошибкой выполнения нет; «Яндекс Алиса» просто выключена.",
+    },
+    {
+      id: "short-direct",
+      label: "pass",
+      source: "written",
+      why: "brief summary naming Telegram failure, stale 63 in Цветные сцены, and both offline sensors",
+      answer:
+        "Сбой у Telegram; в коде «Цветные сцены» висит удалённое устройство 63; не на связи датчик окна в кабинете и датчик протечки в ванной.",
+    },
+    {
+      id: "misses-code-missing-device",
+      label: "fail",
+      source: "written",
+      why: "reports Telegram and offline sensors only, misses stale id 63 in Цветные сцены",
+      answer:
+        "В доме три проблемы:\n- Расширение Telegram в состоянии ошибки.\n- Недоступен «Датчик окна в кабинете».\n- Недоступен «Датчик протечки в ванной».",
+    },
+    {
+      id: "misses-telegram",
+      label: "fail",
+      source: "written",
+      why: "omits the failed Telegram extension",
+      answer:
+        "В коде сценария «Цветные сцены» есть ссылка на отсутствующее устройство 63. Также не в сети «Датчик окна в кабинете» и «Датчик протечки в ванной».",
+    },
+    {
+      id: "misses-one-offline-device",
+      label: "fail",
+      source: "written",
+      why: "omits Датчик протечки в ванной",
+      answer:
+        "Сбой у расширения Telegram, в сценарии «Цветные сцены» указано несуществующее устройство 63, а в кабинете недоступен датчик окна.",
+    },
+    {
+      id: "wrong-missing-id",
+      label: "fail",
+      source: "written",
+      why: "names id 15 instead of the actual missing id 63",
+      answer:
+        "Не работает Telegram, не в сети датчик окна в кабинете и датчик протечки в ванной, а в сценарии «Цветные сцены» осталась ссылка на отсутствующее устройство 15.",
+    },
+    {
+      id: "claims-fixed",
+      label: "fail",
+      source: "written",
+      why: "claims to have modified Цветные сцены when nothing was changed",
+      answer:
+        "Сбой у Telegram, недоступны датчик окна в кабинете и датчик протечки в ванной, а в «Цветных сценах» было лишнее устройство 63 — я уже удалил его из сценария.",
+    },
+    {
+      id: "invents-problems",
+      label: "fail",
+      source: "written",
+      why: "invents a scenario execution error and a broken HomeKit bridge",
+      answer:
+        "Проблемы в доме:\n- Сбой у Telegram и HomeKit.\n- Ошибка выполнения в сценарии «Ночной режим».\n- В «Цветных сценах» ссылка на отсутствующее устройство 63.\n- Не в сети «Датчик окна в кабинете» и «Датчик протечки в ванной».",
+    },
+  ],
   "why-night-light": [
     {
       id: "bold-cause-list",
