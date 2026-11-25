@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
+import { crc32 } from "node:zlib";
 import { WebSocketServer } from "ws";
 
 export const SIMULATED_HUB_TOKEN = "simulated-hub-token";
@@ -58,6 +59,7 @@ export const READ_METHODS = new Set([
   "extension.get",
   "extensionChild.list",
   "extensionChild.get",
+  "file.filePart",
 ]);
 
 export function isWriteMethod(method) {
@@ -246,6 +248,18 @@ export const METHOD_EVIDENCE = {
     "2026-09-17-extension-child-empty-list; a bridge's children, one per exportable accessory with its id, main or notConnected, also of a bridge that does not run (2026-10-13-wave4-contracts 3.2)",
   ],
   "extensionChild.get": [OBSERVED, "2026-09-16-extension-child-read"],
+  "file.backups": [
+    OBSERVED,
+    "2026-11-25-backup-and-window-buttons B4: {loc: 'LOC_TMP', path, scope: 'tmp'} and pushed event.file {success, loc, path, length, scope} without an external SD card",
+  ],
+  "file.filePart": [
+    OBSERVED,
+    "2026-11-25-backup-and-window-buttons B5: {loc, path, start, length, scope} returns base64 {data} with ZIP header 504b0304",
+  ],
+  "file.complete": [
+    OBSERVED,
+    "2026-11-25-backup-and-window-buttons B6: {loc, path, scope} returns empty ACK {} and cleans up the temporary archive without changing Restore",
+  ],
 };
 
 // BLOCK forms taken from the official web client's code
@@ -1195,12 +1209,16 @@ export async function startSimulatedHub(
     latencyMs,
     onRequest,
     account,
+    backup = {},
   } = {},
 ) {
   const state = buildState(withFixtureFaults(fixture, faults), hubTime);
   const tokens = new Set([token]);
   const logins = { account, tokens, issued: 0, stages: new Map() };
   const initialState = structuredClone(state);
+  state.backups = new Map();
+  state.nextBackupId = 1;
+  state.backupConfig = { ...backup };
   state.faults = {
     delayedReadback: structuredClone(faults.delayedReadback ?? []),
     droppedReply: (faults.droppedReply ?? []).map((rule) => ({
@@ -1269,7 +1287,13 @@ export async function startSimulatedHub(
     if (state.replyEvents) state.replyEvents.push(event);
     else state.emit(event);
   };
+  // Optional fast push delivered before the reply frame (e.g. event.file race).
+  state.emitBeforeReply = (event) => {
+    if (state.beforeReplyEvents) state.beforeReplyEvents.push(event);
+    else state.emit(event);
+  };
   const handleWithEvents = (raw, connectionId) => {
+    state.beforeReplyEvents = [];
     state.replyEvents = [];
     try {
       return {
@@ -1281,9 +1305,11 @@ export async function startSimulatedHub(
           refusals,
           connectionId,
         ),
+        beforeEvents: state.beforeReplyEvents,
         events: state.replyEvents,
       };
     } finally {
+      state.beforeReplyEvents = null;
       state.replyEvents = null;
     }
   };
@@ -1341,10 +1367,11 @@ export async function startSimulatedHub(
     });
     const handle = (raw, receivedAt) => {
       const recorded = requests.length;
-      const { reply, events: replyEvents } = handleWithEvents(
-        raw,
-        connection.id,
-      );
+      const {
+        reply,
+        beforeEvents,
+        events: replyEvents,
+      } = handleWithEvents(raw, connection.id);
       if (
         requests.length > recorded &&
         requests.at(-1).serial === state.hub.serial &&
@@ -1363,6 +1390,7 @@ export async function startSimulatedHub(
       const delay = entry ? replyDelays.get(entry.method) : undefined;
       // The events of what the request changed go out after its reply.
       const send = () => {
+        for (const event of beforeEvents) state.emit(event);
         if (text) {
           if (entry) entry.answered_ms = performance.now();
           if (socket.readyState === socket.OPEN) socket.send(text);
@@ -1414,7 +1442,7 @@ export async function startSimulatedHub(
     // Handles native params as a request of a client without a socket, for
     // replaying what a run sent; returns the reply, null if it is dropped.
     request: (params) => {
-      const { reply, events } = handleWithEvents(
+      const { reply, beforeEvents, events } = handleWithEvents(
         JSON.stringify({
           id: requests.length + 1,
           token,
@@ -1424,6 +1452,7 @@ export async function startSimulatedHub(
         }),
         null,
       );
+      for (const event of beforeEvents) state.emit(event);
       for (const event of events) state.emit(event);
       return reply;
     },
@@ -1558,7 +1587,11 @@ export async function startSimulatedHub(
         timerHandles: _timerHandles,
         emit: _emit,
         emitAfterReply: _emitAfterReply,
+        emitBeforeReply: _emitBeforeReply,
+        beforeReplyEvents: _beforeReplyEvents,
         replyEvents: _replyEvents,
+        backups: _backups,
+        backupConfig: _backupConfig,
         ...rest
       } = state;
       return {
@@ -2420,7 +2453,158 @@ const HANDLERS = {
     else endDiscovery(state, extension);
     return {};
   },
+  // Live-verified without an external SD card (2026-11-25-backup-and-window-buttons B4-B6):
+  // file.backups returns {loc, path, scope} and pushes event.file; file.filePart
+  // reads base64 chunks (<= 131072 bytes); file.complete removes the temporary archive.
+  "file.backups": (state) => {
+    const config = state.backupConfig ?? {};
+    const id = state.nextBackupId++;
+    const loc = config.loc ?? "LOC_TMP";
+    const scope = config.scope ?? "tmp";
+    const archivePath = `${config.pathPrefix ?? "/tmp/spruthub-internal-backup-"}${id}.zip`;
+    const buffer =
+      config.bytes instanceof Uint8Array
+        ? Buffer.from(config.bytes)
+        : createMinimalZipBuffer(config.payloadBytes ?? 1_024);
+    state.backups.set(archivePath, {
+      loc,
+      path: archivePath,
+      scope,
+      buffer,
+      completed: false,
+      partCalls: 0,
+    });
+    const readyEvent = {
+      file: {
+        success: config.eventSuccess !== false,
+        loc,
+        path: archivePath,
+        length:
+          config.reportedLength !== undefined
+            ? config.reportedLength
+            : buffer.length,
+        scope,
+        ...(config.eventName !== undefined ? { name: config.eventName } : {}),
+      },
+    };
+    const unrelatedEvents = Array.isArray(config.unrelatedFileEvents)
+      ? config.unrelatedFileEvents
+      : [];
+    if (!config.dropReadyEvent) {
+      if (config.eventBeforeReply) {
+        for (const extra of unrelatedEvents) state.emitBeforeReply(extra);
+        state.emitBeforeReply(readyEvent);
+      } else if ((config.eventDelayMs ?? 0) > 0) {
+        for (const extra of unrelatedEvents) state.emitAfterReply(extra);
+        const timer = setTimeout(() => {
+          state.timers.delete(timer);
+          state.emit(readyEvent);
+        }, config.eventDelayMs);
+        state.timers.add(timer);
+      } else {
+        for (const extra of unrelatedEvents) state.emitAfterReply(extra);
+        state.emitAfterReply(readyEvent);
+      }
+    }
+    return { loc, path: archivePath, scope };
+  },
+  "file.filePart": (state, input) => {
+    const entry = state.backups.get(input?.path);
+    if (!entry || entry.completed) {
+      throw notFound("Backup file not found");
+    }
+    if (
+      typeof input.start !== "number" ||
+      !Number.isSafeInteger(input.start) ||
+      input.start < 0 ||
+      typeof input.length !== "number" ||
+      !Number.isSafeInteger(input.length) ||
+      input.length <= 0 ||
+      input.length > 131_072
+    ) {
+      throw invalidParams("Invalid filePart range");
+    }
+    entry.partCalls += 1;
+    const handler = state.backupConfig?.partHandler;
+    if (typeof handler === "function") {
+      return handler({
+        ...input,
+        attempt: entry.partCalls,
+        buffer: entry.buffer,
+        entry,
+      });
+    }
+    const slice = entry.buffer.subarray(
+      input.start,
+      input.start + input.length,
+    );
+    return { data: slice.toString("base64") };
+  },
+  "file.complete": (state, input) => {
+    const entry = state.backups.get(input?.path);
+    if (!entry) throw notFound("Backup file not found");
+    entry.completed = true;
+    return {};
+  },
 };
+
+// Builds a standards-compliant stored (method 0) ZIP archive containing one
+// entry of payloadBytes so backup tests verify real ZIP magic (50 4b 03 04),
+// exact byte counts, multi-chunk streaming (> 131072 bytes), and SHA-256.
+export function createMinimalZipBuffer(payloadBytes = 1_024) {
+  const fileName = Buffer.from("backup.bin", "utf8");
+  const payload = Buffer.alloc(payloadBytes);
+  for (let index = 0; index < payloadBytes; index += 1) {
+    payload[index] = (index * 31 + 17) & 0xff;
+  }
+  const checksum = crc32(payload) >>> 0;
+  const localHeader = Buffer.alloc(30 + fileName.length);
+  localHeader.writeUInt32LE(0x04034b50, 0);
+  localHeader.writeUInt16LE(20, 4);
+  localHeader.writeUInt16LE(0, 6);
+  localHeader.writeUInt16LE(0, 8);
+  localHeader.writeUInt16LE(0, 10);
+  localHeader.writeUInt16LE(0, 12);
+  localHeader.writeUInt32LE(checksum, 14);
+  localHeader.writeUInt32LE(payload.length, 18);
+  localHeader.writeUInt32LE(payload.length, 22);
+  localHeader.writeUInt16LE(fileName.length, 26);
+  localHeader.writeUInt16LE(0, 28);
+  fileName.copy(localHeader, 30);
+
+  const centralHeader = Buffer.alloc(46 + fileName.length);
+  centralHeader.writeUInt32LE(0x02014b50, 0);
+  centralHeader.writeUInt16LE(20, 4);
+  centralHeader.writeUInt16LE(20, 6);
+  centralHeader.writeUInt16LE(0, 8);
+  centralHeader.writeUInt16LE(0, 10);
+  centralHeader.writeUInt16LE(0, 12);
+  centralHeader.writeUInt16LE(0, 14);
+  centralHeader.writeUInt32LE(checksum, 16);
+  centralHeader.writeUInt32LE(payload.length, 20);
+  centralHeader.writeUInt32LE(payload.length, 24);
+  centralHeader.writeUInt16LE(fileName.length, 28);
+  centralHeader.writeUInt16LE(0, 30);
+  centralHeader.writeUInt16LE(0, 32);
+  centralHeader.writeUInt16LE(0, 34);
+  centralHeader.writeUInt16LE(0, 36);
+  centralHeader.writeUInt32LE(0, 38);
+  centralHeader.writeUInt32LE(0, 42);
+  fileName.copy(centralHeader, 46);
+
+  const centralOffset = localHeader.length + payload.length;
+  const endOfCentral = Buffer.alloc(22);
+  endOfCentral.writeUInt32LE(0x06054b50, 0);
+  endOfCentral.writeUInt16LE(0, 4);
+  endOfCentral.writeUInt16LE(0, 6);
+  endOfCentral.writeUInt16LE(1, 8);
+  endOfCentral.writeUInt16LE(1, 10);
+  endOfCentral.writeUInt32LE(centralHeader.length, 12);
+  endOfCentral.writeUInt32LE(centralOffset, 16);
+  endOfCentral.writeUInt16LE(0, 20);
+
+  return Buffer.concat([localHeader, payload, centralHeader, endOfCentral]);
+}
 
 // ---- device search and pairing ---------------------------------------------
 
@@ -3008,6 +3192,30 @@ function homeSettingsWindow(hub) {
           value: { intValue: minutes * 60 },
         })),
       },
+      // Opt-in on-hub Restore backup list (2026-10-13-wave4-contracts 4.2,
+      // 2026-11-25-backup-and-window-buttons B1): empty choice + saved files.
+      ...(Array.isArray(hub.backups)
+        ? [
+            {
+              key: "Restore",
+              name: "Восстановление из резервной копии",
+              type: "GenericString",
+              inputType: "LIST",
+              parent: "backup",
+              read: true,
+              write: true,
+              events: false,
+              value: { stringValue: "" },
+              validValues: [
+                { name: "", value: { stringValue: "" } },
+                ...hub.backups.map(({ label, path: backupPath }) => ({
+                  name: label,
+                  value: { stringValue: backupPath },
+                })),
+              ],
+            },
+          ]
+        : []),
     ],
   };
 }

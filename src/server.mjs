@@ -5,7 +5,10 @@ import { z } from "zod";
 import packageMetadata from "../package.json" with { type: "json" };
 import { AutomationService } from "./automation-service.mjs";
 import { NATIVE_CHANGE_OPERATIONS } from "./change-refs.mjs";
-import { ConfigurationPointService } from "./configuration-point-service.mjs";
+import {
+  ConfigurationPointService,
+  validateConfigurationPointHomeRef,
+} from "./configuration-point-service.mjs";
 import { DeviceSearches } from "./device-search.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
 import { DEVICE_KINDS, HomeReads } from "./home-reads.mjs";
@@ -651,15 +654,21 @@ registerTool(
 registerTool(
   "configuration_point",
   {
-    title: "Remember SprutHub settings and compare them later",
+    title: "Remember settings, compare them, or save a hub backup",
     description:
-      "Writes only a local file. With entity_refs saves their current settings as a point: scenario settings, accessory name and room, assigned logic, window options and climate setpoints; the rest is listed in not_captured. With point_ref reads one; compare=true also reads the hub now and lists changed settings, renames and manual edits included. Otherwise lists saved points, entity_ref narrows. A point cannot be restored or applied: to act on a difference, prepare a change.",
+      "Saves local files only (never modifies hub settings). With hub_backup=create asks the hub to pack a full .zip backup (file.backups, no SD card needed), saves it locally with 0600 permissions, cleans up the hub's temp archive, and never reads or restores archive contents; hub_backup=list shows local backups and hub backup dates. With entity_refs saves selected settings as a point (scenarios, accessory name/room, logic, window options, climate setpoints); with point_ref reads or compare=true diffs one; otherwise lists saved points. Neither a point nor a backup is restored by the agent.",
     inputSchema: {
       home_ref: homeRefInput,
       entity_refs: z.array(z.string().min(1)).min(1).max(50).optional(),
       point_ref: z.string().min(1).optional(),
       compare: z.boolean().default(false),
       entity_ref: z.string().min(1).optional(),
+      hub_backup: z
+        .enum(["create", "list"])
+        .optional()
+        .describe(
+          "Full SprutHub .zip backup: create downloads a local 0600 backup via file.backups (no SD card needed); list shows local backups and hub backup dates.",
+        ),
       limit: z.number().int().min(1).max(50).default(10),
       cursor: cursorInput,
       ...pageInputs,
@@ -672,6 +681,7 @@ registerTool(
     point_ref: pointRef,
     compare,
     entity_ref: entityRef,
+    hub_backup: hubBackup,
     limit,
     cursor,
     pointer,
@@ -679,6 +689,47 @@ registerTool(
     offset,
     version,
   }) => {
+    if (
+      hubBackup !== undefined &&
+      (entityRefs !== undefined ||
+        pointRef !== undefined ||
+        compare === true ||
+        entityRef !== undefined ||
+        cursor !== undefined ||
+        pointer !== undefined ||
+        offset !== undefined ||
+        version !== undefined)
+    ) {
+      return runRoomTool(async () => {
+        throw new SprutHubError(
+          "invalid_point_call",
+          "hub_backup cannot be combined with entity_refs, point_ref, compare, entity_ref, cursor, pointer, offset, or version.",
+          "configuration_point",
+        );
+      });
+    }
+    if (hubBackup === "create") {
+      return runRoomTool(async () =>
+        (
+          await getConfigurationPointService({
+            requireHub: true,
+            homeRef,
+          })
+        ).createHubBackup({
+          home_ref: homeRef,
+        }),
+      );
+    }
+    if (hubBackup === "list") {
+      return runRoomTool(async () =>
+        (
+          await getConfigurationPointServiceForBackupList(homeRef)
+        ).listHubBackups({
+          home_ref: homeRef,
+          limit,
+        }),
+      );
+    }
     if (pointRef !== undefined && entityRefs !== undefined) {
       return runRoomTool(async () => {
         throw new SprutHubError(
@@ -783,9 +834,34 @@ async function getAutomationService() {
   return automationService;
 }
 
-async function getConfigurationPointService({ requireHub = false } = {}) {
-  const client = requireHub ? await getHubClient() : null;
+async function getConfigurationPointService({
+  requireHub = false,
+  homeRef,
+} = {}) {
   const identity = await connection.localHubIdentity();
+  if (homeRef !== undefined) {
+    validateConfigurationPointHomeRef(homeRef, identity.serial);
+  }
+  const client = requireHub ? await getHubClient() : null;
+  return new ConfigurationPointService({
+    client,
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+    hubUrl: client?.url ?? identity.url,
+    hubSerial: client?.serial ?? identity.serial,
+  });
+}
+
+async function getConfigurationPointServiceForBackupList(homeRef) {
+  const identity = await connection.localHubIdentity();
+  if (homeRef !== undefined) {
+    validateConfigurationPointHomeRef(homeRef, identity.serial);
+  }
+  let client = null;
+  try {
+    client = await getHubClient();
+  } catch (error) {
+    if (!(error instanceof SprutHubError)) throw error;
+  }
   return new ConfigurationPointService({
     client,
     stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,

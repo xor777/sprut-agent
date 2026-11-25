@@ -6,6 +6,7 @@ import {
   configurationPointRef,
   parseConfigurationPointRef,
 } from "./configuration-point-store.mjs";
+import { createHubBackup, listHubBackups } from "./hub-backup.mjs";
 import {
   homeRef as homeRefOf,
   isRedactedNode,
@@ -176,6 +177,34 @@ export class ConfigurationPointService {
     };
   }
 
+  async createHubBackup({ home_ref: requestedHomeRef } = {}) {
+    const homeRef = this.#selectedHomeRef(requestedHomeRef);
+    const serial = this.#requireHome(homeRef);
+    this.#requireClient(
+      "Creating a hub backup requires a live SprutHub connection.",
+    );
+    return createHubBackup({
+      client: this.client,
+      serial,
+      homeRef,
+      stateDirectory: this.stateDirectory,
+      hubUrl: this.hubUrl,
+    });
+  }
+
+  async listHubBackups({ home_ref: requestedHomeRef, limit = 10 } = {}) {
+    const homeRef = this.#selectedHomeRef(requestedHomeRef);
+    const serial = this.#requireHome(homeRef);
+    return listHubBackups({
+      client: this.client,
+      serial,
+      homeRef,
+      stateDirectory: this.stateDirectory,
+      hubUrl: this.hubUrl,
+      limit,
+    });
+  }
+
   async #compare(serial, point) {
     const comparedAt = new Date().toISOString();
     const entities = [];
@@ -271,13 +300,11 @@ export class ConfigurationPointService {
     return extractCapturedEntity(entity, entityRef);
   }
 
-  #requireClient() {
+  #requireClient(
+    message = "Comparing a configuration point requires a live SprutHub read.",
+  ) {
     if (!this.client) {
-      throw new SprutHubError(
-        "connection_failed",
-        "Comparing a configuration point requires a live SprutHub read.",
-        "retry",
-      );
+      throw new SprutHubError("connection_failed", message, "retry");
     }
   }
 
@@ -295,15 +322,7 @@ export class ConfigurationPointService {
   }
 
   #requireHome(homeRef) {
-    let parsed;
-    try {
-      parsed = parseEntityRef(homeRef);
-    } catch {
-      throw invalidHomeRef();
-    }
-    if (parsed.kind !== "home") throw invalidHomeRef();
-    this.#requireSerial(parsed.serial);
-    return parsed.serial;
+    return validateConfigurationPointHomeRef(homeRef, this.configuredSerial);
   }
 
   #requireEntityHome(entityRef, serial) {
@@ -830,6 +849,23 @@ function invalidCursor() {
     "Use the cursor returned by the configuration_point list for the same home and filter.",
     "configuration_point",
   );
+}
+
+export function validateConfigurationPointHomeRef(
+  homeRef,
+  configuredSerial = null,
+) {
+  let parsed;
+  try {
+    parsed = parseEntityRef(homeRef);
+  } catch {
+    throw invalidHomeRef();
+  }
+  if (parsed.kind !== "home") throw invalidHomeRef();
+  if (configuredSerial != null && parsed.serial !== configuredSerial) {
+    throw wrongHome();
+  }
+  return parsed.serial;
 }
 
 function invalidHomeRef() {
