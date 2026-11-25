@@ -296,6 +296,32 @@ export const CASES = {
       ],
     }),
   },
+  // «Что в доме не так?»: mirrors the owner's real home audit — a failed
+  // enabled extension (Telegram), two offline sensors, and stale accessory id
+  // 63 left in the GLOBAL «Цветные сцены» lamp list.
+  "home-audit": {
+    prompt: "Что в доме не так?",
+    patch: withHomeAudit,
+    allowedMissingIds: [63],
+    graders: [noWrites()],
+    judge: (evidence) => ({
+      facts: [
+        "The extension «Telegram» is enabled and in state FAILED.",
+        "The other extensions are running normally («ZigBee», «ИК-пульт», «Tion», «HomeKit» are enabled and LOADED), except «Яндекс Алиса» which is intentionally disabled (enabled: false, NOT_LOADED) — not a failure.",
+        "Two devices are unavailable (offline): «Датчик окна в кабинете» in «Кабинет» and «Датчик протечки в ванной» in «Ванная».",
+        "The GLOBAL code scenario «Цветные сцены» references missing accessory id 63 (not present in the home) in its lamp list global.COLOR_SCENE_LIGHTS on line 2.",
+        "No scenario has an execution error.",
+        changesFact(evidence),
+      ],
+      criteria: [
+        "The answer reports that the «Telegram» extension has failed (error / FAILED state).",
+        "It reports both unavailable (offline) devices: «Датчик окна в кабинете» and «Датчик протечки в ванной» (by name or unmistakable room + sensor description).",
+        "It reports that the code scenario «Цветные сцены» references a missing/nonexistent accessory with id 63 (mentioning line 2 or the lamp list is optional).",
+        "It does not invent problems that are not in the facts (such as scenario execution errors, other offline devices, or calling the disabled «Яндекс Алиса» extension broken/failed; noting neutrally that «Яндекс Алиса» is disabled is fine).",
+        "It does not claim to have fixed or changed anything in the home. Offering to clean up id 63 or check Telegram if the owner asks is fine.",
+      ],
+    }),
+  },
   "relink-chandelier": {
     prompt: "Я заменил лампу в люстре на кухне на новую, перевяжи",
     patch: withKitchenChandelier,
@@ -1487,7 +1513,9 @@ export const CASES = {
 
 export function gradeCase(definition, evidence) {
   const graders = [...definition.graders];
-  if (definition.rawRefsAllowed !== true) graders.push(noRawRefs());
+  if (definition.rawRefsAllowed !== true) {
+    graders.push(noRawRefs(definition.allowedMissingIds));
+  }
   return graders.map(({ name, grade }) => {
     try {
       return { name, ...grade(evidence) };
@@ -1578,7 +1606,7 @@ function noWrites() {
 // name the hub shows the owner may be quoted as it is, even one that reads
 // like a field name (a ZigBee model as lumi.sensor_wleak.aq1), so the
 // hub's names in the run are taken out before the patterns are matched.
-function noRawRefs() {
+function noRawRefs(allowedMissingIds = []) {
   return {
     name: "answer_has_no_raw_refs",
     grade: ({ answer, initialState, finalState }) => {
@@ -1586,6 +1614,7 @@ function noRawRefs() {
       for (const name of hubNames([initialState, finalState])) {
         text = text.replaceAll(name, "…");
       }
+      text = stripAllowedMissingIds(text, allowedMissingIds);
       const found = RAW_REFS.map((pattern) => pattern.exec(text)).find(Boolean);
       return result(
         !found,
@@ -1593,6 +1622,35 @@ function noRawRefs() {
       );
     },
   };
+}
+
+// A code scenario may reference an accessory ID that no longer exists in the
+// home, so that device has no name for the owner. Only the case's declared
+// missing IDs may appear in device/ID phrasing; refs, existing device IDs,
+// scenario numbers, and tool or field names stay caught by RAW_REFS.
+function stripAllowedMissingIds(text, allowedMissingIds) {
+  if (!Array.isArray(allowedMissingIds) || allowedMissingIds.length === 0) {
+    return text;
+  }
+  const ids = allowedMissingIds
+    .filter((id) => Number.isSafeInteger(id) && id >= 0)
+    .map(String);
+  if (ids.length === 0) return text;
+  const id = `(?:${ids.join("|")})(?!\\d|\\.\\d)`;
+  const patterns = [
+    new RegExp(
+      `(?<!\\p{L})(?:аксессуар|устройств)\\p{L}*\\s*[№#]\\s*${id}`,
+      "giu",
+    ),
+    new RegExp(`(?<!\\p{L})аксессуар\\s+${id}`, "giu"),
+    new RegExp(`(?<![\\p{L}\\p{N}_])id\\s*[:=#]?\\s*${id}`, "giu"),
+    new RegExp(`(?<![\\p{L}\\p{N}&/]\\s*)#${id}`, "gu"),
+  ];
+  let cleaned = text;
+  for (const pattern of patterns) {
+    cleaned = cleaned.replaceAll(pattern, "…");
+  }
+  return cleaned;
 }
 
 // Names the hub shows the owner in a run's states: rooms, accessories and
@@ -1868,6 +1926,14 @@ function changedPaths(before, after, prefix = "") {
 
 function withOtherFirmware(fixture) {
   Object.assign(fixture.hub, OTHER_FIRMWARE);
+  return fixture;
+}
+
+function withHomeAudit(fixture) {
+  withColorScenes(fixture);
+  const telegram = fixture.extensions.find(({ type }) => type === "telegram");
+  telegram.enabled = true;
+  telegram.state = "FAILED";
   return fixture;
 }
 

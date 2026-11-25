@@ -3405,3 +3405,56 @@ test("add-floor-lamp-to-alice needs the floor lamp ticked in Alice's bridge and 
   await more.send(tick("yandex", 22, 13, false));
   assert.equal(more.grade("Готово.").nothing_else_changed, false);
 });
+
+test("home-audit allows naming missing id 63 while still catching raw refs, existing ids, scenario numbers and tool names", async (t) => {
+  const session = await caseSession(t, "home-audit");
+  for (const allowed of [
+    "Сбой у Telegram; в «Цветных сценах» указано отсутствующее устройство (ID 63, строка 2); не в сети оба датчика.",
+    "В «Цветных сценах» осталась ссылка на id: 63.",
+    "В «Цветных сценах» в коде указано устройство №63, которого нет в доме.",
+    "В «Цветных сценах» указан несуществующий аксессуар 63.",
+    "В «Цветных сценах» ссылка на удалённое устройство (#63).",
+    "В «Цветных сценах» ссылка на устройство #63 (строка 2).",
+  ]) {
+    assert.deepEqual(
+      session.grade(allowed),
+      { no_writes: true, answer_has_no_raw_refs: true },
+      allowed,
+    );
+  }
+  for (const rejected of [
+    "В сценарии spruthub://hub/sim-apartment-01/scenario/80 пропало устройство 63.",
+    "В scenario/80 указано отсутствующее устройство (ID 63).",
+    "Сценарий 80 ссылается на отсутствующее устройство (ID 63).",
+    "В сценарии #63 указано несуществующее устройство.",
+    "В сценарии №63 указано несуществующее устройство.",
+    "В «Цветных сценах» указан id 15 и id 63.",
+    "Недоступен аксессуар 34 и устройство №37.",
+    "В «Цветных сценах» указано устройство ID 630.",
+    "В «Цветных сценах» указано aId 63.",
+    "В «Цветных сценах» найдено code_missing_device.",
+    "Поле missing_ids содержит 63.",
+    "По данным home_overview в доме проблемы.",
+    "В «Цветных сценах» указана характеристика 63.13.14.",
+  ]) {
+    assert.equal(
+      session.grade(rejected).answer_has_no_raw_refs,
+      false,
+      rejected,
+    );
+  }
+  // Cases without allowedMissingIds still reject ID 63.
+  const other = await nativeSession(t);
+  assert.equal(
+    other.grade("turn-off-room", "Выключил устройство (ID 63).")
+      .answer_has_no_raw_refs,
+    false,
+  );
+  // Any write fails no_writes.
+  await session.send(setOn(16, 13, false));
+  assert.equal(
+    session.grade("Проверил дом, в «Цветных сценах» нет устройства ID 63.")
+      .no_writes,
+    false,
+  );
+});

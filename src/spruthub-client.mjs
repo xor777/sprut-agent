@@ -10,6 +10,7 @@ import {
   relationRole,
   withShownHttpUrls,
 } from "./block-summary.mjs";
+import { ACCESSORY_ID_METHODS } from "./code-device-refs.mjs";
 import { HomeState } from "./home-state.mjs";
 import {
   groupLamps,
@@ -61,10 +62,10 @@ const REFERENCED_ACCESSORY_READS = 16;
 // A BLOCK summary reads the devices of its characteristic conditions now,
 // one accessory.get each, up to this many; the rest show status not_read.
 const CONDITION_VALUE_READS = 16;
-// Relations search the sources of the owner's code scenarios, one
-// scenario.get each, up to this many (one LOGIC and one GLOBAL besides 7
-// built-in LOGIC on the owner's hub, 2026-09-24-live-conformance-3).
-const CODE_SOURCE_READS = 24;
+// Relations and home_overview search the sources of the owner's code
+// scenarios, one scenario.get each, up to this many (one LOGIC and one GLOBAL
+// besides 7 built-in LOGIC on the owner's hub, 2026-09-24-live-conformance-3).
+export const CODE_SOURCE_READS = 24;
 // Native methods that only read. Any other method may change the home: a
 // device value write waits for its event in the warm home state, the
 // writes below leave the state to the hub's events, any other has the home
@@ -3001,6 +3002,18 @@ export class SprutHubClient {
     );
   }
 
+  // Reads one code scenario's raw source without throwing SprutHubError out of
+  // overview/relations callers: read or timeout failures return { ok: false,
+  // outcome, errorCode, observedAt } for unchecked reporting.
+  async codeScenarioSource(serial, index, deadline) {
+    return this.#readRelationSource(
+      { scenario: { get: { index, expand: "data" } } },
+      deadline,
+      serial,
+      extractCodeScenarioSource,
+    );
+  }
+
   // The owner's code scenarios (built-in ones are assigned to services and
   // listed as assigned logic) whose source names this accessory, each
   // source read once in this call, at most CODE_SOURCE_READS of them.
@@ -3033,25 +3046,7 @@ export class SprutHubClient {
     const searched = code.slice(0, CODE_SOURCE_READS);
     const reads = await Promise.all(
       searched.map(({ index }) =>
-        this.#readRelationSource(
-          { scenario: { get: { index, expand: "data" } } },
-          deadline,
-          serial,
-          (response) => {
-            const { data } = extractEntity(
-              response,
-              ["scenario", "get"],
-              "scenario",
-            );
-            if (typeof data !== "string") {
-              throw new SprutHubError(
-                "incompatible_response",
-                "SprutHub returned a code scenario without its source.",
-              );
-            }
-            return data;
-          },
-        ),
+        this.codeScenarioSource(serial, index, deadline),
       ),
     );
     const mentions = [];
@@ -4984,8 +4979,19 @@ function relationFailureOutcome(error) {
   return "failed";
 }
 
-function relationFailure(area, read) {
+export function relationFailure(area, read) {
   return { area, outcome: read.outcome, error_code: read.errorCode };
+}
+
+function extractCodeScenarioSource(response) {
+  const { data } = extractEntity(response, ["scenario", "get"], "scenario");
+  if (typeof data !== "string") {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned a code scenario without its source.",
+    );
+  }
+  return data;
 }
 
 const RELATIONS_LIMITATION =
@@ -6616,18 +6622,6 @@ export function idListLines(source) {
   });
   return looksUpIds ? lists : new Map();
 }
-
-// Hub methods whose first argument is an accessory id, as the owner hub's
-// scenario.sdk declares them: read on 2026-09-09
-// (research/protocol/2026-09-09-automations.md) and again, the same
-// SHA-256, on 2026-10-13.
-const ACCESSORY_ID_METHODS = new Set([
-  "getAccessory",
-  "getCharacteristic",
-  "getCharacteristicValue",
-  "setCharacteristicValue",
-  "toggleCharacteristicValue",
-]);
 
 const JAVASCRIPT_TRIVIA = new Set([
   "HashbangComment",
