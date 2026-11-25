@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
+  access,
   chmod,
   link,
   lstat,
@@ -449,20 +450,56 @@ async function ensureBackupsDirectory({
     hubSerial,
   });
   try {
-    await mkdir(backupsRoot, { recursive: true, mode: 0o700 });
-    await assertRealDirectory(backupsRoot);
-    await chmod(backupsRoot, 0o700);
-    await mkdir(hubDir, { recursive: true, mode: 0o700 });
-    await assertRealDirectory(hubDir);
-    await chmod(hubDir, 0o700);
+    await ensureSingleBackupDirectory(backupsRoot, { createParents: true });
+    await ensureSingleBackupDirectory(hubDir, { createParents: false });
   } catch (error) {
     throw backupsUnavailable("save", hubDir, error);
   }
   return { backupsRoot, hubDir };
 }
 
+async function ensureSingleBackupDirectory(directory, { createParents }) {
+  let stats = await lstatOrNull(directory);
+  if (stats === null) {
+    if (createParents) {
+      await mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
+    }
+    try {
+      await mkdir(directory, { mode: 0o700 });
+      await assertRealDirectory(directory);
+      await chmod(directory, 0o700);
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      stats = await lstat(directory);
+    }
+  }
+  assertRealDirectoryStats(stats);
+  // Check writability BEFORE any chmod so read-only directories (0o500/0o555)
+  // fail cleanly instead of silently re-enabling owner write permission.
+  await access(
+    directory,
+    fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK,
+  );
+  if ((stats.mode & 0o077) !== 0) {
+    await chmod(directory, stats.mode & 0o700);
+  }
+}
+
+async function lstatOrNull(targetPath) {
+  try {
+    return await lstat(targetPath);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 async function assertRealDirectory(directory) {
-  const stats = await lstat(directory);
+  assertRealDirectoryStats(await lstat(directory));
+}
+
+function assertRealDirectoryStats(stats) {
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
     throw Object.assign(new Error("Backup path is not a regular directory"), {
       code: "ENOTDIR",
@@ -482,13 +519,17 @@ async function commitTempFile(directory, tempPath, baseStem) {
     } catch (error) {
       if (error.code === "EEXIST") continue;
       if (NO_HARD_LINKS.has(error.code)) {
-        const exists = await lstat(finalPath).then(
-          () => true,
-          (statError) => {
-            if (statError.code === "ENOENT") return false;
-            throw statError;
-          },
-        );
+        let exists;
+        try {
+          await lstat(finalPath);
+          exists = true;
+        } catch (statError) {
+          if (statError.code === "ENOENT") {
+            exists = false;
+          } else {
+            throw backupsUnavailable("save", directory, statError);
+          }
+        }
         if (exists) continue;
         try {
           await rename(tempPath, finalPath);

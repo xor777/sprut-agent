@@ -322,15 +322,7 @@ export class ConfigurationPointService {
   }
 
   #requireHome(homeRef) {
-    let parsed;
-    try {
-      parsed = parseEntityRef(homeRef);
-    } catch {
-      throw invalidHomeRef();
-    }
-    if (parsed.kind !== "home") throw invalidHomeRef();
-    this.#requireSerial(parsed.serial);
-    return parsed.serial;
+    return validateConfigurationPointHomeRef(homeRef, this.configuredSerial);
   }
 
   #requireEntityHome(entityRef, serial) {
@@ -857,6 +849,23 @@ function invalidCursor() {
     "Use the cursor returned by the configuration_point list for the same home and filter.",
     "configuration_point",
   );
+}
+
+export function validateConfigurationPointHomeRef(
+  homeRef,
+  configuredSerial = null,
+) {
+  let parsed;
+  try {
+    parsed = parseEntityRef(homeRef);
+  } catch {
+    throw invalidHomeRef();
+  }
+  if (parsed.kind !== "home") throw invalidHomeRef();
+  if (configuredSerial != null && parsed.serial !== configuredSerial) {
+    throw wrongHome();
+  }
+  return parsed.serial;
 }
 
 function invalidHomeRef() {

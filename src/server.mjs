@@ -5,14 +5,16 @@ import { z } from "zod";
 import packageMetadata from "../package.json" with { type: "json" };
 import { AutomationService } from "./automation-service.mjs";
 import { NATIVE_CHANGE_OPERATIONS } from "./change-refs.mjs";
-import { ConfigurationPointService } from "./configuration-point-service.mjs";
+import {
+  ConfigurationPointService,
+  validateConfigurationPointHomeRef,
+} from "./configuration-point-service.mjs";
 import { DeviceSearches } from "./device-search.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
 import { DEVICE_KINDS, HomeReads } from "./home-reads.mjs";
 import { hubLogRead } from "./hub-log.mjs";
 import {
   homeRef as configuredHomeRef,
-  isHubReadFailure,
   SprutHubError,
   sanitizeAgentOutput,
 } from "./spruthub-client.mjs";
@@ -693,12 +695,15 @@ registerTool(
         pointRef !== undefined ||
         compare === true ||
         entityRef !== undefined ||
-        cursor !== undefined)
+        cursor !== undefined ||
+        pointer !== undefined ||
+        offset !== undefined ||
+        version !== undefined)
     ) {
       return runRoomTool(async () => {
         throw new SprutHubError(
           "invalid_point_call",
-          "hub_backup cannot be combined with entity_refs, point_ref, compare, entity_ref, or cursor.",
+          "hub_backup cannot be combined with entity_refs, point_ref, compare, entity_ref, cursor, pointer, offset, or version.",
           "configuration_point",
         );
       });
@@ -706,7 +711,10 @@ registerTool(
     if (hubBackup === "create") {
       return runRoomTool(async () =>
         (
-          await getConfigurationPointService({ requireHub: true })
+          await getConfigurationPointService({
+            requireHub: true,
+            homeRef,
+          })
         ).createHubBackup({
           home_ref: homeRef,
         }),
@@ -714,7 +722,9 @@ registerTool(
     }
     if (hubBackup === "list") {
       return runRoomTool(async () =>
-        (await getConfigurationPointServiceForBackupList()).listHubBackups({
+        (
+          await getConfigurationPointServiceForBackupList(homeRef)
+        ).listHubBackups({
           home_ref: homeRef,
           limit,
         }),
@@ -824,9 +834,15 @@ async function getAutomationService() {
   return automationService;
 }
 
-async function getConfigurationPointService({ requireHub = false } = {}) {
-  const client = requireHub ? await getHubClient() : null;
+async function getConfigurationPointService({
+  requireHub = false,
+  homeRef,
+} = {}) {
   const identity = await connection.localHubIdentity();
+  if (homeRef !== undefined) {
+    validateConfigurationPointHomeRef(homeRef, identity.serial);
+  }
+  const client = requireHub ? await getHubClient() : null;
   return new ConfigurationPointService({
     client,
     stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
@@ -835,18 +851,23 @@ async function getConfigurationPointService({ requireHub = false } = {}) {
   });
 }
 
-async function getConfigurationPointServiceForBackupList() {
-  try {
-    return await getConfigurationPointService({ requireHub: true });
-  } catch (error) {
-    if (
-      error instanceof SprutHubError &&
-      (isHubReadFailure(error) || error.code === "authentication_delayed")
-    ) {
-      return getConfigurationPointService({ requireHub: false });
-    }
-    throw error;
+async function getConfigurationPointServiceForBackupList(homeRef) {
+  const identity = await connection.localHubIdentity();
+  if (homeRef !== undefined) {
+    validateConfigurationPointHomeRef(homeRef, identity.serial);
   }
+  let client = null;
+  try {
+    client = await getHubClient();
+  } catch (error) {
+    if (!(error instanceof SprutHubError)) throw error;
+  }
+  return new ConfigurationPointService({
+    client,
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+    hubUrl: client?.url ?? identity.url,
+    hubSerial: client?.serial ?? identity.serial,
+  });
 }
 
 function toToolError(error) {

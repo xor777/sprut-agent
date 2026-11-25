@@ -100,9 +100,11 @@ const READ_ONLY_METHODS = new Set([
   "extension.get",
   "extensionChild.list",
   "extensionChild.get",
+  "file.filePart",
 ]);
 // Writes that change nothing the warm home state holds besides values,
-// which the hub's events carry: scenarios and a device search.
+// which the hub's events carry: scenarios, device searches, and temporary
+// backup archive lifecycle (file.backups / file.complete).
 // Accessories whose services are read for LOGIC assignments at once.
 const LOGIC_SCAN_CONCURRENCY = 8;
 const HOME_STATE_NEUTRAL_WRITES = new Set([
@@ -111,6 +113,8 @@ const HOME_STATE_NEUTRAL_WRITES = new Set([
   "scenario.delete",
   "scenario.run",
   "extension.action",
+  "file.backups",
+  "file.complete",
 ]);
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
