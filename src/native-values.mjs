@@ -30,6 +30,8 @@ import {
 } from "./change-refs.mjs";
 import {
   inspectNativeOption,
+  isAllowedTelegramTextOption,
+  isTelegramWindowKey,
   validateNativeScalarValue,
 } from "./native-option-contract.mjs";
 import { characteristicNotificationServices } from "./scenario-notifications.mjs";
@@ -45,6 +47,11 @@ import {
   sanitizeNativeData,
   serviceRef,
 } from "./spruthub-client.mjs";
+import {
+  telegramTextContractFields,
+  validateTelegramTextOptionValue,
+  WINDOW_BUTTON,
+} from "./window-buttons.mjs";
 
 // Characteristics whose value is a setting rather than a momentary command:
 // an equal value is not resent, and a third value seen after a write is a
@@ -65,12 +72,27 @@ export function characteristicOptionState(option, options = {}) {
 }
 
 export function windowOptionState(option, options = {}) {
-  return nativeOptionState(option, {
-    ...options,
+  const { windowKey, ...rest } = options;
+  const telegramText =
+    typeof windowKey === "string" &&
+    isAllowedTelegramTextOption(windowKey, option?.key);
+  const state = nativeOptionState(option, {
+    allowListedText: true,
+    refuseCredentialValue: telegramText,
+    ...rest,
     owner: "window",
     unsupportedCode: "unsupported_window_option",
     confirmation: "separate_window_get_readback",
   });
+  return {
+    ...state,
+    contract: {
+      ...state.contract,
+      ...(typeof windowKey === "string"
+        ? telegramTextContractFields(windowKey, option.key)
+        : {}),
+    },
+  };
 }
 
 export function logicOptionState(option, options = {}) {
@@ -90,17 +112,35 @@ export function nativeOptionState(
     unsupportedCode,
     confirmation,
     allowText = false,
+    allowListedText = false,
+    refuseCredentialValue = false,
   },
 ) {
-  if (isSensitiveNativeNode(option)) {
+  if (
+    isSensitiveNativeNode(option) ||
+    (refuseCredentialValue &&
+      typeof option?.value?.stringValue === "string" &&
+      sanitizeNativeData(option.value.stringValue) !== option.value.stringValue)
+  ) {
     throw new SprutHubError(
       "sensitive_native_data",
       `The selected ${owner} setting contains sensitive native data.`,
       "get_entity",
     );
   }
-  const inspected = inspectNativeOption(option, { requireWrite, allowText });
+  const inspected = inspectNativeOption(option, {
+    requireWrite,
+    allowText,
+    allowListedText,
+  });
   if (!inspected.supported) {
+    if (inspected.category === "hidden") {
+      throw new SprutHubError(
+        owner === "window" ? "window_option_hidden" : "option_hidden",
+        `The selected ${owner} setting is currently hidden in SprutHub and cannot be changed while hidden; enable its parent setting or mode (such as ProxyType) first, then read the window again.`,
+        "get_entity",
+      );
+    }
     throw new SprutHubError(
       inspected.category === "rights"
         ? "insufficient_rights"
@@ -244,14 +284,29 @@ export const NATIVE_VALUE_KINDS = {
       );
       return boundOptionState(
         change,
-        windowOptionState(option, { requireWrite }),
+        windowOptionState(option, {
+          requireWrite,
+          allowText: isAllowedTelegramTextOption(
+            change.target.windowKey,
+            change.option_key,
+          ),
+          allowListedText: true,
+          windowKey: change.target.windowKey,
+        }),
         "window",
       );
     },
     // The guard reads the bridges anyway; a bridge started or stopped since
     // prepare is told as it is now, and the record saved before the write
     // keeps that.
-    async beforeWrite(service, change) {
+    async beforeWrite(service, change, direction = "apply") {
+      if (direction === "apply") {
+        validateTelegramTextOptionValue(
+          change.target.windowKey,
+          change.option_key,
+          change.requested_value.value,
+        );
+      }
       const bridge = await refuseBridgeExportWrite(
         service,
         change.target.windowKey,
@@ -500,6 +555,7 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "scenario_delete",
   "logic_source_create",
   "logic_source_update",
+  WINDOW_BUTTON,
 ]);
 
 export function isNativeChange(change) {
@@ -808,10 +864,16 @@ export async function inspectWindowOption(service, input) {
     owner,
     input.option_key,
   );
-  await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
+  if (!isTelegramWindowKey(owner.windowKey)) {
+    await rejectDirectScenarioMetadataWindow(service, owner.windowKey, option);
+  }
   return {
     fields: { option_key: input.option_key, target: owner },
-    ...windowOptionState(option),
+    ...windowOptionState(option, {
+      allowText: isAllowedTelegramTextOption(owner.windowKey, input.option_key),
+      allowListedText: true,
+      windowKey: owner.windowKey,
+    }),
   };
 }
 
@@ -918,11 +980,17 @@ export async function prepareWindowOption(service, input) {
     input,
   );
   if (!scenario) {
+    const requested = validateCharacteristicValue(input.value, contract);
+    validateTelegramTextOptionValue(
+      fields.target.windowKey,
+      fields.option_key,
+      requested.value,
+    );
     return {
       fields,
       contract,
       value,
-      requested: validateCharacteristicValue(input.value, contract),
+      requested,
     };
   }
   const spec = SCENARIO_METADATA_OPTIONS[input.option_key];

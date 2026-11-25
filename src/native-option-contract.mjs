@@ -14,14 +14,152 @@ const genericKindByType = new Map([
   ["GenericString", "stringValue"],
 ]);
 
+export const TELEGRAM_WINDOW_KEY_PATTERN = /^Notification\/(telegram_[^/]+)\/$/;
+export const TELEGRAM_SAFE_TEXT_KEYS = new Set([
+  "BotApiUrl",
+  "ProxyHost",
+  "ProxyPort",
+  "Name",
+]);
+export const ZIGBEE_CHILD_WINDOW_KEY_PATTERN =
+  /^Controller\/zigbee_[^/]+\/Child\/[^/]+\/$/;
+export const THERMOSTAT_VALVE_CALIBRATION_PATTERN =
+  /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/;
+export const THERMOSTAT_VALVE_CALIBRATION_STATUS_PATTERN =
+  /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/;
+
+export function isTelegramWindowKey(windowKey) {
+  return (
+    typeof windowKey === "string" && TELEGRAM_WINDOW_KEY_PATTERN.test(windowKey)
+  );
+}
+
+export function telegramExtensionKeyFromWindowKey(windowKey) {
+  if (typeof windowKey !== "string") return null;
+  const match = TELEGRAM_WINDOW_KEY_PATTERN.exec(windowKey);
+  return match ? `Notification:${match[1]}` : null;
+}
+
+export function isAllowedTelegramTextOption(windowKey, optionKey) {
+  return (
+    isTelegramWindowKey(windowKey) && TELEGRAM_SAFE_TEXT_KEYS.has(optionKey)
+  );
+}
+
+export function isAllowedWindowButtonWindowKey(windowKey) {
+  return (
+    typeof windowKey === "string" &&
+    (TELEGRAM_WINDOW_KEY_PATTERN.test(windowKey) ||
+      ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey))
+  );
+}
+
+export function matchAllowedWindowButton(windowKey, optionKey) {
+  if (typeof windowKey !== "string" || typeof optionKey !== "string") {
+    return null;
+  }
+  const telegram = TELEGRAM_WINDOW_KEY_PATTERN.exec(windowKey);
+  if (telegram) {
+    if (optionKey === "Login") {
+      return {
+        id: "telegram_login",
+        requiresConfirmation: false,
+        requiresTelegramToken: true,
+        extensionKey: `Notification:${telegram[1]}`,
+      };
+    }
+    if (optionKey === "Logout") {
+      return {
+        id: "telegram_logout",
+        requiresConfirmation: true,
+        requiresTelegramToken: false,
+        extensionKey: `Notification:${telegram[1]}`,
+      };
+    }
+    return null;
+  }
+  if (
+    ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
+    THERMOSTAT_VALVE_CALIBRATION_PATTERN.test(optionKey)
+  ) {
+    return {
+      id: "thermostat_valve_calibration",
+      requiresConfirmation: false,
+      requiresTelegramToken: false,
+      extensionKey: null,
+    };
+  }
+  return null;
+}
+
+// Live wire contract (SprutHub 3.0.0 rev 20131): pressing a single BUTTON sends
+// its current typed scalar envelope when read=true (C1), or validValues[0].value
+// when write=true && read!==true and validValues has length 1 (C3).
+export function extractButtonPayload(option) {
+  if (!option || typeof option !== "object" || option.inputType !== "BUTTON") {
+    return null;
+  }
+  if (option.read === true) {
+    if (Array.isArray(option.validValues) && option.validValues.length > 1) {
+      return null;
+    }
+    const typed = scalarEnvelope(option.value);
+    return typed && scalarValueMatchesKind(typed.value, typed.kind)
+      ? typed
+      : null;
+  }
+  if (option.write === true) {
+    if (!Array.isArray(option.validValues) || option.validValues.length !== 1) {
+      return null;
+    }
+    const typed = scalarEnvelope(option.validValues[0]?.value);
+    return typed && scalarValueMatchesKind(typed.value, typed.kind)
+      ? typed
+      : null;
+  }
+  return null;
+}
+
+export function publicWindowButtonNativeChange(windowKey, option) {
+  const rule = matchAllowedWindowButton(windowKey, option?.key);
+  if (
+    !rule ||
+    option.inputType !== "BUTTON" ||
+    option.visible === false ||
+    option.disabled === true ||
+    option.write !== true ||
+    !extractButtonPayload(option)
+  ) {
+    return undefined;
+  }
+  const hasNativeConfirm =
+    Array.isArray(option.validValues) &&
+    option.validValues.some(
+      ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
+    );
+  const requiresConfirmation = rule.requiresConfirmation || hasNativeConfirm;
+  return {
+    native_write: true,
+    supported: true,
+    operation: "window_button",
+    ...(requiresConfirmation ? { requires_confirmation: true } : {}),
+  };
+}
+
 export function inspectNativeOption(
   option,
-  { requireWrite = true, allowText = false } = {},
+  { requireWrite = true, allowText = false, allowListedText = false } = {},
 ) {
   if (!option || typeof option !== "object" || Array.isArray(option)) {
     return incompatible(
       "invalid_option",
       "SprutHub returned an invalid option.",
+    );
+  }
+  if (requireWrite && option.visible === false) {
+    return hidden(
+      "option_hidden",
+      "The selected setting is currently hidden in SprutHub.",
     );
   }
   if (typeof option.type !== "string" || option.type.length === 0) {
@@ -62,6 +200,8 @@ export function inspectNativeOption(
   }
 
   const inputType = option.inputType;
+  const hasNonEmptyValidValues =
+    Array.isArray(option.validValues) && option.validValues.length > 0;
   if (inputType === "NUMBER") {
     if (!numericKinds.has(current.kind)) {
       return unsupported(
@@ -77,13 +217,23 @@ export function inspectNativeOption(
       );
     }
   } else if (
-    allowText &&
-    (inputType === "TEXT" || inputType === "TEXT_MULTILINE")
+    (inputType === "TEXT" &&
+      (allowText || (allowListedText && hasNonEmptyValidValues))) ||
+    (allowText && inputType === "TEXT_MULTILINE")
   ) {
     if (current.kind !== "stringValue") {
       return unsupported(
         "incompatible_input_value",
         "A TEXT setting must use stringValue.",
+      );
+    }
+    if (
+      option.validValues !== undefined &&
+      !Array.isArray(option.validValues)
+    ) {
+      return incompatible(
+        "incompatible_valid_values",
+        "SprutHub returned invalid native valid values.",
       );
     }
   } else if (inputType !== "LIST") {
@@ -99,7 +249,10 @@ export function inspectNativeOption(
   if (!lengthMetadata.supported) return lengthMetadata;
 
   let validValues;
-  if (inputType === "LIST") {
+  if (
+    inputType === "LIST" ||
+    (inputType === "TEXT" && hasNonEmptyValidValues)
+  ) {
     if (!Array.isArray(option.validValues) || option.validValues.length === 0) {
       return unsupported(
         "missing_valid_values",
@@ -314,7 +467,7 @@ function inspectNumericMetadata(option, current) {
   return { supported: true, contract };
 }
 
-function scalarEnvelope(value) {
+export function scalarEnvelope(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const kinds = [...scalarKinds].filter((kind) => Object.hasOwn(value, kind));
   return kinds.length === 1 ? { value: value[kinds[0]], kind: kinds[0] } : null;
@@ -356,6 +509,10 @@ function unsupported(reason, message) {
 
 function rights(reason, message) {
   return { supported: false, category: "rights", reason, message };
+}
+
+function hidden(reason, message) {
+  return { supported: false, category: "hidden", reason, message };
 }
 
 function incompatible(reason, message) {

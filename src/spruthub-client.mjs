@@ -21,8 +21,10 @@ import {
 } from "./light-group-members.mjs";
 import {
   inspectNativeOption,
+  isAllowedTelegramTextOption,
   isSelectableNativeValidValue,
   nativeScalarContract,
+  publicWindowButtonNativeChange,
 } from "./native-option-contract.mjs";
 import { parseScript, walk } from "./parse-script.mjs";
 
@@ -5747,6 +5749,7 @@ function normalizeOption(option, changeContext) {
     read: option.read === true,
     write: option.write === true,
     events: option.events === true,
+    ...(option.visible === false ? { visible: false } : {}),
     ...(option.inputType ? { input_type: option.inputType } : {}),
     ...(typeof option.parent === "string" && option.parent.length > 0
       ? { parent: redactSensitiveText(option.parent) }
@@ -5801,9 +5804,16 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
         !commandOptions.includes(option),
     )
     .map((option) => {
+      const telegramText = isAllowedTelegramTextOption(
+        window.windowKey,
+        option.key,
+      );
       const normalized = normalizeOption(option, {
         operation: "window_option",
         targetRef: windowRef(serial, window.windowKey),
+        allowText: telegramText,
+        allowListedText: true,
+        refuseCredentialValue: telegramText,
         writesSupported: window.windowKey !== "",
       });
       if (normalized.redacted) return normalized;
@@ -5824,6 +5834,16 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
         source_timestamp: null,
       };
     });
+  const labelError =
+    typeof window.label?.error === "string" &&
+    window.label.error.trim().length > 0
+      ? redactSensitiveText(window.label.error)
+      : undefined;
+  const labelStatus =
+    typeof window.label?.status === "string" &&
+    window.label.status.trim().length > 0
+      ? redactSensitiveText(window.label.status)
+      : undefined;
   return {
     physical_configuration: {
       ref: windowRef(serial, window.windowKey),
@@ -5831,23 +5851,36 @@ function normalizeWindow(serial, window, includeDiagnostics, observedAt) {
         typeof window.label?.text === "string"
           ? redactSensitiveText(window.label.text)
           : null,
+      ...(labelError !== undefined ? { error: labelError } : {}),
+      ...(labelStatus !== undefined ? { status: labelStatus } : {}),
       options,
       layout: layoutOptions.map((option) =>
         isSensitiveNativeNode(option)
           ? redactedNode()
           : normalizeWindowControl(option),
       ),
-      commands: commandOptions.map((option) =>
-        isSensitiveNativeNode(option)
-          ? redactedNode()
-          : {
-              ...normalizeWindowControl(option),
-              requires_confirmation: option.validValues?.some(
-                ({ confirm }) =>
-                  typeof confirm === "string" && confirm.length > 0,
-              ),
-            },
-      ),
+      commands: commandOptions
+        .filter((option) => option.visible !== false)
+        .map((option) => {
+          if (isSensitiveNativeNode(option)) return redactedNode();
+          const nativeChange = publicWindowButtonNativeChange(
+            window.windowKey,
+            option,
+          );
+          const hasNativeConfirm = option.validValues?.some(
+            ({ confirm }) => typeof confirm === "string" && confirm.length > 0,
+          );
+          const requiresConfirmation =
+            nativeChange?.requires_confirmation === true
+              ? true
+              : hasNativeConfirm;
+          return {
+            ...normalizeWindowControl(option),
+            ...(option.disabled === true ? { disabled: true } : {}),
+            requires_confirmation: requiresConfirmation,
+            ...(nativeChange ? { native_change: nativeChange } : {}),
+          };
+        }),
       freshness: {
         observed_at: observedAt,
         source_timestamp: null,
@@ -6209,6 +6242,9 @@ function namesOptionSecret(node) {
   if (parts.length === 1 && ["key", "pass", "pin"].includes(parts[0])) {
     return true;
   }
+  if (parts.includes("proxy") && parts.includes("login")) {
+    return true;
+  }
   return parts.includes("session") && optionStringValue(node) !== null;
 }
 
@@ -6411,7 +6447,14 @@ function normalizeLogicOption(option, changeContext) {
 
 function publicNativeOptionChange(
   option,
-  { operation, targetRef, allowText = false, writesSupported = true },
+  {
+    operation,
+    targetRef,
+    allowText = false,
+    allowListedText = false,
+    refuseCredentialValue = false,
+    writesSupported = true,
+  },
 ) {
   if (!writesSupported) {
     return {
@@ -6420,7 +6463,18 @@ function publicNativeOptionChange(
       reason: "unsupported_home_settings_write",
     };
   }
-  const inspected = inspectNativeOption(option, { allowText });
+  if (
+    refuseCredentialValue &&
+    typeof option?.value?.stringValue === "string" &&
+    redactSensitiveText(option.value.stringValue) !== option.value.stringValue
+  ) {
+    return {
+      native_write: option.write === true,
+      supported: false,
+      reason: "sensitive_native_data",
+    };
+  }
+  const inspected = inspectNativeOption(option, { allowText, allowListedText });
   if (!inspected.supported) {
     return {
       native_write: option?.write === true,
@@ -6957,6 +7011,8 @@ function redactSensitiveText(text, role = "data") {
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
     // A URL with a user name and password, as in a BLOCK request.
     /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@:]+:[^\s/?#@]+@/i.test(text) ||
+    // A Telegram Bot API URL path carrying a bot token (/bot<id>:<secret>).
+    /\/bot\d{5,}:[A-Za-z0-9_-]{20,}/i.test(text) ||
     // A link whose query carries a login code, token or key, as the hub
     // user's login link …/user/login?code=… (owner's hub, 2026-10-12).
     /\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]*[?&;](?:code|token|access_token|auth|key|api_?key|secret|password|passwd|pass|pin)=[^&\s"'<>#]/i.test(

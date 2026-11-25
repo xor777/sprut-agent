@@ -300,6 +300,16 @@ import {
   virtualLinkSettingsMatch,
   virtualLinkTarget,
 } from "./virtual-light-group.mjs";
+import {
+  buttonWireValue,
+  classifyWindowButtonDelivery,
+  getWindowButtonContract,
+  inspectWindowButton,
+  observeWindowButtonEffect,
+  reverifyWindowButtonBeforeApply,
+  WINDOW_BUTTON,
+  windowButtonTellOwner,
+} from "./window-buttons.mjs";
 
 // Accessories read one by one to learn whether they are virtual.
 const VIRTUAL_CANDIDATE_LIMIT = 10;
@@ -424,6 +434,9 @@ export class AutomationService {
         contract: virtualLightGroupContract(),
       };
     }
+    if (input.operation === WINDOW_BUTTON) {
+      return getWindowButtonContract(this.client, input, this.hubSerial);
+    }
     if (input.operation === "scenario_run") {
       await this.#readRunnableScenario(input.target_ref);
       return {
@@ -533,6 +546,9 @@ export class AutomationService {
     }
     if (input.operation === "block_action_pause") {
       return this.#prepareBlockActionPause(input);
+    }
+    if (input.operation === WINDOW_BUTTON) {
+      return this.#prepareWindowButton(input);
     }
     if (input.operation === "scenario_run") {
       return this.#prepareScenarioRun(input);
@@ -2446,6 +2462,9 @@ export class AutomationService {
     if (change.kind === "logic_assignment") {
       return this.#applyLogicAssignment(change);
     }
+    if (change.kind === WINDOW_BUTTON) {
+      return this.#applyWindowButton(change);
+    }
     if (change.kind === "scenario_run") {
       return this.#applyScenarioRun(change);
     }
@@ -3009,7 +3028,7 @@ export class AutomationService {
   // with current as observed and is thrown; true when the hub acknowledged
   // the write, false when its outcome is left to the read back.
   async #writeRecordedValue(change, current) {
-    await this.#beforeNativeValueWrite(change);
+    await this.#beforeNativeValueWrite(change, "apply");
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.#writeNativeValue(change, change.requested_value);
@@ -3259,6 +3278,9 @@ export class AutomationService {
     if (change.kind === "logic_assignment") {
       return this.#getLogicAssignment(change);
     }
+    if (change.kind === WINDOW_BUTTON) {
+      return this.#getWindowButton(change);
+    }
     if (change.kind === "scenario_run") {
       return this.#getScenarioRun(change);
     }
@@ -3460,6 +3482,13 @@ export class AutomationService {
     if (change.kind === SCENARIO_DELETE) {
       return this.#undoOrUnknown(change, () =>
         this.#restoreScenarioDelete(change),
+      );
+    }
+    if (change.kind === WINDOW_BUTTON) {
+      throw new SprutHubError(
+        "restore_unsupported",
+        "A window button press cannot be undone automatically; restoring its journal entry does not reverse what the button triggered.",
+        "get_native_change",
       );
     }
     if (change.kind === "scenario_run") {
@@ -6188,8 +6217,8 @@ export class AutomationService {
 
   // A refusal here comes before the intent is saved, so the record stays as
   // it was and nothing counts as sent.
-  async #beforeNativeValueWrite(change) {
-    await nativeValueKind(change.kind).beforeWrite?.(this, change);
+  async #beforeNativeValueWrite(change, direction = "apply") {
+    await nativeValueKind(change.kind).beforeWrite?.(this, change, direction);
   }
 
   async #writeNativeValue(change, value) {
@@ -6294,7 +6323,7 @@ export class AutomationService {
     const ownerConflict = await this.#finishValueOwnerConflict(change, current);
     if (ownerConflict) return ownerConflict;
     await this.#settleLaterUnknownWrites(change);
-    await this.#beforeNativeValueWrite(change);
+    await this.#beforeNativeValueWrite(change, "restore");
     await this.#persistNativeIntent(change, "restoring", "restore");
     try {
       await this.#writeNativeValue(change, change.baseline_value);
@@ -6636,6 +6665,151 @@ export class AutomationService {
     };
     await this.store.save(intended);
     Object.assign(change, intended);
+  }
+
+  async #prepareWindowButton(input) {
+    const inspected = await inspectWindowButton(
+      this.client,
+      input.target_ref,
+      input.option_key,
+      this.hubSerial,
+    );
+    if (input.value !== undefined) {
+      throw new SprutHubError(
+        "invalid_native_change",
+        "window_button does not accept value; omit value and pass only target_ref, option_key, and reason.",
+        "prepare_native_change",
+      );
+    }
+    const id = this.store.newId();
+    const now = new Date().toISOString();
+    const change = {
+      id,
+      kind: WINDOW_BUTTON,
+      status: "prepared",
+      home_ref: configuredHomeRef(this.hubSerial),
+      target_ref: input.target_ref,
+      target: { windowKey: inspected.windowKey },
+      option_key: inspected.optionKey,
+      button_kind: inspected.rule.id,
+      button_name: inspected.buttonName,
+      target_name: inspected.targetName,
+      ...(inspected.extensionKey
+        ? { extension_key: inspected.extensionKey }
+        : {}),
+      requires_confirmation: inspected.requiresConfirmation,
+      payload: inspected.payload,
+      reason: input.reason,
+      native_write_sent: false,
+      native_acknowledged: false,
+      button_delivery: { status: "not_sent" },
+      last_verification: freshVerification("window_button_validated"),
+      created_at: now,
+      updated_at: now,
+      history: [{ status: "prepared", at: now }],
+    };
+    await this.store.save(change);
+    const tellOwner = windowButtonTellOwner(inspected);
+    return {
+      ...publicNativeChange(change),
+      ...(tellOwner ? { tell_owner: tellOwner } : {}),
+    };
+  }
+
+  async #applyWindowButton(change) {
+    if (
+      change.status === "applying" &&
+      change.button_delivery?.status === "unknown"
+    ) {
+      const { observedEffect, readbackError, verification } =
+        await observeWindowButtonEffect(this.client, change);
+      return this.#finishNative(change, "uncertain", undefined, {
+        observed_effect: observedEffect,
+        readback_error: readbackError,
+        last_verification: verification,
+      });
+    }
+    if (change.status !== "prepared") return publicStoredNativeChange(change);
+    const check = await reverifyWindowButtonBeforeApply(this.client, change);
+    if (!check.ok) {
+      return this.#finishNative(change, "conflict", undefined, {
+        conflict_reason: check.conflict_reason,
+        configuration_matches: false,
+        last_verification: freshVerification(check.conflict_reason),
+      });
+    }
+    change.button_delivery = { status: "unknown" };
+    await this.#persistNativeIntent(change, "applying", "apply");
+    try {
+      await this.client.updateWindowOption({
+        windowKey: change.target.windowKey,
+        key: change.option_key,
+        value: buttonWireValue(change.payload),
+      });
+      change.native_acknowledged = true;
+      change.write_intent.acknowledged = true;
+      change.button_delivery = { status: "acknowledged" };
+    } catch (error) {
+      const delivery = classifyWindowButtonDelivery(error);
+      change.button_delivery = delivery;
+      if (delivery.status !== "unknown") {
+        change.native_write_sent = delivery.status !== "not_sent";
+        throw await this.#finishRefusedWrite(
+          change,
+          "not_applied",
+          error,
+          undefined,
+          { last_verification: failedVerification(error) },
+        );
+      }
+      const { observedEffect, readbackError } = await observeWindowButtonEffect(
+        this.client,
+        change,
+      );
+      return this.#finishNative(change, "uncertain", undefined, {
+        observed_effect: observedEffect,
+        readback_error: readbackError,
+        last_verification: failedVerification(error),
+      });
+    }
+    const { observedEffect, readbackError, verification } =
+      await observeWindowButtonEffect(this.client, change);
+    return this.#finishNative(change, "applied", undefined, {
+      observed_effect: observedEffect,
+      readback_error: readbackError,
+      configuration_matches: true,
+      last_verification: verification,
+    });
+  }
+
+  async #getWindowButton(change) {
+    if (
+      change.status === "applying" &&
+      change.button_delivery?.status === "unknown"
+    ) {
+      change.status = "uncertain";
+      change.write_intent = change.write_intent
+        ? { ...change.write_intent, phase: "needs_reconciliation" }
+        : change.write_intent;
+      change.history.push({
+        status: "uncertain",
+        at: new Date().toISOString(),
+      });
+    }
+    const { observedEffect, readbackError, verification } =
+      await observeWindowButtonEffect(this.client, change);
+    Object.assign(change, {
+      observed_effect: observedEffect,
+      readback_error: readbackError,
+      last_verification: verification,
+      updated_at: new Date().toISOString(),
+    });
+    const saved = await this.#trySave(change);
+    return withLocalState(
+      publicNativeChange(change),
+      saved,
+      "restore_state_storage_then_get_native_change",
+    );
   }
 
   async #applyScenarioRun(change) {

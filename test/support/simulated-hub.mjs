@@ -2384,6 +2384,7 @@ const HANDLERS = {
       const field = SCENARIO_WINDOW_FIELDS[key];
       if (field) scenario[field.name] = value[field.kind];
     }
+    applyWindowEffects(state, windowKey, window, options);
     return {};
   },
 
@@ -4538,6 +4539,84 @@ function applyOptions(options, updates) {
       throw new SimulatorError(-32000, `Option ${option.key} is read-only`);
     }
     option.value = structuredClone(update.value);
+  }
+}
+
+const TELEGRAM_PROXY_DEPENDENT_KEYS = new Set([
+  "ProxyHost",
+  "ProxyPort",
+  "ProxyLogin",
+  "ProxyPassword",
+]);
+
+function applyWindowEffects(state, windowKey, window, updates) {
+  const telegram = /^Notification\/(telegram_[^/]+)\/$/.exec(windowKey);
+  if (telegram) {
+    const extension = state.extensions.find(
+      (candidate) => candidate.extensionKey === `Notification:${telegram[1]}`,
+    );
+    for (const { key, value } of updates) {
+      if (key === "ProxyType") {
+        const visible = value?.stringValue !== "NONE";
+        for (const option of window.options) {
+          if (TELEGRAM_PROXY_DEPENDENT_KEYS.has(option.key)) {
+            option.visible = visible;
+          }
+        }
+      } else if (key === "Login") {
+        const token = window.options.find((option) => option.key === "Token");
+        const hasToken =
+          typeof token?.value?.stringValue === "string" &&
+          token.value.stringValue.trim().length > 0;
+        const login = window.options.find((option) => option.key === "Login");
+        const logout = window.options.find((option) => option.key === "Logout");
+        if (hasToken) {
+          if (extension) {
+            extension.state = "LOADED";
+            extension.enabled = true;
+          }
+          if (window.label) window.label.error = "";
+          if (login) login.visible = false;
+          if (logout) logout.visible = true;
+        } else {
+          if (extension) extension.state = "FAILED";
+          if (window.label) window.label.error = "Ошибка загрузки";
+        }
+      } else if (key === "Logout") {
+        const login = window.options.find((option) => option.key === "Login");
+        const logout = window.options.find((option) => option.key === "Logout");
+        if (extension) extension.state = "FAILED";
+        if (window.label) window.label.error = "Ошибка загрузки";
+        if (login) login.visible = true;
+        if (logout) logout.visible = false;
+      }
+    }
+    return;
+  }
+  if (/^Controller\/zigbee_[^/]+\/Child\/[^/]+\/$/.test(windowKey)) {
+    for (const { key } of updates) {
+      const calibration =
+        /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/.exec(
+          key,
+        );
+      if (!calibration) continue;
+      const statusOption =
+        window.options.find(
+          (option) =>
+            option.key.startsWith(calibration[1]) &&
+            /^\/\d+\/[0-9A-Fa-f]+_[^/]+\/[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/.test(
+              option.key,
+            ),
+        ) ??
+        window.options.find((option) =>
+          /^\/\d+\/[0-9A-Fa-f]+_[^/]+\/[0-9A-Fa-f]+_ThermostatValveCalibrationStatus\/[^/]+$/.test(
+            option.key,
+          ),
+        );
+      if (statusOption && Object.hasOwn(statusOption.value ?? {}, "intValue")) {
+        statusOption.value = { intValue: 1 };
+      }
+    }
   }
 }
 
