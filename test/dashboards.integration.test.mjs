@@ -13,7 +13,7 @@ import {
 
 // Native SprutHub 3.0 dashboards through the public MCP boundary:
 // home_overview(list="dashboards"), get_entity on dashboard/column/widget,
-// and all 9 prepare/apply/get/restore dashboard operations with 0 new tools.
+// and all 10 prepare/apply/get/restore dashboard operations with 0 new tools.
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -34,6 +34,7 @@ const DASHBOARD_OPERATIONS = [
   "dashboard_widget_create",
   "dashboard_widget_update",
   "dashboard_widget_delete",
+  "dashboard_widget_move",
 ];
 
 async function setup(t, mutateFixture, hubOptions = {}) {
@@ -1789,4 +1790,996 @@ test("review P3-1: non-device widgets and empty dashboard restores skip homeCata
     catalogCallsBefore,
     "non-device widgets and non-device dashboard deletes must not call homeCatalog refresh",
   );
+});
+
+test("hub name normalization: warns on prepare, applies cleanly with hub_normalized_name, preserves conflict on third-party edits and uncertain on timeout", async (t) => {
+  const hooks = {};
+  const { hub, client } = await setup(t, undefined, {
+    onRequest: (request) => hooks.onRequest?.(request),
+  });
+
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Энергия",
+    column_names: ["Сейчас"],
+    reason: "Создать дашборд для теста нормализации имён",
+  });
+  const dashRef = dash.created_dashboard_ref;
+  const dashId = Number(dashRef.split("/").at(-1));
+  const colRef = dash.created_columns[0].ref;
+  const { applied: widget } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "characteristic",
+      name: "Обогреватель",
+      item_refs: [TEMP_CHAR_REF],
+    },
+    reason: "Создать виджет для теста нормализации",
+  });
+  const widgetRef = widget.created_widget_ref;
+  const widgetId = Number(widgetRef.split("/").at(-1));
+
+  // 1. dashboard_update with stripped punctuation ("·" -> internal double space):
+  //    prepare warns, apply succeeds as applied (NOT false conflict!), get_native_change confirms, restore undoes cleanly!
+  const dottedName = "Гостиная · розетка обогревателя";
+  const expectedDottedStored = "Гостиная  розетка обогревателя";
+  const pDashNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dashRef,
+    name: dottedName,
+    reason: "Переименовать панель с точкой посередине",
+  });
+  assert.equal(pDashNorm.status, "prepared");
+  assert.ok(
+    Array.isArray(pDashNorm.warnings) && pDashNorm.warnings.length >= 1,
+  );
+  assert.equal(typeof pDashNorm.warning, "string");
+  assert.ok(
+    pDashNorm.warnings.some(
+      (message) =>
+        message.includes(expectedDottedStored) && message.includes("32"),
+    ),
+    `expected normalization warning with stored name and 32-char limit: ${JSON.stringify(pDashNorm.warnings)}`,
+  );
+
+  const aDashNorm = await call(client, "apply_native_change", {
+    change_ref: pDashNorm.change_ref,
+  });
+  assert.equal(
+    aDashNorm.status,
+    "applied",
+    "hub-normalized dashboard_update must settle as applied, not false conflict",
+  );
+  assert.deepEqual(aDashNorm.hub_normalized_name, {
+    requested: dottedName,
+    stored: expectedDottedStored,
+  });
+  assert.equal(aDashNorm.name_normalized, true);
+  assert.equal(aDashNorm.verification?.result, "requested_name_observed");
+  assert.equal(
+    (await call(client, "get_entity", { entity_ref: dashRef })).entity.name,
+    expectedDottedStored,
+  );
+  const gDashNorm = await call(client, "get_native_change", {
+    change_ref: pDashNorm.change_ref,
+  });
+  assert.equal(gDashNorm.status, "applied");
+  assert.equal(gDashNorm.verification?.result, "applied_name_observed");
+  const rDashNorm = await call(client, "restore_native_change", {
+    change_ref: pDashNorm.change_ref,
+  });
+  assert.equal(rDashNorm.status, "restored");
+  assert.equal(
+    (await call(client, "get_entity", { entity_ref: dashRef })).entity.name,
+    "Энергия",
+  );
+
+  // 2. dashboard_column_update with >32 Unicode code points truncates to 32 chars and restores cleanly.
+  const longColName = "Очень длинное название колонки для проверки обрезки";
+  const expectedLongCol = "Очень длинное название колонки д";
+  assert.equal([...expectedLongCol].length, 32);
+  const pColNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_column_update",
+    target_ref: colRef,
+    name: longColName,
+    reason: "Проверить обрезку имени колонки до 32 символов",
+  });
+  assert.equal(pColNorm.status, "prepared");
+  assert.ok(
+    pColNorm.warnings?.some((message) => message.includes(expectedLongCol)),
+  );
+  const aColNorm = await call(client, "apply_native_change", {
+    change_ref: pColNorm.change_ref,
+  });
+  assert.equal(aColNorm.status, "applied");
+  assert.deepEqual(aColNorm.hub_normalized_name, {
+    requested: longColName,
+    stored: expectedLongCol,
+  });
+  const gColNorm = await call(client, "get_native_change", {
+    change_ref: pColNorm.change_ref,
+  });
+  assert.equal(gColNorm.status, "applied");
+  assert.equal(gColNorm.verification?.result, "applied_name_observed");
+  const rColNorm = await call(client, "restore_native_change", {
+    change_ref: pColNorm.change_ref,
+  });
+  assert.equal(rColNorm.status, "restored");
+  assert.equal(
+    (await call(client, "get_entity", { entity_ref: colRef })).entity.name,
+    "Сейчас",
+  );
+
+  // 3. dashboard_widget_update with punctuation + >32 chars applies cleanly and restores cleanly!
+  const pWidgetNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: widgetRef,
+    widget: {
+      type: "characteristic",
+      name: dottedName,
+      item_refs: [TEMP_CHAR_REF],
+    },
+    reason: "Переименовать виджет с точкой",
+  });
+  assert.equal(pWidgetNorm.status, "prepared");
+  assert.ok(
+    pWidgetNorm.warnings?.some((message) =>
+      message.includes(expectedDottedStored),
+    ),
+  );
+  const aWidgetNorm = await call(client, "apply_native_change", {
+    change_ref: pWidgetNorm.change_ref,
+  });
+  assert.equal(
+    aWidgetNorm.status,
+    "applied",
+    "hub-normalized dashboard_widget_update must settle as applied, not false conflict",
+  );
+  assert.deepEqual(aWidgetNorm.hub_normalized_name, {
+    requested: dottedName,
+    stored: expectedDottedStored,
+  });
+  assert.equal(aWidgetNorm.verification?.result, "requested_widget_observed");
+  const gWidgetNorm = await call(client, "get_native_change", {
+    change_ref: pWidgetNorm.change_ref,
+  });
+  assert.equal(gWidgetNorm.status, "applied");
+  assert.equal(gWidgetNorm.verification?.result, "applied_widget_observed");
+  const rWidgetNorm = await call(client, "restore_native_change", {
+    change_ref: pWidgetNorm.change_ref,
+  });
+  assert.equal(rWidgetNorm.status, "restored");
+  assert.equal(
+    (await call(client, "get_entity", { entity_ref: widgetRef })).entity.name,
+    "Обогреватель",
+  );
+
+  // 4. dashboard_create / dashboard_column_create / dashboard_widget_create:
+  //    record hub_normalized_name on apply AND match normalized names in recordUnknown*Create!
+  const pCreateNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Климат · гостиная",
+    column_names: ["Датчики · сейчас"],
+    reason: "Создание панели с нормализацией имени",
+  });
+  assert.ok(pCreateNorm.warnings?.length >= 2);
+  const aCreateNorm = await call(client, "apply_native_change", {
+    change_ref: pCreateNorm.change_ref,
+  });
+  assert.equal(aCreateNorm.status, "applied");
+  assert.deepEqual(aCreateNorm.hub_normalized_name, {
+    requested: "Климат · гостиная",
+    stored: "Климат  гостиная",
+  });
+
+  const pLostNormCreate = await call(client, "prepare_native_change", {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Потеря · тест",
+    column_names: [],
+    reason: "Потерянный ответ при нормализации",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "dashboard.create",
+    remaining: 1,
+  });
+  const aLostNormCreate = await call(client, "apply_native_change", {
+    change_ref: pLostNormCreate.change_ref,
+  });
+  assert.equal(aLostNormCreate.status, "uncertain");
+  assert.equal(aLostNormCreate.candidate_dashboards?.length, 1);
+  assert.equal(aLostNormCreate.candidate_dashboards[0].name, "Потеря  тест");
+
+  const pLostNormWidget = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: { type: "clock", name: "Часы · спальня" },
+    reason: "Потерянный ответ создания виджета с нормализацией",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "dashboardWidget.create",
+    remaining: 1,
+  });
+  const aLostNormWidget = await call(client, "apply_native_change", {
+    change_ref: pLostNormWidget.change_ref,
+  });
+  assert.equal(aLostNormWidget.status, "uncertain");
+  assert.equal(aLostNormWidget.candidate_widgets?.length, 1);
+  assert.equal(aLostNormWidget.candidate_widgets[0].name, "Часы  спальня");
+
+  // 5. Required name consisting ONLY of stripped punctuation ("···") is rejected cleanly on prepare!
+  for (const invalidArgs of [
+    {
+      operation: "dashboard_create",
+      target_ref: HOME_REF,
+      name: "···",
+      reason: "Пустое после очистки имя панели",
+    },
+    {
+      operation: "dashboard_create",
+      target_ref: HOME_REF,
+      name: "Обычная",
+      column_names: ["Основная", "···"],
+      reason: "Пустое после очистки имя колонки",
+    },
+    {
+      operation: "dashboard_update",
+      target_ref: dashRef,
+      name: "···",
+      reason: "Пустое после очистки обновление панели",
+    },
+    {
+      operation: "dashboard_column_update",
+      target_ref: colRef,
+      name: "···",
+      reason: "Пустое после очистки обновление колонки",
+    },
+  ]) {
+    const err = await callError(client, "prepare_native_change", invalidArgs);
+    assert.equal(err.error.code, "invalid_native_value");
+    assert.ok(err.contract !== undefined, "should include inline contract");
+  }
+  // Optional widget.name and column create name: "···" warns without rejecting, "" has no warning.
+  const pOptWarn = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: { type: "clock", name: "···" },
+    reason: "Необязательное имя из пунктуации",
+  });
+  assert.equal(pOptWarn.status, "prepared");
+  assert.ok(pOptWarn.warnings?.length >= 1);
+  const pOptEmpty = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: { type: "clock", name: "" },
+    reason: "Явно пустое имя виджета",
+  });
+  assert.equal(pOptEmpty.status, "prepared");
+  assert.equal(pOptEmpty.warnings, undefined);
+  assert.equal(pOptEmpty.warning, undefined);
+
+  // 6. Real concurrent third-party rename during apply MUST STILL return conflict (*_changed_since)!
+  const pThirdPartyDash = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dashRef,
+    name: "Энергия · новая",
+    reason: "Конкурентное переименование панели",
+  });
+  let sawDashUpdate = false;
+  hooks.onRequest = (request) => {
+    if (request.method === "dashboard.update") {
+      sawDashUpdate = true;
+      return;
+    }
+    if (sawDashUpdate && request.method === "dashboard.get") {
+      const liveDash = hub.state.dashboards.find((d) => d.id === dashId);
+      if (liveDash) liveDash.name = "Чужое имя";
+      hooks.onRequest = undefined;
+    }
+  };
+  const aThirdPartyDash = await call(client, "apply_native_change", {
+    change_ref: pThirdPartyDash.change_ref,
+  });
+  assert.equal(aThirdPartyDash.status, "conflict");
+  assert.equal(aThirdPartyDash.conflict_reason, "dashboard_changed_since");
+
+  const pThirdPartyWidget = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: widgetRef,
+    widget: {
+      type: "characteristic",
+      name: "Обогреватель · зал",
+      item_refs: [TEMP_CHAR_REF],
+    },
+    reason: "Конкурентное переименование виджета",
+  });
+  let sawWidgetUpdate = false;
+  hooks.onRequest = (request) => {
+    if (request.method === "dashboardWidget.update") {
+      sawWidgetUpdate = true;
+      return;
+    }
+    if (sawWidgetUpdate && request.method === "dashboardWidget.get") {
+      const liveDash = hub.state.dashboards.find((d) => d.id === dashId);
+      const liveWidget = liveDash?.columns
+        .flatMap((c) => c.widgets)
+        .find((w) => w.id === widgetId);
+      if (liveWidget) liveWidget.name = "Чужой виджет";
+      hooks.onRequest = undefined;
+    }
+  };
+  const aThirdPartyWidget = await call(client, "apply_native_change", {
+    change_ref: pThirdPartyWidget.change_ref,
+  });
+  assert.equal(aThirdPartyWidget.status, "conflict");
+  assert.equal(aThirdPartyWidget.conflict_reason, "widget_changed_since");
+
+  // 7. Uncertain write timeout (loseNext) when hub still holds previous MUST stay uncertain, NEVER applied!
+  //    Even when requested name normalizes to the SAME string as previous ("Чужое имя · " -> "Чужое имя")!
+  const pLoseSameNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dashRef,
+    name: "Чужое имя · ",
+    reason: "Таймаут записи при совпадении нормализованного имени с прежним",
+  });
+  hub.loseNext("dashboard.update");
+  const aLoseSameNorm = await call(client, "apply_native_change", {
+    change_ref: pLoseSameNorm.change_ref,
+  });
+  assert.equal(
+    aLoseSameNorm.status,
+    "uncertain",
+    "uncertain write whose readback still equals previous must NEVER claim applied",
+  );
+  const gLoseSameNorm = await call(client, "get_native_change", {
+    change_ref: pLoseSameNorm.change_ref,
+  });
+  assert.equal(gLoseSameNorm.status, "uncertain");
+
+  // Whereas droppedReply on a genuinely NEW normalized name DOES recover to applied!
+  const pDropNewNorm = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dashRef,
+    name: "Энергия · дом",
+    reason: "Потерянный ответ при новом нормализованном имени",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "dashboard.update",
+    remaining: 1,
+  });
+  const aDropNewNorm = await call(client, "apply_native_change", {
+    change_ref: pDropNewNorm.change_ref,
+  });
+  const settledDropNewNorm =
+    aDropNewNorm.status === "applied"
+      ? aDropNewNorm
+      : await call(client, "get_native_change", {
+          change_ref: pDropNewNorm.change_ref,
+        });
+  assert.equal(settledDropNewNorm.status, "applied");
+  assert.equal(settledDropNewNorm.recovered_after_uncertain_write, true);
+  assert.deepEqual(settledDropNewNorm.hub_normalized_name, {
+    requested: "Энергия · дом",
+    stored: "Энергия  дом",
+  });
+});
+
+test("characteristic widget warns on duplicate characteristic_type across >=2 devices, stays silent on same device or distinct types, and strengthens History warning", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.accessories.push(
+      {
+        id: 46,
+        roomId: 3,
+        name: "Розетка обогревателя",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка",
+            characteristics: [
+              { cId: 14, type: "On", value: true },
+              { cId: 15, type: "C_Watt", value: 1200 },
+              { cId: 16, type: "C_KiloWattHour", value: 42.5 },
+            ],
+          },
+        ],
+      },
+      {
+        id: 47,
+        roomId: 4,
+        name: "Розетка посудомойки",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка",
+            characteristics: [
+              { cId: 14, type: "On", value: true },
+              { cId: 15, type: "C_Watt", value: 850 },
+              { cId: 16, type: "C_KiloWattHour", value: 18.2 },
+            ],
+          },
+        ],
+      },
+    );
+  });
+
+  const OUTLET1_WATT = `${HOME_REF}/accessory/46/service/13/characteristic/15`;
+  const OUTLET1_KWH = `${HOME_REF}/accessory/46/service/13/characteristic/16`;
+  const OUTLET2_WATT = `${HOME_REF}/accessory/47/service/13/characteristic/15`;
+
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Энергия",
+    reason: "Панель энергии",
+  });
+  const colRef = dash.created_columns[0].ref;
+
+  // 1. Same characteristic_type (C_Watt) across 2 different accessories -> clear non-blocking warning!
+  const pDupCreate = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "characteristic",
+      name: "Мощность",
+      item_refs: [OUTLET1_WATT, OUTLET2_WATT],
+    },
+    reason: "Показать мощность двух розеток",
+  });
+  assert.equal(pDupCreate.status, "prepared");
+  assert.ok(
+    Array.isArray(pDupCreate.warnings) && pDupCreate.warnings.length >= 1,
+  );
+  assert.equal(typeof pDupCreate.warning, "string");
+  assert.ok(
+    pDupCreate.warnings.some((message) => message.includes("C_Watt")),
+    `warning must name repeated type C_Watt: ${JSON.stringify(pDupCreate.warnings)}`,
+  );
+
+  // 2. Same accessory with different characteristic types (C_Watt + C_KiloWattHour) -> NO warning!
+  const pSameDevice = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "characteristic",
+      name: "Гостиная обогреватель",
+      item_refs: [OUTLET1_WATT, OUTLET1_KWH],
+    },
+    reason: "Метрики одной розетки",
+  });
+  assert.equal(pSameDevice.status, "prepared");
+  assert.equal(pSameDevice.warnings, undefined);
+  assert.equal(pSameDevice.warning, undefined);
+  const aSameDevice = await call(client, "apply_native_change", {
+    change_ref: pSameDevice.change_ref,
+  });
+  assert.equal(aSameDevice.status, "applied");
+
+  // 3. Different accessories with distinct characteristic types -> NO warning!
+  const pDistinct = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "characteristic",
+      name: "Сводка",
+      item_refs: [OUTLET1_WATT, TEMP_CHAR_REF],
+    },
+    reason: "Разные типы характеристик",
+  });
+  assert.equal(pDistinct.status, "prepared");
+  assert.equal(pDistinct.warnings, undefined);
+  assert.equal(pDistinct.warning, undefined);
+
+  // 4. dashboard_widget_update adding a second device's C_Watt -> triggers duplicate-type warning!
+  const pDupUpdate = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: aSameDevice.created_widget_ref,
+    widget: {
+      type: "characteristic",
+      name: "Все розетки",
+      item_refs: [OUTLET1_WATT, OUTLET2_WATT],
+    },
+    reason: "Добавить вторую розетку",
+  });
+  assert.equal(pDupUpdate.status, "prepared");
+  assert.ok(pDupUpdate.warnings?.some((message) => message.includes("C_Watt")));
+
+  // 5. Strengthened HISTORY_MISSING_WARNING advises against empty chart placeholders and notes microSD/USB.
+  const pChartMissing = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "chart",
+      name: "График мощности",
+      item_refs: [OUTLET1_WATT, OUTLET2_WATT],
+      history_group: "HOUR",
+    },
+    reason: "График без приложения История",
+  });
+  assert.equal(pChartMissing.history_app_missing, true);
+  assert.equal(pChartMissing.warnings?.length, 1);
+  assert.match(pChartMissing.warning, /microSD|USB/i);
+  assert.match(pChartMissing.warning, /characteristic/i);
+  assert.match(pChartMissing.warning, /placeholder|empty|by default/i);
+});
+
+test("dashboard_widget_move: cross-column move, intra-column reorder, emptying column, validation, conflict, uncertain recovery, history, and restore", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Create two dashboards: primary with 3 columns (3rd stays unrelated for history filter test) and secondary for cross-dashboard rejection.
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Главная",
+    column_names: ["Сейчас", "Детали", "Справка"],
+    reason: "Дашборд для проверки перемещения виджетов",
+  });
+  const { applied: otherDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Другая",
+    column_names: ["Колонка"],
+    reason: "Вторая панель для проверки запрета переноса между панелями",
+  });
+  const dashRef = dash.created_dashboard_ref;
+  const dashId = Number(dashRef.split("/").at(-1));
+  const col1Ref = dash.created_columns[0].ref;
+  const col2Ref = dash.created_columns[1].ref;
+  const col3Ref = dash.created_columns[2].ref;
+  const col1Id = dash.created_columns[0].id;
+  const col2Id = dash.created_columns[1].id;
+
+  const { applied: w1 } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col1Ref,
+    widget: { type: "clock", name: "Часы" },
+    reason: "W1",
+  });
+  const { applied: w2 } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col1Ref,
+    widget: { type: "weather", name: "Погода" },
+    reason: "W2",
+  });
+  const { applied: w3 } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col1Ref,
+    widget: { type: "tile", name: "Плитка" },
+    reason: "W3",
+  });
+  const { applied: w4 } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col2Ref,
+    widget: {
+      type: "characteristic",
+      name: "Температура",
+      item_refs: [TEMP_CHAR_REF],
+    },
+    reason: "W4",
+  });
+  const w1Ref = w1.created_widget_ref;
+  const w2Ref = w2.created_widget_ref;
+  const w3Ref = w3.created_widget_ref;
+  const w4Ref = w4.created_widget_ref;
+
+  // Warm HomeState so we can also assert HomeState neutrality for dashboardWidget.orders!
+  hub.restEvent();
+  await call(client, "find_devices", { query: "торшер" });
+  const wholeReadsBefore = hub.requests.filter(
+    ({ method }) => method === "accessory.list" || method === "room.list",
+  ).length;
+
+  // 1. Cross-column move with omitted position -> defaults to end of destination column!
+  const ordersBefore = hub.requests.filter(
+    ({ method }) => method === "dashboardWidget.orders",
+  ).length;
+  const pMove1 = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w1Ref,
+    column_ref: col2Ref,
+    reason: "Перенести часы в конец колонки Детали",
+  });
+  assert.equal(pMove1.status, "prepared");
+  assert.equal(pMove1.dashboard_ref, dashRef);
+  assert.equal(pMove1.source_column_ref, col1Ref);
+  assert.equal(pMove1.column_ref, col2Ref);
+  assert.deepEqual(pMove1.diff, {
+    from: { column_ref: col1Ref, column_name: "Сейчас", position: 0 },
+    to: { column_ref: col2Ref, column_name: "Детали", position: 1 },
+  });
+  const aMove1 = await call(client, "apply_native_change", {
+    change_ref: pMove1.change_ref,
+  });
+  assert.equal(aMove1.status, "applied");
+  assert.equal(aMove1.restore_supported, true);
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.orders")
+      .length,
+    ordersBefore + 1,
+    "cross-column move must execute in ONE dashboardWidget.orders RPC",
+  );
+  let stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[0].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w2Ref, order: 0 },
+      { ref: w3Ref, order: 1 },
+    ],
+  );
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w4Ref, order: 0 },
+      { ref: w1Ref, order: 1 },
+    ],
+  );
+
+  // Verify HomeState neutrality after dashboard_widget_move!
+  await call(client, "find_devices", { query: "торшер" });
+  assert.equal(
+    hub.requests.filter(
+      ({ method }) => method === "accessory.list" || method === "room.list",
+    ).length,
+    wholeReadsBefore,
+    "dashboard_widget_move must NOT invalidate warm HomeState",
+  );
+
+  // 2. Cross-column move with explicit position 0 (start of destination column).
+  const { applied: aMove2 } = await prepareAndApply(client, {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    column_ref: col2Ref,
+    position: 0,
+    reason: "Перенести плитку в начало Деталей",
+  });
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[0].widgets.map(({ ref, order }) => ({ ref, order })),
+    [{ ref: w2Ref, order: 0 }],
+  );
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w3Ref, order: 0 },
+      { ref: w4Ref, order: 1 },
+      { ref: w1Ref, order: 2 },
+    ],
+  );
+
+  // 3. Emptying a column (moving last widget w2 out of col1 into col2 at position 1) + restore!
+  const { applied: aEmptyMove } = await prepareAndApply(client, {
+    operation: "dashboard_widget_move",
+    target_ref: w2Ref,
+    column_ref: col2Ref,
+    position: 1,
+    reason: "Опустошить первую колонку",
+  });
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(stateDash.columns[0].widgets, []);
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w3Ref, order: 0 },
+      { ref: w2Ref, order: 1 },
+      { ref: w4Ref, order: 2 },
+      { ref: w1Ref, order: 3 },
+    ],
+  );
+  const undoEmpty = await call(client, "restore_native_change", {
+    change_ref: aEmptyMove.change_ref,
+  });
+  assert.equal(undoEmpty.status, "restored");
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[0].widgets.map(({ ref, order }) => ({ ref, order })),
+    [{ ref: w2Ref, order: 0 }],
+  );
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w3Ref, order: 0 },
+      { ref: w4Ref, order: 1 },
+      { ref: w1Ref, order: 2 },
+    ],
+  );
+
+  // 4. Intra-column reorder (w1 from pos 2 -> pos 0, omitting column_ref) + restore!
+  const { applied: aReorder } = await prepareAndApply(client, {
+    operation: "dashboard_widget_move",
+    target_ref: w1Ref,
+    position: 0,
+    reason: "Поднять часы наверх в Деталях",
+  });
+  assert.equal(aReorder.source_column_ref, col2Ref);
+  assert.equal(aReorder.column_ref, col2Ref);
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w1Ref, order: 0 },
+      { ref: w3Ref, order: 1 },
+      { ref: w4Ref, order: 2 },
+    ],
+  );
+  const undoReorder = await call(client, "restore_native_change", {
+    change_ref: aReorder.change_ref,
+  });
+  assert.equal(undoReorder.status, "restored");
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w3Ref, order: 0 },
+      { ref: w4Ref, order: 1 },
+      { ref: w1Ref, order: 2 },
+    ],
+  );
+
+  // 5. already_desired when already at requested column & position with contiguous orders.
+  const alreadyMove = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    column_ref: col2Ref,
+    position: 0,
+    reason: "Уже на месте",
+  });
+  assert.equal(alreadyMove.status, "already_desired");
+  assert.equal(alreadyMove.operation, "dashboard_widget_move");
+  assert.equal(alreadyMove.column_ref, col2Ref);
+  assert.equal(alreadyMove.position, 0);
+
+  // 6. Validation errors (cross-dashboard, out-of-range position, same-column without position, unexpected fields).
+  const crossDashErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    column_ref: otherDash.created_columns[0].ref,
+    reason: "Перенос в чужой дашборд",
+  });
+  assert.equal(crossDashErr.error.code, "invalid_native_value");
+  assert.ok(crossDashErr.contract !== undefined);
+
+  const outOfRangeErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    position: 3, // col2 has 3 widgets -> valid intra-column positions are 0..2
+    reason: "Позиция за пределами колонки",
+  });
+  assert.equal(outOfRangeErr.error.code, "invalid_native_value");
+  assert.match(outOfRangeErr.error.message, /0.*2/);
+  assert.ok(outOfRangeErr.contract !== undefined);
+
+  const missingPosSameColErr = await callError(
+    client,
+    "prepare_native_change",
+    {
+      operation: "dashboard_widget_move",
+      target_ref: w3Ref,
+      reason: "Без позиции в той же колонке",
+    },
+  );
+  assert.equal(missingPosSameColErr.error.code, "invalid_native_change");
+  assert.ok(missingPosSameColErr.contract !== undefined);
+
+  const missingPosExplicitSameColErr = await callError(
+    client,
+    "prepare_native_change",
+    {
+      operation: "dashboard_widget_move",
+      target_ref: w3Ref,
+      column_ref: col2Ref,
+      reason: "Та же колонка без позиции",
+    },
+  );
+  assert.equal(
+    missingPosExplicitSameColErr.error.code,
+    "invalid_native_change",
+  );
+
+  const unexpectedFieldErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    position: 1,
+    name: "Неожиданное имя",
+    reason: "Лишнее поле",
+  });
+  assert.equal(unexpectedFieldErr.error.code, "invalid_native_change");
+
+  // 7. Read-only get_native_change stability: does NOT bump updated_at on settled move!
+  const histBefore = await call(client, "get_native_change", {
+    entity_ref: dashRef,
+    limit: 50,
+  });
+  const move2EntryBefore = histBefore.changes.find(
+    ({ change_ref }) => change_ref === aMove2.change_ref,
+  );
+  assert.ok(move2EntryBefore);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const inspectedMove2 = await call(client, "get_native_change", {
+    change_ref: aMove2.change_ref,
+  });
+  assert.equal(inspectedMove2.status, "applied");
+  assert.equal(inspectedMove2.verification?.result, "applied_layout_observed");
+  const histAfter = await call(client, "get_native_change", {
+    entity_ref: dashRef,
+    limit: 50,
+  });
+  const move2EntryAfter = histAfter.changes.find(
+    ({ change_ref }) => change_ref === aMove2.change_ref,
+  );
+  assert.equal(
+    move2EntryAfter.updated_at,
+    move2EntryBefore.updated_at,
+    "read-only get_native_change on applied move must not bump updated_at",
+  );
+
+  // 8. History filtering matches dashboard_ref, widget_ref, source_column_ref, and dest column_ref (and NOT col3).
+  for (const filterRef of [dashRef, w1Ref, col1Ref, col2Ref]) {
+    const filtered = await call(client, "get_native_change", {
+      entity_ref: filterRef,
+      limit: 50,
+    });
+    assert.ok(
+      filtered.changes.some(
+        ({ change_ref }) => change_ref === aMove1.change_ref,
+      ),
+      `history filter ${filterRef} must match move1`,
+    );
+  }
+  const col3History = await call(client, "get_native_change", {
+    entity_ref: col3Ref,
+    limit: 50,
+  });
+  assert.equal(
+    col3History.changes.some(
+      ({ change_ref }) => change_ref === aMove1.change_ref,
+    ),
+    false,
+    "unrelated column 3 must NOT match move1",
+  );
+
+  // 9. Refusal on restore when a later layout change intervened (later_owned_change), then undo newest-first!
+  const refuseEarlierMove = await call(client, "restore_native_change", {
+    change_ref: aMove1.change_ref,
+  });
+  assert.equal(refuseEarlierMove.status, "conflict");
+  assert.equal(refuseEarlierMove.conflict_reason, "later_owned_change");
+  assert.equal(refuseEarlierMove.restore_first_change_ref, aMove2.change_ref);
+  // Restore move2 first, then move1 -> full original layout restored!
+  assert.equal(
+    (
+      await call(client, "restore_native_change", {
+        change_ref: aMove2.change_ref,
+      })
+    ).status,
+    "restored",
+  );
+  assert.equal(
+    (
+      await call(client, "restore_native_change", {
+        change_ref: aMove1.change_ref,
+      })
+    ).status,
+    "restored",
+  );
+  stateDash = (await call(client, "get_entity", { entity_ref: dashRef }))
+    .entity;
+  assert.deepEqual(
+    stateDash.columns[0].widgets.map(({ ref, order }) => ({ ref, order })),
+    [
+      { ref: w1Ref, order: 0 },
+      { ref: w2Ref, order: 1 },
+      { ref: w3Ref, order: 2 },
+    ],
+  );
+  assert.deepEqual(
+    stateDash.columns[1].widgets.map(({ ref, order }) => ({ ref, order })),
+    [{ ref: w4Ref, order: 0 }],
+  );
+
+  // 10. Conflict on concurrent layout change between prepare and apply (0 orders RPCs sent!).
+  const pDriftMove = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w1Ref,
+    position: 2,
+    reason: "Проверка конфликта раскладки",
+  });
+  const w1Id = Number(w1Ref.split("/").at(-1));
+  const w2Id = Number(w2Ref.split("/").at(-1));
+  const w3Id = Number(w3Ref.split("/").at(-1));
+  hub.request({
+    dashboardWidget: {
+      orders: {
+        orders: [
+          { dashboardId: dashId, columnId: col1Id, id: w2Id, order: 0 },
+          { dashboardId: dashId, columnId: col1Id, id: w1Id, order: 1 },
+          { dashboardId: dashId, columnId: col1Id, id: w3Id, order: 2 },
+        ],
+      },
+    },
+  });
+  const ordersBeforeDrift = hub.requests.filter(
+    ({ method }) => method === "dashboardWidget.orders",
+  ).length;
+  const aDriftMove = await call(client, "apply_native_change", {
+    change_ref: pDriftMove.change_ref,
+  });
+  assert.equal(aDriftMove.status, "conflict");
+  assert.equal(aDriftMove.conflict_reason, "dashboard_layout_changed_since");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.orders")
+      .length,
+    ordersBeforeDrift,
+    "drift conflict must send 0 dashboardWidget.orders RPCs",
+  );
+
+  // 11. Uncertain write recovery: droppedReply -> applied with recovered_after_uncertain_write;
+  //     loseNext -> uncertain without blind resend on get_native_change!
+  const pDropMove = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w3Ref,
+    column_ref: col2Ref,
+    reason: "Потерянный ответ перемещения",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "dashboardWidget.orders",
+    remaining: 1,
+  });
+  const aDropMove = await call(client, "apply_native_change", {
+    change_ref: pDropMove.change_ref,
+  });
+  const settledDropMove =
+    aDropMove.status === "applied"
+      ? aDropMove
+      : await call(client, "get_native_change", {
+          change_ref: pDropMove.change_ref,
+        });
+  assert.equal(settledDropMove.status, "applied");
+  assert.equal(settledDropMove.recovered_after_uncertain_write, true);
+
+  const pLoseMove = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_move",
+    target_ref: w2Ref,
+    column_ref: col2Ref,
+    reason: "Потерянный запрос перемещения",
+  });
+  const ordersBeforeLose = hub.requests.filter(
+    ({ method }) => method === "dashboardWidget.orders",
+  ).length;
+  hub.loseNext("dashboardWidget.orders");
+  const aLoseMove = await call(client, "apply_native_change", {
+    change_ref: pLoseMove.change_ref,
+  });
+  assert.equal(aLoseMove.status, "uncertain");
+  const checkedLoseMove = await call(client, "get_native_change", {
+    change_ref: pLoseMove.change_ref,
+  });
+  assert.equal(checkedLoseMove.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.orders")
+      .length,
+    ordersBeforeLose + 1,
+    "lost dashboardWidget.orders request must NOT be resent blindly by get_native_change",
+  );
+  // Restore of unconfirmed move stays uncertain without writing:
+  const restoreLoseMove = await call(client, "restore_native_change", {
+    change_ref: pLoseMove.change_ref,
+  });
+  assert.equal(restoreLoseMove.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.orders")
+      .length,
+    ordersBeforeLose + 1,
+  );
+  // Suppress unused variable warning for col2Id if any:
+  assert.ok(col2Id > 0);
 });

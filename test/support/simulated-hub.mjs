@@ -324,6 +324,10 @@ export const METHOD_EVIDENCE = {
     OBSERVED,
     "2026-11-26-dashboards: {dashboardId, id} returns empty ACK {}",
   ],
+  "dashboardWidget.orders": [
+    OBSERVED,
+    "2026-11-26-dashboards: {orders: [{dashboardId, columnId, id, order}]} updates columnId/order and returns {orders}",
+  ],
   "dashboardWidget.types": [
     OBSERVED,
     "2026-11-26-dashboards: returns all 8 DashboardWidgetType values",
@@ -2635,7 +2639,7 @@ const HANDLERS = {
       order: Number.isSafeInteger(input.order)
         ? input.order
         : state.dashboards.length,
-      name: input.name,
+      name: storedDashboardName(input.name),
       columns: [],
     };
     state.dashboards.push(dashboard);
@@ -2648,7 +2652,7 @@ const HANDLERS = {
       if (typeof input.name !== "string") {
         throw invalidParams("Dashboard name must be a string");
       }
-      dashboard.name = input.name;
+      dashboard.name = storedDashboardName(input.name);
     }
     emitDashboards(state, "EVENT_UPDATE", [projectDashboard(dashboard)]);
     return {};
@@ -2698,7 +2702,9 @@ const HANDLERS = {
       order: Number.isSafeInteger(input.order)
         ? input.order
         : dashboard.columns.length,
-      ...(Object.hasOwn(input ?? {}, "name") ? { name: input.name } : {}),
+      ...(Object.hasOwn(input ?? {}, "name")
+        ? { name: storedDashboardName(input.name) }
+        : {}),
       widgets: [],
     };
     dashboard.columns.push(column);
@@ -2720,7 +2726,7 @@ const HANDLERS = {
       if (typeof input.name !== "string") {
         throw invalidParams("Dashboard column name must be a string");
       }
-      column.name = input.name;
+      column.name = storedDashboardName(input.name);
     }
     emitDashboardColumns(state, "EVENT_UPDATE", [
       projectDashboardColumn(column),
@@ -2796,7 +2802,9 @@ const HANDLERS = {
       order: Number.isSafeInteger(input.order)
         ? input.order
         : column.widgets.length,
-      ...(Object.hasOwn(input ?? {}, "name") ? { name: input.name } : {}),
+      ...(Object.hasOwn(input ?? {}, "name")
+        ? { name: storedDashboardName(input.name) }
+        : {}),
       [kindKey]: normalizeSimulatedWidgetPayload(kindKey, input[kindKey]),
     };
     column.widgets.push(widget);
@@ -2814,7 +2822,7 @@ const HANDLERS = {
       if (typeof input.name !== "string") {
         throw invalidParams("Dashboard widget name must be a string");
       }
-      widget.name = input.name;
+      widget.name = storedDashboardName(input.name);
     }
     const kindKey = extractWidgetKindKey(input);
     if (kindKey) {
@@ -2841,6 +2849,74 @@ const HANDLERS = {
       projectDashboardWidget(widget),
     ]);
     return {};
+  },
+  "dashboardWidget.orders": (state, input) => {
+    if (!Array.isArray(input?.orders)) {
+      throw invalidParams("Dashboard widget orders array is required");
+    }
+    const validated = input.orders.map((entry) => {
+      if (
+        !isRecord(entry) ||
+        !Number.isSafeInteger(entry.dashboardId) ||
+        entry.dashboardId <= 0 ||
+        !Number.isSafeInteger(entry.columnId) ||
+        entry.columnId <= 0 ||
+        !Number.isSafeInteger(entry.id) ||
+        entry.id <= 0 ||
+        !Number.isSafeInteger(entry.order) ||
+        entry.order < 0
+      ) {
+        throw invalidParams("Invalid dashboard widget order entry");
+      }
+      const { widget } = requireDashboardWidget(
+        state,
+        entry.dashboardId,
+        entry.id,
+      );
+      const { column: destCol } = requireDashboardColumn(
+        state,
+        entry.dashboardId,
+        entry.columnId,
+      );
+      return { entry, destCol, widget };
+    });
+    const affectedColumns = new Set();
+    const updatedWidgets = [];
+    for (const { entry, destCol, widget } of validated) {
+      if (widget.columnId !== destCol.id) {
+        const { column: currentCol } = requireDashboardWidget(
+          state,
+          entry.dashboardId,
+          entry.id,
+        );
+        const at = currentCol.widgets.indexOf(widget);
+        if (at >= 0) currentCol.widgets.splice(at, 1);
+        destCol.widgets.push(widget);
+        widget.columnId = destCol.id;
+        affectedColumns.add(currentCol);
+      }
+      widget.order = entry.order;
+      affectedColumns.add(destCol);
+      updatedWidgets.push(widget);
+    }
+    for (const column of affectedColumns) {
+      column.widgets.sort((a, b) => a.order - b.order || a.id - b.id);
+    }
+    if (updatedWidgets.length > 0) {
+      emitDashboardWidgets(
+        state,
+        "EVENT_UPDATE",
+        updatedWidgets.map(projectDashboardWidget),
+      );
+    }
+    return {
+      orders: validated.map(({ entry }) => ({
+        dashboardId: entry.dashboardId,
+        columnId: entry.columnId,
+        id: entry.id,
+        order: entry.order,
+      })),
+    };
   },
 };
 
@@ -5447,6 +5523,18 @@ function emitRooms(state, event, rooms) {
   state.emitAfterReply?.({
     room: { event, rooms: structuredClone(rooms) },
   });
+}
+
+// SprutHub 3.0.0 rev 20131 normalizes dashboard, column and widget names on
+// create and update (2026-11-26-dashboards): trims/collapses whitespace,
+// strips characters outside Unicode letters, digits, space and - _ ' `,
+// trims leading/trailing spaces, and keeps the first 32 Unicode code points.
+const DASHBOARD_NAME_LIMIT = 32;
+
+function storedDashboardName(name) {
+  const collapsed = name.trim().replace(/\s+/g, " ");
+  const cleaned = collapsed.replace(/[^\p{L}\p{N}\s\-_'`]/gu, "").trim();
+  return [...cleaned].slice(0, DASHBOARD_NAME_LIMIT).join("").trimEnd();
 }
 
 const DASHBOARD_WIDGET_KINDS = [
