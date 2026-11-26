@@ -3664,11 +3664,17 @@ export class SprutHubClient {
   }
 
   async #readWindowEntity(parsed, requested, deadline) {
-    const response = await this.#request(
-      { window: { get: { windowKey: parsed.windowKey } } },
-      deadline,
-      { serial: parsed.serial },
-    );
+    let response;
+    try {
+      response = await this.#request(
+        { window: { get: { windowKey: parsed.windowKey } } },
+        deadline,
+        { serial: parsed.serial },
+      );
+    } catch (error) {
+      if (isWindowNotFoundError(error)) throw entityNotFound("window");
+      throw error;
+    }
     const window = extractEntity(response, ["window", "get"], "window");
     if (window.windowKey !== parsed.windowKey) {
       throw new SprutHubError(
@@ -4636,6 +4642,17 @@ function isNativeNotFoundCandidate(error) {
   );
 }
 
+// SprutHub answers window.get for a deleted/unlisted window with -32603
+// "Not found: 'Window not found: ...'" (2026-10-14-bridge-export-write 11).
+// Match that text so transient -32603 internal failures stay request_rejected.
+function isWindowNotFoundError(error) {
+  return (
+    isNativeNotFoundCandidate(error) &&
+    typeof error.hubError?.message === "string" &&
+    /\bwindow not found\b/i.test(error.hubError.message)
+  );
+}
+
 const HUB_ERROR_MESSAGE_MAX_LENGTH = 500;
 
 // The hub's error text is untrusted data that may be saved in the journal, so
@@ -4849,7 +4866,7 @@ export function characteristicRef(
   return `${serviceRef(serial, accessoryId, serviceId)}/characteristic/${characteristicId}`;
 }
 
-function scenarioRef(serial, index) {
+export function scenarioRef(serial, index) {
   return `${homeRef(serial)}/scenario/${encodeURIComponent(index)}`;
 }
 
@@ -7097,7 +7114,7 @@ export function codeShownRedacted(source) {
   return redactSensitiveText(source, "javascript_source") !== source;
 }
 
-function redactSensitiveText(text, role = "data") {
+export function redactSensitiveText(text, role = "data") {
   const containsCredential =
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
     // A URL with a user name and password, as in a BLOCK request.

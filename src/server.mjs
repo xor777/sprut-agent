@@ -14,6 +14,7 @@ import {
   ConfigurationPointService,
   validateConfigurationPointHomeRef,
 } from "./configuration-point-service.mjs";
+import { parseConfigurationPointRef } from "./configuration-point-store.mjs";
 import { DeviceSearches } from "./device-search.mjs";
 import { presentEntityResult } from "./entity-presentation.mjs";
 import { DEVICE_KINDS, HomeReads } from "./home-reads.mjs";
@@ -719,9 +720,23 @@ registerTool(
   {
     title: "Remember settings, compare them, or save a hub backup",
     description:
-      "Saves local files only (never modifies hub settings). With hub_backup=create asks the hub to pack a full .zip backup (file.backups, no SD card needed), saves it locally with 0600 permissions, cleans up the hub's temp archive, and never reads or restores archive contents; hub_backup=list shows local backups and hub backup dates. With entity_refs saves selected settings as a point (scenarios, accessory name/room, logic, window options, climate setpoints); with point_ref reads or compare=true diffs one; otherwise lists saved points. Neither a point nor a backup is restored by the agent.",
+      "Saves local files only (never modifies hub settings). With hub_backup=create asks the hub to pack a full .zip backup (file.backups, no SD card needed), saves it locally with 0600 permissions, cleans up the hub's temp archive, and never reads or restores archive contents; hub_backup=list shows local backups and hub backup dates. With scope=home saves a whole-home settings snapshot (rooms, devices/services, scenarios, bridge exports, climate setpoints) or with entity_refs saves selected settings (optional note for either); with point_ref reads or compare=true diffs against live state and attributes changes to the local agent journal vs manual/external edits; otherwise lists saved points. Neither a point nor a backup is restored by the agent.",
     inputSchema: {
       home_ref: homeRefInput,
+      scope: z
+        .literal("home")
+        .optional()
+        .describe(
+          "Save a whole-home settings snapshot (rooms, devices/services, scenarios, bridge exports, climate setpoints).",
+        ),
+      note: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe(
+          "Optional note/reason saved with the point (with entity_refs or scope=home).",
+        ),
       entity_refs: z.array(z.string().min(1)).min(1).max(50).optional(),
       point_ref: z.string().min(1).optional(),
       compare: z.boolean().default(false),
@@ -740,6 +755,8 @@ registerTool(
   },
   async ({
     home_ref: homeRef,
+    scope,
+    note,
     entity_refs: entityRefs,
     point_ref: pointRef,
     compare,
@@ -754,7 +771,9 @@ registerTool(
   }) => {
     if (
       hubBackup !== undefined &&
-      (entityRefs !== undefined ||
+      (scope !== undefined ||
+        note !== undefined ||
+        entityRefs !== undefined ||
         pointRef !== undefined ||
         compare === true ||
         entityRef !== undefined ||
@@ -766,7 +785,45 @@ registerTool(
       return runRoomTool(async () => {
         throw new SprutHubError(
           "invalid_point_call",
-          "hub_backup cannot be combined with entity_refs, point_ref, compare, entity_ref, cursor, pointer, offset, or version.",
+          "hub_backup cannot be combined with scope, note, entity_refs, point_ref, compare, entity_ref, cursor, pointer, offset, or version.",
+          "configuration_point",
+        );
+      });
+    }
+    if (
+      scope !== undefined &&
+      (entityRefs !== undefined ||
+        pointRef !== undefined ||
+        compare === true ||
+        hubBackup !== undefined ||
+        entityRef !== undefined ||
+        cursor !== undefined ||
+        pointer !== undefined ||
+        offset !== undefined ||
+        version !== undefined)
+    ) {
+      return runRoomTool(async () => {
+        throw new SprutHubError(
+          "invalid_point_call",
+          "scope=home cannot be combined with entity_refs, point_ref, compare, hub_backup, entity_ref, cursor, pointer, offset, or version.",
+          "configuration_point",
+        );
+      });
+    }
+    if (note !== undefined && entityRefs === undefined && scope === undefined) {
+      return runRoomTool(async () => {
+        throw new SprutHubError(
+          "invalid_point_call",
+          "note can only be passed when saving a configuration point (with entity_refs or scope=home).",
+          "configuration_point",
+        );
+      });
+    }
+    if (note !== undefined && note.trim().length === 0) {
+      return runRoomTool(async () => {
+        throw new SprutHubError(
+          "invalid_point_call",
+          "note must contain at least one non-whitespace character.",
           "configuration_point",
         );
       });
@@ -793,6 +850,29 @@ registerTool(
         }),
       );
     }
+    if (scope === "home") {
+      return runRoomTool(async () =>
+        (
+          await getConfigurationPointService({
+            requireHub: true,
+            homeRef,
+          })
+        ).saveHome({
+          home_ref: homeRef,
+          note,
+          sensitiveValues: connectionSecrets(),
+        }),
+      );
+    }
+    if (compare === true && pointRef === undefined) {
+      return runRoomTool(async () => {
+        throw new SprutHubError(
+          "invalid_point_call",
+          "compare=true requires point_ref.",
+          "configuration_point",
+        );
+      });
+    }
     if (pointRef !== undefined && entityRefs !== undefined) {
       return runRoomTool(async () => {
         throw new SprutHubError(
@@ -804,15 +884,22 @@ registerTool(
     }
     if (entityRefs !== undefined) {
       return runRoomTool(async () =>
-        (await getConfigurationPointService({ requireHub: true })).save({
+        (
+          await getConfigurationPointService({
+            requireHub: true,
+            homeRef,
+          })
+        ).save({
           home_ref: homeRef,
           entity_refs: entityRefs,
+          note,
+          sensitiveValues: connectionSecrets(),
         }),
       );
     }
     if (pointRef === undefined) {
       return runRoomTool(async () =>
-        (await getConfigurationPointService()).list({
+        (await getConfigurationPointService({ homeRef })).list({
           home_ref: homeRef,
           entity_ref: entityRef,
           limit,
@@ -825,10 +912,12 @@ registerTool(
         (
           await getConfigurationPointService({
             requireHub: compare === true,
+            pointRef,
           })
         ).get({
           point_ref: pointRef,
           compare,
+          sensitiveValues: connectionSecrets(),
         }),
       {
         compact: true,
@@ -943,12 +1032,26 @@ async function getAutomationServiceForHistoryList({
 async function getConfigurationPointService({
   requireHub = false,
   homeRef,
+  pointRef,
 } = {}) {
   const identity = await connection.localHubIdentity();
   if (homeRef !== undefined) {
     validateConfigurationPointHomeRef(homeRef, identity.serial);
   }
+  if (pointRef !== undefined) {
+    const { serial } = parseConfigurationPointRef(pointRef);
+    if (identity.serial != null && serial !== identity.serial) {
+      throw new SprutHubError(
+        "wrong_home",
+        "This configuration point belongs to another home. Use a home_ref for the configured SprutHub connection.",
+        "home_overview",
+      );
+    }
+  }
   const client = requireHub ? await getHubClient() : null;
+  if (client !== null) {
+    selectedHomeRef(client);
+  }
   return new ConfigurationPointService({
     client,
     stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
