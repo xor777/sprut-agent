@@ -68,7 +68,15 @@ async function setup(t, mutateFixture, hubOptions = {}) {
     await hub.close();
     await rm(stateDirectory, { recursive: true, force: true });
   });
-  return { hub, client, connect };
+  return {
+    hub,
+    client,
+    connect,
+    killLatestServer: () => {
+      const pid = servers.at(-1)?.transport?.pid;
+      if (pid) process.kill(pid, "SIGKILL");
+    },
+  };
 }
 
 async function call(client, name, args) {
@@ -1213,5 +1221,572 @@ test("safety, drift detection, inline contracts, HomeState neutrality, secret re
     updatesAfter,
     updatesBefore + 1,
     "lost update request must not be blindly resent by get_native_change",
+  );
+});
+
+test("review P1-1: multi-step delete undo handles mid-sequence refusal, lost reply, resume without duplicates, and missing final readback", async (t) => {
+  const hooks = {};
+  const { hub, client } = await setup(t, undefined, {
+    onRequest: (request) => hooks.onRequest?.(request),
+  });
+
+  // Create dashboard with 2 columns and 2 widgets, then delete it.
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Восстанавливаемый",
+    column_names: ["Первая", "Вторая"],
+    reason: "Дашборд для проверки частичного восстановления",
+  });
+  const col1Ref = dash.created_columns[0].ref;
+  const col2Ref = dash.created_columns[1].ref;
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col1Ref,
+    widget: { type: "clock", name: "Часы 1" },
+    reason: "Виджет в первой колонке",
+  });
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: col2Ref,
+    widget: { type: "weather", name: "Погода 2" },
+    reason: "Виджет во второй колонке",
+  });
+  const pDel = await call(client, "prepare_native_change", {
+    operation: "dashboard_delete",
+    target_ref: dash.created_dashboard_ref,
+    reason: "Удалить дашборд",
+  });
+  assert.equal(typeof pDel.tell_owner, "string");
+  await call(client, "apply_native_change", { change_ref: pDel.change_ref });
+
+  // Refuse the 2nd dashboardColumn.create during restore.
+  let colCreates = 0;
+  hooks.onRequest = (request) => {
+    if (request.method !== "dashboardColumn.create") return;
+    colCreates += 1;
+    if (colCreates === 2) {
+      hub.refuseNext("dashboardColumn.create", {
+        code: -32000,
+        message: "column limit hit",
+      });
+      hooks.onRequest = undefined;
+    }
+  };
+  const partialErr = await callError(client, "restore_native_change", {
+    change_ref: pDel.change_ref,
+  });
+  assert.equal(partialErr.hub_effect, "partial");
+  assert.equal(partialErr.rejection?.protocol_code, -32000);
+  assert.equal(partialErr.next?.tool, "restore_native_change");
+
+  // get_native_change MUST NOT mark incomplete recreation as restored!
+  const inspectedPartial = await call(client, "get_native_change", {
+    change_ref: pDel.change_ref,
+  });
+  assert.notEqual(inspectedPartial.status, "restored");
+  assert.equal(inspectedPartial.recreation_complete, false);
+
+  // Following next: restore_native_change resumes ONLY remaining column/widget (no duplicate dashboard/column 1).
+  const dashCreatesBeforeResume = hub.requests.filter(
+    ({ method }) => method === "dashboard.create",
+  ).length;
+  const resumed = await call(
+    client,
+    partialErr.next.tool,
+    partialErr.next.arguments,
+  );
+  assert.equal(resumed.status, "restored");
+  assert.equal(resumed.recreation_complete, true);
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.create").length,
+    dashCreatesBeforeResume,
+    "resuming partial dashboard_delete restore must not create a second dashboard",
+  );
+  const fullRestored = await call(client, "get_entity", {
+    entity_ref: resumed.recreated_dashboard_ref,
+  });
+  assert.equal(fullRestored.entity.columns.length, 2);
+  assert.equal(fullRestored.entity.columns[0].widgets.length, 1);
+  assert.equal(fullRestored.entity.columns[1].widgets.length, 1);
+  assert.equal(fullRestored.entity.columns[1].widgets[0].name, "Погода 2");
+
+  // dashboard_column_delete mid-loop droppedReply on widget 2 stays uncertain (never restored).
+  const { applied: colDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Колоночный",
+    reason: "Тест колоночного восстановления",
+  });
+  const cRef = colDash.created_columns[0].ref;
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: cRef,
+    widget: { type: "clock", name: "W1" },
+    reason: "Первый виджет",
+  });
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: cRef,
+    widget: { type: "tile", name: "W2" },
+    reason: "Второй виджет",
+  });
+  const pColDel = await call(client, "prepare_native_change", {
+    operation: "dashboard_column_delete",
+    target_ref: cRef,
+    reason: "Удалить колонку",
+  });
+  await call(client, "apply_native_change", { change_ref: pColDel.change_ref });
+
+  let widgetCreates = 0;
+  hooks.onRequest = (request) => {
+    if (request.method !== "dashboardWidget.create") return;
+    widgetCreates += 1;
+    if (widgetCreates === 2) {
+      hub.state.faults.droppedReply.push({
+        method: "dashboardWidget.create",
+        remaining: 1,
+      });
+      hooks.onRequest = undefined;
+    }
+  };
+  const uncertainColRestore = await call(client, "restore_native_change", {
+    change_ref: pColDel.change_ref,
+  });
+  assert.equal(uncertainColRestore.status, "uncertain");
+  assert.equal(uncertainColRestore.recreation_complete, false);
+  const inspectedColRestore = await call(client, "get_native_change", {
+    change_ref: pColDel.change_ref,
+  });
+  assert.equal(inspectedColRestore.status, "uncertain");
+  assert.equal(inspectedColRestore.recreation_complete, false);
+
+  // dashboard_widget_delete undo where recreated widget vanishes before final readback -> conflict (not restored).
+  const { applied: wDelDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Исчезнувший виджет",
+    reason: "Тест readback null",
+  });
+  const { applied: wTemp } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: wDelDash.created_columns[0].ref,
+    widget: { type: "clock", name: "Мигающий" },
+    reason: "Создать виджет",
+  });
+  const { applied: wDeleted } = await prepareAndApply(client, {
+    operation: "dashboard_widget_delete",
+    target_ref: wTemp.created_widget_ref,
+    reason: "Удалить виджет",
+  });
+  const wDelDashId = Number(wDelDash.created_dashboard_ref.split("/").at(-1));
+  hooks.onRequest = (request) => {
+    if (request.method !== "dashboardWidget.get") return;
+    // Remove the just-recreated widget right before final readback.
+    const liveDash = hub.state.dashboards.find((d) => d.id === wDelDashId);
+    if (liveDash?.columns[0]?.widgets.length) {
+      liveDash.columns[0].widgets.length = 0;
+    }
+    hooks.onRequest = undefined;
+  };
+  const missingReadback = await call(client, "restore_native_change", {
+    change_ref: wDeleted.change_ref,
+  });
+  assert.equal(missingReadback.status, "conflict");
+  assert.equal(missingReadback.conflict_reason, "recreated_widget_missing");
+});
+
+test("review P1-2: pre-write conflict and unconfirmed apply never overwrite owner edits or recreate manually deleted objects", async (t) => {
+  const { hub, client } = await setup(t);
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Имя A",
+    reason: "Создать дашборд",
+  });
+  const dashId = Number(dash.created_dashboard_ref.split("/").at(-1));
+
+  // 2a. Pre-write conflict on dashboard_update (native_write_sent=false), then owner sets name to "Имя B".
+  const pUpd = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dash.created_dashboard_ref,
+    name: "Имя B",
+    reason: "Переименовать A -> B",
+  });
+  hub.request({ dashboard: { update: { id: dashId, name: "Имя C" } } });
+  const aConflict = await call(client, "apply_native_change", {
+    change_ref: pUpd.change_ref,
+  });
+  assert.equal(aConflict.status, "conflict");
+  assert.equal(aConflict.native_write_sent, false);
+  // Owner independently renames to "Имя B" matching requested_name!
+  hub.request({ dashboard: { update: { id: dashId, name: "Имя B" } } });
+  const updatesBefore = hub.requests.filter(
+    ({ method }) => method === "dashboard.update",
+  ).length;
+  const restoreUnapplied = await call(client, "restore_native_change", {
+    change_ref: pUpd.change_ref,
+  });
+  assert.equal(restoreUnapplied.status, "not_owned");
+  assert.equal(restoreUnapplied.conflict_reason, "change_was_not_applied");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.update").length,
+    updatesBefore,
+    "pre-write conflict must send 0 dashboard.update writes on restore",
+  );
+  assert.equal(
+    (
+      await call(client, "get_entity", {
+        entity_ref: dash.created_dashboard_ref,
+      })
+    ).entity.name,
+    "Имя B",
+  );
+
+  // 2b. Pre-write conflict on dashboard_delete, then owner manually deletes dashboard -> restore must NOT recreate it!
+  const pDel = await call(client, "prepare_native_change", {
+    operation: "dashboard_delete",
+    target_ref: dash.created_dashboard_ref,
+    reason: "Удалить дашборд",
+  });
+  hub.request({ dashboard: { update: { id: dashId, name: "Имя D" } } });
+  const delConflict = await call(client, "apply_native_change", {
+    change_ref: pDel.change_ref,
+  });
+  assert.equal(delConflict.status, "conflict");
+  assert.equal(delConflict.native_write_sent, false);
+  hub.request({ dashboard: { delete: { id: dashId } } });
+  const createsBefore = hub.requests.filter(
+    ({ method }) => method === "dashboard.create",
+  ).length;
+  const restoreUnappliedDel = await call(client, "restore_native_change", {
+    change_ref: pDel.change_ref,
+  });
+  assert.equal(restoreUnappliedDel.status, "not_owned");
+  assert.equal(restoreUnappliedDel.conflict_reason, "change_was_not_applied");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.create").length,
+    createsBefore,
+    "pre-write delete conflict must NOT recreate manually deleted dashboard",
+  );
+
+  // 2c. Unconfirmed apply (loseNext on dashboard.update -> still baseline on hub) must stay uncertain on restore!
+  const { applied: dash2 } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Исходный",
+    reason: "Создать дашборд 2",
+  });
+  const pLostUpd = await call(client, "prepare_native_change", {
+    operation: "dashboard_update",
+    target_ref: dash2.created_dashboard_ref,
+    name: "Новый",
+    reason: "Потерянное обновление",
+  });
+  hub.loseNext("dashboard.update");
+  const aLost = await call(client, "apply_native_change", {
+    change_ref: pLostUpd.change_ref,
+  });
+  assert.equal(aLost.status, "uncertain");
+  const updatesBeforeUncertainRestore = hub.requests.filter(
+    ({ method }) => method === "dashboard.update",
+  ).length;
+  const restoreUncertain = await call(client, "restore_native_change", {
+    change_ref: pLostUpd.change_ref,
+  });
+  assert.equal(restoreUncertain.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.update").length,
+    updatesBeforeUncertainRestore,
+  );
+});
+
+test("review P1-3: dashboard_create partial column refusal and lost-reply preserve state on get and remain undoable", async (t) => {
+  const hooks = {};
+  const { hub, client } = await setup(t, undefined, {
+    onRequest: (request) => hooks.onRequest?.(request),
+  });
+
+  // 3a. Refused 2nd column during dashboard_create reports rejection, preserves conflict on get, and undoes cleanly!
+  const pPartial = await call(client, "prepare_native_change", {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Частичный",
+    column_names: ["Колонка 1", "Колонка 2"],
+    reason: "Проверка отказа 2-й колонки",
+  });
+  let colAttempt = 0;
+  hooks.onRequest = (request) => {
+    if (request.method !== "dashboardColumn.create") return;
+    colAttempt += 1;
+    if (colAttempt === 2) {
+      hub.refuseNext("dashboardColumn.create", {
+        code: -32001,
+        message: "column rejected",
+      });
+      hooks.onRequest = undefined;
+    }
+  };
+  const errPartial = await callError(client, "apply_native_change", {
+    change_ref: pPartial.change_ref,
+  });
+  assert.equal(errPartial.hub_effect, "partial");
+  assert.equal(errPartial.rejection?.protocol_code, -32001);
+  assert.equal(errPartial.next?.tool, "restore_native_change");
+
+  const getPartial = await call(client, "get_native_change", {
+    change_ref: pPartial.change_ref,
+  });
+  assert.equal(getPartial.status, "conflict");
+  assert.equal(getPartial.conflict_reason, "partial_column_creation_refused");
+  const undoPartial = await call(client, "restore_native_change", {
+    change_ref: pPartial.change_ref,
+  });
+  assert.equal(undoPartial.status, "restored");
+
+  // 3b. droppedReply on column creation leaves uncertain on get AND allows clean undo of owned partial dashboard!
+  const pLostCol = await call(client, "prepare_native_change", {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Потерянная колонка",
+    column_names: ["Основная"],
+    reason: "Проверка потерянного ответа колонки",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "dashboardColumn.create",
+    remaining: 1,
+  });
+  const aLostCol = await call(client, "apply_native_change", {
+    change_ref: pLostCol.change_ref,
+  });
+  assert.equal(aLostCol.status, "uncertain");
+  const getLostCol = await call(client, "get_native_change", {
+    change_ref: pLostCol.change_ref,
+  });
+  assert.equal(getLostCol.status, "uncertain");
+  const undoLostCol = await call(client, "restore_native_change", {
+    change_ref: pLostCol.change_ref,
+  });
+  assert.equal(undoLostCol.status, "restored");
+  const goneLostCol = await callError(client, "get_entity", {
+    entity_ref: aLostCol.created_dashboard_ref,
+  });
+  assert.equal(goneLostCol.error.code, "entity_not_found");
+});
+
+test("review P1-4: get_native_change preserves uncertain restore and conflict states on *_create", async (t) => {
+  const { hub, client } = await setup(t);
+
+  const { applied: d } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Статусы",
+    reason: "Проверка P1-4",
+  });
+  const dashId = Number(d.created_dashboard_ref.split("/").at(-1));
+  const { applied: cLostDel } = await prepareAndApply(client, {
+    operation: "dashboard_column_create",
+    target_ref: d.created_dashboard_ref,
+    name: "Теряемая",
+    reason: "Колонка для loseNext",
+  });
+  hub.loseNext("dashboardColumn.delete");
+  const uncertainRestore = await call(client, "restore_native_change", {
+    change_ref: cLostDel.change_ref,
+  });
+  assert.equal(uncertainRestore.status, "uncertain");
+  const afterGetUncertain = await call(client, "get_native_change", {
+    change_ref: cLostDel.change_ref,
+  });
+  assert.equal(
+    afterGetUncertain.status,
+    "uncertain",
+    "get_native_change must not overwrite uncertain restore back to applied",
+  );
+
+  // Conflict preserved on get_native_change:
+  const { applied: cNonEmpty } = await prepareAndApply(client, {
+    operation: "dashboard_column_create",
+    target_ref: d.created_dashboard_ref,
+    name: "Непустая",
+    reason: "Колонка с ручным виджетом",
+  });
+  const cNonEmptyId = Number(cNonEmpty.created_column_ref.split("/").at(-1));
+  hub.request({
+    dashboardWidget: {
+      create: {
+        dashboardId: dashId,
+        columnId: cNonEmptyId,
+        name: "Ручной",
+        clock: {},
+      },
+    },
+  });
+  const colConflict = await call(client, "restore_native_change", {
+    change_ref: cNonEmpty.change_ref,
+  });
+  assert.equal(colConflict.status, "conflict");
+  assert.equal(colConflict.conflict_reason, "column_not_empty");
+  const afterGetConflict = await call(client, "get_native_change", {
+    change_ref: cNonEmpty.change_ref,
+  });
+  assert.equal(afterGetConflict.status, "conflict");
+  assert.equal(afterGetConflict.conflict_reason, "column_not_empty");
+});
+
+test("review P1-5: crash/restart while status === restoring on dashboard_delete creates no duplicate", async (t) => {
+  const hooks = {};
+  const { hub, client, connect, killLatestServer } = await setup(t, undefined, {
+    onRequest: (request) => hooks.onRequest?.(request),
+  });
+
+  const { applied: crashDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Краш при откате",
+    column_names: [],
+    reason: "Дашборд для теста краша",
+  });
+  const { applied: crashDel } = await prepareAndApply(client, {
+    operation: "dashboard_delete",
+    target_ref: crashDash.created_dashboard_ref,
+    reason: "Удалить перед крашем",
+  });
+  const crashClient = await connect();
+  const dashCreatesBeforeCrash = hub.requests.filter(
+    ({ method }) => method === "dashboard.create",
+  ).length;
+  const killed = new Promise((resolve) => {
+    hooks.onRequest = (request) => {
+      if (request.method !== "dashboard.create") return;
+      hooks.onRequest = undefined;
+      killLatestServer();
+      resolve();
+    };
+  });
+  crashClient
+    .callTool({
+      name: "restore_native_change",
+      arguments: { change_ref: crashDel.change_ref },
+    })
+    .catch(() => {});
+  await killed;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const recoveredClient = await connect();
+  const afterRestartRestore = await call(
+    recoveredClient,
+    "restore_native_change",
+    { change_ref: crashDel.change_ref },
+  );
+  assert.equal(afterRestartRestore.status, "uncertain");
+  assert.equal(afterRestartRestore.candidate_dashboards?.length, 1);
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.create").length,
+    dashCreatesBeforeCrash + 1,
+    "retrying restore after crash in status=restoring must NOT send a second dashboard.create",
+  );
+});
+
+test("review P2-1: read-only get_native_change does not bump updated_at or break later_owned_change", async (t) => {
+  const { client } = await setup(t);
+  const { applied: d } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Порядок",
+    reason: "Проверка P2-1",
+  });
+  const { applied: upd1 } = await prepareAndApply(client, {
+    operation: "dashboard_update",
+    target_ref: d.created_dashboard_ref,
+    name: "Порядок 2",
+    reason: "Первое переименование",
+  });
+  const { applied: upd2 } = await prepareAndApply(client, {
+    operation: "dashboard_update",
+    target_ref: d.created_dashboard_ref,
+    name: "Порядок 3",
+    reason: "Второе переименование",
+  });
+  const histBefore = await call(client, "get_native_change", {
+    entity_ref: d.created_dashboard_ref,
+    limit: 50,
+  });
+  const createEntryBefore = histBefore.changes.find(
+    ({ change_ref }) => change_ref === d.change_ref,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  await call(client, "get_native_change", { change_ref: d.change_ref });
+  await call(client, "get_native_change", { change_ref: upd1.change_ref });
+  const histAfter = await call(client, "get_native_change", {
+    entity_ref: d.created_dashboard_ref,
+    limit: 50,
+  });
+  const createEntryAfter = histAfter.changes.find(
+    ({ change_ref }) => change_ref === d.change_ref,
+  );
+  assert.equal(
+    createEntryAfter.updated_at,
+    createEntryBefore.updated_at,
+    "read-only get_native_change must not bump updated_at",
+  );
+  const restoreEarlier = await call(client, "restore_native_change", {
+    change_ref: upd1.change_ref,
+  });
+  assert.equal(restoreEarlier.status, "conflict");
+  assert.equal(restoreEarlier.conflict_reason, "later_owned_change");
+  assert.equal(restoreEarlier.restore_first_change_ref, upd2.change_ref);
+});
+
+test("review P3-1: non-device widgets and empty dashboard restores skip homeCatalog refresh", async (t) => {
+  const { hub, client } = await setup(t);
+  hub.restEvent();
+  await call(client, "find_devices", { query: "торшер" });
+  const catalogCallsBefore = hub.requests.filter(
+    ({ method }) => method === "accessory.list" || method === "room.list",
+  ).length;
+  const { applied: emptyDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Без устройств",
+    reason: "Проверка P3-1",
+  });
+  const { applied: clockW } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: emptyDash.created_columns[0].ref,
+    widget: { type: "clock", name: "Часы" },
+    reason: "Часы без устройств",
+  });
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_update",
+    target_ref: clockW.created_widget_ref,
+    widget: { type: "weather", name: "Погода" },
+    reason: "Погода без устройств",
+  });
+  const { applied: delClock } = await prepareAndApply(client, {
+    operation: "dashboard_widget_delete",
+    target_ref: clockW.created_widget_ref,
+    reason: "Удалить погоду",
+  });
+  await call(client, "restore_native_change", {
+    change_ref: delClock.change_ref,
+  });
+  const pDelEmptyDash = await call(client, "prepare_native_change", {
+    operation: "dashboard_delete",
+    target_ref: emptyDash.created_dashboard_ref,
+    reason: "Удалить дашборд без устройств",
+  });
+  await call(client, "apply_native_change", {
+    change_ref: pDelEmptyDash.change_ref,
+  });
+  await call(client, "restore_native_change", {
+    change_ref: pDelEmptyDash.change_ref,
+  });
+  const catalogCallsAfter = hub.requests.filter(
+    ({ method }) => method === "accessory.list" || method === "room.list",
+  ).length;
+  assert.equal(
+    catalogCallsAfter,
+    catalogCallsBefore,
+    "non-device widgets and non-device dashboard deletes must not call homeCatalog refresh",
   );
 });
