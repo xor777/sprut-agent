@@ -2165,6 +2165,23 @@ test("hub name normalization: warns on prepare, applies cleanly with hub_normali
     requested: "Энергия · дом",
     stored: "Энергия  дом",
   });
+
+  // 8. Renaming away from a hub-stored double-spaced name ("Энергия  дом") and restoring
+  //    settles as restored even though hub collapses the double space on restore write!
+  const { applied: awayFromDoubleSpace } = await prepareAndApply(client, {
+    operation: "dashboard_update",
+    target_ref: dashRef,
+    name: "Энергия кратко",
+    reason: "Переименовать после имени с двойным пробелом",
+  });
+  const restoredDoubleSpace = await call(client, "restore_native_change", {
+    change_ref: awayFromDoubleSpace.change_ref,
+  });
+  assert.equal(restoredDoubleSpace.status, "restored");
+  assert.equal(
+    (await call(client, "get_entity", { entity_ref: dashRef })).entity.name,
+    "Энергия дом",
+  );
 });
 
 test("characteristic widget warns on duplicate characteristic_type across >=2 devices, stays silent on same device or distinct types, and strengthens History warning", async (t) => {

@@ -2046,6 +2046,73 @@ export class SprutHubClient {
     }
   }
 
+  async reorderDashboardWidgets(orders) {
+    if (!Array.isArray(orders) || orders.length === 0) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "reorderDashboardWidgets requires a non-empty orders array.",
+      );
+    }
+    const normalized = orders.map((entry) => {
+      if (
+        !isPlainObject(entry) ||
+        !isPositiveDashboardId(entry.dashboardId) ||
+        !isPositiveDashboardId(entry.columnId) ||
+        !isPositiveDashboardId(entry.id) ||
+        !isStableId(entry.order)
+      ) {
+        throw new SprutHubError(
+          "invalid_native_value",
+          "Each dashboard widget order entry requires positive dashboardId, columnId, id and non-negative integer order.",
+        );
+      }
+      return {
+        dashboardId: entry.dashboardId,
+        columnId: entry.columnId,
+        id: entry.id,
+        order: entry.order,
+      };
+    });
+    const response = await this.#request(
+      { dashboardWidget: { orders: { orders: normalized } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboardWidget;
+    if (
+      !container ||
+      !Object.hasOwn(container, "orders") ||
+      !isPlainObject(container.orders)
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard widget reorder.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+    let returned;
+    try {
+      returned = extractNativeList(response, [
+        "dashboardWidget",
+        "orders",
+        "orders",
+      ]);
+      for (const entry of returned) validateDashboardWidgetOrder(entry);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return returned.map((entry) => ({
+      dashboardId: entry.dashboardId,
+      columnId: entry.columnId,
+      id: entry.id,
+      order: entry.order ?? 0,
+    }));
+  }
+
   async listDashboardWidgetTypes() {
     const response = await this.#request(
       { dashboardWidget: { types: {} } },
@@ -5544,6 +5611,21 @@ function validateDashboardWidget(widget, expectedDashboardId, expectedId) {
     throw new SprutHubError(
       "incompatible_response",
       "SprutHub returned an incompatible dashboard widget message.",
+    );
+  }
+}
+
+function validateDashboardWidgetOrder(entry) {
+  if (
+    !isPlainObject(entry) ||
+    !isPositiveDashboardId(entry.dashboardId) ||
+    !isPositiveDashboardId(entry.columnId) ||
+    !isPositiveDashboardId(entry.id) ||
+    (entry.order !== undefined && !isStableId(entry.order))
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible dashboard widget order message.",
     );
   }
 }

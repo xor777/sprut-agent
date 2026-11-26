@@ -565,6 +565,7 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "dashboard_widget_create",
   "dashboard_widget_update",
   "dashboard_widget_delete",
+  "dashboard_widget_move",
 ]);
 
 export function isNativeChange(change) {

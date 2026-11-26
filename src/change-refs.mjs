@@ -45,6 +45,7 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "dashboard_widget_create",
   "dashboard_widget_update",
   "dashboard_widget_delete",
+  "dashboard_widget_move",
 ];
 
 export function parseRoomRef(ref, configuredSerial) {
