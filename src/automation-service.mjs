@@ -43,9 +43,15 @@ import {
   compareApplication,
   compareChangeSummaries,
   encodeHistoryCursor,
+  historyFiltersEcho,
   historyNext,
   historySelection,
+  isAppliedHistoryChange,
+  matchesHistoryQuery,
+  matchesHistoryTimeRange,
   nativeAffectedRefs,
+  parseHistoryFilterSyntax,
+  resolveHistoryTimeRange,
 } from "./change-history.mjs";
 import {
   publicNativeChange,
@@ -257,6 +263,7 @@ import {
   codeShownRedacted,
   idListLines,
   SprutHubError,
+  sanitizeAgentOutput,
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
 import {
@@ -5746,24 +5753,68 @@ export class AutomationService {
   async listNativeChanges({
     home_ref: requestedHomeRef,
     entity_ref: entityRef,
+    since,
+    until,
+    applied_only: appliedOnly,
+    query,
     limit = 10,
     cursor,
+    sensitiveValues = [],
   }) {
+    const parsed = parseHistoryFilterSyntax({ since, until, query });
     const homeRef = requestedHomeRef ?? configuredHomeRef(this.hubSerial);
     parseConfiguredHomeRef(homeRef, this.hubSerial);
     if (entityRef !== undefined) requireEntityHome(entityRef, this.hubSerial);
-    const selection = historySelection(homeRef, entityRef, limit, cursor);
-    const storedChanges = await this.#reconciledHistory(entityRef);
-    const all = storedChanges
-      .filter(
-        (change) =>
-          isNativeChange(change) &&
-          change.home_ref === homeRef &&
-          (entityRef === undefined ||
-            nativeAffectedRefs(change, homeRef).includes(entityRef)),
-      )
-      .map(changeSummary)
-      .sort(compareChangeSummaries);
+    const hubZone =
+      parsed.needsTimeZone && this.client !== null
+        ? await this.client.hubTimeZone(
+            this.hubSerial,
+            Date.now() + this.client.timeoutMs,
+          )
+        : null;
+    const timeRange = resolveHistoryTimeRange(parsed, hubZone);
+    const sanitizedQuery =
+      parsed.query === null
+        ? null
+        : sanitizeAgentOutput(parsed.query.raw, sensitiveValues);
+    const queryRedacted =
+      parsed.query !== null && sanitizedQuery !== parsed.query.raw;
+    const selection = historySelection(homeRef, entityRef, limit, cursor, {
+      since: parsed.since?.raw ?? null,
+      until: parsed.until?.raw ?? null,
+      sinceMs: timeRange.sinceMs,
+      untilMs: timeRange.untilMs,
+      appliedOnly: appliedOnly === true,
+      query: sanitizedQuery,
+    });
+    const all = [];
+    if (!queryRedacted) {
+      const storedChanges = await this.#reconciledHistory(entityRef);
+      for (const change of storedChanges) {
+        if (
+          !isNativeChange(change) ||
+          change.home_ref !== homeRef ||
+          (entityRef !== undefined &&
+            !nativeAffectedRefs(change, homeRef).includes(entityRef)) ||
+          (appliedOnly === true && !isAppliedHistoryChange(change)) ||
+          !matchesHistoryTimeRange(change, timeRange.sinceMs, timeRange.untilMs)
+        ) {
+          continue;
+        }
+        const summary = sanitizeAgentOutput(
+          changeSummary(change),
+          sensitiveValues,
+        );
+        if (
+          parsed.query !== null &&
+          !matchesHistoryQuery(summary, parsed.query)
+        ) {
+          continue;
+        }
+        all.push(summary);
+      }
+      all.sort(compareChangeSummaries);
+    }
     const remaining =
       selection.after === null
         ? all
@@ -5775,10 +5826,17 @@ export class AutomationService {
       changes.length < remaining.length
         ? encodeHistoryCursor(changes.at(-1), selection.scope)
         : null;
+    const filters = historyFiltersEcho({
+      parsed,
+      timeRange,
+      appliedOnly,
+      sanitizedQuery,
+    });
     return {
       status: "ok",
       home_ref: homeRef,
       ...(entityRef ? { entity_ref: entityRef } : {}),
+      ...(filters ? { filters } : {}),
       changes,
       page: {
         limit,
@@ -5798,6 +5856,7 @@ export class AutomationService {
   async #reconciledHistory(entityRef) {
     const changes = await this.store.list();
     if (
+      this.client === null ||
       entityRef === undefined ||
       unplacedScenarioCreates(changes).length === 0
     ) {
@@ -5819,7 +5878,13 @@ export class AutomationService {
     }
     const candidates = unplacedScenarioCreates(changes);
     if (candidates.length === 0) return;
-    const scenario = await this.client.getScenario(target.index);
+    let scenario;
+    try {
+      scenario = await this.client.getScenario(target.index);
+    } catch (error) {
+      if (isUnreadError(error)) return;
+      throw error;
+    }
     if (!scenario) return;
     for (const change of candidates) {
       const carriesMarker =

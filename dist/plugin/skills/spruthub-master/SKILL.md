@@ -23,8 +23,11 @@ description: Справка к MCP-серверу sprut-agent для дома н
   (`get_native_change_contract` читай заранее для сложных BLOCK/кода или когда
   неясны поля — при ошибке полей `prepare_native_change` вернёт контракт сам);
   проверка после таймаута/`uncertain` — `get_native_change` с `change_ref`,
-  история — он же без `change_ref`, возврат — `restore_native_change` (и
-  команд устройствам, несколько изменений одним вызовом).
+  история — он же без `change_ref` (фильтры `since`/`until` по поясу хаба,
+  `applied_only: true`, поиск `query` с русскими словоформами, флаг
+  `restore_supported`; читает локальный журнал и офлайн), возврат —
+  `restore_native_change` (и команд устройствам, несколько изменений одним
+  вызовом).
 - Окна расширений и устройств: `window_option` меняет видимые типовые опции,
   `TEXT` с `validValues` (например `joinRoom`) и несекретные настройки Telegram
   (`BotApiUrl`, `ProxyHost`, `ProxyPort`, `Name`; если поля прокси скрыты —
