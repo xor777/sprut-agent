@@ -483,7 +483,7 @@ test("whole-home compare=true returns compact unchanged summary and detects all 
   const parsed3 = JSON.parse(scen3.data);
   parsed3.blockId = 999;
   parsed3.targets[0].blockId = 888;
-  parsed3.targets[0].if.state = true;
+  parsed3.targets[0].state = true;
   parsed3.targets[0].then_delay = 5000;
   scen3.data = JSON.stringify(parsed3);
 

@@ -4849,7 +4849,7 @@ export function characteristicRef(
   return `${serviceRef(serial, accessoryId, serviceId)}/characteristic/${characteristicId}`;
 }
 
-function scenarioRef(serial, index) {
+export function scenarioRef(serial, index) {
   return `${homeRef(serial)}/scenario/${encodeURIComponent(index)}`;
 }
 
@@ -7097,7 +7097,7 @@ export function codeShownRedacted(source) {
   return redactSensitiveText(source, "javascript_source") !== source;
 }
 
-function redactSensitiveText(text, role = "data") {
+export function redactSensitiveText(text, role = "data") {
   const containsCredential =
     /\bBearer\s+[^\s;"'<>]+/i.test(text) ||
     // A URL with a user name and password, as in a BLOCK request.

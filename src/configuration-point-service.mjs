@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { canonicalBlock, withHiddenHttpUrls } from "./block-model.mjs";
 import {
   CONFIGURATION_POINT_FORMAT_VERSION,
@@ -6,6 +5,21 @@ import {
   configurationPointRef,
   parseConfigurationPointRef,
 } from "./configuration-point-store.mjs";
+import {
+  attributeSelectedComparison,
+  CONTROL_SETTING_TYPES,
+  captureHomeSnapshot,
+  compareHomeSnapshots,
+  diffCharacteristicSettings,
+  diffSettings,
+  HOME_SNAPSHOT_EXCLUDED_CATEGORIES,
+  homePointContainsEntity,
+  homeSnapshotCounts,
+  isHidden,
+  isPlainObject,
+  redactedMarker,
+  withHiddenHomeSnapshotUrls,
+} from "./home-configuration-point.mjs";
 import { createHubBackup, listHubBackups } from "./hub-backup.mjs";
 import {
   homeRef as homeRefOf,
@@ -13,6 +27,7 @@ import {
   isSensitiveNativeNode,
   parseEntityRef,
   SprutHubError,
+  sanitizeAgentOutput,
 } from "./spruthub-client.mjs";
 
 const SUPPORTED_KINDS = new Set([
@@ -21,13 +36,6 @@ const SUPPORTED_KINDS = new Set([
   "logic",
   "window",
   "characteristic",
-]);
-// Observed control parameters for this history slice, not a restore
-// allowlist and not every writable characteristic.
-const CONTROL_SETTING_TYPES = new Set([
-  "TargetTemperature",
-  "TargetHeatingCoolingState",
-  "C_FanSpeed",
 ]);
 
 export class ConfigurationPointService {
@@ -46,7 +54,13 @@ export class ConfigurationPointService {
     });
   }
 
-  async save({ home_ref: requestedHomeRef, entity_refs: entityRefs }) {
+  async save({
+    home_ref: requestedHomeRef,
+    entity_refs: entityRefs,
+    note,
+    sensitiveValues = [],
+  }) {
+    const sanitizedNote = sanitizePointNote(note, sensitiveValues);
     const homeRef = this.#selectedHomeRef(requestedHomeRef);
     const serial = this.#requireHome(homeRef);
     this.#requireClient();
@@ -71,6 +85,8 @@ export class ConfigurationPointService {
       id,
       hub_fingerprint: store.hubFingerprint,
       home_ref: homeRef,
+      coverage: "selected_entities",
+      ...(sanitizedNote !== undefined ? { note: sanitizedNote } : {}),
       capture_started_at: started,
       capture_finished_at: finished,
       selected_entity_refs: selected,
@@ -83,6 +99,7 @@ export class ConfigurationPointService {
       status: "ok",
       point_ref: pointRef,
       home_ref: homeRef,
+      ...(sanitizedNote !== undefined ? { note: sanitizedNote } : {}),
       capture_started_at: started,
       capture_finished_at: finished,
       coverage: "selected_entities",
@@ -90,6 +107,66 @@ export class ConfigurationPointService {
       atomic_snapshot: false,
       captured: captured.map(({ entity_ref, kind }) => ({ entity_ref, kind })),
       not_captured: notCaptured,
+      next: {
+        tool: "configuration_point",
+        arguments: { point_ref: pointRef },
+      },
+    };
+  }
+
+  async saveHome({
+    home_ref: requestedHomeRef,
+    note,
+    sensitiveValues = [],
+  } = {}) {
+    const sanitizedNote = sanitizePointNote(note, sensitiveValues);
+    const homeRef = this.#selectedHomeRef(requestedHomeRef);
+    const serial = this.#requireHome(homeRef);
+    this.#requireClient(
+      "Saving a whole-home configuration point requires a live SprutHub connection.",
+    );
+    const started = new Date().toISOString();
+    const { home_snapshot: snapshot, not_captured: notCaptured } =
+      await captureHomeSnapshot({
+        client: this.client,
+        serial,
+        sensitiveValues,
+      });
+    const finished = new Date().toISOString();
+    const store = this.storeFor(serial);
+    const id = store.newId();
+    const point = {
+      version: CONFIGURATION_POINT_FORMAT_VERSION,
+      id,
+      hub_fingerprint: store.hubFingerprint,
+      home_ref: homeRef,
+      coverage: "home",
+      house_complete: false,
+      excluded_categories: HOME_SNAPSHOT_EXCLUDED_CATEGORIES,
+      ...(sanitizedNote !== undefined ? { note: sanitizedNote } : {}),
+      capture_started_at: started,
+      capture_finished_at: finished,
+      selected_entity_refs: [],
+      captured: [],
+      not_captured: notCaptured,
+      home_snapshot: snapshot,
+    };
+    await store.save(point);
+    const pointRef = configurationPointRef(serial, id);
+    return {
+      status: "ok",
+      point_ref: pointRef,
+      home_ref: homeRef,
+      scope: "home",
+      coverage: "home",
+      house_complete: false,
+      atomic_snapshot: false,
+      ...(sanitizedNote !== undefined ? { note: sanitizedNote } : {}),
+      capture_started_at: started,
+      capture_finished_at: finished,
+      counts: homeSnapshotCounts(snapshot),
+      not_captured: notCaptured,
+      excluded_categories: HOME_SNAPSHOT_EXCLUDED_CATEGORIES,
       next: {
         tool: "configuration_point",
         arguments: { point_ref: pointRef },
@@ -110,9 +187,7 @@ export class ConfigurationPointService {
     const filtered = points
       .filter(
         (point) =>
-          entityRef === undefined ||
-          point.selected_entity_refs.includes(entityRef) ||
-          point.captured.some(({ entity_ref }) => entity_ref === entityRef),
+          entityRef === undefined || pointContainsEntity(point, entityRef),
       )
       .sort(comparePoints);
     const after = decodeListCursor(cursor, homeRef, entityRef);
@@ -125,11 +200,18 @@ export class ConfigurationPointService {
       page.length < remaining.length
         ? encodeListCursor(page.at(-1), homeRef, entityRef)
         : null;
+    const scopes = new Set(page.map((point) => pointCoverage(point)));
+    const listCoverage =
+      scopes.size === 1
+        ? [...scopes][0]
+        : scopes.size > 1
+          ? "mixed"
+          : "selected_entities";
     return {
       status: "ok",
       home_ref: homeRef,
       ...(entityRef ? { entity_ref: entityRef } : {}),
-      coverage: "selected_entities",
+      coverage: listCoverage,
       house_complete: false,
       points: page.map((point) => summarizePoint(point, serial)),
       unavailable,
@@ -154,7 +236,7 @@ export class ConfigurationPointService {
     };
   }
 
-  async get({ point_ref: pointRef, compare = false }) {
+  async get({ point_ref: pointRef, compare = false, sensitiveValues = [] }) {
     const { serial, id } = parseConfigurationPointRef(pointRef);
     this.#requireSerial(serial);
     const stored = await this.storeFor(serial).get(id);
@@ -166,14 +248,23 @@ export class ConfigurationPointService {
         { next: { tool: "configuration_point", arguments: {} } },
       );
     }
-    const point = withSecretOptionsHidden(withRequestUrlsHidden(stored));
-    const entity = publicPointEntity(point, serial);
+    const point =
+      pointCoverage(stored) === "home"
+        ? withHiddenHomeSnapshotUrls(stored)
+        : withSecretOptionsHidden(withRequestUrlsHidden(stored));
+    const entity = publicPointEntity(point, serial, {
+      compactHome: compare === true,
+    });
     if (!compare) return { status: "ok", entity };
     this.#requireClient();
+    const comparison =
+      pointCoverage(point) === "home"
+        ? await this.#compareHome(serial, point, sensitiveValues)
+        : await this.#compare(serial, point, sensitiveValues);
     return {
       status: "ok",
       entity,
-      comparison: await this.#compare(serial, point),
+      comparison,
     };
   }
 
@@ -205,9 +296,27 @@ export class ConfigurationPointService {
     });
   }
 
-  async #compare(serial, point) {
+  async #compareHome(serial, point, sensitiveValues) {
+    const currentCapture = await captureHomeSnapshot({
+      client: this.client,
+      serial,
+      sensitiveValues,
+    });
     const comparedAt = new Date().toISOString();
+    return compareHomeSnapshots({
+      point,
+      currentCapture,
+      comparedAt,
+      stateDirectory: this.stateDirectory,
+      hubUrl: this.hubUrl,
+      serial,
+      sensitiveValues,
+    });
+  }
+
+  async #compare(serial, point, sensitiveValues) {
     const entities = [];
+    const currentByRef = new Map();
     for (const captured of point.captured) {
       const current = await this.#captureEntity(serial, captured.entity_ref);
       if (!current.captured) {
@@ -241,6 +350,7 @@ export class ConfigurationPointService {
         });
         continue;
       }
+      currentByRef.set(captured.entity_ref, current.captured);
       const { changes, not_compared } = diffCaptured(
         captured,
         current.captured,
@@ -254,11 +364,22 @@ export class ConfigurationPointService {
         ...currentObservationFrom(current.captured),
       });
     }
+    const comparedAt = new Date().toISOString();
+    const attributed = await attributeSelectedComparison({
+      point,
+      entities,
+      currentByRef,
+      comparedAt,
+      stateDirectory: this.stateDirectory,
+      hubUrl: this.hubUrl,
+      serial,
+      sensitiveValues,
+    });
     return {
       compared_at: comparedAt,
       coverage: "selected_entities",
       house_complete: false,
-      entities,
+      ...attributed,
     };
   }
 
@@ -565,11 +686,59 @@ function withSecretOptionsHidden(point) {
   };
 }
 
-function publicPointEntity(point, serial) {
+function pointCoverage(point) {
+  return point.coverage === "home" ? "home" : "selected_entities";
+}
+
+function pointContainsEntity(point, entityRef) {
+  if (pointCoverage(point) === "home") {
+    return homePointContainsEntity(point, entityRef);
+  }
+  return (
+    point.selected_entity_refs.includes(entityRef) ||
+    point.captured.some(({ entity_ref }) => entity_ref === entityRef)
+  );
+}
+
+export function sanitizePointNote(note, sensitiveValues = []) {
+  if (note === undefined) return undefined;
+  const trimmed = note.trim();
+  if (trimmed.length === 0) {
+    throw new SprutHubError(
+      "invalid_point_call",
+      "note must contain at least one non-whitespace character.",
+      "configuration_point",
+    );
+  }
+  return sanitizeAgentOutput(trimmed, sensitiveValues);
+}
+
+function publicPointEntity(point, serial, { compactHome = false } = {}) {
+  const ref = configurationPointRef(serial, point.id);
+  if (pointCoverage(point) === "home") {
+    return {
+      kind: "configuration_point",
+      ref,
+      home_ref: point.home_ref,
+      scope: "home",
+      coverage: "home",
+      house_complete: false,
+      atomic_snapshot: false,
+      ...(point.note !== undefined ? { note: point.note } : {}),
+      capture_started_at: point.capture_started_at,
+      capture_finished_at: point.capture_finished_at,
+      counts: homeSnapshotCounts(point.home_snapshot),
+      excluded_categories:
+        point.excluded_categories ?? HOME_SNAPSHOT_EXCLUDED_CATEGORIES,
+      ...(compactHome ? {} : { home_snapshot: point.home_snapshot }),
+      not_captured: point.not_captured,
+    };
+  }
   return {
     kind: "configuration_point",
-    ref: configurationPointRef(serial, point.id),
+    ref,
     home_ref: point.home_ref,
+    ...(point.note !== undefined ? { note: point.note } : {}),
     capture_started_at: point.capture_started_at,
     capture_finished_at: point.capture_finished_at,
     coverage: "selected_entities",
@@ -583,8 +752,26 @@ function publicPointEntity(point, serial) {
 
 function summarizePoint(point, serial) {
   const pointRef = configurationPointRef(serial, point.id);
+  if (pointCoverage(point) === "home") {
+    return {
+      point_ref: pointRef,
+      scope: "home",
+      coverage: "home",
+      ...(point.note !== undefined ? { note: point.note } : {}),
+      capture_started_at: point.capture_started_at,
+      capture_finished_at: point.capture_finished_at,
+      counts: homeSnapshotCounts(point.home_snapshot),
+      not_captured_count: point.not_captured.length,
+      next: {
+        tool: "configuration_point",
+        arguments: { point_ref: pointRef },
+      },
+    };
+  }
   return {
     point_ref: pointRef,
+    scope: "selected_entities",
+    ...(point.note !== undefined ? { note: point.note } : {}),
     capture_started_at: point.capture_started_at,
     capture_finished_at: point.capture_finished_at,
     entity_refs: point.selected_entity_refs,
@@ -628,69 +815,6 @@ function comparableSettings(captured) {
   };
 }
 
-function diffCharacteristicSettings(previous, current) {
-  if (!climateSemanticsComparable(previous, current)) {
-    return {
-      changes: [],
-      not_compared: [{ path: ["value"], reason: "incomparable_semantics" }],
-    };
-  }
-  if (
-    !isKnownClimateValue(previous.value) ||
-    !isKnownClimateValue(current.value)
-  ) {
-    return {
-      changes: [],
-      not_compared: [{ path: ["value"], reason: "unknown_value" }],
-    };
-  }
-  if (
-    Object.is(previous.value, current.value) &&
-    (previous.enum?.key ?? null) === (current.enum?.key ?? null)
-  ) {
-    return { changes: [], not_compared: [] };
-  }
-  return {
-    changes: [
-      {
-        path: ["value"],
-        from: comparableClimateValue(previous),
-        to: comparableClimateValue(current),
-      },
-    ],
-    not_compared: [],
-  };
-}
-
-function climateSemanticsComparable(previous, current) {
-  if (previous.type !== current.type) return false;
-  if (!Object.is(previous.unit, current.unit)) return false;
-  const previousKey = previous.enum?.key ?? null;
-  const currentKey = current.enum?.key ?? null;
-  if (previousKey === currentKey) return true;
-  // Same type with different keys is an ordinary mode/speed change only when
-  // the numeric codes also differ; the same code with a new key changed meaning.
-  return (
-    Boolean(previousKey) &&
-    Boolean(currentKey) &&
-    !Object.is(previous.value, current.value)
-  );
-}
-
-function isKnownClimateValue(value) {
-  return ["boolean", "number", "string"].includes(typeof value);
-}
-
-function comparableClimateValue(settings) {
-  return {
-    value: settings.value,
-    ...(settings.enum
-      ? { enum: { key: settings.enum.key, name: settings.enum.name } }
-      : {}),
-    unit: settings.unit,
-  };
-}
-
 function currentObservationFrom(captured) {
   if (captured?.kind !== "characteristic") return {};
   const settings = captured.settings;
@@ -702,13 +826,6 @@ function currentObservationFrom(captured) {
       source_timestamp: settings.source_timestamp,
     },
   };
-}
-
-function diffSettings(previous, current) {
-  const changes = [];
-  const notCompared = [];
-  diffValues([], previous, current, changes, notCompared);
-  return { changes, not_compared: notCompared };
 }
 
 function foldIncompleteOptions(previous, current, changes, notCompared) {
@@ -747,61 +864,6 @@ function keyedIncomplete(items = []) {
       .filter((item) => typeof item.option_key === "string")
       .map((item) => [item.option_key, item]),
   );
-}
-
-function diffValues(path, previous, current, changes, notCompared) {
-  if (isHidden(previous) || isHidden(current)) {
-    // Hidden values are not evidence of equality: two redacted secrets may differ.
-    notCompared.push({ path, reason: "redacted" });
-    return;
-  }
-  if (previous === undefined || current === undefined) {
-    if (!isDeepStrictEqual(previous, current)) {
-      changes.push({ path, from: previous, to: current });
-    }
-    return;
-  }
-  if (isPlainObject(previous) && isPlainObject(current)) {
-    const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
-    for (const key of keys) {
-      diffValues(
-        [...path, key],
-        Object.hasOwn(previous, key) ? previous[key] : undefined,
-        Object.hasOwn(current, key) ? current[key] : undefined,
-        changes,
-        notCompared,
-      );
-    }
-    return;
-  }
-  if (Array.isArray(previous) && Array.isArray(current)) {
-    const length = Math.max(previous.length, current.length);
-    for (let index = 0; index < length; index += 1) {
-      diffValues(
-        [...path, index],
-        previous[index],
-        current[index],
-        changes,
-        notCompared,
-      );
-    }
-    return;
-  }
-  if (!isDeepStrictEqual(previous, current)) {
-    changes.push({ path, from: previous, to: current });
-  }
-}
-
-function isHidden(value) {
-  return isRedactedNode(value) || value === "[REDACTED]";
-}
-
-function redactedMarker() {
-  return { redacted: true, reason: "sensitive_native_data" };
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function comparePoints(left, right) {

@@ -119,18 +119,41 @@ export function parseStoredPoint(text, id, hubFingerprint, hubSerial) {
   } catch {
     throw corruptConfigurationPoint(id, hubSerial);
   }
+  const coverage = state?.coverage;
+  const validCoverage =
+    coverage === undefined ||
+    coverage === "selected_entities" ||
+    coverage === "home";
   if (
     state?.version !== CONFIGURATION_POINT_FORMAT_VERSION ||
     state.id !== id ||
     state.hub_fingerprint !== hubFingerprint ||
     typeof state.home_ref !== "string" ||
+    !validCoverage ||
+    (state.note !== undefined && typeof state.note !== "string") ||
     !Array.isArray(state.captured) ||
     !Array.isArray(state.not_captured) ||
     !Array.isArray(state.selected_entity_refs)
   ) {
     throw corruptConfigurationPoint(id, hubSerial);
   }
+  if (coverage === "home" && !isValidHomeSnapshot(state.home_snapshot)) {
+    throw corruptConfigurationPoint(id, hubSerial);
+  }
   return state;
+}
+
+function isValidHomeSnapshot(snapshot) {
+  return (
+    snapshot !== null &&
+    typeof snapshot === "object" &&
+    !Array.isArray(snapshot) &&
+    Array.isArray(snapshot.rooms) &&
+    Array.isArray(snapshot.accessories) &&
+    Array.isArray(snapshot.scenarios) &&
+    Array.isArray(snapshot.bridges) &&
+    Array.isArray(snapshot.climate_setpoints)
+  );
 }
 
 export function configurationPointRef(serial, id) {
