@@ -19,6 +19,7 @@ import {
   parseDashboardWidgetRef,
   parseServiceRef,
   refuseRedactionMark,
+  writeRejection,
 } from "./change-refs.mjs";
 import {
   failedVerification,
@@ -71,6 +72,12 @@ const WIDGET_TYPES = [
   "shortcut",
 ];
 const WIDGET_TYPE_SET = new Set(WIDGET_TYPES);
+const DEVICE_WIDGET_TYPES = new Set([
+  "characteristic",
+  "chart",
+  "service",
+  "camera",
+]);
 const HISTORY_MISSING_WARNING =
   "The History app («История») is not installed and running on this hub, so this chart widget may stay empty. Warn the owner; characteristic widgets show live values right away without History.";
 
@@ -302,6 +309,14 @@ function canonicalWidgetPayload(type, raw = {}) {
   return {};
 }
 
+function widgetNeedsHomeCatalog(widget) {
+  return (
+    DEVICE_WIDGET_TYPES.has(widget?.type) &&
+    Array.isArray(widget.payload?.items) &&
+    widget.payload.items.length > 0
+  );
+}
+
 function sameWidgetContent(left, right) {
   if (!left || !right) return false;
   return (
@@ -476,6 +491,7 @@ async function verifyServiceExists(client, catalog, target, rawRef) {
 }
 
 function findMissingWidgetRefs(catalog, homeRef, widget) {
+  if (!catalog || !widgetNeedsHomeCatalog(widget)) return [];
   const missing = [];
   if (widget.type === "characteristic" || widget.type === "chart") {
     for (const item of widget.payload?.items ?? []) {
@@ -761,6 +777,21 @@ function notFoundError(kind) {
   );
 }
 
+function attachPartialRefusalDetails(change, error, rejection) {
+  const changeRef = `spruthub-change://native/${change.id}`;
+  error.details = {
+    ...(error.details ?? {}),
+    change_ref: changeRef,
+    hub_effect: "partial",
+    ...(rejection ? { rejection } : {}),
+    next: {
+      tool: "restore_native_change",
+      arguments: { change_ref: changeRef },
+    },
+  };
+  return error;
+}
+
 // ---- Prepare ---------------------------------------------------------------
 
 export async function prepareDashboardChange(ctx, input) {
@@ -810,6 +841,7 @@ async function prepareDashboardCreate(ctx, input) {
     baseline_dashboard_ids: existing.map(({ id }) => id),
     created_columns: [],
     creation_owned: false,
+    creation_complete: false,
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_absent"),
@@ -885,6 +917,7 @@ async function prepareDashboardDelete(ctx, input) {
     baseline_snapshot: snapshot,
     column_count: columnCount,
     widget_count: widgetCount,
+    delete_confirmed: false,
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -1016,6 +1049,7 @@ async function prepareDashboardColumnDelete(ctx, input) {
     column_id: columnId,
     baseline_snapshot: snapshot,
     widget_count: widgetCount,
+    delete_confirmed: false,
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -1189,6 +1223,7 @@ async function prepareDashboardWidgetDelete(ctx, input) {
     column_id: baseline.column_id,
     widget_id: widgetId,
     baseline_snapshot: baseline,
+    delete_confirmed: false,
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -1292,17 +1327,20 @@ async function applyDashboardCreate(ctx, change) {
   change.created_dashboard_ref = dashboardRef(ctx.hubSerial, created.id);
   change.applied_dashboard_name = created.name;
   change.creation_owned = true;
+  change.creation_complete = false;
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
   change.created_columns = [];
   change.column_steps = change.requested_column_names.map((name) => ({
     name,
+    status: "pending",
     sent: false,
     acknowledged: false,
   }));
   await ctx.store.save(change);
 
   for (const step of change.column_steps) {
+    step.status = "sent";
     step.sent = true;
     await ctx.store.save(change);
     let column;
@@ -1313,27 +1351,25 @@ async function applyDashboardCreate(ctx, change) {
       });
     } catch (error) {
       if (!isUncertainWriteError(error)) {
+        step.status = "refused";
+        const rejection = writeRejection(error);
         const live = await ctx.client
           .getDashboard(created.id)
           .catch(() => null);
-        if (live) change.applied_snapshot = dashboardSnapshot(live);
         await ctx.finishNative(change, "conflict", undefined, {
+          creation_complete: false,
+          ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
+          ...(rejection && change.write_intent
+            ? { write_intent: { ...change.write_intent, rejection } }
+            : {}),
           conflict_reason: "partial_column_creation_refused",
           last_verification: freshVerification("partial_dashboard_created"),
         });
-        error.details = {
-          ...(error.details ?? {}),
-          change_ref: `spruthub-change://native/${change.id}`,
-          hub_effect: "partial",
-          next: {
-            tool: "restore_native_change",
-            arguments: { change_ref: `spruthub-change://native/${change.id}` },
-          },
-        };
-        throw error;
+        throw attachPartialRefusalDetails(change, error, rejection);
       }
       const live = await ctx.client.getDashboard(created.id).catch(() => null);
       return ctx.finishNative(change, "uncertain", undefined, {
+        creation_complete: false,
         ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
         conflict_reason: "dashboard_column_creation_outcome_unknown",
         last_verification: live
@@ -1341,7 +1377,9 @@ async function applyDashboardCreate(ctx, change) {
           : failedVerification(error),
       });
     }
+    step.status = "created";
     step.acknowledged = true;
+    step.created_id = column.id;
     change.created_columns.push({
       ref: dashboardColumnRef(ctx.hubSerial, created.id, column.id),
       id: column.id,
@@ -1353,11 +1391,13 @@ async function applyDashboardCreate(ctx, change) {
   const live = await ctx.client.getDashboard(created.id);
   if (!live) {
     return ctx.finishNative(change, "conflict", undefined, {
+      creation_complete: false,
       conflict_reason: "created_dashboard_missing",
       last_verification: freshVerification("created_dashboard_missing"),
     });
   }
   return ctx.finishNative(change, "applied", undefined, {
+    creation_complete: true,
     applied_snapshot: dashboardSnapshot(live),
     last_verification: freshVerification("created_dashboard_observed"),
   });
@@ -1646,18 +1686,20 @@ async function applyDashboardWidgetCreate(ctx, change) {
       last_verification: freshVerification("column_missing"),
     });
   }
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
-  const missingRefs = findMissingWidgetRefs(
-    catalog,
-    change.home_ref,
-    change.requested_widget,
-  );
-  if (missingRefs.length > 0) {
-    return ctx.finishNative(change, "conflict", undefined, {
-      missing_refs: missingRefs,
-      conflict_reason: "referenced_entity_missing",
-      last_verification: freshVerification("referenced_entity_missing"),
-    });
+  if (widgetNeedsHomeCatalog(change.requested_widget)) {
+    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
+    const missingRefs = findMissingWidgetRefs(
+      catalog,
+      change.home_ref,
+      change.requested_widget,
+    );
+    if (missingRefs.length > 0) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        missing_refs: missingRefs,
+        conflict_reason: "referenced_entity_missing",
+        last_verification: freshVerification("referenced_entity_missing"),
+      });
+    }
   }
   await ctx.persistNativeIntent(change, "applying", "apply");
   let created;
@@ -1716,18 +1758,20 @@ async function applyDashboardWidgetUpdate(ctx, change) {
       last_verification: freshVerification("widget_changed_since"),
     });
   }
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
-  const missingRefs = findMissingWidgetRefs(
-    catalog,
-    change.home_ref,
-    change.requested_widget,
-  );
-  if (missingRefs.length > 0) {
-    return ctx.finishNative(change, "conflict", undefined, {
-      missing_refs: missingRefs,
-      conflict_reason: "referenced_entity_missing",
-      last_verification: freshVerification("referenced_entity_missing"),
-    });
+  if (widgetNeedsHomeCatalog(change.requested_widget)) {
+    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
+    const missingRefs = findMissingWidgetRefs(
+      catalog,
+      change.home_ref,
+      change.requested_widget,
+    );
+    if (missingRefs.length > 0) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        missing_refs: missingRefs,
+        conflict_reason: "referenced_entity_missing",
+        last_verification: freshVerification("referenced_entity_missing"),
+      });
+    }
   }
   await ctx.persistNativeIntent(change, "applying", "apply");
   try {
@@ -1789,6 +1833,10 @@ async function applyDashboardWidgetDelete(ctx, change) {
 }
 
 // ---- Get & Reconcile -------------------------------------------------------
+// Read-only get_native_change MUST NOT call finishNative on already-settled
+// (applied / restored / conflict) records so updated_at and history ordering
+// remain stable, and MUST NEVER flip in-flight restore/uncertain/conflict
+// records back to applied.
 
 export async function getDashboardChange(ctx, change) {
   switch (change.kind) {
@@ -1818,8 +1866,21 @@ export async function getDashboardChange(ctx, change) {
   }
 }
 
+function hasIncompleteColumnSteps(change) {
+  return (
+    change.creation_complete === false ||
+    (Array.isArray(change.column_steps) &&
+      change.column_steps.some((step) => step.status !== "created"))
+  );
+}
+
 async function getDashboardCreate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (change.created_dashboard_id === undefined) {
@@ -1843,7 +1904,7 @@ async function getDashboardCreate(ctx, change) {
   }
   if (live === null) {
     if (
-      change.status === "restored" ||
+      ["restoring", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "restore"
     ) {
       return ctx.finishNative(change, "restored", undefined, {
@@ -1853,22 +1914,56 @@ async function getDashboardCreate(ctx, change) {
         last_verification: freshVerification("created_dashboard_absent"),
       });
     }
+    if (change.status === "conflict") {
+      return publicDashboardChange(change, {
+        verification: freshVerification("created_dashboard_missing"),
+      });
+    }
     return ctx.finishNative(change, "conflict", undefined, {
       conflict_reason: "created_dashboard_missing",
       last_verification: freshVerification("created_dashboard_missing"),
     });
   }
-  if (change.status === "restored") return ctx.publicStored(change);
-  const liveSnap = dashboardSnapshot(live);
-  if (change.status === "uncertain") {
-    return ctx.finishNative(change, "uncertain", undefined, {
-      observed_snapshot: liveSnap,
+  if (
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
+  ) {
+    if (change.status === "restoring") {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        observed_snapshot: dashboardSnapshot(live),
+        last_verification: freshVerification("created_dashboard_still_present"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("created_dashboard_still_present"),
+    });
+  }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      verification: freshVerification(change.conflict_reason ?? "conflict"),
+    });
+  }
+  if (change.status === "uncertain" || hasIncompleteColumnSteps(change)) {
+    if (change.status === "applying") {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        observed_snapshot: dashboardSnapshot(live),
+        conflict_reason: "dashboard_column_creation_outcome_unknown",
+        last_verification: freshVerification("partial_dashboard_observed"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("partial_dashboard_observed"),
+    });
+  }
+  if (change.status === "applying") {
+    return ctx.finishNative(change, "applied", undefined, {
+      creation_complete: true,
+      applied_snapshot: dashboardSnapshot(live),
       last_verification: freshVerification("created_dashboard_observed"),
     });
   }
-  return ctx.finishNative(change, "applied", undefined, {
-    observed_snapshot: liveSnap,
-    last_verification: freshVerification("created_dashboard_observed"),
+  return publicDashboardChange(change, {
+    verification: freshVerification("created_dashboard_observed"),
   });
 }
 
@@ -1899,7 +1994,7 @@ async function reconcileDashboardUpdate(
   const previousName =
     direction === "apply"
       ? change.baseline_snapshot.name
-      : (change.applied_snapshot?.name ?? change.requested_name);
+      : change.applied_snapshot?.name;
   if (live.name === targetName) {
     return ctx.finishNative(
       change,
@@ -1933,7 +2028,12 @@ async function reconcileDashboardUpdate(
 }
 
 async function getDashboardUpdate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (["applying", "restoring", "uncertain"].includes(change.status)) {
@@ -1945,13 +2045,22 @@ async function getDashboardUpdate(ctx, change) {
       change.write_intent?.acknowledged !== true,
     );
   }
-  if (change.status === "restored") return ctx.publicStored(change);
   let live;
   try {
     live = await ctx.client.getDashboard(change.dashboard_id);
   } catch (error) {
     return publicDashboardChange(change, {
       verification: failedVerification(error),
+    });
+  }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      ...(live ? { observedName: live.name } : {}),
+      verification: freshVerification(
+        live === null
+          ? "dashboard_missing"
+          : (change.conflict_reason ?? "conflict"),
+      ),
     });
   }
   if (live === null) {
@@ -1963,7 +2072,7 @@ async function getDashboardUpdate(ctx, change) {
   return publicDashboardChange(change, {
     observedName: live.name,
     verification: freshVerification(
-      live.name === (change.applied_snapshot?.name ?? change.requested_name)
+      live.name === change.applied_snapshot?.name
         ? "applied_name_observed"
         : "dashboard_changed_since",
     ),
@@ -1981,6 +2090,7 @@ async function reconcileDashboardDeleteApply(ctx, change, uncertainWrite) {
   }
   if (live === null) {
     return ctx.finishNative(change, "applied", undefined, {
+      delete_confirmed: true,
       ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("deleted_dashboard_absent"),
     });
@@ -1991,7 +2101,11 @@ async function reconcileDashboardDeleteApply(ctx, change, uncertainWrite) {
 }
 
 async function getDashboardDelete(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned"
+  ) {
     return ctx.publicStored(change);
   }
   if (
@@ -2013,15 +2127,34 @@ async function getDashboardDelete(ctx, change) {
         verification: failedVerification(error),
       });
     }
-    return live === null
-      ? ctx.finishNative(change, "conflict", undefined, {
-          conflict_reason: "recreated_dashboard_missing",
-          last_verification: freshVerification("recreated_dashboard_missing"),
-        })
-      : ctx.finishNative(change, "restored", undefined, {
-          recreated_snapshot: dashboardSnapshot(live),
-          last_verification: freshVerification("recreated_dashboard_observed"),
+    if (live === null) {
+      if (change.status === "conflict" || change.status === "restored") {
+        return publicDashboardChange(change, {
+          verification: freshVerification("recreated_dashboard_missing"),
         });
+      }
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_dashboard_missing",
+        last_verification: freshVerification("recreated_dashboard_missing"),
+      });
+    }
+    // NEVER mark incomplete multi-step recreation as restored!
+    if (change.recreation_complete !== true) {
+      if (change.status === "restoring") {
+        return ctx.finishNative(change, "uncertain", undefined, {
+          observed_snapshot: dashboardSnapshot(live),
+          conflict_reason: "recreation_step_outcome_unknown",
+          last_verification: freshVerification("partial_recreation_observed"),
+        });
+      }
+      return publicDashboardChange(change, {
+        verification: freshVerification("partial_recreation_observed"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("recreated_dashboard_observed"),
+    });
   }
   if (
     ["restoring", "uncertain"].includes(change.status) &&
@@ -2038,7 +2171,12 @@ async function getDashboardDelete(ctx, change) {
 }
 
 async function getDashboardColumnCreate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (change.created_column_id === undefined) {
@@ -2065,7 +2203,7 @@ async function getDashboardColumnCreate(ctx, change) {
   }
   if (live === null) {
     if (
-      change.status === "restored" ||
+      ["restoring", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "restore"
     ) {
       return ctx.finishNative(change, "restored", undefined, {
@@ -2075,15 +2213,43 @@ async function getDashboardColumnCreate(ctx, change) {
         last_verification: freshVerification("created_column_absent"),
       });
     }
+    if (change.status === "conflict") {
+      return publicDashboardChange(change, {
+        verification: freshVerification("created_column_missing"),
+      });
+    }
     return ctx.finishNative(change, "conflict", undefined, {
       conflict_reason: "created_column_missing",
       last_verification: freshVerification("created_column_missing"),
     });
   }
-  if (change.status === "restored") return ctx.publicStored(change);
-  return ctx.finishNative(change, "applied", undefined, {
-    observed_snapshot: columnSnapshot(live),
-    last_verification: freshVerification("created_column_observed"),
+  if (
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
+  ) {
+    if (change.status === "restoring") {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        observed_snapshot: columnSnapshot(live),
+        last_verification: freshVerification("created_column_still_present"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("created_column_still_present"),
+    });
+  }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      verification: freshVerification(change.conflict_reason ?? "conflict"),
+    });
+  }
+  if (change.status === "applying") {
+    return ctx.finishNative(change, "applied", undefined, {
+      applied_snapshot: change.applied_snapshot ?? columnSnapshot(live),
+      last_verification: freshVerification("created_column_observed"),
+    });
+  }
+  return publicDashboardChange(change, {
+    verification: freshVerification("created_column_observed"),
   });
 }
 
@@ -2117,7 +2283,7 @@ async function reconcileDashboardColumnUpdate(
   const previousName =
     direction === "apply"
       ? change.baseline_snapshot.name
-      : (change.applied_snapshot?.name ?? change.requested_name);
+      : change.applied_snapshot?.name;
   if (live.name === targetName) {
     return ctx.finishNative(
       change,
@@ -2157,7 +2323,12 @@ async function reconcileDashboardColumnUpdate(
 }
 
 async function getDashboardColumnUpdate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (["applying", "restoring", "uncertain"].includes(change.status)) {
@@ -2169,7 +2340,6 @@ async function getDashboardColumnUpdate(ctx, change) {
       change.write_intent?.acknowledged !== true,
     );
   }
-  if (change.status === "restored") return ctx.publicStored(change);
   let live;
   try {
     live = await ctx.client.getDashboardColumn(
@@ -2181,6 +2351,16 @@ async function getDashboardColumnUpdate(ctx, change) {
       verification: failedVerification(error),
     });
   }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      ...(live ? { observedName: live.name } : {}),
+      verification: freshVerification(
+        live === null
+          ? "column_missing"
+          : (change.conflict_reason ?? "conflict"),
+      ),
+    });
+  }
   if (live === null) {
     return ctx.finishNative(change, "conflict", undefined, {
       conflict_reason: "column_missing",
@@ -2190,7 +2370,7 @@ async function getDashboardColumnUpdate(ctx, change) {
   return publicDashboardChange(change, {
     observedName: live.name,
     verification: freshVerification(
-      live.name === (change.applied_snapshot?.name ?? change.requested_name)
+      live.name === change.applied_snapshot?.name
         ? "applied_name_observed"
         : "column_changed_since",
     ),
@@ -2215,6 +2395,7 @@ async function reconcileDashboardColumnDeleteApply(
   }
   if (live === null) {
     return ctx.finishNative(change, "applied", undefined, {
+      delete_confirmed: true,
       ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("deleted_column_absent"),
     });
@@ -2225,7 +2406,11 @@ async function reconcileDashboardColumnDeleteApply(
 }
 
 async function getDashboardColumnDelete(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned"
+  ) {
     return ctx.publicStored(change);
   }
   if (
@@ -2250,15 +2435,33 @@ async function getDashboardColumnDelete(ctx, change) {
         verification: failedVerification(error),
       });
     }
-    return live === null
-      ? ctx.finishNative(change, "conflict", undefined, {
-          conflict_reason: "recreated_column_missing",
-          last_verification: freshVerification("recreated_column_missing"),
-        })
-      : ctx.finishNative(change, "restored", undefined, {
-          recreated_snapshot: columnSnapshot(live),
-          last_verification: freshVerification("recreated_column_observed"),
+    if (live === null) {
+      if (change.status === "conflict" || change.status === "restored") {
+        return publicDashboardChange(change, {
+          verification: freshVerification("recreated_column_missing"),
         });
+      }
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_column_missing",
+        last_verification: freshVerification("recreated_column_missing"),
+      });
+    }
+    if (change.recreation_complete !== true) {
+      if (change.status === "restoring") {
+        return ctx.finishNative(change, "uncertain", undefined, {
+          observed_snapshot: columnSnapshot(live),
+          conflict_reason: "recreation_step_outcome_unknown",
+          last_verification: freshVerification("partial_recreation_observed"),
+        });
+      }
+      return publicDashboardChange(change, {
+        verification: freshVerification("partial_recreation_observed"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("recreated_column_observed"),
+    });
   }
   if (
     ["restoring", "uncertain"].includes(change.status) &&
@@ -2275,7 +2478,12 @@ async function getDashboardColumnDelete(ctx, change) {
 }
 
 async function getDashboardWidgetCreate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (change.created_widget_id === undefined) {
@@ -2302,7 +2510,7 @@ async function getDashboardWidgetCreate(ctx, change) {
   }
   if (live === null) {
     if (
-      change.status === "restored" ||
+      ["restoring", "uncertain"].includes(change.status) &&
       nativeIntentDirection(change) === "restore"
     ) {
       return ctx.finishNative(change, "restored", undefined, {
@@ -2312,16 +2520,43 @@ async function getDashboardWidgetCreate(ctx, change) {
         last_verification: freshVerification("created_widget_absent"),
       });
     }
+    if (change.status === "conflict") {
+      return publicDashboardChange(change, {
+        verification: freshVerification("created_widget_missing"),
+      });
+    }
     return ctx.finishNative(change, "conflict", undefined, {
       conflict_reason: "created_widget_missing",
       last_verification: freshVerification("created_widget_missing"),
     });
   }
-  if (change.status === "restored") return ctx.publicStored(change);
-  return ctx.finishNative(change, "applied", undefined, {
-    applied_snapshot: change.applied_snapshot ?? widgetSnapshot(live),
-    observed_snapshot: widgetSnapshot(live),
-    last_verification: freshVerification("created_widget_observed"),
+  if (
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
+  ) {
+    if (change.status === "restoring") {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        observed_snapshot: widgetSnapshot(live),
+        last_verification: freshVerification("created_widget_still_present"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("created_widget_still_present"),
+    });
+  }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      verification: freshVerification(change.conflict_reason ?? "conflict"),
+    });
+  }
+  if (change.status === "applying") {
+    return ctx.finishNative(change, "applied", undefined, {
+      applied_snapshot: change.applied_snapshot ?? widgetSnapshot(live),
+      last_verification: freshVerification("created_widget_observed"),
+    });
+  }
+  return publicDashboardChange(change, {
+    verification: freshVerification("created_widget_observed"),
   });
 }
 
@@ -2352,9 +2587,7 @@ async function reconcileDashboardWidgetUpdate(
   const expected =
     direction === "apply" ? change.requested_widget : change.baseline_snapshot;
   const previous =
-    direction === "apply"
-      ? change.baseline_snapshot
-      : (change.applied_snapshot ?? change.requested_widget);
+    direction === "apply" ? change.baseline_snapshot : change.applied_snapshot;
   if (sameWidgetContent(liveSnap, expected)) {
     return ctx.finishNative(
       change,
@@ -2372,7 +2605,7 @@ async function reconcileDashboardWidgetUpdate(
       },
     );
   }
-  if (sameWidgetContent(liveSnap, previous)) {
+  if (previous && sameWidgetContent(liveSnap, previous)) {
     return ctx.finishNative(change, "uncertain", undefined, {
       observed_snapshot: liveSnap,
       last_verification: freshVerification("previous_widget_still_present"),
@@ -2386,7 +2619,12 @@ async function reconcileDashboardWidgetUpdate(
 }
 
 async function getDashboardWidgetUpdate(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
     return ctx.publicStored(change);
   }
   if (["applying", "restoring", "uncertain"].includes(change.status)) {
@@ -2398,7 +2636,6 @@ async function getDashboardWidgetUpdate(ctx, change) {
       change.write_intent?.acknowledged !== true,
     );
   }
-  if (change.status === "restored") return ctx.publicStored(change);
   let live;
   try {
     live = await ctx.client.getDashboardWidget(
@@ -2410,6 +2647,15 @@ async function getDashboardWidgetUpdate(ctx, change) {
       verification: failedVerification(error),
     });
   }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      verification: freshVerification(
+        live === null
+          ? "widget_missing"
+          : (change.conflict_reason ?? "conflict"),
+      ),
+    });
+  }
   if (live === null) {
     return ctx.finishNative(change, "conflict", undefined, {
       conflict_reason: "widget_missing",
@@ -2419,10 +2665,8 @@ async function getDashboardWidgetUpdate(ctx, change) {
   const liveSnap = widgetSnapshot(live);
   return publicDashboardChange(change, {
     verification: freshVerification(
-      sameWidgetContent(
-        liveSnap,
-        change.applied_snapshot ?? change.requested_widget,
-      )
+      change.applied_snapshot &&
+        sameWidgetContent(liveSnap, change.applied_snapshot)
         ? "applied_widget_observed"
         : "widget_changed_since",
     ),
@@ -2447,6 +2691,7 @@ async function reconcileDashboardWidgetDeleteApply(
   }
   if (live === null) {
     return ctx.finishNative(change, "applied", undefined, {
+      delete_confirmed: true,
       ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("deleted_widget_absent"),
     });
@@ -2457,7 +2702,11 @@ async function reconcileDashboardWidgetDeleteApply(
 }
 
 async function getDashboardWidgetDelete(ctx, change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned"
+  ) {
     return ctx.publicStored(change);
   }
   if (
@@ -2482,15 +2731,26 @@ async function getDashboardWidgetDelete(ctx, change) {
         verification: failedVerification(error),
       });
     }
-    return live === null
-      ? ctx.finishNative(change, "conflict", undefined, {
-          conflict_reason: "recreated_widget_missing",
-          last_verification: freshVerification("recreated_widget_missing"),
-        })
-      : ctx.finishNative(change, "restored", undefined, {
-          recreated_snapshot: widgetSnapshot(live),
-          last_verification: freshVerification("recreated_widget_observed"),
+    if (live === null) {
+      if (change.status === "conflict" || change.status === "restored") {
+        return publicDashboardChange(change, {
+          verification: freshVerification("recreated_widget_missing"),
         });
+      }
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "recreated_widget_missing",
+        last_verification: freshVerification("recreated_widget_missing"),
+      });
+    }
+    if (change.status === "restoring") {
+      return ctx.finishNative(change, "restored", undefined, {
+        recreated_snapshot: widgetSnapshot(live),
+        last_verification: freshVerification("recreated_widget_observed"),
+      });
+    }
+    return publicDashboardChange(change, {
+      verification: freshVerification("recreated_widget_observed"),
+    });
   }
   if (
     ["restoring", "uncertain"].includes(change.status) &&
@@ -2508,13 +2768,71 @@ async function getDashboardWidgetDelete(ctx, change) {
 
 // ---- Restore (Undo) --------------------------------------------------------
 
+function changeApplicationTime(change) {
+  return (
+    change.history?.find(({ status }) => status === "applying")?.at ??
+    change.created_at
+  );
+}
+
+function isAppliedAfter(other, base) {
+  const otherTime = changeApplicationTime(other);
+  const baseTime = changeApplicationTime(base);
+  if (otherTime !== baseTime) return otherTime > baseTime;
+  if (other.created_at !== base.created_at) {
+    return other.created_at > base.created_at;
+  }
+  return other.id > base.id;
+}
+
+async function findLaterAppliedChange(ctx, change, kinds) {
+  const stored = await ctx.store.list();
+  const kindSet = new Set(kinds);
+  const later = stored
+    .filter(
+      (other) =>
+        other.id !== change.id &&
+        other.home_ref === change.home_ref &&
+        other.target_ref === change.target_ref &&
+        kindSet.has(other.kind) &&
+        other.status === "applied" &&
+        isAppliedAfter(other, change),
+    )
+    .sort((left, right) =>
+      changeApplicationTime(right).localeCompare(changeApplicationTime(left)),
+    );
+  return later[0] ?? null;
+}
+
 export async function restoreDashboardChange(ctx, change) {
   if (change.status === "restored") return ctx.publicStored(change);
-  if (change.status === "prepared" || change.status === "not_applied") {
+  // Single shared pre-write gate across all 9 dashboard operations:
+  // prepared, hub-refused not_applied, or pre-write conflict (native_write_sent=false)
+  // must NEVER write to the hub or recreate/overwrite owner state.
+  if (
+    change.native_write_sent !== true ||
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned"
+  ) {
     return ctx.finishNative(change, "not_owned", undefined, {
       conflict_reason: "change_was_not_applied",
       last_verification: freshVerification("change_was_not_applied"),
     });
+  }
+  // Unconfirmed apply gate: reconcile apply first before any restore write.
+  if (
+    ["applying", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "apply"
+  ) {
+    const ownedPartialDashboard =
+      change.kind === DASHBOARD_CREATE &&
+      change.creation_owned === true &&
+      change.created_dashboard_id !== undefined;
+    if (!ownedPartialDashboard) {
+      const reconciled = await getDashboardChange(ctx, change);
+      if (change.status !== "applied") return reconciled;
+    }
   }
   switch (change.kind) {
     case DASHBOARD_CREATE:
@@ -2541,23 +2859,6 @@ export async function restoreDashboardChange(ctx, change) {
         "This native operation is not supported.",
       );
   }
-}
-
-async function findLaterAppliedChange(ctx, change, kinds) {
-  const stored = await ctx.store.list();
-  const kindSet = new Set(kinds);
-  const later = stored
-    .filter(
-      (other) =>
-        other.id !== change.id &&
-        other.home_ref === change.home_ref &&
-        other.target_ref === change.target_ref &&
-        kindSet.has(other.kind) &&
-        other.status === "applied" &&
-        other.updated_at >= change.updated_at,
-    )
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-  return later[0] ?? null;
 }
 
 async function restoreDashboardCreate(ctx, change) {
@@ -2598,21 +2899,27 @@ async function restoreDashboardCreate(ctx, change) {
       last_verification: freshVerification("dashboard_not_empty"),
     });
   }
-  const createdColumns = change.created_columns ?? [];
-  const columnsMatch =
-    live.columns.length === createdColumns.length &&
-    live.columns.every(
+  const confirmedColumns = change.created_columns ?? [];
+  const inFlightStep = (change.column_steps ?? []).find(
+    (step) => step.status === "sent" && step.acknowledged !== true,
+  );
+  const prefixMatches =
+    live.columns.length >= confirmedColumns.length &&
+    confirmedColumns.every(
       (column, index) =>
-        column.id === createdColumns[index].id &&
-        column.name === createdColumns[index].name,
+        live.columns[index].id === column.id &&
+        live.columns[index].name === column.name,
     );
+  const columnsMatch =
+    prefixMatches &&
+    (live.columns.length === confirmedColumns.length ||
+      (inFlightStep !== undefined &&
+        live.columns.length === confirmedColumns.length + 1 &&
+        live.columns[confirmedColumns.length].name === inFlightStep.name));
   if (live.name !== expectedName || !columnsMatch) {
     const later = await findLaterAppliedChange(
       ctx,
-      {
-        ...change,
-        target_ref: change.created_dashboard_ref,
-      },
+      { ...change, target_ref: change.created_dashboard_ref },
       [DASHBOARD_UPDATE, DASHBOARD_COLUMN_CREATE],
     );
     return ctx.finishNative(change, "conflict", undefined, {
@@ -2628,12 +2935,14 @@ async function restoreDashboardCreate(ctx, change) {
       ),
     });
   }
+  const priorStatus =
+    change.creation_complete === true ? "applied" : change.status;
   await ctx.persistNativeIntent(change, "restoring", "restore");
   try {
     await ctx.client.deleteDashboard(change.created_dashboard_id);
   } catch (error) {
     if (!isUncertainWriteError(error)) {
-      throw await ctx.finishRefusedWrite(change, "applied", error);
+      throw await ctx.finishRefusedWrite(change, priorStatus, error);
     }
     const after = await ctx.client
       .getDashboard(change.created_dashboard_id)
@@ -2665,6 +2974,12 @@ async function restoreDashboardCreate(ctx, change) {
 }
 
 async function restoreDashboardUpdate(ctx, change) {
+  if (!change.applied_snapshot) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
+  }
   const live = await ctx.client.getDashboard(change.dashboard_id);
   if (live === null) {
     return ctx.finishNative(change, "conflict", undefined, {
@@ -2681,8 +2996,7 @@ async function restoreDashboardUpdate(ctx, change) {
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
-  const appliedName = change.applied_snapshot?.name ?? change.requested_name;
-  if (live.name !== appliedName) {
+  if (live.name !== change.applied_snapshot.name) {
     const later = await findLaterAppliedChange(ctx, change, [DASHBOARD_UPDATE]);
     return ctx.finishNative(change, "conflict", undefined, {
       observed_name: live.name,
@@ -2713,13 +3027,265 @@ async function restoreDashboardUpdate(ctx, change) {
   return reconcileDashboardUpdate(ctx, change, "restore", false);
 }
 
+function buildDashboardRecreationPlan(snapshot) {
+  return snapshot.columns.map((column, columnIndex) => ({
+    index: columnIndex,
+    name: column.name,
+    order: column.order,
+    status: "pending",
+    widgets: column.widgets.map((widget, widgetIndex) => ({
+      index: widgetIndex,
+      name: widget.name,
+      order: widget.order,
+      type: widget.type,
+      payload: widget.payload,
+      status: "pending",
+    })),
+  }));
+}
+
+function buildColumnRecreationWidgets(snapshot) {
+  return snapshot.widgets.map((widget, widgetIndex) => ({
+    index: widgetIndex,
+    name: widget.name,
+    order: widget.order,
+    type: widget.type,
+    payload: widget.payload,
+    status: "pending",
+  }));
+}
+
+function planHasSentStep(plan) {
+  return (plan ?? []).some(
+    (column) =>
+      column.status === "sent" ||
+      (column.widgets ?? []).some((widget) => widget.status === "sent"),
+  );
+}
+
+async function runDashboardDeleteRecreation(ctx, change) {
+  const plan = change.recreation_plan ?? [];
+  const dashboardId = change.recreated_dashboard_id;
+
+  // Never blindly resend a column/widget create whose prior attempt lost reply.
+  if (planHasSentStep(plan)) {
+    let live;
+    try {
+      live = await ctx.client.getDashboard(dashboardId);
+    } catch (error) {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreation_step_outcome_unknown",
+        last_verification: failedVerification(error),
+      });
+    }
+    if (live === null) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_dashboard_missing",
+        last_verification: freshVerification("recreated_dashboard_missing"),
+      });
+    }
+    return ctx.finishNative(change, "uncertain", undefined, {
+      recreation_complete: false,
+      observed_snapshot: dashboardSnapshot(live),
+      conflict_reason: "recreation_step_outcome_unknown",
+      last_verification: freshVerification("partial_recreation_observed"),
+    });
+  }
+
+  // On explicit retry after a hub refusal, re-enable refused steps to pending.
+  for (const columnStep of plan) {
+    if (columnStep.status === "refused") columnStep.status = "pending";
+    for (const widgetStep of columnStep.widgets) {
+      if (widgetStep.status === "refused") widgetStep.status = "pending";
+    }
+  }
+
+  const needsCatalog = plan.some((columnStep) =>
+    columnStep.widgets.some(
+      (widgetStep) =>
+        widgetStep.status === "pending" && widgetNeedsHomeCatalog(widgetStep),
+    ),
+  );
+  const catalog = needsCatalog
+    ? await resolveHomeCatalog(ctx.client, ctx.hubSerial, { refresh: true })
+    : null;
+
+  for (const columnStep of plan) {
+    if (columnStep.status === "pending") {
+      columnStep.status = "sent";
+      await ctx.store.save(change);
+      let createdCol;
+      try {
+        createdCol = await ctx.client.createDashboardColumn({
+          dashboardId,
+          ...(columnStep.name !== "" ? { name: columnStep.name } : {}),
+          order: columnStep.order,
+        });
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          columnStep.status = "refused";
+          const rejection = writeRejection(error);
+          const live = await ctx.client
+            .getDashboard(dashboardId)
+            .catch(() => null);
+          await ctx.finishNative(change, "conflict", undefined, {
+            recreation_complete: false,
+            ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
+            ...(rejection && change.write_intent
+              ? { write_intent: { ...change.write_intent, rejection } }
+              : {}),
+            conflict_reason: "partial_recreation_refused",
+            last_verification: freshVerification("partial_recreation_refused"),
+          });
+          throw attachPartialRefusalDetails(change, error, rejection);
+        }
+        const live = await ctx.client
+          .getDashboard(dashboardId)
+          .catch(() => null);
+        return ctx.finishNative(change, "uncertain", undefined, {
+          recreation_complete: false,
+          ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
+          conflict_reason: "recreation_step_outcome_unknown",
+          last_verification: live
+            ? freshVerification("partial_recreation_observed")
+            : failedVerification(error),
+        });
+      }
+      const colRef = dashboardColumnRef(
+        ctx.hubSerial,
+        dashboardId,
+        createdCol.id,
+      );
+      columnStep.status = "created";
+      columnStep.created_id = createdCol.id;
+      columnStep.created_ref = colRef;
+      change.recreated_columns.push({
+        ref: colRef,
+        id: createdCol.id,
+        name: createdCol.name,
+      });
+      await ctx.store.save(change);
+    }
+
+    if (columnStep.status !== "created") continue;
+    for (const widgetStep of columnStep.widgets) {
+      if (widgetStep.status !== "pending") continue;
+      const missingRefs = findMissingWidgetRefs(
+        catalog,
+        change.home_ref,
+        widgetStep,
+      );
+      if (missingRefs.length > 0) {
+        widgetStep.status = "skipped";
+        widgetStep.missing_refs = missingRefs;
+        change.skipped_widgets.push({
+          column_name: columnStep.name,
+          widget_name: widgetStep.name,
+          type: widgetStep.type,
+          reason: "referenced_entity_missing",
+          missing_refs: missingRefs,
+        });
+        await ctx.store.save(change);
+        continue;
+      }
+      widgetStep.status = "sent";
+      await ctx.store.save(change);
+      let createdWidget;
+      try {
+        createdWidget = await ctx.client.createDashboardWidget({
+          dashboardId,
+          columnId: columnStep.created_id,
+          ...(widgetStep.name !== "" ? { name: widgetStep.name } : {}),
+          order: widgetStep.order,
+          kindKey: widgetStep.type,
+          payload: widgetStep.payload,
+        });
+      } catch (error) {
+        if (!isUncertainWriteError(error)) {
+          widgetStep.status = "refused";
+          const rejection = writeRejection(error);
+          const live = await ctx.client
+            .getDashboard(dashboardId)
+            .catch(() => null);
+          await ctx.finishNative(change, "conflict", undefined, {
+            recreation_complete: false,
+            ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
+            ...(rejection && change.write_intent
+              ? { write_intent: { ...change.write_intent, rejection } }
+              : {}),
+            conflict_reason: "partial_recreation_refused",
+            last_verification: freshVerification("partial_recreation_refused"),
+          });
+          throw attachPartialRefusalDetails(change, error, rejection);
+        }
+        const live = await ctx.client
+          .getDashboard(dashboardId)
+          .catch(() => null);
+        return ctx.finishNative(change, "uncertain", undefined, {
+          recreation_complete: false,
+          ...(live ? { observed_snapshot: dashboardSnapshot(live) } : {}),
+          conflict_reason: "recreation_step_outcome_unknown",
+          last_verification: live
+            ? freshVerification("partial_recreation_observed")
+            : failedVerification(error),
+        });
+      }
+      const widgetRef = dashboardWidgetRef(
+        ctx.hubSerial,
+        dashboardId,
+        createdWidget.id,
+      );
+      widgetStep.status = "created";
+      widgetStep.created_id = createdWidget.id;
+      widgetStep.created_ref = widgetRef;
+      change.recreated_widgets.push({
+        ref: widgetRef,
+        id: createdWidget.id,
+        column_ref: columnStep.created_ref,
+        name: createdWidget.name,
+        type: createdWidget.type,
+      });
+      await ctx.store.save(change);
+    }
+  }
+
+  const live = await ctx.client.getDashboard(dashboardId);
+  if (live === null) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      recreation_complete: false,
+      conflict_reason: "recreated_dashboard_missing",
+      last_verification: freshVerification("recreated_dashboard_missing"),
+    });
+  }
+  return ctx.finishNative(change, "restored", undefined, {
+    recreation_complete: true,
+    recreated_snapshot: dashboardSnapshot(live),
+    last_verification: freshVerification("recreated_dashboard_observed"),
+  });
+}
+
 async function restoreDashboardDelete(ctx, change) {
   if (change.recreated_dashboard_id !== undefined) {
-    return getDashboardDelete(ctx, change);
+    if (change.recreation_complete === true) {
+      return getDashboardDelete(ctx, change);
+    }
+    const liveParent = await ctx.client.getDashboard(
+      change.recreated_dashboard_id,
+    );
+    if (liveParent === null) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_dashboard_missing",
+        last_verification: freshVerification("recreated_dashboard_missing"),
+      });
+    }
+    return runDashboardDeleteRecreation(ctx, change);
   }
   if (
-    nativeIntentDirection(change) === "restore" &&
-    change.status === "uncertain"
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
   ) {
     return recordUnknownDashboardCreate(
       ctx,
@@ -2727,6 +3293,12 @@ async function restoreDashboardDelete(ctx, change) {
       change.restore_baseline_dashboard_ids,
       change.baseline_snapshot.name,
     );
+  }
+  if (change.delete_confirmed !== true) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
   }
   const existing = await ctx.client.getDashboard(change.dashboard_id);
   if (existing !== null) {
@@ -2737,9 +3309,6 @@ async function restoreDashboardDelete(ctx, change) {
   }
   const beforeList = await ctx.client.listDashboards();
   change.restore_baseline_dashboard_ids = beforeList.map(({ id }) => id);
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-    refresh: true,
-  });
   const snapshot = change.baseline_snapshot;
   await ctx.persistNativeIntent(change, "restoring", "restore");
   let created;
@@ -2761,74 +3330,22 @@ async function restoreDashboardDelete(ctx, change) {
   }
   change.recreated_dashboard_id = created.id;
   change.recreated_dashboard_ref = dashboardRef(ctx.hubSerial, created.id);
+  change.recreation_complete = false;
+  change.recreation_plan = buildDashboardRecreationPlan(snapshot);
   change.recreated_columns = [];
   change.recreated_widgets = [];
   change.skipped_widgets = [];
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
   await ctx.store.save(change);
-
-  for (const column of snapshot.columns) {
-    const createdCol = await ctx.client.createDashboardColumn({
-      dashboardId: created.id,
-      ...(column.name !== "" ? { name: column.name } : {}),
-      order: column.order,
-    });
-    const colRef = dashboardColumnRef(ctx.hubSerial, created.id, createdCol.id);
-    change.recreated_columns.push({
-      ref: colRef,
-      id: createdCol.id,
-      name: createdCol.name,
-    });
-    await ctx.store.save(change);
-
-    for (const widget of column.widgets) {
-      const missingRefs = findMissingWidgetRefs(
-        catalog,
-        change.home_ref,
-        widget,
-      );
-      if (missingRefs.length > 0) {
-        change.skipped_widgets.push({
-          column_name: column.name,
-          widget_name: widget.name,
-          type: widget.type,
-          reason: "referenced_entity_missing",
-          missing_refs: missingRefs,
-        });
-        await ctx.store.save(change);
-        continue;
-      }
-      const createdWidget = await ctx.client.createDashboardWidget({
-        dashboardId: created.id,
-        columnId: createdCol.id,
-        ...(widget.name !== "" ? { name: widget.name } : {}),
-        order: widget.order,
-        kindKey: widget.type,
-        payload: widget.payload,
-      });
-      change.recreated_widgets.push({
-        ref: dashboardWidgetRef(ctx.hubSerial, created.id, createdWidget.id),
-        id: createdWidget.id,
-        column_ref: colRef,
-        name: createdWidget.name,
-        type: createdWidget.type,
-      });
-      await ctx.store.save(change);
-    }
-  }
-
-  const live = await ctx.client.getDashboard(created.id);
-  return ctx.finishNative(change, "restored", undefined, {
-    ...(live ? { recreated_snapshot: dashboardSnapshot(live) } : {}),
-    last_verification: freshVerification("recreated_dashboard_observed"),
-  });
+  return runDashboardDeleteRecreation(ctx, change);
 }
 
 async function restoreDashboardColumnCreate(ctx, change) {
   if (
     change.creation_owned !== true ||
-    change.created_column_id === undefined
+    change.created_column_id === undefined ||
+    !change.applied_snapshot
   ) {
     return ctx.finishNative(change, "not_owned", undefined, {
       conflict_reason: "column_creation_not_confirmed",
@@ -2858,8 +3375,7 @@ async function restoreDashboardColumnCreate(ctx, change) {
       last_verification: freshVerification("column_not_empty"),
     });
   }
-  const appliedName = change.applied_snapshot?.name ?? change.requested_name;
-  if (live.name !== appliedName) {
+  if (live.name !== change.applied_snapshot.name) {
     const later = await findLaterAppliedChange(
       ctx,
       { ...change, target_ref: change.created_column_ref },
@@ -2921,6 +3437,12 @@ async function restoreDashboardColumnCreate(ctx, change) {
 }
 
 async function restoreDashboardColumnUpdate(ctx, change) {
+  if (!change.applied_snapshot) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
+  }
   const live = await ctx.client.getDashboardColumn(
     change.dashboard_id,
     change.column_id,
@@ -2940,8 +3462,7 @@ async function restoreDashboardColumnUpdate(ctx, change) {
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
-  const appliedName = change.applied_snapshot?.name ?? change.requested_name;
-  if (live.name !== appliedName) {
+  if (live.name !== change.applied_snapshot.name) {
     const later = await findLaterAppliedChange(ctx, change, [
       DASHBOARD_COLUMN_UPDATE,
     ]);
@@ -2976,13 +3497,165 @@ async function restoreDashboardColumnUpdate(ctx, change) {
   return reconcileDashboardColumnUpdate(ctx, change, "restore", false);
 }
 
+async function runColumnDeleteRecreation(ctx, change) {
+  const widgetSteps = change.recreation_widgets ?? [];
+  const dashboardId = change.dashboard_id;
+  const columnId = change.recreated_column_id;
+  const colRef = change.recreated_column_ref;
+
+  if (widgetSteps.some((step) => step.status === "sent")) {
+    let live;
+    try {
+      live = await ctx.client.getDashboardColumn(dashboardId, columnId);
+    } catch (error) {
+      return ctx.finishNative(change, "uncertain", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreation_step_outcome_unknown",
+        last_verification: failedVerification(error),
+      });
+    }
+    if (live === null) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_column_missing",
+        last_verification: freshVerification("recreated_column_missing"),
+      });
+    }
+    return ctx.finishNative(change, "uncertain", undefined, {
+      recreation_complete: false,
+      observed_snapshot: columnSnapshot(live),
+      conflict_reason: "recreation_step_outcome_unknown",
+      last_verification: freshVerification("partial_recreation_observed"),
+    });
+  }
+
+  for (const step of widgetSteps) {
+    if (step.status === "refused") step.status = "pending";
+  }
+
+  const needsCatalog = widgetSteps.some(
+    (step) => step.status === "pending" && widgetNeedsHomeCatalog(step),
+  );
+  const catalog = needsCatalog
+    ? await resolveHomeCatalog(ctx.client, ctx.hubSerial, { refresh: true })
+    : null;
+
+  for (const widgetStep of widgetSteps) {
+    if (widgetStep.status !== "pending") continue;
+    const missingRefs = findMissingWidgetRefs(
+      catalog,
+      change.home_ref,
+      widgetStep,
+    );
+    if (missingRefs.length > 0) {
+      widgetStep.status = "skipped";
+      widgetStep.missing_refs = missingRefs;
+      change.skipped_widgets.push({
+        column_name: change.baseline_snapshot.name,
+        widget_name: widgetStep.name,
+        type: widgetStep.type,
+        reason: "referenced_entity_missing",
+        missing_refs: missingRefs,
+      });
+      await ctx.store.save(change);
+      continue;
+    }
+    widgetStep.status = "sent";
+    await ctx.store.save(change);
+    let createdWidget;
+    try {
+      createdWidget = await ctx.client.createDashboardWidget({
+        dashboardId,
+        columnId,
+        ...(widgetStep.name !== "" ? { name: widgetStep.name } : {}),
+        order: widgetStep.order,
+        kindKey: widgetStep.type,
+        payload: widgetStep.payload,
+      });
+    } catch (error) {
+      if (!isUncertainWriteError(error)) {
+        widgetStep.status = "refused";
+        const rejection = writeRejection(error);
+        const live = await ctx.client
+          .getDashboardColumn(dashboardId, columnId)
+          .catch(() => null);
+        await ctx.finishNative(change, "conflict", undefined, {
+          recreation_complete: false,
+          ...(live ? { observed_snapshot: columnSnapshot(live) } : {}),
+          ...(rejection && change.write_intent
+            ? { write_intent: { ...change.write_intent, rejection } }
+            : {}),
+          conflict_reason: "partial_recreation_refused",
+          last_verification: freshVerification("partial_recreation_refused"),
+        });
+        throw attachPartialRefusalDetails(change, error, rejection);
+      }
+      const live = await ctx.client
+        .getDashboardColumn(dashboardId, columnId)
+        .catch(() => null);
+      return ctx.finishNative(change, "uncertain", undefined, {
+        recreation_complete: false,
+        ...(live ? { observed_snapshot: columnSnapshot(live) } : {}),
+        conflict_reason: "recreation_step_outcome_unknown",
+        last_verification: live
+          ? freshVerification("partial_recreation_observed")
+          : failedVerification(error),
+      });
+    }
+    const widgetRef = dashboardWidgetRef(
+      ctx.hubSerial,
+      dashboardId,
+      createdWidget.id,
+    );
+    widgetStep.status = "created";
+    widgetStep.created_id = createdWidget.id;
+    widgetStep.created_ref = widgetRef;
+    change.recreated_widgets.push({
+      ref: widgetRef,
+      id: createdWidget.id,
+      column_ref: colRef,
+      name: createdWidget.name,
+      type: createdWidget.type,
+    });
+    await ctx.store.save(change);
+  }
+
+  const live = await ctx.client.getDashboardColumn(dashboardId, columnId);
+  if (live === null) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      recreation_complete: false,
+      conflict_reason: "recreated_column_missing",
+      last_verification: freshVerification("recreated_column_missing"),
+    });
+  }
+  return ctx.finishNative(change, "restored", undefined, {
+    recreation_complete: true,
+    recreated_snapshot: columnSnapshot(live),
+    last_verification: freshVerification("recreated_column_observed"),
+  });
+}
+
 async function restoreDashboardColumnDelete(ctx, change) {
   if (change.recreated_column_id !== undefined) {
-    return getDashboardColumnDelete(ctx, change);
+    if (change.recreation_complete === true) {
+      return getDashboardColumnDelete(ctx, change);
+    }
+    const liveCol = await ctx.client.getDashboardColumn(
+      change.dashboard_id,
+      change.recreated_column_id,
+    );
+    if (liveCol === null) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        recreation_complete: false,
+        conflict_reason: "recreated_column_missing",
+        last_verification: freshVerification("recreated_column_missing"),
+      });
+    }
+    return runColumnDeleteRecreation(ctx, change);
   }
   if (
-    nativeIntentDirection(change) === "restore" &&
-    change.status === "uncertain"
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
   ) {
     return recordUnknownColumnCreate(
       ctx,
@@ -2990,6 +3663,12 @@ async function restoreDashboardColumnDelete(ctx, change) {
       change.restore_baseline_column_ids,
       change.baseline_snapshot.name,
     );
+  }
+  if (change.delete_confirmed !== true) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
   }
   const dashboard = await ctx.client.getDashboard(change.dashboard_id);
   if (dashboard === null) {
@@ -3005,9 +3684,6 @@ async function restoreDashboardColumnDelete(ctx, change) {
     });
   }
   change.restore_baseline_column_ids = dashboard.columns.map(({ id }) => id);
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-    refresh: true,
-  });
   const snapshot = change.baseline_snapshot;
   await ctx.persistNativeIntent(change, "restoring", "restore");
   let createdCol;
@@ -3035,61 +3711,21 @@ async function restoreDashboardColumnDelete(ctx, change) {
   );
   change.recreated_column_id = createdCol.id;
   change.recreated_column_ref = colRef;
+  change.recreation_complete = false;
+  change.recreation_widgets = buildColumnRecreationWidgets(snapshot);
   change.recreated_widgets = [];
   change.skipped_widgets = [];
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
   await ctx.store.save(change);
-
-  for (const widget of snapshot.widgets) {
-    const missingRefs = findMissingWidgetRefs(catalog, change.home_ref, widget);
-    if (missingRefs.length > 0) {
-      change.skipped_widgets.push({
-        column_name: snapshot.name,
-        widget_name: widget.name,
-        type: widget.type,
-        reason: "referenced_entity_missing",
-        missing_refs: missingRefs,
-      });
-      await ctx.store.save(change);
-      continue;
-    }
-    const createdWidget = await ctx.client.createDashboardWidget({
-      dashboardId: change.dashboard_id,
-      columnId: createdCol.id,
-      ...(widget.name !== "" ? { name: widget.name } : {}),
-      order: widget.order,
-      kindKey: widget.type,
-      payload: widget.payload,
-    });
-    change.recreated_widgets.push({
-      ref: dashboardWidgetRef(
-        ctx.hubSerial,
-        change.dashboard_id,
-        createdWidget.id,
-      ),
-      id: createdWidget.id,
-      column_ref: colRef,
-      name: createdWidget.name,
-      type: createdWidget.type,
-    });
-    await ctx.store.save(change);
-  }
-
-  const live = await ctx.client.getDashboardColumn(
-    change.dashboard_id,
-    createdCol.id,
-  );
-  return ctx.finishNative(change, "restored", undefined, {
-    ...(live ? { recreated_snapshot: columnSnapshot(live) } : {}),
-    last_verification: freshVerification("recreated_column_observed"),
-  });
+  return runColumnDeleteRecreation(ctx, change);
 }
 
 async function restoreDashboardWidgetCreate(ctx, change) {
   if (
     change.creation_owned !== true ||
-    change.created_widget_id === undefined
+    change.created_widget_id === undefined ||
+    !change.applied_snapshot
   ) {
     return ctx.finishNative(change, "not_owned", undefined, {
       conflict_reason: "widget_creation_not_confirmed",
@@ -3115,10 +3751,7 @@ async function restoreDashboardWidgetCreate(ctx, change) {
   const liveSnap = widgetSnapshot(live);
   if (
     liveSnap.column_id !== change.column_id ||
-    !sameWidgetContent(
-      liveSnap,
-      change.applied_snapshot ?? change.requested_widget,
-    )
+    !sameWidgetContent(liveSnap, change.applied_snapshot)
   ) {
     const later = await findLaterAppliedChange(
       ctx,
@@ -3181,6 +3814,12 @@ async function restoreDashboardWidgetCreate(ctx, change) {
 }
 
 async function restoreDashboardWidgetUpdate(ctx, change) {
+  if (!change.applied_snapshot) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
+  }
   const live = await ctx.client.getDashboardWidget(
     change.dashboard_id,
     change.widget_id,
@@ -3201,12 +3840,7 @@ async function restoreDashboardWidgetUpdate(ctx, change) {
       last_verification: freshVerification("baseline_widget_observed"),
     });
   }
-  if (
-    !sameWidgetContent(
-      liveSnap,
-      change.applied_snapshot ?? change.requested_widget,
-    )
-  ) {
+  if (!sameWidgetContent(liveSnap, change.applied_snapshot)) {
     const later = await findLaterAppliedChange(ctx, change, [
       DASHBOARD_WIDGET_UPDATE,
     ]);
@@ -3223,20 +3857,22 @@ async function restoreDashboardWidgetUpdate(ctx, change) {
       ),
     });
   }
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-    refresh: true,
-  });
-  const missingRefs = findMissingWidgetRefs(
-    catalog,
-    change.home_ref,
-    change.baseline_snapshot,
-  );
-  if (missingRefs.length > 0) {
-    return ctx.finishNative(change, "conflict", undefined, {
-      missing_refs: missingRefs,
-      conflict_reason: "referenced_entity_missing",
-      last_verification: freshVerification("referenced_entity_missing"),
+  if (widgetNeedsHomeCatalog(change.baseline_snapshot)) {
+    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
+      refresh: true,
     });
+    const missingRefs = findMissingWidgetRefs(
+      catalog,
+      change.home_ref,
+      change.baseline_snapshot,
+    );
+    if (missingRefs.length > 0) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        missing_refs: missingRefs,
+        conflict_reason: "referenced_entity_missing",
+        last_verification: freshVerification("referenced_entity_missing"),
+      });
+    }
   }
   await ctx.persistNativeIntent(change, "restoring", "restore");
   try {
@@ -3265,8 +3901,8 @@ async function restoreDashboardWidgetDelete(ctx, change) {
     return getDashboardWidgetDelete(ctx, change);
   }
   if (
-    nativeIntentDirection(change) === "restore" &&
-    change.status === "uncertain"
+    ["restoring", "uncertain"].includes(change.status) &&
+    nativeIntentDirection(change) === "restore"
   ) {
     return recordUnknownWidgetCreate(
       ctx,
@@ -3274,6 +3910,12 @@ async function restoreDashboardWidgetDelete(ctx, change) {
       change.restore_baseline_widget_ids,
       change.baseline_snapshot,
     );
+  }
+  if (change.delete_confirmed !== true) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
   }
   const dashboard = await ctx.client.getDashboard(change.dashboard_id);
   if (dashboard === null) {
@@ -3297,20 +3939,22 @@ async function restoreDashboardWidgetDelete(ctx, change) {
       last_verification: freshVerification("widget_still_present"),
     });
   }
-  const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-    refresh: true,
-  });
-  const missingRefs = findMissingWidgetRefs(
-    catalog,
-    change.home_ref,
-    change.baseline_snapshot,
-  );
-  if (missingRefs.length > 0) {
-    return ctx.finishNative(change, "conflict", undefined, {
-      missing_refs: missingRefs,
-      conflict_reason: "referenced_entity_missing",
-      last_verification: freshVerification("referenced_entity_missing"),
+  if (widgetNeedsHomeCatalog(change.baseline_snapshot)) {
+    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
+      refresh: true,
     });
+    const missingRefs = findMissingWidgetRefs(
+      catalog,
+      change.home_ref,
+      change.baseline_snapshot,
+    );
+    if (missingRefs.length > 0) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        missing_refs: missingRefs,
+        conflict_reason: "referenced_entity_missing",
+        last_verification: freshVerification("referenced_entity_missing"),
+      });
+    }
   }
   change.restore_baseline_widget_ids = column.widgets.map(({ id }) => id);
   await ctx.persistNativeIntent(change, "restoring", "restore");
@@ -3345,12 +3989,19 @@ async function restoreDashboardWidgetDelete(ctx, change) {
   );
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
+  await ctx.store.save(change);
   const live = await ctx.client.getDashboardWidget(
     change.dashboard_id,
     created.id,
   );
+  if (live === null) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "recreated_widget_missing",
+      last_verification: freshVerification("recreated_widget_missing"),
+    });
+  }
   return ctx.finishNative(change, "restored", undefined, {
-    recreated_snapshot: widgetSnapshot(live ?? created),
+    recreated_snapshot: widgetSnapshot(live),
     last_verification: freshVerification("recreated_widget_observed"),
   });
 }
@@ -3445,13 +4096,12 @@ export function publicDashboardChange(change, options = {}) {
         },
       },
       ...(change.created_dashboard_ref
-        ? { created_dashboard_ref: change.created_dashboard_ref }
-        : {}),
-      ...(change.created_dashboard_ref
         ? {
+            created_dashboard_ref: change.created_dashboard_ref,
             created_columns: (change.created_columns ?? []).map((col) => ({
               ...col,
             })),
+            creation_complete: change.creation_complete === true,
           }
         : {}),
       ...(change.candidate_dashboards
@@ -3503,6 +4153,7 @@ export function publicDashboardChange(change, options = {}) {
       ...(change.recreated_dashboard_ref
         ? {
             recreated_dashboard_ref: change.recreated_dashboard_ref,
+            recreation_complete: change.recreation_complete === true,
             recreated_columns: structuredClone(change.recreated_columns ?? []),
             recreated_widgets: structuredClone(change.recreated_widgets ?? []),
             skipped_widgets: structuredClone(change.skipped_widgets ?? []),
@@ -3514,12 +4165,13 @@ export function publicDashboardChange(change, options = {}) {
           }
         : {}),
       ...tail,
-      restore_supported: [
-        "prepared",
-        "applying",
-        "uncertain",
-        "applied",
-      ].includes(change.status),
+      restore_supported:
+        ["prepared", "applying", "uncertain", "applied"].includes(
+          change.status,
+        ) ||
+        (change.status === "conflict" &&
+          change.recreated_dashboard_id !== undefined &&
+          change.recreation_complete !== true),
       limitations: [
         "Deleting a dashboard cascades all columns and widgets; undo recreates them under a new dashboard ID and skips widgets whose referenced devices no longer exist.",
       ],
@@ -3583,6 +4235,7 @@ export function publicDashboardChange(change, options = {}) {
       ...(change.recreated_column_ref
         ? {
             recreated_column_ref: change.recreated_column_ref,
+            recreation_complete: change.recreation_complete === true,
             recreated_widgets: structuredClone(change.recreated_widgets ?? []),
             skipped_widgets: structuredClone(change.skipped_widgets ?? []),
           }
@@ -3591,12 +4244,13 @@ export function publicDashboardChange(change, options = {}) {
         ? { candidate_columns: structuredClone(change.candidate_columns) }
         : {}),
       ...tail,
-      restore_supported: [
-        "prepared",
-        "applying",
-        "uncertain",
-        "applied",
-      ].includes(change.status),
+      restore_supported:
+        ["prepared", "applying", "uncertain", "applied"].includes(
+          change.status,
+        ) ||
+        (change.status === "conflict" &&
+          change.recreated_column_id !== undefined &&
+          change.recreation_complete !== true),
       limitations: [
         "Deleting a column cascades all widgets inside it; undo recreates the column and widgets while the dashboard still exists.",
       ],
@@ -3733,6 +4387,7 @@ export function dashboardRestoreSupported(
   change,
   { activeStatus, isConflict },
 ) {
+  if (change.native_write_sent !== true) return false;
   if (
     change.kind === DASHBOARD_CREATE ||
     change.kind === DASHBOARD_COLUMN_CREATE ||
@@ -3749,6 +4404,18 @@ export function dashboardRestoreSupported(
       ? change.applied_snapshot !== undefined &&
           change.conflict_reason === "later_owned_change"
       : activeStatus;
+  }
+  if (
+    change.kind === DASHBOARD_DELETE ||
+    change.kind === DASHBOARD_COLUMN_DELETE
+  ) {
+    if (isConflict) {
+      return (
+        change.conflict_reason === "partial_recreation_refused" &&
+        change.recreation_complete !== true
+      );
+    }
+    return activeStatus;
   }
   return activeStatus;
 }
