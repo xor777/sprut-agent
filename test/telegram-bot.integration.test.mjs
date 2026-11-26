@@ -25,11 +25,12 @@ const BOT_ENTRY = path.join(REPO_ROOT, "telegram", "bot.mjs");
 const TEST_TOKEN = "123456789:AAA_fake_test_secret_token_9876543210";
 
 async function loadTelegramModules() {
-  const [configMod, botMod] = await Promise.all([
+  const [configMod, botMod, sessionMod] = await Promise.all([
     import("../telegram/config.mjs"),
     import("../telegram/bot.mjs"),
+    import("../telegram/codex-session.mjs"),
   ]);
-  return { ...configMod, ...botMod };
+  return { ...configMod, ...botMod, ...sessionMod };
 }
 
 function makePrivateMessageUpdate(updateId, userId, text, extra = {}) {
@@ -92,6 +93,23 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
       if (!entry) {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("Not found");
+        return;
+      }
+      if (entry.hangDownload) {
+        entry.onDownloadStarted?.();
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 10_000);
+          timer.unref?.();
+          req.once("close", () => {
+            clearTimeout(timer);
+            entry.onDownloadAborted?.();
+            resolve();
+          });
+        });
+        if (!res.writableEnded) {
+          res.writeHead(200, { "Content-Type": "image/jpeg" });
+          res.end(entry.bytes);
+        }
         return;
       }
       res.writeHead(200, {
@@ -252,6 +270,9 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
       bytes,
       contentType = "image/jpeg",
       declaredSize,
+      hangDownload = false,
+      onDownloadStarted,
+      onDownloadAborted,
     }) {
       files.set(filePath, {
         fileId,
@@ -259,6 +280,9 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
         bytes,
         contentType,
         declaredSize,
+        hangDownload,
+        onDownloadStarted,
+        onDownloadAborted,
       });
     },
     failNext(method, fault) {
@@ -405,6 +429,88 @@ rl.on("line", async (line) => {
     const prompt = textItem?.text ?? "";
     const state = { turnId, interrupted: false, onInterrupt: null };
     activeTurnByThread.set(threadId, state);
+
+    if (prompt.includes("[HANG_TURN_START]")) {
+      // Simulate an unresponsive turn/start RPC: never send a response.
+      return;
+    }
+
+    if (prompt.includes("[FAST_EARLY_EVENTS]")) {
+      // Emit matching turn notifications BEFORE the turn/start JSON-RPC reply.
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Быстрый ранний ответ",
+          },
+        },
+      });
+      activeTurnByThread.delete(threadId);
+      trace({ event: "turn_end", threadId, turnId, status: "completed" });
+      send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "completed" } },
+      });
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: turnId } } });
+      }, 25);
+      return;
+    }
+
+    if (prompt.includes("[STALE_BEFORE_START_REPLY]")) {
+      // Emit a stale turn's notifications BEFORE the new turn/start RPC reply.
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId: "turn_stale_999",
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Устаревший ответ прошлого хода",
+          },
+        },
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId, turn: { id: "turn_stale_999", status: "completed" } },
+      });
+      setTimeout(() => {
+        send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: turnId } } });
+        setTimeout(() => {
+          send({
+            jsonrpc: "2.0",
+            method: "item/completed",
+            params: {
+              threadId,
+              turnId,
+              item: {
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "Свежий ответ нового хода",
+              },
+            },
+          });
+          activeTurnByThread.delete(threadId);
+          trace({ event: "turn_end", threadId, turnId, status: "completed" });
+          send({
+            jsonrpc: "2.0",
+            method: "turn/completed",
+            params: { threadId, turn: { id: turnId, status: "completed" } },
+          });
+        }, 30);
+      }, 30);
+      return;
+    }
+
     send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: turnId } } });
 
     const finish = (status, extra = {}) => {
@@ -424,6 +530,70 @@ rl.on("line", async (line) => {
 
     if (prompt.includes("[HANG]")) {
       state.onInterrupt = () => finish("interrupted");
+      return;
+    }
+
+    if (prompt.includes("[ECHO_SECRET]")) {
+      const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text:
+              "Конфиг: " +
+              secretToken +
+              " и ещё bot987654:AnotherLeakedBotSecretToken123456",
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[LEGACY_V1_APPROVAL]")) {
+      const req1 = new Promise((resolve) =>
+        pendingServerResponses.set("srv-v1-exec", resolve),
+      );
+      send({
+        jsonrpc: "2.0",
+        id: "srv-v1-exec",
+        method: "execCommandApproval",
+        params: { command: "cat ~/.config/sprut-agent/telegram.env" },
+      });
+      const res1 = await req1;
+      const req2 = new Promise((resolve) =>
+        pendingServerResponses.set("srv-v1-patch", resolve),
+      );
+      send({
+        jsonrpc: "2.0",
+        id: "srv-v1-patch",
+        method: "applyPatchApproval",
+        params: { patch: "*** Begin Patch" },
+      });
+      const res2 = await req2;
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text:
+              "v1:" +
+              (res1.result?.decision ?? "err") +
+              "/" +
+              (res2.result?.decision ?? "err"),
+          },
+        },
+      });
+      finish("completed");
       return;
     }
 
@@ -1343,4 +1513,291 @@ test("--pair mode pairs private user, persists 0600 telegram.env without duplica
   const envText2 = await readFile(harness.envFile, "utf8");
   assert.match(envText2, new RegExp(`^TELEGRAM_BOT_TOKEN=${TEST_TOKEN}$`, "m"));
   assert.match(envText2, /^TELEGRAM_ALLOWED_USER_IDS=424242,535353$/m);
+});
+
+test("outgoing successful Codex replies scrub TELEGRAM_BOT_TOKEN and bot<id>:<secret> before sending to Telegram", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config,
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(200, 1001, `[ECHO_SECRET] SECRET=${TEST_TOKEN}`),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+
+  const reply = harness.tg.sentMessages(1001)[0].text;
+  assert.equal(
+    reply.includes(TEST_TOKEN),
+    false,
+    "successful Codex reply must scrub exact TELEGRAM_BOT_TOKEN",
+  );
+  assert.equal(
+    reply.includes("AnotherLeakedBotSecretToken123456"),
+    false,
+    "successful Codex reply must scrub generic bot<id>:<secret> patterns",
+  );
+  assert.match(reply, /\[REDACTED\]/);
+});
+
+test("pre-turnId buffering preserves fast matching turns, blocks stale-turn hijacking, and recycles child on turn/start timeout", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 250 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 200,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  // 1. Fast matching events arriving before turn/start RPC response must still succeed
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(300, 1001, "[FAST_EARLY_EVENTS]"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+  assert.equal(harness.tg.sentMessages(1001)[0].text, "Быстрый ранний ответ");
+
+  // 2. Stale non-matching events arriving before turn/start RPC response must NOT hijack the turn
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(301, 1001, "[STALE_BEFORE_START_REPLY]"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 2);
+  assert.equal(
+    harness.tg.sentMessages(1001)[1].text,
+    "Свежий ответ нового хода",
+    "stale pre-turnId notifications must not hijack the new turn",
+  );
+
+  // 3. Hanging turn/start RPC must time out promptly, recycle child process, and resume on next message
+  const pidsBefore = (await harness.readTrace())
+    .filter((e) => e.event === "spawn")
+    .map((e) => e.pid);
+  assert.equal(pidsBefore.length, 1);
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(302, 1001, "[HANG_TURN_START]"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 3, {
+    timeoutMs: 2500,
+  });
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(303, 1001, "После зависания turn/start"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 4, {
+    timeoutMs: 3000,
+  });
+  assert.equal(
+    harness.tg.sentMessages(1001)[3].text,
+    "Ответ[thr_1]: После зависания turn/start",
+  );
+
+  const traceAfter = await harness.readTrace();
+  const spawnPids = traceAfter
+    .filter((e) => e.event === "spawn")
+    .map((e) => e.pid);
+  assert.equal(
+    spawnPids.length,
+    2,
+    "turn/start transport timeout must recycle codex app-server child process",
+  );
+  assert.notEqual(spawnPids[0], spawnPids[1]);
+});
+
+test("stop() returns promptly on a wedged turn or photo download without running queued messages or sending shutdown errors", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+
+  // Case A: wedged turn + queued message
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 3500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 200,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(makePrivateMessageUpdate(400, 1001, "[HANG]"));
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(401, 1001, "Не должно запускаться после stop"),
+  );
+
+  await waitFor(async () =>
+    (await harness.readTrace()).some((e) => e.event === "turn_begin"),
+  );
+
+  const startedStopAt = Date.now();
+  await runner.stop();
+  const stopElapsedMs = Date.now() - startedStopAt;
+
+  assert.ok(
+    stopElapsedMs < 1500,
+    `stop() must return promptly on a wedged turn (took ${stopElapsedMs} ms)`,
+  );
+  const turnStarts = (await harness.readTrace()).filter(
+    (e) => e.event === "recv" && e.msg.method === "turn/start",
+  );
+  assert.equal(
+    turnStarts.length,
+    1,
+    "queued messages must not start new Codex turns after stop()",
+  );
+  assert.equal(
+    harness.tg.sentMessages(1001).length,
+    0,
+    "shutdown cancellation must not send error replies to Telegram",
+  );
+
+  // Case B: hanging photo download aborts promptly on stop()
+  const photoHarness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const photoConfig = await loadTelegramConfig({ env: photoHarness.baseEnv });
+  let downloadStarted = false;
+  let downloadAborted = false;
+  photoHarness.tg.addFile({
+    fileId: "photo_hang_id",
+    filePath: "photos/slow.jpg",
+    bytes: Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+    hangDownload: true,
+    onDownloadStarted: () => {
+      downloadStarted = true;
+    },
+    onDownloadAborted: () => {
+      downloadAborted = true;
+    },
+  });
+
+  const photoRunner = new TelegramBotRunner({
+    config: photoConfig,
+    env: photoHarness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await photoRunner.start();
+  photoHarness.onCleanup(() => photoRunner.stop());
+
+  photoHarness.tg.pushUpdate({
+    update_id: 410,
+    message: {
+      message_id: 410,
+      date: Math.floor(Date.now() / 1000),
+      chat: { id: 1001, type: "private" },
+      from: { id: 1001, is_bot: false, first_name: "Owner" },
+      caption: "Зависшее фото",
+      photo: [
+        { file_id: "photo_hang_id", width: 800, height: 600, file_size: 4 },
+      ],
+    },
+  });
+
+  await waitFor(() => downloadStarted);
+  const photoStopAt = Date.now();
+  await photoRunner.stop();
+  const photoStopElapsed = Date.now() - photoStopAt;
+
+  assert.ok(
+    photoStopElapsed < 1500,
+    `stop() must abort hanging photo downloads promptly (took ${photoStopElapsed} ms)`,
+  );
+  assert.equal(
+    downloadAborted,
+    true,
+    "photo download HTTP request must receive abort signal on stop()",
+  );
+  assert.equal(photoHarness.tg.sentMessages(1001).length, 0);
+});
+
+test("concurrent prepareEnvironment() and multi-chat session persistence never race or lose threads", async (t) => {
+  const { loadTelegramConfig, CodexSessionManager } =
+    await loadTelegramModules();
+  const harness = await createTestHarness(t, {
+    allowedUserIds: "2001,2002,2003,2004,2005,2006",
+  });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const manager = new CodexSessionManager({
+    config,
+    env: harness.baseEnv,
+    logger: () => {},
+  });
+  harness.onCleanup(() => manager.close());
+
+  // Concurrent prepareEnvironment calls on fresh stateDir must not race on ensureSymlink (EEXIST)
+  await Promise.all([
+    manager.prepareEnvironment(),
+    manager.prepareEnvironment(),
+    manager.prepareEnvironment(),
+    manager.prepareEnvironment(),
+  ]);
+
+  // Concurrent multi-chat turns followed by concurrent reset + turns must persist every surviving chat
+  const chatIds = [2001, 2002, 2003, 2004, 2005, 2006];
+  await Promise.all(
+    chatIds.map((chatId) =>
+      manager.sendTurn(chatId, [{ type: "text", text: `Чат ${chatId}` }]),
+    ),
+  );
+
+  // Reset chat 2003 concurrently while other chats run turns
+  await Promise.all([
+    manager.resetThread(2003),
+    manager.sendTurn(2001, [{ type: "text", text: "Второй ход 2001" }]),
+    manager.sendTurn(2006, [{ type: "text", text: "Второй ход 2006" }]),
+  ]);
+
+  const saved = JSON.parse(
+    await readFile(path.join(harness.stateDir, "sessions.json"), "utf8"),
+  );
+  assert.equal(
+    Object.hasOwn(saved.chats, "2003"),
+    false,
+    "resetThread chat must not be resurrected by concurrent saves",
+  );
+  for (const chatId of [2001, 2002, 2004, 2005, 2006]) {
+    assert.ok(
+      typeof saved.chats[String(chatId)]?.threadId === "string" &&
+        saved.chats[String(chatId)].threadId.length > 0,
+      `chat ${chatId} threadId must be persisted in sessions.json`,
+    );
+  }
+});
+
+test("legacy v1 approval requests receive abort while v2 approvals receive decline", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config,
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(500, 1001, "[LEGACY_V1_APPROVAL]"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+  assert.equal(
+    harness.tg.sentMessages(1001)[0].text,
+    "v1:abort/abort",
+    "legacy v1 execCommandApproval and applyPatchApproval must reply with decision: abort",
+  );
 });
