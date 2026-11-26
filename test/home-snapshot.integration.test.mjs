@@ -1175,3 +1175,484 @@ test("mutual exclusion, blank/secret note handling, foreign/malformed home_ref, 
     `instructions exceeded 2048 chars: ${instructions.length}`,
   );
 });
+
+test("manual BLOCK edits after agent block_data_update or block_action_pause are attributed as agent_and_later_change on home and selected_entities points", async (t) => {
+  const { hub, client } = await setup(t);
+
+  const homePoint = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "Before BLOCK edits",
+  });
+  const selectedPoint = await callOk(client, "configuration_point", {
+    entity_refs: [scenarioRef("3"), scenarioRef("5"), scenarioRef("14")],
+    note: "Selected BLOCKs",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  // 1. Agent updates scenario 3 BLOCK data, then owner manually edits it further -> agent_and_later_change.
+  const scen3Data = JSON.parse(
+    hub.state.scenarios.find(({ index }) => index === "3").data,
+  );
+  scen3Data.targets[0].then_delay = 2_000;
+  const scen3Update = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef("3"),
+    data: scen3Data,
+    reason: "Поставить задержку 2с",
+  });
+  const scen3After = hub.state.scenarios.find(({ index }) => index === "3");
+  const scen3Manual = JSON.parse(scen3After.data);
+  scen3Manual.targets[0].then_delay = 9_000;
+  scen3After.data = JSON.stringify(scen3Manual);
+
+  // 2. Agent pauses an action on scenario 5, then owner manually edits scenario 5 BLOCK data -> agent_and_later_change.
+  const scen5Pause = await applyNative(client, {
+    operation: "block_action_pause",
+    target_ref: scenarioRef("5"),
+    action_pointer: "/targets/0/then/0",
+    duration_seconds: 3_600,
+    reason: "Временно поставить действие на паузу",
+  });
+  const scen5After = hub.state.scenarios.find(({ index }) => index === "5");
+  const scen5Manual = JSON.parse(scen5After.data);
+  scen5Manual.targets[0].then_delay = 7_000;
+  scen5After.data = JSON.stringify(scen5Manual);
+
+  // 3. Control: clean agent block_data_update on scenario 14 (no later manual edit) -> agent.
+  const scen14Data = JSON.parse(
+    hub.state.scenarios.find(({ index }) => index === "14").data,
+  );
+  scen14Data.targets[0].then_delay = 4_000;
+  const scen14Update = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef("14"),
+    data: scen14Data,
+    reason: "Добавить задержку вечернему свету",
+  });
+
+  // Verify on whole-home point.
+  const homeCompared = await callOk(client, "configuration_point", {
+    point_ref: homePoint.point_ref,
+    compare: true,
+  });
+  const h3 = homeCompared.comparison.scenarios.changed.find(
+    ({ index }) => index === "3",
+  );
+  assert.equal(h3.attribution, "agent_and_later_change");
+  assert.equal(h3.matching_agent_changes[0].change_ref, scen3Update.change_ref);
+
+  const h5 = homeCompared.comparison.scenarios.changed.find(
+    ({ index }) => index === "5",
+  );
+  assert.equal(h5.attribution, "agent_and_later_change");
+  assert.equal(h5.matching_agent_changes[0].change_ref, scen5Pause.change_ref);
+
+  const h14 = homeCompared.comparison.scenarios.changed.find(
+    ({ index }) => index === "14",
+  );
+  assert.equal(h14.attribution, "agent");
+  assert.equal(
+    h14.matching_agent_changes[0].change_ref,
+    scen14Update.change_ref,
+  );
+
+  // Verify on selected_entities point too.
+  const selectedCompared = await callOk(client, "configuration_point", {
+    point_ref: selectedPoint.point_ref,
+    compare: true,
+  });
+  const s3 = selectedCompared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === scenarioRef("3"),
+  );
+  assert.equal(s3.attribution, "agent_and_later_change");
+  const s5 = selectedCompared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === scenarioRef("5"),
+  );
+  assert.equal(s5.attribution, "agent_and_later_change");
+  const s14 = selectedCompared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === scenarioRef("14"),
+  );
+  assert.equal(s14.attribution, "agent");
+});
+
+test("in-window event modeling handles pre-snapshot reconciliation, clean post-snapshot restore, and sequential C1->C2 agent edits", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Pre-snapshot changes:
+  // A1: room 1 renamed before snapshot; later manual edit + get_native_change conflict must NOT bleed in.
+  const preRoom1 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(1),
+    value: "Холл",
+    reason: "До снимка переименовать прихожую",
+  });
+  // A2: room 2 renamed before snapshot, then manually reverted BEFORE snapshot; later no-write restore must NOT bleed in.
+  const preRoom2 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(2),
+    value: "Галерея",
+    reason: "До снимка переименовать коридор",
+  });
+  hub.state.rooms.find(({ id }) => id === 2).name = "Коридор";
+
+  // B1: room 7 renamed before snapshot; cleanly restored AFTER snapshot -> agent.
+  const preRoom7 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(7),
+    value: "Офис",
+    reason: "До снимка переименовать кабинет",
+  });
+  // B2: room created before snapshot; cleanly restored (deleted) AFTER snapshot -> agent.
+  const preCreatedRoom = await applyNative(client, {
+    operation: "room_create",
+    target_ref: HOME_REF,
+    name: "Временная",
+    reason: "До снимка создать временную комнату",
+  });
+  const createdRoomRef = preCreatedRoom.room_ref;
+  // B3: scenario 3 BLOCK updated before snapshot; cleanly restored AFTER snapshot -> agent.
+  const scen3Data = JSON.parse(
+    hub.state.scenarios.find(({ index }) => index === "3").data,
+  );
+  scen3Data.targets[0].then_delay = 1_500;
+  const preScen3 = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef("3"),
+    data: scen3Data,
+    reason: "До снимка задать задержку",
+  });
+  // B4: scenario 8 deleted before snapshot; cleanly restored (recreated under new index) AFTER snapshot -> agent.
+  const preScen8Delete = await applyNative(client, {
+    operation: "scenario_delete",
+    target_ref: scenarioRef("8"),
+    reason: "До снимка удалить сценарий кабинета",
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const snapshot = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "Baseline for event modeling",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Post-snapshot A1: manual rename on room 1, then read-only get_native_change bumps updated_at + sets conflict.
+  hub.state.rooms.find(({ id }) => id === 1).name = "Прихожая ручная";
+  const preRoom1Checked = await callOk(client, "get_native_change", {
+    change_ref: preRoom1.change_ref,
+  });
+  assert.equal(preRoom1Checked.status, "conflict");
+
+  // Post-snapshot A2: no-write restore reconciliation on preRoom2 (already back to "Коридор"), then manual edit.
+  const preRoom2Restored = await callOk(client, "restore_native_change", {
+    change_ref: preRoom2.change_ref,
+  });
+  assert.equal(preRoom2Restored.status, "restored");
+  hub.state.rooms.find(({ id }) => id === 2).name = "Коридор ручной";
+
+  // Post-snapshot B1-B4: clean agent restores!
+  for (const changeRef of [
+    preRoom7.change_ref,
+    preCreatedRoom.change_ref,
+    preScen3.change_ref,
+  ]) {
+    const restored = await callOk(client, "restore_native_change", {
+      change_ref: changeRef,
+    });
+    assert.equal(restored.status, "restored", changeRef);
+  }
+  const restoredScen8 = await callOk(client, "restore_native_change", {
+    change_ref: preScen8Delete.change_ref,
+  });
+  assert.equal(restoredScen8.status, "restored");
+
+  // Post-snapshot C: sequential purely-agent edits C1 -> C2 on room 3, with C1 reconciled to later_owned_change.
+  const c1 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(3),
+    value: "Зал",
+    reason: "Первое переименование гостиной",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const c2 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(3),
+    value: "Большая комната",
+    reason: "Второе переименование гостиной",
+  });
+  const c1Checked = await callOk(client, "get_native_change", {
+    change_ref: c1.change_ref,
+  });
+  assert.equal(c1Checked.status, "conflict");
+  assert.equal(c1Checked.conflict_reason, "later_owned_change");
+
+  const compared = await callOk(client, "configuration_point", {
+    point_ref: snapshot.point_ref,
+    compare: true,
+  });
+  const { comparison } = compared;
+
+  // A1 & A2: purely manual edits must NOT inherit pre-snapshot changes.
+  const r1 = comparison.rooms.changed.find(({ id }) => id === 1);
+  assert.equal(r1.attribution, "manual_or_external");
+  assert.equal(r1.matching_agent_changes, undefined);
+
+  const r2 = comparison.rooms.changed.find(({ id }) => id === 2);
+  assert.equal(r2.attribution, "manual_or_external");
+  assert.equal(r2.matching_agent_changes, undefined);
+
+  // B1-B4: clean agent restores must attribute to "agent".
+  const r7 = comparison.rooms.changed.find(({ id }) => id === 7);
+  assert.equal(r7.attribution, "agent");
+  assert.equal(r7.matching_agent_changes[0].change_ref, preRoom7.change_ref);
+
+  const removedRoom = comparison.rooms.removed.find(
+    ({ ref }) => ref === createdRoomRef,
+  );
+  assert.ok(removedRoom, JSON.stringify(comparison.rooms.removed));
+  assert.equal(removedRoom.attribution, "agent");
+  assert.equal(
+    removedRoom.matching_agent_changes[0].change_ref,
+    preCreatedRoom.change_ref,
+  );
+
+  const s3 = comparison.scenarios.changed.find(({ index }) => index === "3");
+  assert.equal(s3.attribution, "agent");
+  assert.equal(s3.matching_agent_changes[0].change_ref, preScen3.change_ref);
+
+  assert.equal(comparison.scenarios.added.length, 1);
+  assert.equal(comparison.scenarios.added[0].attribution, "agent");
+  assert.equal(
+    comparison.scenarios.added[0].matching_agent_changes[0].change_ref,
+    preScen8Delete.change_ref,
+  );
+
+  // C: sequential C1 -> C2 purely-agent edits must attribute to "agent" with C2 first.
+  const r3 = comparison.rooms.changed.find(({ id }) => id === 3);
+  assert.equal(r3.attribution, "agent");
+  assert.equal(r3.matching_agent_changes[0].change_ref, c2.change_ref);
+});
+
+test("paginating /comparison under compare=true completes despite advancing compared_at and rejects mid-pagination mutations as stale_entity_content", async (t) => {
+  const { hub, client } = await setup(t);
+
+  const saved = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "Pagination baseline",
+  });
+  hub.state.rooms.find(({ id }) => id === 1).name = "Холл 1";
+  hub.state.rooms.find(({ id }) => id === 2).name = "Коридор 2";
+  hub.state.accessories.find(({ id }) => id === 12).name = "Лампа прихожей 2";
+  hub.state.accessories.find(({ id }) => id === 15).name = "Люстра гостиной 2";
+
+  const first = await callOk(client, "configuration_point", {
+    point_ref: saved.point_ref,
+    compare: true,
+    pointer: "/comparison",
+    max_bytes: 2_048,
+  });
+  assert.equal(first.representation.kind, "selected_value");
+  assert.equal(first.representation.selected_pointer, "/comparison");
+  assert.ok(
+    first.representation.next,
+    "/comparison must paginate across multiple pages at max_bytes=2048",
+  );
+
+  const seenPointers = [];
+  let page = first;
+  let pages = 0;
+  for (;;) {
+    pages += 1;
+    seenPointers.push(
+      ...page.representation.available_parts.map(({ pointer }) => pointer),
+    );
+    if (!page.representation.next) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    page = await callOk(
+      client,
+      page.representation.next.tool,
+      page.representation.next.arguments,
+    );
+    assert.ok(pages < 20, "pagination loop did not finish");
+  }
+  assert.ok(pages >= 2);
+  assert.equal(page.representation.available_parts_complete, true);
+  assert.equal(seenPointers.includes("/comparison/rooms"), true);
+  assert.equal(seenPointers.includes("/comparison/accessories"), true);
+  assert.equal(seenPointers.includes("/comparison/attribution_summary"), true);
+
+  // Real mutation mid-pagination MUST still trigger stale_entity_content.
+  const fresh = await callOk(client, "configuration_point", {
+    point_ref: saved.point_ref,
+    compare: true,
+    pointer: "/comparison",
+    max_bytes: 2_048,
+  });
+  assert.ok(fresh.representation.next);
+  hub.state.rooms.find(({ id }) => id === 4).name = "Кухня изменена";
+  const stale = await callError(
+    client,
+    fresh.representation.next.tool,
+    fresh.representation.next.arguments,
+  );
+  assert.equal(stale.error.code, "stale_entity_content");
+});
+
+test("redacted fields and services stay in comparison.not_compared even when another field on the same entity changes", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Add a second service with a redacted name to accessory 16.
+  hub.state.accessories
+    .find(({ id }) => id === 16)
+    .services.push({
+      aId: 16,
+      sId: 25,
+      name: "password=service-secret-value-42",
+      type: "Switch",
+      visible: true,
+      characteristics: [
+        {
+          aId: 16,
+          sId: 25,
+          cId: 1,
+          hasOptions: false,
+          control: {
+            name: "On",
+            type: "On",
+            read: true,
+            write: true,
+            events: true,
+            value: { boolValue: false },
+          },
+        },
+      ],
+    });
+
+  const saved = await callOk(client, "configuration_point", {
+    scope: "home",
+  });
+
+  // Change another visible field on BOTH accessory 16 and the secret-bearing LOGIC scenario.
+  hub.state.accessories.find(({ id }) => id === 16).name = "Торшер обновлённый";
+  hub.state.scenarios.find(({ index }) => index === SECRET_LOGIC_INDEX).name =
+    "Интеграция обновлённая";
+
+  const compared = await callOk(client, "configuration_point", {
+    point_ref: saved.point_ref,
+    compare: true,
+  });
+  const { comparison } = compared;
+
+  assert.equal(
+    comparison.accessories.changed.some(({ id }) => id === 16),
+    true,
+  );
+  assert.equal(
+    comparison.not_compared.some(
+      (item) =>
+        item.entity_ref === serviceRef(16, 25) &&
+        item.kind === "service" &&
+        item.reason === "redacted",
+    ),
+    true,
+    JSON.stringify(comparison.not_compared),
+  );
+
+  assert.equal(
+    comparison.scenarios.changed.some(
+      ({ index }) => index === SECRET_LOGIC_INDEX,
+    ),
+    true,
+  );
+  assert.equal(
+    comparison.not_compared.some(
+      (item) =>
+        item.entity_ref === scenarioRef(SECRET_LOGIC_INDEX) &&
+        item.kind === "scenario" &&
+        item.reason === "redacted",
+    ),
+    true,
+    JSON.stringify(comparison.not_compared),
+  );
+});
+
+test("selected_entities missing logic and window refs destroyed by scenario_delete or virtual_device_delete are attributed to agent", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // User LOGIC scenario 9 ("Защита от протечки", type "9") is already assigned to leak sensor 23/13 in apartment fixture.
+  const assignedLogicRef = `${serviceRef(23, 13)}/logic/9`;
+  const scen9WindowKey = hub.state.scenarios.find(
+    ({ index }) => index === "9",
+  ).optionsWindow;
+  assert.ok(scen9WindowKey);
+  const scen9WindowRef = windowRef(scen9WindowKey);
+
+  // Create a virtual switch so it has a HomeKit bridge child window, then snapshot it.
+  const createdVirtual = await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(3),
+    name: "Тестовый тумблер",
+    value: "Switch",
+    reason: "Создать тестовый виртуальный выключатель",
+  });
+  const virtualAccRef = createdVirtual.device.ref;
+  const virtualId = Number(virtualAccRef.split("/").at(-1));
+  const virtualBridgeWindowRef = windowRef(
+    `Bridge/homekit/Child/${virtualId}/`,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const selectedPoint = await callOk(client, "configuration_point", {
+    entity_refs: [assignedLogicRef, scen9WindowRef, virtualBridgeWindowRef],
+    note: "Logic and windows before delete",
+  });
+  assert.equal(selectedPoint.captured.length, 3);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  // Agent deletes scenario 9 (destroying assignedLogicRef and scen9WindowRef) and deletes virtual switch (destroying virtualBridgeWindowRef).
+  const deletedScen9 = await applyNative(client, {
+    operation: "scenario_delete",
+    target_ref: scenarioRef("9"),
+    reason: "Удалить сценарий защиты от протечки",
+  });
+  const deletedVirtual = await applyNative(client, {
+    operation: "virtual_device_delete",
+    target_ref: virtualAccRef,
+    reason: "Удалить тестовый виртуальный выключатель",
+  });
+
+  const compared = await callOk(client, "configuration_point", {
+    point_ref: selectedPoint.point_ref,
+    compare: true,
+  });
+
+  const logicDiff = compared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === assignedLogicRef,
+  );
+  assert.equal(logicDiff.status, "missing");
+  assert.equal(logicDiff.attribution, "agent");
+  assert.equal(
+    logicDiff.matching_agent_changes[0].change_ref,
+    deletedScen9.change_ref,
+  );
+
+  const scenWinDiff = compared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === scen9WindowRef,
+  );
+  assert.equal(scenWinDiff.status, "missing");
+  assert.equal(scenWinDiff.attribution, "agent");
+  assert.equal(
+    scenWinDiff.matching_agent_changes[0].change_ref,
+    deletedScen9.change_ref,
+  );
+
+  const bridgeWinDiff = compared.comparison.entities.find(
+    ({ entity_ref }) => entity_ref === virtualBridgeWindowRef,
+  );
+  assert.equal(bridgeWinDiff.status, "missing");
+  assert.equal(bridgeWinDiff.attribution, "agent");
+  assert.equal(
+    bridgeWinDiff.matching_agent_changes[0].change_ref,
+    deletedVirtual.change_ref,
+  );
+});
