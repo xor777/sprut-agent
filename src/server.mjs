@@ -958,6 +958,7 @@ registerTool(
         }),
       {
         compact: true,
+        stringRoles: configurationPointStringRole,
         present: (result) =>
           presentEntityResult(result, {
             entityRef: pointRef,
@@ -1266,6 +1267,107 @@ function updateSerializedPageSize(result, compact) {
 
 function connectionSecrets() {
   return connection.secrets;
+}
+
+function configurationPointStringRole(path, root) {
+  let match =
+    /^\/restore_plan\/reapply_from_point\/(\d+)\/(arguments\/source|from_current|to_point)$/.exec(
+      path,
+    );
+  if (match) {
+    const step = root?.restore_plan?.reapply_from_point?.[Number(match[1])];
+    return step?.arguments?.operation === "logic_source_update"
+      ? "javascript_source"
+      : undefined;
+  }
+  if (
+    /^\/restore_plan\/reapply_from_point\/\d+\/(arguments\/data|from_current|to_point)\//.test(
+      path,
+    ) &&
+    path.endsWith("/code")
+  ) {
+    const parent = parentObjectAtPointer(root, path);
+    if (parent?.type === "code") return "javascript_source";
+  }
+  match =
+    /^\/entity\/home_snapshot\/scenarios\/(\d+)\/configuration\/value$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.entity?.home_snapshot?.scenarios?.[Number(match[1])];
+    return scen?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match = /^\/entity\/entities\/(\d+)\/settings\/configuration\/value$/.exec(
+    path,
+  );
+  if (match) {
+    const ent = root?.entity?.entities?.[Number(match[1])];
+    return ent?.kind === "scenario" &&
+      ent?.settings?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match =
+    /^\/comparison\/scenarios\/(added|removed)\/(\d+)\/configuration\/value$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.comparison?.scenarios?.[match[1]]?.[Number(match[2])];
+    return scen?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match =
+    /^\/comparison\/scenarios\/changed\/(\d+)\/changes\/(\d+)\/(from|to)$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.comparison?.scenarios?.changed?.[Number(match[1])];
+    const diff = scen?.changes?.[Number(match[2])];
+    if (
+      (scen?.type === "LOGIC" || scen?.type === "GLOBAL") &&
+      diff?.path?.[0] === "configuration" &&
+      diff?.path?.[1] === "value"
+    ) {
+      return "javascript_source";
+    }
+    return undefined;
+  }
+  match = /^\/comparison\/entities\/(\d+)\/changes\/(\d+)\/(from|to)$/.exec(
+    path,
+  );
+  if (match) {
+    const ent = root?.comparison?.entities?.[Number(match[1])];
+    const diff = ent?.changes?.[Number(match[2])];
+    if (
+      ent?.kind === "scenario" &&
+      diff?.path?.[0] === "configuration" &&
+      diff?.path?.[1] === "value"
+    ) {
+      const saved = root?.entity?.entities?.find(
+        ({ entity_ref }) => entity_ref === ent.entity_ref,
+      );
+      const format = saved?.settings?.configuration?.format;
+      const type = saved?.settings?.type;
+      if (format === "code" || type === "LOGIC" || type === "GLOBAL") {
+        return "javascript_source";
+      }
+    }
+  }
+  return undefined;
+}
+
+function parentObjectAtPointer(root, pointer) {
+  const parts = pointer.split("/").slice(1, -1);
+  let cursor = root;
+  for (const raw of parts) {
+    if (cursor === null || typeof cursor !== "object") return null;
+    const token = raw.replaceAll("~1", "/").replaceAll("~0", "~");
+    cursor = Array.isArray(cursor) ? cursor[Number(token)] : cursor[token];
+  }
+  return cursor && typeof cursor === "object" ? cursor : null;
 }
 
 let shuttingDown = false;

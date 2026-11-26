@@ -1,18 +1,31 @@
 import { isDeepStrictEqual } from "node:util";
 import {
+  blockAffectedRefs,
+  blockDataHasTrigger,
+  blockScenarioTargets,
   canonicalBlock,
   httpUrlHidden,
+  isActionPath,
+  visitKnownBlockNodes,
   withHiddenHttpUrls,
 } from "./block-model.mjs";
 import {
   applicationTime,
+  changeAppliedAt,
   compareApplication,
   summaryRestoreSupported,
 } from "./change-history.mjs";
 import { changeName } from "./change-restore.mjs";
 import { isHidden, isPlainObject } from "./home-configuration-point.mjs";
 import { hubCodeProblems } from "./hub-code.mjs";
-import { changeOperation } from "./light-group-members.mjs";
+import {
+  changeOperation,
+  expectedAppliedKeys,
+  incomingLinks,
+  LIGHT_GROUP_MEMBERS,
+  linkKeys,
+  sameKeys,
+} from "./light-group-members.mjs";
 import { readLogicInfo } from "./logic-info.mjs";
 import {
   isAllowedTelegramTextOption,
@@ -20,6 +33,8 @@ import {
 } from "./native-option-contract.mjs";
 import { roomNameWithinLimit } from "./native-values.mjs";
 import {
+  accessoryMentions,
+  homeRef as homeRefOf,
   isSensitiveNativeNode,
   parseEntityRef,
   redactSensitiveText,
@@ -49,6 +64,8 @@ const LOGIC_FIELD_TO_NATIVE_SNAPSHOT_KEY = {
   on_start: "onStart",
 };
 
+const SCENARIO_METADATA_KEYS = new Set(["Name", "Desc", "OnStart", "Sync"]);
+
 const SCENARIO_WINDOW_RESERVED_KEYS = new Set([
   "Active",
   "Name",
@@ -74,6 +91,11 @@ export function buildRestorePlan({
   attributionDetails = null,
   serial,
   sensitiveValues = [],
+  currentRooms = null,
+  currentAccessoryIds = null,
+  currentScenarioIndexes = null,
+  scenarioOptionsWindows = null,
+  liveVirtualLightGroups = null,
 }) {
   const coverage =
     comparison.coverage === "home" ? "home" : "selected_entities";
@@ -82,21 +104,43 @@ export function buildRestorePlan({
       ? point.id.slice(0, 8)
       : "saved";
 
+  const homeCurrentRooms =
+    coverage === "home" && currentSnapshot
+      ? new Map(currentSnapshot.rooms.map((room) => [room.ref, room]))
+      : currentRooms;
+  const homeCurrentAccessoryIds =
+    coverage === "home" && currentSnapshot
+      ? new Set(currentSnapshot.accessories.map(({ id }) => id))
+      : currentAccessoryIds;
+  const homeCurrentScenarioIndexes =
+    coverage === "home" && currentSnapshot
+      ? buildHomeScenarioIndexSet(currentSnapshot, comparison)
+      : currentScenarioIndexes;
+
   const ctx = {
     pointRef,
     shortPointId,
     coverage,
     serial,
     sensitiveValues,
+    captureStartedMs: Date.parse(point?.capture_started_at ?? ""),
     attributionUnavailable: comparison.attribution_unavailable === true,
     attributionDetails: attributionDetails ?? new Map(),
     taintedChangeIds: collectTaintedChangeIds(comparison, attributionDetails),
+    currentRooms: homeCurrentRooms,
+    currentAccessoryIds: homeCurrentAccessoryIds,
+    currentScenarioIndexes: homeCurrentScenarioIndexes,
+    scenarioOptionsWindows,
+    liveVirtualLightGroups: liveVirtualLightGroups ?? new Map(),
     undoEntriesById: new Map(),
     reapply: [],
     notRestorable: [],
     notRestorableKeys: new Set(),
     removedByUndoAccessories: new Set(),
     movedOutByUndoAccessories: new Set(),
+    undoneRemovedScenarios: new Map(),
+    undoneConfigScenarios: new Map(),
+    undoneAddedBridgeExports: new Map(),
   };
 
   if (coverage === "home") {
@@ -216,6 +260,8 @@ function addReapply(
     kind,
     field,
     attribution,
+    manual_override_warning = true,
+    displayRole = "data",
     from_current,
     to_point,
     arguments: args,
@@ -226,9 +272,13 @@ function addReapply(
     kind,
     field,
     attribution,
-    manual_override_warning: attribution !== "agent",
-    from_current: sanitizeDisplayValue(from_current, ctx.sensitiveValues),
-    to_point: sanitizeDisplayValue(to_point, ctx.sensitiveValues),
+    manual_override_warning: manual_override_warning !== false,
+    from_current: sanitizeDisplayValue(
+      from_current,
+      ctx.sensitiveValues,
+      displayRole,
+    ),
+    to_point: sanitizeDisplayValue(to_point, ctx.sensitiveValues, displayRole),
     tool: "prepare_native_change",
     arguments: args,
   });
@@ -284,39 +334,7 @@ function planHomeRestore(ctx, savedSnapshot, currentSnapshot, comparison) {
     currentSnapshot.climate_setpoints.map((c) => [c.ref, c]),
   );
 
-  // 1. Accessories first (so rooms.added and climate/bridges know which accessories are undone).
-  for (const item of comparison.accessories.added) {
-    planHomeAddedAccessory(ctx, item);
-  }
-  for (const item of comparison.accessories.removed) {
-    planHomeRemovedAccessory(ctx, item);
-  }
-  for (const item of comparison.accessories.changed) {
-    const saved = savedAccessories.get(item.ref);
-    const current = currentAccessories.get(item.ref);
-    planHomeChangedAccessory(ctx, item, saved, current, currentRooms);
-  }
-
-  // 2. Rooms (after accessories so room_create checks emptiness accurately).
-  for (const item of comparison.rooms.changed) {
-    const saved = savedRooms.get(item.ref);
-    const current = currentRooms.get(item.ref);
-    planHomeChangedRoom(ctx, item, saved, current);
-  }
-  for (const item of comparison.rooms.removed) {
-    addNotRestorable(ctx, {
-      entity_ref: item.ref,
-      kind: "room",
-      reason: "room_removed",
-      message:
-        "This room was deleted after the configuration point was saved and cannot be restored with its original room ID automatically.",
-    });
-  }
-  for (const item of comparison.rooms.added) {
-    planHomeAddedRoom(ctx, item, currentSnapshot.accessories);
-  }
-
-  // 3. Scenarios.
+  // 1. Scenarios first (so accessories.added knows which scenario dependencies are undone).
   for (const item of comparison.scenarios.added) {
     planHomeAddedScenario(ctx, item, currentScenarios.get(item.ref));
   }
@@ -334,7 +352,7 @@ function planHomeRestore(ctx, savedSnapshot, currentSnapshot, comparison) {
     });
   }
 
-  // 4. Bridges.
+  // 2. Bridges next (so accessories.added knows which bridge exports are undone).
   for (const item of comparison.bridges.added) {
     addNotRestorable(ctx, {
       entity_ref: item.ref,
@@ -357,6 +375,38 @@ function planHomeRestore(ctx, savedSnapshot, currentSnapshot, comparison) {
     planHomeChangedBridge(ctx, item);
   }
 
+  // 3. Accessories (after scenarios/bridges, before rooms.added).
+  for (const item of comparison.accessories.added) {
+    planHomeAddedAccessory(ctx, item, currentSnapshot);
+  }
+  for (const item of comparison.accessories.removed) {
+    planHomeRemovedAccessory(ctx, item, currentRooms);
+  }
+  for (const item of comparison.accessories.changed) {
+    const saved = savedAccessories.get(item.ref);
+    const current = currentAccessories.get(item.ref);
+    planHomeChangedAccessory(ctx, item, saved, current, currentRooms);
+  }
+
+  // 4. Rooms (after accessories so room_create checks emptiness accurately).
+  for (const item of comparison.rooms.changed) {
+    const saved = savedRooms.get(item.ref);
+    const current = currentRooms.get(item.ref);
+    planHomeChangedRoom(ctx, item, saved, current);
+  }
+  for (const item of comparison.rooms.removed) {
+    addNotRestorable(ctx, {
+      entity_ref: item.ref,
+      kind: "room",
+      reason: "room_removed",
+      message:
+        "This room was deleted after the configuration point was saved and cannot be restored with its original room ID automatically.",
+    });
+  }
+  for (const item of comparison.rooms.added) {
+    planHomeAddedRoom(ctx, item, currentSnapshot.accessories);
+  }
+
   // 5. Climate setpoints.
   for (const item of comparison.climate_setpoints.added) {
     planHomeAddedClimate(ctx, item);
@@ -372,7 +422,9 @@ function planHomeRestore(ctx, savedSnapshot, currentSnapshot, comparison) {
       diffItem: item,
       saved,
       current,
-      accessoryExists: currentAccessories.has(item.accessory_ref),
+      accessoryExists: currentAccessories.has(
+        item.ref ? item.accessory_ref : "",
+      ),
     });
   }
 
@@ -385,13 +437,11 @@ function planHomeRestore(ctx, savedSnapshot, currentSnapshot, comparison) {
 function planHomeAddedRoom(ctx, item, currentAccessories) {
   const { attribution, entries } = itemDetail(ctx, item);
   if (attribution === "agent" && entries.length > 0) {
-    const createEntries = entries.filter(
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const createEntries = (active ?? []).filter(
       ({ change }) => change.kind === "room_create",
     );
-    if (
-      createEntries.length === 1 &&
-      entries.every((e) => isEligibleApplyEntry(ctx, e))
-    ) {
+    if (active && createEntries.length === 1 && active.length === 1) {
       const { change } = createEntries[0];
       const nameMatches = change.applied_snapshot?.name === item.name;
       const visibleMatches =
@@ -438,19 +488,28 @@ function planHomeChangedRoom(ctx, item, saved, current) {
     const nameEntries = entries.filter(
       ({ change }) => change.kind === "room_name",
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(ctx, nameEntries, saved?.name, current?.name)
-    ) {
-      registerUndoEntries(ctx, nameEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyScalarChain(ctx, nameEntries, saved?.name, current?.name)
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
     } else if (isCleanNonEmptyString(saved?.name)) {
       const validName = validateRoomNameForPlan(saved.name);
       if (validName.ok) {
+        const pureRestore = isPureAgentRestoreTransitionScalar(
+          ctx,
+          attribution,
+          nameEntries,
+          saved.name,
+          current?.name,
+        );
         addReapply(ctx, {
           entity_ref: item.ref,
           kind: "room",
           field: "name",
           attribution,
+          manual_override_warning: !pureRestore,
           from_current: current?.name ?? null,
           to_point: saved.name,
           arguments: {
@@ -493,7 +552,7 @@ function planHomeChangedRoom(ctx, item, saved, current) {
   }
 }
 
-function planHomeAddedAccessory(ctx, item) {
+function planHomeAddedAccessory(ctx, item, currentSnapshot) {
   const { attribution, entries } = itemDetail(ctx, item);
   if (attribution === "agent" && entries.length > 0) {
     const createEntries = entries.filter(
@@ -501,11 +560,23 @@ function planHomeAddedAccessory(ctx, item) {
         change.kind === "virtual_device" ||
         change.kind === "virtual_light_group",
     );
+    const memberEntries = entries.filter(
+      ({ change }) => change.kind === LIGHT_GROUP_MEMBERS,
+    );
+    const otherActive = entries.filter(
+      (entry) =>
+        entry.change?.kind !== "virtual_device" &&
+        entry.change?.kind !== "virtual_light_group" &&
+        entry.change?.kind !== LIGHT_GROUP_MEMBERS &&
+        entry.change?.status !== "restored",
+    );
     if (
       createEntries.length === 1 &&
-      entries.every((e) => isEligibleApplyEntry(ctx, e))
+      otherActive.length === 0 &&
+      isEligibleApplyEntry(ctx, createEntries[0])
     ) {
-      const { change } = createEntries[0];
+      const createEntry = createEntries[0];
+      const { change } = createEntry;
       const snapshot =
         change.kind === "virtual_device"
           ? change.created_snapshot
@@ -516,9 +587,50 @@ function planHomeAddedAccessory(ctx, item) {
         typeof snapshot.room_id === "number" &&
         roomRef(ctx.serial, snapshot.room_id) === item.room_ref;
       if (matchesCreated) {
-        registerUndoEntries(ctx, createEntries);
-        ctx.removedByUndoAccessories.add(item.ref);
-        return;
+        if (
+          hasBlockingVirtualDeviceDependency(
+            ctx,
+            item,
+            createEntry.eventMs,
+            currentSnapshot,
+          )
+        ) {
+          addNotRestorable(ctx, {
+            entity_ref: item.ref,
+            kind: "accessory",
+            reason: "virtual_device_in_use",
+            message:
+              "This agent-created virtual device is referenced by a live scenario or exported to a bridge that is not removed before undo, so deleting it automatically would fail with virtual_device_in_use.",
+          });
+          return;
+        }
+        if (change.kind === "virtual_device") {
+          if (memberEntries.length === 0) {
+            registerUndoEntries(ctx, [createEntry]);
+            ctx.removedByUndoAccessories.add(item.ref);
+            return;
+          }
+        } else {
+          const groupUndoChain = verifyVirtualLightGroupUndoChain(
+            ctx,
+            createEntry,
+            memberEntries,
+            item,
+          );
+          if (groupUndoChain) {
+            registerUndoEntries(ctx, groupUndoChain);
+            ctx.removedByUndoAccessories.add(item.ref);
+            return;
+          }
+          addNotRestorable(ctx, {
+            entity_ref: item.ref,
+            kind: "accessory",
+            reason: "virtual_light_group_modified",
+            message:
+              "This agent-created virtual light group has link or member changes that cannot be undone cleanly back to its initial state.",
+          });
+          return;
+        }
       }
     }
   }
@@ -531,16 +643,27 @@ function planHomeAddedAccessory(ctx, item) {
   });
 }
 
-function planHomeRemovedAccessory(ctx, item) {
+function planHomeRemovedAccessory(ctx, item, currentRooms) {
   const { attribution, entries } = itemDetail(ctx, item);
   if (attribution === "agent" && entries.length > 0) {
-    const deleteEntries = entries.filter(
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const deleteEntries = (active ?? []).filter(
       ({ change }) => change.kind === "virtual_device_delete",
     );
-    if (
-      deleteEntries.length === 1 &&
-      entries.every((e) => isEligibleApplyEntry(ctx, e))
-    ) {
+    if (active && deleteEntries.length === 1 && active.length === 1) {
+      const baseRoomId =
+        deleteEntries[0].change.baseline_snapshot?.room_id ??
+        deleteEntries[0].change.room_id;
+      if (!roomIdExists(currentRooms, ctx.serial, baseRoomId)) {
+        addNotRestorable(ctx, {
+          entity_ref: item.ref,
+          kind: "accessory",
+          reason: "target_room_missing",
+          message:
+            "The room this deleted virtual device belonged to no longer exists on the hub, so virtual_device_delete cannot be undone automatically.",
+        });
+        return;
+      }
       registerUndoEntries(ctx, deleteEntries);
       return;
     }
@@ -639,11 +762,18 @@ function planAccessoryPlacement(
     ({ change }) =>
       change.kind === "accessory_placement" && change.target_ref === entityRef,
   );
-  if (
-    attribution === "agent" &&
-    verifyPlacementChain(ctx, placementEntries, saved, current, currentRooms)
-  ) {
-    registerUndoEntries(ctx, placementEntries);
+  const undoChain =
+    attribution === "agent"
+      ? verifyPlacementChain(
+          ctx,
+          placementEntries,
+          saved,
+          current,
+          currentRooms,
+        )
+      : null;
+  if (undoChain) {
+    registerUndoEntries(ctx, undoChain);
     if (changedFields.has("room_ref")) {
       ctx.movedOutByUndoAccessories.add(entityRef);
     }
@@ -655,9 +785,18 @@ function planAccessoryPlacement(
 
   let canRestoreRoom = false;
   if (roomChanged) {
-    if (
+    if (currentRooms?.unavailable) {
+      addNotRestorable(ctx, {
+        entity_ref: entityRef,
+        kind: "accessory",
+        field: "room_ref",
+        reason: "not_compared",
+        message:
+          "Live rooms could not be read from the hub to verify the saved destination room, so accessory placement cannot be planned safely.",
+      });
+    } else if (
       typeof saved?.room_ref === "string" &&
-      (!currentRooms || currentRooms.has(saved.room_ref))
+      roomRefExists(currentRooms, saved.room_ref)
     ) {
       canRestoreRoom = true;
     } else {
@@ -707,13 +846,16 @@ function planAccessoryPlacement(
   }
   if (
     typeof targetRoomRef !== "string" ||
-    (currentRooms && !currentRooms.has(targetRoomRef))
+    currentRooms?.unavailable ||
+    !roomRefExists(currentRooms, targetRoomRef)
   ) {
     addNotRestorable(ctx, {
       entity_ref: entityRef,
       kind: "accessory",
       field: canRestoreName ? "name" : "room_ref",
-      reason: "target_room_missing",
+      reason: currentRooms?.unavailable
+        ? "not_compared"
+        : "target_room_missing",
       message:
         "Accessory placement requires an existing destination room on the hub.",
     });
@@ -739,11 +881,19 @@ function planAccessoryPlacement(
         ? saved.name
         : saved.room_ref;
 
+  const pureRestore = isPureAgentRestoreTransitionPlacement(
+    ctx,
+    attribution,
+    placementEntries,
+    saved,
+    current,
+  );
   addReapply(ctx, {
     entity_ref: entityRef,
     kind: "accessory",
     field,
     attribution,
+    manual_override_warning: !pureRestore,
     from_current: fromCurrent,
     to_point: toPoint,
     arguments: {
@@ -769,17 +919,26 @@ function planServiceChanges(
       ({ change }) =>
         change.kind === "service_name" && change.target_ref === svcDiff.ref,
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(ctx, nameEntries, savedSvc?.name, currentSvc?.name)
-    ) {
-      registerUndoEntries(ctx, nameEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyScalarChain(ctx, nameEntries, savedSvc?.name, currentSvc?.name)
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
     } else if (isCleanNonEmptyString(savedSvc?.name)) {
+      const pureRestore = isPureAgentRestoreTransitionScalar(
+        ctx,
+        attribution,
+        nameEntries,
+        savedSvc.name,
+        currentSvc?.name,
+      );
       addReapply(ctx, {
         entity_ref: svcDiff.ref,
         kind: "service",
         field: "name",
         attribution,
+        manual_override_warning: !pureRestore,
         from_current: currentSvc?.name ?? null,
         to_point: savedSvc.name,
         arguments: {
@@ -808,22 +967,31 @@ function planServiceChanges(
       ({ change }) =>
         change.kind === "service_visible" && change.target_ref === svcDiff.ref,
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(
-        ctx,
-        visibleEntries,
-        savedSvc?.visible,
-        currentSvc?.visible,
-      )
-    ) {
-      registerUndoEntries(ctx, visibleEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyScalarChain(
+            ctx,
+            visibleEntries,
+            savedSvc?.visible,
+            currentSvc?.visible,
+          )
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
     } else if (typeof savedSvc?.visible === "boolean") {
+      const pureRestore = isPureAgentRestoreTransitionScalar(
+        ctx,
+        attribution,
+        visibleEntries,
+        savedSvc.visible,
+        currentSvc?.visible,
+      );
       addReapply(ctx, {
         entity_ref: svcDiff.ref,
         kind: "service",
         field: "visible",
         attribution,
+        manual_override_warning: !pureRestore,
         from_current: currentSvc?.visible ?? null,
         to_point: savedSvc.visible,
         arguments: {
@@ -860,13 +1028,15 @@ function planServiceChanges(
 function planHomeAddedScenario(ctx, item, currentScenario) {
   const { attribution, entries } = itemDetail(ctx, item);
   if (attribution === "agent" && entries.length > 0 && currentScenario) {
-    const createEntries = entries.filter(
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const createEntries = (active ?? []).filter(
       ({ change }) =>
         change.kind === "block_create" || change.kind === "logic_source_create",
     );
     if (
+      active &&
       createEntries.length === 1 &&
-      entries.every((e) => isEligibleApplyEntry(ctx, e)) &&
+      active.length === 1 &&
       createdScenarioMatchesCurrent(
         createEntries[0].change,
         currentScenario,
@@ -874,6 +1044,7 @@ function planHomeAddedScenario(ctx, item, currentScenario) {
       )
     ) {
       registerUndoEntries(ctx, createEntries);
+      ctx.undoneRemovedScenarios.set(item.ref, createEntries[0].eventMs);
       return;
     }
   }
@@ -889,13 +1060,11 @@ function planHomeAddedScenario(ctx, item, currentScenario) {
 function planHomeRemovedScenario(ctx, item) {
   const { attribution, entries } = itemDetail(ctx, item);
   if (attribution === "agent" && entries.length > 0) {
-    const deleteEntries = entries.filter(
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const deleteEntries = (active ?? []).filter(
       ({ change }) => change.kind === "scenario_delete",
     );
-    if (
-      deleteEntries.length === 1 &&
-      entries.every((e) => isEligibleApplyEntry(ctx, e))
-    ) {
+    if (active && deleteEntries.length === 1 && active.length === 1) {
       registerUndoEntries(ctx, deleteEntries);
       return;
     }
@@ -964,17 +1133,26 @@ function planScenarioChanges(ctx, { entityRef, diffItem, saved, current }) {
       ({ change }) =>
         change.kind === "scenario_active" && change.target_ref === entityRef,
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(ctx, activeEntries, saved?.active, current?.active)
-    ) {
-      registerUndoEntries(ctx, activeEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyScalarChain(ctx, activeEntries, saved?.active, current?.active)
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
     } else if (typeof saved?.active === "boolean") {
+      const pureRestore = isPureAgentRestoreTransitionScalar(
+        ctx,
+        attribution,
+        activeEntries,
+        saved.active,
+        current?.active,
+      );
       addReapply(ctx, {
         entity_ref: entityRef,
         kind: "scenario",
         field: "active",
         attribution,
+        manual_override_warning: !pureRestore,
         from_current: current?.active ?? null,
         to_point: saved.active,
         arguments: {
@@ -1043,11 +1221,12 @@ function planScenarioChanges(ctx, { entityRef, diffItem, saved, current }) {
         change.target_ref === entityRef &&
         change.option_key === optionKey,
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(ctx, metaEntries, saved?.[field], current?.[field])
-    ) {
-      registerUndoEntries(ctx, metaEntries);
+    const metaUndoChain =
+      attribution === "agent"
+        ? verifyScalarChain(ctx, metaEntries, saved?.[field], current?.[field])
+        : null;
+    if (metaUndoChain) {
+      registerUndoEntries(ctx, metaUndoChain);
       continue;
     }
 
@@ -1069,11 +1248,19 @@ function planScenarioChanges(ctx, { entityRef, diffItem, saved, current }) {
       continue;
     }
 
+    const pureRestore = isPureAgentRestoreTransitionScalar(
+      ctx,
+      attribution,
+      metaEntries,
+      savedVal,
+      current?.[field],
+    );
     addReapply(ctx, {
       entity_ref: entityRef,
       kind: "scenario",
       field,
       attribution,
+      manual_override_warning: !pureRestore,
       from_current: current?.[field] ?? null,
       to_point: savedVal,
       arguments: {
@@ -1119,20 +1306,26 @@ function planBlockConfigurationChange(
       (change.kind === "block_data_update" ||
         change.kind === "block_action_pause"),
   );
-  if (
-    attribution === "agent" &&
-    verifyBlockChain(
-      ctx,
-      blockEntries,
-      saved?.configuration?.value,
-      current?.configuration?.value,
-    )
-  ) {
-    registerUndoEntries(ctx, blockEntries);
+  const undoChain =
+    attribution === "agent"
+      ? verifyBlockChain(
+          ctx,
+          blockEntries,
+          saved?.configuration?.value,
+          current?.configuration?.value,
+        )
+      : null;
+  if (undoChain) {
+    registerUndoEntries(ctx, undoChain);
+    ctx.undoneConfigScenarios.set(entityRef, {
+      savedScenario: saved,
+      minEventMs: Math.min(...undoChain.map((entry) => entry.eventMs)),
+    });
     return;
   }
 
   const savedConfig = saved?.configuration;
+  const currentConfig = current?.configuration;
   if (savedConfig?.format !== "json" || !isPlainObject(savedConfig.value)) {
     addNotRestorable(ctx, {
       entity_ref: entityRef,
@@ -1144,14 +1337,17 @@ function planBlockConfigurationChange(
     });
     return;
   }
-  if (containsHiddenHttpUrl(savedConfig.value)) {
+  if (
+    containsHiddenHttpUrl(savedConfig.value) ||
+    containsHiddenHttpUrl(currentConfig?.value)
+  ) {
     addNotRestorable(ctx, {
       entity_ref: entityRef,
       kind: "scenario",
       field: "configuration",
       reason: "redacted_http_url",
       message:
-        "This BLOCK scenario contains an HTTP request URL whose path or query is redacted in the saved point, so it cannot be reapplied automatically without losing the URL.",
+        "This BLOCK scenario contains an HTTP request URL whose path or query is redacted, so it cannot be restored automatically without risking URL loss.",
     });
     return;
   }
@@ -1166,13 +1362,47 @@ function planBlockConfigurationChange(
     });
     return;
   }
+  if (
+    isPlainObject(currentConfig?.value) &&
+    blockDataHasTrigger(currentConfig.value) &&
+    !blockDataHasTrigger(savedConfig.value)
+  ) {
+    addNotRestorable(ctx, {
+      entity_ref: entityRef,
+      kind: "scenario",
+      field: "configuration",
+      reason: "block_would_remove_last_trigger",
+      message:
+        "The saved BLOCK has no triggers while the current BLOCK is triggered; prepare_native_change refuses to remove the last trigger automatically.",
+    });
+    return;
+  }
+  const blockProblem = validateSavedBlockForReapply(ctx, savedConfig.value);
+  if (blockProblem) {
+    addNotRestorable(ctx, {
+      entity_ref: entityRef,
+      kind: "scenario",
+      field: "configuration",
+      reason: blockProblem.reason,
+      message: blockProblem.message,
+    });
+    return;
+  }
 
+  const pureRestore = isPureAgentRestoreTransitionBlock(
+    ctx,
+    attribution,
+    blockEntries,
+    savedConfig.value,
+    currentConfig?.value,
+  );
   addReapply(ctx, {
     entity_ref: entityRef,
     kind: "scenario",
     field: "configuration",
     attribution,
-    from_current: current?.configuration?.value ?? null,
+    manual_override_warning: !pureRestore,
+    from_current: currentConfig?.value ?? null,
     to_point: savedConfig.value,
     arguments: {
       operation: "block_data_update",
@@ -1191,11 +1421,16 @@ function planCodeConfigurationChange(
     ({ change }) =>
       change.target_ref === entityRef && change.kind === "logic_source_update",
   );
-  if (
-    attribution === "agent" &&
-    verifyLogicSourceChain(ctx, codeEntries, saved, current, changedFields)
-  ) {
-    registerUndoEntries(ctx, codeEntries);
+  const undoChain =
+    attribution === "agent"
+      ? verifyLogicSourceChain(ctx, codeEntries, saved, current, changedFields)
+      : null;
+  if (undoChain) {
+    registerUndoEntries(ctx, undoChain);
+    ctx.undoneConfigScenarios.set(entityRef, {
+      savedScenario: saved,
+      minEventMs: Math.min(...undoChain.map((entry) => entry.eventMs)),
+    });
     return true;
   }
 
@@ -1218,12 +1453,24 @@ function planCodeConfigurationChange(
     });
     return false;
   }
+  const sanitizedSaved = sanitizeCodeForCompare(
+    savedConfig.value,
+    ctx.sensitiveValues,
+  );
+  const sanitizedCurrent =
+    typeof currentConfig?.value === "string"
+      ? sanitizeCodeForCompare(currentConfig.value, ctx.sensitiveValues)
+      : null;
   if (
     isHidden(savedConfig.value) ||
     savedConfig.value.includes("[REDACTED]") ||
+    sanitizedSaved !== savedConfig.value ||
+    sanitizedSaved.includes("[REDACTED]") ||
     isHidden(currentConfig?.value) ||
     (typeof currentConfig?.value === "string" &&
-      currentConfig.value.includes("[REDACTED]"))
+      (currentConfig.value.includes("[REDACTED]") ||
+        sanitizedCurrent !== currentConfig.value ||
+        sanitizedCurrent.includes("[REDACTED]")))
   ) {
     addNotRestorable(ctx, {
       entity_ref: entityRef,
@@ -1231,7 +1478,7 @@ function planCodeConfigurationChange(
       field: "configuration",
       reason: "redacted_value",
       message:
-        "This scenario's source code contains redacted credential-shaped text and cannot be rewritten automatically.",
+        "This scenario's source code contains redacted credential-shaped text or connection secrets and cannot be rewritten automatically.",
     });
     return false;
   }
@@ -1247,11 +1494,21 @@ function planCodeConfigurationChange(
     return false;
   }
 
+  const pureRestore = isPureAgentRestoreTransitionLogicSource(
+    ctx,
+    attribution,
+    codeEntries,
+    saved,
+    current,
+    changedFields,
+  );
   addReapply(ctx, {
     entity_ref: entityRef,
     kind: "scenario",
     field: "configuration",
     attribution,
+    manual_override_warning: !pureRestore,
+    displayRole: "javascript_source",
     from_current: currentConfig?.value ?? null,
     to_point: savedConfig.value,
     arguments: {
@@ -1285,11 +1542,16 @@ function planHomeChangedBridge(ctx, item) {
         change.bridge_export?.bridge_ref === item.ref &&
         bridgeExportAccessoryRef(change) === accRef,
     );
-    if (
-      attribution === "agent" &&
-      verifyBridgeExportChain(ctx, exportEntries, "added")
-    ) {
-      registerUndoEntries(ctx, exportEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyBridgeExportChain(ctx, exportEntries, "added")
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
+      ctx.undoneAddedBridgeExports.set(
+        `${item.ref}\0${accRef}`,
+        Math.min(...undoChain.map((entry) => entry.eventMs)),
+      );
       continue;
     }
     addNotRestorable(ctx, {
@@ -1309,11 +1571,12 @@ function planHomeChangedBridge(ctx, item) {
         change.bridge_export?.bridge_ref === item.ref &&
         bridgeExportAccessoryRef(change) === accRef,
     );
-    if (
-      attribution === "agent" &&
-      verifyBridgeExportChain(ctx, exportEntries, "removed")
-    ) {
-      registerUndoEntries(ctx, exportEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyBridgeExportChain(ctx, exportEntries, "removed")
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
       continue;
     }
     addNotRestorable(ctx, {
@@ -1370,11 +1633,12 @@ function planClimateSetpointChange(
     ({ change }) =>
       change.kind === "characteristic_value" && change.target_ref === entityRef,
   );
-  if (
-    attribution === "agent" &&
-    verifyScalarChain(ctx, valueEntries, saved?.value, current?.value)
-  ) {
-    registerUndoEntries(ctx, valueEntries);
+  const undoChain =
+    attribution === "agent"
+      ? verifyScalarChain(ctx, valueEntries, saved?.value, current?.value)
+      : null;
+  if (undoChain) {
+    registerUndoEntries(ctx, undoChain);
     return;
   }
   if (!accessoryExists) {
@@ -1399,11 +1663,19 @@ function planClimateSetpointChange(
     });
     return;
   }
+  const pureRestore = isPureAgentRestoreTransitionScalar(
+    ctx,
+    attribution,
+    valueEntries,
+    saved.value,
+    current?.value,
+  );
   addReapply(ctx, {
     entity_ref: entityRef,
     kind: "characteristic",
     field: "value",
     attribution,
+    manual_override_warning: !pureRestore,
     from_current: current?.value ?? null,
     to_point: saved.value,
     arguments: {
@@ -1427,15 +1699,7 @@ function planSelectedRestore(ctx, point, currentByRef, comparison) {
     const current = currentByRef.get(entity.entity_ref);
 
     if (entity.status === "missing") {
-      const coveredByUndo = planSelectedMissingEntity(ctx, entity);
-      if (!coveredByUndo) {
-        addNotRestorable(ctx, {
-          entity_ref: entity.entity_ref,
-          kind: entity.kind,
-          reason: "entity_missing",
-          message: `This ${entity.kind} no longer exists on the hub and cannot be restored automatically.`,
-        });
-      }
+      planSelectedMissingEntity(ctx, entity);
       continue;
     }
 
@@ -1457,20 +1721,82 @@ function planSelectedRestore(ctx, point, currentByRef, comparison) {
 
 function planSelectedMissingEntity(ctx, entity) {
   const { attribution, entries } = itemDetail(ctx, entity);
-  if (attribution !== "agent" || entries.length === 0) return false;
-  const deleteEntries = entries.filter(
+  if (
+    entity.kind === "scenario" &&
+    attribution === "agent" &&
+    entries.length > 0
+  ) {
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const deleteEntries = (active ?? []).filter(
+      ({ change }) => change.kind === "scenario_delete",
+    );
+    if (active && deleteEntries.length === 1 && active.length === 1) {
+      registerUndoEntries(ctx, deleteEntries);
+      return;
+    }
+  }
+  if (
+    entity.kind === "accessory" &&
+    attribution === "agent" &&
+    entries.length > 0
+  ) {
+    const active = extractEligibleApplyEntries(ctx, entries);
+    const deleteEntries = (active ?? []).filter(
+      ({ change }) => change.kind === "virtual_device_delete",
+    );
+    if (active && deleteEntries.length === 1 && active.length === 1) {
+      const baseRoomId =
+        deleteEntries[0].change.baseline_snapshot?.room_id ??
+        deleteEntries[0].change.room_id;
+      if (ctx.currentRooms?.unavailable) {
+        addNotRestorable(ctx, {
+          entity_ref: entity.entity_ref,
+          kind: entity.kind,
+          reason: "not_compared",
+          message:
+            "Live rooms could not be read from the hub to verify the deleted virtual device's original room.",
+        });
+        return;
+      }
+      if (!roomIdExists(ctx.currentRooms, ctx.serial, baseRoomId)) {
+        addNotRestorable(ctx, {
+          entity_ref: entity.entity_ref,
+          kind: entity.kind,
+          reason: "target_room_missing",
+          message:
+            "The room this deleted virtual device belonged to no longer exists on the hub, so virtual_device_delete cannot be undone automatically.",
+        });
+        return;
+      }
+      registerUndoEntries(ctx, deleteEntries);
+      return;
+    }
+  }
+
+  const causedByParentDelete = entries.some(
     ({ change }) =>
-      change.kind === "scenario_delete" ||
-      change.kind === "virtual_device_delete",
+      change?.kind === "scenario_delete" ||
+      change?.kind === "virtual_device_delete",
   );
   if (
-    deleteEntries.length === 1 &&
-    entries.every((e) => isEligibleApplyEntry(ctx, e))
+    causedByParentDelete &&
+    ["logic", "window", "characteristic"].includes(entity.kind)
   ) {
-    registerUndoEntries(ctx, deleteEntries);
-    return true;
+    addNotRestorable(ctx, {
+      entity_ref: entity.entity_ref,
+      kind: entity.kind,
+      reason: "parent_recreate_changes_id",
+      message: `This ${entity.kind} was removed when its parent scenario or virtual device was deleted; undoing the parent delete assigns a new ID/index and does not restore logic assignments, window options, or previous characteristic references.`,
+    });
+    return;
   }
-  return false;
+
+  addNotRestorable(ctx, {
+    entity_ref: entity.entity_ref,
+    kind: entity.kind,
+    reason: "entity_missing",
+    message: `This ${entity.kind} no longer exists on the hub and cannot be restored automatically.`,
+  });
 }
 
 function planSelectedChangedEntity(ctx, entity, saved, current) {
@@ -1516,7 +1842,7 @@ function planSelectedChangedEntity(ctx, entity, saved, current) {
         changedFields,
         saved: saved?.settings,
         current: current?.settings,
-        currentRooms: null,
+        currentRooms: ctx.currentRooms,
       });
     }
     for (const field of changedFields) {
@@ -1552,22 +1878,31 @@ function planSelectedChangedEntity(ctx, entity, saved, current) {
           change.kind === "logic_active" &&
           change.target_ref === entity.entity_ref,
       );
-      if (
-        attribution === "agent" &&
-        verifyScalarChain(
-          ctx,
-          activeEntries,
-          saved?.settings?.active,
-          current?.settings?.active,
-        )
-      ) {
-        registerUndoEntries(ctx, activeEntries);
+      const undoChain =
+        attribution === "agent"
+          ? verifyScalarChain(
+              ctx,
+              activeEntries,
+              saved?.settings?.active,
+              current?.settings?.active,
+            )
+          : null;
+      if (undoChain) {
+        registerUndoEntries(ctx, undoChain);
       } else if (typeof saved?.settings?.active === "boolean") {
+        const pureRestore = isPureAgentRestoreTransitionScalar(
+          ctx,
+          attribution,
+          activeEntries,
+          saved.settings.active,
+          current?.settings?.active,
+        );
         addReapply(ctx, {
           entity_ref: entity.entity_ref,
           kind: "logic",
           field: "active",
           attribution,
+          manual_override_warning: !pureRestore,
           from_current: current?.settings?.active ?? null,
           to_point: saved.settings.active,
           arguments: {
@@ -1699,16 +2034,17 @@ function planOptionMapChanges(
         (change.target_ref === entityRef || change.window_ref === entityRef) &&
         change.option_key === optionKey,
     );
-    if (
-      attribution === "agent" &&
-      verifyScalarChain(
-        ctx,
-        optEntries,
-        savedOpt.configured_value,
-        currentOpt.configured_value,
-      )
-    ) {
-      registerUndoEntries(ctx, optEntries);
+    const undoChain =
+      attribution === "agent"
+        ? verifyScalarChain(
+            ctx,
+            optEntries,
+            savedOpt.configured_value,
+            currentOpt.configured_value,
+          )
+        : null;
+    if (undoChain) {
+      registerUndoEntries(ctx, undoChain);
       continue;
     }
 
@@ -1740,17 +2076,18 @@ function planOptionMapChanges(
         });
         continue;
       }
-      if (
-        windowKey.startsWith("Scenario/") &&
-        !isTelegramWindowKey(windowKey) &&
-        SCENARIO_WINDOW_RESERVED_KEYS.has(optionKey)
-      ) {
+      const scenarioWindowRejection = checkScenarioOptionsWindowRejection(
+        ctx,
+        windowKey,
+        optionKey,
+      );
+      if (scenarioWindowRejection) {
         addNotRestorable(ctx, {
           entity_ref: entityRef,
           kind,
           field,
-          reason: "scenario_owner_required",
-          message: `Scenario option "${optionKey}" must be restored through the owning scenario ref rather than its raw window ref.`,
+          reason: scenarioWindowRejection.reason,
+          message: scenarioWindowRejection.message,
         });
         continue;
       }
@@ -1795,11 +2132,19 @@ function planOptionMapChanges(
       }
     }
 
+    const pureRestore = isPureAgentRestoreTransitionScalar(
+      ctx,
+      attribution,
+      optEntries,
+      savedOpt.configured_value,
+      currentOpt.configured_value,
+    );
     addReapply(ctx, {
       entity_ref: entityRef,
       kind,
       field,
       attribution,
+      manual_override_warning: !pureRestore,
       from_current: currentOpt.configured_value,
       to_point: savedOpt.configured_value,
       arguments: {
@@ -1815,20 +2160,264 @@ function planOptionMapChanges(
 
 // --- Chain integrity verifiers ---
 
-function verifyScalarChain(ctx, entries, savedValue, currentValue) {
+function extractEligibleApplyEntries(ctx, entries) {
+  if (entries.length === 0) return null;
+  if (
+    entries[0].eventKind === "restore" ||
+    entries[0].change?.status === "restored"
+  ) {
+    return null;
+  }
+  const active = [];
+  for (const entry of entries) {
+    if (entry.change?.status === "restored") continue;
+    if (!isEligibleApplyEntry(ctx, entry)) return null;
+    active.push(entry);
+  }
+  return active.length > 0 ? active : null;
+}
+
+function isCleanPureAgentEvent(entry) {
+  if (!entry?.change) return false;
+  if (entry.eventKind === "restore") {
+    return entry.change.status === "restored";
+  }
+  if (entry.eventKind === "apply") {
+    return (
+      entry.change.status === "applied" ||
+      entry.change.status === "restored" ||
+      (entry.change.status === "conflict" &&
+        entry.change.conflict_reason === "later_owned_change")
+    );
+  }
+  return false;
+}
+
+function oldestRestoreWasPreSnapshot(ctx, oldestEntry) {
+  if (oldestEntry.eventKind !== "restore") return true;
+  if (!Number.isFinite(ctx.captureStartedMs)) return false;
+  const appliedAt =
+    changeAppliedAt(oldestEntry.change) ?? oldestEntry.change?.created_at;
+  const appliedMs = Date.parse(appliedAt ?? "");
+  return Number.isFinite(appliedMs) && appliedMs <= ctx.captureStartedMs;
+}
+
+function verifyPureAgentRestoreTransition(
+  ctx,
+  attribution,
+  entries,
+  savedValue,
+  currentValue,
+  { beforeOf, afterOf, equals },
+) {
+  if (attribution !== "agent" || ctx.attributionUnavailable) return false;
   if (entries.length === 0) return false;
-  if (!entries.every((e) => isEligibleApplyEntry(ctx, e))) return false;
-  const newest = entries[0].change;
+  if (!entries.some((entry) => entry.eventKind === "restore")) return false;
+  if (!entries.every(isCleanPureAgentEvent)) return false;
+  if (!oldestRestoreWasPreSnapshot(ctx, entries.at(-1))) return false;
+  if (!equals(afterOf(entries[0]), currentValue)) return false;
+  for (let index = 0; index < entries.length - 1; index += 1) {
+    if (!equals(beforeOf(entries[index]), afterOf(entries[index + 1]))) {
+      return false;
+    }
+  }
+  return equals(beforeOf(entries.at(-1)), savedValue);
+}
+
+function scalarEventValue(container) {
+  return container && Object.hasOwn(container, "value")
+    ? { ok: true, value: container.value }
+    : { ok: false, value: undefined };
+}
+
+function isPureAgentRestoreTransitionScalar(
+  ctx,
+  attribution,
+  entries,
+  savedValue,
+  currentValue,
+) {
+  return verifyPureAgentRestoreTransition(
+    ctx,
+    attribution,
+    entries,
+    { ok: true, value: savedValue },
+    { ok: true, value: currentValue },
+    {
+      beforeOf: (entry) =>
+        scalarEventValue(
+          entry.eventKind === "restore"
+            ? entry.change.requested_value
+            : entry.change.baseline_value,
+        ),
+      afterOf: (entry) =>
+        scalarEventValue(
+          entry.eventKind === "restore"
+            ? entry.change.baseline_value
+            : entry.change.requested_value,
+        ),
+      equals: (left, right) =>
+        left.ok && right.ok && isDeepStrictEqual(left.value, right.value),
+    },
+  );
+}
+
+function placementStateFromSnapshot(serial, snap) {
+  if (!snap || typeof snap.room_id !== "number") return null;
+  return { name: snap.name, room_ref: roomRef(serial, snap.room_id) };
+}
+
+function isPureAgentRestoreTransitionPlacement(
+  ctx,
+  attribution,
+  entries,
+  saved,
+  current,
+) {
+  if (!saved || !current) return false;
+  return verifyPureAgentRestoreTransition(
+    ctx,
+    attribution,
+    entries,
+    { name: saved.name, room_ref: saved.room_ref },
+    { name: current.name, room_ref: current.room_ref },
+    {
+      beforeOf: (entry) =>
+        placementStateFromSnapshot(
+          ctx.serial,
+          entry.eventKind === "restore"
+            ? (entry.change.applied_snapshot ?? entry.change.requested_snapshot)
+            : entry.change.baseline_snapshot,
+        ),
+      afterOf: (entry) =>
+        placementStateFromSnapshot(
+          ctx.serial,
+          entry.eventKind === "restore"
+            ? entry.change.baseline_snapshot
+            : (entry.change.applied_snapshot ??
+                entry.change.requested_snapshot),
+        ),
+      equals: (left, right) =>
+        left !== null &&
+        right !== null &&
+        left.name === right.name &&
+        left.room_ref === right.room_ref,
+    },
+  );
+}
+
+function isPureAgentRestoreTransitionBlock(
+  ctx,
+  attribution,
+  entries,
+  savedData,
+  currentData,
+) {
+  if (!isPlainObject(savedData) || !isPlainObject(currentData)) return false;
+  if (containsHiddenHttpUrl(savedData) || containsHiddenHttpUrl(currentData)) {
+    return false;
+  }
+  return verifyPureAgentRestoreTransition(
+    ctx,
+    attribution,
+    entries,
+    savedData,
+    currentData,
+    {
+      beforeOf: (entry) =>
+        entry.eventKind === "restore"
+          ? (entry.change.applied_snapshot?.data ??
+            entry.change.requested_snapshot?.data)
+          : entry.change.baseline_snapshot?.data,
+      afterOf: (entry) =>
+        entry.eventKind === "restore"
+          ? entry.change.baseline_snapshot?.data
+          : (entry.change.applied_snapshot?.data ??
+            entry.change.requested_snapshot?.data),
+      equals: blockDataEquals,
+    },
+  );
+}
+
+function isPureAgentRestoreTransitionLogicSource(
+  ctx,
+  attribution,
+  entries,
+  saved,
+  current,
+  changedFields,
+) {
+  const savedCode = saved?.configuration?.value;
+  const currentCode = current?.configuration?.value;
+  if (typeof savedCode !== "string" || typeof currentCode !== "string") {
+    return false;
+  }
+  const ok = verifyPureAgentRestoreTransition(
+    ctx,
+    attribution,
+    entries,
+    savedCode,
+    currentCode,
+    {
+      beforeOf: (entry) =>
+        sanitizeCodeForCompare(
+          entry.eventKind === "restore"
+            ? (entry.change.applied_snapshot?.data ??
+                entry.change.requested_snapshot?.data)
+            : entry.change.baseline_snapshot?.data,
+          ctx.sensitiveValues,
+        ),
+      afterOf: (entry) =>
+        sanitizeCodeForCompare(
+          entry.eventKind === "restore"
+            ? entry.change.baseline_snapshot?.data
+            : (entry.change.applied_snapshot?.data ??
+                entry.change.requested_snapshot?.data),
+          ctx.sensitiveValues,
+        ),
+      equals: (left, right) => typeof left === "string" && left === right,
+    },
+  );
+  if (!ok) return false;
+  if (saved?.type === "LOGIC") {
+    const oldest = entries.at(-1);
+    const newest = entries[0];
+    const oldestBeforeSnap =
+      oldest.eventKind === "restore"
+        ? (oldest.change.applied_snapshot ?? oldest.change.requested_snapshot)
+        : oldest.change.baseline_snapshot;
+    const newestAfterSnap =
+      newest.eventKind === "restore"
+        ? newest.change.baseline_snapshot
+        : (newest.change.applied_snapshot ?? newest.change.requested_snapshot);
+    for (const field of ["name", "description", "on_start"]) {
+      if (!changedFields.has(field)) continue;
+      const nativeKey = LOGIC_FIELD_TO_NATIVE_SNAPSHOT_KEY[field];
+      if (
+        !isDeepStrictEqual(oldestBeforeSnap?.[nativeKey], saved?.[field]) ||
+        !isDeepStrictEqual(newestAfterSnap?.[nativeKey], current?.[field])
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function verifyScalarChain(ctx, entries, savedValue, currentValue) {
+  const active = extractEligibleApplyEntries(ctx, entries);
+  if (!active) return null;
+  const newest = active[0].change;
   if (
     !newest.requested_value ||
     !Object.hasOwn(newest.requested_value, "value") ||
     !isDeepStrictEqual(newest.requested_value.value, currentValue)
   ) {
-    return false;
+    return null;
   }
-  for (let index = 0; index < entries.length - 1; index += 1) {
-    const newerBase = entries[index].change.baseline_value;
-    const olderReq = entries[index + 1].change.requested_value;
+  for (let index = 0; index < active.length - 1; index += 1) {
+    const newerBase = active[index].change.baseline_value;
+    const olderReq = active[index + 1].change.requested_value;
     if (
       !newerBase ||
       !olderReq ||
@@ -1836,90 +2425,97 @@ function verifyScalarChain(ctx, entries, savedValue, currentValue) {
       !Object.hasOwn(olderReq, "value") ||
       !isDeepStrictEqual(newerBase.value, olderReq.value)
     ) {
-      return false;
+      return null;
     }
   }
-  const oldest = entries.at(-1).change;
+  const oldest = active.at(-1).change;
   if (
     !oldest.baseline_value ||
     !Object.hasOwn(oldest.baseline_value, "value") ||
     !isDeepStrictEqual(oldest.baseline_value.value, savedValue)
   ) {
-    return false;
+    return null;
   }
-  return true;
+  return active;
 }
 
 function verifyPlacementChain(ctx, entries, saved, current, currentRooms) {
-  if (entries.length === 0 || !saved || !current) return false;
-  if (!entries.every((e) => isEligibleApplyEntry(ctx, e))) return false;
+  if (!saved || !current || currentRooms?.unavailable) return null;
+  const active = extractEligibleApplyEntries(ctx, entries);
+  if (!active) return null;
 
   const newestSnap =
-    entries[0].change.applied_snapshot ?? entries[0].change.requested_snapshot;
+    active[0].change.applied_snapshot ?? active[0].change.requested_snapshot;
   if (
     !newestSnap ||
     newestSnap.name !== current.name ||
     typeof newestSnap.room_id !== "number" ||
     roomRef(ctx.serial, newestSnap.room_id) !== current.room_ref
   ) {
-    return false;
+    return null;
   }
 
-  for (let index = 0; index < entries.length; index += 1) {
-    const base = entries[index].change.baseline_snapshot;
-    if (!base || typeof base.room_id !== "number") return false;
-    if (currentRooms && !currentRooms.has(roomRef(ctx.serial, base.room_id))) {
-      return false;
+  for (let index = 0; index < active.length; index += 1) {
+    const base = active[index].change.baseline_snapshot;
+    if (!base || typeof base.room_id !== "number") return null;
+    if (!roomIdExists(currentRooms, ctx.serial, base.room_id)) {
+      return null;
     }
-    if (index < entries.length - 1) {
+    if (index < active.length - 1) {
       const olderSnap =
-        entries[index + 1].change.applied_snapshot ??
-        entries[index + 1].change.requested_snapshot;
+        active[index + 1].change.applied_snapshot ??
+        active[index + 1].change.requested_snapshot;
       if (
         !olderSnap ||
         base.name !== olderSnap.name ||
         base.room_id !== olderSnap.room_id
       ) {
-        return false;
+        return null;
       }
     }
   }
 
-  const oldestBase = entries.at(-1).change.baseline_snapshot;
-  return (
-    oldestBase.name === saved.name &&
-    roomRef(ctx.serial, oldestBase.room_id) === saved.room_ref
-  );
+  const oldestBase = active.at(-1).change.baseline_snapshot;
+  if (
+    oldestBase.name !== saved.name ||
+    roomRef(ctx.serial, oldestBase.room_id) !== saved.room_ref
+  ) {
+    return null;
+  }
+  return active;
 }
 
 function verifyBlockChain(ctx, entries, savedData, currentData) {
-  if (
-    entries.length === 0 ||
-    !isPlainObject(savedData) ||
-    !isPlainObject(currentData)
-  ) {
-    return false;
+  if (!isPlainObject(savedData) || !isPlainObject(currentData)) {
+    return null;
   }
-  if (!entries.every((e) => isEligibleApplyEntry(ctx, e))) return false;
+  if (containsHiddenHttpUrl(savedData) || containsHiddenHttpUrl(currentData)) {
+    return null;
+  }
+  if (!blockReferencesExist(ctx, savedData)) {
+    return null;
+  }
+  const active = extractEligibleApplyEntries(ctx, entries);
+  if (!active) return null;
   const newestRaw =
-    entries[0].change.applied_snapshot?.data ??
-    entries[0].change.requested_snapshot?.data;
-  if (!blockDataEquals(newestRaw, currentData)) return false;
+    active[0].change.applied_snapshot?.data ??
+    active[0].change.requested_snapshot?.data;
+  if (!blockDataEquals(newestRaw, currentData)) return null;
 
-  for (let index = 0; index < entries.length - 1; index += 1) {
-    const newerBase = entries[index].change.baseline_snapshot?.data;
+  for (let index = 0; index < active.length - 1; index += 1) {
+    const newerBase = active[index].change.baseline_snapshot?.data;
     const olderResult =
-      entries[index + 1].change.applied_snapshot?.data ??
-      entries[index + 1].change.requested_snapshot?.data;
-    if (!blockDataEquals(newerBase, olderResult)) return false;
+      active[index + 1].change.applied_snapshot?.data ??
+      active[index + 1].change.requested_snapshot?.data;
+    if (!blockDataEquals(newerBase, olderResult)) return null;
   }
-  const oldestBase = entries.at(-1).change.baseline_snapshot?.data;
-  return blockDataEquals(oldestBase, savedData);
+  const oldestBase = active.at(-1).change.baseline_snapshot?.data;
+  return blockDataEquals(oldestBase, savedData) ? active : null;
 }
 
 function verifyLogicSourceChain(ctx, entries, saved, current, changedFields) {
-  if (entries.length === 0) return false;
-  if (!entries.every((e) => isEligibleApplyEntry(ctx, e))) return false;
+  const active = extractEligibleApplyEntries(ctx, entries);
+  if (!active) return null;
   const savedCode = saved?.configuration?.value;
   const currentCode = current?.configuration?.value;
   if (
@@ -1928,30 +2524,30 @@ function verifyLogicSourceChain(ctx, entries, saved, current, changedFields) {
     isHidden(savedCode) ||
     isHidden(currentCode)
   ) {
-    return false;
+    return null;
   }
-  const newest = entries[0].change;
+  const newest = active[0].change;
   const newestSnap = newest.applied_snapshot ?? newest.requested_snapshot;
   if (
     sanitizeCodeForCompare(newestSnap?.data, ctx.sensitiveValues) !==
     currentCode
   ) {
-    return false;
+    return null;
   }
-  for (let index = 0; index < entries.length - 1; index += 1) {
-    const newerBase = entries[index].change.baseline_snapshot?.data;
+  for (let index = 0; index < active.length - 1; index += 1) {
+    const newerBase = active[index].change.baseline_snapshot?.data;
     const olderSnap =
-      entries[index + 1].change.applied_snapshot ??
-      entries[index + 1].change.requested_snapshot;
+      active[index + 1].change.applied_snapshot ??
+      active[index + 1].change.requested_snapshot;
     if (typeof newerBase !== "string" || newerBase !== olderSnap?.data) {
-      return false;
+      return null;
     }
   }
-  const oldestBase = entries.at(-1).change.baseline_snapshot;
+  const oldestBase = active.at(-1).change.baseline_snapshot;
   if (
     sanitizeCodeForCompare(oldestBase?.data, ctx.sensitiveValues) !== savedCode
   ) {
-    return false;
+    return null;
   }
   if (saved?.type === "LOGIC") {
     for (const field of ["name", "description", "on_start"]) {
@@ -1961,21 +2557,20 @@ function verifyLogicSourceChain(ctx, entries, saved, current, changedFields) {
         !isDeepStrictEqual(oldestBase?.[nativeKey], saved?.[field]) ||
         !isDeepStrictEqual(newestSnap?.[nativeKey], current?.[field])
       ) {
-        return false;
+        return null;
       }
     }
   }
-  return true;
+  return active;
 }
 
 function verifyBridgeExportChain(ctx, entries, direction) {
-  if (entries.length === 0) return false;
-  if (!entries.every((e) => isEligibleApplyEntry(ctx, e))) return false;
+  if (entries.length === 0) return null;
 
   const byKey = new Map();
   for (const entry of entries) {
     const key = entry.change.option_key;
-    if (typeof key !== "string" || key.length === 0) return false;
+    if (typeof key !== "string" || key.length === 0) return null;
     const list = byKey.get(key) ?? [];
     list.push(entry);
     byKey.set(key, list);
@@ -1984,20 +2579,401 @@ function verifyBridgeExportChain(ctx, entries, direction) {
   let matchedDirection = false;
   const expectedFinal = direction === "added";
   const expectedSaved = !expectedFinal;
-  for (const chain of byKey.values()) {
-    const newestVal = chain[0].change.requested_value?.value;
-    const oldestBase = chain.at(-1).change.baseline_value?.value;
-    if (typeof newestVal !== "boolean" || typeof oldestBase !== "boolean") {
-      return false;
+  const verifiedEntries = [];
+
+  for (const rawChain of byKey.values()) {
+    if (
+      rawChain.every(
+        (entry) =>
+          entry.change?.status === "restored" &&
+          !oldestRestoreWasPreSnapshot(ctx, entry),
+      )
+    ) {
+      // Closed in-window apply->restore cycle on another service checkbox of
+      // the same accessory: net effect is already back at baseline.
+      continue;
     }
-    if (!verifyScalarChain(ctx, chain, oldestBase, newestVal)) return false;
-    if (direction === "added" && oldestBase !== false) return false;
-    if (direction === "removed" && newestVal !== false) return false;
+    const active = extractEligibleApplyEntries(ctx, rawChain);
+    if (!active) return null;
+    const newestVal = active[0].change.requested_value?.value;
+    const oldestBase = active.at(-1).change.baseline_value?.value;
+    if (typeof newestVal !== "boolean" || typeof oldestBase !== "boolean") {
+      return null;
+    }
+    const verified = verifyScalarChain(ctx, active, oldestBase, newestVal);
+    if (!verified) return null;
+    if (direction === "added" && oldestBase !== false) return null;
+    if (direction === "removed" && newestVal !== false) return null;
     if (newestVal === expectedFinal && oldestBase === expectedSaved) {
       matchedDirection = true;
     }
+    verifiedEntries.push(...verified);
   }
-  return matchedDirection;
+  return matchedDirection && verifiedEntries.length > 0
+    ? verifiedEntries
+    : null;
+}
+
+function verifyVirtualLightGroupUndoChain(
+  ctx,
+  createEntry,
+  memberEntries,
+  item,
+) {
+  const createChange = createEntry.change;
+  const live = ctx.liveVirtualLightGroups?.get(item.ref);
+  if (!live || live.readError || live.absent) return null;
+  if (
+    !createChange.applied_snapshot ||
+    !Array.isArray(createChange.characteristic_types)
+  ) {
+    return null;
+  }
+  if (
+    !isDeepStrictEqual(
+      live.accessory,
+      createChange.applied_snapshot.accessory,
+    ) ||
+    !isDeepStrictEqual(
+      live.link_settings,
+      createChange.applied_snapshot.link_settings,
+    )
+  ) {
+    return null;
+  }
+  const liveIncoming = {};
+  const createdIncoming = {};
+  for (const type of createChange.characteristic_types) {
+    const rawLinks = live.links?.[type];
+    if (!Array.isArray(rawLinks)) return null;
+    if (
+      rawLinks.some(
+        (link) => link.type !== "IN" || link.characteristics.length !== 1,
+      )
+    ) {
+      return null;
+    }
+    liveIncoming[type] = incomingLinks(rawLinks);
+    createdIncoming[type] = incomingLinks(
+      createChange.applied_snapshot.links?.[type] ?? [],
+    );
+  }
+  const liveKeys = linkKeys(liveIncoming);
+  const createdKeys = linkKeys(createdIncoming);
+
+  if (
+    memberEntries.length === 0 ||
+    memberEntries.every((entry) => entry.change?.status === "restored")
+  ) {
+    return sameKeys(liveKeys, createdKeys) ? [createEntry] : null;
+  }
+
+  const activeMembers = extractEligibleApplyEntries(ctx, memberEntries);
+  if (!activeMembers) return null;
+  if (activeMembers.some((entry) => entry.eventMs < createEntry.eventMs)) {
+    return null;
+  }
+  for (const { change } of activeMembers) {
+    if (!change.baseline_links || !Array.isArray(change.steps)) return null;
+    for (const step of change.steps) {
+      if (
+        step.action === "remove" &&
+        ctx.currentAccessoryIds instanceof Set &&
+        !ctx.currentAccessoryIds.has(step.target?.aId)
+      ) {
+        return null;
+      }
+    }
+  }
+  if (!sameKeys(expectedAppliedKeys(activeMembers[0].change), liveKeys)) {
+    return null;
+  }
+  for (let index = 0; index < activeMembers.length - 1; index += 1) {
+    const newerBase = linkKeys(activeMembers[index].change.baseline_links);
+    const olderApplied = expectedAppliedKeys(activeMembers[index + 1].change);
+    if (!sameKeys(newerBase, olderApplied)) return null;
+  }
+  const oldestBase = linkKeys(activeMembers.at(-1).change.baseline_links);
+  if (!sameKeys(oldestBase, createdKeys)) return null;
+
+  return [...activeMembers, createEntry];
+}
+
+function hasBlockingVirtualDeviceDependency(
+  ctx,
+  item,
+  createEventMs,
+  currentSnapshot,
+) {
+  const homeRef = homeRefOf(ctx.serial);
+  for (const scenario of currentSnapshot.scenarios ?? []) {
+    const removedAt = ctx.undoneRemovedScenarios.get(scenario.ref);
+    if (removedAt !== undefined && removedAt >= createEventMs) continue;
+    const reverted = ctx.undoneConfigScenarios.get(scenario.ref);
+    const effective =
+      reverted && reverted.minEventMs >= createEventMs
+        ? reverted.savedScenario
+        : scenario;
+    if (scenarioReferencesAccessory(effective, item, homeRef)) {
+      return true;
+    }
+  }
+  for (const bridge of currentSnapshot.bridges ?? []) {
+    if (!(bridge.exported_accessory_refs ?? []).includes(item.ref)) continue;
+    const undoneAt = ctx.undoneAddedBridgeExports.get(
+      `${bridge.ref}\0${item.ref}`,
+    );
+    if (undoneAt === undefined || undoneAt < createEventMs) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function scenarioReferencesAccessory(scenario, item, homeRef) {
+  const config = scenario?.configuration;
+  if (!isPlainObject(config)) return false;
+  if (config.format === "json" && isPlainObject(config.value)) {
+    if (blockAffectedRefs(config.value, homeRef).includes(item.ref)) {
+      return true;
+    }
+    let mentioned = false;
+    visitKnownBlockNodes(config.value, (node, kind) => {
+      if (mentioned || kind !== "code" || typeof node.code !== "string") return;
+      if (
+        accessoryMentions(node.code, { id: item.id, name: item.name }) !== null
+      ) {
+        mentioned = true;
+      }
+    });
+    return mentioned;
+  }
+  if (
+    (config.format === "code" || config.format === "javascript") &&
+    typeof config.value === "string"
+  ) {
+    return (
+      accessoryMentions(config.value, { id: item.id, name: item.name }) !== null
+    );
+  }
+  return false;
+}
+
+function collectBlockReferencedIds(blockData) {
+  const accessoryIds = new Set();
+  const scenarioIndexes = new Set();
+  visitKnownBlockNodes(blockData, (node, kind) => {
+    if (kind === "characteristic" && Number.isSafeInteger(node.aId)) {
+      accessoryIds.add(node.aId);
+    }
+    if (kind === "service") {
+      if (Number.isSafeInteger(node.aId)) accessoryIds.add(node.aId);
+      for (const action of node.characteristics ?? []) {
+        if (action?.type === "from" && Number.isSafeInteger(action.from_aId)) {
+          accessoryIds.add(action.from_aId);
+        }
+      }
+    }
+  });
+  for (const target of blockScenarioTargets(blockData)) {
+    if (typeof target.index === "string") scenarioIndexes.add(target.index);
+  }
+  return { accessoryIds, scenarioIndexes };
+}
+
+function blockReferencesExist(ctx, blockData) {
+  const { accessoryIds, scenarioIndexes } =
+    collectBlockReferencedIds(blockData);
+  if (accessoryIds.size > 0) {
+    if (ctx.currentAccessoryIds?.unavailable) return false;
+    if (ctx.currentAccessoryIds instanceof Set) {
+      for (const aId of accessoryIds) {
+        if (!ctx.currentAccessoryIds.has(aId)) return false;
+      }
+    }
+  }
+  if (scenarioIndexes.size > 0) {
+    if (ctx.currentScenarioIndexes?.unavailable) return false;
+    if (ctx.currentScenarioIndexes instanceof Set) {
+      for (const index of scenarioIndexes) {
+        if (!ctx.currentScenarioIndexes.has(index)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function validateSavedBlockForReapply(ctx, blockData) {
+  let nodeProblem = null;
+  visitKnownBlockNodes(blockData, (node, kind, path) => {
+    if (nodeProblem || kind !== "code") return;
+    if (!isActionPath(path)) {
+      nodeProblem = {
+        reason: "unsupported_block_node",
+        message:
+          "The saved BLOCK contains a code condition node that cannot be written through block_data_update.",
+      };
+      return;
+    }
+    if (typeof node.code !== "string" || node.code.trim().length === 0) {
+      nodeProblem = {
+        reason: "unsupported_javascript",
+        message:
+          "The saved BLOCK contains an empty code action that cannot be written through block_data_update.",
+      };
+      return;
+    }
+    const sanitized = sanitizeCodeForCompare(node.code, ctx.sensitiveValues);
+    if (
+      node.code.includes("[REDACTED]") ||
+      sanitized !== node.code ||
+      sanitized.includes("[REDACTED]")
+    ) {
+      nodeProblem = {
+        reason: "redacted_value",
+        message:
+          "The saved BLOCK contains a code action with redacted or sensitive content and cannot be written automatically.",
+      };
+      return;
+    }
+    if (
+      hubCodeProblems(node.code, { functionBody: true }).problems.length > 0
+    ) {
+      nodeProblem = {
+        reason: "unsupported_javascript",
+        message:
+          "The saved BLOCK contains a code action that fails SprutHub's Nashorn JavaScript check and cannot be written automatically.",
+      };
+    }
+  });
+  if (nodeProblem) return nodeProblem;
+
+  const { accessoryIds, scenarioIndexes } =
+    collectBlockReferencedIds(blockData);
+  if (accessoryIds.size > 0) {
+    if (ctx.currentAccessoryIds?.unavailable) {
+      return {
+        reason: "not_compared",
+        message:
+          "Live accessories could not be read from the hub to verify devices referenced by this BLOCK scenario.",
+      };
+    }
+    if (ctx.currentAccessoryIds instanceof Set) {
+      for (const aId of accessoryIds) {
+        if (!ctx.currentAccessoryIds.has(aId)) {
+          return {
+            reason: "referenced_entity_missing",
+            message: `This saved BLOCK references accessory ${aId}, which no longer exists on the hub, so block_data_update would be refused.`,
+          };
+        }
+      }
+    }
+  }
+  if (scenarioIndexes.size > 0) {
+    if (ctx.currentScenarioIndexes?.unavailable) {
+      return {
+        reason: "not_compared",
+        message:
+          "Live scenarios could not be read from the hub to verify scenarios referenced by this BLOCK scenario.",
+      };
+    }
+    if (ctx.currentScenarioIndexes instanceof Set) {
+      for (const index of scenarioIndexes) {
+        if (!ctx.currentScenarioIndexes.has(index)) {
+          return {
+            reason: "referenced_entity_missing",
+            message: `This saved BLOCK references scenario ${index}, which no longer exists on the hub, so block_data_update would be refused.`,
+          };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function checkScenarioOptionsWindowRejection(ctx, windowKey, optionKey) {
+  if (ctx.scenarioOptionsWindows?.unavailable) {
+    if (SCENARIO_WINDOW_RESERVED_KEYS.has(optionKey)) {
+      return {
+        reason: "not_compared",
+        message:
+          "Live scenarios could not be read from the hub to verify whether this window belongs to a scenario.",
+      };
+    }
+    return null;
+  }
+  if (ctx.scenarioOptionsWindows instanceof Map) {
+    const matches = ctx.scenarioOptionsWindows.get(windowKey) ?? [];
+    if (matches.length === 1 && matches[0].predefined === true) {
+      return {
+        reason: "predefined_scenario",
+        message:
+          "This options window belongs to a built-in (predefined) SprutHub scenario and cannot be modified through native write tools.",
+      };
+    }
+    if (optionKey === "Active" && matches.length > 0) {
+      return {
+        reason: "scenario_owner_required",
+        message:
+          "Scenario Active state must be restored via scenario_active on the owning scenario ref rather than its raw options window ref.",
+      };
+    }
+    if (SCENARIO_METADATA_KEYS.has(optionKey) && matches.length === 1) {
+      if (matches[0].type === "LOGIC" && optionKey !== "Sync") {
+        return {
+          reason: "logic_info_in_code",
+          message: `LOGIC scenario option "${optionKey}" is controlled by info in the scenario's code and cannot be written via window_option.`,
+        };
+      }
+      return {
+        reason: "scenario_owner_required",
+        message: `Scenario option "${optionKey}" must be restored through the owning scenario ref rather than its raw options window ref.`,
+      };
+    }
+    return null;
+  }
+  if (
+    windowKey.startsWith("Scenario/") &&
+    !isTelegramWindowKey(windowKey) &&
+    SCENARIO_WINDOW_RESERVED_KEYS.has(optionKey)
+  ) {
+    return {
+      reason: "scenario_owner_required",
+      message: `Scenario option "${optionKey}" must be restored through the owning scenario ref rather than its raw window ref.`,
+    };
+  }
+  return null;
+}
+
+function buildHomeScenarioIndexSet(currentSnapshot, comparison) {
+  const indexes = new Set(
+    (currentSnapshot.scenarios ?? [])
+      .map(({ index }) => index)
+      .filter((index) => typeof index === "string"),
+  );
+  for (const entry of comparison.not_compared ?? []) {
+    if (entry.kind !== "scenario" || entry.reason !== "read_error") continue;
+    try {
+      const parsed = parseEntityRef(entry.entity_ref);
+      if (parsed.kind === "scenario" && typeof parsed.index === "string") {
+        indexes.add(parsed.index);
+      }
+    } catch {
+      // Ignore malformed refs.
+    }
+  }
+  return indexes;
+}
+
+function roomRefExists(currentRooms, targetRoomRef) {
+  if (currentRooms === null || currentRooms === undefined) return true;
+  if (currentRooms.unavailable) return false;
+  return currentRooms.has(targetRoomRef);
+}
+
+function roomIdExists(currentRooms, serial, roomId) {
+  if (typeof roomId !== "number") return false;
+  return roomRefExists(currentRooms, roomRef(serial, roomId));
 }
 
 function createdScenarioMatchesCurrent(
@@ -2248,6 +3224,11 @@ function validateRoomNameForPlan(rawName) {
   }
 }
 
-function sanitizeDisplayValue(value, sensitiveValues) {
+function sanitizeDisplayValue(value, sensitiveValues, role = "data") {
+  if (typeof value === "string" && role !== "data") {
+    return sanitizeAgentOutput(value, sensitiveValues, {
+      stringRoles: { "": role },
+    });
+  }
   return sanitizeAgentOutput(value, sensitiveValues);
 }

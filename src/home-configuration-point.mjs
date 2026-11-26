@@ -9,7 +9,10 @@ import {
 } from "./change-history.mjs";
 import { restoreIntentTime } from "./change-restore.mjs";
 import { mapWithConcurrency } from "./device-commands.mjs";
-import { changeOperation } from "./light-group-members.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import {
   accessoryRef,
   characteristicRef,
@@ -341,7 +344,7 @@ export function homePointContainsEntity(point, entityRef) {
   return false;
 }
 
-export function withHiddenHomeSnapshotUrls(point) {
+export function withHiddenHomeSnapshotUrls(point, sensitiveValues = []) {
   if (point.coverage !== "home" || !isPlainObject(point.home_snapshot)) {
     return point;
   }
@@ -362,20 +365,30 @@ export function withHiddenHomeSnapshotUrls(point) {
           };
         }
         if (config.format === "code" && typeof config.value === "string") {
+          const hasSecret = sensitiveValues.some(
+            (secret) => secret.length > 0 && config.value.includes(secret),
+          );
           return {
             ...scenario,
             configuration: {
               ...config,
-              value: redactSensitiveText(config.value, "javascript_source"),
+              value: hasSecret
+                ? "[REDACTED]"
+                : redactSensitiveText(config.value, "javascript_source"),
             },
           };
         }
         if (config.format === "raw" && typeof config.value === "string") {
+          const hasSecret = sensitiveValues.some(
+            (secret) => secret.length > 0 && config.value.includes(secret),
+          );
           return {
             ...scenario,
             configuration: {
               ...config,
-              value: redactSensitiveText(config.value),
+              value: hasSecret
+                ? "[REDACTED]"
+                : redactSensitiveText(config.value),
             },
           };
         }
@@ -1523,10 +1536,22 @@ function attributeAccessoryItem(context, action, item) {
   if (context.unavailable) return { attribution: "unavailable" };
   const ref = item.ref ?? item.entity_ref;
   if (action === "added") {
-    const matched = context.entries.filter(
+    const createMatches = context.entries.filter(
       (entry) => entry.refs.has(ref) && isAccessoryAddedEvent(entry),
     );
-    return buildVerdict(context, matched, matched.length > 0);
+    const hasVirtualLightGroup = createMatches.some(
+      ({ change }) => change.kind === "virtual_light_group",
+    );
+    const memberMatches =
+      hasVirtualLightGroup && typeof item.id === "number"
+        ? context.entries.filter(
+            ({ change }) =>
+              change.kind === LIGHT_GROUP_MEMBERS &&
+              change.group?.aId === item.id,
+          )
+        : [];
+    const matched = [...createMatches, ...memberMatches];
+    return buildVerdict(context, matched, createMatches.length > 0);
   }
   if (action === "removed" || action === "missing") {
     const matched = context.entries.filter(

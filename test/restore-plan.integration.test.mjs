@@ -1621,18 +1621,34 @@ test("P1-3, P1-5, P2-1: selected_entities handles scenario options windows, dele
     "Свет в коридоре",
   );
 
-  // P2-1: selected_entities point with logic ref, scenario options window ref, and virtual device window ref.
-  // Delete LOGIC scenario "9" via scenario_delete and virtual device via virtual_device_delete.
-  const virtDeviceWindowKey = virtAcc.deviceWindow;
-  const logicAssignmentRef = logicRef(14, 13, "9");
+  // P2-1: selected_entities point with logic ref, scenario options window ref, virtual bridge child window ref, and virtual climate characteristic ref.
+  // LOGIC scenario "9" is already assigned to leak sensor 23/13; add a TargetTemperature characteristic to virtAcc so all 3 child kinds are captured cleanly.
+  const logicAssignmentRef = logicRef(23, 13, "9");
+  virtSvc.characteristics.push({
+    cId: 99,
+    control: {
+      name: "TargetTemperature",
+      type: "TargetTemperature",
+      read: true,
+      write: true,
+      minValue: 10,
+      maxValue: 35,
+      minStep: 0.5,
+      value: { doubleValue: 22 },
+    },
+  });
+  const virtCharRef = characteristicRef(virtAcc.id, virtSvc.sId, 99);
+  const virtBridgeWindowRef = windowRef(`Bridge/homekit/Child/${virtAcc.id}/`);
   const pointB = await callOk(client, "configuration_point", {
     entity_refs: [
       logicAssignmentRef,
       windowRef(logicScen.optionsWindow),
-      ...(virtDeviceWindowKey ? [windowRef(virtDeviceWindowKey)] : []),
+      virtCharRef,
+      virtBridgeWindowRef,
     ],
     note: "P2-1 missing child refs baseline",
   });
+  assert.equal(pointB.captured.length, 4);
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   await applyNative(client, {
@@ -1640,13 +1656,11 @@ test("P1-3, P1-5, P2-1: selected_entities handles scenario options windows, dele
     target_ref: scenarioRef("9"),
     reason: "Удалить LOGIC сценарий 9",
   });
-  if (virtDeviceWindowKey) {
-    await applyNative(client, {
-      operation: "virtual_device_delete",
-      target_ref: accessoryRef(virtAcc.id),
-      reason: "Удалить виртуальный датчик",
-    });
-  }
+  await applyNative(client, {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(virtAcc.id),
+    reason: "Удалить виртуальный датчик",
+  });
   assert.ok(createdVirt.change_ref);
 
   const planBResp = await callOk(client, "configuration_point", {
@@ -1659,7 +1673,10 @@ test("P1-3, P1-5, P2-1: selected_entities handles scenario options windows, dele
   assert.equal(planB.requires_owner_confirmation, true);
   assert.equal(
     planB.not_restorable.some(
-      (item) => item.entity_ref === logicAssignmentRef && item.kind === "logic",
+      (item) =>
+        item.entity_ref === logicAssignmentRef &&
+        item.kind === "logic" &&
+        item.reason === "parent_recreate_changes_id",
     ),
     true,
     JSON.stringify(planB.not_restorable),
@@ -1668,22 +1685,32 @@ test("P1-3, P1-5, P2-1: selected_entities handles scenario options windows, dele
     planB.not_restorable.some(
       (item) =>
         item.entity_ref === windowRef(logicScen.optionsWindow) &&
-        item.kind === "window",
+        item.kind === "window" &&
+        item.reason === "parent_recreate_changes_id",
     ),
     true,
     JSON.stringify(planB.not_restorable),
   );
-  if (virtDeviceWindowKey) {
-    assert.equal(
-      planB.not_restorable.some(
-        (item) =>
-          item.entity_ref === windowRef(virtDeviceWindowKey) &&
-          item.kind === "window",
-      ),
-      true,
-      JSON.stringify(planB.not_restorable),
-    );
-  }
+  assert.equal(
+    planB.not_restorable.some(
+      (item) =>
+        item.entity_ref === virtCharRef &&
+        item.kind === "characteristic" &&
+        item.reason === "parent_recreate_changes_id",
+    ),
+    true,
+    JSON.stringify(planB.not_restorable),
+  );
+  assert.equal(
+    planB.not_restorable.some(
+      (item) =>
+        item.entity_ref === virtBridgeWindowRef &&
+        item.kind === "window" &&
+        item.reason === "parent_recreate_changes_id",
+    ),
+    true,
+    JSON.stringify(planB.not_restorable),
+  );
   assert.equal(planB.undo_agent_changes.length, 0);
 });
 
@@ -2130,35 +2157,14 @@ test("P2-2: whole-home undo eligibility covers deleted virtual_device room, virt
     ({ name }) => name === "Выключатель B",
   );
   assert.ok(virtBObj);
-  // Export virtB manually in Yandex bridge window.
+  // Export virtB manually in HomeKit bridge (keeping Bridge:yandex clean for 7.4).
   const virtBSvc = virtBObj.services.find(({ type }) => type === "Switch");
-  const yandexBridgeWinKey = `Bridge/yandex/Child/${virtBObj.id}/`;
-  const bridgeWin = hub.state.windows[yandexBridgeWinKey];
-  if (bridgeWin) {
-    const opt = bridgeWin.options.find((o) => o.key === `s:${virtBSvc.sId}`);
-    if (opt) opt.value = { boolValue: true };
-  }
-  const yandexExt = hub.state.extensions.find(
-    ({ key }) => key === "Bridge:yandex" || key === "yandex",
+  const homekitExt = hub.state.extensions.find(
+    ({ extensionKey }) => extensionKey === "Bridge:homekit",
   );
-  if (
-    yandexExt &&
-    Array.isArray(hub.state.extensionChildren?.[yandexExt.key])
-  ) {
-    const existingChild = hub.state.extensionChildren[yandexExt.key].find(
-      (c) => String(c.id) === String(virtBObj.id),
-    );
-    if (!existingChild) {
-      hub.state.extensionChildren[yandexExt.key].push({
-        id: String(virtBObj.id),
-        name: virtBObj.name,
-        enabled: true,
-        optionsWindow: yandexBridgeWinKey,
-      });
-    } else {
-      existingChild.enabled = true;
-    }
-  }
+  assert.ok(homekitExt, "expected Bridge:homekit extension in fixture");
+  homekitExt.exported ??= {};
+  homekitExt.exported[virtBObj.id] = [virtBSvc.sId];
 
   // 7.3a: Agent creates virtual_light_group (vlg1) with [15, 16], then edits members via light_group_members (vlg1Members) to [15, 17].
   const vlg1Create = await applyNative(client, {
