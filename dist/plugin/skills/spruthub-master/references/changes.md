@@ -343,5 +343,18 @@
   значениям. `recorded_status` — сохранённый исход, не текущая проверка
   (текущую даёт `next` записи); `restore_supported` показывает, можно ли
   передать запись в `restore_native_change`.
+- «Откати настройки на сохранённую точку / на дату»: найди нужную точку через
+  `configuration_point({})` и вызови `configuration_point` с `point_ref`,
+  `compare: true` и `plan_restore: true`. Ответ строго read-only и возвращает
+  `restore_plan`: пакеты `undo_agent_changes` (до 50 `change_refs` на вызов
+  `restore_native_change`, от новых к старым — только чистые правки агента с
+  целой цепочкой до точки), шаги `reapply_from_point` (`prepare_native_change` →
+  `apply_native_change`, с `manual_override_warning: true` для ручных или
+  перезаписанных правок) и `not_restorable` (секреты, скрытые HTTP URL,
+  удалённые физические устройства, экспорт мостов без выбора сервисов, встроенные
+  сценарии и несопоставленные поля). Если `requires_owner_confirmation: true`,
+  передай владельцу суть из `tell_owner` и дождись подтверждения до любых
+  записей; после подтверждения сначала выполни пакеты `undo_agent_changes`, затем
+  шаги `reapply_from_point`.
 - Журнал изменений хранится локально вне репозитория и кэша плагина,
   каталог задаёт `SPRUT_AGENT_STATE_DIR` в окружении процесса MCP. Токена в нём нет.
