@@ -1,4 +1,5 @@
 import { canonicalBlock, withHiddenHttpUrls } from "./block-model.mjs";
+import { buildRestorePlan } from "./configuration-point-restore-plan.mjs";
 import {
   CONFIGURATION_POINT_FORMAT_VERSION,
   ConfigurationPointStore,
@@ -23,12 +24,20 @@ import {
 import { createHubBackup, listHubBackups } from "./hub-backup.mjs";
 import {
   homeRef as homeRefOf,
+  isHubReadFailure,
   isRedactedNode,
   isSensitiveNativeNode,
   parseEntityRef,
+  redactSensitiveText,
+  roomRef,
   SprutHubError,
   sanitizeAgentOutput,
 } from "./spruthub-client.mjs";
+import {
+  normalizeVirtualLinks,
+  virtualAccessoryStructure,
+  virtualLightSettingsSnapshot,
+} from "./virtual-light-group.mjs";
 
 const SUPPORTED_KINDS = new Set([
   "scenario",
@@ -73,7 +82,11 @@ export class ConfigurationPointService {
       if (seen.has(entityRef)) continue;
       seen.add(entityRef);
       selected.push(entityRef);
-      const result = await this.#captureEntity(serial, entityRef);
+      const result = await this.#captureEntity(
+        serial,
+        entityRef,
+        sensitiveValues,
+      );
       if (result.captured) captured.push(result.captured);
       notCaptured.push(...result.not_captured);
     }
@@ -236,7 +249,12 @@ export class ConfigurationPointService {
     };
   }
 
-  async get({ point_ref: pointRef, compare = false, sensitiveValues = [] }) {
+  async get({
+    point_ref: pointRef,
+    compare = false,
+    plan_restore: planRestore = false,
+    sensitiveValues = [],
+  }) {
     const { serial, id } = parseConfigurationPointRef(pointRef);
     this.#requireSerial(serial);
     const stored = await this.storeFor(serial).get(id);
@@ -250,21 +268,28 @@ export class ConfigurationPointService {
     }
     const point =
       pointCoverage(stored) === "home"
-        ? withHiddenHomeSnapshotUrls(stored)
-        : withSecretOptionsHidden(withRequestUrlsHidden(stored));
+        ? withHiddenHomeSnapshotUrls(stored, sensitiveValues)
+        : withSecretOptionsHidden(
+            withRequestUrlsHidden(stored, sensitiveValues),
+          );
     const entity = publicPointEntity(point, serial, {
       compactHome: compare === true,
     });
     if (!compare) return { status: "ok", entity };
     this.#requireClient();
-    const comparison =
+    const { comparison, restorePlan } =
       pointCoverage(point) === "home"
-        ? await this.#compareHome(serial, point, sensitiveValues)
-        : await this.#compare(serial, point, sensitiveValues);
+        ? await this.#compareHome(serial, point, pointRef, sensitiveValues, {
+            planRestore,
+          })
+        : await this.#compare(serial, point, pointRef, sensitiveValues, {
+            planRestore,
+          });
     return {
       status: "ok",
       entity,
       comparison,
+      ...(restorePlan !== undefined ? { restore_plan: restorePlan } : {}),
     };
   }
 
@@ -296,14 +321,21 @@ export class ConfigurationPointService {
     });
   }
 
-  async #compareHome(serial, point, sensitiveValues) {
+  async #compareHome(
+    serial,
+    point,
+    pointRef,
+    sensitiveValues,
+    { planRestore = false } = {},
+  ) {
     const currentCapture = await captureHomeSnapshot({
       client: this.client,
       serial,
       sensitiveValues,
     });
     const comparedAt = new Date().toISOString();
-    return compareHomeSnapshots({
+    const attributionDetails = planRestore ? new Map() : null;
+    const comparison = await compareHomeSnapshots({
       point,
       currentCapture,
       comparedAt,
@@ -311,14 +343,45 @@ export class ConfigurationPointService {
       hubUrl: this.hubUrl,
       serial,
       sensitiveValues,
+      attributionDetails,
     });
+    const liveVirtualLightGroups = planRestore
+      ? await observeLiveVirtualLightGroups(
+          this.client,
+          comparison.accessories.added,
+          attributionDetails,
+        )
+      : null;
+    const restorePlan = planRestore
+      ? buildRestorePlan({
+          pointRef,
+          point,
+          comparison,
+          currentSnapshot: currentCapture.home_snapshot,
+          attributionDetails,
+          serial,
+          sensitiveValues,
+          liveVirtualLightGroups,
+        })
+      : undefined;
+    return { comparison, restorePlan };
   }
 
-  async #compare(serial, point, sensitiveValues) {
+  async #compare(
+    serial,
+    point,
+    pointRef,
+    sensitiveValues,
+    { planRestore = false } = {},
+  ) {
     const entities = [];
     const currentByRef = new Map();
     for (const captured of point.captured) {
-      const current = await this.#captureEntity(serial, captured.entity_ref);
+      const current = await this.#captureEntity(
+        serial,
+        captured.entity_ref,
+        sensitiveValues,
+      );
       if (!current.captured) {
         const reason = current.not_captured[0]?.reason ?? "read_error";
         if (
@@ -365,6 +428,7 @@ export class ConfigurationPointService {
       });
     }
     const comparedAt = new Date().toISOString();
+    const attributionDetails = planRestore ? new Map() : null;
     const attributed = await attributeSelectedComparison({
       point,
       entities,
@@ -374,16 +438,133 @@ export class ConfigurationPointService {
       hubUrl: this.hubUrl,
       serial,
       sensitiveValues,
+      attributionDetails,
     });
-    return {
+    const comparison = {
       compared_at: comparedAt,
       coverage: "selected_entities",
       house_complete: false,
       ...attributed,
     };
+    const liveContext = planRestore
+      ? await this.#readSelectedRestoreContext(
+          serial,
+          point,
+          comparison,
+          currentByRef,
+        )
+      : {};
+    const restorePlan = planRestore
+      ? buildRestorePlan({
+          pointRef,
+          point,
+          comparison,
+          currentByRef,
+          attributionDetails,
+          serial,
+          sensitiveValues,
+          ...liveContext,
+        })
+      : undefined;
+    return { comparison, restorePlan };
   }
 
-  async #captureEntity(serial, entityRef) {
+  async #readSelectedRestoreContext(serial, point, comparison, currentByRef) {
+    const savedByRef = new Map(
+      (point.captured ?? []).map((captured) => [captured.entity_ref, captured]),
+    );
+    const entities = comparison.entities ?? [];
+    const needRooms = entities.some(
+      (entity) =>
+        entity.kind === "accessory" &&
+        (entity.status === "missing" ||
+          (entity.status === "changed" &&
+            (entity.changes ?? []).some(
+              (diff) => diff.path?.[0] === "room_ref",
+            ))),
+    );
+    const hasChangedWindow = entities.some(
+      (entity) => entity.kind === "window" && entity.status === "changed",
+    );
+    const hasChangedBlock = entities.some((entity) => {
+      if (entity.kind !== "scenario" || entity.status !== "changed") {
+        return false;
+      }
+      const saved = savedByRef.get(entity.entity_ref);
+      const current = currentByRef.get(entity.entity_ref);
+      return (saved?.settings?.type ?? current?.settings?.type) === "BLOCK";
+    });
+    const needScenarios = hasChangedWindow || hasChangedBlock;
+    const needAccessories = hasChangedBlock;
+
+    let currentRooms = null;
+    if (needRooms) {
+      try {
+        const { rooms } = await this.client.nativeRooms(
+          serial,
+          Date.now() + this.client.timeoutMs,
+        );
+        currentRooms = new Map(
+          rooms.map((room) => [roomRef(serial, room.id), room]),
+        );
+      } catch (error) {
+        if (!isHubReadFailure(error)) throw error;
+        currentRooms = { unavailable: true };
+      }
+    }
+
+    let scenarioOptionsWindows = null;
+    let currentScenarioIndexes = null;
+    if (needScenarios) {
+      try {
+        const scenarios = await this.client.listScenarios();
+        scenarioOptionsWindows = new Map();
+        currentScenarioIndexes = new Set();
+        for (const scenario of scenarios) {
+          if (typeof scenario.index === "string") {
+            currentScenarioIndexes.add(scenario.index);
+          }
+          if (
+            typeof scenario.optionsWindow === "string" &&
+            scenario.optionsWindow.length > 0
+          ) {
+            const list =
+              scenarioOptionsWindows.get(scenario.optionsWindow) ?? [];
+            list.push({
+              index: scenario.index,
+              type: scenario.type,
+              predefined: scenario.predefined === true,
+            });
+            scenarioOptionsWindows.set(scenario.optionsWindow, list);
+          }
+        }
+      } catch (error) {
+        if (!isHubReadFailure(error)) throw error;
+        scenarioOptionsWindows = { unavailable: true };
+        currentScenarioIndexes = { unavailable: true };
+      }
+    }
+
+    let currentAccessoryIds = null;
+    if (needAccessories) {
+      try {
+        const accessories = await this.client.listAccessories();
+        currentAccessoryIds = new Set(accessories.map(({ id }) => id));
+      } catch (error) {
+        if (!isHubReadFailure(error)) throw error;
+        currentAccessoryIds = { unavailable: true };
+      }
+    }
+
+    return {
+      currentRooms,
+      scenarioOptionsWindows,
+      currentScenarioIndexes,
+      currentAccessoryIds,
+    };
+  }
+
+  async #captureEntity(serial, entityRef, sensitiveValues = []) {
     let parsed;
     try {
       parsed = parseEntityRef(entityRef);
@@ -418,7 +599,7 @@ export class ConfigurationPointService {
         error_code: error.code,
       });
     }
-    return extractCapturedEntity(entity, entityRef);
+    return extractCapturedEntity(entity, entityRef, sensitiveValues);
   }
 
   #requireClient(
@@ -467,7 +648,7 @@ export class ConfigurationPointService {
   }
 }
 
-function extractCapturedEntity(entity, entityRef) {
+function extractCapturedEntity(entity, entityRef, sensitiveValues = []) {
   if (isRedactedNode(entity)) {
     return notCaptured(entityRef, "redacted");
   }
@@ -488,10 +669,13 @@ function extractCapturedEntity(entity, entityRef) {
     };
   }
   if (entity.kind === "scenario") {
-    const configuration = entity.configuration ?? {
-      format: "not_returned",
-      value: null,
-    };
+    const configuration = sanitizeSelectedScenarioConfiguration(
+      entity.configuration ?? {
+        format: "not_returned",
+        value: null,
+      },
+      sensitiveValues,
+    );
     return {
       captured: {
         entity_ref: entity.ref,
@@ -634,22 +818,109 @@ function notCapturedOption(entityRef, optionKey, reason) {
 // beyond scheme and host hold such a URL as read, and a key may sit in its
 // path (Telegram /bot<token>/), so a point is shown and compared with the
 // rule get_entity applies now.
-function withRequestUrlsHidden(point) {
+function sanitizeSelectedScenarioConfiguration(configuration, sensitiveValues) {
+  if (!isPlainObject(configuration)) return configuration;
+  if (
+    (configuration.format === "code" ||
+      configuration.format === "javascript" ||
+      configuration.format === "raw") &&
+    typeof configuration.value === "string"
+  ) {
+    const hasSecret = sensitiveValues.some(
+      (secret) => secret.length > 0 && configuration.value.includes(secret),
+    );
+    const role = configuration.format === "raw" ? "data" : "javascript_source";
+    return {
+      ...configuration,
+      value: hasSecret
+        ? "[REDACTED]"
+        : redactSensitiveText(configuration.value, role),
+    };
+  }
+  return configuration;
+}
+
+async function observeLiveVirtualLightGroups(
+  client,
+  addedAccessories,
+  attributionDetails,
+) {
+  const observed = new Map();
+  if (!attributionDetails || !Array.isArray(addedAccessories)) return observed;
+  for (const item of addedAccessories) {
+    const detail = attributionDetails.get(item);
+    const createEntry = detail?.entries?.find(
+      ({ change }) => change?.kind === "virtual_light_group",
+    );
+    if (!createEntry) continue;
+    const { change } = createEntry;
+    if (
+      change.created_accessory_id === undefined ||
+      !change.virtual_target?.characteristics ||
+      !Array.isArray(change.characteristic_types)
+    ) {
+      observed.set(item.ref, { readError: true });
+      continue;
+    }
+    try {
+      const accessory = await client.getAccessoryOrNull(
+        change.created_accessory_id,
+      );
+      if (accessory === null) {
+        observed.set(item.ref, { absent: true });
+        continue;
+      }
+      const links = {};
+      for (const type of change.characteristic_types) {
+        const target = change.virtual_target.characteristics[type];
+        links[type] = normalizeVirtualLinks(await client.listLinks(target));
+      }
+      observed.set(item.ref, {
+        absent: false,
+        accessory: virtualAccessoryStructure(accessory),
+        links,
+        link_settings: virtualLightSettingsSnapshot(
+          accessory,
+          change.virtual_target,
+          change.characteristic_types,
+        ),
+      });
+    } catch (error) {
+      if (!isHubReadFailure(error)) throw error;
+      observed.set(item.ref, { readError: true });
+    }
+  }
+  return observed;
+}
+
+function withRequestUrlsHidden(point, sensitiveValues = []) {
   return {
     ...point,
     captured: point.captured.map((captured) => {
       const configuration = captured.settings?.configuration;
-      if (captured.kind !== "scenario" || configuration?.format !== "json") {
+      if (captured.kind !== "scenario" || !isPlainObject(configuration)) {
         return captured;
+      }
+      if (configuration.format === "json") {
+        return {
+          ...captured,
+          settings: {
+            ...captured.settings,
+            configuration: {
+              ...configuration,
+              value: withHiddenHttpUrls(configuration.value),
+            },
+          },
+        };
       }
       return {
         ...captured,
         settings: {
           ...captured.settings,
-          configuration: {
-            ...configuration,
-            value: withHiddenHttpUrls(configuration.value),
-          },
+          configuration: sanitizeSelectedScenarioConfiguration(
+            configuration,
+            sensitiveValues,
+          ),
         },
       };
     }),

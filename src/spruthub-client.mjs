@@ -6848,6 +6848,7 @@ export function sanitizeAgentOutput(
     codeConfiguration,
     stringRoles,
     "",
+    value,
   );
 }
 
@@ -6857,6 +6858,7 @@ function sanitizeAgentValue(
   codeConfiguration,
   stringRoles,
   path,
+  root,
 ) {
   if (isRedactedNode(value)) return redactedNode();
   if (Array.isArray(value)) {
@@ -6867,6 +6869,7 @@ function sanitizeAgentValue(
         codeConfiguration,
         stringRoles,
         `${path}/${index}`,
+        root,
       ),
     );
   }
@@ -6887,15 +6890,20 @@ function sanitizeAgentValue(
           codeConfiguration,
           stringRoles,
           `${path}/${escapeJsonPointerToken(key)}`,
+          root,
         ),
       ]),
     );
   }
   if (typeof value !== "string") return value;
+  const configuredRole =
+    typeof stringRoles === "function"
+      ? stringRoles(path, root)
+      : stringRoles[path];
   const role =
     path === "/entity/configuration/value" && codeConfiguration !== null
       ? "javascript_source"
-      : (stringRoles[path] ?? "data");
+      : (configuredRole ?? "data");
   return redactAgentString(value, sensitiveValues, role);
 }
 

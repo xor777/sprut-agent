@@ -720,7 +720,7 @@ registerTool(
   {
     title: "Remember settings, compare them, or save a hub backup",
     description:
-      "Saves local files only (never modifies hub settings). With hub_backup=create asks the hub to pack a full .zip backup (file.backups, no SD card needed), saves it locally with 0600 permissions, cleans up the hub's temp archive, and never reads or restores archive contents; hub_backup=list shows local backups and hub backup dates. With scope=home saves a whole-home settings snapshot (rooms, devices/services, scenarios, bridge exports, climate setpoints) or with entity_refs saves selected settings (optional note for either); with point_ref reads or compare=true diffs against live state and attributes changes to the local agent journal vs manual/external edits; otherwise lists saved points. Neither a point nor a backup is restored by the agent.",
+      "Saves local files only (never modifies hub settings). With hub_backup=create downloads a local 0600 full .zip backup via file.backups (no SD card needed), cleans up the hub temp archive, and never reads/restores it; hub_backup=list shows local backups and hub backup dates. With scope=home saves a whole-home settings snapshot (rooms, devices/services, scenarios, bridge exports, climate setpoints) or with entity_refs saves selected settings (optional note for either); with point_ref reads, compare=true diffs against live state with agent-vs-manual attribution, and compare=true with plan_restore=true adds a read-only rollback plan (undo batches for restore_native_change, reapply steps for prepare_native_change with manual-override warnings, and not_restorable items); otherwise lists saved points.",
     inputSchema: {
       home_ref: homeRefInput,
       scope: z
@@ -740,6 +740,12 @@ registerTool(
       entity_refs: z.array(z.string().min(1)).min(1).max(50).optional(),
       point_ref: z.string().min(1).optional(),
       compare: z.boolean().default(false),
+      plan_restore: z
+        .boolean()
+        .default(false)
+        .describe(
+          "With point_ref and compare=true: build a strictly read-only rollback plan (undo batches, reapply steps, and not_restorable).",
+        ),
       entity_ref: z.string().min(1).optional(),
       hub_backup: z
         .enum(["create", "list"])
@@ -760,6 +766,7 @@ registerTool(
     entity_refs: entityRefs,
     point_ref: pointRef,
     compare,
+    plan_restore: planRestore,
     entity_ref: entityRef,
     hub_backup: hubBackup,
     limit,
@@ -776,6 +783,7 @@ registerTool(
         entityRefs !== undefined ||
         pointRef !== undefined ||
         compare === true ||
+        planRestore === true ||
         entityRef !== undefined ||
         cursor !== undefined ||
         pointer !== undefined ||
@@ -785,7 +793,7 @@ registerTool(
       return runRoomTool(async () => {
         throw new SprutHubError(
           "invalid_point_call",
-          "hub_backup cannot be combined with scope, note, entity_refs, point_ref, compare, entity_ref, cursor, pointer, offset, or version.",
+          "hub_backup cannot be combined with scope, note, entity_refs, point_ref, compare, plan_restore, entity_ref, cursor, pointer, offset, or version.",
           "configuration_point",
         );
       });
@@ -795,6 +803,7 @@ registerTool(
       (entityRefs !== undefined ||
         pointRef !== undefined ||
         compare === true ||
+        planRestore === true ||
         hubBackup !== undefined ||
         entityRef !== undefined ||
         cursor !== undefined ||
@@ -805,10 +814,37 @@ registerTool(
       return runRoomTool(async () => {
         throw new SprutHubError(
           "invalid_point_call",
-          "scope=home cannot be combined with entity_refs, point_ref, compare, hub_backup, entity_ref, cursor, pointer, offset, or version.",
+          "scope=home cannot be combined with entity_refs, point_ref, compare, plan_restore, hub_backup, entity_ref, cursor, pointer, offset, or version.",
           "configuration_point",
         );
       });
+    }
+    if (planRestore === true) {
+      if (pointRef === undefined || compare !== true) {
+        return runRoomTool(async () => {
+          throw new SprutHubError(
+            "invalid_point_call",
+            "plan_restore=true requires both point_ref and compare=true.",
+            "configuration_point",
+          );
+        });
+      }
+      if (
+        scope !== undefined ||
+        note !== undefined ||
+        entityRefs !== undefined ||
+        hubBackup !== undefined ||
+        entityRef !== undefined ||
+        cursor !== undefined
+      ) {
+        return runRoomTool(async () => {
+          throw new SprutHubError(
+            "invalid_point_call",
+            "plan_restore=true cannot be combined with scope, note, entity_refs, hub_backup, entity_ref, or cursor.",
+            "configuration_point",
+          );
+        });
+      }
     }
     if (note !== undefined && entityRefs === undefined && scope === undefined) {
       return runRoomTool(async () => {
@@ -917,10 +953,12 @@ registerTool(
         ).get({
           point_ref: pointRef,
           compare,
+          plan_restore: planRestore,
           sensitiveValues: connectionSecrets(),
         }),
       {
         compact: true,
+        stringRoles: configurationPointStringRole,
         present: (result) =>
           presentEntityResult(result, {
             entityRef: pointRef,
@@ -931,7 +969,10 @@ registerTool(
             version,
             readTool: "configuration_point",
             readRefArgument: "point_ref",
-            readArguments: compare ? { compare: true } : {},
+            readArguments: {
+              ...(compare ? { compare: true } : {}),
+              ...(planRestore ? { plan_restore: true } : {}),
+            },
           }),
       },
     );
@@ -1048,7 +1089,20 @@ async function getConfigurationPointService({
       );
     }
   }
-  const client = requireHub ? await getHubClient() : null;
+  let client = null;
+  if (requireHub) {
+    client = await getHubClient();
+  } else if (
+    homeRef === undefined &&
+    pointRef === undefined &&
+    identity.serial === null
+  ) {
+    try {
+      client = hubClient ?? (await getHubClient());
+    } catch (error) {
+      if (!(error instanceof SprutHubError)) throw error;
+    }
+  }
   if (client !== null) {
     selectedHomeRef(client);
   }
@@ -1213,6 +1267,107 @@ function updateSerializedPageSize(result, compact) {
 
 function connectionSecrets() {
   return connection.secrets;
+}
+
+function configurationPointStringRole(path, root) {
+  let match =
+    /^\/restore_plan\/reapply_from_point\/(\d+)\/(arguments\/source|from_current|to_point)$/.exec(
+      path,
+    );
+  if (match) {
+    const step = root?.restore_plan?.reapply_from_point?.[Number(match[1])];
+    return step?.arguments?.operation === "logic_source_update"
+      ? "javascript_source"
+      : undefined;
+  }
+  if (
+    /^\/restore_plan\/reapply_from_point\/\d+\/(arguments\/data|from_current|to_point)\//.test(
+      path,
+    ) &&
+    path.endsWith("/code")
+  ) {
+    const parent = parentObjectAtPointer(root, path);
+    if (parent?.type === "code") return "javascript_source";
+  }
+  match =
+    /^\/entity\/home_snapshot\/scenarios\/(\d+)\/configuration\/value$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.entity?.home_snapshot?.scenarios?.[Number(match[1])];
+    return scen?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match = /^\/entity\/entities\/(\d+)\/settings\/configuration\/value$/.exec(
+    path,
+  );
+  if (match) {
+    const ent = root?.entity?.entities?.[Number(match[1])];
+    return ent?.kind === "scenario" &&
+      ent?.settings?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match =
+    /^\/comparison\/scenarios\/(added|removed)\/(\d+)\/configuration\/value$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.comparison?.scenarios?.[match[1]]?.[Number(match[2])];
+    return scen?.configuration?.format === "code"
+      ? "javascript_source"
+      : undefined;
+  }
+  match =
+    /^\/comparison\/scenarios\/changed\/(\d+)\/changes\/(\d+)\/(from|to)$/.exec(
+      path,
+    );
+  if (match) {
+    const scen = root?.comparison?.scenarios?.changed?.[Number(match[1])];
+    const diff = scen?.changes?.[Number(match[2])];
+    if (
+      (scen?.type === "LOGIC" || scen?.type === "GLOBAL") &&
+      diff?.path?.[0] === "configuration" &&
+      diff?.path?.[1] === "value"
+    ) {
+      return "javascript_source";
+    }
+    return undefined;
+  }
+  match = /^\/comparison\/entities\/(\d+)\/changes\/(\d+)\/(from|to)$/.exec(
+    path,
+  );
+  if (match) {
+    const ent = root?.comparison?.entities?.[Number(match[1])];
+    const diff = ent?.changes?.[Number(match[2])];
+    if (
+      ent?.kind === "scenario" &&
+      diff?.path?.[0] === "configuration" &&
+      diff?.path?.[1] === "value"
+    ) {
+      const saved = root?.entity?.entities?.find(
+        ({ entity_ref }) => entity_ref === ent.entity_ref,
+      );
+      const format = saved?.settings?.configuration?.format;
+      const type = saved?.settings?.type;
+      if (format === "code" || type === "LOGIC" || type === "GLOBAL") {
+        return "javascript_source";
+      }
+    }
+  }
+  return undefined;
+}
+
+function parentObjectAtPointer(root, pointer) {
+  const parts = pointer.split("/").slice(1, -1);
+  let cursor = root;
+  for (const raw of parts) {
+    if (cursor === null || typeof cursor !== "object") return null;
+    const token = raw.replaceAll("~1", "/").replaceAll("~0", "~");
+    cursor = Array.isArray(cursor) ? cursor[Number(token)] : cursor[token];
+  }
+  return cursor && typeof cursor === "object" ? cursor : null;
 }
 
 let shuttingDown = false;

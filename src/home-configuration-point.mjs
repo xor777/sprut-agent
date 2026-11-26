@@ -9,7 +9,10 @@ import {
 } from "./change-history.mjs";
 import { restoreIntentTime } from "./change-restore.mjs";
 import { mapWithConcurrency } from "./device-commands.mjs";
-import { changeOperation } from "./light-group-members.mjs";
+import {
+  changeOperation,
+  LIGHT_GROUP_MEMBERS,
+} from "./light-group-members.mjs";
 import {
   accessoryRef,
   characteristicRef,
@@ -341,7 +344,7 @@ export function homePointContainsEntity(point, entityRef) {
   return false;
 }
 
-export function withHiddenHomeSnapshotUrls(point) {
+export function withHiddenHomeSnapshotUrls(point, sensitiveValues = []) {
   if (point.coverage !== "home" || !isPlainObject(point.home_snapshot)) {
     return point;
   }
@@ -362,20 +365,30 @@ export function withHiddenHomeSnapshotUrls(point) {
           };
         }
         if (config.format === "code" && typeof config.value === "string") {
+          const hasSecret = sensitiveValues.some(
+            (secret) => secret.length > 0 && config.value.includes(secret),
+          );
           return {
             ...scenario,
             configuration: {
               ...config,
-              value: redactSensitiveText(config.value, "javascript_source"),
+              value: hasSecret
+                ? "[REDACTED]"
+                : redactSensitiveText(config.value, "javascript_source"),
             },
           };
         }
         if (config.format === "raw" && typeof config.value === "string") {
+          const hasSecret = sensitiveValues.some(
+            (secret) => secret.length > 0 && config.value.includes(secret),
+          );
           return {
             ...scenario,
             configuration: {
               ...config,
-              value: redactSensitiveText(config.value),
+              value: hasSecret
+                ? "[REDACTED]"
+                : redactSensitiveText(config.value),
             },
           };
         }
@@ -393,6 +406,7 @@ export async function compareHomeSnapshots({
   hubUrl,
   serial,
   sensitiveValues = [],
+  attributionDetails = null,
 }) {
   const saved = point.home_snapshot;
   const current = currentCapture.home_snapshot;
@@ -457,11 +471,13 @@ export async function compareHomeSnapshots({
     roomsDiff,
     (action, item) => attributeRoomItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const accessories = attributeCategoryDiff(
     accessoriesDiff,
     (action, item) => attributeAccessoryItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const scenarios = attributeCategoryDiff(
     scenariosDiff,
@@ -481,16 +497,19 @@ export async function compareHomeSnapshots({
       };
     },
     summary,
+    attributionDetails,
   );
   const bridges = attributeCategoryDiff(
     bridgesDiff,
     (action, item) => attributeBridgeItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const climateSetpoints = attributeCategoryDiff(
     climateDiff,
     (action, item) => attributeClimateItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
 
   const totalChanges = [
@@ -546,6 +565,7 @@ export async function attributeSelectedComparison({
   hubUrl,
   serial,
   sensitiveValues = [],
+  attributionDetails = null,
 }) {
   const attribution = await loadAttributionContext({
     stateDirectory,
@@ -570,7 +590,7 @@ export async function attributeSelectedComparison({
       action,
       current,
     );
-    return decorateAttribution(entity, verdict, summary);
+    return decorateAttribution(entity, verdict, summary, attributionDetails);
   });
 
   return {
@@ -1307,7 +1327,12 @@ function finalizeAttributionSummary(summary, unavailable) {
   };
 }
 
-function attributeCategoryDiff(diff, evaluate, summary) {
+function attributeCategoryDiff(
+  diff,
+  evaluate,
+  summary,
+  attributionDetails = null,
+) {
   const mapAction = (action, items) =>
     items.map((raw) => {
       const evaluated = evaluate(action, raw);
@@ -1316,9 +1341,14 @@ function attributeCategoryDiff(diff, evaluate, summary) {
         Object.hasOwn(evaluated, "verdict") &&
         Object.hasOwn(evaluated, "item")
       ) {
-        return decorateAttribution(evaluated.item, evaluated.verdict, summary);
+        return decorateAttribution(
+          evaluated.item,
+          evaluated.verdict,
+          summary,
+          attributionDetails,
+        );
       }
-      return decorateAttribution(raw, evaluated, summary);
+      return decorateAttribution(raw, evaluated, summary, attributionDetails);
     });
   return {
     added: mapAction("added", diff.added),
@@ -1327,7 +1357,20 @@ function attributeCategoryDiff(diff, evaluate, summary) {
   };
 }
 
-function decorateAttribution(item, verdict, summary) {
+function decorateAttribution(
+  item,
+  rawVerdict,
+  summary,
+  attributionDetails = null,
+) {
+  const verdict =
+    rawVerdict && Object.hasOwn(rawVerdict, "publicVerdict")
+      ? rawVerdict.publicVerdict
+      : rawVerdict;
+  const entries =
+    rawVerdict && Object.hasOwn(rawVerdict, "entries")
+      ? rawVerdict.entries
+      : [];
   if (verdict.attribution === "agent") summary.agent += 1;
   else if (verdict.attribution === "manual_or_external") {
     summary.manual_or_external += 1;
@@ -1336,18 +1379,28 @@ function decorateAttribution(item, verdict, summary) {
   } else if (verdict.attribution === "unavailable") {
     summary.unavailable += 1;
   }
-  return {
+  const decorated = {
     ...item,
     ...verdict,
   };
+  if (attributionDetails) {
+    attributionDetails.set(decorated, {
+      attribution: verdict.attribution,
+      entries,
+    });
+  }
+  return decorated;
 }
 
 function buildVerdict(context, matchedEntries, allCovered) {
   if (context.unavailable) {
-    return { attribution: "unavailable" };
+    return { publicVerdict: { attribution: "unavailable" }, entries: [] };
   }
   if (matchedEntries.length === 0) {
-    return { attribution: "manual_or_external" };
+    return {
+      publicVerdict: { attribution: "manual_or_external" },
+      entries: [],
+    };
   }
   const sorted = [...matchedEntries].sort(compareEntriesNewestFirst);
   const uniqueEntries = [];
@@ -1363,15 +1416,18 @@ function buildVerdict(context, matchedEntries, allCovered) {
     latest.conflict_reason !== "later_owned_change";
   const hasLaterSignal = !allCovered || latestHasForeignConflict;
   return {
-    attribution: hasLaterSignal ? "agent_and_later_change" : "agent",
-    matching_agent_changes: uniqueEntries
-      .slice(0, MAX_MATCHING_AGENT_CHANGES)
-      .map((entry) =>
-        summarizeMatchingAgentChange(entry, context.sensitiveValues),
-      ),
-    ...(uniqueEntries.length > MAX_MATCHING_AGENT_CHANGES
-      ? { matching_agent_changes_total: uniqueEntries.length }
-      : {}),
+    publicVerdict: {
+      attribution: hasLaterSignal ? "agent_and_later_change" : "agent",
+      matching_agent_changes: uniqueEntries
+        .slice(0, MAX_MATCHING_AGENT_CHANGES)
+        .map((entry) =>
+          summarizeMatchingAgentChange(entry, context.sensitiveValues),
+        ),
+      ...(uniqueEntries.length > MAX_MATCHING_AGENT_CHANGES
+        ? { matching_agent_changes_total: uniqueEntries.length }
+        : {}),
+    },
+    entries: uniqueEntries,
   };
 }
 
@@ -1480,10 +1536,22 @@ function attributeAccessoryItem(context, action, item) {
   if (context.unavailable) return { attribution: "unavailable" };
   const ref = item.ref ?? item.entity_ref;
   if (action === "added") {
-    const matched = context.entries.filter(
+    const createMatches = context.entries.filter(
       (entry) => entry.refs.has(ref) && isAccessoryAddedEvent(entry),
     );
-    return buildVerdict(context, matched, matched.length > 0);
+    const hasVirtualLightGroup = createMatches.some(
+      ({ change }) => change.kind === "virtual_light_group",
+    );
+    const memberMatches =
+      hasVirtualLightGroup && typeof item.id === "number"
+        ? context.entries.filter(
+            ({ change }) =>
+              change.kind === LIGHT_GROUP_MEMBERS &&
+              change.group?.aId === item.id,
+          )
+        : [];
+    const matched = [...createMatches, ...memberMatches];
+    return buildVerdict(context, matched, createMatches.length > 0);
   }
   if (action === "removed" || action === "missing") {
     const matched = context.entries.filter(
