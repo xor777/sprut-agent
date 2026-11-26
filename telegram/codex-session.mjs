@@ -21,9 +21,11 @@ const DEFAULT_REPO_ROOT = path.resolve(
   "..",
 );
 
-const APPROVAL_METHODS = new Set([
+const V2_APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
+]);
+const LEGACY_V1_APPROVAL_METHODS = new Set([
   "execCommandApproval",
   "applyPatchApproval",
 ]);
@@ -262,6 +264,8 @@ class CodexAppServerClient {
     const turnCtx = {
       threadId,
       turnId: null,
+      ready: false,
+      earlyEvents: [],
       messages: [],
       deltaBuffer: "",
       settled: false,
@@ -278,27 +282,48 @@ class CodexAppServerClient {
     };
 
     // Register before turn/start so fast notifications arriving in the same
-    // stdout burst as the RPC reply are never dropped.
+    // stdout burst as the RPC reply are buffered until turnId is known.
     this.#activeTurns.set(threadId, turnCtx);
 
+    const startedAt = Date.now();
+    const startTimeoutMs = Math.min(30_000, timeoutMs);
     let startResult;
     try {
-      startResult = await this.request("turn/start", {
-        threadId,
-        model,
-        effort,
-        serviceTier,
-        input,
-      });
+      startResult = await this.request(
+        "turn/start",
+        {
+          threadId,
+          model,
+          effort,
+          serviceTier,
+          input,
+        },
+        { timeoutMs: startTimeoutMs },
+      );
     } catch (error) {
       this.#activeTurns.delete(threadId);
+      // Recycle the child on transport errors (such as turn/start timeout) so
+      // an uncertain or orphaned turn cannot bleed into the next message.
+      if (error instanceof CodexTransportError && !this.closed) {
+        await this.close();
+      }
       throw error;
     }
 
     turnCtx.turnId = startResult?.turn?.id ?? startResult?.turnId ?? null;
+    turnCtx.ready = true;
+    const buffered = turnCtx.earlyEvents;
+    turnCtx.earlyEvents = [];
+    for (const event of buffered) {
+      this.#applyTurnNotification(turnCtx, event.method, event.params);
+    }
 
     let timedOut = false;
     let timeoutTimer;
+    const remainingTimeoutMs = Math.max(
+      1,
+      timeoutMs - (Date.now() - startedAt),
+    );
     const timeoutPromise = new Promise((_, reject) => {
       timeoutTimer = setTimeout(() => {
         timedOut = true;
@@ -307,7 +332,7 @@ class CodexAppServerClient {
             `Codex turn timed out after ${timeoutMs} ms`,
           ),
         );
-      }, timeoutMs);
+      }, remainingTimeoutMs);
       timeoutTimer.unref?.();
     });
 
@@ -422,11 +447,17 @@ class CodexAppServerClient {
 
   #handleServerRequest(msg) {
     try {
-      if (APPROVAL_METHODS.has(msg.method)) {
+      if (V2_APPROVAL_METHODS.has(msg.method)) {
         this.#write({
           jsonrpc: "2.0",
           id: msg.id,
           result: { decision: "decline" },
+        });
+      } else if (LEGACY_V1_APPROVAL_METHODS.has(msg.method)) {
+        this.#write({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: { decision: "abort" },
         });
       } else {
         this.#write({
@@ -458,6 +489,15 @@ class CodexAppServerClient {
     const turnCtx = this.#matchActiveTurn(params);
     if (!turnCtx) return;
 
+    if (!turnCtx.ready) {
+      turnCtx.earlyEvents.push({ method, params });
+      return;
+    }
+
+    this.#applyTurnNotification(turnCtx, method, params);
+  }
+
+  #applyTurnNotification(turnCtx, method, params) {
     const notifTurnId = params?.turnId ?? params?.turn?.id ?? null;
     if (turnCtx.turnId && notifTurnId && turnCtx.turnId !== notifTurnId) {
       return;
@@ -555,8 +595,10 @@ export class CodexSessionManager {
   #interruptGraceMs;
   #sessions = new Map();
   #chatQueues = new Map();
+  #saveQueue = Promise.resolve();
   #client = null;
   #startingClient = null;
+  #preparingPromise = null;
   #prepared = false;
   #closed = false;
   #startedAt = Date.now();
@@ -585,6 +627,21 @@ export class CodexSessionManager {
   }
 
   async prepareEnvironment() {
+    if (this.#prepared) return;
+    if (this.#preparingPromise) return this.#preparingPromise;
+    const prep = this.#doPrepareEnvironment();
+    this.#preparingPromise = prep;
+    try {
+      await prep;
+      this.#prepared = true;
+    } finally {
+      if (this.#preparingPromise === prep) {
+        this.#preparingPromise = null;
+      }
+    }
+  }
+
+  async #doPrepareEnvironment() {
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
     await chmod(this.codexHome, 0o700);
@@ -624,7 +681,6 @@ export class CodexSessionManager {
     });
 
     await this.#loadSessions();
-    this.#prepared = true;
   }
 
   async #loadSessions() {
@@ -662,19 +718,25 @@ export class CodexSessionManager {
     }
   }
 
-  async #saveSessions() {
-    const chats = {};
-    for (const [chatId, entry] of this.#sessions) {
-      chats[chatId] = {
-        threadId: entry.threadId,
-        updatedAt: entry.updatedAt,
-      };
-    }
-    await atomicWriteFile(
-      this.sessionsFile,
-      `${JSON.stringify({ version: 1, chats }, null, 2)}\n`,
-      { mode: 0o600, dirMode: 0o700 },
-    );
+  #saveSessions() {
+    const run = this.#saveQueue
+      .catch(() => {})
+      .then(() => {
+        const chats = {};
+        for (const [chatId, entry] of this.#sessions) {
+          chats[chatId] = {
+            threadId: entry.threadId,
+            updatedAt: entry.updatedAt,
+          };
+        }
+        return atomicWriteFile(
+          this.sessionsFile,
+          `${JSON.stringify({ version: 1, chats }, null, 2)}\n`,
+          { mode: 0o600, dirMode: 0o700 },
+        );
+      });
+    this.#saveQueue = run.catch(() => {});
+    return run;
   }
 
   #buildChildEnv() {
@@ -879,5 +941,6 @@ export class CodexSessionManager {
     if (client) {
       await client.close();
     }
+    await this.#saveQueue.catch(() => {});
   }
 }

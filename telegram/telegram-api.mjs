@@ -243,7 +243,7 @@ export class TelegramApi {
   }
 
   async sendMessage(chatId, text, options = {}) {
-    const trimmed = String(text ?? "").trim();
+    const trimmed = this.#scrub(String(text ?? "")).trim();
     if (trimmed.length === 0) return [];
     const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
     const sent = [];

@@ -100,9 +100,11 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
         await new Promise((resolve) => {
           const timer = setTimeout(resolve, 10_000);
           timer.unref?.();
-          req.once("close", () => {
+          res.once("close", () => {
             clearTimeout(timer);
-            entry.onDownloadAborted?.();
+            if (!res.writableEnded) {
+              entry.onDownloadAborted?.();
+            }
             resolve();
           });
         });
@@ -1714,11 +1716,7 @@ test("stop() returns promptly on a wedged turn or photo download without running
     photoStopElapsed < 1500,
     `stop() must abort hanging photo downloads promptly (took ${photoStopElapsed} ms)`,
   );
-  assert.equal(
-    downloadAborted,
-    true,
-    "photo download HTTP request must receive abort signal on stop()",
-  );
+  await waitFor(() => downloadAborted, { timeoutMs: 1000 });
   assert.equal(photoHarness.tg.sentMessages(1001).length, 0);
 });
 

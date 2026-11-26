@@ -225,6 +225,7 @@ export class TelegramBotRunner {
 
         if (Array.isArray(updates)) {
           for (const update of updates) {
+            if (this.#stopped) break;
             if (typeof update?.update_id === "number") {
               this.#offset = Math.max(this.#offset ?? 0, update.update_id + 1);
               await saveLastUpdateId(this.#offsetFile, update.update_id);
@@ -250,6 +251,7 @@ export class TelegramBotRunner {
   }
 
   #dispatchUpdate(update) {
+    if (this.#stopped) return;
     const msg = update?.message;
     if (!msg) return;
     if (msg.chat?.type !== "private") return;
@@ -278,6 +280,7 @@ export class TelegramBotRunner {
   }
 
   async #handleAuthorizedMessage(msg) {
+    if (this.#stopped) return;
     const chatId = msg.chat.id;
     const text = typeof msg.text === "string" ? msg.text.trim() : "";
     const hasPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
@@ -330,7 +333,12 @@ export class TelegramBotRunner {
       if (chosenPhoto) {
         const dataUrl = await this.#api.downloadPhotoAsDataUrl(
           chosenPhoto.file_id,
+          { signal: this.#abortController?.signal },
         );
+        if (this.#stopped) {
+          stopTyping();
+          return;
+        }
         const caption =
           typeof msg.caption === "string" ? msg.caption.trim() : "";
         input = [
@@ -346,6 +354,7 @@ export class TelegramBotRunner {
 
       const reply = await this.#sessions.sendTurn(chatId, input);
       stopTyping();
+      if (this.#stopped) return;
       await this.#safeSendMessage(
         chatId,
         reply ||
@@ -353,6 +362,9 @@ export class TelegramBotRunner {
       );
     } catch (error) {
       stopTyping();
+      if (this.#stopped || error?.name === "AbortError") {
+        return;
+      }
       this.#logger(
         `[telegram] error handling chat ${chatId}: ${error?.message ?? String(error)}`,
       );
@@ -363,12 +375,17 @@ export class TelegramBotRunner {
   #startTypingLoop(chatId) {
     let active = true;
     const sendTyping = () => {
-      if (!active) return;
-      this.#api.sendChatAction(chatId, "typing").catch((error) => {
-        this.#logger(
-          `[telegram] sendChatAction failed: ${error?.message ?? String(error)}`,
-        );
-      });
+      if (!active || this.#stopped) return;
+      this.#api
+        .sendChatAction(chatId, "typing", {
+          signal: this.#abortController?.signal,
+        })
+        .catch((error) => {
+          if (this.#stopped || error?.name === "AbortError") return;
+          this.#logger(
+            `[telegram] sendChatAction failed: ${error?.message ?? String(error)}`,
+          );
+        });
     };
     sendTyping();
     const timer = setInterval(sendTyping, this.#typingIntervalMs);
@@ -391,9 +408,15 @@ export class TelegramBotRunner {
   }
 
   async #safeSendMessage(chatId, text) {
+    if (this.#stopped) return;
     try {
-      await this.#api.sendMessage(chatId, text);
+      await this.#api.sendMessage(
+        chatId,
+        redactTelegramSecrets(text, this.#config.token),
+        { signal: this.#abortController?.signal },
+      );
     } catch (error) {
+      if (this.#stopped || error?.name === "AbortError") return;
       this.#logger(
         `[telegram] sendMessage failed for chat ${chatId}: ${error?.message ?? String(error)}`,
       );
@@ -404,14 +427,17 @@ export class TelegramBotRunner {
     if (this.#stopped) return;
     this.#stopped = true;
     this.#abortController?.abort();
-    if (this.#pollPromise) {
-      await this.#pollPromise.catch(() => {});
-      this.#pollPromise = null;
-    }
+    const poll = this.#pollPromise;
+    this.#pollPromise = null;
+    // Close sessions immediately alongside poll teardown so wedged turns do
+    // not hold shutdown open up to turnTimeoutMs.
+    await Promise.allSettled([
+      poll ?? Promise.resolve(),
+      this.#sessions.close(),
+    ]);
     if (this.#inFlight.size > 0) {
       await Promise.allSettled([...this.#inFlight]);
     }
-    await this.#sessions.close();
   }
 }
 
