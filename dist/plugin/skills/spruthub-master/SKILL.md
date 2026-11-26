@@ -49,11 +49,16 @@ description: Справка к MCP-серверу sprut-agent для дома н
   на устройстве-цели покажет сценарии, которые уже им управляют; новое
   правило — `prepare_native_change` с `block_create` по контракту операции.
 - «Запомни, как настроено, потом покажи, что изменилось»:
-  `configuration_point` с выбранными `entity_refs` (у климата это уставки
-  `TargetTemperature`, `TargetHeatingCoolingState`, `C_FanSpeed`), позже
-  `configuration_point` с `point_ref` и `compare=true`. Точка служит
-  только для сравнения: вернуть по ней ничего нельзя, а состояния до первой
-  точки нет.
+  `configuration_point` со `scope: "home"` (снимок всего дома: комнаты,
+  устройства и сервисы, сценарии, экспорт в мосты, уставки климата; без опций
+  окон, опций logic, виртуальных связей и секретов) или с выбранными
+  `entity_refs` (у климата это `TargetTemperature`,
+  `TargetHeatingCoolingState`, `C_FanSpeed`), с необязательным `note`; позже
+  `configuration_point` с `point_ref` и `compare=true` покажет компактный diff
+  и атрибуцию по локальному журналу агента (`agent`, `manual_or_external`,
+  `agent_and_later_change`; правки из приложения SprutHub или другого клиента
+  видны как `manual_or_external`). Точка служит только для сравнения: вернуть
+  по ней ничего нельзя, а состояния до первой точки нет.
 - Полная резервная копия хаба (например, перед рискованной правкой):
   `configuration_point` с `hub_backup: "create"` скачивает полный `.zip`-архив
   через `file.backups` (работает без внешней SD-карты), сохраняет локально с
