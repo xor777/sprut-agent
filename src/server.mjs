@@ -921,24 +921,14 @@ async function getAutomationServiceForHistoryList({
     clientError = error;
   }
   if (client !== null) {
-    if (client.serial !== null) {
-      automationService ??= new AutomationService({
-        client,
-        stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
-        hubUrl: client.url,
-        hubSerial: client.serial,
-      });
-      return automationService;
-    }
-    if (requestedSerial === null) {
-      selectedHomeRef(client);
-    }
-    return new AutomationService({
+    selectedHomeRef(client);
+    automationService ??= new AutomationService({
       client,
       stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
       hubUrl: client.url,
-      hubSerial: requestedSerial,
+      hubSerial: client.serial,
     });
+    return automationService;
   }
   const offlineSerial = identity.serial ?? requestedSerial;
   if (offlineSerial === null) throw clientError;

@@ -5773,40 +5773,48 @@ export class AutomationService {
           )
         : null;
     const timeRange = resolveHistoryTimeRange(parsed, hubZone);
+    const sanitizedQuery =
+      parsed.query === null
+        ? null
+        : sanitizeAgentOutput(parsed.query.raw, sensitiveValues);
+    const queryRedacted =
+      parsed.query !== null && sanitizedQuery !== parsed.query.raw;
     const selection = historySelection(homeRef, entityRef, limit, cursor, {
       since: parsed.since?.raw ?? null,
       until: parsed.until?.raw ?? null,
       sinceMs: timeRange.sinceMs,
       untilMs: timeRange.untilMs,
       appliedOnly: appliedOnly === true,
-      query: parsed.query?.raw ?? null,
+      query: sanitizedQuery,
     });
-    const storedChanges = await this.#reconciledHistory(entityRef);
     const all = [];
-    for (const change of storedChanges) {
-      if (
-        !isNativeChange(change) ||
-        change.home_ref !== homeRef ||
-        (entityRef !== undefined &&
-          !nativeAffectedRefs(change, homeRef).includes(entityRef)) ||
-        (appliedOnly === true && !isAppliedHistoryChange(change)) ||
-        !matchesHistoryTimeRange(change, timeRange.sinceMs, timeRange.untilMs)
-      ) {
-        continue;
+    if (!queryRedacted) {
+      const storedChanges = await this.#reconciledHistory(entityRef);
+      for (const change of storedChanges) {
+        if (
+          !isNativeChange(change) ||
+          change.home_ref !== homeRef ||
+          (entityRef !== undefined &&
+            !nativeAffectedRefs(change, homeRef).includes(entityRef)) ||
+          (appliedOnly === true && !isAppliedHistoryChange(change)) ||
+          !matchesHistoryTimeRange(change, timeRange.sinceMs, timeRange.untilMs)
+        ) {
+          continue;
+        }
+        const summary = sanitizeAgentOutput(
+          changeSummary(change),
+          sensitiveValues,
+        );
+        if (
+          parsed.query !== null &&
+          !matchesHistoryQuery(summary, parsed.query)
+        ) {
+          continue;
+        }
+        all.push(summary);
       }
-      const summary = sanitizeAgentOutput(
-        changeSummary(change),
-        sensitiveValues,
-      );
-      if (
-        parsed.query !== null &&
-        !matchesHistoryQuery(summary, parsed.query)
-      ) {
-        continue;
-      }
-      all.push(summary);
+      all.sort(compareChangeSummaries);
     }
-    all.sort(compareChangeSummaries);
     const remaining =
       selection.after === null
         ? all
@@ -5818,10 +5826,6 @@ export class AutomationService {
       changes.length < remaining.length
         ? encodeHistoryCursor(changes.at(-1), selection.scope)
         : null;
-    const sanitizedQuery =
-      parsed.query === null
-        ? null
-        : sanitizeAgentOutput(parsed.query.raw, sensitiveValues);
     const filters = historyFiltersEcho({
       parsed,
       timeRange,

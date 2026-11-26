@@ -1271,7 +1271,7 @@ test("query uses whole-word fallback for stopwords/single chars and preserves nu
   });
   const hallway1 = await prepareAndApply(client, {
     operation: "room_name",
-    target_ref: `${HOME_REF}/room/2`,
+    target_ref: `${HOME_REF}/room/1`,
     value: "Коридор 1",
     reason: "Зона коридор 1",
   });
@@ -1283,7 +1283,7 @@ test("query uses whole-word fallback for stopwords/single chars and preserves nu
   });
   const hallway20 = await prepareAndApply(client, {
     operation: "room_name",
-    target_ref: `${HOME_REF}/room/2`,
+    target_ref: `${HOME_REF}/room/3`,
     value: "Коридор 20",
     reason: "Зона коридор 20",
   });

@@ -14,12 +14,15 @@ import {
 import { createdLogicMapping } from "./logic-changes.mjs";
 import {
   isNativeValueChange,
+  manualValueChangeObserved,
   nativeValueRestoration,
 } from "./native-values.mjs";
 import {
   isLogicSourceChange,
+  scenarioConflictAsksForNewPrepare,
   scenarioRestoreSupported,
 } from "./scenario-changes.mjs";
+import { SCENARIO_DELETE } from "./scenario-delete.mjs";
 import { SprutHubError, zonedTimestamp } from "./spruthub-client.mjs";
 import { VIRTUAL_DEVICE, VIRTUAL_DEVICE_DELETE } from "./virtual-device.mjs";
 import { WINDOW_BUTTON } from "./window-buttons.mjs";
@@ -56,18 +59,20 @@ export function compareApplication(left, right) {
 }
 
 // Whether a stored history record can currently be passed to
-// restore_native_change, matching publicNativeChange's per-kind ownership and
-// restoration rules while marking unsent/terminal statuses false.
+// restore_native_change, matching publicNativeChange's per-kind ownership,
+// restoration rules, and recoverable post-apply conflicts while marking
+// unsent, terminal, and right-lost statuses false.
 export function summaryRestoreSupported(change) {
-  const statusEligible =
+  if (change.kind === "scenario_run" || change.kind === WINDOW_BUTTON) {
+    return false;
+  }
+  const activeStatus =
     change.status === "applied" ||
     change.status === "uncertain" ||
     ((change.status === "applying" || change.status === "restoring") &&
       change.native_write_sent === true);
-  if (!statusEligible) return false;
-  if (change.kind === "scenario_run" || change.kind === WINDOW_BUTTON) {
-    return false;
-  }
+  const isConflict = change.status === "conflict";
+  if (!activeStatus && !isConflict) return false;
   if (change.kind === "room_create") {
     return change.room_creation_owned === true;
   }
@@ -81,29 +86,66 @@ export function summaryRestoreSupported(change) {
     return change.status === "applied";
   }
   if (change.kind === "logic_assignment") {
-    return change.assignment_ownership_lost !== true;
+    return isConflict
+      ? change.applied_snapshot !== undefined &&
+          change.assignment_ownership_lost !== true
+      : change.assignment_ownership_lost !== true;
+  }
+  if (change.kind === "accessory_placement") {
+    return isConflict
+      ? change.applied_snapshot !== undefined &&
+          change.conflict_reason === "later_owned_change"
+      : true;
+  }
+  if (change.kind === LIGHT_GROUP_MEMBERS) {
+    return isConflict
+      ? change.conflict_reason === "later_owned_change" &&
+          Boolean(change.steps?.some(({ sent }) => sent))
+      : true;
   }
   if (
     change.kind === "block_create" ||
     change.kind === "block_data_update" ||
     isLogicSourceChange(change)
   ) {
-    return scenarioRestoreSupported(change);
+    if (!scenarioRestoreSupported(change)) return false;
+    return isConflict ? !scenarioConflictAsksForNewPrepare(change) : true;
   }
   if (isNativeValueChange(change)) {
-    return (
-      change.lamp_level !== true && nativeValueRestoration(change).supported
-    );
+    if (
+      change.lamp_level === true ||
+      !nativeValueRestoration(change).supported
+    ) {
+      return false;
+    }
+    return isConflict
+      ? change.applied_value_observed === true &&
+          !manualValueChangeObserved(change)
+      : true;
   }
-  return true;
+  if (change.kind === "block_action_pause" || change.kind === SCENARIO_DELETE) {
+    return activeStatus;
+  }
+  return activeStatus;
 }
 
 export function isAppliedHistoryChange(change) {
-  if (change.status === "prepared" || change.status === "not_applied") {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    (change.status === "not_owned" &&
+      (change.conflict_reason === "change_was_not_applied" ||
+        (change.write_intent?.direction === "apply" &&
+          change.write_intent?.rejection !== undefined)))
+  ) {
     return false;
   }
   if (APPLIED_HISTORY_STATUSES.has(change.status)) return true;
-  return change.native_write_sent === true;
+  return (
+    change.native_write_sent === true ||
+    change.caused_by_change_id !== undefined ||
+    change.applied_value_observed === true
+  );
 }
 
 // Pure syntactic validation of history filters so malformed dates, inverted
@@ -140,10 +182,13 @@ export function parseHistoryFilterSyntax({ since, until, query } = {}) {
         "get_native_change",
       );
     }
+    const tokens = normalized.split(" ");
     parsedQuery = {
       raw,
       normalized,
+      tokens,
       stems: queryStems(raw),
+      numericTokens: tokens.filter((token) => /^\d+$/.test(token)),
     };
   }
   return {
@@ -221,14 +266,16 @@ export function matchesHistoryTimeRange(change, sinceMs, untilMs) {
 
 // Matches against already-sanitized changeSummary fields only, stripping
 // REDACTED_MARK so redacted placeholders are never searchable either.
+// Stopword/single-char fallbacks and pure numeric tokens match whole words.
 export function matchesHistoryQuery(sanitizedSummary, parsedQuery) {
   const searchable = historySearchText(sanitizedSummary);
   if (searchable.length === 0) return false;
-  if (parsedQuery.stems.length > 0) {
-    return matchesStems(parsedQuery.stems, searchable);
+  const words = normalizeName(searchable).split(" ");
+  if (parsedQuery.stems.length === 0) {
+    return parsedQuery.tokens.every((token) => words.includes(token));
   }
-  const tokens = parsedQuery.normalized.split(" ");
-  return matchesStems(tokens, searchable);
+  if (!matchesStems(parsedQuery.stems, searchable)) return false;
+  return parsedQuery.numericTokens.every((token) => words.includes(token));
 }
 
 export function historyFiltersEcho({
