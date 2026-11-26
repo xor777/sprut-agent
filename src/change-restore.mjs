@@ -1,5 +1,10 @@
 import { valuesEqual } from "./change-contracts.mjs";
 import { nativeChangeNext } from "./change-refs.mjs";
+import {
+  dashboardChangeName,
+  dashboardSummaryValue,
+  isDashboardChangeKind,
+} from "./dashboard-changes.mjs";
 import { resendDeviceCommandNext } from "./device-commands.mjs";
 import {
   changeOperation,
@@ -84,6 +89,7 @@ export function restoreItem(change, result, before) {
           sent,
           ...observed,
           ...recreatedScenario(result),
+          ...recreatedDashboard(result),
         };
       }
       if (
@@ -299,7 +305,9 @@ export function changeName(change) {
     case WINDOW_BUTTON:
       return change.button_name ?? change.option_key;
     default:
-      return undefined;
+      return isDashboardChangeKind(change.kind)
+        ? dashboardChangeName(change)
+        : undefined;
   }
 }
 
@@ -317,6 +325,9 @@ export const SUMMARY_VALUE_KINDS = new Set([
 ]);
 
 export function summaryValue(change) {
+  if (isDashboardChangeKind(change.kind)) {
+    return dashboardSummaryValue(change);
+  }
   if (
     !(SUMMARY_VALUE_KINDS.has(change.kind) || change.bridge_export) ||
     !change.baseline_value ||
@@ -336,5 +347,22 @@ function recreatedScenario(result) {
   return {
     ...(result.recreated ? { recreated: result.recreated } : {}),
     ...(result.not_restored ? { not_restored: result.not_restored } : {}),
+  };
+}
+
+function recreatedDashboard(result) {
+  return {
+    ...(result.recreated_dashboard_ref
+      ? { recreated_dashboard_ref: result.recreated_dashboard_ref }
+      : {}),
+    ...(result.recreated_column_ref
+      ? { recreated_column_ref: result.recreated_column_ref }
+      : {}),
+    ...(result.recreated_widget_ref
+      ? { recreated_widget_ref: result.recreated_widget_ref }
+      : {}),
+    ...(result.skipped_widgets?.length > 0
+      ? { skipped_widgets: result.skipped_widgets }
+      : {}),
   };
 }

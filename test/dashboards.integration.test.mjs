@@ -195,7 +195,7 @@ test("end-to-end household dashboard flow: overview, create, all 8 widget types,
   const page2 = await call(client, "home_overview", page1.next.arguments);
   assert.equal(hub.requests.length, requestsBeforePage2);
   assert.equal(page2.dashboards.length, 1);
-  assert.equal(page2.next, undefined);
+  assert.equal(page2.next, null);
 
   // Create ALL 8 widget kinds on dashboard 1's default column.
   // 1. characteristic
@@ -825,6 +825,83 @@ test("full undo (restore_native_change) across all 9 dashboard operations and sa
   });
   assert.equal(refusedMissingParent.status, "conflict");
   assert.equal(refusedMissingParent.conflict_reason, "dashboard_missing");
+
+  // Batch restore_native_change({ change_refs }) undoes newest-first:
+  // widget create deleted first, then clean dashboard deleted!
+  const { applied: batchDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Пакетный откат",
+    reason: "Создать дашборд для пакетного отката",
+  });
+  const { applied: batchWidget } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: batchDash.created_columns[0].ref,
+    widget: { type: "clock", name: "Часы" },
+    reason: "Добавить часы для пакетного отката",
+  });
+  const batchUndo = await call(client, "restore_native_change", {
+    change_refs: [batchDash.change_ref, batchWidget.change_ref],
+  });
+  assert.equal(batchUndo.status, "ok");
+  assert.equal(batchUndo.summary.restored, 2);
+  assert.equal(batchUndo.results[0].operation, "dashboard_widget_create");
+  assert.equal(batchUndo.results[1].operation, "dashboard_create");
+
+  // dashboard_widget_create undo refuses when widget was manually edited;
+  // dashboard_widget_delete undo refuses when referenced device was deleted.
+  const { applied: guardDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Защита виджетов",
+    reason: "Проверка конфликтов виджетов",
+  });
+  const guardDashId = Number(guardDash.created_dashboard_ref.split("/").at(-1));
+  const { applied: editedWidget } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: guardDash.created_columns[0].ref,
+    widget: {
+      type: "service",
+      name: "Коридор",
+      item_refs: [HALL_LAMP_SERVICE_REF],
+    },
+    reason: "Виджет света коридора",
+  });
+  const editedWidgetId = Number(
+    editedWidget.created_widget_ref.split("/").at(-1),
+  );
+  hub.request({
+    dashboardWidget: {
+      update: {
+        dashboardId: guardDashId,
+        id: editedWidgetId,
+        name: "Изменено вручную",
+        service: { items: [{ aId: 14, sId: 13 }] },
+      },
+    },
+  });
+  const refusedEditedWidget = await call(client, "restore_native_change", {
+    change_ref: editedWidget.change_ref,
+  });
+  assert.equal(refusedEditedWidget.status, "conflict");
+  assert.equal(refusedEditedWidget.conflict_reason, "widget_changed_since");
+
+  const { applied: delWidgetForMissingDevice } = await prepareAndApply(client, {
+    operation: "dashboard_widget_delete",
+    target_ref: editedWidget.created_widget_ref,
+    reason: "Удалить виджет коридора",
+  });
+  hub.request({ accessory: { delete: { id: 14 } } });
+  const refusedMissingDeviceWidget = await call(
+    client,
+    "restore_native_change",
+    { change_ref: delWidgetForMissingDevice.change_ref },
+  );
+  assert.equal(refusedMissingDeviceWidget.status, "conflict");
+  assert.equal(
+    refusedMissingDeviceWidget.conflict_reason,
+    "referenced_entity_missing",
+  );
 });
 
 test("safety, drift detection, inline contracts, HomeState neutrality, secret redaction, lost-reply reconciliation, and MCP surface budgets", async (t) => {

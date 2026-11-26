@@ -13,6 +13,7 @@ import {
   characteristicNotifyOffered,
   characteristicNotifyOn,
   characteristicRef,
+  dashboardRef,
   extractTypedValue,
   homeRef,
   isSensitiveNativeNode,
@@ -20,6 +21,7 @@ import {
   lastReportMs,
   matchEnumValue,
   parseEntityRef,
+  redactSensitiveText,
   relationFailure,
   roomRef,
   SprutHubError,
@@ -110,10 +112,11 @@ export class HomeReads {
     const list = input.list ?? null;
     const query = input.query ?? null;
     const needs = (part) => list === null || list === part;
-    const [homeRead, scenarios, extensions] = await Promise.all([
+    const [homeRead, scenarios, extensions, dashboards] = await Promise.all([
       needs("rooms") ? client.homeCatalog(serial, deadline) : null,
       needs("scenarios") ? client.nativeScenarios(serial, deadline) : null,
       needs("extensions") ? client.nativeExtensions(serial, deadline) : null,
+      list === "dashboards" ? client.nativeDashboards(serial, deadline) : null,
     ]);
     const catalog = homeRead?.catalog ?? null;
     const observedAt = latest([
@@ -121,6 +124,7 @@ export class HomeReads {
       catalog && latestObservation(catalog),
       scenarios?.observedAt,
       extensions?.observedAt,
+      dashboards?.observedAt,
     ]);
     const roomList =
       catalog &&
@@ -143,9 +147,11 @@ export class HomeReads {
         },
         key: list ?? "matches",
         entries: overviewEntries(paging, {
+          serial,
           roomList,
           scenarios: scenarios?.scenarios,
           extensions: extensions?.extensions,
+          dashboards: dashboards?.dashboards,
         }),
         extras: list === null ? deviceMatchesHint(serial, query, catalog) : {},
       });
@@ -1664,7 +1670,7 @@ function checkOverviewInput(input) {
   ) {
     throw new SprutHubError(
       "invalid_filter",
-      "limit and cursor page a list (list=scenarios, rooms or extensions) or a query.",
+      "limit and cursor page a list (list=scenarios, rooms, extensions or dashboards) or a query.",
       "home_overview",
     );
   }
@@ -1701,7 +1707,10 @@ function overviewSelection(input, serial) {
 // The entries a list or a query pages through: a list in the hub's order,
 // or ranked by the query; a query without list mixes rooms, scenarios and
 // extensions with their kind.
-function overviewEntries(selection, { roomList, scenarios, extensions }) {
+function overviewEntries(
+  selection,
+  { serial, roomList, scenarios, extensions, dashboards },
+) {
   const sameType = (type) =>
     selection.type === null ||
     type.toLocaleLowerCase("en") === selection.type.toLocaleLowerCase("en");
@@ -1720,6 +1729,8 @@ function overviewEntries(selection, { roomList, scenarios, extensions }) {
         .map(scenarioEntry),
     extensions: () =>
       extensions.filter(({ type }) => sameType(type)).map(extensionSummary),
+    dashboards: () =>
+      dashboards.map((dashboard) => dashboardEntry(serial, dashboard)),
   };
   if (selection.list !== null) {
     const entries = lists[selection.list]();
@@ -1738,6 +1749,25 @@ function overviewEntries(selection, { roomList, scenarios, extensions }) {
       ...extensionSummary(extension),
     })),
   ]);
+}
+
+function dashboardEntry(serial, dashboard) {
+  const hasColumns = Array.isArray(dashboard.columns);
+  return {
+    ref: dashboardRef(serial, dashboard.id),
+    id: dashboard.id,
+    name: redactSensitiveText(dashboard.name ?? ""),
+    order: dashboard.order ?? 0,
+    ...(hasColumns
+      ? {
+          column_count: dashboard.columns.length,
+          widget_count: dashboard.columns.reduce(
+            (sum, column) => sum + (column.widgets?.length ?? 0),
+            0,
+          ),
+        }
+      : {}),
+  };
 }
 
 // How many services a name query matches, with the find_devices call that

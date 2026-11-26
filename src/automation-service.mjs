@@ -98,6 +98,15 @@ import {
   restoreItem,
 } from "./change-restore.mjs";
 import {
+  applyDashboardChange,
+  dashboardContract,
+  dashboardHubStepsSent,
+  getDashboardChange,
+  isDashboardChangeKind,
+  prepareDashboardChange,
+  restoreDashboardChange,
+} from "./dashboard-changes.mjs";
+import {
   characteristicRefOf,
   commandCharacteristic,
   commandDevice,
@@ -426,6 +435,13 @@ export class AutomationService {
         contract: virtualDeviceContract(input.operation),
       };
     }
+    if (isDashboardChangeKind(input.operation)) {
+      return {
+        status: "ok",
+        operation: input.operation,
+        contract: dashboardContract(input.operation),
+      };
+    }
     if (input.operation === "virtual_light_group") {
       if (input.target_ref !== undefined && !isHomeRef(input.target_ref)) {
         const group = await this.#readLampGroup(input.target_ref);
@@ -547,6 +563,17 @@ export class AutomationService {
     // the value's contract (validateCharacteristicValue).
     for (const field of ["name", "description", "source"]) {
       refuseRedactionMark(input[field], field);
+    }
+    if (Array.isArray(input.column_names)) {
+      for (const columnName of input.column_names) {
+        refuseRedactionMark(columnName, "column_names");
+      }
+    }
+    if (input.widget?.name !== undefined) {
+      refuseRedactionMark(input.widget.name, "widget.name");
+    }
+    if (isDashboardChangeKind(input.operation)) {
+      return prepareDashboardChange(this.#dashboardContext(), input);
     }
     const valueKind = nativeValueKind(input.operation);
     if (valueKind) {
@@ -2501,6 +2528,9 @@ export class AutomationService {
     if (change.kind === VIRTUAL_DEVICE_DELETE) {
       return this.#applyVirtualDeviceDelete(change);
     }
+    if (isDashboardChangeKind(change.kind)) {
+      return applyDashboardChange(this.#dashboardContext(), change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#applyLampGroupMembers(change);
     }
@@ -3317,6 +3347,9 @@ export class AutomationService {
     if (change.kind === VIRTUAL_DEVICE_DELETE) {
       return this.#getVirtualDeviceDelete(change);
     }
+    if (isDashboardChangeKind(change.kind)) {
+      return getDashboardChange(this.#dashboardContext(), change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#getLampGroupMembers(change);
     }
@@ -3499,6 +3532,11 @@ export class AutomationService {
     }
     if (change.kind === VIRTUAL_DEVICE_DELETE) {
       return this.#restoreVirtualDeviceDelete(change);
+    }
+    if (isDashboardChangeKind(change.kind)) {
+      return this.#undoOrUnknown(change, () =>
+        restoreDashboardChange(this.#dashboardContext(), change),
+      );
     }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#undoOrUnknown(change, () =>
@@ -8146,6 +8184,21 @@ export class AutomationService {
     }
   }
 
+  #dashboardContext() {
+    return {
+      client: this.client,
+      store: this.store,
+      hubSerial: this.hubSerial,
+      persistNativeIntent: (change, status, direction) =>
+        this.#persistNativeIntent(change, status, direction),
+      finishNative: (change, status, observedValue, extra) =>
+        this.#finishNative(change, status, observedValue, extra),
+      finishRefusedWrite: (change, status, error, observedValue, extra) =>
+        this.#finishRefusedWrite(change, status, error, observedValue, extra),
+      publicStored: (change) => publicStoredNativeChange(change),
+    };
+  }
+
   async #exclusiveWrite(operation) {
     const current = this.#writeSequence
       .catch(() => {})
@@ -8187,6 +8240,9 @@ function hubStepsSent(change, direction) {
       (["applying", "restoring", "uncertain"].includes(change.status) &&
         nativeIntentDirection(change) === direction)
     );
+  }
+  if (isDashboardChangeKind(change.kind)) {
+    return dashboardHubStepsSent(change, direction);
   }
   return false;
 }

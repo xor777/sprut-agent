@@ -556,6 +556,15 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "logic_source_create",
   "logic_source_update",
   WINDOW_BUTTON,
+  "dashboard_create",
+  "dashboard_update",
+  "dashboard_delete",
+  "dashboard_column_create",
+  "dashboard_column_update",
+  "dashboard_column_delete",
+  "dashboard_widget_create",
+  "dashboard_widget_update",
+  "dashboard_widget_delete",
 ]);
 
 export function isNativeChange(change) {

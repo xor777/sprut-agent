@@ -101,10 +101,17 @@ const READ_ONLY_METHODS = new Set([
   "extensionChild.list",
   "extensionChild.get",
   "file.filePart",
+  "dashboard.list",
+  "dashboard.get",
+  "dashboardColumn.list",
+  "dashboardColumn.get",
+  "dashboardWidget.list",
+  "dashboardWidget.get",
+  "dashboardWidget.types",
 ]);
 // Writes that change nothing the warm home state holds besides values,
-// which the hub's events carry: scenarios, device searches, and temporary
-// backup archive lifecycle (file.backups / file.complete).
+// which the hub's events carry: scenarios, device searches, dashboards,
+// and temporary backup archive lifecycle (file.backups / file.complete).
 // Accessories whose services are read for LOGIC assignments at once.
 const LOGIC_SCAN_CONCURRENCY = 8;
 const HOME_STATE_NEUTRAL_WRITES = new Set([
@@ -115,6 +122,18 @@ const HOME_STATE_NEUTRAL_WRITES = new Set([
   "extension.action",
   "file.backups",
   "file.complete",
+  "dashboard.create",
+  "dashboard.update",
+  "dashboard.delete",
+  "dashboard.orders",
+  "dashboardColumn.create",
+  "dashboardColumn.update",
+  "dashboardColumn.delete",
+  "dashboardColumn.orders",
+  "dashboardWidget.create",
+  "dashboardWidget.update",
+  "dashboardWidget.delete",
+  "dashboardWidget.orders",
 ]);
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
@@ -1700,6 +1719,341 @@ export class SprutHubClient {
     }
   }
 
+  async nativeDashboards(
+    serial = this.serial,
+    deadline = Date.now() + this.timeoutMs,
+  ) {
+    const response = await this.#request(
+      { dashboard: { list: {} } },
+      deadline,
+      { serial },
+    );
+    const dashboards = extractNativeList(response, [
+      "dashboard",
+      "list",
+      "dashboards",
+    ]);
+    for (const dashboard of dashboards) validateDashboard(dashboard);
+    return {
+      dashboards,
+      observedAt: response.responseReceivedAt,
+    };
+  }
+
+  async listDashboards() {
+    const { dashboards } = await this.nativeDashboards(
+      this.serial,
+      Date.now() + this.timeoutMs,
+    );
+    return dashboards;
+  }
+
+  async getDashboard(
+    id,
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
+    let response;
+    try {
+      response = await this.#request({ dashboard: { get: { id } } }, deadline, {
+        serial,
+      });
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const { dashboards } = await this.nativeDashboards(serial, deadline);
+      if (dashboards.some((dashboard) => dashboard.id === id)) throw error;
+      return null;
+    }
+    const container = response.result?.dashboard;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible dashboard response.",
+      );
+    }
+    if (container.get === null) return null;
+    validateDashboard(container.get, id);
+    return normalizeNativeDashboard(container.get);
+  }
+
+  async createDashboard({ name, order }) {
+    const request = {
+      name,
+      ...(order !== undefined ? { order } : {}),
+    };
+    const response = await this.#request(
+      { dashboard: { create: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const dashboard = response.result?.dashboard?.create;
+    try {
+      validateDashboard(dashboard);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return normalizeNativeDashboard(dashboard);
+  }
+
+  async updateDashboard(id, { name }) {
+    const update = { id };
+    if (name !== undefined) update.name = name;
+    const response = await this.#request(
+      { dashboard: { update } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboard;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async deleteDashboard(id) {
+    const response = await this.#request(
+      { dashboard: { delete: { id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboard;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async listDashboardColumns(dashboardId) {
+    const response = await this.#request(
+      { dashboardColumn: { list: { dashboardId } } },
+      Date.now() + this.timeoutMs,
+    );
+    const columns = extractNativeList(response, [
+      "dashboardColumn",
+      "list",
+      "columns",
+    ]);
+    for (const column of columns) validateDashboardColumn(column, dashboardId);
+    return columns.map((column) =>
+      normalizeNativeDashboardColumn(column, dashboardId),
+    );
+  }
+
+  // Reads a column via live-verified dashboard.get so full nested widgets are
+  // guaranteed in 1 RPC without relying on unobserved dashboardColumn.get.
+  async getDashboardColumn(
+    dashboardId,
+    id,
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
+    const dashboard = await this.getDashboard(dashboardId, {
+      serial,
+      deadline,
+    });
+    if (!dashboard) return null;
+    return dashboard.columns.find((column) => column.id === id) ?? null;
+  }
+
+  async createDashboardColumn({ dashboardId, name, order }) {
+    const request = {
+      dashboardId,
+      ...(name !== undefined ? { name } : {}),
+      ...(order !== undefined ? { order } : {}),
+    };
+    const response = await this.#request(
+      { dashboardColumn: { create: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const column = response.result?.dashboardColumn?.create;
+    try {
+      validateDashboardColumn(column, dashboardId);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return normalizeNativeDashboardColumn(column, dashboardId);
+  }
+
+  async updateDashboardColumn(dashboardId, id, { name }) {
+    const update = { dashboardId, id };
+    if (name !== undefined) update.name = name;
+    const response = await this.#request(
+      { dashboardColumn: { update } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboardColumn;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard column update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async deleteDashboardColumn(dashboardId, id) {
+    const response = await this.#request(
+      { dashboardColumn: { delete: { dashboardId, id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboardColumn;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard column deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async listDashboardWidgets(dashboardId, columnId) {
+    const request = {
+      dashboardId,
+      ...(columnId !== undefined ? { columnId } : {}),
+    };
+    const response = await this.#request(
+      { dashboardWidget: { list: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const widgets = extractNativeList(response, [
+      "dashboardWidget",
+      "list",
+      "widgets",
+    ]);
+    for (const widget of widgets) validateDashboardWidget(widget, dashboardId);
+    return widgets.map((widget) =>
+      normalizeNativeDashboardWidget(widget, dashboardId),
+    );
+  }
+
+  async getDashboardWidget(
+    dashboardId,
+    id,
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
+    let response;
+    try {
+      response = await this.#request(
+        { dashboardWidget: { get: { dashboardId, id } } },
+        deadline,
+        { serial },
+      );
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const dashboard = await this.getDashboard(dashboardId, {
+        serial,
+        deadline,
+      });
+      if (!dashboard) return null;
+      const found = dashboard.columns.some((column) =>
+        column.widgets.some((widget) => widget.id === id),
+      );
+      if (!found) return null;
+      throw error;
+    }
+    const container = response.result?.dashboardWidget;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible dashboard widget response.",
+      );
+    }
+    if (container.get === null) return null;
+    validateDashboardWidget(container.get, dashboardId, id);
+    return normalizeNativeDashboardWidget(container.get, dashboardId);
+  }
+
+  async createDashboardWidget({
+    dashboardId,
+    columnId,
+    name,
+    order,
+    kindKey,
+    payload,
+  }) {
+    const request = {
+      dashboardId,
+      columnId,
+      ...(name !== undefined ? { name } : {}),
+      ...(order !== undefined ? { order } : {}),
+      [kindKey]: payload,
+    };
+    const response = await this.#request(
+      { dashboardWidget: { create: request } },
+      Date.now() + this.timeoutMs,
+    );
+    const widget = response.result?.dashboardWidget?.create;
+    try {
+      validateDashboardWidget(widget, dashboardId);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+    return normalizeNativeDashboardWidget(widget, dashboardId);
+  }
+
+  async updateDashboardWidget(dashboardId, id, { name, kindKey, payload }) {
+    const update = {
+      dashboardId,
+      id,
+      ...(name !== undefined ? { name } : {}),
+      ...(kindKey !== undefined ? { [kindKey]: payload } : {}),
+    };
+    const response = await this.#request(
+      { dashboardWidget: { update } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboardWidget;
+    if (!container || !Object.hasOwn(container, "update")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard widget update.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async deleteDashboardWidget(dashboardId, id) {
+    const response = await this.#request(
+      { dashboardWidget: { delete: { dashboardId, id } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.dashboardWidget;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the dashboard widget deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
+  async listDashboardWidgetTypes() {
+    const response = await this.#request(
+      { dashboardWidget: { types: {} } },
+      Date.now() + this.timeoutMs,
+    );
+    return extractNativeList(response, ["dashboardWidget", "types", "types"]);
+  }
+
   async listAccessoriesInRoom(roomId) {
     const response = await this.#request(
       { accessory: { list: { roomId } } },
@@ -2243,10 +2597,82 @@ export class SprutHubClient {
       entity = await this.#readExtensionChildEntity(parsed, deadline);
     } else if (parsed.kind === "window") {
       entity = await this.#readWindowEntity(parsed, requested, deadline);
+    } else if (parsed.kind === "dashboard") {
+      entity = await this.#readDashboardEntity(parsed, deadline);
+    } else if (parsed.kind === "dashboard_column") {
+      entity = await this.#readDashboardColumnEntity(parsed, deadline);
+    } else if (parsed.kind === "dashboard_widget") {
+      entity = await this.#readDashboardWidgetEntity(parsed, deadline);
     } else {
       throw invalidEntityRef();
     }
     return addIncludeResolution(entity, requested, ownerContext);
+  }
+
+  async #readDashboardEntity(parsed, deadline) {
+    const dashboard = await this.getDashboard(parsed.dashboardId, {
+      serial: parsed.serial,
+      deadline,
+    });
+    if (!dashboard) throw entityNotFound("dashboard");
+    const widgets = dashboard.columns.flatMap((column) => column.widgets);
+    const catalog = widgets.some(widgetReferencesHomeDevice)
+      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
+      : null;
+    return {
+      kind: "dashboard",
+      ref: dashboardRef(parsed.serial, dashboard.id),
+      id: dashboard.id,
+      name: redactSensitiveText(dashboard.name),
+      order: dashboard.order,
+      column_count: dashboard.columns.length,
+      widget_count: widgets.length,
+      columns: dashboard.columns.map((column) =>
+        presentDashboardColumn(parsed.serial, dashboard.id, column, catalog),
+      ),
+    };
+  }
+
+  async #readDashboardColumnEntity(parsed, deadline) {
+    const column = await this.getDashboardColumn(
+      parsed.dashboardId,
+      parsed.columnId,
+      { serial: parsed.serial, deadline },
+    );
+    if (!column) throw entityNotFound("dashboard column");
+    const catalog = column.widgets.some(widgetReferencesHomeDevice)
+      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
+      : null;
+    return {
+      kind: "dashboard_column",
+      ...presentDashboardColumn(
+        parsed.serial,
+        parsed.dashboardId,
+        column,
+        catalog,
+      ),
+    };
+  }
+
+  async #readDashboardWidgetEntity(parsed, deadline) {
+    const widget = await this.getDashboardWidget(
+      parsed.dashboardId,
+      parsed.widgetId,
+      { serial: parsed.serial, deadline },
+    );
+    if (!widget) throw entityNotFound("dashboard widget");
+    const catalog = widgetReferencesHomeDevice(widget)
+      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
+      : null;
+    return {
+      kind: "dashboard_widget",
+      ...presentDashboardWidget(
+        parsed.serial,
+        parsed.dashboardId,
+        widget,
+        catalog,
+      ),
+    };
   }
 
   async #readRoomEntity(parsed, deadline) {
@@ -4878,6 +5304,18 @@ export function extensionChildRef(serial, key, id) {
   return `${extensionRef(serial, key)}/child/${encodeURIComponent(id)}`;
 }
 
+export function dashboardRef(serial, dashboardId) {
+  return `${homeRef(serial)}/dashboard/${dashboardId}`;
+}
+
+export function dashboardColumnRef(serial, dashboardId, columnId) {
+  return `${dashboardRef(serial, dashboardId)}/column/${columnId}`;
+}
+
+export function dashboardWidgetRef(serial, dashboardId, widgetId) {
+  return `${dashboardRef(serial, dashboardId)}/widget/${widgetId}`;
+}
+
 function windowRef(serial, key) {
   return `${homeRef(serial)}/window/${encodeURIComponent(key)}`;
 }
@@ -4948,6 +5386,37 @@ export function parseEntityRef(ref) {
   if (segments.length === 3 && segments[1] === "window") {
     return { kind: "window", serial, windowKey: segments[2] };
   }
+  if (segments.length === 3 && segments[1] === "dashboard") {
+    return {
+      kind: "dashboard",
+      serial,
+      dashboardId: parsePositiveEntityId(segments[2]),
+    };
+  }
+  if (
+    segments.length === 5 &&
+    segments[1] === "dashboard" &&
+    segments[3] === "column"
+  ) {
+    return {
+      kind: "dashboard_column",
+      serial,
+      dashboardId: parsePositiveEntityId(segments[2]),
+      columnId: parsePositiveEntityId(segments[4]),
+    };
+  }
+  if (
+    segments.length === 5 &&
+    segments[1] === "dashboard" &&
+    segments[3] === "widget"
+  ) {
+    return {
+      kind: "dashboard_widget",
+      serial,
+      dashboardId: parsePositiveEntityId(segments[2]),
+      widgetId: parsePositiveEntityId(segments[4]),
+    };
+  }
   if (segments[1] !== "accessory") throw invalidEntityRef();
   const accessoryId = parseEntityId(segments[2]);
   if (segments.length === 3) return { kind: "accessory", serial, accessoryId };
@@ -4992,6 +5461,317 @@ function parseEntityId(value) {
   const id = Number(value);
   if (!isStableId(id)) throw invalidEntityRef();
   return id;
+}
+
+function parsePositiveEntityId(value) {
+  if (!/^[1-9]\d*$/.test(value)) throw invalidEntityRef();
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw invalidEntityRef();
+  return id;
+}
+
+const NATIVE_DASHBOARD_WIDGET_KINDS = [
+  "tile",
+  "service",
+  "characteristic",
+  "chart",
+  "camera",
+  "shortcut",
+  "weather",
+  "clock",
+];
+
+function isPositiveDashboardId(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function validateDashboard(dashboard, expectedId) {
+  if (
+    !isPlainObject(dashboard) ||
+    !isPositiveDashboardId(dashboard.id) ||
+    (expectedId !== undefined && dashboard.id !== expectedId) ||
+    (dashboard.order !== undefined && !isStableId(dashboard.order)) ||
+    (dashboard.name !== undefined && typeof dashboard.name !== "string") ||
+    (dashboard.columns !== undefined && !Array.isArray(dashboard.columns))
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible dashboard message.",
+    );
+  }
+  for (const column of dashboard.columns ?? []) {
+    validateDashboardColumn(column, dashboard.id);
+  }
+}
+
+function validateDashboardColumn(column, expectedDashboardId, expectedId) {
+  if (
+    !isPlainObject(column) ||
+    !isPositiveDashboardId(column.id) ||
+    (expectedId !== undefined && column.id !== expectedId) ||
+    (column.dashboardId !== undefined &&
+      (!isPositiveDashboardId(column.dashboardId) ||
+        (expectedDashboardId !== undefined &&
+          column.dashboardId !== expectedDashboardId))) ||
+    (column.order !== undefined && !isStableId(column.order)) ||
+    (column.name !== undefined && typeof column.name !== "string") ||
+    (column.widgets !== undefined && !Array.isArray(column.widgets))
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible dashboard column message.",
+    );
+  }
+  for (const widget of column.widgets ?? []) {
+    validateDashboardWidget(widget, expectedDashboardId ?? column.dashboardId);
+  }
+}
+
+function validateDashboardWidget(widget, expectedDashboardId, expectedId) {
+  if (
+    !isPlainObject(widget) ||
+    !isPositiveDashboardId(widget.id) ||
+    (expectedId !== undefined && widget.id !== expectedId) ||
+    (widget.dashboardId !== undefined &&
+      (!isPositiveDashboardId(widget.dashboardId) ||
+        (expectedDashboardId !== undefined &&
+          widget.dashboardId !== expectedDashboardId))) ||
+    (widget.columnId !== undefined &&
+      !isPositiveDashboardId(widget.columnId)) ||
+    (widget.order !== undefined && !isStableId(widget.order)) ||
+    (widget.name !== undefined && typeof widget.name !== "string")
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible dashboard widget message.",
+    );
+  }
+}
+
+function detectDashboardWidgetKind(widget) {
+  for (const kind of NATIVE_DASHBOARD_WIDGET_KINDS) {
+    if (Object.hasOwn(widget, kind) && isPlainObject(widget[kind])) {
+      return kind;
+    }
+  }
+  return null;
+}
+
+function normalizeNativeDashboardWidget(
+  widget,
+  fallbackDashboardId,
+  fallbackColumnId,
+) {
+  const kind = detectDashboardWidgetKind(widget);
+  const rawPayload = kind ? widget[kind] : {};
+  let payload = {};
+  if (kind === "characteristic") {
+    payload = {
+      items: Array.isArray(rawPayload.items)
+        ? rawPayload.items.map(({ aId, sId, cId }) => ({ aId, sId, cId }))
+        : [],
+    };
+  } else if (kind === "chart") {
+    payload = {
+      items: Array.isArray(rawPayload.items)
+        ? rawPayload.items.map(({ aId, sId, cId }) => ({ aId, sId, cId }))
+        : [],
+      ...(rawPayload.group !== undefined ? { group: rawPayload.group } : {}),
+    };
+  } else if (kind === "service") {
+    payload = {
+      items: Array.isArray(rawPayload.items)
+        ? rawPayload.items.map(({ aId, sId }) => ({ aId, sId }))
+        : [],
+      ...(typeof rawPayload.showRooms === "boolean"
+        ? { showRooms: rawPayload.showRooms }
+        : {}),
+    };
+  } else if (kind === "camera") {
+    payload = {
+      items: Array.isArray(rawPayload.items)
+        ? rawPayload.items.map(({ aId, sId }) => ({ aId, sId }))
+        : [],
+    };
+  } else if (kind === "shortcut") {
+    payload = {
+      items: Array.isArray(rawPayload.items)
+        ? rawPayload.items.map(({ id }) => ({ id }))
+        : [],
+    };
+  }
+  return {
+    dashboardId: widget.dashboardId ?? fallbackDashboardId,
+    columnId: widget.columnId ?? fallbackColumnId,
+    id: widget.id,
+    order: widget.order ?? 0,
+    name: typeof widget.name === "string" ? widget.name : "",
+    type: kind,
+    payload,
+    ...(kind ? { [kind]: payload } : {}),
+  };
+}
+
+function normalizeNativeDashboardColumn(column, fallbackDashboardId) {
+  const dashboardId = column.dashboardId ?? fallbackDashboardId;
+  return {
+    dashboardId,
+    id: column.id,
+    order: column.order ?? 0,
+    name: typeof column.name === "string" ? column.name : "",
+    widgets: (column.widgets ?? []).map((widget) =>
+      normalizeNativeDashboardWidget(widget, dashboardId, column.id),
+    ),
+  };
+}
+
+function normalizeNativeDashboard(dashboard) {
+  return {
+    id: dashboard.id,
+    order: dashboard.order ?? 0,
+    name: typeof dashboard.name === "string" ? dashboard.name : "",
+    columns: (dashboard.columns ?? []).map((column) =>
+      normalizeNativeDashboardColumn(column, dashboard.id),
+    ),
+  };
+}
+
+function widgetReferencesHomeDevice(widget) {
+  return (
+    ["characteristic", "chart", "service", "camera"].includes(widget?.type) &&
+    Array.isArray(widget.payload?.items) &&
+    widget.payload.items.length > 0
+  );
+}
+
+function enrichCharacteristicItem(serial, item, catalog) {
+  const accessory = catalog?.byId?.get(item.aId) ?? null;
+  const service =
+    accessory?.services?.find((candidate) => candidate.sId === item.sId) ??
+    null;
+  const characteristic =
+    service?.characteristics?.find((candidate) => candidate.cId === item.cId) ??
+    null;
+  const room = accessory
+    ? (catalog.rooms.find((candidate) => candidate.id === accessory.roomId) ??
+      null)
+    : null;
+  const missing = !accessory || !service || !characteristic;
+  return {
+    characteristic_ref: characteristicRef(serial, item.aId, item.sId, item.cId),
+    aId: item.aId,
+    sId: item.sId,
+    cId: item.cId,
+    accessory_name: accessory
+      ? redactSensitiveText(accessory.name ?? "")
+      : null,
+    room_name: room ? redactSensitiveText(room.name ?? "") : null,
+    service_name: service ? redactSensitiveText(service.name ?? "") : null,
+    ...(service?.type ? { service_type: service.type } : {}),
+    characteristic_type: characteristic?.control?.type ?? null,
+    unit: characteristic?.control?.unit ?? null,
+    ...(missing ? { missing: true } : {}),
+  };
+}
+
+function enrichServiceItem(serial, item, catalog) {
+  const accessory = catalog?.byId?.get(item.aId) ?? null;
+  const service =
+    accessory?.services?.find((candidate) => candidate.sId === item.sId) ??
+    null;
+  const room = accessory
+    ? (catalog.rooms.find((candidate) => candidate.id === accessory.roomId) ??
+      null)
+    : null;
+  const missing = !accessory || !service;
+  return {
+    service_ref: serviceRef(serial, item.aId, item.sId),
+    aId: item.aId,
+    sId: item.sId,
+    accessory_name: accessory
+      ? redactSensitiveText(accessory.name ?? "")
+      : null,
+    room_name: room ? redactSensitiveText(room.name ?? "") : null,
+    service_name: service ? redactSensitiveText(service.name ?? "") : null,
+    ...(service?.type ? { service_type: service.type } : {}),
+    ...(missing ? { missing: true } : {}),
+  };
+}
+
+function presentDashboardWidget(serial, dashboardId, widget, catalog) {
+  const base = {
+    ref: dashboardWidgetRef(serial, dashboardId, widget.id),
+    dashboard_ref: dashboardRef(serial, dashboardId),
+    column_ref: dashboardColumnRef(serial, dashboardId, widget.columnId),
+    dashboard_id: dashboardId,
+    column_id: widget.columnId,
+    id: widget.id,
+    name: redactSensitiveText(widget.name ?? ""),
+    order: widget.order ?? 0,
+    type: widget.type,
+  };
+  if (widget.type === "characteristic") {
+    return {
+      ...base,
+      items: (widget.payload.items ?? []).map((item) =>
+        enrichCharacteristicItem(serial, item, catalog),
+      ),
+    };
+  }
+  if (widget.type === "chart") {
+    return {
+      ...base,
+      items: (widget.payload.items ?? []).map((item) =>
+        enrichCharacteristicItem(serial, item, catalog),
+      ),
+      ...(widget.payload.group !== undefined
+        ? { history_group: widget.payload.group }
+        : {}),
+    };
+  }
+  if (widget.type === "service") {
+    return {
+      ...base,
+      items: (widget.payload.items ?? []).map((item) =>
+        enrichServiceItem(serial, item, catalog),
+      ),
+      ...(typeof widget.payload.showRooms === "boolean"
+        ? { show_rooms: widget.payload.showRooms }
+        : {}),
+    };
+  }
+  if (widget.type === "camera") {
+    return {
+      ...base,
+      items: (widget.payload.items ?? []).map((item) =>
+        enrichServiceItem(serial, item, catalog),
+      ),
+    };
+  }
+  if (widget.type === "shortcut") {
+    const items = (widget.payload.items ?? []).map(({ id }) => ({ id }));
+    return {
+      ...base,
+      shortcut_ids: items.map(({ id }) => id),
+      items,
+    };
+  }
+  return base;
+}
+
+function presentDashboardColumn(serial, dashboardId, column, catalog) {
+  return {
+    ref: dashboardColumnRef(serial, dashboardId, column.id),
+    dashboard_ref: dashboardRef(serial, dashboardId),
+    dashboard_id: dashboardId,
+    id: column.id,
+    name: redactSensitiveText(column.name ?? ""),
+    order: column.order ?? 0,
+    widget_count: column.widgets.length,
+    widgets: column.widgets.map((widget) =>
+      presentDashboardWidget(serial, dashboardId, widget, catalog),
+    ),
+  };
 }
 
 function invalidEntityRef(action = "home_overview") {

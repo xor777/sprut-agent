@@ -1,9 +1,14 @@
 import {
+  dashboardColumnRef,
+  dashboardRef,
+  dashboardWidgetRef,
   hiddenLogicCode,
   hiddenLogicInfo,
   isHubReadFailure,
   SprutHubError,
 } from "./spruthub-client.mjs";
+
+export { dashboardColumnRef, dashboardRef, dashboardWidgetRef };
 
 // The operations of prepare_native_change and get_native_change_contract.
 export const NATIVE_CHANGE_OPERATIONS = [
@@ -31,6 +36,15 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "virtual_light_group",
   "virtual_device",
   "virtual_device_delete",
+  "dashboard_create",
+  "dashboard_update",
+  "dashboard_delete",
+  "dashboard_column_create",
+  "dashboard_column_update",
+  "dashboard_column_delete",
+  "dashboard_widget_create",
+  "dashboard_widget_update",
+  "dashboard_widget_delete",
 ];
 
 export function parseRoomRef(ref, configuredSerial) {
@@ -170,6 +184,111 @@ export function parseWindowRef(ref, configuredSerial) {
   const serial = decodeReferenceSegment(match[1]);
   requireConfiguredHome(serial, configuredSerial);
   return { windowKey: decodeReferenceSegment(match[2]) };
+}
+
+function parsePositiveDashboardId(raw, errorCode, message, action, details) {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new SprutHubError(errorCode, message, action, details);
+  }
+  const id = Number(raw);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new SprutHubError(errorCode, message, action, details);
+  }
+  return id;
+}
+
+export function parseDashboardRef(ref, configuredSerial) {
+  const match = /^spruthub:\/\/hub\/([^/]+)\/dashboard\/([^/]+)$/.exec(
+    typeof ref === "string" ? ref : "",
+  );
+  const message =
+    "Use a home-qualified dashboard reference from home_overview with list=dashboards or dashboard_create.";
+  const details = {
+    next: { tool: "home_overview", arguments: { list: "dashboards" } },
+  };
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_dashboard_ref",
+      message,
+      "home_overview",
+      details,
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  return {
+    id: parsePositiveDashboardId(
+      match[2],
+      "invalid_dashboard_ref",
+      message,
+      "home_overview",
+      details,
+    ),
+  };
+}
+
+export function parseDashboardColumnRef(ref, configuredSerial) {
+  const match =
+    /^spruthub:\/\/hub\/([^/]+)\/dashboard\/([^/]+)\/column\/([^/]+)$/.exec(
+      typeof ref === "string" ? ref : "",
+    );
+  const message =
+    "Use a home-qualified dashboard column reference returned by get_entity or dashboard_create.";
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_dashboard_column_ref",
+      message,
+      "get_entity",
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  return {
+    dashboardId: parsePositiveDashboardId(
+      match[2],
+      "invalid_dashboard_column_ref",
+      message,
+      "get_entity",
+    ),
+    columnId: parsePositiveDashboardId(
+      match[3],
+      "invalid_dashboard_column_ref",
+      message,
+      "get_entity",
+    ),
+  };
+}
+
+export function parseDashboardWidgetRef(ref, configuredSerial) {
+  const match =
+    /^spruthub:\/\/hub\/([^/]+)\/dashboard\/([^/]+)\/widget\/([^/]+)$/.exec(
+      typeof ref === "string" ? ref : "",
+    );
+  const message =
+    "Use a home-qualified dashboard widget reference returned by get_entity or dashboard_widget_create.";
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_dashboard_widget_ref",
+      message,
+      "get_entity",
+    );
+  }
+  const serial = decodeReferenceSegment(match[1]);
+  requireConfiguredHome(serial, configuredSerial);
+  return {
+    dashboardId: parsePositiveDashboardId(
+      match[2],
+      "invalid_dashboard_widget_ref",
+      message,
+      "get_entity",
+    ),
+    widgetId: parsePositiveDashboardId(
+      match[3],
+      "invalid_dashboard_widget_ref",
+      message,
+      "get_entity",
+    ),
+  };
 }
 
 export function assertWindowOptionWritable(windowKey) {
@@ -489,9 +608,23 @@ export function refuseRedactedChangeTexts(change) {
       source: requested?.data,
     },
     logic_source_update: { source: requested?.data },
+    dashboard_create: { name: change.requested_name },
+    dashboard_update: { name: change.requested_name },
+    dashboard_column_create: { name: change.requested_name },
+    dashboard_column_update: { name: change.requested_name },
+    dashboard_widget_create: { name: change.requested_widget?.name },
+    dashboard_widget_update: { name: change.requested_widget?.name },
   }[change.kind];
   for (const [field, text] of Object.entries(texts ?? {})) {
     refuseRedactionMark(text, field);
+  }
+  if (
+    change.kind === "dashboard_create" &&
+    Array.isArray(change.requested_column_names)
+  ) {
+    for (const columnName of change.requested_column_names) {
+      refuseRedactionMark(columnName, "column_names");
+    }
   }
 }
 
