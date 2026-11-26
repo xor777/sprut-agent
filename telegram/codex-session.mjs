@@ -21,6 +21,16 @@ const DEFAULT_REPO_ROOT = path.resolve(
   "..",
 );
 
+const SPRUT_AGENT_MCP_SERVER = "sprut-agent";
+const TELEGRAM_APPROVAL_POLICY = Object.freeze({
+  granular: Object.freeze({
+    mcp_elicitations: true,
+    request_permissions: false,
+    rules: false,
+    sandbox_approval: false,
+    skill_approval: false,
+  }),
+});
 const V2_APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -447,7 +457,19 @@ class CodexAppServerClient {
 
   #handleServerRequest(msg) {
     try {
-      if (V2_APPROVAL_METHODS.has(msg.method)) {
+      if (msg.method === "mcpServer/elicitation/request") {
+        const isSprutToolApproval =
+          msg.params?.serverName === SPRUT_AGENT_MCP_SERVER &&
+          msg.params?.mode === "form" &&
+          msg.params?._meta?.codex_approval_kind === "mcp_tool_call";
+        this.#write({
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: isSprutToolApproval
+            ? { action: "accept", content: {}, _meta: { persist: "session" } }
+            : { action: "decline" },
+        });
+      } else if (V2_APPROVAL_METHODS.has(msg.method)) {
         this.#write({
           jsonrpc: "2.0",
           id: msg.id,
@@ -804,7 +826,7 @@ export class CodexSessionManager {
       serviceTier: this.#config.codexServiceTier,
       cwd: this.workspaceDir,
       sandbox: "read-only",
-      approvalPolicy: "never",
+      approvalPolicy: TELEGRAM_APPROVAL_POLICY,
       developerInstructions: this.#developerInstructions,
     };
   }
