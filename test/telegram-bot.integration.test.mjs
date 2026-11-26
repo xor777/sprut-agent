@@ -599,6 +599,92 @@ rl.on("line", async (line) => {
       return;
     }
 
+    if (prompt.includes("[MCP_ELICITATION]")) {
+      const reqSprut = new Promise((resolve) =>
+        pendingServerResponses.set("elicit-sprut", resolve),
+      );
+      send({
+        jsonrpc: "2.0",
+        id: "elicit-sprut",
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId,
+          turnId,
+          serverName: "sprut-agent",
+          mode: "form",
+          _meta: {
+            codex_approval_kind: "mcp_tool_call",
+            persist: ["session", "always"],
+            tool_name: "send_device_commands",
+          },
+          message: "Allow sprut-agent?",
+          requestedSchema: { type: "object", properties: {} },
+        },
+      });
+      const resSprut = await reqSprut;
+
+      const reqForeign = new Promise((resolve) =>
+        pendingServerResponses.set("elicit-foreign", resolve),
+      );
+      send({
+        jsonrpc: "2.0",
+        id: "elicit-foreign",
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId,
+          turnId,
+          serverName: "other-mcp",
+          mode: "form",
+          _meta: { codex_approval_kind: "mcp_tool_call", tool_name: "evil" },
+          message: "Allow other-mcp?",
+          requestedSchema: { type: "object", properties: {} },
+        },
+      });
+      const resForeign = await reqForeign;
+
+      const reqNonTool = new Promise((resolve) =>
+        pendingServerResponses.set("elicit-nontool", resolve),
+      );
+      send({
+        jsonrpc: "2.0",
+        id: "elicit-nontool",
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId,
+          turnId,
+          serverName: "sprut-agent",
+          mode: "url",
+          url: "https://example.invalid/auth",
+          message: "Open link?",
+        },
+      });
+      const resNonTool = await reqNonTool;
+
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text:
+              "elicit:" +
+              (resSprut.result?.action ?? "err") +
+              ":" +
+              (resSprut.result?._meta?.persist ?? "none") +
+              "/" +
+              (resForeign.result?.action ?? "err") +
+              "/" +
+              (resNonTool.result?.action ?? "err"),
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
     if (prompt.includes("[FAIL_WITH_SECRET]")) {
       const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
       finish("failed", {
@@ -1067,7 +1153,15 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
   assert.equal(threadStartReq.msg.params.model, "gpt-6.2-sol");
   assert.equal(threadStartReq.msg.params.serviceTier, "priority");
   assert.equal(threadStartReq.msg.params.sandbox, "read-only");
-  assert.equal(threadStartReq.msg.params.approvalPolicy, "never");
+  assert.deepEqual(threadStartReq.msg.params.approvalPolicy, {
+    granular: {
+      mcp_elicitations: true,
+      request_permissions: false,
+      rules: false,
+      sandbox_approval: false,
+      skill_approval: false,
+    },
+  });
   assert.equal(
     threadStartReq.msg.params.cwd,
     path.join(harness.stateDir, "workspace"),
@@ -1797,5 +1891,29 @@ test("legacy v1 approval requests receive abort while v2 approvals receive decli
     harness.tg.sentMessages(1001)[0].text,
     "v1:abort/abort",
     "legacy v1 execCommandApproval and applyPatchApproval must reply with decision: abort",
+  );
+});
+
+test("mcpServer/elicitation/request accepts sprut-agent tool calls with session persistence and declines foreign or non-tool requests", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config,
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(510, 1001, "[MCP_ELICITATION]"),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+  assert.equal(
+    harness.tg.sentMessages(1001)[0].text,
+    "elicit:accept:session/decline/decline",
   );
 });
