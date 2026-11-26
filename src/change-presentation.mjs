@@ -1,6 +1,10 @@
 import { storedScenarioRunPlan } from "./block-validation.mjs";
 import { ROOM_NAME_LIMIT_NOTE, valuesEqual } from "./change-contracts.mjs";
 import { decodeReferenceSegment } from "./change-refs.mjs";
+import {
+  isDashboardChangeKind,
+  publicDashboardChange,
+} from "./dashboard-changes.mjs";
 import { hubCodeErrorFields } from "./hub-code.mjs";
 import {
   LIGHT_GROUP_MEMBERS,
@@ -251,6 +255,9 @@ export function publicNativeChange(
   }
   if (change.kind === VIRTUAL_DEVICE || change.kind === VIRTUAL_DEVICE_DELETE) {
     return publicVirtualDeviceChange(change, { verification });
+  }
+  if (isDashboardChangeKind(change.kind)) {
+    return publicDashboardChange(change, { verification });
   }
   if (change.kind === LIGHT_GROUP_MEMBERS) {
     return publicLampGroupChange(change, {

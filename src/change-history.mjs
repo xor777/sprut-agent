@@ -6,6 +6,11 @@ import {
   restoreIntentTime,
   summaryValue,
 } from "./change-restore.mjs";
+import {
+  dashboardAffectedRefs,
+  dashboardRestoreSupported,
+  isDashboardChangeKind,
+} from "./dashboard-changes.mjs";
 import { matchesStems, normalizeName, queryStems } from "./home-reads.mjs";
 import {
   changeOperation,
@@ -125,6 +130,9 @@ export function summaryRestoreSupported(change) {
   }
   if (change.kind === "block_action_pause" || change.kind === SCENARIO_DELETE) {
     return activeStatus;
+  }
+  if (isDashboardChangeKind(change.kind)) {
+    return dashboardRestoreSupported(change, { activeStatus, isConflict });
   }
   return activeStatus;
 }
@@ -760,6 +768,8 @@ export function nativeAffectedRefs(change, homeRef) {
     if (type !== undefined) {
       refs.push(`${change.target_ref}/logic/${encodeURIComponent(type)}`);
     }
+  } else if (isDashboardChangeKind(change.kind)) {
+    refs.push(...dashboardAffectedRefs(change, homeRef, canonicalAncestors));
   }
   return uniqueRefs(refs);
 }
@@ -793,7 +803,18 @@ export function canonicalAncestors(ref) {
   }
   const service =
     /^(spruthub:\/\/hub\/[^/]+\/accessory\/\d+)\/service\/\d+$/.exec(ref);
-  return service ? [service[1]] : [];
+  if (service) return [service[1]];
+  const dashboardChild =
+    /^((spruthub:\/\/hub\/[^/]+)\/dashboard\/[1-9]\d*)\/(?:column|widget)\/[1-9]\d*$/.exec(
+      ref,
+    );
+  if (dashboardChild) {
+    return [dashboardChild[2], dashboardChild[1]];
+  }
+  const dashboard = /^(spruthub:\/\/hub\/[^/]+)\/dashboard\/[1-9]\d*$/.exec(
+    ref,
+  );
+  return dashboard ? [dashboard[1]] : [];
 }
 
 export function uniqueRefs(refs) {

@@ -60,6 +60,13 @@ export const READ_METHODS = new Set([
   "extensionChild.list",
   "extensionChild.get",
   "file.filePart",
+  "dashboard.list",
+  "dashboard.get",
+  "dashboardColumn.list",
+  "dashboardColumn.get",
+  "dashboardWidget.list",
+  "dashboardWidget.get",
+  "dashboardWidget.types",
 ]);
 
 export function isWriteMethod(method) {
@@ -259,6 +266,67 @@ export const METHOD_EVIDENCE = {
   "file.complete": [
     OBSERVED,
     "2026-11-25-backup-and-window-buttons B6: {loc, path, scope} returns empty ACK {} and cleans up the temporary archive without changing Restore",
+  ],
+  "dashboard.list": [
+    OBSERVED,
+    "2026-11-26-dashboards: proto3 omits empty dashboards field",
+  ],
+  "dashboard.get": [
+    OBSERVED,
+    "2026-11-26-dashboards: returns full nested columns and widgets in 1 RPC",
+  ],
+  "dashboard.create": [
+    OBSERVED,
+    "2026-11-26-dashboards: returns {id, order, name} with 0 auto-created columns",
+  ],
+  "dashboard.update": [
+    OBSERVED,
+    "2026-11-26-dashboards: {id, name} returns empty ACK {}",
+  ],
+  "dashboard.delete": [
+    OBSERVED,
+    "2026-11-26-dashboards: {id} cascades columns/widgets and returns empty ACK {}",
+  ],
+  "dashboardColumn.list": [
+    OBSERVED,
+    "2026-11-26-dashboards: proto3 omits empty columns field",
+  ],
+  "dashboardColumn.get": [SCHEMA_ONLY, "57808-DashboardColumn.proto"],
+  "dashboardColumn.create": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, name?, order?} returns {dashboardId, id, order, name?}",
+  ],
+  "dashboardColumn.update": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, id, name?} returns empty ACK {}",
+  ],
+  "dashboardColumn.delete": [
+    OBSERVED,
+    "2026-11-26-dashboards: cascades non-empty column and widgets, pushes EVENT_REMOVE for each",
+  ],
+  "dashboardWidget.list": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, columnId?} omits empty widgets field",
+  ],
+  "dashboardWidget.get": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, id} returns DashboardWidgetMessage",
+  ],
+  "dashboardWidget.create": [
+    OBSERVED,
+    "2026-11-26-dashboards: characteristic, chart, service, clock live-verified; tile, camera, shortcut, weather per 88338-DashboardWidget.proto",
+  ],
+  "dashboardWidget.update": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, id, name?, <kind>} returns empty ACK {}",
+  ],
+  "dashboardWidget.delete": [
+    OBSERVED,
+    "2026-11-26-dashboards: {dashboardId, id} returns empty ACK {}",
+  ],
+  "dashboardWidget.types": [
+    OBSERVED,
+    "2026-11-26-dashboards: returns all 8 DashboardWidgetType values",
   ],
 };
 
@@ -2546,6 +2614,234 @@ const HANDLERS = {
     entry.completed = true;
     return {};
   },
+
+  "dashboard.list": (state, input) => {
+    const ids = Array.isArray(input?.ids) ? new Set(input.ids) : null;
+    const listed = state.dashboards
+      .filter((dashboard) => ids === null || ids.has(dashboard.id))
+      .map(projectDashboard);
+    return listed.length > 0 ? { dashboards: listed } : {};
+  },
+  "dashboard.get": (state, input) => {
+    const dashboard = requireDashboard(state, input?.id);
+    return projectDashboard(dashboard);
+  },
+  "dashboard.create": (state, input) => {
+    if (typeof input?.name !== "string" || input.name.trim().length === 0) {
+      throw invalidParams("Dashboard name is required");
+    }
+    const dashboard = {
+      id: state.nextDashboardId++,
+      order: Number.isSafeInteger(input.order)
+        ? input.order
+        : state.dashboards.length,
+      name: input.name,
+      columns: [],
+    };
+    state.dashboards.push(dashboard);
+    emitDashboards(state, "EVENT_ADD", [projectDashboard(dashboard)]);
+    return { id: dashboard.id, order: dashboard.order, name: dashboard.name };
+  },
+  "dashboard.update": (state, input) => {
+    const dashboard = requireDashboard(state, input?.id);
+    if (Object.hasOwn(input ?? {}, "name")) {
+      if (typeof input.name !== "string") {
+        throw invalidParams("Dashboard name must be a string");
+      }
+      dashboard.name = input.name;
+    }
+    emitDashboards(state, "EVENT_UPDATE", [projectDashboard(dashboard)]);
+    return {};
+  },
+  "dashboard.delete": (state, input) => {
+    const at = state.dashboards.findIndex((d) => d.id === input?.id);
+    if (at < 0) throw notFound(`Dashboard ${input?.id}`);
+    const [removed] = state.dashboards.splice(at, 1);
+    const removedWidgets = removed.columns.flatMap((c) =>
+      c.widgets.map(projectDashboardWidget),
+    );
+    if (removedWidgets.length > 0) {
+      emitDashboardWidgets(state, "EVENT_REMOVE", removedWidgets);
+    }
+    if (removed.columns.length > 0) {
+      emitDashboardColumns(
+        state,
+        "EVENT_REMOVE",
+        removed.columns.map(projectDashboardColumn),
+      );
+    }
+    emitDashboards(state, "EVENT_REMOVE", [projectDashboard(removed)]);
+    return {};
+  },
+
+  "dashboardColumn.list": (state, input) => {
+    const dashboard = requireDashboard(state, input?.dashboardId);
+    const listed = dashboard.columns.map(projectDashboardColumn);
+    return listed.length > 0 ? { columns: listed } : {};
+  },
+  "dashboardColumn.get": (state, input) => {
+    const { column } = requireDashboardColumn(
+      state,
+      input?.dashboardId,
+      input?.id,
+    );
+    return projectDashboardColumn(column);
+  },
+  "dashboardColumn.create": (state, input) => {
+    const dashboard = requireDashboard(state, input?.dashboardId);
+    if (Object.hasOwn(input ?? {}, "name") && typeof input.name !== "string") {
+      throw invalidParams("Dashboard column name must be a string");
+    }
+    const column = {
+      dashboardId: dashboard.id,
+      id: state.nextDashboardColumnId++,
+      order: Number.isSafeInteger(input.order)
+        ? input.order
+        : dashboard.columns.length,
+      ...(Object.hasOwn(input ?? {}, "name") ? { name: input.name } : {}),
+      widgets: [],
+    };
+    dashboard.columns.push(column);
+    emitDashboardColumns(state, "EVENT_ADD", [projectDashboardColumn(column)]);
+    return {
+      dashboardId: column.dashboardId,
+      id: column.id,
+      order: column.order,
+      ...(Object.hasOwn(column, "name") ? { name: column.name } : {}),
+    };
+  },
+  "dashboardColumn.update": (state, input) => {
+    const { column } = requireDashboardColumn(
+      state,
+      input?.dashboardId,
+      input?.id,
+    );
+    if (Object.hasOwn(input ?? {}, "name")) {
+      if (typeof input.name !== "string") {
+        throw invalidParams("Dashboard column name must be a string");
+      }
+      column.name = input.name;
+    }
+    emitDashboardColumns(state, "EVENT_UPDATE", [
+      projectDashboardColumn(column),
+    ]);
+    return {};
+  },
+  "dashboardColumn.delete": (state, input) => {
+    const dashboard = requireDashboard(state, input?.dashboardId);
+    const at = dashboard.columns.findIndex((c) => c.id === input?.id);
+    if (at < 0) throw notFound(`Dashboard column ${input?.id}`);
+    const [removed] = dashboard.columns.splice(at, 1);
+    if (removed.widgets.length > 0) {
+      emitDashboardWidgets(
+        state,
+        "EVENT_REMOVE",
+        removed.widgets.map(projectDashboardWidget),
+      );
+    }
+    emitDashboardColumns(state, "EVENT_REMOVE", [
+      projectDashboardColumn(removed),
+    ]);
+    return {};
+  },
+
+  "dashboardWidget.types": () => ({
+    types: [
+      { type: "TILE", name: "Tile" },
+      { type: "SERVICE", name: "Service" },
+      { type: "CHARACTERISTIC", name: "Characteristic" },
+      { type: "CHART", name: "Chart" },
+      { type: "CAMERA", name: "Camera" },
+      { type: "SHORTCUT", name: "Shortcut" },
+      { type: "WEATHER", name: "Weather" },
+      { type: "CLOCK", name: "Clock" },
+    ],
+  }),
+  "dashboardWidget.list": (state, input) => {
+    const dashboard = requireDashboard(state, input?.dashboardId);
+    const columns =
+      input?.columnId !== undefined
+        ? dashboard.columns.filter((c) => c.id === input.columnId)
+        : dashboard.columns;
+    const widgets = columns.flatMap((c) =>
+      c.widgets.map(projectDashboardWidget),
+    );
+    return widgets.length > 0 ? { widgets } : {};
+  },
+  "dashboardWidget.get": (state, input) => {
+    const { widget } = requireDashboardWidget(
+      state,
+      input?.dashboardId,
+      input?.id,
+    );
+    return projectDashboardWidget(widget);
+  },
+  "dashboardWidget.create": (state, input) => {
+    const { dashboard, column } = requireDashboardColumn(
+      state,
+      input?.dashboardId,
+      input?.columnId,
+    );
+    const kindKey = extractWidgetKindKey(input);
+    if (!kindKey) {
+      throw invalidParams("Dashboard widget kind payload is required");
+    }
+    if (Object.hasOwn(input ?? {}, "name") && typeof input.name !== "string") {
+      throw invalidParams("Dashboard widget name must be a string");
+    }
+    const widget = {
+      dashboardId: dashboard.id,
+      columnId: column.id,
+      id: state.nextDashboardWidgetId++,
+      order: Number.isSafeInteger(input.order)
+        ? input.order
+        : column.widgets.length,
+      ...(Object.hasOwn(input ?? {}, "name") ? { name: input.name } : {}),
+      [kindKey]: normalizeSimulatedWidgetPayload(kindKey, input[kindKey]),
+    };
+    column.widgets.push(widget);
+    const projected = projectDashboardWidget(widget);
+    emitDashboardWidgets(state, "EVENT_ADD", [projected]);
+    return projected;
+  },
+  "dashboardWidget.update": (state, input) => {
+    const { widget } = requireDashboardWidget(
+      state,
+      input?.dashboardId,
+      input?.id,
+    );
+    if (Object.hasOwn(input ?? {}, "name")) {
+      if (typeof input.name !== "string") {
+        throw invalidParams("Dashboard widget name must be a string");
+      }
+      widget.name = input.name;
+    }
+    const kindKey = extractWidgetKindKey(input);
+    if (kindKey) {
+      for (const candidate of DASHBOARD_WIDGET_KINDS) delete widget[candidate];
+      widget[kindKey] = normalizeSimulatedWidgetPayload(
+        kindKey,
+        input[kindKey],
+      );
+    }
+    emitDashboardWidgets(state, "EVENT_UPDATE", [
+      projectDashboardWidget(widget),
+    ]);
+    return {};
+  },
+  "dashboardWidget.delete": (state, input) => {
+    const { column, widget } = requireDashboardWidget(
+      state,
+      input?.dashboardId,
+      input?.id,
+    );
+    const at = column.widgets.indexOf(widget);
+    if (at >= 0) column.widgets.splice(at, 1);
+    emitDashboardWidgets(state, "EVENT_REMOVE", [
+      projectDashboardWidget(widget),
+    ]);
+    return {};
+  },
 };
 
 // Builds a standards-compliant stored (method 0) ZIP archive containing one
@@ -2890,6 +3186,10 @@ function buildState(fixture, hubTime) {
     nextScenarioIndex: 1,
     nextWindow: 1,
     nextSubscription: 1,
+    dashboards: [],
+    nextDashboardId: 1,
+    nextDashboardColumnId: 1,
+    nextDashboardWidgetId: 1,
   };
   for (const input of fixture.accessories) {
     state.accessories.push({
@@ -2950,6 +3250,54 @@ function buildState(fixture, hubTime) {
     };
     state.logics.push(assigned);
     logicOptions(state, assigned);
+  }
+  for (const input of fixture.dashboards ?? []) {
+    const dashboardId = input.id ?? state.nextDashboardId++;
+    state.nextDashboardId = Math.max(state.nextDashboardId, dashboardId + 1);
+    const dashboard = {
+      id: dashboardId,
+      order: input.order ?? state.dashboards.length,
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      columns: [],
+    };
+    for (const colInput of input.columns ?? []) {
+      const columnId = colInput.id ?? state.nextDashboardColumnId++;
+      state.nextDashboardColumnId = Math.max(
+        state.nextDashboardColumnId,
+        columnId + 1,
+      );
+      const column = {
+        dashboardId,
+        id: columnId,
+        order: colInput.order ?? dashboard.columns.length,
+        ...(colInput.name !== undefined ? { name: colInput.name } : {}),
+        widgets: [],
+      };
+      for (const widgetInput of colInput.widgets ?? []) {
+        const widgetId = widgetInput.id ?? state.nextDashboardWidgetId++;
+        state.nextDashboardWidgetId = Math.max(
+          state.nextDashboardWidgetId,
+          widgetId + 1,
+        );
+        const kindKey = extractWidgetKindKey(widgetInput);
+        if (!kindKey) {
+          throw new Error(`Fixture dashboard widget ${widgetId} lacks a kind`);
+        }
+        column.widgets.push({
+          dashboardId,
+          columnId,
+          id: widgetId,
+          order: widgetInput.order ?? column.widgets.length,
+          ...(widgetInput.name !== undefined ? { name: widgetInput.name } : {}),
+          [kindKey]: normalizeSimulatedWidgetPayload(
+            kindKey,
+            widgetInput[kindKey],
+          ),
+        });
+      }
+      dashboard.columns.push(column);
+    }
+    state.dashboards.push(dashboard);
   }
   return state;
 }
@@ -5101,6 +5449,162 @@ function emitRooms(state, event, rooms) {
   });
 }
 
+const DASHBOARD_WIDGET_KINDS = [
+  "tile",
+  "service",
+  "characteristic",
+  "chart",
+  "camera",
+  "shortcut",
+  "weather",
+  "clock",
+];
+
+function extractWidgetKindKey(input) {
+  if (!isRecord(input)) return null;
+  const found = DASHBOARD_WIDGET_KINDS.filter((key) =>
+    Object.hasOwn(input, key),
+  );
+  return found.length === 1 ? found[0] : null;
+}
+
+function normalizeSimulatedWidgetPayload(kindKey, raw) {
+  const payload = isRecord(raw) ? raw : {};
+  if (kindKey === "tile" || kindKey === "weather" || kindKey === "clock") {
+    return {};
+  }
+  if (kindKey === "characteristic") {
+    return {
+      items: Array.isArray(payload.items)
+        ? payload.items.map(({ aId, sId, cId }) => ({ aId, sId, cId }))
+        : [],
+    };
+  }
+  if (kindKey === "chart") {
+    return {
+      items: Array.isArray(payload.items)
+        ? payload.items.map(({ aId, sId, cId }) => ({ aId, sId, cId }))
+        : [],
+      ...(payload.group !== undefined ? { group: payload.group } : {}),
+    };
+  }
+  if (kindKey === "service") {
+    return {
+      items: Array.isArray(payload.items)
+        ? payload.items.map(({ aId, sId }) => ({ aId, sId }))
+        : [],
+      ...(typeof payload.showRooms === "boolean"
+        ? { showRooms: payload.showRooms }
+        : {}),
+    };
+  }
+  if (kindKey === "camera") {
+    return {
+      items: Array.isArray(payload.items)
+        ? payload.items.map(({ aId, sId }) => ({ aId, sId }))
+        : [],
+    };
+  }
+  if (kindKey === "shortcut") {
+    return {
+      items: Array.isArray(payload.items)
+        ? payload.items.map(({ id }) => ({ id }))
+        : [],
+    };
+  }
+  return {};
+}
+
+function projectDashboardWidget(widget) {
+  const kindKey = extractWidgetKindKey(widget);
+  const rawPayload = widget[kindKey] ?? {};
+  const projectedPayload = {};
+  if (Array.isArray(rawPayload.items) && rawPayload.items.length > 0) {
+    projectedPayload.items = structuredClone(rawPayload.items);
+  }
+  if (Object.hasOwn(rawPayload, "showRooms")) {
+    projectedPayload.showRooms = rawPayload.showRooms;
+  }
+  if (Object.hasOwn(rawPayload, "group")) {
+    projectedPayload.group = rawPayload.group;
+  }
+  return {
+    dashboardId: widget.dashboardId,
+    columnId: widget.columnId,
+    id: widget.id,
+    order: widget.order,
+    ...(Object.hasOwn(widget, "name") ? { name: widget.name } : {}),
+    [kindKey]: projectedPayload,
+  };
+}
+
+function projectDashboardColumn(column) {
+  return {
+    dashboardId: column.dashboardId,
+    id: column.id,
+    order: column.order,
+    ...(Object.hasOwn(column, "name") ? { name: column.name } : {}),
+    ...(column.widgets.length > 0
+      ? { widgets: column.widgets.map(projectDashboardWidget) }
+      : {}),
+  };
+}
+
+function projectDashboard(dashboard) {
+  return {
+    id: dashboard.id,
+    order: dashboard.order,
+    ...(Object.hasOwn(dashboard, "name") ? { name: dashboard.name } : {}),
+    ...(dashboard.columns.length > 0
+      ? { columns: dashboard.columns.map(projectDashboardColumn) }
+      : {}),
+  };
+}
+
+function requireDashboard(state, id) {
+  const dashboard = state.dashboards.find((candidate) => candidate.id === id);
+  if (!dashboard) throw notFound(`Dashboard ${id}`);
+  return dashboard;
+}
+
+function requireDashboardColumn(state, dashboardId, columnId) {
+  const dashboard = requireDashboard(state, dashboardId);
+  const column = dashboard.columns.find(
+    (candidate) => candidate.id === columnId,
+  );
+  if (!column) throw notFound(`Dashboard column ${columnId}`);
+  return { dashboard, column };
+}
+
+function requireDashboardWidget(state, dashboardId, widgetId) {
+  const dashboard = requireDashboard(state, dashboardId);
+  for (const column of dashboard.columns) {
+    const widget = column.widgets.find(
+      (candidate) => candidate.id === widgetId,
+    );
+    if (widget) return { dashboard, column, widget };
+  }
+  throw notFound(`Dashboard widget ${widgetId}`);
+}
+
+function emitDashboards(state, event, dashboards) {
+  state.emitAfterReply?.({
+    dashboard: { event, dashboards: structuredClone(dashboards) },
+  });
+}
+
+function emitDashboardColumns(state, event, columns) {
+  state.emitAfterReply?.({
+    dashboardColumn: { event, columns: structuredClone(columns) },
+  });
+}
+
+function emitDashboardWidgets(state, event, widgets) {
+  state.emitAfterReply?.({
+    dashboardWidget: { event, widgets: structuredClone(widgets) },
+  });
+}
+
 function emitAccessories(state, event, accessories) {
   state.emitAfterReply?.({
     accessory: {
@@ -5371,6 +5875,20 @@ export function homeSnapshot(state) {
       );
       for (const sId of bridgeExportedServices(extension, accessory)) {
         snapshot[`bridge/${extension.extensionKey}/${id}.${sId}`] = true;
+      }
+    }
+  }
+  for (const dashboard of state.dashboards ?? []) {
+    snapshot[`dashboard/${dashboard.id}/name`] = dashboard.name ?? "";
+    snapshot[`dashboard/${dashboard.id}/order`] = dashboard.order;
+    for (const column of dashboard.columns) {
+      snapshot[`dashboard/${dashboard.id}/column/${column.id}/name`] =
+        column.name ?? "";
+      snapshot[`dashboard/${dashboard.id}/column/${column.id}/order`] =
+        column.order;
+      for (const widget of column.widgets) {
+        snapshot[`dashboard/${dashboard.id}/widget/${widget.id}`] =
+          JSON.stringify(projectDashboardWidget(widget));
       }
     }
   }

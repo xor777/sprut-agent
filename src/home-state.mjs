@@ -60,6 +60,15 @@ const ACCESSORY_REREADS = 4;
 // Creating 4 accessories pushed about 360 frames in 2 s on the owner's hub.
 const EVENT_LOG_LIMIT = 1_000;
 
+// Pushed event domains that never affect rooms, accessories or characteristic
+// values (2026-11-26-dashboards): ignored so dashboard edits never invalidate
+// the warm HomeState cache or fill the in-flight event replay buffer.
+const IGNORED_EVENT_DOMAINS = new Set([
+  "dashboard",
+  "dashboardColumn",
+  "dashboardWidget",
+]);
+
 export class HomeState {
   #rooms = null;
   #accessories = null;
@@ -237,6 +246,13 @@ export class HomeState {
   // An event frame's event part, from the connection record.
   receive(event, record, receivedAt) {
     if (this.#accessories === null && !this.#log) return;
+    if (
+      event &&
+      typeof event === "object" &&
+      Object.keys(event).every((domain) => IGNORED_EVENT_DOMAINS.has(domain))
+    ) {
+      return;
+    }
     const entry = { event, record, receivedAt, seq: ++this.#seq };
     this.#append(entry);
     if (this.#accessories !== null) this.#apply(entry, { all: true });
@@ -316,6 +332,7 @@ export class HomeState {
     // them in its log and tells them apart by its own connection.
     const fromFeed = entry.record === this.#feed || this.#stale !== null;
     for (const [domain, part] of Object.entries(entry.event)) {
+      if (IGNORED_EVENT_DOMAINS.has(domain)) continue;
       if (domain === "characteristic") {
         this.#characteristicEvent(part, entry, scope, fromFeed);
       } else if (domain === "accessory") {
