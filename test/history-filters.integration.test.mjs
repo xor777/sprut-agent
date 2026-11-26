@@ -499,12 +499,18 @@ test("query matches Russian inflected forms across summary fields, rejects punct
     value: true,
     reason: "Добавить торшер для голосового управления",
   });
-  // Record with credential-shaped text and connection token in reason + Telegram button.
+  // Records with credential-shaped text and connection token in reason + Telegram button.
   await prepareAndApply(client, {
     operation: "room_name",
     target_ref: `${HOME_REF}/room/7`,
     value: "Кабинет 5",
-    reason: `Ссылка ${EMBEDDED_SECRET_URL} и токен ${SIMULATED_HUB_TOKEN}`,
+    reason: `Ссылка камеры ${EMBEDDED_SECRET_URL}`,
+  });
+  await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/8`,
+    value: "Ванная обновлённая",
+    reason: `Служебный токен ${SIMULATED_HUB_TOKEN}`,
   });
   await prepareAndApply(client, {
     operation: "window_button",
@@ -532,7 +538,7 @@ test("query matches Russian inflected forms across summary fields, rejects punct
     [bedroom.prepared.change_ref],
   );
 
-  // Matches `bridge` and `operation` fields.
+  // Matches `bridge`, `name`, and `operation` fields.
   const bridgeByName = await callOk(client, "get_native_change", {
     query: "homekit",
   });
@@ -541,11 +547,18 @@ test("query matches Russian inflected forms across summary fields, rejects punct
     [bridgeChange.prepared.change_ref],
   );
   const bridgeByOp = await callOk(client, "get_native_change", {
-    query: "bridge_export",
+    query: "window_option",
   });
   assert.deepEqual(
     bridgeByOp.changes.map(({ change_ref }) => change_ref),
     [bridgeChange.prepared.change_ref],
+  );
+  const byScenarioName = await callOk(client, "get_native_change", {
+    query: "ночной режим",
+  });
+  assert.deepEqual(
+    byScenarioName.changes.map(({ change_ref }) => change_ref),
+    [bedroom.prepared.change_ref],
   );
 
   // Matches `value` text ("Ночной коридор").
@@ -580,10 +593,18 @@ test("query matches Russian inflected forms across summary fields, rejects punct
   }
 
   // Secret strings are NEVER searchable and NEVER leaked in response JSON.
+  for (const bareSecret of ["hunter2SecretPass", TELEGRAM_BOT_TOKEN]) {
+    const probed = await callOk(client, "get_native_change", {
+      query: bareSecret,
+      limit: 50,
+    });
+    assert.deepEqual(probed.changes, [], `bare secret matched: ${bareSecret}`);
+  }
+  const telegramBotUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe`;
   for (const secretProbe of [
-    "hunter2SecretPass",
+    EMBEDDED_SECRET_URL,
+    telegramBotUrl,
     SIMULATED_HUB_TOKEN,
-    TELEGRAM_BOT_TOKEN,
     "REDACTED",
   ]) {
     const probed = await callOk(client, "get_native_change", {
@@ -600,6 +621,12 @@ test("query matches Russian inflected forms across summary fields, rejects punct
     assert.equal(serialized.includes(SIMULATED_HUB_TOKEN), false);
     assert.equal(serialized.includes(TELEGRAM_BOT_TOKEN), false);
   }
+  const unfilteredSerialized = JSON.stringify(
+    await callOk(client, "get_native_change", { limit: 50 }),
+  );
+  assert.equal(unfilteredSerialized.includes("hunter2SecretPass"), false);
+  assert.equal(unfilteredSerialized.includes(SIMULATED_HUB_TOKEN), false);
+  assert.equal(unfilteredSerialized.includes(TELEGRAM_BOT_TOKEN), false);
 });
 
 test("cursor pagination preserves filters across pages and rejects cursor reuse with different filters", async (t) => {
@@ -867,6 +894,20 @@ test("change_ref combined with list filters fails with invalid_history_query bef
     0,
     "mutual exclusion must reject before any hub login or RPC",
   );
+
+  // Calling get_native_change({ change_ref }) alone still reconciles normally.
+  const live = await setup(t);
+  const applied = await prepareAndApply(live.client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор проверка",
+    reason: "Проверить get_native_change с change_ref",
+  });
+  const inspected = await callOk(live.client, "get_native_change", {
+    change_ref: applied.prepared.change_ref,
+  });
+  assert.equal(inspected.status, "applied");
+  assert.equal(inspected.change_ref, applied.prepared.change_ref);
 });
 
 test("offline history listing works without hub credentials, surfaces unreadable connection.env, and rejects foreign home_ref with 0 hub requests", async (t) => {
@@ -913,6 +954,36 @@ test("offline history listing works without hub credentials, surfaces unreadable
     [saved.prepared.change_ref],
   );
   assert.equal(listedOffline.changes[0].restore_supported, true);
+
+  // 1b. Unreachable hub (closed port) with SPRUTHUB_LOGIN/SPRUTHUB_PASSWORD still lists local journal.
+  const closedHubUrl = hub.url;
+  const closedSerial = hub.serial;
+  await hub.close();
+  const unreachable = await connectServer(t, {
+    env: {
+      SPRUTHUB_URL: closedHubUrl,
+      SPRUTHUB_SERIAL: closedSerial,
+      SPRUTHUB_LOGIN: "owner@example.invalid",
+      SPRUTHUB_PASSWORD: "correct-password-123",
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
+      XDG_CONFIG_HOME: emptyConfigRoot,
+    },
+  });
+  const listedUnreachable = await callOk(
+    unreachable.client,
+    "get_native_change",
+    {
+      since: "2020-01-01",
+      applied_only: true,
+    },
+  );
+  assert.equal(listedUnreachable.status, "ok");
+  assert.equal(listedUnreachable.filters.time_zone, "UTC");
+  assert.equal(listedUnreachable.filters.time_zone_source, "utc_fallback");
+  assert.deepEqual(
+    listedUnreachable.changes.map(({ change_ref }) => change_ref),
+    [saved.prepared.change_ref],
+  );
 
   // 2. Unreadable / wrong-mode connection.env (0o644) still surfaces credential_file_unavailable.
   const badConfigRoot = await mkdtemp(

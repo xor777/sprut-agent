@@ -1,17 +1,42 @@
 import { blockAffectedRefs } from "./block-model.mjs";
 import { publicPauseEffect } from "./change-presentation.mjs";
-import { groupRef, stableNativeId } from "./change-refs.mjs";
-import { changeName, summaryValue } from "./change-restore.mjs";
+import { groupRef, REDACTED_MARK, stableNativeId } from "./change-refs.mjs";
+import {
+  changeName,
+  restoreIntentTime,
+  summaryValue,
+} from "./change-restore.mjs";
+import { matchesStems, normalizeName, queryStems } from "./home-reads.mjs";
 import {
   changeOperation,
   LIGHT_GROUP_MEMBERS,
 } from "./light-group-members.mjs";
 import { createdLogicMapping } from "./logic-changes.mjs";
-import { isNativeValueChange } from "./native-values.mjs";
-import { isLogicSourceChange } from "./scenario-changes.mjs";
-import { SprutHubError } from "./spruthub-client.mjs";
+import {
+  isNativeValueChange,
+  nativeValueRestoration,
+} from "./native-values.mjs";
+import {
+  isLogicSourceChange,
+  scenarioRestoreSupported,
+} from "./scenario-changes.mjs";
+import { SprutHubError, zonedTimestamp } from "./spruthub-client.mjs";
+import { VIRTUAL_DEVICE, VIRTUAL_DEVICE_DELETE } from "./virtual-device.mjs";
 import { WINDOW_BUTTON } from "./window-buttons.mjs";
 import { canOwnCreatedAccessories } from "./xiaomi-join.mjs";
+
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const ISO_OFFSET_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+const APPLIED_HISTORY_STATUSES = new Set([
+  "applied",
+  "restored",
+  "completed",
+  "superseded",
+  "uncertain",
+  "applying",
+  "restoring",
+]);
 
 // When a change was first applied: its first apply intent, else (a draft)
 // when it was recorded.
@@ -28,6 +53,210 @@ export function compareApplication(left, right) {
     left.created_at.localeCompare(right.created_at) ||
     left.id.localeCompare(right.id)
   );
+}
+
+// Whether a stored history record can currently be passed to
+// restore_native_change, matching publicNativeChange's per-kind ownership and
+// restoration rules while marking unsent/terminal statuses false.
+export function summaryRestoreSupported(change) {
+  const statusEligible =
+    change.status === "applied" ||
+    change.status === "uncertain" ||
+    ((change.status === "applying" || change.status === "restoring") &&
+      change.native_write_sent === true);
+  if (!statusEligible) return false;
+  if (change.kind === "scenario_run" || change.kind === WINDOW_BUTTON) {
+    return false;
+  }
+  if (change.kind === "room_create") {
+    return change.room_creation_owned === true;
+  }
+  if (change.kind === "virtual_light_group") {
+    return change.virtual_accessory_creation_owned === true;
+  }
+  if (change.kind === VIRTUAL_DEVICE) {
+    return change.creation_owned === true;
+  }
+  if (change.kind === VIRTUAL_DEVICE_DELETE) {
+    return change.status === "applied";
+  }
+  if (change.kind === "logic_assignment") {
+    return change.assignment_ownership_lost !== true;
+  }
+  if (
+    change.kind === "block_create" ||
+    change.kind === "block_data_update" ||
+    isLogicSourceChange(change)
+  ) {
+    return scenarioRestoreSupported(change);
+  }
+  if (isNativeValueChange(change)) {
+    return (
+      change.lamp_level !== true && nativeValueRestoration(change).supported
+    );
+  }
+  return true;
+}
+
+export function isAppliedHistoryChange(change) {
+  if (change.status === "prepared" || change.status === "not_applied") {
+    return false;
+  }
+  if (APPLIED_HISTORY_STATUSES.has(change.status)) return true;
+  return change.native_write_sent === true;
+}
+
+// Pure syntactic validation of history filters so malformed dates, inverted
+// comparable bounds, and punctuation-only queries fail before hub contact.
+export function parseHistoryFilterSyntax({ since, until, query } = {}) {
+  const parsedSince =
+    since === undefined ? null : parseHistoryBound(since, "since");
+  const parsedUntil =
+    until === undefined ? null : parseHistoryBound(until, "until");
+  if (parsedSince !== null && parsedUntil !== null) {
+    if (
+      parsedSince.kind === "date" &&
+      parsedUntil.kind === "date" &&
+      parsedSince.raw > parsedUntil.raw
+    ) {
+      throw invertedTimeRange();
+    }
+    if (
+      parsedSince.kind === "timestamp" &&
+      parsedUntil.kind === "timestamp" &&
+      parsedSince.ms > parsedUntil.ms
+    ) {
+      throw invertedTimeRange();
+    }
+  }
+  let parsedQuery = null;
+  if (query !== undefined) {
+    const raw = typeof query === "string" ? query.trim() : "";
+    const normalized = normalizeName(raw);
+    if (normalized.length === 0) {
+      throw new SprutHubError(
+        "invalid_history_query",
+        "query must contain at least one letter or digit.",
+        "get_native_change",
+      );
+    }
+    parsedQuery = {
+      raw,
+      normalized,
+      stems: queryStems(raw),
+    };
+  }
+  return {
+    since: parsedSince,
+    until: parsedUntil,
+    needsTimeZone: parsedSince?.kind === "date" || parsedUntil?.kind === "date",
+    query: parsedQuery,
+  };
+}
+
+export function resolveHistoryTimeRange(parsed, hubTimeZone) {
+  const { since, until, needsTimeZone } = parsed;
+  if (since === null && until === null) {
+    return {
+      sinceMs: null,
+      untilMs: null,
+      sinceAt: null,
+      untilAt: null,
+      timeZone: null,
+      timeZoneSource: null,
+    };
+  }
+  let zone = null;
+  let timeZoneSource;
+  if (needsTimeZone) {
+    zone = isValidIanaTimeZone(hubTimeZone) ? hubTimeZone : null;
+    timeZoneSource = zone !== null ? "hub" : "utc_fallback";
+  } else {
+    timeZoneSource = "explicit";
+  }
+  const sinceMs =
+    since === null
+      ? null
+      : since.kind === "date"
+        ? startOfCalendarDayMs(since.year, since.month, since.day, zone)
+        : since.ms;
+  const untilMs =
+    until === null
+      ? null
+      : until.kind === "date"
+        ? endOfCalendarDayMs(until.year, until.month, until.day, zone)
+        : until.ms;
+  if (sinceMs !== null && untilMs !== null && sinceMs > untilMs) {
+    throw invertedTimeRange();
+  }
+  const formatBound = (ms) =>
+    ms === null
+      ? null
+      : zone !== null
+        ? (zonedTimestamp(ms, zone) ?? new Date(ms).toISOString())
+        : new Date(ms).toISOString();
+  return {
+    sinceMs,
+    untilMs,
+    sinceAt: formatBound(sinceMs),
+    untilAt: formatBound(untilMs),
+    timeZone: zone ?? "UTC",
+    timeZoneSource,
+  };
+}
+
+export function matchesHistoryTimeRange(change, sinceMs, untilMs) {
+  if (sinceMs === null && untilMs === null) return true;
+  if (inTimeRange(Date.parse(applicationTime(change)), sinceMs, untilMs)) {
+    return true;
+  }
+  if (change.status === "restored") {
+    const restoredAt = restoreIntentTime(change) ?? change.updated_at;
+    if (inTimeRange(Date.parse(restoredAt), sinceMs, untilMs)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Matches against already-sanitized changeSummary fields only, stripping
+// REDACTED_MARK so redacted placeholders are never searchable either.
+export function matchesHistoryQuery(sanitizedSummary, parsedQuery) {
+  const searchable = historySearchText(sanitizedSummary);
+  if (searchable.length === 0) return false;
+  if (parsedQuery.stems.length > 0) {
+    return matchesStems(parsedQuery.stems, searchable);
+  }
+  const tokens = parsedQuery.normalized.split(" ");
+  return matchesStems(tokens, searchable);
+}
+
+export function historyFiltersEcho({
+  parsed,
+  timeRange,
+  appliedOnly,
+  sanitizedQuery,
+}) {
+  const hasFilter =
+    parsed.since !== null ||
+    parsed.until !== null ||
+    appliedOnly !== undefined ||
+    parsed.query !== null;
+  if (!hasFilter) return undefined;
+  return {
+    ...(parsed.since !== null ? { since: parsed.since.raw } : {}),
+    ...(parsed.until !== null ? { until: parsed.until.raw } : {}),
+    ...(timeRange.sinceAt !== null ? { since_at: timeRange.sinceAt } : {}),
+    ...(timeRange.untilAt !== null ? { until_at: timeRange.untilAt } : {}),
+    ...(timeRange.timeZone !== null ? { time_zone: timeRange.timeZone } : {}),
+    ...(timeRange.timeZoneSource !== null
+      ? { time_zone_source: timeRange.timeZoneSource }
+      : {}),
+    ...(appliedOnly !== undefined ? { applied_only: appliedOnly } : {}),
+    ...(parsed.query !== null
+      ? { query: sanitizedQuery ?? parsed.query.raw }
+      : {}),
+  };
 }
 
 // What an owner recognises in a history line: what changed (name, value),
@@ -51,6 +280,7 @@ export function changeSummary(change) {
     ...(change.bridge_export ? { bridge: change.bridge_export.bridge } : {}),
     ...(value ? { value } : {}),
     recorded_status: change.status,
+    restore_supported: summaryRestoreSupported(change),
     ...(change.kind === "block_action_pause"
       ? {
           effect_status: publicPauseEffect(change).status,
@@ -90,12 +320,39 @@ export function compareChangeSummaries(left, right) {
   return updated || left.change_ref.localeCompare(right.change_ref);
 }
 
-export function historySelection(homeRef, entityRef, limit, cursor) {
+export function historySelection(
+  homeRef,
+  entityRef,
+  limit,
+  cursor,
+  filters = {},
+) {
+  const since = filters.since ?? null;
+  const until = filters.until ?? null;
+  const sinceMs = filters.sinceMs ?? null;
+  const untilMs = filters.untilMs ?? null;
+  const appliedOnly = filters.appliedOnly === true;
+  const query = filters.query ?? null;
   const scope = JSON.stringify({
     home_ref: homeRef,
     entity_ref: entityRef ?? null,
+    since,
+    until,
+    since_ms: sinceMs,
+    until_ms: untilMs,
+    applied_only: appliedOnly,
+    query,
   });
-  const selection = { homeRef, entityRef: entityRef ?? null, limit, scope };
+  const selection = {
+    homeRef,
+    entityRef: entityRef ?? null,
+    since,
+    until,
+    appliedOnly,
+    query,
+    limit,
+    scope,
+  };
   return {
     ...selection,
     after: decodeHistoryCursor(cursor, scope, selection),
@@ -144,6 +401,10 @@ export function historyNext(selection, cursor) {
     arguments: {
       home_ref: selection.homeRef,
       ...(selection.entityRef ? { entity_ref: selection.entityRef } : {}),
+      ...(selection.since !== null ? { since: selection.since } : {}),
+      ...(selection.until !== null ? { until: selection.until } : {}),
+      ...(selection.appliedOnly ? { applied_only: true } : {}),
+      ...(selection.query !== null ? { query: selection.query } : {}),
       limit: selection.limit,
       ...(cursor ? { cursor } : {}),
     },
@@ -153,10 +414,186 @@ export function historyNext(selection, cursor) {
 export function invalidHistoryCursor(selection) {
   return new SprutHubError(
     "invalid_cursor",
-    "Use the cursor returned by the history of get_native_change for the same home and entity filter.",
+    "Use the cursor returned by the history of get_native_change for the same home and filters.",
     "restart_history",
     { next: historyNext(selection, null) },
   );
+}
+
+function parseHistoryBound(raw, field) {
+  if (typeof raw !== "string") throw invalidTimeBound(field);
+  const dateOnly = DATE_ONLY_PATTERN.exec(raw);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    if (!isValidCalendarDate(year, month, day)) {
+      throw invalidTimeBound(field);
+    }
+    return { kind: "date", raw, year, month, day };
+  }
+  const iso = ISO_OFFSET_PATTERN.exec(raw);
+  if (!iso) throw invalidTimeBound(field);
+  const year = Number(iso[1]);
+  const month = Number(iso[2]);
+  const day = Number(iso[3]);
+  const hour = Number(iso[4]);
+  const minute = Number(iso[5]);
+  const second = Number(iso[6]);
+  const frac = iso[7] ?? "";
+  if (
+    !isValidCalendarDate(year, month, day) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    throw invalidTimeBound(field);
+  }
+  let offsetMinutes = 0;
+  if (iso[8] !== "Z") {
+    const sign = iso[9] === "-" ? -1 : 1;
+    const offsetHour = Number(iso[10]);
+    const offsetMinute = Number(iso[11]);
+    if (offsetHour > 23 || offsetMinute > 59) {
+      throw invalidTimeBound(field);
+    }
+    offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+  }
+  const millisecond =
+    frac.length > 0 ? Number(frac.slice(0, 3).padEnd(3, "0")) : 0;
+  const ms =
+    utcMillis(year, month, day, hour, minute, second, millisecond) -
+    offsetMinutes * 60_000;
+  if (!Number.isFinite(ms)) throw invalidTimeBound(field);
+  return { kind: "timestamp", raw, ms };
+}
+
+function invalidTimeBound(field) {
+  return new SprutHubError(
+    "invalid_time_range",
+    `${field} must be a valid calendar date (YYYY-MM-DD) or an ISO-8601 timestamp with an explicit timezone offset (Z or ±HH:MM), e.g. 2026-11-20 or 2026-11-20T10:00:00+03:00.`,
+    "get_native_change",
+  );
+}
+
+function invertedTimeRange() {
+  return new SprutHubError(
+    "invalid_time_range",
+    "since must be earlier than or equal to until.",
+    "get_native_change",
+  );
+}
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function daysInMonth(year, month) {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function isValidCalendarDate(year, month, day) {
+  return (
+    month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month)
+  );
+}
+
+function nextCalendarDay(year, month, day) {
+  if (day < daysInMonth(year, month)) return { year, month, day: day + 1 };
+  if (month < 12) return { year, month: month + 1, day: 1 };
+  return { year: year + 1, month: 1, day: 1 };
+}
+
+function utcMillis(year, month, day, hour = 0, minute = 0, second = 0, ms = 0) {
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, ms);
+  return date.getTime();
+}
+
+function isValidIanaTimeZone(timeZone) {
+  if (typeof timeZone !== "string" || timeZone.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Earliest UTC epoch millisecond (aligned to whole seconds) whose wall-clock
+// calendar date in timeZone is >= (year, month, day), handling DST transitions
+// including midnight jumps and fall-backs.
+function startOfCalendarDayMs(year, month, day, timeZone) {
+  const baseUtc = utcMillis(year, month, day);
+  if (timeZone === null || timeZone === "UTC") return baseUtc;
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const targetCode = year * 10_000 + month * 100 + day;
+  let lo = baseUtc - 18 * 3_600_000;
+  let hi = baseUtc + 18 * 3_600_000;
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2_000) * 1_000;
+    if (dateCodeInZone(formatter, mid) < targetCode) lo = mid + 1_000;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function endOfCalendarDayMs(year, month, day, timeZone) {
+  const next = nextCalendarDay(year, month, day);
+  return startOfCalendarDayMs(next.year, next.month, next.day, timeZone) - 1;
+}
+
+function dateCodeInZone(formatter, ms) {
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  for (const part of formatter.formatToParts(new Date(ms))) {
+    if (part.type === "year") year = Number(part.value);
+    else if (part.type === "month") month = Number(part.value);
+    else if (part.type === "day") day = Number(part.value);
+  }
+  return year * 10_000 + month * 100 + day;
+}
+
+function inTimeRange(timestampMs, sinceMs, untilMs) {
+  return (
+    Number.isFinite(timestampMs) &&
+    (sinceMs === null || timestampMs >= sinceMs) &&
+    (untilMs === null || timestampMs <= untilMs)
+  );
+}
+
+function historySearchText(summary) {
+  const parts = [];
+  for (const field of [
+    summary.name,
+    summary.reason,
+    summary.operation,
+    summary.bridge,
+  ]) {
+    if (typeof field === "string" && field.length > 0) {
+      parts.push(field.replaceAll(REDACTED_MARK, " "));
+    }
+  }
+  if (summary.value !== undefined && summary.value !== null) {
+    for (const bound of [summary.value.from, summary.value.to]) {
+      if (
+        typeof bound === "string" ||
+        typeof bound === "number" ||
+        typeof bound === "boolean"
+      ) {
+        parts.push(String(bound).replaceAll(REDACTED_MARK, " "));
+      }
+    }
+  }
+  return parts.join(" ");
 }
 
 export function nativeAffectedRefs(change, homeRef) {

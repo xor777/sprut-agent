@@ -17552,6 +17552,7 @@ test("history discovers changes by home and entity after restart", async (t) => 
       reason: "Изменить RESET delay",
       target_ref: scenarioRef,
       recorded_status: "prepared",
+      restore_supported: false,
       created_at: history.structuredContent.changes[0].created_at,
       updated_at: history.structuredContent.changes[0].updated_at,
       next: {

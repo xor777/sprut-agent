@@ -4,7 +4,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import packageMetadata from "../package.json" with { type: "json" };
 import { AutomationService } from "./automation-service.mjs";
-import { NATIVE_CHANGE_OPERATIONS } from "./change-refs.mjs";
+import { parseHistoryFilterSyntax } from "./change-history.mjs";
+import {
+  NATIVE_CHANGE_OPERATIONS,
+  parseConfiguredHomeRef,
+  requireEntityHome,
+} from "./change-refs.mjs";
 import {
   ConfigurationPointService,
   validateConfigurationPointHomeRef,
@@ -436,7 +441,7 @@ registerTool(
   {
     title: "Inspect a SprutHub change or the history of changes",
     description:
-      "Read-only. With change_ref: its status, reconciled with the hub after an interruption, timeout or restart without sending the write again; check it before another write. Without change_ref: the saved changes, newest first, each with what changed (name, value from and to), the agent's reason, applied_at, recorded_status (stored, not live) and group_ref. The changes of one request share its reason and time: «верни как было» restores them together. entity_ref keeps one entity's changes, an accessory's with its characteristics'.",
+      "Read-only. With change_ref: its status, reconciled with the hub after an interruption, timeout or restart without sending the write again; check it before another write. Without change_ref: the saved local history, newest first (works offline when the home is known), each with name, value from/to, reason, applied_at, recorded_status (stored, not live), restore_supported and group_ref. Filter by entity_ref, since/until (YYYY-MM-DD in hub time zone or ISO-8601 with Z/±HH:MM), applied_only=true (skip unapplied drafts) and query (reason, name, operation, bridge or value; Russian forms included). One request's changes share reason and time: «верни как было» restores them together.",
     inputSchema: {
       change_ref: z
         .string()
@@ -445,6 +450,34 @@ registerTool(
         .describe("Omitted: the history."),
       home_ref: homeRefInput,
       entity_ref: z.string().min(1).optional(),
+      since: z
+        .string()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe(
+          "Inclusive start: YYYY-MM-DD (hub time zone) or ISO-8601 with Z/±HH:MM.",
+        ),
+      until: z
+        .string()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe(
+          "Inclusive end: YYYY-MM-DD (end of day, hub time zone) or ISO-8601 with Z/±HH:MM.",
+        ),
+      applied_only: z
+        .boolean()
+        .optional()
+        .describe("true: skip unapplied drafts, rejections and conflicts."),
+      query: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          "Words in reason, name, operation, bridge or value (Russian forms included).",
+        ),
       limit: z.number().int().min(1).max(50).default(10),
       cursor: cursorInput,
     },
@@ -454,19 +487,49 @@ registerTool(
     change_ref: changeRef,
     home_ref: homeRef,
     entity_ref: entityRef,
+    since,
+    until,
+    applied_only: appliedOnly,
+    query,
     limit,
     cursor,
   }) =>
     runRoomTool(async () => {
-      const service = await getAutomationService();
-      return changeRef === undefined
-        ? service.listNativeChanges({
-            home_ref: homeRef,
-            entity_ref: entityRef,
-            limit,
-            cursor,
-          })
-        : service.getNativeChange(changeRef);
+      if (changeRef !== undefined) {
+        if (
+          since !== undefined ||
+          until !== undefined ||
+          appliedOnly !== undefined ||
+          query !== undefined ||
+          entityRef !== undefined ||
+          cursor !== undefined
+        ) {
+          throw new SprutHubError(
+            "invalid_history_query",
+            "change_ref inspects one change and cannot be combined with history list filters (since, until, applied_only, query, entity_ref, cursor).",
+            "get_native_change",
+          );
+        }
+        return (await getAutomationService()).getNativeChange(changeRef);
+      }
+      const service = await getAutomationServiceForHistoryList({
+        homeRef,
+        entityRef,
+        since,
+        until,
+        query,
+      });
+      return service.listNativeChanges({
+        home_ref: homeRef,
+        entity_ref: entityRef,
+        since,
+        until,
+        applied_only: appliedOnly,
+        query,
+        limit,
+        cursor,
+        sensitiveValues: connectionSecrets(),
+      });
     }),
 );
 
@@ -832,6 +895,59 @@ async function getAutomationService() {
     hubSerial: client.serial,
   });
   return automationService;
+}
+
+async function getAutomationServiceForHistoryList({
+  homeRef,
+  entityRef,
+  since,
+  until,
+  query,
+}) {
+  parseHistoryFilterSyntax({ since, until, query });
+  const identity = await connection.localHubIdentity();
+  const localSerial = identity.serial ?? undefined;
+  const requestedSerial =
+    homeRef === undefined ? null : parseConfiguredHomeRef(homeRef, localSerial);
+  if (entityRef !== undefined) {
+    requireEntityHome(entityRef, requestedSerial ?? localSerial);
+  }
+  let client = null;
+  let clientError = null;
+  try {
+    client = await getHubClient();
+  } catch (error) {
+    if (!(error instanceof SprutHubError)) throw error;
+    clientError = error;
+  }
+  if (client !== null) {
+    if (client.serial !== null) {
+      automationService ??= new AutomationService({
+        client,
+        stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+        hubUrl: client.url,
+        hubSerial: client.serial,
+      });
+      return automationService;
+    }
+    if (requestedSerial === null) {
+      selectedHomeRef(client);
+    }
+    return new AutomationService({
+      client,
+      stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+      hubUrl: client.url,
+      hubSerial: requestedSerial,
+    });
+  }
+  const offlineSerial = identity.serial ?? requestedSerial;
+  if (offlineSerial === null) throw clientError;
+  return new AutomationService({
+    client: null,
+    stateDirectory: process.env.SPRUT_AGENT_STATE_DIR,
+    hubUrl: identity.url,
+    hubSerial: offlineSerial,
+  });
 }
 
 async function getConfigurationPointService({
