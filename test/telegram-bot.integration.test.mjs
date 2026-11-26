@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   readlink,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -275,6 +276,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
     },
     async close() {
       notifyPolls();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     },
   };
@@ -613,7 +615,9 @@ async function readTrace(traceFile) {
 }
 
 async function createTestHarness(t, { allowedUserIds = "1001" } = {}) {
-  const root = await mkdtemp(path.join(tmpdir(), "sprut-telegram-test-"));
+  const root = await realpath(
+    await mkdtemp(path.join(tmpdir(), "sprut-telegram-test-")),
+  );
   const stateDir = path.join(root, "state");
   const envFile = path.join(root, "telegram.env");
   const authFile = path.join(root, "fake-codex-auth.json");
@@ -638,7 +642,11 @@ async function createTestHarness(t, { allowedUserIds = "1001" } = {}) {
   ];
   await writeFile(envFile, `${envLines.join("\n")}\n`, { mode: 0o600 });
 
+  const cleanups = [];
   t.after(async () => {
+    for (const fn of cleanups.reverse()) {
+      await fn();
+    }
     await tg.close();
     await rm(root, { recursive: true, force: true });
   });
@@ -659,6 +667,7 @@ async function createTestHarness(t, { allowedUserIds = "1001" } = {}) {
     codexBin,
     tg,
     baseEnv,
+    onCleanup: (fn) => cleanups.push(fn),
     readTrace: () => readTrace(traceFile),
   };
 }
@@ -745,7 +754,7 @@ test("allowlist and chat-type security refuse empty allowlist, ignore outsiders/
     logger: () => {},
   });
   await runner.start();
-  t.after(() => runner.stop());
+  harness.onCleanup(() => runner.stop());
 
   harness.tg.pushUpdate(
     makePrivateMessageUpdate(1, 9999, "Включи свет от чужого"),
@@ -805,6 +814,7 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
     logger: () => {},
   });
   await runner1.start();
+  harness.onCleanup(() => runner1.stop());
 
   // First user message -> thread/start, commentary filtered out, final_answer returned
   harness.tg.pushUpdate(
@@ -966,6 +976,7 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
     logger: () => {},
   });
   await runner2.start();
+  harness.onCleanup(() => runner2.stop());
   harness.tg.pushUpdate(
     makePrivateMessageUpdate(14, 1001, "Продолжаем после рестарта"),
   );
@@ -995,7 +1006,7 @@ test("persistent session, isolated CODEX_HOME, commentary filtering, restart res
     logger: () => {},
   });
   await runner3.start();
-  t.after(() => runner3.stop());
+  harness.onCleanup(() => runner3.stop());
 
   harness.tg.pushUpdate(makePrivateMessageUpdate(15, 1001, "Если тред пропал"));
   await waitFor(() => harness.tg.sentMessages(1001).length === 6);
@@ -1030,6 +1041,7 @@ test("concurrency serialization, long message split, photos, ServerRequest refus
     logger: (line) => logs.push(String(line)),
   });
   await runner.start();
+  harness.onCleanup(() => runner.stop());
 
   // 1. Two rapid messages serialize sequentially without interleaving + typing indicator fires
   harness.tg.pushUpdate(makePrivateMessageUpdate(20, 1001, "[SLOW] Первое"));
@@ -1234,7 +1246,7 @@ test("concurrency serialization, long message split, photos, ServerRequest refus
     logger: () => {},
   });
   await runnerAfterRestart.start();
-  t.after(() => runnerAfterRestart.stop());
+  harness.onCleanup(() => runnerAfterRestart.stop());
 
   // Push update 29; runner must NOT replay 20..28, only handle 29
   harness.tg.pushUpdate(makePrivateMessageUpdate(29, 1001, "Только свежее"));

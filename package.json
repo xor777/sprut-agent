@@ -12,6 +12,8 @@
     "conformance:live": "node research/live-conformance.mjs",
     "format": "biome format --write .",
     "start": "node src/server.mjs",
+    "telegram:bot": "node telegram/bot.mjs",
+    "telegram:pair": "node telegram/bot.mjs --pair",
     "eval:agent": "node research/eval-agent.mjs",
     "eval:judge-calibrate": "node research/eval-judge-calibrate.mjs",
     "eval:spruthub-master": "node research/evaluate-spruthub-master.mjs",
