@@ -110,12 +110,12 @@ async function connectServer(t, { env }) {
 
 async function setup(
   t,
-  { timeZone, withTelegram = false, timeoutMs = 2_000 } = {},
+  { timeZone, withTelegram = false, faults, timeoutMs = 2_000 } = {},
 ) {
   const fixture = await loadHomeFixture("apartment");
   if (timeZone !== undefined) fixture.hub.timeZone = timeZone;
   if (withTelegram) fixture.extensions.push(telegramExtension());
-  const hub = await startSimulatedHub(fixture);
+  const hub = await startSimulatedHub(fixture, faults ? { faults } : {});
   if (withTelegram) hub.state.windows[TELEGRAM_WINDOW] = telegramWindow();
   const stateDirectory = await mkdtemp(
     path.join(tmpdir(), "sprut-agent-history-filters-"),
@@ -1081,5 +1081,403 @@ test("MCP surface keeps 13 tools, <= 2048 char instructions, <= 1000 char tool d
       Object.hasOwn(historyTool.inputSchema.properties, prop),
       `get_native_change missing inputSchema property ${prop}`,
     );
+  }
+});
+
+test("credential-shaped query returns empty matches and never embeds raw secret in next_cursor", async (t) => {
+  const { client } = await setup(t);
+
+  // Ordinary non-secret reasons containing both "кухня" and "key", so dropping
+  // 1-char tokens ("x", "S") from "кухня /x?key=S" would otherwise match both.
+  await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/4`,
+    value: "Кухня 1",
+    reason: "Настроить key в кухне шаг 1",
+  });
+  await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/4`,
+    value: "Кухня 2",
+    reason: "Настроить key в кухне шаг 2",
+  });
+
+  const secretQuery = "кухня /x?key=S";
+  const result = await callOk(client, "get_native_change", {
+    query: secretQuery,
+    limit: 1,
+  });
+  assert.deepEqual(result.changes, []);
+  assert.equal(result.page.next_cursor, null);
+  assert.equal(result.next, null);
+  assert.equal(result.filters.query, "[REDACTED]");
+  assert.equal(JSON.stringify(result).includes("/x?key=S"), false);
+
+  // Even when a bad cursor is supplied alongside a secret query, invalid_cursor's
+  // restart next call never embeds the raw secret.
+  const badCursor = await callError(client, "get_native_change", {
+    query: secretQuery,
+    limit: 1,
+    cursor: "not-a-valid-cursor",
+  });
+  assert.equal(badCursor.error.code, "invalid_cursor");
+  assert.equal(badCursor.next.arguments.query, "[REDACTED]");
+  assert.equal(JSON.stringify(badCursor).includes("/x?key=S"), false);
+});
+
+test("summary restore_supported stays true for recoverable post-apply conflicts and false for permanent or unsent conflicts", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // 1. later_owned_change on a native value (room_name): recoverable once later change is undone.
+  const firstRename = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор А",
+    reason: "Первое переименование коридора",
+  });
+  const secondRename = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор Б",
+    reason: "Второе переименование коридора",
+  });
+  const laterBlocked = await callOk(client, "restore_native_change", {
+    change_ref: firstRename.prepared.change_ref,
+  });
+  assert.equal(laterBlocked.status, "conflict");
+  assert.equal(laterBlocked.conflict_reason, "later_owned_change");
+  assert.equal(laterBlocked.restore_supported, true);
+
+  // 2. room_not_empty on owned room_create: recoverable once room is emptied.
+  const createdRoom = await prepareAndApply(client, {
+    operation: "room_create",
+    target_ref: HOME_REF,
+    name: "Кладовая",
+    reason: "Создать кладовую",
+  });
+  const createdRoomRef = createdRoom.applied.room.ref;
+  await prepareAndApply(client, {
+    operation: "accessory_placement",
+    target_ref: `${HOME_REF}/accessory/16`,
+    name: "Торшер",
+    room_ref: createdRoomRef,
+    reason: "Перенести торшер в кладовую",
+  });
+  const roomNotEmpty = await callOk(client, "restore_native_change", {
+    change_ref: createdRoom.prepared.change_ref,
+  });
+  assert.equal(roomNotEmpty.status, "conflict");
+  assert.equal(roomNotEmpty.conflict_reason, "room_not_empty");
+  assert.equal(roomNotEmpty.restore_supported, true);
+
+  // 3. later_owned_change on accessory_placement: recoverable once later placement is undone.
+  const firstPlace = await prepareAndApply(client, {
+    operation: "accessory_placement",
+    target_ref: `${HOME_REF}/accessory/15`,
+    name: "Люстра А",
+    room_ref: `${HOME_REF}/room/3`,
+    reason: "Первое имя люстры",
+  });
+  await prepareAndApply(client, {
+    operation: "accessory_placement",
+    target_ref: `${HOME_REF}/accessory/15`,
+    name: "Люстра Б",
+    room_ref: `${HOME_REF}/room/3`,
+    reason: "Второе имя люстры",
+  });
+  const placeBlocked = await callOk(client, "restore_native_change", {
+    change_ref: firstPlace.prepared.change_ref,
+  });
+  assert.equal(placeBlocked.status, "conflict");
+  assert.equal(placeBlocked.conflict_reason, "later_owned_change");
+  assert.equal(placeBlocked.restore_supported, true);
+
+  // 4. Permanent manual_change_observed conflict on room_name -> false.
+  const manualEdited = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/4`,
+    value: "Кухня агента",
+    reason: "Переименование кухни до ручной правки",
+  });
+  hub.state.rooms.find(({ id }) => id === 4).name = "Кухня владельца";
+  const manualConflict = await callOk(client, "restore_native_change", {
+    change_ref: manualEdited.prepared.change_ref,
+  });
+  assert.equal(manualConflict.status, "conflict");
+  assert.equal(manualConflict.conflict_reason, "manual_change");
+  assert.equal(manualConflict.manual_change_observed, true);
+
+  // 5. Unsent pre-apply baseline_changed conflict -> false.
+  const unsentConflict = await callOk(client, "prepare_native_change", {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/1`,
+    value: "Прихожая агента",
+    reason: "Конфликт до отправки",
+  });
+  hub.state.rooms.find(({ id }) => id === 1).name = "Прихожая владельца";
+  const preApplyConflict = await callOk(client, "apply_native_change", {
+    change_ref: unsentConflict.change_ref,
+  });
+  assert.equal(preApplyConflict.status, "conflict");
+  assert.equal(preApplyConflict.conflict_reason, "baseline_changed");
+
+  const history = await callOk(client, "get_native_change", { limit: 50 });
+  const byRef = new Map(
+    history.changes.map((summary) => [summary.change_ref, summary]),
+  );
+
+  assert.equal(
+    byRef.get(firstRename.prepared.change_ref).restore_supported,
+    true,
+  );
+  assert.equal(
+    byRef.get(createdRoom.prepared.change_ref).restore_supported,
+    true,
+  );
+  assert.equal(
+    byRef.get(firstPlace.prepared.change_ref).restore_supported,
+    true,
+  );
+  assert.equal(
+    byRef.get(manualEdited.prepared.change_ref).restore_supported,
+    false,
+  );
+  assert.equal(byRef.get(unsentConflict.change_ref).restore_supported, false);
+
+  // Confirm the recoverable later_owned_change record actually restores once its blocker is undone.
+  await callOk(client, "restore_native_change", {
+    change_ref: secondRename.prepared.change_ref,
+  });
+  const recovered = await callOk(client, "restore_native_change", {
+    change_ref: firstRename.prepared.change_ref,
+  });
+  assert.equal(recovered.status, "restored");
+});
+
+test("query uses whole-word fallback for stopwords/single chars and preserves numeric tokens", async (t) => {
+  const { client } = await setup(t);
+
+  await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/8`,
+    value: "Ванная новая",
+    reason: "Настроить свет",
+  });
+  await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/7`,
+    value: "Кабинет 77",
+    reason: "Номер 77",
+  });
+  const hallway1 = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор 1",
+    reason: "Зона коридор 1",
+  });
+  const hallway2 = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор 2",
+    reason: "Зона коридор 2",
+  });
+  const hallway20 = await prepareAndApply(client, {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/2`,
+    value: "Коридор 20",
+    reason: "Зона коридор 20",
+  });
+  const bedroomWords = await prepareAndApply(client, {
+    operation: "scenario_active",
+    target_ref: `${HOME_REF}/scenario/5`,
+    value: false,
+    reason: "Выключить в спальне на ночь",
+  });
+
+  // Stopword-only fallback "в на" matches whole words, never prefixes like "Ванная / Настроить".
+  const stopwordQuery = await callOk(client, "get_native_change", {
+    query: "в на",
+    limit: 50,
+  });
+  assert.deepEqual(
+    stopwordQuery.changes.map(({ change_ref }) => change_ref),
+    [bedroomWords.prepared.change_ref],
+  );
+
+  // Single digit "7" must not prefix-match "77".
+  const digit7 = await callOk(client, "get_native_change", {
+    query: "7",
+    limit: 50,
+  });
+  assert.deepEqual(digit7.changes, []);
+
+  // Mixed query "коридор 2" preserves "2" as an exact numeric word (not "1" or "20").
+  const corridor2 = await callOk(client, "get_native_change", {
+    query: "коридор 2",
+    limit: 50,
+  });
+  assert.deepEqual(
+    corridor2.changes.map(({ change_ref }) => change_ref),
+    [hallway2.prepared.change_ref],
+  );
+  assert.equal(
+    corridor2.changes.some(({ change_ref }) =>
+      [hallway1.prepared.change_ref, hallway20.prepared.change_ref].includes(
+        change_ref,
+      ),
+    ),
+    false,
+  );
+});
+
+test("applied_only includes synthetic lamp-On conflict and excludes restored hub-refused not_owned records", async (t) => {
+  const { hub, client } = await setup(t, {
+    faults: { lampLogic: [{ aId: 15, sId: 13 }] },
+  });
+
+  // 1. Switch lamp 15 off, then set Brightness=60 so the lamp switches On
+  //    (creating a synthetic caused_by_change_id record with native_write_sent=false).
+  await callOk(client, "send_device_commands", {
+    home_ref: HOME_REF,
+    commands: [
+      {
+        target_ref: `${HOME_REF}/accessory/15/service/13/characteristic/14`,
+        value: false,
+      },
+    ],
+    reason: "Выключить люстру перед яркостью",
+  });
+  const brightnessCmd = await callOk(client, "send_device_commands", {
+    home_ref: HOME_REF,
+    commands: [
+      {
+        target_ref: `${HOME_REF}/accessory/15/service/13/characteristic/15`,
+        value: 60,
+      },
+    ],
+    reason: "Задать яркость выключенной люстре",
+  });
+  const brightnessRef = brightnessCmd.results[0].change_ref;
+
+  // Locate the synthetic lamp-On change caused by the brightness write.
+  const allAfterLamp = await callOk(client, "get_native_change", { limit: 50 });
+  const syntheticOnSummary = allAfterLamp.changes.find(
+    (entry) =>
+      entry.operation === "characteristic_value" &&
+      entry.target_ref ===
+        `${HOME_REF}/accessory/15/service/13/characteristic/14` &&
+      entry.change_ref !== brightnessRef &&
+      entry.reason === "Задать яркость выключенной люстре",
+  );
+  assert.ok(syntheticOnSummary, "expected synthetic lamp-On change in journal");
+
+  // Apply a later command to the same On characteristic, then attempt restore on the synthetic record.
+  await callOk(client, "send_device_commands", {
+    home_ref: HOME_REF,
+    commands: [
+      {
+        target_ref: `${HOME_REF}/accessory/15/service/13/characteristic/14`,
+        value: false,
+      },
+    ],
+    reason: "Позже выключить люстру",
+  });
+  const syntheticConflict = await callOk(client, "restore_native_change", {
+    change_ref: syntheticOnSummary.change_ref,
+  });
+  assert.equal(syntheticConflict.status, "conflict");
+  assert.equal(syntheticConflict.conflict_reason, "later_owned_change");
+
+  // 2. Hub-refused writes (not_applied) that transition to not_owned on restore attempt.
+  const refusedRename = await callOk(client, "prepare_native_change", {
+    operation: "room_name",
+    target_ref: `${HOME_REF}/room/6`,
+    value: "Отклонённая детская",
+    reason: "Отклонённое переименование комнаты",
+  });
+  hub.refuseNext("room.update", { code: 400, message: "Refused" });
+  await callError(client, "apply_native_change", {
+    change_ref: refusedRename.change_ref,
+  });
+  const refusedRenameRestored = await callOk(client, "restore_native_change", {
+    change_ref: refusedRename.change_ref,
+  });
+  assert.equal(refusedRenameRestored.status, "not_owned");
+  assert.equal(refusedRenameRestored.conflict_reason, "change_was_not_applied");
+
+  const refusedRoomCreate = await callOk(client, "prepare_native_change", {
+    operation: "room_create",
+    target_ref: HOME_REF,
+    name: "Отклонённая комната",
+    reason: "Отклонённое создание комнаты",
+  });
+  hub.refuseNext("room.create", { code: 400, message: "Refused" });
+  await callError(client, "apply_native_change", {
+    change_ref: refusedRoomCreate.change_ref,
+  });
+  const refusedCreateRestored = await callOk(client, "restore_native_change", {
+    change_ref: refusedRoomCreate.change_ref,
+  });
+  assert.equal(refusedCreateRestored.status, "not_owned");
+  assert.equal(
+    refusedCreateRestored.conflict_reason,
+    "room_creation_not_confirmed",
+  );
+
+  const appliedHistory = await callOk(client, "get_native_change", {
+    applied_only: true,
+    limit: 50,
+  });
+  const appliedRefs = new Set(
+    appliedHistory.changes.map(({ change_ref }) => change_ref),
+  );
+  assert.equal(appliedRefs.has(syntheticOnSummary.change_ref), true);
+  assert.equal(
+    appliedHistory.changes.find(
+      ({ change_ref }) => change_ref === syntheticOnSummary.change_ref,
+    ).restore_supported,
+    true,
+  );
+  assert.equal(appliedRefs.has(refusedRename.change_ref), false);
+  assert.equal(appliedRefs.has(refusedRoomCreate.change_ref), false);
+});
+
+test("multi-home/unpinned live client rejects get_native_change with home_selection_required even when home_ref is passed", async (t) => {
+  const fixture = await loadHomeFixture("apartment");
+  const hub = await startSimulatedHub(fixture);
+  const stateDirectory = await mkdtemp(
+    path.join(tmpdir(), "sprut-agent-history-unpinned-"),
+  );
+  const emptyConfigRoot = await mkdtemp(
+    path.join(tmpdir(), "sprut-agent-history-unpinned-cfg-"),
+  );
+  t.after(async () => {
+    await hub.close().catch(() => {});
+    await rm(stateDirectory, { recursive: true, force: true });
+    await rm(emptyConfigRoot, { recursive: true, force: true });
+  });
+
+  // Live token client with NO SPRUTHUB_SERIAL -> client.serial === null.
+  const { SPRUTHUB_SERIAL: _omitted, ...unpinnedEnv } = hub.connectionEnv();
+  const { client } = await connectServer(t, {
+    env: {
+      ...unpinnedEnv,
+      SPRUT_AGENT_STATE_DIR: stateDirectory,
+      XDG_CONFIG_HOME: emptyConfigRoot,
+    },
+  });
+
+  for (const args of [
+    {},
+    { home_ref: HOME_REF },
+    { home_ref: "spruthub://hub/nonexistent-home" },
+  ]) {
+    const failed = await callError(client, "get_native_change", args);
+    assert.equal(
+      failed.error.code,
+      "home_selection_required",
+      JSON.stringify(args),
+    );
+    assert.equal(failed.error.action, "home_overview", JSON.stringify(args));
   }
 });
