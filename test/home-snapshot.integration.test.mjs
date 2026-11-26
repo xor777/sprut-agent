@@ -1309,7 +1309,8 @@ test("in-window event modeling handles pre-snapshot reconciliation, clean post-s
     name: "Временная",
     reason: "До снимка создать временную комнату",
   });
-  const createdRoomRef = preCreatedRoom.room_ref;
+  const createdRoomRef = preCreatedRoom.room.ref;
+  assert.ok(createdRoomRef);
   // B3: scenario 3 BLOCK updated before snapshot; cleanly restored AFTER snapshot -> agent.
   const scen3Data = JSON.parse(
     hub.state.scenarios.find(({ index }) => index === "3").data,

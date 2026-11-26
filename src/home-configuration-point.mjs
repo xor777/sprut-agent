@@ -3,6 +3,7 @@ import { AutomationStore } from "./automation-store.mjs";
 import { canonicalBlock, withHiddenHttpUrls } from "./block-model.mjs";
 import {
   applicationTime,
+  changeAppliedAt,
   isAppliedHistoryChange,
   nativeAffectedRefs,
 } from "./change-history.mjs";
@@ -17,6 +18,7 @@ import {
   isRedactedNode,
   isSensitiveNativeNode,
   matchEnumValue,
+  parseEntityRef,
   redactSensitiveText,
   roomRef,
   SprutHubError,
@@ -730,6 +732,17 @@ function collectUnreadByKind(
   return refs;
 }
 
+function appendNotCompared(notCompared, entityRef, kind, entries) {
+  for (const item of entries) {
+    notCompared.push({
+      entity_ref: entityRef,
+      kind,
+      path: item.path,
+      reason: item.reason,
+    });
+  }
+}
+
 function diffRooms(savedRooms, currentRooms, notCompared) {
   const savedByRef = new Map(savedRooms.map((room) => [room.ref, room]));
   const currentByRef = new Map(currentRooms.map((room) => [room.ref, room]));
@@ -748,6 +761,7 @@ function diffRooms(savedRooms, currentRooms, notCompared) {
       { name: previous.name, visible: previous.visible },
       { name: room.name, visible: room.visible },
     );
+    appendNotCompared(notCompared, room.ref, "room", nc);
     if (changes.length > 0) {
       changed.push({
         ref: room.ref,
@@ -756,16 +770,7 @@ function diffRooms(savedRooms, currentRooms, notCompared) {
         changes,
         ...(nc.length > 0 ? { not_compared: nc } : {}),
       });
-    } else if (nc.length > 0) {
-      for (const item of nc) {
-        notCompared.push({
-          entity_ref: room.ref,
-          kind: "room",
-          path: item.path,
-          reason: item.reason,
-        });
-      }
-    } else {
+    } else if (nc.length === 0) {
       unchanged += 1;
     }
   }
@@ -805,6 +810,8 @@ function diffAccessories(savedAccessories, currentAccessories, notCompared) {
       previous.services ?? [],
       accessory.services ?? [],
     );
+    appendNotCompared(notCompared, accessory.ref, "accessory", nc);
+    notCompared.push(...svcDiff.notCompared);
     const hasDiff =
       changes.length > 0 ||
       svcDiff.added.length > 0 ||
@@ -825,19 +832,7 @@ function diffAccessories(savedAccessories, currentAccessories, notCompared) {
           : {}),
         ...(nc.length > 0 ? { not_compared: nc } : {}),
       });
-    } else if (nc.length > 0 || svcDiff.notCompared.length > 0) {
-      for (const item of nc) {
-        notCompared.push({
-          entity_ref: accessory.ref,
-          kind: "accessory",
-          path: item.path,
-          reason: item.reason,
-        });
-      }
-      for (const item of svcDiff.notCompared) {
-        notCompared.push(item);
-      }
-    } else {
+    } else if (nc.length === 0 && svcDiff.notCompared.length === 0) {
       unchanged += 1;
     }
   }
@@ -865,6 +860,7 @@ function diffAccessoryServices(previousServices, currentServices) {
       { type: previous.type, name: previous.name, visible: previous.visible },
       { type: service.type, name: service.name, visible: service.visible },
     );
+    appendNotCompared(notCompared, service.ref, "service", nc);
     if (changes.length > 0) {
       changed.push({
         sId: service.sId,
@@ -873,15 +869,6 @@ function diffAccessoryServices(previousServices, currentServices) {
         changes,
         ...(nc.length > 0 ? { not_compared: nc } : {}),
       });
-    } else if (nc.length > 0) {
-      for (const item of nc) {
-        notCompared.push({
-          entity_ref: service.ref,
-          kind: "service",
-          path: item.path,
-          reason: item.reason,
-        });
-      }
     }
   }
   for (const service of previousServices) {
@@ -921,6 +908,7 @@ function diffScenarios(
       comparableHomeScenario(previous),
       comparableHomeScenario(scenario),
     );
+    appendNotCompared(notCompared, scenario.ref, "scenario", nc);
     if (changes.length > 0) {
       changed.push({
         ref: scenario.ref,
@@ -931,16 +919,7 @@ function diffScenarios(
         ...(nc.length > 0 ? { not_compared: nc } : {}),
         _currentConfig: scenario.configuration ?? null,
       });
-    } else if (nc.length > 0) {
-      for (const item of nc) {
-        notCompared.push({
-          entity_ref: scenario.ref,
-          kind: "scenario",
-          path: item.path,
-          reason: item.reason,
-        });
-      }
-    } else {
+    } else if (nc.length === 0) {
       unchanged += 1;
     }
   }
@@ -1036,6 +1015,7 @@ function diffBridges(savedBridges, currentBridges, unreadBridges, notCompared) {
     const removedExports = [...prevExports]
       .filter((ref) => !currExports.has(ref))
       .sort();
+    appendNotCompared(notCompared, bridge.ref, "bridge", nc);
     if (
       changes.length > 0 ||
       addedExports.length > 0 ||
@@ -1052,16 +1032,7 @@ function diffBridges(savedBridges, currentBridges, unreadBridges, notCompared) {
           : {}),
         ...(nc.length > 0 ? { not_compared: nc } : {}),
       });
-    } else if (nc.length > 0) {
-      for (const item of nc) {
-        notCompared.push({
-          entity_ref: bridge.ref,
-          kind: "bridge",
-          path: item.path,
-          reason: item.reason,
-        });
-      }
-    } else {
+    } else if (nc.length === 0) {
       unchanged += 1;
     }
   }
@@ -1102,6 +1073,7 @@ function diffClimateSetpoints(
       previous,
       item,
     );
+    appendNotCompared(notCompared, item.ref, "characteristic", nc);
     if (changes.length > 0) {
       changed.push({
         ref: item.ref,
@@ -1111,16 +1083,7 @@ function diffClimateSetpoints(
         changes,
         ...(nc.length > 0 ? { not_compared: nc } : {}),
       });
-    } else if (nc.length > 0) {
-      for (const entry of nc) {
-        notCompared.push({
-          entity_ref: item.ref,
-          kind: "characteristic",
-          path: entry.path,
-          reason: entry.reason,
-        });
-      }
-    } else {
+    } else if (nc.length === 0) {
       unchanged += 1;
     }
   }
@@ -1226,6 +1189,7 @@ async function loadAttributionContext({
     return {
       unavailable: true,
       homeRef,
+      serial,
       sensitiveValues,
       entries: [],
     };
@@ -1237,7 +1201,8 @@ async function loadAttributionContext({
   for (const change of rawChanges) {
     if (change.home_ref !== homeRef) continue;
     if (!isAppliedHistoryChange(change)) continue;
-    if (!isChangeActiveInWindow(change, startMs, endMs)) continue;
+    const event = latestInWindowEvent(change, startMs, endMs);
+    if (!event) continue;
     const refs = new Set(nativeAffectedRefs(change, homeRef));
     if (typeof change.bridge_export?.bridge_ref === "string") {
       refs.add(change.bridge_export.bridge_ref);
@@ -1245,11 +1210,30 @@ async function loadAttributionContext({
     if (typeof change.recreated_index === "string") {
       refs.add(scenarioRef(serial, change.recreated_index));
     }
-    entries.push({ change, refs });
+    if (typeof change.options_window_ref === "string") {
+      refs.add(change.options_window_ref);
+    }
+    if (typeof change.device_window_ref === "string") {
+      refs.add(change.device_window_ref);
+    }
+    if (
+      change.kind === "scenario_delete" &&
+      change.baseline_snapshot?.type === "LOGIC"
+    ) {
+      const deletedIndex = deletedScenarioIndex(change);
+      if (deletedIndex !== null) {
+        for (const assignment of change.dependencies?.logic_assignments ?? []) {
+          if (typeof assignment?.service_ref === "string") {
+            refs.add(
+              `${assignment.service_ref}/logic/${encodeURIComponent(deletedIndex)}`,
+            );
+          }
+        }
+      }
+    }
+    entries.push({ change, refs, ...event });
   }
-  entries.sort((left, right) =>
-    compareChangesNewestFirst(left.change, right.change),
-  );
+  entries.sort(compareEntriesNewestFirst);
   return {
     unavailable: false,
     homeRef,
@@ -1259,20 +1243,44 @@ async function loadAttributionContext({
   };
 }
 
-function isChangeActiveInWindow(change, startMs, endMs) {
-  const appliedMs = Date.parse(applicationTime(change));
-  if (inWindow(appliedMs, startMs, endMs)) return true;
-  if (change.status === "restored") {
-    const restoredMs = Date.parse(
-      restoreIntentTime(change) ?? change.updated_at,
-    );
-    if (inWindow(restoredMs, startMs, endMs)) return true;
+// Only real agent write events inside [startMs, endMs] qualify: apply intent
+// (history applying timestamp) or explicit restore intent (write_intent with
+// direction === "restore" and no rejection). Read-only reconciliations and
+// no-write restores only bump updated_at and must not drag pre-snapshot
+// changes into the window.
+function latestInWindowEvent(change, startMs, endMs) {
+  const restoreAt = restoreIntentTime(change);
+  const restoreRejected =
+    change.write_intent?.direction === "restore" &&
+    change.write_intent?.rejection !== undefined;
+  const restoreMs =
+    typeof restoreAt === "string" &&
+    !restoreRejected &&
+    ["restored", "restoring", "uncertain", "conflict"].includes(change.status)
+      ? Date.parse(restoreAt)
+      : Number.NaN;
+
+  const applyAt =
+    changeAppliedAt(change) ??
+    (change.native_write_sent === true ? change.created_at : undefined);
+  const applyRejected =
+    change.write_intent?.direction === "apply" &&
+    change.write_intent?.rejection !== undefined;
+  const appliedMs =
+    typeof applyAt === "string" && !applyRejected
+      ? Date.parse(applyAt)
+      : Number.NaN;
+
+  const restoreInWindow = inWindow(restoreMs, startMs, endMs);
+  const applyInWindow = inWindow(appliedMs, startMs, endMs);
+
+  if (restoreInWindow && (!applyInWindow || restoreMs >= appliedMs)) {
+    return { eventKind: "restore", eventMs: restoreMs, eventAt: restoreAt };
   }
-  if (change.status === "conflict") {
-    const updatedMs = Date.parse(change.updated_at);
-    if (inWindow(updatedMs, startMs, endMs)) return true;
+  if (applyInWindow) {
+    return { eventKind: "apply", eventMs: appliedMs, eventAt: applyAt };
   }
-  return false;
+  return null;
 }
 
 function inWindow(ms, startMs, endMs) {
@@ -1341,33 +1349,34 @@ function buildVerdict(context, matchedEntries, allCovered) {
   if (matchedEntries.length === 0) {
     return { attribution: "manual_or_external" };
   }
-  const uniqueChanges = [];
+  const sorted = [...matchedEntries].sort(compareEntriesNewestFirst);
+  const uniqueEntries = [];
   const seenIds = new Set();
-  for (const { change } of matchedEntries) {
-    if (seenIds.has(change.id)) continue;
-    seenIds.add(change.id);
-    uniqueChanges.push(change);
+  for (const entry of sorted) {
+    if (seenIds.has(entry.change.id)) continue;
+    seenIds.add(entry.change.id);
+    uniqueEntries.push(entry);
   }
-  uniqueChanges.sort(compareChangesNewestFirst);
-  const hasLaterSignal =
-    !allCovered ||
-    uniqueChanges.some(
-      (change) => change.status === "restored" || change.status === "conflict",
-    );
+  const latest = uniqueEntries[0].change;
+  const latestHasForeignConflict =
+    latest.status === "conflict" &&
+    latest.conflict_reason !== "later_owned_change";
+  const hasLaterSignal = !allCovered || latestHasForeignConflict;
   return {
     attribution: hasLaterSignal ? "agent_and_later_change" : "agent",
-    matching_agent_changes: uniqueChanges
+    matching_agent_changes: uniqueEntries
       .slice(0, MAX_MATCHING_AGENT_CHANGES)
-      .map((change) =>
-        summarizeMatchingAgentChange(change, context.sensitiveValues),
+      .map((entry) =>
+        summarizeMatchingAgentChange(entry, context.sensitiveValues),
       ),
-    ...(uniqueChanges.length > MAX_MATCHING_AGENT_CHANGES
-      ? { matching_agent_changes_total: uniqueChanges.length }
+    ...(uniqueEntries.length > MAX_MATCHING_AGENT_CHANGES
+      ? { matching_agent_changes_total: uniqueEntries.length }
       : {}),
   };
 }
 
-function summarizeMatchingAgentChange(change, sensitiveValues) {
+function summarizeMatchingAgentChange(entry, sensitiveValues) {
+  const { change, eventKind, eventAt } = entry;
   return {
     change_ref: `spruthub-change://native/${change.id}`,
     operation: changeOperation(change),
@@ -1375,15 +1384,64 @@ function summarizeMatchingAgentChange(change, sensitiveValues) {
       ? { reason: sanitizeAgentOutput(change.reason, sensitiveValues) }
       : {}),
     applied_at: applicationTime(change),
+    ...(eventKind === "restore" ? { restored_at: eventAt } : {}),
     recorded_status: change.status,
   };
 }
 
-function compareChangesNewestFirst(left, right) {
+function compareEntriesNewestFirst(left, right) {
   return (
-    applicationTime(right).localeCompare(applicationTime(left)) ||
-    right.updated_at.localeCompare(left.updated_at) ||
-    right.id.localeCompare(left.id)
+    right.eventMs - left.eventMs ||
+    right.change.updated_at.localeCompare(left.change.updated_at) ||
+    right.change.id.localeCompare(left.change.id)
+  );
+}
+
+function isAccessoryAddedEvent(entry) {
+  const { change, eventKind } = entry;
+  if (eventKind === "apply") {
+    return (
+      change.kind === "virtual_device" ||
+      change.kind === "virtual_light_group" ||
+      (change.kind === "window_button" && change.button_kind === "xiaomi_join")
+    );
+  }
+  return eventKind === "restore" && change.kind === "virtual_device_delete";
+}
+
+function isAccessoryRemovedEvent(entry) {
+  const { change, eventKind } = entry;
+  if (eventKind === "apply") {
+    return (
+      change.kind === "virtual_device_delete" ||
+      (change.kind === "window_button" &&
+        change.button_kind === "device_remove")
+    );
+  }
+  return (
+    eventKind === "restore" &&
+    (change.kind === "virtual_device" || change.kind === "virtual_light_group")
+  );
+}
+
+function isScenarioAddedEvent(entry) {
+  const { change, eventKind } = entry;
+  if (eventKind === "apply") {
+    return (
+      change.kind === "block_create" || change.kind === "logic_source_create"
+    );
+  }
+  return eventKind === "restore" && change.kind === "scenario_delete";
+}
+
+function isScenarioRemovedEvent(entry) {
+  const { change, eventKind } = entry;
+  if (eventKind === "apply") {
+    return change.kind === "scenario_delete";
+  }
+  return (
+    eventKind === "restore" &&
+    (change.kind === "block_create" || change.kind === "logic_source_create")
   );
 }
 
@@ -1391,15 +1449,18 @@ function attributeRoomItem(context, action, item) {
   if (context.unavailable) return { attribution: "unavailable" };
   if (action === "added") {
     const matched = context.entries.filter(
-      ({ change, refs }) => change.kind === "room_create" && refs.has(item.ref),
+      ({ change, refs, eventKind }) =>
+        eventKind === "apply" &&
+        change.kind === "room_create" &&
+        refs.has(item.ref),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
   if (action === "removed") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
+      ({ change, refs, eventKind }) =>
+        eventKind === "restore" &&
         change.kind === "room_create" &&
-        change.status === "restored" &&
         refs.has(item.ref),
     );
     return buildVerdict(context, matched, matched.length > 0);
@@ -1420,29 +1481,13 @@ function attributeAccessoryItem(context, action, item) {
   const ref = item.ref ?? item.entity_ref;
   if (action === "added") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        ([
-          "virtual_device",
-          "virtual_light_group",
-          "virtual_device_delete",
-        ].includes(change.kind) ||
-          (change.kind === "window_button" &&
-            change.button_kind === "xiaomi_join")),
+      (entry) => entry.refs.has(ref) && isAccessoryAddedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
   if (action === "removed" || action === "missing") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        ([
-          "virtual_device_delete",
-          "virtual_device",
-          "virtual_light_group",
-        ].includes(change.kind) ||
-          (change.kind === "window_button" &&
-            change.button_kind === "device_remove")),
+      (entry) => entry.refs.has(ref) && isAccessoryRemovedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
@@ -1520,21 +1565,13 @@ function attributeScenarioItem(context, action, item, currentConfig = null) {
   const ref = item.ref ?? item.entity_ref;
   if (action === "added") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        ["block_create", "logic_source_create", "scenario_delete"].includes(
-          change.kind,
-        ),
+      (entry) => entry.refs.has(ref) && isScenarioAddedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
   if (action === "removed" || action === "missing") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        ["scenario_delete", "block_create", "logic_source_create"].includes(
-          change.kind,
-        ),
+      (entry) => entry.refs.has(ref) && isScenarioRemovedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
@@ -1578,11 +1615,11 @@ function attributeScenarioItem(context, action, item, currentConfig = null) {
         );
       });
       if (metadataEdits.length === 0) return false;
-      const latest = metadataEdits[0].change;
-      if (latest.kind === "window_option") {
-        return scalarMatchesLatest([metadataEdits[0]], changeDiff.to);
+      const latestEntry = metadataEdits[0];
+      if (latestEntry.change.kind === "window_option") {
+        return scalarMatchesLatest([latestEntry], changeDiff.to);
       }
-      return logicInfoFieldMatchesChange(latest, field, changeDiff.to);
+      return logicInfoFieldMatchesChange(latestEntry, field, changeDiff.to);
     }
     if (field === "configuration") {
       const configEdits = matched.filter(({ change }) =>
@@ -1593,17 +1630,21 @@ function attributeScenarioItem(context, action, item, currentConfig = null) {
         ].includes(change.kind),
       );
       if (configEdits.length === 0) return false;
-      const latest = configEdits[0].change;
+      const latestEntry = configEdits[0];
       if (
-        latest.kind === "block_data_update" ||
-        latest.kind === "block_action_pause"
+        latestEntry.change.kind === "block_data_update" ||
+        latestEntry.change.kind === "block_action_pause"
       ) {
-        return blockConfigurationMatchesChange(latest, currentConfig);
+        return blockConfigurationMatchesChange(latestEntry, currentConfig);
       }
-      if (latest.kind === "logic_source_update") {
-        return codeConfigurationMatchesChange(latest, currentConfig);
+      if (latestEntry.change.kind === "logic_source_update") {
+        return codeConfigurationMatchesChange(
+          latestEntry,
+          currentConfig,
+          context.sensitiveValues,
+        );
       }
-      return true;
+      return false;
     }
     return false;
   });
@@ -1632,11 +1673,9 @@ function attributeBridgeItem(context, action, item) {
   });
 
   const removalMatches = context.entries.filter(
-    ({ change, refs }) =>
-      (change.kind === "virtual_device_delete" ||
-        (change.kind === "window_button" &&
-          change.button_kind === "device_remove")) &&
-      removedExports.some((accRef) => refs.has(accRef)),
+    (entry) =>
+      isAccessoryRemovedEvent(entry) &&
+      removedExports.some((accRef) => entry.refs.has(accRef)),
   );
 
   const matched = [...exportMatches, ...removalMatches];
@@ -1675,21 +1714,13 @@ function attributeClimateItem(context, action, item) {
     ref.replace(/\/service\/\d+\/characteristic\/\d+$/, "");
   if (action === "added") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(accRef) &&
-        (["virtual_device", "virtual_light_group"].includes(change.kind) ||
-          (change.kind === "window_button" &&
-            change.button_kind === "xiaomi_join")),
+      (entry) => entry.refs.has(accRef) && isAccessoryAddedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
   if (action === "removed" || action === "missing") {
     const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(accRef) &&
-        (change.kind === "virtual_device_delete" ||
-          (change.kind === "window_button" &&
-            change.button_kind === "device_remove")),
+      (entry) => entry.refs.has(accRef) && isAccessoryRemovedEvent(entry),
     );
     return buildVerdict(context, matched, matched.length > 0);
   }
@@ -1735,12 +1766,44 @@ function attributeLogicItem(context, action, item) {
   if (context.unavailable) return { attribution: "unavailable" };
   const ref = item.entity_ref;
   if (action === "missing") {
-    const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        (change.kind === "logic_assignment" ||
-          change.kind === "scenario_delete"),
-    );
+    const parsed = safeParseEntityRef(ref);
+    const parentAccRef =
+      parsed?.kind === "logic"
+        ? accessoryRef(context.serial, parsed.accessoryId)
+        : null;
+    const matched = context.entries.filter((entry) => {
+      const { change, refs, eventKind } = entry;
+      if (
+        change.kind === "logic_assignment" &&
+        eventKind === "restore" &&
+        refs.has(ref)
+      ) {
+        return true;
+      }
+      if (isScenarioRemovedEvent(entry)) {
+        if (refs.has(ref)) return true;
+        const removedIndex = deletedScenarioIndex(change);
+        const isLogicScenario =
+          change.kind === "logic_source_create" ||
+          change.baseline_snapshot?.type === "LOGIC";
+        if (
+          isLogicScenario &&
+          removedIndex !== null &&
+          parsed?.kind === "logic" &&
+          parsed.logicType === removedIndex
+        ) {
+          return true;
+        }
+      }
+      if (
+        parentAccRef !== null &&
+        isAccessoryRemovedEvent(entry) &&
+        refs.has(parentAccRef)
+      ) {
+        return true;
+      }
+      return false;
+    });
     return buildVerdict(context, matched, matched.length > 0);
   }
   const matched = context.entries.filter(
@@ -1757,17 +1820,16 @@ function attributeLogicItem(context, action, item) {
     }
     if (
       changeDiff.path[0] === "options" &&
-      typeof changeDiff.path[1] === "string"
+      typeof changeDiff.path[1] === "string" &&
+      changeDiff.path[2] === "configured_value" &&
+      changeDiff.path.length === 3
     ) {
       const key = changeDiff.path[1];
       const edits = matched.filter(
         ({ change }) =>
           change.kind === "logic_option" && change.option_key === key,
       );
-      if (changeDiff.path[2] === "configured_value") {
-        return scalarMatchesLatest(edits, changeDiff.to);
-      }
-      return edits.length > 0;
+      return scalarMatchesLatest(edits, changeDiff.to);
     }
     return false;
   });
@@ -1778,13 +1840,51 @@ function attributeWindowItem(context, action, item) {
   if (context.unavailable) return { attribution: "unavailable" };
   const ref = item.entity_ref;
   if (action === "missing") {
-    const matched = context.entries.filter(
-      ({ change, refs }) =>
-        refs.has(ref) &&
-        ["scenario_delete", "virtual_device_delete", "window_button"].includes(
-          change.kind,
-        ),
-    );
+    const parsed = safeParseEntityRef(ref);
+    const windowKey = parsed?.kind === "window" ? parsed.windowKey : null;
+    const bridgeAccId =
+      windowKey !== null ? parseBridgeChildWindowAccessoryId(windowKey) : null;
+    const logicWin = windowKey !== null ? parseLogicWindowKey(windowKey) : null;
+    const matched = context.entries.filter((entry) => {
+      const { change, refs } = entry;
+      if (isScenarioRemovedEvent(entry)) {
+        if (change.options_window_ref === ref || refs.has(ref)) return true;
+        const removedIndex = deletedScenarioIndex(change);
+        const isLogicScenario =
+          change.kind === "logic_source_create" ||
+          change.baseline_snapshot?.type === "LOGIC";
+        if (
+          isLogicScenario &&
+          removedIndex !== null &&
+          logicWin !== null &&
+          logicWin.type === removedIndex
+        ) {
+          return true;
+        }
+      }
+      if (isAccessoryRemovedEvent(entry)) {
+        if (
+          change.device_window_ref === ref ||
+          change.target_ref === ref ||
+          refs.has(ref)
+        ) {
+          return true;
+        }
+        if (
+          bridgeAccId !== null &&
+          refs.has(accessoryRef(context.serial, bridgeAccId))
+        ) {
+          return true;
+        }
+        if (
+          logicWin !== null &&
+          refs.has(accessoryRef(context.serial, logicWin.accessoryId))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    });
     return buildVerdict(context, matched, matched.length > 0);
   }
   const matched = context.entries.filter(
@@ -1795,14 +1895,13 @@ function attributeWindowItem(context, action, item) {
   const allCovered = (item.changes ?? []).every((changeDiff) => {
     if (
       changeDiff.path[0] === "options" &&
-      typeof changeDiff.path[1] === "string"
+      typeof changeDiff.path[1] === "string" &&
+      changeDiff.path[2] === "configured_value" &&
+      changeDiff.path.length === 3
     ) {
       const key = changeDiff.path[1];
       const edits = matched.filter(({ change }) => change.option_key === key);
-      if (changeDiff.path[2] === "configured_value") {
-        return scalarMatchesLatest(edits, changeDiff.to);
-      }
-      return edits.length > 0;
+      return scalarMatchesLatest(edits, changeDiff.to);
     }
     return false;
   });
@@ -1811,14 +1910,13 @@ function attributeWindowItem(context, action, item) {
 
 function scalarMatchesLatest(entries, liveValue) {
   if (entries.length === 0) return false;
-  const latest = entries[0].change;
-  if (
-    !latest.requested_value ||
-    !Object.hasOwn(latest.requested_value, "value")
-  ) {
-    return true;
+  const { change, eventKind } = entries[0];
+  const expected =
+    eventKind === "restore" ? change.baseline_value : change.requested_value;
+  if (!expected || !Object.hasOwn(expected, "value")) {
+    return false;
   }
-  return isDeepStrictEqual(latest.requested_value.value, liveValue);
+  return isDeepStrictEqual(expected.value, liveValue);
 }
 
 function placementChangedField(change, field) {
@@ -1831,28 +1929,28 @@ function placementChangedField(change, field) {
 
 function placementFieldMatchesLatest(entries, field, liveValue) {
   if (entries.length === 0) return false;
-  const latest = entries[0].change;
-  const candidates = [
-    latest.applied_snapshot?.[field],
-    latest.requested_snapshot?.[field],
-  ].filter((value) => value !== undefined);
-  if (candidates.length === 0) return true;
-  return candidates.some((candidate) =>
-    isDeepStrictEqual(candidate, liveValue),
-  );
+  const { change, eventKind } = entries[0];
+  const candidates =
+    eventKind === "restore"
+      ? [change.baseline_snapshot?.[field]]
+      : [change.applied_snapshot?.[field], change.requested_snapshot?.[field]];
+  const valid = candidates.filter((value) => value !== undefined);
+  if (valid.length === 0) return false;
+  return valid.some((candidate) => isDeepStrictEqual(candidate, liveValue));
 }
 
 function placementRoomMatchesLatest(entries, serial, liveRoomRef) {
   if (entries.length === 0) return false;
-  const latest = entries[0].change;
-  const candidates = [
-    latest.applied_snapshot?.room_id,
-    latest.requested_snapshot?.room_id,
-  ]
+  const { change, eventKind } = entries[0];
+  const candidates =
+    eventKind === "restore"
+      ? [change.baseline_snapshot?.room_id]
+      : [change.applied_snapshot?.room_id, change.requested_snapshot?.room_id];
+  const valid = candidates
     .filter((id) => typeof id === "number")
     .map((id) => roomRef(serial, id));
-  if (candidates.length === 0) return true;
-  return candidates.includes(liveRoomRef);
+  if (valid.length === 0) return false;
+  return valid.includes(liveRoomRef);
 }
 
 function bridgeExportAccessoryRef(change) {
@@ -1861,35 +1959,61 @@ function bridgeExportAccessoryRef(change) {
   return svcRef.replace(/\/service\/\d+$/, "");
 }
 
-function blockConfigurationMatchesChange(change, currentConfig) {
-  if (currentConfig?.format !== "json" || !isPlainObject(currentConfig.value)) {
-    return true;
+function parseBlockData(raw) {
+  if (isPlainObject(raw)) return raw;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return isPlainObject(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
-  const raw = change.applied_snapshot?.data ?? change.requested_snapshot?.data;
-  if (typeof raw !== "string") return true;
-  try {
-    const expected = canonicalBlock(withHiddenHttpUrls(JSON.parse(raw)));
-    const current = canonicalBlock(withHiddenHttpUrls(currentConfig.value));
-    const { changes } = diffSettings(expected, current);
-    return changes.length === 0;
-  } catch {
-    return true;
-  }
+  return null;
 }
 
-function codeConfigurationMatchesChange(change, currentConfig) {
+function blockConfigurationMatchesChange(entry, currentConfig) {
+  if (currentConfig?.format !== "json" || !isPlainObject(currentConfig.value)) {
+    return false;
+  }
+  const { change, eventKind } = entry;
+  const raw =
+    eventKind === "restore"
+      ? (change.restore_snapshot?.data ?? change.baseline_snapshot?.data)
+      : (change.applied_snapshot?.data ?? change.requested_snapshot?.data);
+  const parsed = parseBlockData(raw);
+  if (!parsed) return false;
+  const expected = canonicalBlock(withHiddenHttpUrls(parsed));
+  const current = canonicalBlock(withHiddenHttpUrls(currentConfig.value));
+  const { changes } = diffSettings(expected, current);
+  return changes.length === 0;
+}
+
+function codeConfigurationMatchesChange(
+  entry,
+  currentConfig,
+  sensitiveValues = [],
+) {
   if (
     currentConfig?.format !== "code" ||
     typeof currentConfig.value !== "string"
   ) {
-    return true;
+    return false;
   }
-  if (isHidden(currentConfig.value)) return true;
+  if (isHidden(currentConfig.value)) return false;
+  const { change, eventKind } = entry;
   const expected =
-    change.applied_snapshot?.data ?? change.requested_snapshot?.data;
-  if (typeof expected !== "string") return true;
-  const sanitizedExpected = redactSensitiveText(expected, "javascript_source");
-  if (isHidden(sanitizedExpected)) return true;
+    eventKind === "restore"
+      ? (change.restore_snapshot?.data ?? change.baseline_snapshot?.data)
+      : (change.applied_snapshot?.data ?? change.requested_snapshot?.data);
+  if (typeof expected !== "string") return false;
+  const hasSecret = sensitiveValues.some(
+    (secret) => secret.length > 0 && expected.includes(secret),
+  );
+  const sanitizedExpected = hasSecret
+    ? "[REDACTED]"
+    : redactSensitiveText(expected, "javascript_source");
+  if (isHidden(sanitizedExpected)) return false;
   return sanitizedExpected === currentConfig.value;
 }
 
@@ -1899,15 +2023,55 @@ const LOGIC_INFO_NATIVE_FIELD = {
   on_start: "onStart",
 };
 
-function logicInfoFieldMatchesChange(change, field, liveValue) {
+function logicInfoFieldMatchesChange(entry, field, liveValue) {
   const nativeField = LOGIC_INFO_NATIVE_FIELD[field];
   if (!nativeField) return false;
-  const candidates = [
-    change.applied_snapshot?.[nativeField],
-    change.requested_snapshot?.[nativeField],
-  ].filter((value) => value !== undefined);
-  if (candidates.length === 0) return true;
-  return candidates.some((candidate) =>
-    isDeepStrictEqual(candidate, liveValue),
-  );
+  const { change, eventKind } = entry;
+  const candidates =
+    eventKind === "restore"
+      ? [
+          change.restore_snapshot?.[nativeField],
+          change.baseline_snapshot?.[nativeField],
+        ]
+      : [
+          change.applied_snapshot?.[nativeField],
+          change.requested_snapshot?.[nativeField],
+        ];
+  const valid = candidates.filter((value) => value !== undefined);
+  if (valid.length === 0) return false;
+  return valid.some((candidate) => isDeepStrictEqual(candidate, liveValue));
+}
+
+function safeParseEntityRef(ref) {
+  try {
+    return parseEntityRef(ref);
+  } catch {
+    return null;
+  }
+}
+
+function deletedScenarioIndex(change) {
+  const index =
+    change.target?.index ??
+    change.baseline_snapshot?.index ??
+    change.scenario_index;
+  return typeof index === "string" && index.length > 0 ? index : null;
+}
+
+function parseBridgeChildWindowAccessoryId(windowKey) {
+  const match = /^Bridge\/[^/]+\/Child\/(\d+)\/$/.exec(windowKey);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
+function parseLogicWindowKey(windowKey) {
+  const match = /^Logic\/([^/]+)\/(\d+)\/(\d+)$/.exec(windowKey);
+  if (!match) return null;
+  const accessoryId = Number(match[2]);
+  const serviceId = Number(match[3]);
+  if (!Number.isSafeInteger(accessoryId) || !Number.isSafeInteger(serviceId)) {
+    return null;
+  }
+  return { type: match[1], accessoryId, serviceId };
 }

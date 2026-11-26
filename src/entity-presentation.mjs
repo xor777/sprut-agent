@@ -514,17 +514,74 @@ function containerVersion(entries, pointer) {
     stableKeyCounts.set(stableKey, (stableKeyCounts.get(stableKey) ?? 0) + 1);
   }
   const mapIdentity = entries.map(([key, value], index) => {
+    const childPointer = `${pointer}/${escapePointerToken(key)}`;
     const { identity, stableKey } = candidates[index];
     const unambiguous =
       stableKey !== null && stableKeyCounts.get(stableKey) === 1;
     return {
-      pointer: `${pointer}/${escapePointerToken(key)}`,
-      ...(unambiguous ? { identity } : { value }),
+      pointer: childPointer,
+      ...(unambiguous
+        ? { identity }
+        : { value: versionComparableValue(childPointer, value) }),
     };
   });
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(mapIdentity))
     .digest("base64url")}`;
+}
+
+// Re-running compare=true on continuation advances compared_at and
+// current_observation.observed_at even when nothing in the home changed.
+// Exclude only those volatile read timestamps from container map versions so
+// paging /comparison completes while real diff mutations still fail stale.
+function versionComparableValue(childPointer, value) {
+  if (
+    childPointer === "/comparison/compared_at" ||
+    /^\/comparison\/entities\/\d+\/current_observation\/observed_at$/.test(
+      childPointer,
+    )
+  ) {
+    return null;
+  }
+  if (
+    /^\/comparison\/entities\/\d+\/current_observation$/.test(childPointer) &&
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  ) {
+    const { observed_at: _observedAt, ...rest } = value;
+    return rest;
+  }
+  if (
+    childPointer === "/comparison" &&
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  ) {
+    const { compared_at: _comparedAt, ...rest } = value;
+    return Array.isArray(rest.entities)
+      ? { ...rest, entities: stripComparisonObservationTime(rest.entities) }
+      : rest;
+  }
+  if (childPointer === "/comparison/entities" && Array.isArray(value)) {
+    return stripComparisonObservationTime(value);
+  }
+  return value;
+}
+
+function stripComparisonObservationTime(entities) {
+  return entities.map((entity) => {
+    if (
+      !entity ||
+      typeof entity !== "object" ||
+      !entity.current_observation ||
+      typeof entity.current_observation !== "object"
+    ) {
+      return entity;
+    }
+    const { observed_at: _observedAt, ...restObs } = entity.current_observation;
+    return { ...entity, current_observation: restObs };
+  });
 }
 
 function stableIdentityKey(identity) {

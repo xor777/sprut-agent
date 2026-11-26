@@ -975,6 +975,12 @@ export class AutomationService {
     change.native_acknowledged = true;
     change.write_intent.acknowledged = true;
     change.created_id = created.id;
+    if (
+      typeof created.deviceWindow === "string" &&
+      created.deviceWindow.length > 0
+    ) {
+      change.device_window_ref = `${change.home_ref}/window/${encodeURIComponent(created.deviceWindow)}`;
+    }
     change.created_snapshot = virtualDeviceSnapshot(created);
     change.creation_owned = true;
     await this.store.save(change);
@@ -1240,13 +1246,20 @@ export class AutomationService {
       this.#accessoryDependencies(accessory),
     ]);
     const now = new Date().toISOString();
+    const homeRef = configuredHomeRef(this.hubSerial);
     const change = {
       id: this.store.newId(),
       kind: VIRTUAL_DEVICE_DELETE,
       status: "prepared",
-      home_ref: configuredHomeRef(this.hubSerial),
+      home_ref: homeRef,
       reason: input.reason,
       target_ref: input.target_ref,
+      ...(typeof accessory.deviceWindow === "string" &&
+      accessory.deviceWindow.length > 0
+        ? {
+            device_window_ref: `${homeRef}/window/${encodeURIComponent(accessory.deviceWindow)}`,
+          }
+        : {}),
       room_id: accessory.roomId,
       room_name: room?.name ?? null,
       target_name: accessory.name,
@@ -1901,15 +1914,22 @@ export class AutomationService {
     if (!scenario) throw scenarioNotFound();
     const snapshot = deleteSnapshot(scenario);
     refuseUndeletable(snapshot);
-    return { target, snapshot };
+    return {
+      target,
+      snapshot,
+      optionsWindow:
+        typeof scenario.optionsWindow === "string" &&
+        scenario.optionsWindow.length > 0
+          ? scenario.optionsWindow
+          : null,
+    };
   }
 
   // The scenario as it is, and what stops working without it. With any
   // dependency the owner hears of it first (tell_owner, no next call).
   async #prepareScenarioDelete(input) {
-    const { target, snapshot } = await this.#readDeletableScenario(
-      input.target_ref,
-    );
+    const { target, snapshot, optionsWindow } =
+      await this.#readDeletableScenario(input.target_ref);
     const homeRef = configuredHomeRef(this.hubSerial);
     const dependencies = await scenarioDeleteDependencies(
       this.client,
@@ -1924,6 +1944,11 @@ export class AutomationService {
       status: "prepared",
       home_ref: homeRef,
       target_ref: input.target_ref,
+      ...(optionsWindow
+        ? {
+            options_window_ref: `${homeRef}/window/${encodeURIComponent(optionsWindow)}`,
+          }
+        : {}),
       target,
       reason: input.reason,
       baseline_snapshot: snapshot,
@@ -1984,6 +2009,12 @@ export class AutomationService {
     }
     // What undo brings back: the scenario as it is right before the delete.
     change.deleted_snapshot = snapshot;
+    if (
+      typeof current.optionsWindow === "string" &&
+      current.optionsWindow.length > 0
+    ) {
+      change.options_window_ref = `${change.home_ref}/window/${encodeURIComponent(current.optionsWindow)}`;
+    }
     await this.#persistNativeIntent(change, "applying", "apply");
     try {
       await this.client.deleteScenario(change.target.index);
@@ -7294,6 +7325,12 @@ export class AutomationService {
             : logicSourceCreateRequest(change),
         );
         change.scenario_index = created.index;
+        if (
+          typeof created.optionsWindow === "string" &&
+          created.optionsWindow.length > 0
+        ) {
+          change.options_window_ref = `${change.home_ref}/window/${encodeURIComponent(created.optionsWindow)}`;
+        }
       } else if (change.kind === "block_data_update") {
         await this.client.updateScenario(
           change.target.index,

@@ -3664,11 +3664,17 @@ export class SprutHubClient {
   }
 
   async #readWindowEntity(parsed, requested, deadline) {
-    const response = await this.#request(
-      { window: { get: { windowKey: parsed.windowKey } } },
-      deadline,
-      { serial: parsed.serial },
-    );
+    let response;
+    try {
+      response = await this.#request(
+        { window: { get: { windowKey: parsed.windowKey } } },
+        deadline,
+        { serial: parsed.serial },
+      );
+    } catch (error) {
+      if (isWindowNotFoundError(error)) throw entityNotFound("window");
+      throw error;
+    }
     const window = extractEntity(response, ["window", "get"], "window");
     if (window.windowKey !== parsed.windowKey) {
       throw new SprutHubError(
@@ -4633,6 +4639,17 @@ function isNativeNotFoundCandidate(error) {
     error instanceof SprutHubError &&
     error.code === "request_rejected" &&
     error.protocolErrorCode === -32603
+  );
+}
+
+// SprutHub answers window.get for a deleted/unlisted window with -32603
+// "Not found: 'Window not found: ...'" (2026-10-14-bridge-export-write 11).
+// Match that text so transient -32603 internal failures stay request_rejected.
+function isWindowNotFoundError(error) {
+  return (
+    isNativeNotFoundCandidate(error) &&
+    typeof error.hubError?.message === "string" &&
+    /\bwindow not found\b/i.test(error.hubError.message)
   );
 }
 
