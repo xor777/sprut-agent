@@ -1,7 +1,8 @@
 // Native SprutHub 3.0 dashboard write operations (0 new MCP tools):
 // dashboard_create, dashboard_update, dashboard_delete,
 // dashboard_column_create, dashboard_column_update, dashboard_column_delete,
-// dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete.
+// dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete,
+// dashboard_widget_move.
 // Protocol verified live on SprutHub 3.0.0 rev 20131
 // (research/protocol/2026-11-26-dashboards.md).
 import { isDeepStrictEqual } from "node:util";
@@ -42,6 +43,7 @@ export const DASHBOARD_COLUMN_DELETE = "dashboard_column_delete";
 export const DASHBOARD_WIDGET_CREATE = "dashboard_widget_create";
 export const DASHBOARD_WIDGET_UPDATE = "dashboard_widget_update";
 export const DASHBOARD_WIDGET_DELETE = "dashboard_widget_delete";
+export const DASHBOARD_WIDGET_MOVE = "dashboard_widget_move";
 
 export const DASHBOARD_OPERATIONS = [
   DASHBOARD_CREATE,
@@ -53,10 +55,12 @@ export const DASHBOARD_OPERATIONS = [
   DASHBOARD_WIDGET_CREATE,
   DASHBOARD_WIDGET_UPDATE,
   DASHBOARD_WIDGET_DELETE,
+  DASHBOARD_WIDGET_MOVE,
 ];
 
 const DASHBOARD_OPERATION_SET = new Set(DASHBOARD_OPERATIONS);
 const DEFAULT_COLUMN_NAMES = ["Основная"];
+export const DASHBOARD_HUB_NAME_MAX_LENGTH = 32;
 const MAX_NAME_LENGTH = 120;
 const MAX_COLUMNS = 20;
 const MAX_ITEMS = 50;
@@ -78,11 +82,97 @@ const DEVICE_WIDGET_TYPES = new Set([
   "service",
   "camera",
 ]);
+const DASHBOARD_NAME_RULE_NOTE =
+  "SprutHub 3.0 truncates names to 32 chars and strips punctuation outside letters, digits, spaces, and - _ ' `.";
 const HISTORY_MISSING_WARNING =
-  "The History app («История») is not installed and running on this hub, so this chart widget may stay empty. Warn the owner; characteristic widgets show live values right away without History.";
+  "The History app («История») is not installed and running on this hub, so this chart widget will stay empty. Do not add empty chart widgets by default unless the owner explicitly asked for placeholders — prefer characteristic widgets for live values, and tell the owner that History requires an external microSD/USB drive plus the History app.";
+
+// Single source of truth for SprutHub 3.0.0 rev 20131 dashboard, column, and
+// widget name normalization: trims & collapses whitespace, strips characters
+// outside Unicode letters, digits, spaces, and - _ ' `, trims edges, and takes
+// the first 32 Unicode code points. Accepts both the raw 32-code-point slice
+// and the trimEnd() form (plus collapsed-space variants) so a trailing space at
+// code point #32 never triggers a false conflict.
+function hubNormalizedDashboardNameVariants(name) {
+  if (typeof name !== "string") return [];
+  const primaryCleaned = name
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s\-_'`]/gu, "")
+    .trim();
+  const primaryCut = [...primaryCleaned]
+    .slice(0, DASHBOARD_HUB_NAME_MAX_LENGTH)
+    .join("");
+  const collapsedCleaned = name
+    .replace(/[^\p{L}\p{N}\s\-_'`]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const collapsedCut = [...collapsedCleaned]
+    .slice(0, DASHBOARD_HUB_NAME_MAX_LENGTH)
+    .join("");
+  return [
+    primaryCut.trimEnd(),
+    primaryCut,
+    collapsedCut.trimEnd(),
+    collapsedCut,
+  ];
+}
+
+export function predictSprutHubDashboardName(name) {
+  if (typeof name !== "string") return "";
+  return hubNormalizedDashboardNameVariants(name)[0];
+}
+
+export function isHubNormalizedDashboardName(requested, observed) {
+  if (typeof requested !== "string" || typeof observed !== "string") {
+    return false;
+  }
+  if (observed === requested) return false;
+  return hubNormalizedDashboardNameVariants(requested).includes(observed);
+}
+
+function matchesDashboardName(requested, observed) {
+  return (
+    observed === requested || isHubNormalizedDashboardName(requested, observed)
+  );
+}
+
+function nameNormalizationWarning(label, name) {
+  const predicted = predictSprutHubDashboardName(name);
+  if (predicted === name) return null;
+  const shownStored = predicted === "" ? '"" (empty)' : `«${predicted}»`;
+  return `SprutHub 3.0 truncates ${label} to ${DASHBOARD_HUB_NAME_MAX_LENGTH} chars and strips punctuation outside letters, digits, spaces, and - _ ' \`; expected stored name: ${shownStored}.`;
+}
+
+function duplicateCharacteristicWarning(repeatedTypes) {
+  const typesList = repeatedTypes.join(", ");
+  return `SprutHub 3.0 characteristic widgets label each row only by characteristic name (without device or room), so repeating ${typesList} across multiple devices produces identical unreadable rows. Prefer one widget per device with device and room in widget.name, or group only different characteristics of the same device.`;
+}
+
+function warningRecordFields(warnings, historyAppMissing = false) {
+  const list = (warnings ?? []).filter(
+    (entry) => typeof entry === "string" && entry.length > 0,
+  );
+  return {
+    ...(historyAppMissing === true ? { history_app_missing: true } : {}),
+    ...(list.length > 0
+      ? {
+          warning: list.join(" "),
+          warnings: list,
+        }
+      : {}),
+  };
+}
 
 export function isDashboardChangeKind(kind) {
   return DASHBOARD_OPERATION_SET.has(kind);
+}
+
+function isPendingRestoreIntent(change) {
+  return (
+    ["restoring", "uncertain"].includes(change?.status) &&
+    nativeIntentDirection(change) === "restore"
+  );
 }
 
 export function dashboardHubStepsSent(change, direction) {
@@ -112,12 +202,18 @@ export function dashboardContract(operation) {
         write: "dashboard.create({name}) + dashboardColumn.create per column",
         fields: {
           target_ref: "home_ref",
-          name: { required: true, min_length: 1, max_length: MAX_NAME_LENGTH },
+          name: {
+            required: true,
+            min_length: 1,
+            max_length: MAX_NAME_LENGTH,
+            hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
+            note: DASHBOARD_NAME_RULE_NOTE,
+          },
           column_names: {
             optional: true,
             max_items: MAX_COLUMNS,
             default: DEFAULT_COLUMN_NAMES,
-            note: "Pass [] for 0 columns; SprutHub creates 0 columns automatically.",
+            note: "On mobile each column is a separate horizontal swipe screen: default to 1 column for one-screen phone dashboards, 2-3 for swipe tabs/desktop. Pass [] for 0 columns.",
           },
           reason: "required",
         },
@@ -130,7 +226,13 @@ export function dashboardContract(operation) {
         write: "dashboard.update({id,name})",
         fields: {
           target_ref: "dashboard_ref",
-          name: { required: true, min_length: 1, max_length: MAX_NAME_LENGTH },
+          name: {
+            required: true,
+            min_length: 1,
+            max_length: MAX_NAME_LENGTH,
+            hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
+            note: DASHBOARD_NAME_RULE_NOTE,
+          },
           reason: "required",
         },
         restore:
@@ -152,7 +254,12 @@ export function dashboardContract(operation) {
         write: "dashboardColumn.create({dashboardId,name?})",
         fields: {
           target_ref: "dashboard_ref",
-          name: { optional: true, max_length: MAX_NAME_LENGTH },
+          name: {
+            optional: true,
+            max_length: MAX_NAME_LENGTH,
+            hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
+            note: DASHBOARD_NAME_RULE_NOTE,
+          },
           reason: "required",
         },
         restore:
@@ -164,7 +271,12 @@ export function dashboardContract(operation) {
         write: "dashboardColumn.update({dashboardId,id,name})",
         fields: {
           target_ref: "dashboard_column_ref",
-          name: { required: true, max_length: MAX_NAME_LENGTH },
+          name: {
+            required: true,
+            max_length: MAX_NAME_LENGTH,
+            hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
+            note: DASHBOARD_NAME_RULE_NOTE,
+          },
           reason: "required",
         },
         restore:
@@ -198,12 +310,14 @@ export function dashboardContract(operation) {
             name: {
               optional: true,
               max_length: MAX_NAME_LENGTH,
-              note: "Put widget title in widget.name, not top-level name.",
+              hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
+              note: `Put widget title in widget.name, not top-level name. ${DASHBOARD_NAME_RULE_NOTE}`,
             },
             types: {
-              characteristic: "item_refs: characteristic refs (1..50)",
+              characteristic:
+                "item_refs: characteristic refs (1..50). Rows show only characteristic name (no device/room): use 1 card per device for the same metric across devices.",
               chart:
-                "item_refs: characteristic refs (1..50), optional history_group (MINUTE|HOUR|DAY); warns if History app is not running",
+                "item_refs: characteristic refs (1..50), optional history_group (MINUTE|HOUR|DAY). Requires running History app + microSD/USB; do not add empty placeholders by default.",
               service:
                 "item_refs: service refs (1..50), optional show_rooms (boolean)",
               camera: "item_refs: service refs (1..50)",
@@ -227,6 +341,26 @@ export function dashboardContract(operation) {
         fields: { target_ref: "dashboard_widget_ref", reason: "required" },
         restore:
           "recreates the widget in the same column if dashboard, column and referenced devices still exist.",
+        restore_supported: true,
+      };
+    case DASHBOARD_WIDGET_MOVE:
+      return {
+        write:
+          "dashboardWidget.orders({orders: [{dashboardId,columnId,id,order}, ...]}) for all widgets in affected columns",
+        fields: {
+          target_ref: "dashboard_widget_ref",
+          column_ref: {
+            optional: true,
+            note: "Destination dashboard_column_ref on the same dashboard; omit to reorder within current column.",
+          },
+          position: {
+            optional: true,
+            note: "0-based target index in destination column (required when staying in the same column; defaults to end when moving across columns).",
+          },
+          reason: "required",
+        },
+        restore:
+          "restores original column membership and orders for all affected columns while live layout matches the applied layout.",
         restore_supported: true,
       };
     default:
@@ -317,16 +451,48 @@ function widgetNeedsHomeCatalog(widget) {
   );
 }
 
-function sameWidgetContent(left, right) {
+function sameWidgetPayloadAndType(left, right) {
   if (!left || !right) return false;
   return (
-    (left.name ?? "") === (right.name ?? "") &&
     left.type === right.type &&
     isDeepStrictEqual(
       canonicalWidgetPayload(left.type, left.payload),
       canonicalWidgetPayload(right.type, right.payload),
     )
   );
+}
+
+function sameWidgetContent(left, right, { allowNormalizedName = false } = {}) {
+  if (!sameWidgetPayloadAndType(left, right)) return false;
+  const leftName = left.name ?? "";
+  const rightName = right.name ?? "";
+  if (leftName === rightName) return true;
+  return (
+    allowNormalizedName && isHubNormalizedDashboardName(rightName, leftName)
+  );
+}
+
+function sortColumnWidgets(widgets = []) {
+  return [...widgets].sort(
+    (left, right) =>
+      (left.order ?? 0) - (right.order ?? 0) || left.id - right.id,
+  );
+}
+
+function columnLayoutEntries(column) {
+  return sortColumnWidgets(column.widgets).map((widget) => ({
+    id: widget.id,
+    order: widget.order ?? 0,
+  }));
+}
+
+function sameColumnsLayout(dashboard, expectedColumns) {
+  if (!dashboard || !Array.isArray(expectedColumns)) return false;
+  return expectedColumns.every(({ column_id: columnId, widgets }) => {
+    const liveColumn = dashboard.columns.find(({ id }) => id === columnId);
+    if (!liveColumn) return false;
+    return isDeepStrictEqual(columnLayoutEntries(liveColumn), widgets);
+  });
 }
 
 function sameColumnStructure(left, right) {
@@ -387,6 +553,13 @@ function validateRequiredName(value, operation) {
       "prepare_native_change",
     );
   }
+  if (predictSprutHubDashboardName(value) === "") {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "name would become empty on SprutHub 3.0 because it strips punctuation outside letters, digits, spaces, and - _ ' `.",
+      "prepare_native_change",
+    );
+  }
   return value;
 }
 
@@ -413,6 +586,17 @@ function validateOptionalColumnName(value, { required = false } = {}) {
     throw new SprutHubError(
       "name_too_long",
       `Column name must be at most ${MAX_NAME_LENGTH} characters.`,
+      "prepare_native_change",
+    );
+  }
+  if (
+    required &&
+    value.length > 0 &&
+    predictSprutHubDashboardName(value) === ""
+  ) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "Column name would become empty on SprutHub 3.0 because it strips punctuation outside letters, digits, spaces, and - _ ' `.",
       "prepare_native_change",
     );
   }
@@ -447,6 +631,12 @@ function validateColumnNames(raw) {
         `Every column name must be at most ${MAX_NAME_LENGTH} characters.`,
       );
     }
+    if (predictSprutHubDashboardName(name) === "") {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "A column_names entry would become empty on SprutHub 3.0 because it strips punctuation outside letters, digits, spaces, and - _ ' `.",
+      );
+    }
     return name;
   });
 }
@@ -473,6 +663,7 @@ async function verifyCharacteristicExists(client, catalog, target, rawRef) {
       "find_devices",
     );
   }
+  return characteristic;
 }
 
 async function verifyServiceExists(client, catalog, target, rawRef) {
@@ -588,6 +779,12 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
     name = rawWidget.name;
   }
 
+  const warnings = [];
+  if (typeof name === "string" && name.length > 0) {
+    const nameWarning = nameNormalizationWarning("widget.name", name);
+    if (nameWarning) warnings.push(nameWarning);
+  }
+
   let payload;
   if (type === "characteristic") {
     forbidWidgetKeys(
@@ -595,16 +792,19 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
       ["show_rooms", "history_group", "shortcut_ids"],
       type,
     );
-    const items = await parseAndVerifyCharacteristicRefs(
+    const { items, repeatedTypes } = await parseAndVerifyCharacteristicRefs(
       client,
       serial,
       rawWidget.item_refs,
       type,
     );
+    if (repeatedTypes.length > 0) {
+      warnings.push(duplicateCharacteristicWarning(repeatedTypes));
+    }
     payload = { items };
   } else if (type === "chart") {
     forbidWidgetKeys(rawWidget, ["show_rooms", "shortcut_ids"], type);
-    const items = await parseAndVerifyCharacteristicRefs(
+    const { items } = await parseAndVerifyCharacteristicRefs(
       client,
       serial,
       rawWidget.item_refs,
@@ -690,10 +890,33 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
   }
 
   return {
-    ...(name !== undefined ? { name } : {}),
-    type,
-    payload,
+    widget: {
+      ...(name !== undefined ? { name } : {}),
+      type,
+      payload,
+    },
+    warnings,
   };
+}
+
+function findRepeatedCharacteristicTypesAcrossDevices(resolvedItems) {
+  const accessoriesByType = new Map();
+  for (const { target, characteristicType } of resolvedItems) {
+    if (typeof characteristicType !== "string" || characteristicType === "") {
+      continue;
+    }
+    let aIds = accessoriesByType.get(characteristicType);
+    if (!aIds) {
+      aIds = new Set();
+      accessoriesByType.set(characteristicType, aIds);
+    }
+    aIds.add(target.aId);
+  }
+  const repeated = [];
+  for (const [characteristicType, aIds] of accessoriesByType.entries()) {
+    if (aIds.size >= 2) repeated.push(characteristicType);
+  }
+  return repeated;
 }
 
 async function parseAndVerifyCharacteristicRefs(
@@ -729,10 +952,30 @@ async function parseAndVerifyCharacteristicRefs(
     }
   });
   const catalog = await resolveHomeCatalog(client, serial);
+  const resolved = [];
   for (const { ref, target } of parsed) {
-    await verifyCharacteristicExists(client, catalog, target, ref);
+    const characteristic = await verifyCharacteristicExists(
+      client,
+      catalog,
+      target,
+      ref,
+    );
+    resolved.push({
+      target,
+      characteristicType:
+        characteristic.control?.type ??
+        characteristic.control?.key ??
+        characteristic.type,
+    });
   }
-  return parsed.map(({ target }) => target);
+  const repeatedTypes =
+    type === "characteristic" && resolved.length > 1
+      ? findRepeatedCharacteristicTypesAcrossDevices(resolved)
+      : [];
+  return {
+    items: parsed.map(({ target }) => target),
+    repeatedTypes,
+  };
 }
 
 async function parseAndVerifyServiceRefs(client, serial, itemRefs, type) {
@@ -814,6 +1057,8 @@ export async function prepareDashboardChange(ctx, input) {
       return prepareDashboardWidgetUpdate(ctx, input);
     case DASHBOARD_WIDGET_DELETE:
       return prepareDashboardWidgetDelete(ctx, input);
+    case DASHBOARD_WIDGET_MOVE:
+      return prepareDashboardWidgetMove(ctx, input);
     default:
       throw new SprutHubError(
         "unsupported_native_operation",
@@ -824,9 +1069,23 @@ export async function prepareDashboardChange(ctx, input) {
 
 async function prepareDashboardCreate(ctx, input) {
   parseConfiguredHomeRef(input.target_ref, ctx.hubSerial);
-  forbidUnexpectedFields(input, ["widget"], DASHBOARD_CREATE);
+  forbidUnexpectedFields(
+    input,
+    ["widget", "column_ref", "position"],
+    DASHBOARD_CREATE,
+  );
   const name = validateRequiredName(input.name, DASHBOARD_CREATE);
   const columnNames = validateColumnNames(input.column_names);
+  const warnings = [];
+  const dashNameWarning = nameNormalizationWarning("dashboard name", name);
+  if (dashNameWarning) warnings.push(dashNameWarning);
+  for (const [index, columnName] of columnNames.entries()) {
+    const colWarning = nameNormalizationWarning(
+      `column_names[${index}]`,
+      columnName,
+    );
+    if (colWarning) warnings.push(colWarning);
+  }
   const existing = await ctx.client.listDashboards();
   const now = new Date().toISOString();
   const change = {
@@ -839,6 +1098,7 @@ async function prepareDashboardCreate(ctx, input) {
     requested_name: name,
     requested_column_names: columnNames,
     baseline_dashboard_ids: existing.map(({ id }) => id),
+    ...warningRecordFields(warnings),
     created_columns: [],
     creation_owned: false,
     creation_complete: false,
@@ -855,8 +1115,15 @@ async function prepareDashboardCreate(ctx, input) {
 
 async function prepareDashboardUpdate(ctx, input) {
   const { id } = parseDashboardRef(input.target_ref, ctx.hubSerial);
-  forbidUnexpectedFields(input, ["column_names", "widget"], DASHBOARD_UPDATE);
+  forbidUnexpectedFields(
+    input,
+    ["column_names", "widget", "column_ref", "position"],
+    DASHBOARD_UPDATE,
+  );
   const name = validateRequiredName(input.name, DASHBOARD_UPDATE);
+  const warnings = [];
+  const nameWarning = nameNormalizationWarning("dashboard name", name);
+  if (nameWarning) warnings.push(nameWarning);
   const dashboard = await ctx.client.getDashboard(id);
   if (!dashboard) throw notFoundError("dashboard");
   if (dashboard.name === name) {
@@ -879,6 +1146,7 @@ async function prepareDashboardUpdate(ctx, input) {
     dashboard_id: id,
     baseline_snapshot: { id, name: dashboard.name },
     requested_name: name,
+    ...warningRecordFields(warnings),
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -894,7 +1162,7 @@ async function prepareDashboardDelete(ctx, input) {
   const { id } = parseDashboardRef(input.target_ref, ctx.hubSerial);
   forbidUnexpectedFields(
     input,
-    ["name", "column_names", "widget"],
+    ["name", "column_names", "widget", "column_ref", "position"],
     DASHBOARD_DELETE,
   );
   const dashboard = await ctx.client.getDashboard(id);
@@ -943,10 +1211,15 @@ async function prepareDashboardColumnCreate(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["column_names", "widget"],
+    ["column_names", "widget", "column_ref", "position"],
     DASHBOARD_COLUMN_CREATE,
   );
   const name = validateOptionalColumnName(input.name, { required: false });
+  const warnings = [];
+  if (typeof name === "string" && name.length > 0) {
+    const nameWarning = nameNormalizationWarning("column name", name);
+    if (nameWarning) warnings.push(nameWarning);
+  }
   const dashboard = await ctx.client.getDashboard(dashboardId);
   if (!dashboard) throw notFoundError("dashboard");
   const now = new Date().toISOString();
@@ -962,6 +1235,7 @@ async function prepareDashboardColumnCreate(ctx, input) {
     requested_name: name ?? "",
     has_requested_name: name !== undefined,
     baseline_column_ids: dashboard.columns.map(({ id }) => id),
+    ...warningRecordFields(warnings),
     creation_owned: false,
     native_write_sent: false,
     native_acknowledged: false,
@@ -981,10 +1255,15 @@ async function prepareDashboardColumnUpdate(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["column_names", "widget"],
+    ["column_names", "widget", "column_ref", "position"],
     DASHBOARD_COLUMN_UPDATE,
   );
   const name = validateOptionalColumnName(input.name, { required: true });
+  const warnings = [];
+  if (name.length > 0) {
+    const nameWarning = nameNormalizationWarning("column name", name);
+    if (nameWarning) warnings.push(nameWarning);
+  }
   const column = await ctx.client.getDashboardColumn(dashboardId, columnId);
   if (!column) throw notFoundError("dashboard column");
   if (column.name === name) {
@@ -1012,6 +1291,7 @@ async function prepareDashboardColumnUpdate(ctx, input) {
       name: column.name,
     },
     requested_name: name,
+    ...warningRecordFields(warnings),
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -1030,7 +1310,7 @@ async function prepareDashboardColumnDelete(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["name", "column_names", "widget"],
+    ["name", "column_names", "widget", "column_ref", "position"],
     DASHBOARD_COLUMN_DELETE,
   );
   const column = await ctx.client.getDashboardColumn(dashboardId, columnId);
@@ -1075,10 +1355,10 @@ async function prepareDashboardWidgetCreate(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["name", "column_names"],
+    ["name", "column_names", "column_ref", "position"],
     DASHBOARD_WIDGET_CREATE,
   );
-  const requestedWidget = await validateAndBuildWidget(
+  const { widget: requestedWidget, warnings } = await validateAndBuildWidget(
     ctx.client,
     ctx.hubSerial,
     input.widget,
@@ -1090,6 +1370,9 @@ async function prepareDashboardWidgetCreate(ctx, input) {
     requestedWidget.type === "chart"
       ? await checkHistoryApp(ctx.client, ctx.hubSerial)
       : { history_app_missing: false };
+  if (historyCheck.history_app_missing) {
+    warnings.push(historyCheck.warning);
+  }
   const now = new Date().toISOString();
   const change = {
     id: ctx.store.newId(),
@@ -1102,12 +1385,7 @@ async function prepareDashboardWidgetCreate(ctx, input) {
     column_id: columnId,
     requested_widget: requestedWidget,
     baseline_widget_ids: column.widgets.map(({ id }) => id),
-    ...(historyCheck.history_app_missing
-      ? {
-          history_app_missing: true,
-          warning: historyCheck.warning,
-        }
-      : {}),
+    ...warningRecordFields(warnings, historyCheck.history_app_missing),
     creation_owned: false,
     native_write_sent: false,
     native_acknowledged: false,
@@ -1127,7 +1405,7 @@ async function prepareDashboardWidgetUpdate(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["name", "column_names"],
+    ["name", "column_names", "column_ref", "position"],
     DASHBOARD_WIDGET_UPDATE,
   );
   const existing = await ctx.client.getDashboardWidget(dashboardId, widgetId);
@@ -1139,7 +1417,7 @@ async function prepareDashboardWidgetUpdate(ctx, input) {
     );
   }
   const baseline = widgetSnapshot(existing);
-  const requestedWidget = await validateAndBuildWidget(
+  const { widget: requestedWidget, warnings } = await validateAndBuildWidget(
     ctx.client,
     ctx.hubSerial,
     input.widget,
@@ -1149,17 +1427,19 @@ async function prepareDashboardWidgetUpdate(ctx, input) {
     requestedWidget.type === "chart"
       ? await checkHistoryApp(ctx.client, ctx.hubSerial)
       : { history_app_missing: false };
+  if (historyCheck.history_app_missing) {
+    warnings.push(historyCheck.warning);
+  }
+  const warningFields = warningRecordFields(
+    warnings,
+    historyCheck.history_app_missing,
+  );
   if (sameWidgetContent(baseline, requestedWidget)) {
     return {
       status: "already_desired",
       operation: DASHBOARD_WIDGET_UPDATE,
       target_ref: input.target_ref,
-      ...(historyCheck.history_app_missing
-        ? {
-            history_app_missing: true,
-            warning: historyCheck.warning,
-          }
-        : {}),
+      ...warningFields,
     };
   }
   const now = new Date().toISOString();
@@ -1175,12 +1455,7 @@ async function prepareDashboardWidgetUpdate(ctx, input) {
     widget_id: widgetId,
     baseline_snapshot: baseline,
     requested_widget: requestedWidget,
-    ...(historyCheck.history_app_missing
-      ? {
-          history_app_missing: true,
-          warning: historyCheck.warning,
-        }
-      : {}),
+    ...warningFields,
     native_write_sent: false,
     native_acknowledged: false,
     last_verification: freshVerification("baseline_observed"),
@@ -1199,7 +1474,7 @@ async function prepareDashboardWidgetDelete(ctx, input) {
   );
   forbidUnexpectedFields(
     input,
-    ["name", "column_names", "widget"],
+    ["name", "column_names", "widget", "column_ref", "position"],
     DASHBOARD_WIDGET_DELETE,
   );
   const existing = await ctx.client.getDashboardWidget(dashboardId, widgetId);
@@ -1235,6 +1510,177 @@ async function prepareDashboardWidgetDelete(ctx, input) {
   return publicDashboardChange(change);
 }
 
+async function prepareDashboardWidgetMove(ctx, input) {
+  const { dashboardId, widgetId } = parseDashboardWidgetRef(
+    input.target_ref,
+    ctx.hubSerial,
+  );
+  forbidUnexpectedFields(
+    input,
+    ["name", "column_names", "widget"],
+    DASHBOARD_WIDGET_MOVE,
+  );
+  let targetColumnId;
+  if (input.column_ref !== undefined) {
+    const parsedCol = parseDashboardColumnRef(input.column_ref, ctx.hubSerial);
+    if (parsedCol.dashboardId !== dashboardId) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "dashboard_widget_move cannot move a widget to a column on a different dashboard.",
+        "prepare_native_change",
+      );
+    }
+    targetColumnId = parsedCol.columnId;
+  }
+  if (
+    input.position !== undefined &&
+    (!Number.isSafeInteger(input.position) || input.position < 0)
+  ) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      "position must be a non-negative integer (0-based index).",
+      "prepare_native_change",
+    );
+  }
+  const dashboard = await ctx.client.getDashboard(dashboardId);
+  if (!dashboard) throw notFoundError("dashboard widget");
+  let sourceCol = null;
+  let widget = null;
+  for (const column of dashboard.columns) {
+    const found = column.widgets.find(({ id }) => id === widgetId);
+    if (found) {
+      sourceCol = column;
+      widget = found;
+      break;
+    }
+  }
+  if (!sourceCol || !widget) throw notFoundError("dashboard widget");
+  const destColId = targetColumnId ?? sourceCol.id;
+  const destCol = dashboard.columns.find(({ id }) => id === destColId);
+  if (!destCol) throw notFoundError("dashboard column");
+
+  const sameColumn = sourceCol.id === destCol.id;
+  if (sameColumn && input.position === undefined) {
+    throw new SprutHubError(
+      "invalid_native_change",
+      "position is required when moving a widget within the same column (or pass a different column_ref).",
+      "prepare_native_change",
+    );
+  }
+
+  const sourceSorted = sortColumnWidgets(sourceCol.widgets);
+  const currentPosition = sourceSorted.findIndex(({ id }) => id === widgetId);
+  const destSorted = sameColumn
+    ? sourceSorted
+    : sortColumnWidgets(destCol.widgets);
+  const destWithoutSelf = destSorted.filter(({ id }) => id !== widgetId);
+  const maxPosition = destWithoutSelf.length;
+  const targetPosition =
+    input.position !== undefined ? input.position : maxPosition;
+  if (targetPosition < 0 || targetPosition > maxPosition) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      `position must be between 0 and ${maxPosition} for the destination column.`,
+      "prepare_native_change",
+    );
+  }
+
+  const nextDestIds = destWithoutSelf.map(({ id }) => id);
+  nextDestIds.splice(targetPosition, 0, widgetId);
+
+  const baselineColumns = sameColumn
+    ? [{ column_id: sourceCol.id, widgets: columnLayoutEntries(sourceCol) }]
+    : [
+        { column_id: sourceCol.id, widgets: columnLayoutEntries(sourceCol) },
+        { column_id: destCol.id, widgets: columnLayoutEntries(destCol) },
+      ];
+  const targetColumns = sameColumn
+    ? [
+        {
+          column_id: sourceCol.id,
+          widgets: nextDestIds.map((id, order) => ({ id, order })),
+        },
+      ]
+    : [
+        {
+          column_id: sourceCol.id,
+          widgets: sourceSorted
+            .filter(({ id }) => id !== widgetId)
+            .map(({ id }, order) => ({ id, order })),
+        },
+        {
+          column_id: destCol.id,
+          widgets: nextDestIds.map((id, order) => ({ id, order })),
+        },
+      ];
+  const targetOrders = targetColumns.flatMap(({ column_id, widgets }) =>
+    widgets.map(({ id, order }) => ({
+      dashboardId,
+      columnId: column_id,
+      id,
+      order,
+    })),
+  );
+
+  const sourceColumnRef = dashboardColumnRef(
+    ctx.hubSerial,
+    dashboardId,
+    sourceCol.id,
+  );
+  const destColumnRef = dashboardColumnRef(
+    ctx.hubSerial,
+    dashboardId,
+    destCol.id,
+  );
+
+  if (
+    sameColumn &&
+    currentPosition === targetPosition &&
+    sameColumnsLayout(dashboard, targetColumns)
+  ) {
+    return {
+      status: "already_desired",
+      operation: DASHBOARD_WIDGET_MOVE,
+      target_ref: input.target_ref,
+      column_ref: destColumnRef,
+      position: targetPosition,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const change = {
+    id: ctx.store.newId(),
+    kind: DASHBOARD_WIDGET_MOVE,
+    status: "prepared",
+    home_ref: configuredHomeRef(ctx.hubSerial),
+    reason: input.reason,
+    target_ref: input.target_ref,
+    dashboard_id: dashboardId,
+    widget_id: widgetId,
+    widget_name: widget.name ?? "",
+    widget_type: widget.type ?? undefined,
+    source_column_id: sourceCol.id,
+    source_column_ref: sourceColumnRef,
+    source_column_name: sourceCol.name ?? "",
+    source_position: currentPosition,
+    column_id: destCol.id,
+    column_ref: destColumnRef,
+    dest_column_name: destCol.name ?? "",
+    target_position: targetPosition,
+    baseline_columns: baselineColumns,
+    target_columns: targetColumns,
+    target_orders: targetOrders,
+    native_write_sent: false,
+    native_acknowledged: false,
+    last_verification: freshVerification("baseline_observed"),
+    created_at: now,
+    updated_at: now,
+    history: [{ status: "prepared", at: now }],
+  };
+  await ctx.store.save(change);
+  return publicDashboardChange(change);
+}
+
 // ---- Apply -----------------------------------------------------------------
 
 export async function applyDashboardChange(ctx, change) {
@@ -1258,6 +1704,8 @@ export async function applyDashboardChange(ctx, change) {
       return applyDashboardWidgetUpdate(ctx, change);
     case DASHBOARD_WIDGET_DELETE:
       return applyDashboardWidgetDelete(ctx, change);
+    case DASHBOARD_WIDGET_MOVE:
+      return applyDashboardWidgetMove(ctx, change);
     default:
       throw new SprutHubError(
         "unsupported_native_operation",
@@ -1273,7 +1721,8 @@ async function recordUnknownDashboardCreate(ctx, change, baselineIds, name) {
     candidates = (await ctx.client.listDashboards())
       .filter(
         (dashboard) =>
-          !known.has(dashboard.id) && (dashboard.name ?? "") === name,
+          !known.has(dashboard.id) &&
+          matchesDashboardName(name, dashboard.name ?? ""),
       )
       .map((dashboard) => ({
         id: dashboard.id,
@@ -1326,6 +1775,12 @@ async function applyDashboardCreate(ctx, change) {
   change.created_dashboard_id = created.id;
   change.created_dashboard_ref = dashboardRef(ctx.hubSerial, created.id);
   change.applied_dashboard_name = created.name;
+  if (created.name !== change.requested_name) {
+    change.hub_normalized_name = {
+      requested: change.requested_name,
+      stored: created.name,
+    };
+  }
   change.creation_owned = true;
   change.creation_complete = false;
   change.native_acknowledged = true;
@@ -1384,6 +1839,14 @@ async function applyDashboardCreate(ctx, change) {
       ref: dashboardColumnRef(ctx.hubSerial, created.id, column.id),
       id: column.id,
       name: column.name,
+      ...(column.name !== step.name
+        ? {
+            hub_normalized_name: {
+              requested: step.name,
+              stored: column.name,
+            },
+          }
+        : {}),
     });
     await ctx.store.save(change);
   }
@@ -1478,7 +1941,8 @@ async function recordUnknownColumnCreate(ctx, change, baselineIds, name) {
     candidates = (dashboard?.columns ?? [])
       .filter(
         (column) =>
-          !known.has(column.id) && (column.name ?? "") === (name ?? ""),
+          !known.has(column.id) &&
+          matchesDashboardName(name ?? "", column.name ?? ""),
       )
       .map((column) => ({
         id: column.id,
@@ -1544,6 +2008,12 @@ async function applyDashboardColumnCreate(ctx, change) {
     change.dashboard_id,
     created.id,
   );
+  if (change.has_requested_name && created.name !== change.requested_name) {
+    change.hub_normalized_name = {
+      requested: change.requested_name,
+      stored: created.name,
+    };
+  }
   change.creation_owned = true;
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
@@ -1640,7 +2110,9 @@ async function recordUnknownWidgetCreate(ctx, change, baselineIds, requested) {
       .filter(
         (widget) =>
           !known.has(widget.id) &&
-          sameWidgetContent(widgetSnapshot(widget), requested),
+          sameWidgetContent(widgetSnapshot(widget), requested, {
+            allowNormalizedName: true,
+          }),
       )
       .map((widget) => ({
         id: widget.id,
@@ -1730,6 +2202,16 @@ async function applyDashboardWidgetCreate(ctx, change) {
     change.dashboard_id,
     created.id,
   );
+  const requestedWidgetName = change.requested_widget.name ?? "";
+  if (
+    change.requested_widget.name !== undefined &&
+    created.name !== requestedWidgetName
+  ) {
+    change.hub_normalized_name = {
+      requested: requestedWidgetName,
+      stored: created.name,
+    };
+  }
   change.creation_owned = true;
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
@@ -1832,6 +2314,54 @@ async function applyDashboardWidgetDelete(ctx, change) {
   return reconcileDashboardWidgetDeleteApply(ctx, change, false);
 }
 
+async function applyDashboardWidgetMove(ctx, change) {
+  if (change.native_write_sent === true && change.status !== "not_applied") {
+    return getDashboardWidgetMove(ctx, change);
+  }
+  const live = await ctx.client.getDashboard(change.dashboard_id);
+  if (!live) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "dashboard_missing",
+      last_verification: freshVerification("dashboard_missing"),
+    });
+  }
+  for (const { column_id: columnId } of change.baseline_columns) {
+    if (!live.columns.some(({ id }) => id === columnId)) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "column_missing",
+        last_verification: freshVerification("column_missing"),
+      });
+    }
+  }
+  const hasWidget = live.columns.some((column) =>
+    column.widgets.some(({ id }) => id === change.widget_id),
+  );
+  if (!hasWidget) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "widget_missing",
+      last_verification: freshVerification("widget_missing"),
+    });
+  }
+  if (!sameColumnsLayout(live, change.baseline_columns)) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "dashboard_layout_changed_since",
+      last_verification: freshVerification("dashboard_layout_changed_since"),
+    });
+  }
+  await ctx.persistNativeIntent(change, "applying", "apply");
+  try {
+    await ctx.client.reorderDashboardWidgets(change.target_orders);
+  } catch (error) {
+    if (!isUncertainWriteError(error)) {
+      throw await ctx.finishRefusedWrite(change, "not_applied", error);
+    }
+    return reconcileDashboardWidgetMove(ctx, change, "apply", true);
+  }
+  change.native_acknowledged = true;
+  change.write_intent.acknowledged = true;
+  return reconcileDashboardWidgetMove(ctx, change, "apply", false);
+}
+
 // ---- Get & Reconcile -------------------------------------------------------
 // Read-only get_native_change MUST NOT call finishNative on already-settled
 // (applied / restored / conflict) records so updated_at and history ordering
@@ -1858,6 +2388,8 @@ export async function getDashboardChange(ctx, change) {
       return getDashboardWidgetUpdate(ctx, change);
     case DASHBOARD_WIDGET_DELETE:
       return getDashboardWidgetDelete(ctx, change);
+    case DASHBOARD_WIDGET_MOVE:
+      return getDashboardWidgetMove(ctx, change);
     default:
       throw new SprutHubError(
         "unsupported_native_operation",
@@ -1903,10 +2435,7 @@ async function getDashboardCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -1924,10 +2453,7 @@ async function getDashboardCreate(ctx, change) {
       last_verification: freshVerification("created_dashboard_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: dashboardSnapshot(live),
@@ -1995,7 +2521,11 @@ async function reconcileDashboardUpdate(
     direction === "apply"
       ? change.baseline_snapshot.name
       : change.applied_snapshot?.name;
-  if (live.name === targetName) {
+  const exactMatch = live.name === targetName;
+  const normalizedMatch =
+    isHubNormalizedDashboardName(targetName, live.name) &&
+    (!uncertainWrite || live.name !== previousName);
+  if (exactMatch || normalizedMatch) {
     return ctx.finishNative(
       change,
       direction === "apply" ? "applied" : "restored",
@@ -2003,6 +2533,14 @@ async function reconcileDashboardUpdate(
       {
         ...(direction === "apply"
           ? { applied_snapshot: { id: live.id, name: live.name } }
+          : {}),
+        ...(direction === "apply" && normalizedMatch
+          ? {
+              hub_normalized_name: {
+                requested: targetName,
+                stored: live.name,
+              },
+            }
           : {}),
         observed_name: live.name,
         ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
@@ -2156,10 +2694,7 @@ async function getDashboardDelete(ctx, change) {
       verification: freshVerification("recreated_dashboard_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownDashboardCreate(
       ctx,
       change,
@@ -2202,10 +2737,7 @@ async function getDashboardColumnCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -2223,10 +2755,7 @@ async function getDashboardColumnCreate(ctx, change) {
       last_verification: freshVerification("created_column_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: columnSnapshot(live),
@@ -2284,7 +2813,11 @@ async function reconcileDashboardColumnUpdate(
     direction === "apply"
       ? change.baseline_snapshot.name
       : change.applied_snapshot?.name;
-  if (live.name === targetName) {
+  const exactMatch = live.name === targetName;
+  const normalizedMatch =
+    isHubNormalizedDashboardName(targetName, live.name) &&
+    (!uncertainWrite || live.name !== previousName);
+  if (exactMatch || normalizedMatch) {
     return ctx.finishNative(
       change,
       direction === "apply" ? "applied" : "restored",
@@ -2296,6 +2829,14 @@ async function reconcileDashboardColumnUpdate(
                 dashboard_id: change.dashboard_id,
                 id: change.column_id,
                 name: live.name,
+              },
+            }
+          : {}),
+        ...(direction === "apply" && normalizedMatch
+          ? {
+              hub_normalized_name: {
+                requested: targetName,
+                stored: live.name,
               },
             }
           : {}),
@@ -2463,10 +3004,7 @@ async function getDashboardColumnDelete(ctx, change) {
       verification: freshVerification("recreated_column_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownColumnCreate(
       ctx,
       change,
@@ -2509,10 +3047,7 @@ async function getDashboardWidgetCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -2530,10 +3065,7 @@ async function getDashboardWidgetCreate(ctx, change) {
       last_verification: freshVerification("created_widget_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: widgetSnapshot(live),
@@ -2588,13 +3120,28 @@ async function reconcileDashboardWidgetUpdate(
     direction === "apply" ? change.requested_widget : change.baseline_snapshot;
   const previous =
     direction === "apply" ? change.baseline_snapshot : change.applied_snapshot;
-  if (sameWidgetContent(liveSnap, expected)) {
+  const exactMatch = sameWidgetContent(liveSnap, expected);
+  const expectedName = expected.name ?? "";
+  const liveName = liveSnap.name ?? "";
+  const normalizedMatch =
+    sameWidgetPayloadAndType(liveSnap, expected) &&
+    isHubNormalizedDashboardName(expectedName, liveName) &&
+    (!uncertainWrite || !previous || !sameWidgetContent(liveSnap, previous));
+  if (exactMatch || normalizedMatch) {
     return ctx.finishNative(
       change,
       direction === "apply" ? "applied" : "restored",
       undefined,
       {
         ...(direction === "apply" ? { applied_snapshot: liveSnap } : {}),
+        ...(direction === "apply" && normalizedMatch
+          ? {
+              hub_normalized_name: {
+                requested: expectedName,
+                stored: liveName,
+              },
+            }
+          : {}),
         observed_snapshot: liveSnap,
         ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
         last_verification: freshVerification(
@@ -2752,10 +3299,7 @@ async function getDashboardWidgetDelete(ctx, change) {
       verification: freshVerification("recreated_widget_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownWidgetCreate(
       ctx,
       change,
@@ -2764,6 +3308,127 @@ async function getDashboardWidgetDelete(ctx, change) {
     );
   }
   return ctx.publicStored(change);
+}
+
+async function reconcileDashboardWidgetMove(
+  ctx,
+  change,
+  direction,
+  uncertainWrite,
+) {
+  let live;
+  try {
+    live = await ctx.client.getDashboard(change.dashboard_id);
+  } catch (error) {
+    return ctx.finishNative(change, "uncertain", undefined, {
+      last_verification: failedVerification(error),
+    });
+  }
+  if (live === null) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "dashboard_missing",
+      last_verification: freshVerification("dashboard_missing"),
+    });
+  }
+  const expectedColumns =
+    direction === "apply" ? change.target_columns : change.baseline_columns;
+  const previousColumns =
+    direction === "apply"
+      ? change.baseline_columns
+      : (change.applied_columns ?? change.target_columns);
+  if (sameColumnsLayout(live, expectedColumns)) {
+    return ctx.finishNative(
+      change,
+      direction === "apply" ? "applied" : "restored",
+      undefined,
+      {
+        ...(direction === "apply"
+          ? { applied_columns: structuredClone(expectedColumns) }
+          : {}),
+        ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
+        last_verification: freshVerification(
+          direction === "apply"
+            ? "requested_layout_observed"
+            : "baseline_layout_observed",
+        ),
+      },
+    );
+  }
+  if (sameColumnsLayout(live, previousColumns)) {
+    return ctx.finishNative(change, "uncertain", undefined, {
+      last_verification: freshVerification("previous_layout_still_present"),
+    });
+  }
+  for (const { column_id: columnId } of change.baseline_columns ?? []) {
+    if (!live.columns.some(({ id }) => id === columnId)) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "column_missing",
+        last_verification: freshVerification("column_missing"),
+      });
+    }
+  }
+  const hasWidget = live.columns.some((column) =>
+    column.widgets.some(({ id }) => id === change.widget_id),
+  );
+  if (!hasWidget) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "widget_missing",
+      last_verification: freshVerification("widget_missing"),
+    });
+  }
+  return ctx.finishNative(change, "conflict", undefined, {
+    conflict_reason: "dashboard_layout_changed_since",
+    last_verification: freshVerification("dashboard_layout_changed_since"),
+  });
+}
+
+async function getDashboardWidgetMove(ctx, change) {
+  if (
+    change.status === "prepared" ||
+    change.status === "not_applied" ||
+    change.status === "not_owned" ||
+    change.status === "restored"
+  ) {
+    return ctx.publicStored(change);
+  }
+  if (["applying", "restoring", "uncertain"].includes(change.status)) {
+    const direction = nativeIntentDirection(change) ?? "apply";
+    return reconcileDashboardWidgetMove(
+      ctx,
+      change,
+      direction,
+      change.write_intent?.acknowledged !== true,
+    );
+  }
+  let live;
+  try {
+    live = await ctx.client.getDashboard(change.dashboard_id);
+  } catch (error) {
+    return publicDashboardChange(change, {
+      verification: failedVerification(error),
+    });
+  }
+  if (change.status === "conflict") {
+    return publicDashboardChange(change, {
+      verification: freshVerification(
+        live === null
+          ? "dashboard_missing"
+          : (change.conflict_reason ?? "conflict"),
+      ),
+    });
+  }
+  if (live === null) {
+    return publicDashboardChange(change, {
+      verification: freshVerification("dashboard_missing"),
+    });
+  }
+  return publicDashboardChange(change, {
+    verification: freshVerification(
+      change.applied_columns && sameColumnsLayout(live, change.applied_columns)
+        ? "applied_layout_observed"
+        : "dashboard_layout_changed_since",
+    ),
+  });
 }
 
 // ---- Restore (Undo) --------------------------------------------------------
@@ -2804,9 +3469,50 @@ async function findLaterAppliedChange(ctx, change, kinds) {
   return later[0] ?? null;
 }
 
+async function findLaterAppliedDashboardLayoutChange(ctx, change) {
+  const stored = await ctx.store.list();
+  const affectedColumnIds = new Set(
+    (change.baseline_columns ?? []).map(({ column_id }) => column_id),
+  );
+  const later = stored
+    .filter((other) => {
+      if (
+        other.id === change.id ||
+        other.home_ref !== change.home_ref ||
+        other.dashboard_id !== change.dashboard_id ||
+        other.status !== "applied" ||
+        !isAppliedAfter(other, change)
+      ) {
+        return false;
+      }
+      if (other.kind === DASHBOARD_DELETE) return true;
+      if (
+        other.kind === DASHBOARD_WIDGET_CREATE ||
+        other.kind === DASHBOARD_WIDGET_DELETE ||
+        other.kind === DASHBOARD_COLUMN_DELETE
+      ) {
+        return affectedColumnIds.has(other.column_id);
+      }
+      if (other.kind === DASHBOARD_WIDGET_MOVE) {
+        return (
+          affectedColumnIds.has(other.source_column_id) ||
+          affectedColumnIds.has(other.column_id) ||
+          (other.baseline_columns ?? []).some(({ column_id }) =>
+            affectedColumnIds.has(column_id),
+          )
+        );
+      }
+      return false;
+    })
+    .sort((left, right) =>
+      changeApplicationTime(right).localeCompare(changeApplicationTime(left)),
+    );
+  return later[0] ?? null;
+}
+
 export async function restoreDashboardChange(ctx, change) {
   if (change.status === "restored") return ctx.publicStored(change);
-  // Single shared pre-write gate across all 9 dashboard operations:
+  // Single shared pre-write gate across all 10 dashboard operations:
   // prepared, hub-refused not_applied, or pre-write conflict (native_write_sent=false)
   // must NEVER write to the hub or recreate/overwrite owner state.
   if (
@@ -2853,6 +3559,8 @@ export async function restoreDashboardChange(ctx, change) {
       return restoreDashboardWidgetUpdate(ctx, change);
     case DASHBOARD_WIDGET_DELETE:
       return restoreDashboardWidgetDelete(ctx, change);
+    case DASHBOARD_WIDGET_MOVE:
+      return restoreDashboardWidgetMove(ctx, change);
     default:
       throw new SprutHubError(
         "unsupported_native_operation",
@@ -2873,7 +3581,7 @@ async function restoreDashboardCreate(ctx, change) {
   }
   const live = await ctx.client.getDashboard(change.created_dashboard_id);
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_dashboard_absent"),
@@ -2915,7 +3623,10 @@ async function restoreDashboardCreate(ctx, change) {
     (live.columns.length === confirmedColumns.length ||
       (inFlightStep !== undefined &&
         live.columns.length === confirmedColumns.length + 1 &&
-        live.columns[confirmedColumns.length].name === inFlightStep.name));
+        matchesDashboardName(
+          inFlightStep.name,
+          live.columns[confirmedColumns.length].name,
+        )));
   if (live.name !== expectedName || !columnsMatch) {
     const later = await findLaterAppliedChange(
       ctx,
@@ -2987,12 +3698,16 @@ async function restoreDashboardUpdate(ctx, change) {
       last_verification: freshVerification("dashboard_missing"),
     });
   }
-  if (live.name === change.baseline_snapshot.name) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    live.name === change.baseline_snapshot.name ||
+    (pendingRestore &&
+      live.name !== change.applied_snapshot.name &&
+      isHubNormalizedDashboardName(change.baseline_snapshot.name, live.name))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_name: live.name,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
@@ -3283,10 +3998,7 @@ async function restoreDashboardDelete(ctx, change) {
     }
     return runDashboardDeleteRecreation(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownDashboardCreate(
       ctx,
       change,
@@ -3357,7 +4069,7 @@ async function restoreDashboardColumnCreate(ctx, change) {
     change.created_column_id,
   );
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_column_absent"),
@@ -3453,12 +4165,16 @@ async function restoreDashboardColumnUpdate(ctx, change) {
       last_verification: freshVerification("column_missing"),
     });
   }
-  if (live.name === change.baseline_snapshot.name) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    live.name === change.baseline_snapshot.name ||
+    (pendingRestore &&
+      live.name !== change.applied_snapshot.name &&
+      isHubNormalizedDashboardName(change.baseline_snapshot.name, live.name))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_name: live.name,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
@@ -3653,10 +4369,7 @@ async function restoreDashboardColumnDelete(ctx, change) {
     }
     return runColumnDeleteRecreation(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownColumnCreate(
       ctx,
       change,
@@ -3737,7 +4450,7 @@ async function restoreDashboardWidgetCreate(ctx, change) {
     change.created_widget_id,
   );
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_widget_absent"),
@@ -3756,7 +4469,7 @@ async function restoreDashboardWidgetCreate(ctx, change) {
     const later = await findLaterAppliedChange(
       ctx,
       { ...change, target_ref: change.created_widget_ref },
-      [DASHBOARD_WIDGET_UPDATE],
+      [DASHBOARD_WIDGET_UPDATE, DASHBOARD_WIDGET_MOVE],
     );
     return ctx.finishNative(change, "conflict", undefined, {
       observed_snapshot: liveSnap,
@@ -3831,12 +4544,18 @@ async function restoreDashboardWidgetUpdate(ctx, change) {
     });
   }
   const liveSnap = widgetSnapshot(live);
-  if (sameWidgetContent(liveSnap, change.baseline_snapshot)) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    sameWidgetContent(liveSnap, change.baseline_snapshot) ||
+    (pendingRestore &&
+      !sameWidgetContent(liveSnap, change.applied_snapshot) &&
+      sameWidgetContent(liveSnap, change.baseline_snapshot, {
+        allowNormalizedName: true,
+      }))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_snapshot: liveSnap,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_widget_observed"),
     });
   }
@@ -3900,10 +4619,7 @@ async function restoreDashboardWidgetDelete(ctx, change) {
   if (change.recreated_widget_id !== undefined) {
     return getDashboardWidgetDelete(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownWidgetCreate(
       ctx,
       change,
@@ -4006,6 +4722,91 @@ async function restoreDashboardWidgetDelete(ctx, change) {
   });
 }
 
+async function restoreDashboardWidgetMove(ctx, change) {
+  if (!change.applied_columns) {
+    return ctx.finishNative(change, "not_owned", undefined, {
+      conflict_reason: "change_was_not_applied",
+      last_verification: freshVerification("change_was_not_applied"),
+    });
+  }
+  const live = await ctx.client.getDashboard(change.dashboard_id);
+  if (live === null) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "dashboard_missing",
+      last_verification: freshVerification("dashboard_missing"),
+    });
+  }
+  for (const { column_id: columnId } of change.baseline_columns) {
+    if (!live.columns.some(({ id }) => id === columnId)) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "column_missing",
+        last_verification: freshVerification("column_missing"),
+      });
+    }
+  }
+  const hasWidget = live.columns.some((column) =>
+    column.widgets.some(({ id }) => id === change.widget_id),
+  );
+  if (!hasWidget) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "widget_missing",
+      last_verification: freshVerification("widget_missing"),
+    });
+  }
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (!pendingRestore) {
+    const later = await findLaterAppliedDashboardLayoutChange(ctx, change);
+    if (later) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "later_owned_change",
+        restore_first_change_id: later.id,
+        last_verification: freshVerification("later_owned_change"),
+      });
+    }
+  }
+  if (sameColumnsLayout(live, change.baseline_columns)) {
+    return ctx.finishNative(change, "restored", undefined, {
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
+      last_verification: freshVerification("baseline_layout_observed"),
+    });
+  }
+  if (!sameColumnsLayout(live, change.applied_columns)) {
+    const later = await findLaterAppliedDashboardLayoutChange(ctx, change);
+    return ctx.finishNative(change, "conflict", undefined, {
+      ...(later
+        ? {
+            conflict_reason: "later_owned_change",
+            restore_first_change_id: later.id,
+          }
+        : { conflict_reason: "dashboard_layout_changed_since" }),
+      last_verification: freshVerification(
+        later ? "later_owned_change" : "dashboard_layout_changed_since",
+      ),
+    });
+  }
+  const restoreOrders = change.baseline_columns.flatMap(
+    ({ column_id, widgets }) =>
+      widgets.map(({ id, order }) => ({
+        dashboardId: change.dashboard_id,
+        columnId: column_id,
+        id,
+        order,
+      })),
+  );
+  await ctx.persistNativeIntent(change, "restoring", "restore");
+  try {
+    await ctx.client.reorderDashboardWidgets(restoreOrders);
+  } catch (error) {
+    if (!isUncertainWriteError(error)) {
+      throw await ctx.finishRefusedWrite(change, "applied", error);
+    }
+    return reconcileDashboardWidgetMove(ctx, change, "restore", true);
+  }
+  change.native_acknowledged = true;
+  change.write_intent.acknowledged = true;
+  return reconcileDashboardWidgetMove(ctx, change, "restore", false);
+}
+
 // ---- Presentation, History & Summary Helpers -------------------------------
 
 function widgetDiffView(homeRef, widget) {
@@ -4058,6 +4859,11 @@ export function publicDashboardChange(change, options = {}) {
     reason: change.reason,
     target_ref: change.target_ref,
   };
+  const warnings = Array.isArray(change.warnings)
+    ? [...change.warnings]
+    : typeof change.warning === "string" && change.warning.length > 0
+      ? [change.warning]
+      : [];
   const tail = {
     native_write_sent: change.native_write_sent,
     native_acknowledged: change.native_acknowledged,
@@ -4079,7 +4885,22 @@ export function publicDashboardChange(change, options = {}) {
       : {}),
     ...(change.missing_refs ? { missing_refs: [...change.missing_refs] } : {}),
     ...(change.history_app_missing === true
-      ? { history_app_missing: true, warning: change.warning }
+      ? { history_app_missing: true }
+      : {}),
+    ...(warnings.length > 0
+      ? {
+          warning:
+            typeof change.warning === "string" && change.warning.length > 0
+              ? change.warning
+              : warnings.join(" "),
+          warnings,
+        }
+      : {}),
+    ...(change.hub_normalized_name
+      ? {
+          hub_normalized_name: structuredClone(change.hub_normalized_name),
+          name_normalized: true,
+        }
       : {}),
   };
 
@@ -4302,6 +5123,33 @@ export function publicDashboardChange(change, options = {}) {
     };
   }
 
+  if (change.kind === DASHBOARD_WIDGET_MOVE) {
+    return {
+      ...common,
+      dashboard_ref: `${change.home_ref}/dashboard/${change.dashboard_id}`,
+      source_column_ref: change.source_column_ref,
+      column_ref: change.column_ref,
+      diff: {
+        from: {
+          column_ref: change.source_column_ref,
+          column_name: redactSensitiveText(change.source_column_name ?? ""),
+          position: change.source_position,
+        },
+        to: {
+          column_ref: change.column_ref,
+          column_name: redactSensitiveText(change.dest_column_name ?? ""),
+          position: change.target_position,
+        },
+      },
+      ...tail,
+      restore_supported: true,
+      limitations: [
+        "Reorders all widgets in every affected column contiguously (0..N-1) in one dashboardWidget.orders RPC.",
+        "Restore puts back the original column membership and orders only while affected columns still match the applied layout.",
+      ],
+    };
+  }
+
   // DASHBOARD_WIDGET_DELETE
   return {
     ...common,
@@ -4357,12 +5205,19 @@ export function dashboardChangeName(change) {
       );
     case DASHBOARD_WIDGET_UPDATE:
       return (
+        change.applied_snapshot?.name ||
         change.requested_widget?.name ||
         change.baseline_snapshot?.name ||
         change.baseline_snapshot?.type
       );
     case DASHBOARD_WIDGET_DELETE:
       return change.baseline_snapshot?.name || change.baseline_snapshot?.type;
+    case DASHBOARD_WIDGET_MOVE:
+      return (
+        (change.widget_name
+          ? redactSensitiveText(change.widget_name)
+          : undefined) || change.widget_type
+      );
     default:
       return undefined;
   }
@@ -4377,7 +5232,19 @@ export function dashboardSummaryValue(change) {
   ) {
     return {
       from: change.baseline_snapshot.name,
-      to: change.requested_name,
+      to: change.applied_snapshot?.name ?? change.requested_name,
+    };
+  }
+  if (change.kind === DASHBOARD_WIDGET_MOVE) {
+    const fromCol = redactSensitiveText(
+      change.source_column_name || `#${change.source_column_id}`,
+    );
+    const toCol = redactSensitiveText(
+      change.dest_column_name || `#${change.column_id}`,
+    );
+    return {
+      from: `${fromCol}[${change.source_position}]`,
+      to: `${toCol}[${change.target_position}]`,
     };
   }
   return undefined;
@@ -4398,10 +5265,12 @@ export function dashboardRestoreSupported(
   if (
     change.kind === DASHBOARD_UPDATE ||
     change.kind === DASHBOARD_COLUMN_UPDATE ||
-    change.kind === DASHBOARD_WIDGET_UPDATE
+    change.kind === DASHBOARD_WIDGET_UPDATE ||
+    change.kind === DASHBOARD_WIDGET_MOVE
   ) {
     return isConflict
-      ? change.applied_snapshot !== undefined &&
+      ? (change.applied_snapshot !== undefined ||
+          change.applied_columns !== undefined) &&
           change.conflict_reason === "later_owned_change"
       : activeStatus;
   }
@@ -4430,7 +5299,17 @@ export function dashboardAffectedRefs(change, homeRef, canonicalAncestors) {
       `${homeRef}/dashboard/${change.dashboard_id}/column/${change.column_id}`,
     );
   }
+  if (
+    change.dashboard_id !== undefined &&
+    change.source_column_id !== undefined
+  ) {
+    refs.push(
+      `${homeRef}/dashboard/${change.dashboard_id}/column/${change.source_column_id}`,
+    );
+  }
   for (const ref of [
+    change.source_column_ref,
+    change.column_ref,
     change.created_dashboard_ref,
     change.recreated_dashboard_ref,
     change.created_column_ref,
