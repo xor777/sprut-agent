@@ -2800,3 +2800,398 @@ test("dashboard_widget_move: cross-column move, intra-column reorder, emptying c
   // Suppress unused variable warning for col2Id if any:
   assert.ok(col2Id > 0);
 });
+
+test("review return 1: interrupted restore retry on double-spaced baseline, refused-restore guards, 32-char trailing-space match, and control.key fallback", async (t) => {
+  const hooks = {};
+  const { hub, client } = await setup(
+    t,
+    (fixture) => {
+      fixture.accessories.push(
+        {
+          id: 48,
+          roomId: 3,
+          name: "Счётчик 1",
+          services: [
+            {
+              sId: 13,
+              type: "Outlet",
+              name: "Розетка",
+              characteristics: [{ cId: 15, type: "C_Watt", value: 110 }],
+            },
+          ],
+        },
+        {
+          id: 49,
+          roomId: 4,
+          name: "Счётчик 2",
+          services: [
+            {
+              sId: 13,
+              type: "Outlet",
+              name: "Розетка",
+              characteristics: [{ cId: 15, type: "C_Watt", value: 220 }],
+            },
+          ],
+        },
+      );
+    },
+    { onRequest: (request) => hooks.onRequest?.(request) },
+  );
+
+  // Strip control.type and set control.key on custom characteristics for accessories 48 & 49.
+  for (const accessoryId of [48, 49]) {
+    const acc = hub.state.accessories.find(({ id }) => id === accessoryId);
+    const char = acc?.services?.[0]?.characteristics?.[0];
+    assert.ok(char?.control);
+    delete char.control.type;
+    char.control.key = "CustomPower";
+  }
+
+  // 1. P1-A: Interrupted/uncertain restore retry on hub-normalized double-spaced baseline
+  //    across dashboard_update, dashboard_column_update, and dashboard_widget_update.
+  const { applied: normDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Энергия · дом",
+    column_names: ["Свет · зал"],
+    reason: "Панель с двойным пробелом после нормализации",
+  });
+  const normDashRef = normDash.created_dashboard_ref;
+  const normDashId = Number(normDashRef.split("/").at(-1));
+  const normColRef = normDash.created_columns[0].ref;
+  const { applied: normWidget } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: normColRef,
+    widget: { type: "clock", name: "Лампа · стол" },
+    reason: "Виджет с двойным пробелом после нормализации",
+  });
+  const normWidgetRef = normWidget.created_widget_ref;
+
+  await t.test(
+    "P1-A: retrying interrupted restore on double-spaced baseline settles as restored",
+    async () => {
+      // 1a. dashboard_update
+      const { applied: updDash } = await prepareAndApply(client, {
+        operation: "dashboard_update",
+        target_ref: normDashRef,
+        name: "Энергия кратко",
+        reason: "Временное переименование панели",
+      });
+      let dashRestoreSent = false;
+      hub.state.faults.droppedReply.push({
+        method: "dashboard.update",
+        remaining: 1,
+      });
+      hooks.onRequest = (request) => {
+        if (request.method === "dashboard.update") {
+          dashRestoreSent = true;
+          return;
+        }
+        if (dashRestoreSent && request.method === "dashboard.get") {
+          hub.refuseNext("dashboard.get", {
+            code: -32000,
+            message: "transient",
+          });
+          hooks.onRequest = undefined;
+        }
+      };
+      const uncertainDashRestore = await call(client, "restore_native_change", {
+        change_ref: updDash.change_ref,
+      });
+      assert.equal(uncertainDashRestore.status, "uncertain");
+      const retriedDashRestore = await call(client, "restore_native_change", {
+        change_ref: updDash.change_ref,
+      });
+      assert.equal(
+        retriedDashRestore.status,
+        "restored",
+        "retrying uncertain restore on double-spaced dashboard baseline must settle as restored",
+      );
+      assert.equal(retriedDashRestore.recovered_after_uncertain_write, true);
+
+      // 1b. dashboard_column_update
+      const { applied: updCol } = await prepareAndApply(client, {
+        operation: "dashboard_column_update",
+        target_ref: normColRef,
+        name: "Свет кратко",
+        reason: "Временное переименование колонки",
+      });
+      let colRestoreSent = false;
+      hub.state.faults.droppedReply.push({
+        method: "dashboardColumn.update",
+        remaining: 1,
+      });
+      hooks.onRequest = (request) => {
+        if (request.method === "dashboardColumn.update") {
+          colRestoreSent = true;
+          return;
+        }
+        if (colRestoreSent && request.method === "dashboard.get") {
+          hub.refuseNext("dashboard.get", {
+            code: -32000,
+            message: "transient",
+          });
+          hooks.onRequest = undefined;
+        }
+      };
+      const uncertainColRestore = await call(client, "restore_native_change", {
+        change_ref: updCol.change_ref,
+      });
+      assert.equal(uncertainColRestore.status, "uncertain");
+      const retriedColRestore = await call(client, "restore_native_change", {
+        change_ref: updCol.change_ref,
+      });
+      assert.equal(
+        retriedColRestore.status,
+        "restored",
+        "retrying uncertain restore on double-spaced column baseline must settle as restored",
+      );
+      assert.equal(retriedColRestore.recovered_after_uncertain_write, true);
+
+      // 1c. dashboard_widget_update
+      const { applied: updWidget } = await prepareAndApply(client, {
+        operation: "dashboard_widget_update",
+        target_ref: normWidgetRef,
+        widget: { type: "clock", name: "Лампа кратко" },
+        reason: "Временное переименование виджета",
+      });
+      let widgetRestoreSent = false;
+      hub.state.faults.droppedReply.push({
+        method: "dashboardWidget.update",
+        remaining: 1,
+      });
+      hooks.onRequest = (request) => {
+        if (request.method === "dashboardWidget.update") {
+          widgetRestoreSent = true;
+          return;
+        }
+        if (widgetRestoreSent && request.method === "dashboardWidget.get") {
+          hub.refuseNext("dashboardWidget.get", {
+            code: -32000,
+            message: "transient",
+          });
+          hooks.onRequest = undefined;
+        }
+      };
+      const uncertainWidgetRestore = await call(
+        client,
+        "restore_native_change",
+        { change_ref: updWidget.change_ref },
+      );
+      assert.equal(uncertainWidgetRestore.status, "uncertain");
+      const retriedWidgetRestore = await call(client, "restore_native_change", {
+        change_ref: updWidget.change_ref,
+      });
+      assert.equal(
+        retriedWidgetRestore.status,
+        "restored",
+        "retrying uncertain restore on double-spaced widget baseline must settle as restored",
+      );
+      assert.equal(retriedWidgetRestore.recovered_after_uncertain_write, true);
+    },
+  );
+
+  // 2. P1-B: Refused restore leaves status="applied" with write_intent.direction="restore":
+  //    must NEVER skip later_owned_change or falsely claim recovered_after_uncertain_write!
+  await t.test(
+    "P1-B: refused restore preserves later_owned_change and never falsely marks recovered_after_uncertain_write",
+    async () => {
+      const { applied: moveDash } = await prepareAndApply(client, {
+        operation: "dashboard_create",
+        target_ref: HOME_REF,
+        name: "Отказ отката",
+        column_names: ["Колонка 1", "Колонка 2"],
+        reason: "Панель для теста refused restore",
+      });
+      const mDashId = Number(moveDash.created_dashboard_ref.split("/").at(-1));
+      const mCol1Ref = moveDash.created_columns[0].ref;
+      const mCol2Ref = moveDash.created_columns[1].ref;
+      const mCol1Id = moveDash.created_columns[0].id;
+      const { applied: mW1 } = await prepareAndApply(client, {
+        operation: "dashboard_widget_create",
+        target_ref: mCol1Ref,
+        widget: { type: "clock", name: "Часы" },
+        reason: "Виджет 1",
+      });
+      const { applied: mW2 } = await prepareAndApply(client, {
+        operation: "dashboard_widget_create",
+        target_ref: mCol1Ref,
+        widget: { type: "weather", name: "Погода" },
+        reason: "Виджет 2",
+      });
+
+      // 2a. Move W1 col1 -> col2 (M1), refuse restore(M1), apply M2 moving W1 back col2 -> col1 pos 0,
+      //     then restore(M1) MUST return conflict: later_owned_change pointing to M2!
+      const { applied: m1 } = await prepareAndApply(client, {
+        operation: "dashboard_widget_move",
+        target_ref: mW1.created_widget_ref,
+        column_ref: mCol2Ref,
+        reason: "M1: перенести часы во вторую колонку",
+      });
+      hub.refuseNext("dashboardWidget.orders", {
+        code: -32000,
+        message: "temporarily busy",
+      });
+      const refusedM1 = await callError(client, "restore_native_change", {
+        change_ref: m1.change_ref,
+      });
+      assert.equal(refusedM1.hub_effect, "not_applied");
+      const { applied: m2 } = await prepareAndApply(client, {
+        operation: "dashboard_widget_move",
+        target_ref: mW1.created_widget_ref,
+        column_ref: mCol1Ref,
+        position: 0,
+        reason: "M2: вернуть часы в первую колонку",
+      });
+      const retryAfterLaterMove = await call(client, "restore_native_change", {
+        change_ref: m1.change_ref,
+      });
+      assert.equal(
+        retryAfterLaterMove.status,
+        "conflict",
+        "refused restore must NOT skip later_owned_change check on retry",
+      );
+      assert.equal(retryAfterLaterMove.conflict_reason, "later_owned_change");
+      assert.equal(retryAfterLaterMove.restore_first_change_ref, m2.change_ref);
+      assert.equal(
+        retryAfterLaterMove.recovered_after_uncertain_write,
+        undefined,
+      );
+
+      // 2b. Refused restore + manual revert to baseline must NOT set recovered_after_uncertain_write!
+      const { applied: m3 } = await prepareAndApply(client, {
+        operation: "dashboard_widget_move",
+        target_ref: mW2.created_widget_ref,
+        column_ref: mCol2Ref,
+        reason: "M3: перенести погоду во вторую колонку",
+      });
+      hub.refuseNext("dashboardWidget.orders", {
+        code: -32000,
+        message: "refused",
+      });
+      const refusedM3 = await callError(client, "restore_native_change", {
+        change_ref: m3.change_ref,
+      });
+      assert.equal(refusedM3.hub_effect, "not_applied");
+      const mW1Id = Number(mW1.created_widget_ref.split("/").at(-1));
+      const mW2Id = Number(mW2.created_widget_ref.split("/").at(-1));
+      hub.request({
+        dashboardWidget: {
+          orders: {
+            orders: [
+              { dashboardId: mDashId, columnId: mCol1Id, id: mW1Id, order: 0 },
+              { dashboardId: mDashId, columnId: mCol1Id, id: mW2Id, order: 1 },
+            ],
+          },
+        },
+      });
+      const afterManualRevert = await call(client, "restore_native_change", {
+        change_ref: m3.change_ref,
+      });
+      assert.equal(afterManualRevert.status, "restored");
+      assert.equal(
+        afterManualRevert.recovered_after_uncertain_write,
+        undefined,
+        "refused restore followed by manual revert must NOT falsely set recovered_after_uncertain_write",
+      );
+
+      // 2c. Refused restore on dashboard_create + manual deletion -> conflict: created_dashboard_missing!
+      const { applied: dRefused } = await prepareAndApply(client, {
+        operation: "dashboard_create",
+        target_ref: HOME_REF,
+        name: "Удалят вручную",
+        column_names: [],
+        reason: "Проверка refused restore на dashboard_create",
+      });
+      const dRefusedId = Number(
+        dRefused.created_dashboard_ref.split("/").at(-1),
+      );
+      hub.refuseNext("dashboard.delete", { code: -32000, message: "refused" });
+      await callError(client, "restore_native_change", {
+        change_ref: dRefused.change_ref,
+      });
+      hub.request({ dashboard: { delete: { id: dRefusedId } } });
+      const afterManualDelete = await call(client, "restore_native_change", {
+        change_ref: dRefused.change_ref,
+      });
+      assert.equal(afterManualDelete.status, "conflict");
+      assert.equal(
+        afterManualDelete.conflict_reason,
+        "created_dashboard_missing",
+      );
+      assert.equal(
+        afterManualDelete.recovered_after_uncertain_write,
+        undefined,
+      );
+    },
+  );
+
+  // 3. P2: Name whose 32nd surviving code point is a space (raw 32-char slice preserved by hub)
+  //    reconciles cleanly as applied without false conflict!
+  await t.test(
+    "P2: raw 32-code-point truncation keeping trailing space reconciles as applied",
+    async () => {
+      const boundaryInput = "1234567890123456789012345678901 extra";
+      const raw32WithTrailingSpace = "1234567890123456789012345678901 ";
+      assert.equal([...raw32WithTrailingSpace].length, 32);
+      const pBoundary = await call(client, "prepare_native_change", {
+        operation: "dashboard_update",
+        target_ref: normDashRef,
+        name: boundaryInput,
+        reason: "Проверка пробела на 32-й позиции обрезки",
+      });
+      let boundaryUpdated = false;
+      hooks.onRequest = (request) => {
+        if (request.method === "dashboard.update") {
+          boundaryUpdated = true;
+          return;
+        }
+        if (boundaryUpdated && request.method === "dashboard.get") {
+          const liveDash = hub.state.dashboards.find(
+            (d) => d.id === normDashId,
+          );
+          if (liveDash) liveDash.name = raw32WithTrailingSpace;
+          hooks.onRequest = undefined;
+        }
+      };
+      const aBoundary = await call(client, "apply_native_change", {
+        change_ref: pBoundary.change_ref,
+      });
+      assert.equal(
+        aBoundary.status,
+        "applied",
+        "raw 32-code-point cut keeping trailing space at char #32 must reconcile as applied",
+      );
+      assert.deepEqual(aBoundary.hub_normalized_name, {
+        requested: boundaryInput,
+        stored: raw32WithTrailingSpace,
+      });
+    },
+  );
+
+  // 4. P3: Custom characteristic with control.key (and no control.type) across 2 accessories
+  //    triggers duplicate-characteristic warning naming CustomPower!
+  await t.test(
+    "P3: custom characteristic control.key fallback warns on duplicate across 2 accessories",
+    async () => {
+      const pKeyDup = await call(client, "prepare_native_change", {
+        operation: "dashboard_widget_create",
+        target_ref: normColRef,
+        widget: {
+          type: "characteristic",
+          name: "Счётчики",
+          item_refs: [
+            `${HOME_REF}/accessory/48/service/13/characteristic/15`,
+            `${HOME_REF}/accessory/49/service/13/characteristic/15`,
+          ],
+        },
+        reason: "Проверка control.key fallback при дубле характеристик",
+      });
+      assert.equal(pKeyDup.status, "prepared");
+      assert.ok(
+        pKeyDup.warnings?.some((message) => message.includes("CustomPower")),
+        `expected duplicate characteristic warning naming CustomPower: ${JSON.stringify(pKeyDup.warnings)}`,
+      );
+    },
+  );
+});
