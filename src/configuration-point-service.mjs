@@ -1,4 +1,5 @@
 import { canonicalBlock, withHiddenHttpUrls } from "./block-model.mjs";
+import { buildRestorePlan } from "./configuration-point-restore-plan.mjs";
 import {
   CONFIGURATION_POINT_FORMAT_VERSION,
   ConfigurationPointStore,
@@ -236,7 +237,12 @@ export class ConfigurationPointService {
     };
   }
 
-  async get({ point_ref: pointRef, compare = false, sensitiveValues = [] }) {
+  async get({
+    point_ref: pointRef,
+    compare = false,
+    plan_restore: planRestore = false,
+    sensitiveValues = [],
+  }) {
     const { serial, id } = parseConfigurationPointRef(pointRef);
     this.#requireSerial(serial);
     const stored = await this.storeFor(serial).get(id);
@@ -257,14 +263,19 @@ export class ConfigurationPointService {
     });
     if (!compare) return { status: "ok", entity };
     this.#requireClient();
-    const comparison =
+    const { comparison, restorePlan } =
       pointCoverage(point) === "home"
-        ? await this.#compareHome(serial, point, sensitiveValues)
-        : await this.#compare(serial, point, sensitiveValues);
+        ? await this.#compareHome(serial, point, pointRef, sensitiveValues, {
+            planRestore,
+          })
+        : await this.#compare(serial, point, pointRef, sensitiveValues, {
+            planRestore,
+          });
     return {
       status: "ok",
       entity,
       comparison,
+      ...(restorePlan !== undefined ? { restore_plan: restorePlan } : {}),
     };
   }
 
@@ -296,14 +307,21 @@ export class ConfigurationPointService {
     });
   }
 
-  async #compareHome(serial, point, sensitiveValues) {
+  async #compareHome(
+    serial,
+    point,
+    pointRef,
+    sensitiveValues,
+    { planRestore = false } = {},
+  ) {
     const currentCapture = await captureHomeSnapshot({
       client: this.client,
       serial,
       sensitiveValues,
     });
     const comparedAt = new Date().toISOString();
-    return compareHomeSnapshots({
+    const attributionDetails = planRestore ? new Map() : null;
+    const comparison = await compareHomeSnapshots({
       point,
       currentCapture,
       comparedAt,
@@ -311,10 +329,29 @@ export class ConfigurationPointService {
       hubUrl: this.hubUrl,
       serial,
       sensitiveValues,
+      attributionDetails,
     });
+    const restorePlan = planRestore
+      ? buildRestorePlan({
+          pointRef,
+          point,
+          comparison,
+          currentSnapshot: currentCapture.home_snapshot,
+          attributionDetails,
+          serial,
+          sensitiveValues,
+        })
+      : undefined;
+    return { comparison, restorePlan };
   }
 
-  async #compare(serial, point, sensitiveValues) {
+  async #compare(
+    serial,
+    point,
+    pointRef,
+    sensitiveValues,
+    { planRestore = false } = {},
+  ) {
     const entities = [];
     const currentByRef = new Map();
     for (const captured of point.captured) {
@@ -365,6 +402,7 @@ export class ConfigurationPointService {
       });
     }
     const comparedAt = new Date().toISOString();
+    const attributionDetails = planRestore ? new Map() : null;
     const attributed = await attributeSelectedComparison({
       point,
       entities,
@@ -374,13 +412,26 @@ export class ConfigurationPointService {
       hubUrl: this.hubUrl,
       serial,
       sensitiveValues,
+      attributionDetails,
     });
-    return {
+    const comparison = {
       compared_at: comparedAt,
       coverage: "selected_entities",
       house_complete: false,
       ...attributed,
     };
+    const restorePlan = planRestore
+      ? buildRestorePlan({
+          pointRef,
+          point,
+          comparison,
+          currentByRef,
+          attributionDetails,
+          serial,
+          sensitiveValues,
+        })
+      : undefined;
+    return { comparison, restorePlan };
   }
 
   async #captureEntity(serial, entityRef) {

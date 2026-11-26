@@ -462,10 +462,21 @@ function isCompactScalar(value) {
 }
 
 function presentationRoot(result) {
-  // Comparison is a sibling of entity in the complete result; include it in
-  // the addressable root so a large point can still reach the diff by pointer.
-  if (result.comparison === undefined) return result.entity;
-  return { ...result.entity, comparison: result.comparison };
+  // Comparison and restore_plan are siblings of entity in the complete result;
+  // include them in the addressable root so a large point can reach them by
+  // pointer.
+  if (result.comparison === undefined && result.restore_plan === undefined) {
+    return result.entity;
+  }
+  return {
+    ...result.entity,
+    ...(result.comparison !== undefined
+      ? { comparison: result.comparison }
+      : {}),
+    ...(result.restore_plan !== undefined
+      ? { restore_plan: result.restore_plan }
+      : {}),
+  };
 }
 
 function entityNext(selection, pointer, continuation = {}) {
@@ -517,7 +528,9 @@ function containerVersion(entries, pointer) {
     const childPointer = `${pointer}/${escapePointerToken(key)}`;
     const { identity, stableKey } = candidates[index];
     const unambiguous =
-      stableKey !== null && stableKeyCounts.get(stableKey) === 1;
+      !pointer.startsWith("/restore_plan") &&
+      stableKey !== null &&
+      stableKeyCounts.get(stableKey) === 1;
     return {
       pointer: childPointer,
       ...(unambiguous

@@ -393,6 +393,7 @@ export async function compareHomeSnapshots({
   hubUrl,
   serial,
   sensitiveValues = [],
+  attributionDetails = null,
 }) {
   const saved = point.home_snapshot;
   const current = currentCapture.home_snapshot;
@@ -457,11 +458,13 @@ export async function compareHomeSnapshots({
     roomsDiff,
     (action, item) => attributeRoomItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const accessories = attributeCategoryDiff(
     accessoriesDiff,
     (action, item) => attributeAccessoryItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const scenarios = attributeCategoryDiff(
     scenariosDiff,
@@ -481,16 +484,19 @@ export async function compareHomeSnapshots({
       };
     },
     summary,
+    attributionDetails,
   );
   const bridges = attributeCategoryDiff(
     bridgesDiff,
     (action, item) => attributeBridgeItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
   const climateSetpoints = attributeCategoryDiff(
     climateDiff,
     (action, item) => attributeClimateItem(attribution, action, item),
     summary,
+    attributionDetails,
   );
 
   const totalChanges = [
@@ -546,6 +552,7 @@ export async function attributeSelectedComparison({
   hubUrl,
   serial,
   sensitiveValues = [],
+  attributionDetails = null,
 }) {
   const attribution = await loadAttributionContext({
     stateDirectory,
@@ -570,7 +577,7 @@ export async function attributeSelectedComparison({
       action,
       current,
     );
-    return decorateAttribution(entity, verdict, summary);
+    return decorateAttribution(entity, verdict, summary, attributionDetails);
   });
 
   return {
@@ -1307,7 +1314,12 @@ function finalizeAttributionSummary(summary, unavailable) {
   };
 }
 
-function attributeCategoryDiff(diff, evaluate, summary) {
+function attributeCategoryDiff(
+  diff,
+  evaluate,
+  summary,
+  attributionDetails = null,
+) {
   const mapAction = (action, items) =>
     items.map((raw) => {
       const evaluated = evaluate(action, raw);
@@ -1316,9 +1328,14 @@ function attributeCategoryDiff(diff, evaluate, summary) {
         Object.hasOwn(evaluated, "verdict") &&
         Object.hasOwn(evaluated, "item")
       ) {
-        return decorateAttribution(evaluated.item, evaluated.verdict, summary);
+        return decorateAttribution(
+          evaluated.item,
+          evaluated.verdict,
+          summary,
+          attributionDetails,
+        );
       }
-      return decorateAttribution(raw, evaluated, summary);
+      return decorateAttribution(raw, evaluated, summary, attributionDetails);
     });
   return {
     added: mapAction("added", diff.added),
@@ -1327,7 +1344,20 @@ function attributeCategoryDiff(diff, evaluate, summary) {
   };
 }
 
-function decorateAttribution(item, verdict, summary) {
+function decorateAttribution(
+  item,
+  rawVerdict,
+  summary,
+  attributionDetails = null,
+) {
+  const verdict =
+    rawVerdict && Object.hasOwn(rawVerdict, "publicVerdict")
+      ? rawVerdict.publicVerdict
+      : rawVerdict;
+  const entries =
+    rawVerdict && Object.hasOwn(rawVerdict, "entries")
+      ? rawVerdict.entries
+      : [];
   if (verdict.attribution === "agent") summary.agent += 1;
   else if (verdict.attribution === "manual_or_external") {
     summary.manual_or_external += 1;
@@ -1336,18 +1366,28 @@ function decorateAttribution(item, verdict, summary) {
   } else if (verdict.attribution === "unavailable") {
     summary.unavailable += 1;
   }
-  return {
+  const decorated = {
     ...item,
     ...verdict,
   };
+  if (attributionDetails) {
+    attributionDetails.set(decorated, {
+      attribution: verdict.attribution,
+      entries,
+    });
+  }
+  return decorated;
 }
 
 function buildVerdict(context, matchedEntries, allCovered) {
   if (context.unavailable) {
-    return { attribution: "unavailable" };
+    return { publicVerdict: { attribution: "unavailable" }, entries: [] };
   }
   if (matchedEntries.length === 0) {
-    return { attribution: "manual_or_external" };
+    return {
+      publicVerdict: { attribution: "manual_or_external" },
+      entries: [],
+    };
   }
   const sorted = [...matchedEntries].sort(compareEntriesNewestFirst);
   const uniqueEntries = [];
@@ -1363,15 +1403,18 @@ function buildVerdict(context, matchedEntries, allCovered) {
     latest.conflict_reason !== "later_owned_change";
   const hasLaterSignal = !allCovered || latestHasForeignConflict;
   return {
-    attribution: hasLaterSignal ? "agent_and_later_change" : "agent",
-    matching_agent_changes: uniqueEntries
-      .slice(0, MAX_MATCHING_AGENT_CHANGES)
-      .map((entry) =>
-        summarizeMatchingAgentChange(entry, context.sensitiveValues),
-      ),
-    ...(uniqueEntries.length > MAX_MATCHING_AGENT_CHANGES
-      ? { matching_agent_changes_total: uniqueEntries.length }
-      : {}),
+    publicVerdict: {
+      attribution: hasLaterSignal ? "agent_and_later_change" : "agent",
+      matching_agent_changes: uniqueEntries
+        .slice(0, MAX_MATCHING_AGENT_CHANGES)
+        .map((entry) =>
+          summarizeMatchingAgentChange(entry, context.sensitiveValues),
+        ),
+      ...(uniqueEntries.length > MAX_MATCHING_AGENT_CHANGES
+        ? { matching_agent_changes_total: uniqueEntries.length }
+        : {}),
+    },
+    entries: uniqueEntries,
   };
 }
 

@@ -867,8 +867,8 @@ test("safety edge cases: in-window restore, partial placement edits, >5 chained 
   assert.equal(hub.state.rooms.find(({ id }) => id === 8).name, "Ванная");
 
   // 8. Corrupt AutomationStore -> attribution_unavailable=true, undo_agent_changes=[], manual_override_warning=true, requires_owner_confirmation=true.
-  const storeFiles = (await readdir(stateDirectory)).filter((name) =>
-    name.startsWith("native-changes-"),
+  const storeFiles = (await readdir(stateDirectory)).filter(
+    (name) => name.startsWith("automation-changes-") && name.endsWith(".json"),
   );
   assert.ok(storeFiles.length >= 1);
   await writeFile(
@@ -1260,7 +1260,10 @@ test("validation mutual exclusion, /restore_plan pagination & staleness, MCP bud
     "configuration_point",
     { point_ref: singleSaved.point_ref },
   );
-  assert.equal(offlineWithPointRef.entity.ref, singleSaved.point_ref);
+  assert.equal(
+    offlineWithPointRef.entity?.ref ?? offlineWithPointRef.identity?.ref,
+    singleSaved.point_ref,
+  );
   assert.equal(singleHomeHub.requests.length, requestsBeforeOffline);
 
   // 6. MCP surface budgets: 13 tools, instructions <= 2048, every description <= 1000, configuration_point <= 920.
