@@ -290,8 +290,14 @@ ZigBee-сопряжение, замена лампы в группе, отобр
    `configuration_point({})` без `home_ref`, живая read-only проверка на хабе (177 мс
    план, 61 мс холодный список) и 3/3 на AX-прогоне `flash` на симуляторе.
 
-Следующий шаг: удалённый доступ с телефона (Streamable HTTP + OAuth 2.1 для мобильного
-Claude/ChatGPT либо Telegram-бот на ВМ — по выбору владельца).
+Следующий шаг: удалённый доступ с телефона (выбран локальный Telegram-бот на
+`codex app-server` — в `main`, `fbb646f`, 26.11.2026: `telegram/`, 0 новых зависимостей,
+`gpt-6.2-sol`, `medium`, `priority`/`ultrafast`, `web_search: "live"`, изолированный
+`CODEX_HOME` с `apps = false` и только `sprut-agent` MCP + `spruthub-master`, одна
+длинная сессия через `thread/resume` + `/new`, приём фото, белый список `user_id` в
+`~/.config/sprut-agent/telegram.env` (`0600`), 1368 офлайн-тестов). Позже при
+необходимости переносится с MacBook на постоянно работающий мини-ПК/VPS или
+дополняется Streamable HTTP + OAuth 2.1.
 
 AX идёт через все волны:
 
