@@ -1283,3 +1283,1091 @@ test("validation mutual exclusion, /restore_plan pagination & staleness, MCP bud
   const instructions = client.getInstructions();
   assert.ok(instructions.length <= 2_048);
 });
+
+test("P1-1: manual->agent and agent1->manual->agent2 chains keep manual_override_warning=true and require owner confirmation", async (t) => {
+  const { hub, client } = await setup(t);
+
+  const saved = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "P1-1 manual-before-agent baseline",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Case A: manual -> agent on room 1.
+  hub.state.rooms.find(({ id }) => id === 1).name = "Прихожая ручная";
+  const room1Agent = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(1),
+    value: "Прихожая агента",
+    reason: "Переименовать прихожую поверх ручной правки",
+  });
+
+  // Case B: agent1 -> manual -> agent2 on room 4.
+  const room4Agent1 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(4),
+    value: "Кухня агента 1",
+    reason: "Первый шаг переименования кухни",
+  });
+  hub.state.rooms.find(({ id }) => id === 4).name = "Кухня ручная";
+  const room4Agent2 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(4),
+    value: "Кухня агента 2",
+    reason: "Второй шаг переименования кухни",
+  });
+
+  const planned = await callOk(client, "configuration_point", {
+    point_ref: saved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const plan = planned.restore_plan;
+  const undoRefs = plan.undo_agent_changes.flatMap(
+    (batch) => batch.arguments.change_refs,
+  );
+  for (const ref of [
+    room1Agent.change_ref,
+    room4Agent1.change_ref,
+    room4Agent2.change_ref,
+  ]) {
+    assert.equal(undoRefs.includes(ref), false);
+  }
+
+  const room1Step = plan.reapply_from_point.find(
+    ({ entity_ref }) => entity_ref === roomRef(1),
+  );
+  const room4Step = plan.reapply_from_point.find(
+    ({ entity_ref }) => entity_ref === roomRef(4),
+  );
+  assert.ok(room1Step, "expected room 1 in reapply_from_point");
+  assert.ok(room4Step, "expected room 4 in reapply_from_point");
+  assert.equal(room1Step.manual_override_warning, true);
+  assert.equal(room4Step.manual_override_warning, true);
+  assert.equal(plan.has_manual_overrides, true);
+  assert.equal(plan.requires_owner_confirmation, true);
+  assert.equal(plan.summary.manual_override_count, 2);
+  assert.equal(typeof plan.tell_owner, "string");
+  assert.ok(plan.tell_owner.length > 0);
+});
+
+test("P1-2: clean JS with token ternary/case executes logic_source_update cleanly while connection secret in selected_entities routes to not_restorable", async (t) => {
+  const CLEAN_TOKEN_INDEX = "211";
+  const CONN_SECRET_INDEX = "212";
+  const cleanCode = [
+    "function pick(ok, token, fallback) {",
+    "  switch (token) {",
+    "    case token:",
+    "      return ok ? token : fallback;",
+    "    default:",
+    "      return fallback;",
+    "  }",
+    "}",
+  ].join("\n");
+
+  const fixture = await createExtendedFixture();
+  fixture.scenarios.push(
+    {
+      index: CLEAN_TOKEN_INDEX,
+      name: "Выбор значения",
+      desc: "Тернарник и switch с идентификатором token",
+      type: "GLOBAL",
+      predefined: false,
+      active: true,
+      onStart: true,
+      sync: false,
+      data: cleanCode,
+    },
+    {
+      index: CONN_SECRET_INDEX,
+      name: "Скрипт с токеном хаба",
+      desc: "Содержит секрет подключения",
+      type: "GLOBAL",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: `function auth() { return "${SIMULATED_HUB_TOKEN}"; }`,
+    },
+  );
+  const { hub, client } = await setup(t, { fixture });
+
+  const homeSaved = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "P1-2 home baseline",
+  });
+  const selectedSaved = await callOk(client, "configuration_point", {
+    entity_refs: [
+      scenarioRef(CLEAN_TOKEN_INDEX),
+      scenarioRef(CONN_SECRET_INDEX),
+    ],
+    note: "P1-2 selected baseline",
+  });
+
+  hub.state.scenarios.find(({ index }) => index === CLEAN_TOKEN_INDEX).data =
+    "function pick(ok, token, fallback) { return fallback; }";
+  hub.state.scenarios.find(({ index }) => index === CONN_SECRET_INDEX).data =
+    'function auth() { return "changed"; }';
+
+  // Selected-entities plan: cleanCode must stay unredacted and executable; connection secret must be not_restorable.
+  const selectedPlanResp = await callOk(client, "configuration_point", {
+    point_ref: selectedSaved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  assert.equal(
+    JSON.stringify(selectedPlanResp).includes(SIMULATED_HUB_TOKEN),
+    false,
+    "connection secret must never appear in tool output",
+  );
+  const selPlan = selectedPlanResp.restore_plan;
+  const cleanStep = selPlan.reapply_from_point.find(
+    ({ entity_ref }) => entity_ref === scenarioRef(CLEAN_TOKEN_INDEX),
+  );
+  assert.ok(cleanStep, "expected clean JS scenario in reapply_from_point");
+  assert.equal(cleanStep.arguments.operation, "logic_source_update");
+  assert.equal(cleanStep.arguments.source, cleanCode);
+  assert.equal(cleanStep.to_point, cleanCode);
+  assert.equal(cleanStep.from_current.includes("[REDACTED]"), false);
+
+  assert.equal(
+    selPlan.reapply_from_point.some(
+      ({ entity_ref }) => entity_ref === scenarioRef(CONN_SECRET_INDEX),
+    ),
+    false,
+    "connection-secret scenario must NOT enter reapply_from_point",
+  );
+  assert.equal(
+    selPlan.not_restorable.some(
+      (item) =>
+        item.entity_ref === scenarioRef(CONN_SECRET_INDEX) &&
+        item.reason === "redacted_value",
+    ),
+    true,
+    JSON.stringify(selPlan.not_restorable),
+  );
+
+  // Home plan must also preserve cleanCode unredacted in reapply_from_point.
+  const homePlanResp = await callOk(client, "configuration_point", {
+    point_ref: homeSaved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const homeCleanStep = homePlanResp.restore_plan.reapply_from_point.find(
+    ({ entity_ref }) => entity_ref === scenarioRef(CLEAN_TOKEN_INDEX),
+  );
+  assert.ok(homeCleanStep);
+  assert.equal(homeCleanStep.arguments.source, cleanCode);
+
+  // Actually execute cleanStep through prepare_native_change -> apply_native_change!
+  await executeRestorePlan(client, {
+    undo_agent_changes: [],
+    reapply_from_point: [cleanStep],
+  });
+  assert.equal(
+    hub.state.scenarios.find(({ index }) => index === CLEAN_TOKEN_INDEX).data,
+    cleanCode,
+  );
+});
+
+test("P1-3, P1-5, P2-1: selected_entities handles scenario options windows, deleted accessory rooms, and missing child refs honestly", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Create a virtual device with a characteristic so we can delete it via virtual_device_delete.
+  const createdVirt = await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(3),
+    name: "Виртуальный датчик для удаления",
+    value: "TemperatureSensor",
+    reason: "Создать виртуальный датчик температуры",
+  });
+  const virtAcc = hub.state.accessories.find(
+    ({ name }) => name === "Виртуальный датчик для удаления",
+  );
+  assert.ok(virtAcc);
+  const virtSvc = virtAcc.services.find(
+    ({ type }) => type === "TemperatureSensor",
+  );
+  assert.ok(virtSvc);
+  // Also create a Thermostat-like virtual switch or use a real window + scenario options window + logic ref.
+  const blockScen = hub.state.scenarios.find(({ index }) => index === "3");
+  const logicScen = hub.state.scenarios.find(({ index }) => index === "9");
+  const predefinedScen = hub.state.scenarios.find(
+    ({ index }) => index === PREDEFINED_INDEX,
+  );
+  assert.ok(blockScen?.optionsWindow);
+  assert.ok(logicScen?.optionsWindow);
+  assert.ok(predefinedScen?.optionsWindow);
+
+  // P1-3 + P1-5 point: scenario options windows + accessories in room 2.
+  const pointA = await callOk(client, "configuration_point", {
+    entity_refs: [
+      windowRef(blockScen.optionsWindow),
+      windowRef(logicScen.optionsWindow),
+      windowRef(predefinedScen.optionsWindow),
+      accessoryRef(14),
+    ],
+    note: "P1-3 and P1-5 selected baseline",
+  });
+
+  // Flip writable CHECKBOX options (OnStart, Sync) on scenario options windows.
+  blockScen.onStart = !blockScen.onStart;
+  blockScen.sync = !blockScen.sync;
+  logicScen.sync = !logicScen.sync;
+  const logicOnStartOpt = hub.state.windows[
+    logicScen.optionsWindow
+  ].options.find((o) => o.key === "OnStart");
+  logicOnStartOpt.value = {
+    boolValue: !(logicOnStartOpt.value?.boolValue === true),
+  };
+  predefinedScen.onStart = !predefinedScen.onStart;
+
+  // Move accessory 14 out of room 2 and delete room 2.
+  const acc14 = hub.state.accessories.find(({ id }) => id === 14);
+  acc14.roomId = 3;
+  acc14.name = "Свет 14 переехал";
+  hub.state.rooms = hub.state.rooms.filter(({ id }) => id !== 2);
+
+  const planAResp = await callOk(client, "configuration_point", {
+    point_ref: pointA.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const planA = planAResp.restore_plan;
+
+  // P1-3: NONE of the scenario options windows may emit window_option into reapply_from_point!
+  for (const winKey of [
+    blockScen.optionsWindow,
+    logicScen.optionsWindow,
+    predefinedScen.optionsWindow,
+  ]) {
+    assert.equal(
+      planA.reapply_from_point.some(
+        ({ entity_ref }) => entity_ref === windowRef(winKey),
+      ),
+      false,
+      `scenario options window ${winKey} must NOT emit reapply_from_point: ${JSON.stringify(planA.reapply_from_point)}`,
+    );
+  }
+  assert.equal(
+    planA.not_restorable.some(
+      (item) =>
+        item.entity_ref === windowRef(blockScen.optionsWindow) &&
+        item.field === "options.OnStart" &&
+        item.reason === "scenario_owner_required",
+    ),
+    true,
+    JSON.stringify(planA.not_restorable),
+  );
+  assert.equal(
+    planA.not_restorable.some(
+      (item) =>
+        item.entity_ref === windowRef(blockScen.optionsWindow) &&
+        item.field === "options.Sync" &&
+        item.reason === "scenario_owner_required",
+    ),
+    true,
+    JSON.stringify(planA.not_restorable),
+  );
+  assert.equal(
+    planA.not_restorable.some(
+      (item) =>
+        item.entity_ref === windowRef(logicScen.optionsWindow) &&
+        item.field === "options.OnStart" &&
+        item.reason === "logic_info_in_code",
+    ),
+    true,
+    JSON.stringify(planA.not_restorable),
+  );
+  assert.equal(
+    planA.not_restorable.some(
+      (item) =>
+        item.entity_ref === windowRef(logicScen.optionsWindow) &&
+        item.field === "options.Sync" &&
+        item.reason === "scenario_owner_required",
+    ),
+    true,
+    JSON.stringify(planA.not_restorable),
+  );
+
+  // P1-5: room_ref must be target_room_missing; name reapply must target existing room 3 and execute cleanly!
+  assert.equal(
+    planA.not_restorable.some(
+      (item) =>
+        item.entity_ref === accessoryRef(14) &&
+        item.field === "room_ref" &&
+        item.reason === "target_room_missing",
+    ),
+    true,
+    JSON.stringify(planA.not_restorable),
+  );
+  const acc14Step = planA.reapply_from_point.find(
+    ({ entity_ref }) => entity_ref === accessoryRef(14),
+  );
+  assert.ok(acc14Step);
+  assert.equal(acc14Step.arguments.operation, "accessory_placement");
+  assert.equal(acc14Step.arguments.room_ref, roomRef(3));
+  await executeRestorePlan(client, {
+    undo_agent_changes: [],
+    reapply_from_point: [acc14Step],
+  });
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 14).name,
+    "Свет в коридоре",
+  );
+
+  // P2-1: selected_entities point with logic ref, scenario options window ref, and virtual device window ref.
+  // Delete LOGIC scenario "9" via scenario_delete and virtual device via virtual_device_delete.
+  const virtDeviceWindowKey = virtAcc.deviceWindow;
+  const logicAssignmentRef = logicRef(14, 13, "9");
+  const pointB = await callOk(client, "configuration_point", {
+    entity_refs: [
+      logicAssignmentRef,
+      windowRef(logicScen.optionsWindow),
+      ...(virtDeviceWindowKey ? [windowRef(virtDeviceWindowKey)] : []),
+    ],
+    note: "P2-1 missing child refs baseline",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await applyNative(client, {
+    operation: "scenario_delete",
+    target_ref: scenarioRef("9"),
+    reason: "Удалить LOGIC сценарий 9",
+  });
+  if (virtDeviceWindowKey) {
+    await applyNative(client, {
+      operation: "virtual_device_delete",
+      target_ref: accessoryRef(virtAcc.id),
+      reason: "Удалить виртуальный датчик",
+    });
+  }
+  assert.ok(createdVirt.change_ref);
+
+  const planBResp = await callOk(client, "configuration_point", {
+    point_ref: pointB.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const planB = planBResp.restore_plan;
+  assert.equal(planB.requires_owner_confirmation, true);
+  assert.equal(
+    planB.not_restorable.some(
+      (item) => item.entity_ref === logicAssignmentRef && item.kind === "logic",
+    ),
+    true,
+    JSON.stringify(planB.not_restorable),
+  );
+  assert.equal(
+    planB.not_restorable.some(
+      (item) =>
+        item.entity_ref === windowRef(logicScen.optionsWindow) &&
+        item.kind === "window",
+    ),
+    true,
+    JSON.stringify(planB.not_restorable),
+  );
+  if (virtDeviceWindowKey) {
+    assert.equal(
+      planB.not_restorable.some(
+        (item) =>
+          item.entity_ref === windowRef(virtDeviceWindowKey) &&
+          item.kind === "window",
+      ),
+      true,
+      JSON.stringify(planB.not_restorable),
+    );
+  }
+  assert.equal(planB.undo_agent_changes.length, 0);
+});
+
+test("P1-4: BLOCK planner rejects Nashorn-invalid code, condition code, deleted referenced accessory/scenario, 0-trigger regression, and HTTP-URL undo contradiction", async (t) => {
+  const BAD_CODE_BLOCK = "221";
+  const COND_CODE_BLOCK = "222";
+  const REF_ACC_BLOCK = "223";
+  const REF_SCEN_BLOCK = "224";
+  const ZERO_TRIG_BLOCK = "225";
+  const HTTP_AGENT_BLOCK = "226";
+
+  const triggerCondition = {
+    type: "characteristic",
+    aId: 12,
+    sId: 13,
+    cId: 14,
+    hs: "Lightbulb",
+    hc: "On",
+    cond: "==",
+    value: "true",
+    trigger: true,
+    timeCond: "",
+    time: 0,
+  };
+  const turnOn15Action = {
+    type: "service",
+    aId: 15,
+    sId: 13,
+    hs: "Lightbulb",
+    characteristics: [{ cId: 14, hc: "On", type: "set", value: "true" }],
+  };
+
+  const fixture = await createExtendedFixture();
+  fixture.scenarios.push(
+    {
+      index: BAD_CODE_BLOCK,
+      name: "BLOCK с неподдерживаемым JS",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [triggerCondition],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+            then: [{ type: "code", code: "const x = global?.foo;" }],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    },
+    {
+      index: COND_CODE_BLOCK,
+      name: "BLOCK с кодом в условии",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [
+                triggerCondition,
+                { type: "code", code: "return true;" },
+              ],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+            then: [turnOn15Action],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    },
+    {
+      index: REF_ACC_BLOCK,
+      name: "BLOCK со ссылкой на удаляемое устройство",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [triggerCondition],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+            then: [
+              {
+                type: "service",
+                aId: 20,
+                sId: 13,
+                hs: "Outlet",
+                characteristics: [
+                  { cId: 14, hc: "On", type: "set", value: "true" },
+                ],
+              },
+            ],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    },
+    {
+      index: REF_SCEN_BLOCK,
+      name: "BLOCK со ссылкой на удаляемый сценарий",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [triggerCondition],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+            then: [{ type: "scenario", index: "7", mode: "ON" }],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    },
+    {
+      index: ZERO_TRIG_BLOCK,
+      name: "BLOCK без триггера",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [turnOn15Action],
+      },
+    },
+    {
+      index: HTTP_AGENT_BLOCK,
+      name: "BLOCK с HTTP и правкой агента",
+      desc: "",
+      type: "BLOCK",
+      predefined: false,
+      active: true,
+      onStart: false,
+      sync: false,
+      data: {
+        targets: [
+          {
+            type: "if",
+            mode: "EVERY",
+            if: {
+              type: "condition",
+              mode: "AND",
+              conditions: [triggerCondition],
+            },
+            // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+            then: [
+              {
+                type: "http",
+                method: "GET",
+                url: `https://api.telegram.org/bot${SECRET_TELEGRAM_TOKEN}/sendMessage?chat_id=2`,
+              },
+              turnOn15Action,
+            ],
+            else: [],
+            then_delay: 0,
+            else_delay: 0,
+          },
+        ],
+      },
+    },
+  );
+  const { hub, client } = await setup(t, { fixture });
+
+  const homeSaved = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "P1-4 home baseline",
+  });
+  const selectedSaved = await callOk(client, "configuration_point", {
+    entity_refs: [scenarioRef(REF_ACC_BLOCK), scenarioRef(REF_SCEN_BLOCK)],
+    note: "P1-4 selected baseline",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Mutate all 5 manual BLOCKs into valid triggered BLOCKs, and delete acc 20 + scenario "7".
+  const replaceWithCleanBlock = (index) => {
+    const scen = hub.state.scenarios.find((s) => s.index === index);
+    scen.data = JSON.stringify({
+      targets: [
+        {
+          type: "if",
+          mode: "EVERY",
+          if: {
+            type: "condition",
+            mode: "AND",
+            conditions: [triggerCondition],
+          },
+          // biome-ignore lint/suspicious/noThenProperty: SprutHub BLOCK key.
+          then: [turnOn15Action],
+          else: [],
+          then_delay: 2_000,
+          else_delay: 0,
+        },
+      ],
+    });
+  };
+  for (const idx of [
+    BAD_CODE_BLOCK,
+    COND_CODE_BLOCK,
+    REF_ACC_BLOCK,
+    REF_SCEN_BLOCK,
+    ZERO_TRIG_BLOCK,
+  ]) {
+    replaceWithCleanBlock(idx);
+  }
+  hub.state.accessories = hub.state.accessories.filter(({ id }) => id !== 20);
+  hub.state.scenarios = hub.state.scenarios.filter(
+    ({ index }) => index !== "7",
+  );
+
+  // For HTTP_AGENT_BLOCK: agent edits then_delay while keeping the HTTP node.
+  const httpEntity = await callOk(client, "get_entity", {
+    entity_ref: scenarioRef(HTTP_AGENT_BLOCK),
+    include: ["configuration"],
+  });
+  const httpData = structuredClone(httpEntity.entity.configuration.value);
+  httpData.targets[0].then_delay = 3_000;
+  const httpAgentChange = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef(HTTP_AGENT_BLOCK),
+    data: httpData,
+    reason: "Добавить задержку HTTP сценарию",
+  });
+
+  const homePlanResp = await callOk(client, "configuration_point", {
+    point_ref: homeSaved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const homePlan = homePlanResp.restore_plan;
+  const homeUndoRefs = homePlan.undo_agent_changes.flatMap(
+    (batch) => batch.arguments.change_refs,
+  );
+
+  // None of the 6 BLOCKs may appear in reapply_from_point, and HTTP_AGENT_BLOCK must NOT be in undo_agent_changes!
+  for (const idx of [
+    BAD_CODE_BLOCK,
+    COND_CODE_BLOCK,
+    REF_ACC_BLOCK,
+    REF_SCEN_BLOCK,
+    ZERO_TRIG_BLOCK,
+    HTTP_AGENT_BLOCK,
+  ]) {
+    assert.equal(
+      homePlan.reapply_from_point.some(
+        ({ entity_ref }) => entity_ref === scenarioRef(idx),
+      ),
+      false,
+      `BLOCK ${idx} must NOT emit reapply_from_point`,
+    );
+  }
+  assert.equal(
+    homeUndoRefs.includes(httpAgentChange.change_ref),
+    false,
+    "HTTP-URL BLOCK agent edit must NOT enter undo_agent_changes alongside redacted_http_url",
+  );
+
+  const expectNotRestorable = (plan, idx, reason) => {
+    assert.equal(
+      plan.not_restorable.some(
+        (item) =>
+          item.entity_ref === scenarioRef(idx) &&
+          item.field === "configuration" &&
+          item.reason === reason,
+      ),
+      true,
+      `expected ${idx} -> ${reason} in ${JSON.stringify(plan.not_restorable)}`,
+    );
+  };
+  expectNotRestorable(homePlan, BAD_CODE_BLOCK, "unsupported_javascript");
+  expectNotRestorable(homePlan, COND_CODE_BLOCK, "unsupported_block_node");
+  expectNotRestorable(homePlan, REF_ACC_BLOCK, "referenced_entity_missing");
+  expectNotRestorable(homePlan, REF_SCEN_BLOCK, "referenced_entity_missing");
+  expectNotRestorable(
+    homePlan,
+    ZERO_TRIG_BLOCK,
+    "block_would_remove_last_trigger",
+  );
+  expectNotRestorable(homePlan, HTTP_AGENT_BLOCK, "redacted_http_url");
+
+  // Also verify selected_entities mode catches deleted referenced accessory & scenario!
+  const selPlanResp = await callOk(client, "configuration_point", {
+    point_ref: selectedSaved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const selPlan = selPlanResp.restore_plan;
+  assert.equal(selPlan.reapply_from_point.length, 0);
+  expectNotRestorable(selPlan, REF_ACC_BLOCK, "referenced_entity_missing");
+  expectNotRestorable(selPlan, REF_SCEN_BLOCK, "referenced_entity_missing");
+});
+
+test("P2-2: whole-home undo eligibility covers deleted virtual_device room, virtual_device_in_use + room_not_empty, virtual_light_group + light_group_members chain, and apply->restore->apply2", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Create virtInRoom2 AND a sentinel virtual device BEFORE snapshot so deleting virtInRoom2 never collides with later created IDs.
+  await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(2),
+    name: "Вирт в комнате 2",
+    value: "Switch",
+    reason: "Создать вирт в комнате 2 до снимка",
+  });
+  await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(3),
+    name: "Опорный вирт",
+    value: "Switch",
+    reason: "Занять следующий id до снимка",
+  });
+  const virtInRoom2 = hub.state.accessories.find(
+    ({ name }) => name === "Вирт в комнате 2",
+  );
+  assert.ok(virtInRoom2);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const saved = await callOk(client, "configuration_point", {
+    scope: "home",
+    note: "P2-2 undo eligibility baseline",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // 7.1: virtual_device_delete whose baseline room (room 2) is then deleted.
+  const delVirtRoom2 = await applyNative(client, {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(virtInRoom2.id),
+    reason: "Удалить вирт в комнате 2",
+  });
+  // Move remaining acc 14 out of room 2 before deleting room 2.
+  hub.state.accessories.find(({ id }) => id === 14).roomId = 3;
+  hub.state.rooms = hub.state.rooms.filter(({ id }) => id !== 2);
+
+  // 7.2a: Agent creates roomA + virtual device virtA inside roomA; manual BLOCK references virtA.
+  const roomA = await applyNative(client, {
+    operation: "room_create",
+    target_ref: HOME_REF,
+    name: "Новая комната A",
+    reason: "Создать комнату A",
+  });
+  const roomAObj = hub.state.rooms.find(
+    ({ name }) => name === "Новая комната A",
+  );
+  assert.ok(roomAObj);
+  const virtA = await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(roomAObj.id),
+    name: "Выключатель A",
+    value: "Switch",
+    reason: "Создать выключатель A",
+  });
+  const virtAObj = hub.state.accessories.find(
+    ({ name }) => name === "Выключатель A",
+  );
+  assert.ok(virtAObj);
+  const virtASvc = virtAObj.services.find(({ type }) => type === "Switch");
+  const virtAOn = virtASvc.characteristics.find(
+    ({ control }) => (control?.type ?? control?.key) === "On",
+  );
+  // Manual scenario edit adds reference to virtA.
+  const scen3 = hub.state.scenarios.find(({ index }) => index === "3");
+  const scen3Data = JSON.parse(scen3.data);
+  scen3Data.targets[0].then.push({
+    type: "service",
+    aId: virtAObj.id,
+    sId: virtASvc.sId,
+    hs: "Switch",
+    characteristics: [
+      { cId: virtAOn.cId, hc: "On", type: "set", value: "true" },
+    ],
+  });
+  scen3.data = JSON.stringify(scen3Data);
+
+  // 7.2b: Agent creates roomB + virtual device virtB inside roomB; manual bridge export adds virtB.
+  const roomB = await applyNative(client, {
+    operation: "room_create",
+    target_ref: HOME_REF,
+    name: "Новая комната B",
+    reason: "Создать комнату B",
+  });
+  const roomBObj = hub.state.rooms.find(
+    ({ name }) => name === "Новая комната B",
+  );
+  assert.ok(roomBObj);
+  const virtB = await applyNative(client, {
+    operation: "virtual_device",
+    target_ref: HOME_REF,
+    room_ref: roomRef(roomBObj.id),
+    name: "Выключатель B",
+    value: "Switch",
+    reason: "Создать выключатель B",
+  });
+  const virtBObj = hub.state.accessories.find(
+    ({ name }) => name === "Выключатель B",
+  );
+  assert.ok(virtBObj);
+  // Export virtB manually in Yandex bridge window.
+  const virtBSvc = virtBObj.services.find(({ type }) => type === "Switch");
+  const yandexBridgeWinKey = `Bridge/yandex/Child/${virtBObj.id}/`;
+  const bridgeWin = hub.state.windows[yandexBridgeWinKey];
+  if (bridgeWin) {
+    const opt = bridgeWin.options.find((o) => o.key === `s:${virtBSvc.sId}`);
+    if (opt) opt.value = { boolValue: true };
+  }
+  const yandexExt = hub.state.extensions.find(
+    ({ key }) => key === "Bridge:yandex" || key === "yandex",
+  );
+  if (
+    yandexExt &&
+    Array.isArray(hub.state.extensionChildren?.[yandexExt.key])
+  ) {
+    const existingChild = hub.state.extensionChildren[yandexExt.key].find(
+      (c) => String(c.id) === String(virtBObj.id),
+    );
+    if (!existingChild) {
+      hub.state.extensionChildren[yandexExt.key].push({
+        id: String(virtBObj.id),
+        name: virtBObj.name,
+        enabled: true,
+        optionsWindow: yandexBridgeWinKey,
+      });
+    } else {
+      existingChild.enabled = true;
+    }
+  }
+
+  // 7.3a: Agent creates virtual_light_group (vlg1) with [15, 16], then edits members via light_group_members (vlg1Members) to [15, 17].
+  const vlg1Create = await applyNative(client, {
+    operation: "virtual_light_group",
+    target_ref: HOME_REF,
+    room_ref: roomRef(3),
+    name: "Группа света агента",
+    member_service_refs: [serviceRef(15, 13), serviceRef(16, 13)],
+    characteristic_types: ["On", "Brightness"],
+    reason: "Создать группу света",
+  });
+  const vlg1Acc = hub.state.accessories.find(
+    ({ name }) => name === "Группа света агента",
+  );
+  assert.ok(vlg1Acc);
+  const vlg1Svc = vlg1Acc.services.find(({ type }) => type === "Lightbulb");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const vlg1Members = await applyNative(client, {
+    operation: "virtual_light_group",
+    target_ref: serviceRef(vlg1Acc.id, vlg1Svc.sId),
+    member_service_refs: [serviceRef(15, 13), serviceRef(17, 13)],
+    reason: "Заменить торшер на ленту в группе",
+  });
+
+  // 7.3b: Agent creates virtual_light_group (vlg2), then links are manually mutated.
+  const vlg2Create = await applyNative(client, {
+    operation: "virtual_light_group",
+    target_ref: HOME_REF,
+    room_ref: roomRef(4),
+    name: "Группа с ручной правкой",
+    member_service_refs: [serviceRef(15, 13), serviceRef(22, 13)],
+    characteristic_types: ["On", "Brightness"],
+    reason: "Создать вторую группу света",
+  });
+  const vlg2Acc = hub.state.accessories.find(
+    ({ name }) => name === "Группа с ручной правкой",
+  );
+  assert.ok(vlg2Acc);
+  const vlg2Svc = vlg2Acc.services.find(({ type }) => type === "Lightbulb");
+  const vlg2On = vlg2Svc.characteristics.find(
+    ({ control }) => (control?.type ?? control?.key) === "On",
+  );
+  const vlg2Key = `${vlg2Acc.id}.${vlg2Svc.sId}.${vlg2On.cId}`;
+  // Manually drop one IN link from vlg2.
+  const vlg2Links = hub.state.links.get(vlg2Key) ?? [];
+  hub.state.links.set(vlg2Key, vlg2Links.slice(0, 1));
+
+  // 7.4: apply -> restore -> apply2 on bridge export, room rename, and BLOCK.
+  const exp1 = await applyNative(client, {
+    operation: "window_option",
+    target_ref: windowRef("Bridge/yandex/Child/12/"),
+    option_key: "s:13",
+    value: true,
+    reason: "Экспорт 1",
+  });
+  await callOk(client, "restore_native_change", {
+    change_ref: exp1.change_ref,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const exp2 = await applyNative(client, {
+    operation: "window_option",
+    target_ref: windowRef("Bridge/yandex/Child/12/"),
+    option_key: "s:13",
+    value: true,
+    reason: "Экспорт 2",
+  });
+
+  const rename1 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(1),
+    value: "Прихожая 1",
+    reason: "Переименование 1",
+  });
+  await callOk(client, "restore_native_change", {
+    change_ref: rename1.change_ref,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const rename2 = await applyNative(client, {
+    operation: "room_name",
+    target_ref: roomRef(1),
+    value: "Прихожая 2",
+    reason: "Переименование 2",
+  });
+
+  const scen14Initial = JSON.parse(
+    hub.state.scenarios.find(({ index }) => index === "14").data,
+  );
+  const scen14V1 = structuredClone(scen14Initial);
+  scen14V1.targets[0].then_delay = 2_000;
+  const block1 = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef("14"),
+    data: scen14V1,
+    reason: "BLOCK правка 1",
+  });
+  await callOk(client, "restore_native_change", {
+    change_ref: block1.change_ref,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const scen14V2 = structuredClone(scen14Initial);
+  scen14V2.targets[0].then_delay = 5_000;
+  const block2 = await applyNative(client, {
+    operation: "block_data_update",
+    target_ref: scenarioRef("14"),
+    data: scen14V2,
+    reason: "BLOCK правка 2",
+  });
+
+  const planned = await callOk(client, "configuration_point", {
+    point_ref: saved.point_ref,
+    compare: true,
+    plan_restore: true,
+    max_bytes: 32_768,
+  });
+  const plan = planned.restore_plan;
+  const undoRefs = plan.undo_agent_changes.flatMap(
+    (batch) => batch.arguments.change_refs,
+  );
+
+  // 7.1: delVirtRoom2 NOT in undo; target_room_missing in not_restorable.
+  assert.equal(undoRefs.includes(delVirtRoom2.change_ref), false);
+  assert.equal(
+    plan.not_restorable.some(
+      (item) =>
+        item.entity_ref === accessoryRef(virtInRoom2.id) &&
+        item.reason === "target_room_missing",
+    ),
+    true,
+    JSON.stringify(plan.not_restorable),
+  );
+
+  // 7.2a & 7.2b: virtA, roomA, virtB, roomB all OUT of undo; virtual_device_in_use & room_not_empty in not_restorable!
+  for (const ref of [
+    virtA.change_ref,
+    roomA.change_ref,
+    virtB.change_ref,
+    roomB.change_ref,
+  ]) {
+    assert.equal(
+      undoRefs.includes(ref),
+      false,
+      `blocked change ${ref} must NOT enter undo_agent_changes`,
+    );
+  }
+  for (const id of [virtAObj.id, virtBObj.id]) {
+    assert.equal(
+      plan.not_restorable.some(
+        (item) =>
+          item.entity_ref === accessoryRef(id) &&
+          item.reason === "virtual_device_in_use",
+      ),
+      true,
+      `expected virtual_device_in_use for ${id} in ${JSON.stringify(plan.not_restorable)}`,
+    );
+  }
+  for (const rId of [roomAObj.id, roomBObj.id]) {
+    assert.equal(
+      plan.not_restorable.some(
+        (item) =>
+          item.entity_ref === roomRef(rId) && item.reason === "room_not_empty",
+      ),
+      true,
+      `expected room_not_empty for ${rId} in ${JSON.stringify(plan.not_restorable)}`,
+    );
+  }
+
+  // 7.3a: BOTH vlg1Members and vlg1Create MUST be in undo_agent_changes with vlg1Members BEFORE vlg1Create!
+  const idxMembers = undoRefs.indexOf(vlg1Members.change_ref);
+  const idxCreate = undoRefs.indexOf(vlg1Create.change_ref);
+  assert.ok(
+    idxMembers >= 0 && idxCreate >= 0 && idxMembers < idxCreate,
+    `expected [vlg1Members, vlg1Create] in undoRefs, got ${JSON.stringify(undoRefs)}`,
+  );
+
+  // 7.3b: vlg2Create (manual link edit) MUST NOT be in undo_agent_changes!
+  assert.equal(undoRefs.includes(vlg2Create.change_ref), false);
+  assert.equal(
+    plan.not_restorable.some(
+      (item) => item.entity_ref === accessoryRef(vlg2Acc.id),
+    ),
+    true,
+  );
+
+  // 7.4: apply -> restore -> apply2 includes ONLY exp2, rename2, block2 (NOT exp1, rename1, block1)!
+  for (const ref of [exp2.change_ref, rename2.change_ref, block2.change_ref]) {
+    assert.equal(
+      undoRefs.includes(ref),
+      true,
+      `expected active ${ref} in undo_agent_changes: ${JSON.stringify(undoRefs)}`,
+    );
+  }
+  for (const ref of [exp1.change_ref, rename1.change_ref, block1.change_ref]) {
+    assert.equal(undoRefs.includes(ref), false);
+  }
+
+  // ACTUALLY EXECUTE the entire undo_agent_changes batch — ZERO skips allowed!
+  await executeRestorePlan(client, {
+    undo_agent_changes: plan.undo_agent_changes,
+    reapply_from_point: [],
+  });
+  assert.equal(
+    hub.state.accessories.some(({ id }) => id === vlg1Acc.id),
+    false,
+    "vlg1 should be completely removed after undoing members then creation",
+  );
+  assert.equal(hub.state.rooms.find(({ id }) => id === 1).name, "Прихожая");
+  assert.equal(
+    JSON.parse(hub.state.scenarios.find(({ index }) => index === "14").data)
+      .targets[0].then_delay,
+    scen14Initial.targets[0].then_delay,
+  );
+});
