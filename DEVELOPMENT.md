@@ -162,6 +162,51 @@ Caddy обслуживает HTTPS и передаёт запросы на `127.
 открытия разговора прототип может оставить захваченный микрофон; до исправления
 закрой страницу, чтобы его освободить.
 
+## Локальный Telegram-бот
+
+`telegram/bot.mjs` запускает локального Telegram-бота поверх `codex app-server`
+и собранного MCP `dist/plugin/dist/server.mjs`. Новых npm-зависимостей бот не
+требует; нужны действующий вход в Codex CLI (`~/.codex/auth.json`) и токен бота
+от `@BotFather`.
+
+Настройки читаются из `~/.config/sprut-agent/telegram.env` (или пути из
+`SPRUT_TELEGRAM_ENV`, права `0600`). Без непустого `TELEGRAM_ALLOWED_USER_IDS`
+бот отказывается стартовать; групповые чаты и сообщения других ботов
+игнорируются без запуска Codex.
+
+```sh
+# 1. Сохрани TELEGRAM_BOT_TOKEN в ~/.config/sprut-agent/telegram.env (chmod 600)
+# 2. Привяжи свой личный чат (повтори для второго владельца — ID добавится без дублей):
+npm run telegram:pair
+
+# 3. Запусти бота:
+npm run telegram:bot
+```
+
+Состояние хранится в `TELEGRAM_STATE_DIR` (по умолчанию подкаталог `telegram`
+в каталоге состояния `sprut-agent`):
+
+- `codex-home/` (`0700`) — изолированный `CODEX_HOME` с симлинками на
+  `~/.codex/auth.json` (переопределяется `SPRUT_TELEGRAM_CODEX_AUTH_PATH`) и
+  `skills/spruthub-master`, плюс сгенерированный `config.toml` (`gpt-6.2-sol`,
+  `effort=medium`, `service_tier=priority`, `ultrafast_mode=true`,
+  `web_search="live"`, `apps=false`, MCP `sprut-agent`);
+- `workspace/` (`0700`) — пустой рабочий каталог для `codex app-server`;
+- `sessions.json` и `offset.json` (`0600`) — постоянный `threadId` на каждый
+  чат и последний обработанный `update_id`.
+
+В личном чате работают команды `/start` (приветствие без сброса контекста),
+`/new` (начать новый тред) и `/status` (модель, режим, состояние сессии,
+аптайм), а также обычные сообщения и фото до 5 МБ. Необязательные переменные
+для отладки: `TELEGRAM_CODEX_MODEL`, `TELEGRAM_CODEX_EFFORT`,
+`TELEGRAM_CODEX_SERVICE_TIER`, `TELEGRAM_CODEX_BIN`, `TELEGRAM_API_BASE`,
+`TELEGRAM_TURN_TIMEOUT_MS`. Офлайн-проверка с локальной подменой Telegram API и
+`codex app-server`:
+
+```sh
+node --import ./test/support/isolated-home.mjs --test test/telegram-bot.integration.test.mjs
+```
+
 ## Проверки
 
 ```sh
