@@ -90,27 +90,37 @@ const HISTORY_MISSING_WARNING =
 // Single source of truth for SprutHub 3.0.0 rev 20131 dashboard, column, and
 // widget name normalization: trims & collapses whitespace, strips characters
 // outside Unicode letters, digits, spaces, and - _ ' `, trims edges, and takes
-// the first 32 Unicode code points (trimming any trailing space left at the cut).
-export function predictSprutHubDashboardName(name) {
-  if (typeof name !== "string") return "";
-  const collapsed = name.trim().replace(/\s+/g, " ");
-  const cleaned = collapsed.replace(/[^\p{L}\p{N}\s\-_'`]/gu, "").trim();
-  return [...cleaned]
+// the first 32 Unicode code points. Accepts both the raw 32-code-point slice
+// and the trimEnd() form (plus collapsed-space variants) so a trailing space at
+// code point #32 never triggers a false conflict.
+function hubNormalizedDashboardNameVariants(name) {
+  if (typeof name !== "string") return [];
+  const primaryCleaned = name
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s\-_'`]/gu, "")
+    .trim();
+  const primaryCut = [...primaryCleaned]
     .slice(0, DASHBOARD_HUB_NAME_MAX_LENGTH)
-    .join("")
-    .trimEnd();
-}
-
-function predictCollapsedSprutHubDashboardName(name) {
-  if (typeof name !== "string") return "";
-  const cleaned = name
+    .join("");
+  const collapsedCleaned = name
     .replace(/[^\p{L}\p{N}\s\-_'`]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-  return [...cleaned]
+  const collapsedCut = [...collapsedCleaned]
     .slice(0, DASHBOARD_HUB_NAME_MAX_LENGTH)
-    .join("")
-    .trimEnd();
+    .join("");
+  return [
+    primaryCut.trimEnd(),
+    primaryCut,
+    collapsedCut.trimEnd(),
+    collapsedCut,
+  ];
+}
+
+export function predictSprutHubDashboardName(name) {
+  if (typeof name !== "string") return "";
+  return hubNormalizedDashboardNameVariants(name)[0];
 }
 
 export function isHubNormalizedDashboardName(requested, observed) {
@@ -118,10 +128,7 @@ export function isHubNormalizedDashboardName(requested, observed) {
     return false;
   }
   if (observed === requested) return false;
-  return (
-    observed === predictSprutHubDashboardName(requested) ||
-    observed === predictCollapsedSprutHubDashboardName(requested)
-  );
+  return hubNormalizedDashboardNameVariants(requested).includes(observed);
 }
 
 function matchesDashboardName(requested, observed) {
@@ -159,6 +166,13 @@ function warningRecordFields(warnings, historyAppMissing = false) {
 
 export function isDashboardChangeKind(kind) {
   return DASHBOARD_OPERATION_SET.has(kind);
+}
+
+function isPendingRestoreIntent(change) {
+  return (
+    ["restoring", "uncertain"].includes(change?.status) &&
+    nativeIntentDirection(change) === "restore"
+  );
 }
 
 export function dashboardHubStepsSent(change, direction) {
@@ -948,7 +962,10 @@ async function parseAndVerifyCharacteristicRefs(
     );
     resolved.push({
       target,
-      characteristicType: characteristic.control?.type ?? characteristic.type,
+      characteristicType:
+        characteristic.control?.type ??
+        characteristic.control?.key ??
+        characteristic.type,
     });
   }
   const repeatedTypes =
@@ -2418,10 +2435,7 @@ async function getDashboardCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -2439,10 +2453,7 @@ async function getDashboardCreate(ctx, change) {
       last_verification: freshVerification("created_dashboard_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: dashboardSnapshot(live),
@@ -2683,10 +2694,7 @@ async function getDashboardDelete(ctx, change) {
       verification: freshVerification("recreated_dashboard_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownDashboardCreate(
       ctx,
       change,
@@ -2729,10 +2737,7 @@ async function getDashboardColumnCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -2750,10 +2755,7 @@ async function getDashboardColumnCreate(ctx, change) {
       last_verification: freshVerification("created_column_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: columnSnapshot(live),
@@ -3002,10 +3004,7 @@ async function getDashboardColumnDelete(ctx, change) {
       verification: freshVerification("recreated_column_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownColumnCreate(
       ctx,
       change,
@@ -3048,10 +3047,7 @@ async function getDashboardWidgetCreate(ctx, change) {
     });
   }
   if (live === null) {
-    if (
-      ["restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === "restore"
-    ) {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         ...(change.write_intent?.acknowledged === false
           ? { recovered_after_uncertain_write: true }
@@ -3069,10 +3065,7 @@ async function getDashboardWidgetCreate(ctx, change) {
       last_verification: freshVerification("created_widget_missing"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     if (change.status === "restoring") {
       return ctx.finishNative(change, "uncertain", undefined, {
         observed_snapshot: widgetSnapshot(live),
@@ -3306,10 +3299,7 @@ async function getDashboardWidgetDelete(ctx, change) {
       verification: freshVerification("recreated_widget_observed"),
     });
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownWidgetCreate(
       ctx,
       change,
@@ -3591,7 +3581,7 @@ async function restoreDashboardCreate(ctx, change) {
   }
   const live = await ctx.client.getDashboard(change.created_dashboard_id);
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_dashboard_absent"),
@@ -3708,12 +3698,16 @@ async function restoreDashboardUpdate(ctx, change) {
       last_verification: freshVerification("dashboard_missing"),
     });
   }
-  if (live.name === change.baseline_snapshot.name) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    live.name === change.baseline_snapshot.name ||
+    (pendingRestore &&
+      live.name !== change.applied_snapshot.name &&
+      isHubNormalizedDashboardName(change.baseline_snapshot.name, live.name))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_name: live.name,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
@@ -4004,10 +3998,7 @@ async function restoreDashboardDelete(ctx, change) {
     }
     return runDashboardDeleteRecreation(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownDashboardCreate(
       ctx,
       change,
@@ -4078,7 +4069,7 @@ async function restoreDashboardColumnCreate(ctx, change) {
     change.created_column_id,
   );
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_column_absent"),
@@ -4174,12 +4165,16 @@ async function restoreDashboardColumnUpdate(ctx, change) {
       last_verification: freshVerification("column_missing"),
     });
   }
-  if (live.name === change.baseline_snapshot.name) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    live.name === change.baseline_snapshot.name ||
+    (pendingRestore &&
+      live.name !== change.applied_snapshot.name &&
+      isHubNormalizedDashboardName(change.baseline_snapshot.name, live.name))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_name: live.name,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_name_observed"),
     });
   }
@@ -4374,10 +4369,7 @@ async function restoreDashboardColumnDelete(ctx, change) {
     }
     return runColumnDeleteRecreation(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownColumnCreate(
       ctx,
       change,
@@ -4458,7 +4450,7 @@ async function restoreDashboardWidgetCreate(ctx, change) {
     change.created_widget_id,
   );
   if (live === null) {
-    if (nativeIntentDirection(change) === "restore") {
+    if (isPendingRestoreIntent(change)) {
       return ctx.finishNative(change, "restored", undefined, {
         recovered_after_uncertain_write: true,
         last_verification: freshVerification("created_widget_absent"),
@@ -4552,12 +4544,18 @@ async function restoreDashboardWidgetUpdate(ctx, change) {
     });
   }
   const liveSnap = widgetSnapshot(live);
-  if (sameWidgetContent(liveSnap, change.baseline_snapshot)) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (
+    sameWidgetContent(liveSnap, change.baseline_snapshot) ||
+    (pendingRestore &&
+      !sameWidgetContent(liveSnap, change.applied_snapshot) &&
+      sameWidgetContent(liveSnap, change.baseline_snapshot, {
+        allowNormalizedName: true,
+      }))
+  ) {
     return ctx.finishNative(change, "restored", undefined, {
       observed_snapshot: liveSnap,
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_widget_observed"),
     });
   }
@@ -4621,10 +4619,7 @@ async function restoreDashboardWidgetDelete(ctx, change) {
   if (change.recreated_widget_id !== undefined) {
     return getDashboardWidgetDelete(ctx, change);
   }
-  if (
-    ["restoring", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "restore"
-  ) {
+  if (isPendingRestoreIntent(change)) {
     return recordUnknownWidgetCreate(
       ctx,
       change,
@@ -4758,7 +4753,8 @@ async function restoreDashboardWidgetMove(ctx, change) {
       last_verification: freshVerification("widget_missing"),
     });
   }
-  if (nativeIntentDirection(change) !== "restore") {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (!pendingRestore) {
     const later = await findLaterAppliedDashboardLayoutChange(ctx, change);
     if (later) {
       return ctx.finishNative(change, "conflict", undefined, {
@@ -4770,9 +4766,7 @@ async function restoreDashboardWidgetMove(ctx, change) {
   }
   if (sameColumnsLayout(live, change.baseline_columns)) {
     return ctx.finishNative(change, "restored", undefined, {
-      ...(nativeIntentDirection(change) === "restore"
-        ? { recovered_after_uncertain_write: true }
-        : {}),
+      ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
       last_verification: freshVerification("baseline_layout_observed"),
     });
   }
