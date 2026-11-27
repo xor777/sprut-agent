@@ -1,7 +1,11 @@
 import { DEFAULT_TELEGRAM_API_BASE, redactTelegramSecrets } from "./config.mjs";
+import { splitTelegramHtmlChunks } from "./format-html.mjs";
 
 export const MAX_TELEGRAM_MESSAGE_LENGTH = 4096;
 export const MAX_TELEGRAM_PHOTO_BYTES = 5 * 1024 * 1024;
+const TELEGRAM_HTML_PARSE_ERROR_RE =
+  /can't parse entities|unsupported start tag|unclosed|expected end tag/i;
+const DISABLED_LINK_PREVIEW = { is_disabled: true };
 
 export class TelegramApiError extends Error {
   constructor(
@@ -245,16 +249,67 @@ export class TelegramApi {
   async sendMessage(chatId, text, options = {}) {
     const trimmed = this.#scrub(String(text ?? "")).trim();
     if (trimmed.length === 0) return [];
-    const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
+    const { parseMode, ...callOptions } = options ?? {};
+
+    if (parseMode === null || parseMode === false) {
+      const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
+      const sent = [];
+      for (const chunk of chunks) {
+        sent.push(
+          await this.call(
+            "sendMessage",
+            {
+              chat_id: chatId,
+              text: chunk,
+              link_preview_options: DISABLED_LINK_PREVIEW,
+            },
+            callOptions,
+          ),
+        );
+      }
+      return sent;
+    }
+
+    const chunks = splitTelegramHtmlChunks(
+      trimmed,
+      MAX_TELEGRAM_MESSAGE_LENGTH,
+    );
     const sent = [];
     for (const chunk of chunks) {
-      sent.push(
-        await this.call(
-          "sendMessage",
-          { chat_id: chatId, text: chunk },
-          options,
-        ),
-      );
+      try {
+        sent.push(
+          await this.call(
+            "sendMessage",
+            {
+              chat_id: chatId,
+              text: chunk.html,
+              parse_mode: "HTML",
+              link_preview_options: DISABLED_LINK_PREVIEW,
+            },
+            callOptions,
+          ),
+        );
+      } catch (error) {
+        if (
+          error instanceof TelegramApiError &&
+          error.status === 400 &&
+          TELEGRAM_HTML_PARSE_ERROR_RE.test(error.message)
+        ) {
+          sent.push(
+            await this.call(
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: chunk.plain,
+                link_preview_options: DISABLED_LINK_PREVIEW,
+              },
+              callOptions,
+            ),
+          );
+          continue;
+        }
+        throw error;
+      }
     }
     return sent;
   }

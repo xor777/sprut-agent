@@ -2167,7 +2167,7 @@ test("TelegramApi.sendMessage falls back to plain text only on HTTP 400 HTML par
   //    chunk 1 retries as plain text without parse_mode; chunks 2 and 3 still send HTML.
   const para1 = `**Блок 1**: ${"а".repeat(2500)}`;
   const para2 = `**Блок 2**: [справка](https://wiki.spruthub.ru/Тест) ${"б".repeat(2500)}`;
-  const para3 = `**Блок 3**: \`home_overview\``;
+  const para3 = `**Блок 3**: \`home_overview\` ${"в".repeat(2500)}`;
   const fullText = `${para1}\n\n${para2}\n\n${para3}`;
 
   tg.failNext("sendMessage", {
