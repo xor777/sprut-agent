@@ -67,6 +67,9 @@ export const READ_METHODS = new Set([
   "dashboardWidget.list",
   "dashboardWidget.get",
   "dashboardWidget.types",
+  "catalog.types",
+  "catalog.list",
+  "catalog.get",
 ]);
 
 export function isWriteMethod(method) {
@@ -331,6 +334,30 @@ export const METHOD_EVIDENCE = {
   "dashboardWidget.types": [
     OBSERVED,
     "2026-11-26-dashboards: returns all 8 DashboardWidgetType values",
+  ],
+  "catalog.types": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: returns stores and controllers",
+  ],
+  "catalog.list": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: filters by stores/controllers/search; omits empty catalogs",
+  ],
+  "catalog.get": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: returns CatalogMessage with template, write, error, devices, accessories",
+  ],
+  "catalog.create": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: writes INTERNAL /N.json; invalid templates create active=false + error without JSON-RPC error",
+  ],
+  "catalog.update": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: updates INTERNAL template in place; invalid templates set active=false + error",
+  ],
+  "catalog.delete": [
+    OBSERVED,
+    "2026-11-27 SprutHub 3.0.0 rev 20131: deletes INTERNAL template and returns empty ACK {}",
   ],
 };
 
@@ -2950,6 +2977,169 @@ const HANDLERS = {
       })),
     };
   },
+
+  "catalog.types": (state) => ({
+    stores: [...state.catalogTypes.stores],
+    controllers: [...state.catalogTypes.controllers],
+  }),
+  "catalog.list": (state, input) => {
+    const filter = isRecord(input?.filter) ? input.filter : null;
+    const stores =
+      Array.isArray(filter?.stores) && filter.stores.length > 0
+        ? new Set(filter.stores)
+        : null;
+    const controllers =
+      Array.isArray(filter?.controllers) && filter.controllers.length > 0
+        ? new Set(filter.controllers)
+        : null;
+    const serviceTypes =
+      Array.isArray(filter?.serviceTypes) && filter.serviceTypes.length > 0
+        ? new Set(filter.serviceTypes)
+        : null;
+    const search =
+      typeof input?.search === "string" && input.search.trim().length > 0
+        ? input.search.trim().toLowerCase()
+        : null;
+    let listed = state.catalogs.filter((entry) => {
+      if (stores && !stores.has(entry.store)) return false;
+      if (controllers && !controllers.has(entry.controller)) return false;
+      if (
+        serviceTypes &&
+        !(entry.availableServices ?? []).some((svc) =>
+          serviceTypes.has(svc.type),
+        )
+      ) {
+        return false;
+      }
+      if (search !== null) {
+        const haystack = [
+          entry.file,
+          entry.controller,
+          entry.manufacturer ?? "",
+          entry.model ?? "",
+          ...(entry.manufacturerIds ?? []),
+          ...(entry.modelIds ?? []),
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+    const afterIndex =
+      Number.isSafeInteger(input?.afterIndex) && input.afterIndex > 0
+        ? input.afterIndex
+        : 0;
+    if (afterIndex > 0) listed = listed.slice(afterIndex);
+    if (Number.isSafeInteger(input?.limit) && input.limit > 0) {
+      listed = listed.slice(0, input.limit);
+    }
+    const projected = listed.map(projectCatalogListItem);
+    return projected.length > 0 ? { catalogs: projected } : {};
+  },
+  "catalog.get": (state, input) => {
+    const entry = findCatalogEntry(
+      state,
+      input?.store,
+      input?.controller,
+      input?.file,
+    );
+    if (!entry) {
+      throw notFound(
+        `Catalog ${input?.store}:${input?.controller}:${input?.file}`,
+      );
+    }
+    return projectCatalogDetail(entry);
+  },
+  "catalog.create": (state, input) => {
+    const controller = input?.controller;
+    const template = input?.template;
+    if (
+      typeof controller !== "string" ||
+      !state.catalogTypes.controllers.includes(controller)
+    ) {
+      throw invalidParams(`Unknown catalog controller ${controller}`);
+    }
+    if (typeof template !== "string") {
+      throw invalidParams("Catalog template must be a string");
+    }
+    const file = nextInternalCatalogFile(state, controller);
+    const evaluation = evaluateCatalogTemplate(state, {
+      op: "create",
+      store: "INTERNAL",
+      controller,
+      file,
+      template,
+    });
+    const entry = {
+      store: "INTERNAL",
+      controller,
+      file,
+      template,
+      write: true,
+      active: evaluation.active,
+      ...(evaluation.error ? { error: evaluation.error } : {}),
+      ...evaluation.metadata,
+      deviceCount: 0,
+      devices: [],
+      accessories: [],
+    };
+    state.catalogs.push(entry);
+    return projectCatalogDetail(entry);
+  },
+  "catalog.update": (state, input) => {
+    if (input?.store !== "INTERNAL") {
+      throw invalidParams("Only INTERNAL catalog templates can be updated");
+    }
+    const entry = findCatalogEntry(
+      state,
+      input.store,
+      input?.controller,
+      input?.file,
+    );
+    if (!entry) {
+      throw notFound(
+        `Catalog ${input.store}:${input?.controller}:${input?.file}`,
+      );
+    }
+    if (typeof input?.template !== "string") {
+      throw invalidParams("Catalog template must be a string");
+    }
+    const evaluation = evaluateCatalogTemplate(state, {
+      op: "update",
+      store: "INTERNAL",
+      controller: entry.controller,
+      file: entry.file,
+      template: input.template,
+    });
+    entry.template = input.template;
+    entry.active = evaluation.active;
+    if (evaluation.error) {
+      entry.error = evaluation.error;
+    } else {
+      delete entry.error;
+    }
+    Object.assign(entry, evaluation.metadata);
+    return projectCatalogDetail(entry);
+  },
+  "catalog.delete": (state, input) => {
+    if (input?.store !== "INTERNAL") {
+      throw invalidParams("Only INTERNAL catalog templates can be deleted");
+    }
+    const at = state.catalogs.findIndex(
+      (entry) =>
+        entry.store === input.store &&
+        entry.controller === input?.controller &&
+        entry.file === input?.file,
+    );
+    if (at < 0) {
+      throw notFound(
+        `Catalog ${input.store}:${input?.controller}:${input?.file}`,
+      );
+    }
+    state.catalogs.splice(at, 1);
+    return {};
+  },
 };
 
 // Builds a standards-compliant stored (method 0) ZIP archive containing one
@@ -3274,8 +3464,11 @@ function buildState(fixture, hubTime) {
             : fixture.hub.clock,
       }),
       ...bridgeWindows(fixture.extensions ?? []),
+      ...defaultZigbeeRepairWindows(),
+      ...(fixture.windows ? structuredClone(fixture.windows) : {}),
     },
     removedWindows: new Set(),
+    repairedChildren: [],
     extensions: structuredClone(fixture.extensions ?? []),
     // The hub's DiscoveryTime and the devices in pairing mode (see
     // startDiscovery); joining holds devices announced and not yet paired.
@@ -3298,6 +3491,16 @@ function buildState(fixture, hubTime) {
     nextDashboardId: 1,
     nextDashboardColumnId: 1,
     nextDashboardWidgetId: 1,
+    catalogTypes: {
+      stores: structuredClone(fixture.catalog?.stores ?? ["MAIN", "INTERNAL"]),
+      controllers: structuredClone(
+        fixture.catalog?.controllers ?? ["sonoff", "xiaomi", "zigbee"],
+      ),
+    },
+    catalogs: seedCatalogTemplates(fixture.catalog?.templates),
+    nextCatalogFileId: new Map(),
+    catalogRejectNext: [],
+    catalogValidator: null,
   };
   for (const input of fixture.accessories) {
     state.accessories.push({
@@ -5248,7 +5451,28 @@ function applyWindowEffects(state, windowKey, window, updates) {
     /^Controller\/((?:zigbee|xiaomi)_[^/]+)\/Child\/([^/]+)\/$/.exec(windowKey);
   if (controllerChild) {
     if (controllerChild[1].startsWith("zigbee_")) {
-      for (const { key } of updates) {
+      for (const { key, value } of updates) {
+        if (key === "Repair") {
+          window.label ??= { text: "" };
+          window.label.status = "Переспаривание запущено";
+          state.repairedChildren.push({
+            extensionKey: `Controller:${controllerChild[1]}`,
+            childId: controllerChild[2],
+            windowKey,
+            value: structuredClone(value),
+          });
+          const ext = state.extensions.find(
+            (candidate) =>
+              candidate.extensionKey === `Controller:${controllerChild[1]}`,
+          );
+          const child = ext?.children?.find(
+            (candidate) => candidate.id === controllerChild[2],
+          );
+          if (child) {
+            child.status = "Переспаривание";
+          }
+          continue;
+        }
         const calibration =
           /^(\/\d+\/[0-9A-Fa-f]+_[^/]+\/)[0-9A-Fa-f]+_ThermostatValveCalibration\/[^/]+$/.exec(
             key,
@@ -5731,6 +5955,320 @@ function emitDashboardWidgets(state, event, widgets) {
   state.emitAfterReply?.({
     dashboardWidget: { event, widgets: structuredClone(widgets) },
   });
+}
+
+function defaultZigbeeRepairWindows() {
+  const repairButton = () => ({
+    key: "Repair",
+    name: "Переспарить",
+    inputType: "BUTTON",
+    read: true,
+    write: true,
+    visible: true,
+    disabled: false,
+    value: { boolValue: false },
+    type: "GenericBoolean",
+    parent: "debug",
+  });
+  return {
+    "Controller/zigbee_1/Child/00158d0001repair/": {
+      windowKey: "Controller/zigbee_1/Child/00158d0001repair/",
+      label: { text: "Розетка Tuya TS011F", status: "Работает" },
+      options: [
+        {
+          key: "Info",
+          name: "Информация",
+          type: "GenericString",
+          inputType: "HTML",
+          parent: "",
+          read: true,
+          write: false,
+          disabled: false,
+          visible: true,
+          value: {
+            stringValue:
+              "Address: 00158d0001repair/1234<br>Manufacturer: _TZ3000_g5xawfcq<br>Model: TS011F",
+          },
+        },
+        repairButton(),
+      ],
+    },
+    "Controller/zigbee_1/Child/00124b0000000000/": {
+      windowKey: "Controller/zigbee_1/Child/00124b0000000000/",
+      label: { text: "Координатор ZigBee", status: "Работает" },
+      options: [
+        {
+          key: "Info",
+          name: "Информация",
+          type: "GenericString",
+          inputType: "HTML",
+          parent: "",
+          read: true,
+          write: false,
+          disabled: false,
+          visible: true,
+          value: {
+            stringValue: "Address: 00124b0000000000/0000<br>Role: Coordinator",
+          },
+        },
+        repairButton(),
+      ],
+    },
+  };
+}
+
+function defaultCatalogTemplates() {
+  return [
+    {
+      active: true,
+      store: "MAIN",
+      controller: "zigbee",
+      file: "/_Tuya/PollMetering.json",
+      manufacturer: "Tuya",
+      model: "PollMetering Base",
+      manufacturerIds: [],
+      modelIds: [],
+      availableServices: [{ type: "C_WattMeter", count: 1 }],
+      catalogId: 100,
+      write: false,
+      deviceCount: 0,
+      devices: [],
+      accessories: [],
+      template: JSON.stringify(
+        {
+          manufacturer: "Tuya",
+          model: "PollMetering Base",
+          services: [{ type: "C_WattMeter" }],
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      active: true,
+      store: "MAIN",
+      controller: "zigbee",
+      file: "/Tuya/TS011F.json",
+      manufacturer: "Tuya",
+      model: "TS011F Smart Plug",
+      manufacturerIds: ["_TZ3000_g5xawfcq"],
+      modelIds: ["TS011F"],
+      availableServices: [
+        { type: "Outlet", count: 1 },
+        { type: "C_WattMeter", count: 1 },
+      ],
+      catalogId: 101,
+      write: false,
+      deviceCount: 1,
+      devices: [
+        {
+          extensionKey: "Controller:zigbee_1",
+          id: "00158d0001repair",
+          name: "Розетка Tuya TS011F",
+          online: true,
+          paired: true,
+          manufacturer: "_TZ3000_g5xawfcq",
+          model: "TS011F",
+        },
+      ],
+      accessories: [{ id: 16, name: "Торшер", roomId: 3, online: true }],
+      template: JSON.stringify(
+        {
+          manufacturer: "Tuya",
+          model: "TS011F Smart Plug",
+          manufacturerIds: ["_TZ3000_g5xawfcq"],
+          modelIds: ["TS011F"],
+          template: "/_Tuya/PollMetering.json",
+          services: [{ type: "Outlet" }],
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      active: true,
+      store: "MAIN",
+      controller: "xiaomi",
+      file: "/Lumi/sensor_ht.json",
+      manufacturer: "Xiaomi",
+      model: "WSDCGQ01LM",
+      manufacturerIds: ["LUMI"],
+      modelIds: ["lumi.sensor_ht"],
+      availableServices: [
+        { type: "TemperatureSensor", count: 1 },
+        { type: "HumiditySensor", count: 1 },
+      ],
+      catalogId: 201,
+      write: false,
+      deviceCount: 0,
+      devices: [],
+      accessories: [],
+      template: JSON.stringify(
+        {
+          manufacturer: "Xiaomi",
+          model: "WSDCGQ01LM",
+          manufacturerIds: ["LUMI"],
+          modelIds: ["lumi.sensor_ht"],
+        },
+        null,
+        2,
+      ),
+    },
+  ];
+}
+
+function seedCatalogTemplates(rawTemplates) {
+  const source = Array.isArray(rawTemplates)
+    ? rawTemplates
+    : defaultCatalogTemplates();
+  return source.map((entry) => ({
+    active: entry.active !== false,
+    store: entry.store,
+    controller: entry.controller,
+    file: entry.file,
+    ...(entry.manufacturer !== undefined
+      ? { manufacturer: entry.manufacturer }
+      : {}),
+    ...(entry.model !== undefined ? { model: entry.model } : {}),
+    manufacturerIds: [...(entry.manufacturerIds ?? [])],
+    modelIds: [...(entry.modelIds ?? [])],
+    availableServices: structuredClone(entry.availableServices ?? []),
+    ...(entry.catalogId !== undefined ? { catalogId: entry.catalogId } : {}),
+    template: typeof entry.template === "string" ? entry.template : "{}",
+    write:
+      typeof entry.write === "boolean"
+        ? entry.write
+        : entry.store === "INTERNAL",
+    ...(entry.error !== undefined ? { error: entry.error } : {}),
+    deviceCount:
+      typeof entry.deviceCount === "number"
+        ? entry.deviceCount
+        : (entry.devices?.length ?? 0),
+    devices: structuredClone(entry.devices ?? []),
+    accessories: structuredClone(entry.accessories ?? []),
+  }));
+}
+
+function findCatalogEntry(state, store, controller, file) {
+  return (
+    state.catalogs.find(
+      (entry) =>
+        entry.store === store &&
+        entry.controller === controller &&
+        entry.file === file,
+    ) ?? null
+  );
+}
+
+function nextInternalCatalogFile(state, controller) {
+  let next = state.nextCatalogFileId.get(controller);
+  if (next === undefined) {
+    let maxExisting = 0;
+    for (const entry of state.catalogs) {
+      if (entry.store !== "INTERNAL" || entry.controller !== controller) {
+        continue;
+      }
+      const match = /^\/(\d+)\.json$/.exec(entry.file);
+      if (match) maxExisting = Math.max(maxExisting, Number(match[1]));
+    }
+    next = maxExisting + 1;
+  }
+  state.nextCatalogFileId.set(controller, next + 1);
+  return `/${next}.json`;
+}
+
+function evaluateCatalogTemplate(state, context) {
+  if (
+    Array.isArray(state.catalogRejectNext) &&
+    state.catalogRejectNext.length
+  ) {
+    const next = state.catalogRejectNext.shift();
+    const message =
+      typeof next === "string"
+        ? next
+        : typeof next?.error === "string"
+          ? next.error
+          : "Неправильный шаблон: ошибка проверки на хабе";
+    return { active: false, error: message, metadata: {} };
+  }
+  if (typeof state.catalogValidator === "function") {
+    const customError = state.catalogValidator(context);
+    if (typeof customError === "string" && customError.length > 0) {
+      return { active: false, error: customError, metadata: {} };
+    }
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(context.template);
+  } catch (err) {
+    return {
+      active: false,
+      error: `Неправильный шаблон: ${err.message}`,
+      metadata: {},
+    };
+  }
+  if (!isRecord(parsed)) {
+    return {
+      active: false,
+      error: "Неправильный шаблон: корень должен быть JSON-объектом",
+      metadata: {},
+    };
+  }
+  const metadata = {
+    ...(typeof parsed.manufacturer === "string"
+      ? { manufacturer: parsed.manufacturer }
+      : {}),
+    ...(typeof parsed.model === "string" ? { model: parsed.model } : {}),
+    manufacturerIds: Array.isArray(parsed.manufacturerIds)
+      ? parsed.manufacturerIds.filter((s) => typeof s === "string")
+      : [],
+    modelIds: Array.isArray(parsed.modelIds)
+      ? parsed.modelIds.filter((s) => typeof s === "string")
+      : [],
+    availableServices: Array.isArray(parsed.services)
+      ? parsed.services
+          .filter((svc) => typeof svc?.type === "string")
+          .map((svc) => ({ type: svc.type, count: 1 }))
+      : [],
+  };
+  return { active: true, error: null, metadata };
+}
+
+function projectCatalogListItem(entry) {
+  return {
+    active: entry.active === true,
+    store: entry.store,
+    controller: entry.controller,
+    file: entry.file,
+    deviceCount: entry.deviceCount ?? 0,
+    ...(entry.manufacturer !== undefined
+      ? { manufacturer: entry.manufacturer }
+      : {}),
+    ...(entry.model !== undefined ? { model: entry.model } : {}),
+    ...(entry.manufacturerIds?.length > 0
+      ? { manufacturerIds: [...entry.manufacturerIds] }
+      : {}),
+    ...(entry.modelIds?.length > 0 ? { modelIds: [...entry.modelIds] } : {}),
+    ...(entry.availableServices?.length > 0
+      ? { availableServices: structuredClone(entry.availableServices) }
+      : {}),
+    ...(entry.catalogId !== undefined ? { catalogId: entry.catalogId } : {}),
+    write: entry.write === true,
+    ...(entry.error !== undefined ? { error: entry.error } : {}),
+  };
+}
+
+function projectCatalogDetail(entry) {
+  return {
+    ...projectCatalogListItem(entry),
+    template: entry.template,
+    ...(entry.devices?.length > 0
+      ? { devices: structuredClone(entry.devices) }
+      : {}),
+    ...(entry.accessories?.length > 0
+      ? { accessories: structuredClone(entry.accessories) }
+      : {}),
+  };
 }
 
 function emitAccessories(state, event, accessories) {
