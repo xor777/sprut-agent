@@ -319,3 +319,63 @@ test("get_native_change_contract succeeds without target_ref for EVERY operation
 
   assert.deepEqual(hub.writes(), []);
 });
+
+test("virtual_light_group works end-to-end on simulated-hub when Lightbulb creation emits read-only C_ColorMode", async (t) => {
+  const { hub, client } = await setup(t);
+  // Living room lamp 15 (Люстра: On, Brightness, ColorTemperature) and 17 (Лента: On, Brightness, Hue, Saturation, ColorTemperature)
+  const memberRefs = [
+    `${accessoryRef(15)}/service/13`,
+    `${accessoryRef(17)}/service/13`,
+  ];
+  const prepared = await callOk(client, "prepare_native_change", {
+    operation: "virtual_light_group",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Полный свет зала",
+    member_service_refs: memberRefs,
+    reason: "Проверить 5-контрольную группу с C_ColorMode",
+  });
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(prepared.characteristic_types, [
+    "On",
+    "Brightness",
+    "Hue",
+    "Saturation",
+    "ColorTemperature",
+  ]);
+
+  const applied = await callOk(client, "apply_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(applied.status, "applied");
+  const createdGroup = hub.state.accessories.find(
+    ({ name }) => name === "Полный свет зала",
+  );
+  const groupLightService = createdGroup.services.find(
+    ({ type }) => type === "Lightbulb",
+  );
+  const colorMode = groupLightService.characteristics.find(
+    ({ control }) => control.type === "C_ColorMode",
+  );
+  assert.ok(
+    colorMode,
+    "simulated hub must emit C_ColorMode on color Lightbulb",
+  );
+  assert.equal(colorMode.control.read, true);
+  assert.equal(colorMode.control.write, false);
+
+  const inspected = await callOk(client, "get_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(inspected.status, "applied");
+  assert.equal(inspected.configuration_matches, true);
+
+  const restored = await callOk(client, "restore_native_change", {
+    change_ref: prepared.change_ref,
+  });
+  assert.equal(restored.status, "restored");
+  assert.equal(
+    hub.state.accessories.some(({ name }) => name === "Полный свет зала"),
+    false,
+  );
+});

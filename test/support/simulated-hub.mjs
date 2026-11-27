@@ -2027,11 +2027,18 @@ const HANDLERS = {
       const optional = catalog.optional
         .map(({ type }) => type)
         .filter((type) => type !== "Name");
+      const requestedOptional = (serviceInput.optional ?? []).filter((type) =>
+        optional.includes(type),
+      );
       const types = [
         ...catalog.required.map(({ type }) => type),
-        ...(serviceInput.optional ?? []).filter((type) =>
-          optional.includes(type),
-        ),
+        ...requestedOptional,
+        ...(serviceInput.type === "Lightbulb" &&
+        requestedOptional.some((type) =>
+          ["Hue", "Saturation", "ColorTemperature"].includes(type),
+        )
+          ? ["C_ColorMode"]
+          : []),
       ];
       const service = {
         aId: id,

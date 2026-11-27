@@ -19852,6 +19852,90 @@ test("a lost rename response reports the unchanged baseline before a safe retry"
   );
 });
 
+test("rename-only accessory_placement stays uncertain with ack_without_requested_result when ACKed hub leaves baseline unchanged, while real name normalization still applies", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const client = await startClient(t, hub, stateDirectory);
+
+  // 1. Rename-only (room_ref omitted) where hub ACKs {} but drops the update.
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      name: "Настольная лампа",
+      reason: "Переименовать лампу без смены комнаты",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  hub.state.behavior.dropNextAccessoryUpdate = true;
+
+  const uncertain = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(uncertain.isError, undefined, uncertain.content[0]?.text);
+  assert.equal(uncertain.structuredContent.status, "uncertain");
+  assert.equal(
+    uncertain.structuredContent.conflict_reason,
+    "ack_without_requested_result",
+  );
+  assert.equal(uncertain.structuredContent.applied, undefined);
+  assert.equal(uncertain.structuredContent.name_normalized, undefined);
+  assert.equal(hub.state.accessories.find(({ id }) => id === 34).name, "Лампа");
+
+  // get_native_change while still unchanged keeps uncertain + ack_without_requested_result.
+  const inspected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "uncertain");
+  assert.equal(
+    inspected.structuredContent.conflict_reason,
+    "ack_without_requested_result",
+  );
+
+  // Retrying apply_native_change now that hub accepts the write succeeds cleanly.
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.equal(applied.structuredContent.name_normalized, false);
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 34).name,
+    "Настольная лампа",
+  );
+
+  // 2. Rename-only where hub actually normalizes the new name (differs from baseline) still settles as applied + name_normalized: true.
+  const normalizedPrepare = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "accessory_placement",
+      target_ref: accessoryRef,
+      name: "Рабочая · лампа",
+      reason: "Переименовать с нормализацией на хабе",
+    },
+  });
+  hub.state.behavior.normalizeNextAccessoryName = true;
+  const normalizedApply = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: normalizedPrepare.structuredContent.change_ref },
+  });
+  assert.equal(normalizedApply.structuredContent.status, "applied");
+  assert.equal(normalizedApply.structuredContent.name_normalized, true);
+  assert.equal(normalizedApply.structuredContent.applied.name, "Рабочая лампа");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: normalizedPrepare.structuredContent.change_ref },
+  });
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(
+    hub.state.accessories.find(({ id }) => id === 34).name,
+    "Настольная лампа",
+  );
+});
+
 test("a restore retry preserves a manual edit when its fresh read fails", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);

@@ -1854,8 +1854,128 @@ test("the group rejects a capability absent from every member or invalid charact
       "unsupported_group_characteristics",
       JSON.stringify(invalidTypes),
     );
+    assert.ok(
+      prepared.structuredContent.contract,
+      `unsupported_group_characteristics must include inline compact contract (${JSON.stringify(invalidTypes)})`,
+    );
+    assert.ok(
+      Buffer.byteLength(
+        JSON.stringify(prepared.structuredContent.contract),
+        "utf8",
+      ) <= 4_096,
+    );
   }
   assert.equal(hub.requests.some(isGroupWrite), false);
+});
+
+test("auto-inference ignores stray read-only duplicate or incompatible optional controls on members and completes apply + undo", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  const memberA = memberAccessory({
+    id: 34,
+    sId: 13,
+    name: "RGB-лампа с дублем",
+    color: false,
+    temperature: false,
+  });
+  memberA.services[0].characteristics.push(
+    // Stray read-only Hue alongside a valid writable Hue
+    lightCharacteristic(34, 13, 29, "Hue", 0, { write: false }),
+    lightCharacteristic(34, 13, 23, "Hue", 120, {
+      minValue: 0,
+      maxValue: 360,
+      minStep: 1,
+    }),
+    // Incompatible string-valued optional ColorTemperature
+    {
+      aId: 34,
+      sId: 13,
+      cId: 30,
+      control: {
+        name: "ColorTemperature",
+        type: "ColorTemperature",
+        read: true,
+        write: true,
+        value: { stringValue: "warm" },
+      },
+    },
+  );
+  const memberB = memberAccessory({
+    id: 35,
+    sId: 14,
+    name: "CW/WW с дублем Saturation",
+    temperature: true,
+  });
+  memberB.services[0].characteristics.push(
+    // Two stray read-only Saturation duplicates
+    lightCharacteristic(35, 14, 31, "Saturation", 0, { write: false }),
+    lightCharacteristic(35, 14, 32, "Saturation", 0, { write: false }),
+  );
+  hub.state.accessories = [
+    memberA,
+    memberB,
+    memberAccessory({ id: 36, sId: 15, name: "Чужая" }),
+  ];
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "virtual_light_group",
+      target_ref: homeRef,
+      room_ref: roomRef,
+      name: "Автоопределение",
+      member_service_refs: memberServiceRefs,
+      reason: "Собрать группу несмотря на лишние read-only дубли",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent.characteristic_types, [
+    "On",
+    "Brightness",
+    "Hue",
+    "ColorTemperature",
+  ]);
+  assert.deepEqual(
+    prepared.structuredContent.members.find(
+      ({ service_ref }) => service_ref === memberServiceRefs[0],
+    ).lacks,
+    ["ColorTemperature"],
+  );
+  assert.deepEqual(
+    prepared.structuredContent.members.find(
+      ({ service_ref }) => service_ref === memberServiceRefs[1],
+    ).lacks,
+    ["Hue"],
+  );
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  // Writable Hue (cId 23) was linked on member 34, not read-only duplicate (cId 29)
+  assert.equal(
+    hub.requests.some(
+      ({ link }) =>
+        link?.addVirtual?.tAId === 34 && link.addVirtual.tCId === 23,
+    ),
+    true,
+  );
+  assert.equal(
+    hub.requests.some(
+      ({ link }) =>
+        link?.addVirtual?.tAId === 34 && link.addVirtual.tCId === 29,
+    ),
+    false,
+  );
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
 });
 
 test("omitted characteristic_types auto-infers all 5 Lightbulb controls and selectively links mixed RGBW + CW/WW lamps with full undo", async (t) => {

@@ -900,10 +900,22 @@ test("virtual_device accepts any non-system service.types entry and optional cha
     ownServices(createdLight)[0]
       .characteristics.map(({ control }) => control.type)
       .filter((type) => type !== "Name"),
-    ["On", "Brightness", "Hue", "Saturation", "ColorTemperature"],
+    [
+      "On",
+      "Brightness",
+      "Hue",
+      "Saturation",
+      "ColorTemperature",
+      "C_ColorMode",
+    ],
   );
+  const colorModeCreated = ownServices(createdLight)[0].characteristics.find(
+    ({ control }) => control.type === "C_ColorMode",
+  );
+  assert.equal(colorModeCreated.control.read, true);
+  assert.equal(colorModeCreated.control.write, false);
 
-  // 2. Delete and restore the virtual Lightbulb -> recreated device keeps all 4 optional characteristics.
+  // 2. Delete and restore the virtual Lightbulb -> recreated device keeps all 4 optional characteristics + auto C_ColorMode.
   const delPrepared = await call(client, "prepare_native_change", {
     operation: "virtual_device_delete",
     target_ref: accessoryRef(createdLight.id),
@@ -929,10 +941,22 @@ test("virtual_device accepts any non-system service.types entry and optional cha
   assert.equal(writes(hub, "accessory.delete").length, 1);
   assert.equal(writes(hub, "accessory.create").length, 2);
   assert.deepEqual(
+    writes(hub, "accessory.create").at(-1).params.accessory.create.services[0]
+      .optional,
+    ["Brightness", "Hue", "Saturation", "ColorTemperature"],
+  );
+  assert.deepEqual(
     ownServices(recreatedLight)[0]
       .characteristics.map(({ control }) => control.type)
       .filter((type) => type !== "Name"),
-    ["On", "Brightness", "Hue", "Saturation", "ColorTemperature"],
+    [
+      "On",
+      "Brightness",
+      "Hue",
+      "Saturation",
+      "ColorTemperature",
+      "C_ColorMode",
+    ],
   );
 
   // 3. Previously hardcoded-out service types (Thermostat with optional CurrentRelativeHumidity, WindowCovering, C_WattMeter) work.
