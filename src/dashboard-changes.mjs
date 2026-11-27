@@ -5088,7 +5088,7 @@ export function publicDashboardChange(change, options = {}) {
           change.recreated_dashboard_id !== undefined &&
           change.recreation_complete !== true),
       limitations: [
-        "Deleting a dashboard cascades all columns and widgets; undo recreates them under a new dashboard ID and skips widgets whose referenced devices no longer exist.",
+        "Deleting a dashboard cascades all columns and widgets; undo recreates them under a new dashboard ID and skips widgets whose referenced devices or shortcut dashboards no longer exist.",
       ],
     };
   }
@@ -5167,7 +5167,7 @@ export function publicDashboardChange(change, options = {}) {
           change.recreated_column_id !== undefined &&
           change.recreation_complete !== true),
       limitations: [
-        "Deleting a column cascades all widgets inside it; undo recreates the column and widgets while the dashboard still exists.",
+        "Deleting a column cascades all widgets inside it; undo recreates the column and widgets while the dashboard still exists, skipping widgets whose referenced devices or shortcut dashboards no longer exist.",
       ],
     };
   }
@@ -5212,7 +5212,7 @@ export function publicDashboardChange(change, options = {}) {
       ...tail,
       restore_supported: true,
       limitations: [
-        "Restore writes the previous widget payload back only while live state still matches the applied snapshot and referenced devices still exist.",
+        "Restore writes the previous widget payload back only while live state still matches the applied snapshot and referenced devices or shortcut dashboards still exist.",
       ],
     };
   }
@@ -5264,7 +5264,7 @@ export function publicDashboardChange(change, options = {}) {
       "applied",
     ].includes(change.status),
     limitations: [
-      "Undo recreates the widget in the same column under a new widget ID if dashboard, column and referenced devices still exist.",
+      "Undo recreates the widget in the same column under a new widget ID if dashboard, column and referenced devices or shortcut dashboards still exist.",
     ],
   };
 }

@@ -2091,10 +2091,9 @@ const HANDLERS = {
       ) {
         throw invalidParams("Service grid must be an object");
       }
-      const existingOrder = Number.isSafeInteger(service.grid?.order)
-        ? service.grid.order
-        : Number.isSafeInteger(service.order)
-          ? service.order
+      const existingOrder =
+        Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0
+          ? service.grid.order
           : 0;
       const order =
         input.grid.order !== undefined ? input.grid.order : existingOrder;
@@ -3450,7 +3449,10 @@ function buildAccessory(state, input) {
       // A live accessory.get reports service visible (owner hub, 2026-09-24).
       visible: service.visible !== false,
       grid: {
-        order: service.grid?.order ?? service.order ?? 0,
+        order:
+          Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0
+            ? service.grid.order
+            : 0,
         width: service.grid?.width ?? 1,
         height: service.grid?.height ?? 1,
       },

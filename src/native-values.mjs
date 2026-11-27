@@ -533,11 +533,7 @@ export const NATIVE_VALUE_KINDS = {
         service.client,
         change.target,
       );
-      if (order !== undefined) {
-        observedServiceGridOrders.set(change, order);
-      } else {
-        observedServiceGridOrders.delete(change);
-      }
+      observedServiceGridOrders.set(change, order ?? 0);
       return { value, contract };
     },
     write(service, change, value) {
@@ -1645,9 +1641,8 @@ export function parseServiceGridDimensions(normalized) {
 }
 
 function readServiceGridOrder(service) {
-  if (Number.isSafeInteger(service?.grid?.order)) return service.grid.order;
-  if (Number.isSafeInteger(service?.order)) return service.order;
-  return undefined;
+  const order = service?.grid?.order;
+  return Number.isSafeInteger(order) && order >= 0 ? order : undefined;
 }
 
 export async function readServiceGrid(client, target) {
