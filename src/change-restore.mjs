@@ -1,3 +1,4 @@
+import { catalogChangeName, isCatalogChangeKind } from "./catalog-changes.mjs";
 import { valuesEqual } from "./change-contracts.mjs";
 import { nativeChangeNext } from "./change-refs.mjs";
 import {
@@ -90,6 +91,7 @@ export function restoreItem(change, result, before) {
           ...observed,
           ...recreatedScenario(result),
           ...recreatedDashboard(result),
+          ...recreatedCatalog(result),
         };
       }
       if (
@@ -307,7 +309,9 @@ export function changeName(change) {
     default:
       return isDashboardChangeKind(change.kind)
         ? dashboardChangeName(change)
-        : undefined;
+        : isCatalogChangeKind(change.kind)
+          ? catalogChangeName(change)
+          : undefined;
   }
 }
 
@@ -364,6 +368,14 @@ function recreatedDashboard(result) {
       : {}),
     ...(result.skipped_widgets?.length > 0
       ? { skipped_widgets: result.skipped_widgets }
+      : {}),
+  };
+}
+
+function recreatedCatalog(result) {
+  return {
+    ...(result.restored_catalog_ref
+      ? { restored_catalog_ref: result.restored_catalog_ref }
       : {}),
   };
 }

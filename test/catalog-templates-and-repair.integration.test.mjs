@@ -272,8 +272,8 @@ test("catalog read: home_overview list=catalog filters/pages, get_entity reads t
   });
 
   // Warm HomeState first to prove catalog reads do not invalidate or populate it.
-  hub.restEvent();
   await callOk(client, "find_devices", { query: "торшер" });
+  hub.restEvent();
   const wholeReadsBefore = hub.requests.filter(
     ({ method }) => method === "accessory.list" || method === "room.list",
   ).length;
@@ -454,8 +454,8 @@ test("catalog write + undo lifecycle: create, update, delete, already_desired, o
   const { hub, client } = await setup(t);
 
   // Warm HomeState before catalog writes
-  hub.restEvent();
   await callOk(client, "find_devices", { query: "торшер" });
+  hub.restEvent();
   const wholeReadsBefore = hub.requests.filter(
     ({ method }) => method === "accessory.list" || method === "room.list",
   ).length;
@@ -804,7 +804,10 @@ test("catalog validation refuses MAIN/read-only writes, bad JSON/size/secrets/[R
 });
 
 test("catalog live hub quirk: active=false/error cleans up on create, rolls back on update, and degrades honestly if cleanup/rollback fails", async (t) => {
-  const { hub, client } = await setup(t);
+  const hooks = {};
+  const { hub, client } = await setup(t, {
+    onRequest: (req) => hooks.onRequest?.(req),
+  });
 
   // 1. catalog.create returns active=false + error -> apply cleans up ghost file and marks rejected!
   const pBadCreate = await callOk(client, "prepare_native_change", {
@@ -924,23 +927,22 @@ test("catalog live hub quirk: active=false/error cleans up on create, rolls back
   });
   // Fail the second catalog.update (the rollback write)
   let updateCount = 0;
-  const origOnRequest = hub.state.onRequest;
-  hub.state.onRequest = (req) => {
-    origOnRequest?.(req);
+  hooks.onRequest = (req) => {
     if (req.method === "catalog.update") {
       updateCount += 1;
-      if (updateCount === 1) {
+      if (updateCount === 2) {
         hub.refuseNext("catalog.update", {
           code: -32603,
           message: "temporary error",
         });
+        hooks.onRequest = undefined;
       }
     }
   };
   const stuckUpdate = await callOk(client, "apply_native_change", {
     change_ref: pRollbackFail.change_ref,
   });
-  hub.state.onRequest = origOnRequest;
+  hooks.onRequest = undefined;
   assert.ok(["applied", "uncertain"].includes(stuckUpdate.status));
   assert.match(stuckUpdate.hub_template_error, /ошибка 2/);
   assert.equal(stuckUpdate.restore_supported, true);

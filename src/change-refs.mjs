@@ -1,14 +1,28 @@
 import {
+  CATALOG_CONTROLLER_PATTERN,
+  CATALOG_STORE_SET,
+  CATALOG_STORES,
+  catalogRef,
   dashboardColumnRef,
   dashboardRef,
   dashboardWidgetRef,
   hiddenLogicCode,
   hiddenLogicInfo,
   isHubReadFailure,
+  isValidCatalogFile,
   SprutHubError,
 } from "./spruthub-client.mjs";
 
-export { dashboardColumnRef, dashboardRef, dashboardWidgetRef };
+export {
+  CATALOG_CONTROLLER_PATTERN,
+  CATALOG_STORE_SET,
+  CATALOG_STORES,
+  catalogRef,
+  dashboardColumnRef,
+  dashboardRef,
+  dashboardWidgetRef,
+  isValidCatalogFile,
+};
 
 // The operations of prepare_native_change and get_native_change_contract.
 export const NATIVE_CHANGE_OPERATIONS = [
@@ -47,6 +61,9 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "dashboard_widget_update",
   "dashboard_widget_delete",
   "dashboard_widget_move",
+  "catalog_template_create",
+  "catalog_template_update",
+  "catalog_template_delete",
 ];
 
 export function parseRoomRef(ref, configuredSerial) {
@@ -197,6 +214,57 @@ function parsePositiveDashboardId(raw, errorCode, message, action, details) {
     throw new SprutHubError(errorCode, message, action, details);
   }
   return id;
+}
+
+export function parseCatalogRef(ref, configuredSerial) {
+  const match =
+    /^spruthub:\/\/hub\/([^/?#]+)\/catalog\/([^/?#]+)\/([^/?#]+)\/([^/?#]+)$/.exec(
+      typeof ref === "string" ? ref : "",
+    );
+  const message =
+    "Use a home-qualified catalog template reference from home_overview with list=catalog or catalog_template_create.";
+  const details = {
+    next: { tool: "home_overview", arguments: { list: "catalog" } },
+  };
+  if (!match) {
+    throw new SprutHubError(
+      "invalid_catalog_ref",
+      message,
+      "home_overview",
+      details,
+    );
+  }
+  let serial;
+  let store;
+  let controller;
+  let file;
+  try {
+    serial = decodeURIComponent(match[1]);
+    store = decodeURIComponent(match[2]);
+    controller = decodeURIComponent(match[3]);
+    file = decodeURIComponent(match[4]);
+  } catch {
+    throw new SprutHubError(
+      "invalid_catalog_ref",
+      message,
+      "home_overview",
+      details,
+    );
+  }
+  requireConfiguredHome(serial, configuredSerial);
+  if (
+    !CATALOG_STORE_SET.has(store) ||
+    !CATALOG_CONTROLLER_PATTERN.test(controller) ||
+    !isValidCatalogFile(file)
+  ) {
+    throw new SprutHubError(
+      "invalid_catalog_ref",
+      message,
+      "home_overview",
+      details,
+    );
+  }
+  return { store, controller, file };
 }
 
 export function parseDashboardRef(ref, configuredSerial) {
@@ -616,6 +684,8 @@ export function refuseRedactedChangeTexts(change) {
     dashboard_column_update: { name: change.requested_name },
     dashboard_widget_create: { name: change.requested_widget?.name },
     dashboard_widget_update: { name: change.requested_widget?.name },
+    catalog_template_create: { source: change.requested_template },
+    catalog_template_update: { source: change.requested_template },
   }[change.kind];
   for (const [field, text] of Object.entries(texts ?? {})) {
     refuseRedactionMark(text, field);

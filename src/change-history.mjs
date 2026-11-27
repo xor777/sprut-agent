@@ -1,4 +1,9 @@
 import { blockAffectedRefs } from "./block-model.mjs";
+import {
+  catalogAffectedRefs,
+  catalogRestoreSupported,
+  isCatalogChangeKind,
+} from "./catalog-changes.mjs";
 import { publicPauseEffect } from "./change-presentation.mjs";
 import { groupRef, REDACTED_MARK, stableNativeId } from "./change-refs.mjs";
 import {
@@ -134,6 +139,9 @@ export function summaryRestoreSupported(change) {
   if (isDashboardChangeKind(change.kind)) {
     return dashboardRestoreSupported(change, { activeStatus, isConflict });
   }
+  if (isCatalogChangeKind(change.kind)) {
+    return catalogRestoreSupported(change, { activeStatus, isConflict });
+  }
   return activeStatus;
 }
 
@@ -141,6 +149,7 @@ export function isAppliedHistoryChange(change) {
   if (
     change.status === "prepared" ||
     change.status === "not_applied" ||
+    change.status === "rejected" ||
     (change.status === "not_owned" &&
       (change.conflict_reason === "change_was_not_applied" ||
         (change.write_intent?.direction === "apply" &&
@@ -712,7 +721,9 @@ export function nativeAffectedRefs(change, homeRef) {
       const extRef = `${homeRef}/extension/${encodeURIComponent(change.extension_key)}`;
       refs.push(extRef);
       const childId =
-        change.device_remove?.child_id ?? change.xiaomi_join?.child_id;
+        change.device_remove?.child_id ??
+        change.xiaomi_join?.child_id ??
+        change.child_id;
       if (typeof childId === "string") {
         refs.push(`${extRef}/child/${encodeURIComponent(childId)}`);
       }
@@ -770,6 +781,8 @@ export function nativeAffectedRefs(change, homeRef) {
     }
   } else if (isDashboardChangeKind(change.kind)) {
     refs.push(...dashboardAffectedRefs(change, homeRef, canonicalAncestors));
+  } else if (isCatalogChangeKind(change.kind)) {
+    refs.push(...catalogAffectedRefs(change));
   }
   return uniqueRefs(refs);
 }

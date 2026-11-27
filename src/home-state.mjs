@@ -67,6 +67,7 @@ const IGNORED_EVENT_DOMAINS = new Set([
   "dashboard",
   "dashboardColumn",
   "dashboardWidget",
+  "catalog",
 ]);
 
 export class HomeState {

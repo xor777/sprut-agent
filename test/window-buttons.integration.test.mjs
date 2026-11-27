@@ -579,8 +579,8 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
   assert.equal(disabledLogout.disabled, true);
   assert.equal(Object.hasOwn(disabledLogout, "native_change"), false);
 
-  // 4. ZigBee thermostat window: 5 hidden debug buttons omitted; calibration and Remove supported;
-  // Repair/readAllAttributes stay compact without native_change.
+  // 4. ZigBee thermostat window: 5 hidden debug buttons omitted; calibration, Repair and Remove supported;
+  // readAllAttributes stays compact without native_change.
   const trv = await callOk(client, "get_entity", {
     entity_ref: windowRef(ZIGBEE_THERMOSTAT_WINDOW),
   });
@@ -595,6 +595,12 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
     supported: true,
     operation: "window_button",
   });
+  const repairCmd = trvCommands.find(({ key }) => key === "Repair");
+  assert.deepEqual(repairCmd.native_change, {
+    native_write: true,
+    supported: true,
+    operation: "window_button",
+  });
   const trvRemoveCmd = trvCommands.find(({ key }) => key === "Remove");
   assert.equal(trvRemoveCmd.requires_confirmation, true);
   assert.deepEqual(trvRemoveCmd.native_change, {
@@ -603,15 +609,13 @@ test("get_entity surfaces window label error/status, filters hidden buttons, mar
     operation: "window_button",
     requires_confirmation: true,
   });
-  for (const key of ["Repair", "readAllAttributes"]) {
-    assert.equal(
-      Object.hasOwn(
-        trvCommands.find((cmd) => cmd.key === key),
-        "native_change",
-      ),
-      false,
-    );
-  }
+  assert.equal(
+    Object.hasOwn(
+      trvCommands.find((cmd) => cmd.key === "readAllAttributes"),
+      "native_change",
+    ),
+    false,
+  );
 
   // Also verify accessory get_entity with include=["physical_configuration"] filters hidden buttons
   // and redacts credential-shaped window.label.error.
@@ -1152,7 +1156,6 @@ test("window_button enforces strict allowlist refusals, hidden/disabled/token ch
   // 1. Strict non-allowlisted refusals (no inline contract, zero hub writes).
   const refusedCases = [
     ["Telegram Remove", tgRef, "Remove", "unsupported_window_button"],
-    ["ZigBee child Repair", trvRef, "Repair", "unsupported_window_button"],
     [
       "ZigBee child readAllAttributes",
       trvRef,

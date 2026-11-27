@@ -23,6 +23,15 @@ import {
   withKeptSubtreesAsStored,
 } from "./block-validation.mjs";
 import {
+  applyCatalogChange,
+  catalogContract,
+  catalogHubStepsSent,
+  getCatalogChange,
+  isCatalogChangeKind,
+  prepareCatalogChange,
+  restoreCatalogChange,
+} from "./catalog-changes.mjs";
+import {
   accessoryPlacementContract,
   attachInlineContract,
   blockActionPauseContract,
@@ -442,6 +451,13 @@ export class AutomationService {
         contract: dashboardContract(input.operation),
       };
     }
+    if (isCatalogChangeKind(input.operation)) {
+      return {
+        status: "ok",
+        operation: input.operation,
+        contract: catalogContract(input.operation),
+      };
+    }
     if (input.operation === "virtual_light_group") {
       if (input.target_ref !== undefined && !isHomeRef(input.target_ref)) {
         const group = await this.#readLampGroup(input.target_ref);
@@ -574,6 +590,9 @@ export class AutomationService {
     }
     if (isDashboardChangeKind(input.operation)) {
       return prepareDashboardChange(this.#dashboardContext(), input);
+    }
+    if (isCatalogChangeKind(input.operation)) {
+      return prepareCatalogChange(this.#dashboardContext(), input);
     }
     const valueKind = nativeValueKind(input.operation);
     if (valueKind) {
@@ -2531,6 +2550,9 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return applyDashboardChange(this.#dashboardContext(), change);
     }
+    if (isCatalogChangeKind(change.kind)) {
+      return applyCatalogChange(this.#dashboardContext(), change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#applyLampGroupMembers(change);
     }
@@ -3350,6 +3372,9 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return getDashboardChange(this.#dashboardContext(), change);
     }
+    if (isCatalogChangeKind(change.kind)) {
+      return getCatalogChange(this.#dashboardContext(), change);
+    }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
       return this.#getLampGroupMembers(change);
     }
@@ -3536,6 +3561,11 @@ export class AutomationService {
     if (isDashboardChangeKind(change.kind)) {
       return this.#undoOrUnknown(change, () =>
         restoreDashboardChange(this.#dashboardContext(), change),
+      );
+    }
+    if (isCatalogChangeKind(change.kind)) {
+      return this.#undoOrUnknown(change, () =>
+        restoreCatalogChange(this.#dashboardContext(), change),
       );
     }
     if (change.kind === LIGHT_GROUP_MEMBERS) {
@@ -6861,6 +6891,7 @@ export class AutomationService {
       ...(inspected.extensionKey
         ? { extension_key: inspected.extensionKey }
         : {}),
+      ...(inspected.childId ? { child_id: inspected.childId } : {}),
       ...(deviceRemoveAudit
         ? {
             device_remove: deviceRemoveAudit.summary,
@@ -8243,6 +8274,9 @@ function hubStepsSent(change, direction) {
   }
   if (isDashboardChangeKind(change.kind)) {
     return dashboardHubStepsSent(change, direction);
+  }
+  if (isCatalogChangeKind(change.kind)) {
+    return catalogHubStepsSent(change, direction);
   }
   return false;
 }

@@ -4948,6 +4948,10 @@ function extensionChildren(state, extensionKey) {
     name: child.name,
     online: child.online ?? true,
     optionsWindow: child.optionsWindow ?? "",
+    ...(child.status !== undefined ? { status: child.status } : {}),
+    ...(child.description !== undefined
+      ? { description: child.description }
+      : {}),
   }));
   const seenDeviceIds = new Set(declared.map(({ id }) => id));
   const devices = [];
