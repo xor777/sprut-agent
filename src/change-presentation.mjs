@@ -1,4 +1,8 @@
 import { storedScenarioRunPlan } from "./block-validation.mjs";
+import {
+  isCatalogChangeKind,
+  publicCatalogChange,
+} from "./catalog-changes.mjs";
 import { ROOM_NAME_LIMIT_NOTE, valuesEqual } from "./change-contracts.mjs";
 import { decodeReferenceSegment } from "./change-refs.mjs";
 import {
@@ -258,6 +262,9 @@ export function publicNativeChange(
   }
   if (isDashboardChangeKind(change.kind)) {
     return publicDashboardChange(change, { verification });
+  }
+  if (isCatalogChangeKind(change.kind)) {
+    return publicCatalogChange(change, { verification });
   }
   if (change.kind === LIGHT_GROUP_MEMBERS) {
     return publicLampGroupChange(change, {

@@ -108,6 +108,9 @@ const READ_ONLY_METHODS = new Set([
   "dashboardWidget.list",
   "dashboardWidget.get",
   "dashboardWidget.types",
+  "catalog.types",
+  "catalog.list",
+  "catalog.get",
 ]);
 // Writes that change nothing the warm home state holds besides values,
 // which the hub's events carry: scenarios, device searches, dashboards,
@@ -134,6 +137,9 @@ const HOME_STATE_NEUTRAL_WRITES = new Set([
   "dashboardWidget.update",
   "dashboardWidget.delete",
   "dashboardWidget.orders",
+  "catalog.create",
+  "catalog.update",
+  "catalog.delete",
 ]);
 const LOG_LEVEL_NAMES = new Map(
   ["off", "error", "warn", "info", "debug", "trace", "all"].map((name) => [
@@ -658,6 +664,37 @@ export class SprutHubClient {
     ]);
     normalizeExtensionChildren(serial, children, key);
     return { children, observedAt: response.responseReceivedAt };
+  }
+
+  async nativeExtensionChild(serial, key, id, deadline) {
+    let response;
+    try {
+      response = await this.#request(
+        { extensionChild: { get: { extensionKey: key, id } } },
+        deadline,
+        { serial },
+      );
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const { children, observedAt } = await this.nativeExtensionChildren(
+        serial,
+        key,
+        deadline,
+      );
+      if (children.some((child) => child.id === id)) throw error;
+      return { child: null, observedAt };
+    }
+    const container = response.result?.extensionChild;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible extension child response.",
+      );
+    }
+    return {
+      child: container.get ?? null,
+      observedAt: response.responseReceivedAt,
+    };
   }
 
   // Sends an action of an extension space: state true starts a search,
@@ -1748,6 +1785,193 @@ export class SprutHubClient {
     };
   }
 
+  async nativeCatalogTypes(
+    serial = this.serial,
+    deadline = Date.now() + this.timeoutMs,
+  ) {
+    const response = await this.#request({ catalog: { types: {} } }, deadline, {
+      serial,
+    });
+    const types = response.result?.catalog?.types;
+    if (!isPlainObject(types)) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible catalog types response.",
+      );
+    }
+    const stores = types.stores === undefined ? [] : types.stores;
+    const controllers =
+      types.controllers === undefined ? [] : types.controllers;
+    if (
+      !Array.isArray(stores) ||
+      !stores.every((entry) => typeof entry === "string") ||
+      !Array.isArray(controllers) ||
+      !controllers.every((entry) => typeof entry === "string")
+    ) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned incompatible catalog types entries.",
+      );
+    }
+    return {
+      stores,
+      controllers,
+      observedAt: response.responseReceivedAt,
+    };
+  }
+
+  async catalogTypes({
+    serial = this.serial,
+    deadline = Date.now() + this.timeoutMs,
+  } = {}) {
+    const { stores, controllers } = await this.nativeCatalogTypes(
+      serial,
+      deadline,
+    );
+    return { stores, controllers };
+  }
+
+  async nativeCatalogList(
+    { filter, search, limit, afterIndex } = {},
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
+    const request = {};
+    if (isPlainObject(filter)) {
+      const normalizedFilter = {};
+      for (const field of [
+        "stores",
+        "controllers",
+        "serviceTypes",
+        "characteristicTypes",
+      ]) {
+        if (Array.isArray(filter[field]) && filter[field].length > 0) {
+          normalizedFilter[field] = filter[field];
+        }
+      }
+      if (Object.keys(normalizedFilter).length > 0) {
+        request.filter = normalizedFilter;
+      }
+    }
+    if (typeof search === "string" && search.length > 0) {
+      request.search = search;
+    }
+    if (Number.isSafeInteger(limit) && limit > 0) {
+      request.limit = limit;
+    }
+    if (Number.isSafeInteger(afterIndex) && afterIndex >= 0) {
+      request.afterIndex = afterIndex;
+    }
+    const response = await this.#request(
+      { catalog: { list: request } },
+      deadline,
+      { serial },
+    );
+    const catalogs = extractNativeList(response, [
+      "catalog",
+      "list",
+      "catalogs",
+    ]).map(normalizeCatalogMessage);
+    return {
+      catalogs,
+      observedAt: response.responseReceivedAt,
+    };
+  }
+
+  async listCatalogTemplates(options = {}) {
+    const { catalogs } = await this.nativeCatalogList(options);
+    return catalogs;
+  }
+
+  async getCatalogTemplate(
+    { store, controller, file },
+    { serial = this.serial, deadline = Date.now() + this.timeoutMs } = {},
+  ) {
+    let response;
+    try {
+      response = await this.#request(
+        { catalog: { get: { store, controller, file } } },
+        deadline,
+        { serial },
+      );
+    } catch (error) {
+      if (!isNativeNotFoundCandidate(error)) throw error;
+      const { catalogs } = await this.nativeCatalogList(
+        { filter: { stores: [store], controllers: [controller] } },
+        { serial, deadline },
+      );
+      if (
+        catalogs.some(
+          (item) =>
+            item.store === store &&
+            item.controller === controller &&
+            item.file === file,
+        )
+      ) {
+        throw error;
+      }
+      return null;
+    }
+    const container = response.result?.catalog;
+    if (!container || !Object.hasOwn(container, "get")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub returned an incompatible catalog response.",
+      );
+    }
+    if (container.get === null) return null;
+    return normalizeCatalogMessage(container.get);
+  }
+
+  async createCatalogTemplate({ controller, template }) {
+    const response = await this.#request(
+      { catalog: { create: { controller, template } } },
+      Date.now() + this.timeoutMs,
+    );
+    const created = response.result?.catalog?.create;
+    try {
+      return normalizeCatalogMessage(created);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+  }
+
+  async updateCatalogTemplate({ store, controller, file, template }) {
+    const response = await this.#request(
+      { catalog: { update: { store, controller, file, template } } },
+      Date.now() + this.timeoutMs,
+    );
+    const updated = response.result?.catalog?.update;
+    try {
+      return normalizeCatalogMessage(updated);
+    } catch (error) {
+      if (error instanceof SprutHubError) {
+        error.requestSent = true;
+        error.action = "get_native_change";
+      }
+      throw error;
+    }
+  }
+
+  async deleteCatalogTemplate({ store, controller, file }) {
+    const response = await this.#request(
+      { catalog: { delete: { store, controller, file } } },
+      Date.now() + this.timeoutMs,
+    );
+    const container = response.result?.catalog;
+    if (!container || !Object.hasOwn(container, "delete")) {
+      throw new SprutHubError(
+        "incompatible_response",
+        "SprutHub did not acknowledge the catalog template deletion.",
+        "get_native_change",
+        { requestSent: true },
+      );
+    }
+  }
+
   async listDashboards({
     serial = this.serial,
     deadline = Date.now() + this.timeoutMs,
@@ -2678,6 +2902,8 @@ export class SprutHubClient {
       entity = await this.#readDashboardColumnEntity(parsed, deadline);
     } else if (parsed.kind === "dashboard_widget") {
       entity = await this.#readDashboardWidgetEntity(parsed, deadline);
+    } else if (parsed.kind === "catalog") {
+      entity = await this.#readCatalogEntity(parsed, deadline);
     } else {
       throw invalidEntityRef();
     }
@@ -2687,6 +2913,19 @@ export class SprutHubClient {
   async #dashboardsById(serial, deadline) {
     const dashboards = await this.listDashboards({ serial, deadline });
     return new Map(dashboards.map((dashboard) => [dashboard.id, dashboard]));
+  }
+
+  async #readCatalogEntity(parsed, deadline) {
+    const catalog = await this.getCatalogTemplate(
+      {
+        store: parsed.store,
+        controller: parsed.controller,
+        file: parsed.file,
+      },
+      { serial: parsed.serial, deadline },
+    );
+    if (!catalog) throw entityNotFound("catalog template");
+    return presentCatalogTemplateEntity(parsed.serial, catalog);
   }
 
   async #readDashboardEntity(parsed, deadline) {
@@ -5413,6 +5652,48 @@ export function extensionChildRef(serial, key, id) {
   return `${extensionRef(serial, key)}/child/${encodeURIComponent(id)}`;
 }
 
+export const CATALOG_STORES = [
+  "MAIN",
+  "DEV_MAIN",
+  "INTERNAL",
+  "GENERATED",
+  "APP",
+];
+export const CATALOG_STORE_SET = new Set(CATALOG_STORES);
+export const CATALOG_CONTROLLER_PATTERN = /^[a-z0-9_-]{1,64}$/i;
+
+export function isValidCatalogFile(file) {
+  if (
+    typeof file !== "string" ||
+    file.length <= 1 ||
+    !file.startsWith("/") ||
+    file.includes("\\")
+  ) {
+    return false;
+  }
+  const segments = file.slice(1).split("/");
+  if (
+    segments.some(
+      (segment) =>
+        segment.length === 0 ||
+        segment.trim().length === 0 ||
+        segment === "." ||
+        segment === "..",
+    )
+  ) {
+    return false;
+  }
+  for (let index = 0; index < file.length; index += 1) {
+    const code = file.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
+export function catalogRef(serial, store, controller, file) {
+  return `${homeRef(serial)}/catalog/${encodeURIComponent(store)}/${encodeURIComponent(controller)}/${encodeURIComponent(file)}`;
+}
+
 export function dashboardRef(serial, dashboardId) {
   return `${homeRef(serial)}/dashboard/${dashboardId}`;
 }
@@ -5526,6 +5807,19 @@ export function parseEntityRef(ref) {
       widgetId: parsePositiveEntityId(segments[4]),
     };
   }
+  if (segments.length === 5 && segments[1] === "catalog") {
+    const [, , store, controller, file] = segments;
+    if (
+      url.search !== "" ||
+      url.hash !== "" ||
+      !CATALOG_STORE_SET.has(store) ||
+      !CATALOG_CONTROLLER_PATTERN.test(controller) ||
+      !isValidCatalogFile(file)
+    ) {
+      throw invalidEntityRef();
+    }
+    return { kind: "catalog", serial, store, controller, file };
+  }
   if (segments[1] !== "accessory") throw invalidEntityRef();
   const accessoryId = parseEntityId(segments[2]);
   if (segments.length === 3) return { kind: "accessory", serial, accessoryId };
@@ -5592,6 +5886,182 @@ const NATIVE_DASHBOARD_WIDGET_KINDS = [
 
 function isPositiveDashboardId(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+function normalizeCatalogMessage(catalog) {
+  if (!isPlainObject(catalog)) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible catalog template message.",
+    );
+  }
+  // In 41851-Catalog.proto, active (bool = false) and store (StoreTemplate =
+  // MAIN = 0) use proto3 implicit presence and are omitted on the wire when
+  // at their default values.
+  const store = catalog.store === undefined ? "MAIN" : catalog.store;
+  if (
+    typeof store !== "string" ||
+    !CATALOG_STORE_SET.has(store) ||
+    typeof catalog.controller !== "string" ||
+    !CATALOG_CONTROLLER_PATTERN.test(catalog.controller) ||
+    typeof catalog.file !== "string" ||
+    !isValidCatalogFile(catalog.file) ||
+    (catalog.active !== undefined && typeof catalog.active !== "boolean")
+  ) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible catalog template message.",
+    );
+  }
+  return {
+    ...catalog,
+    store,
+    active: catalog.active === true,
+  };
+}
+
+export function normalizeCatalogAvailableServices(services) {
+  if (!Array.isArray(services)) return [];
+  return services
+    .filter(
+      (entry) =>
+        isPlainObject(entry) &&
+        typeof entry.type === "string" &&
+        entry.type.length > 0,
+    )
+    .map((entry) => {
+      const count = Number(entry.count ?? 1);
+      return {
+        type: redactSensitiveText(entry.type),
+        count: Number.isFinite(count) && count >= 0 ? count : 1,
+        ...(typeof entry.label === "string" && entry.label.length > 0
+          ? { label: redactSensitiveText(entry.label) }
+          : {}),
+      };
+    });
+}
+
+function extractReferencedTemplates(serial, controller, templateText) {
+  if (typeof templateText !== "string" || templateText.trim().length === 0) {
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(templateText);
+  } catch {
+    return [];
+  }
+  if (!isPlainObject(parsed) || parsed.template === undefined) return [];
+  const raw =
+    typeof parsed.template === "string"
+      ? [parsed.template]
+      : Array.isArray(parsed.template)
+        ? parsed.template.filter((item) => typeof item === "string")
+        : [];
+  const seen = new Set();
+  const refs = [];
+  for (const file of raw) {
+    if (!isValidCatalogFile(file) || seen.has(file)) continue;
+    seen.add(file);
+    refs.push({
+      file,
+      main_ref: catalogRef(serial, "MAIN", controller, file),
+      internal_ref: catalogRef(serial, "INTERNAL", controller, file),
+    });
+  }
+  return refs;
+}
+
+function presentCatalogTemplateEntity(serial, catalog) {
+  const templateText =
+    typeof catalog.template === "string" ? catalog.template : "";
+  const linkedDevices = Array.isArray(catalog.devices)
+    ? catalog.devices.filter(isPlainObject).map((device) => ({
+        ...(typeof device.extensionKey === "string" &&
+        typeof device.id === "string"
+          ? {
+              ref: extensionChildRef(serial, device.extensionKey, device.id),
+              extension_ref: extensionRef(serial, device.extensionKey),
+            }
+          : {}),
+        ...(typeof device.id === "string" ? { id: device.id } : {}),
+        ...(typeof device.name === "string"
+          ? { name: redactSensitiveText(device.name) }
+          : {}),
+        ...(typeof device.online === "boolean"
+          ? { online: device.online }
+          : {}),
+        ...(typeof device.paired === "boolean"
+          ? { paired: device.paired }
+          : {}),
+        ...(typeof device.manufacturer === "string"
+          ? { manufacturer: redactSensitiveText(device.manufacturer) }
+          : {}),
+        ...(typeof device.model === "string"
+          ? { model: redactSensitiveText(device.model) }
+          : {}),
+      }))
+    : [];
+  const linkedAccessories = Array.isArray(catalog.accessories)
+    ? catalog.accessories.filter(isPlainObject).map((acc) => ({
+        ...(isStableId(acc.id)
+          ? { ref: accessoryRef(serial, acc.id), id: acc.id }
+          : {}),
+        ...(typeof acc.name === "string"
+          ? { name: redactSensitiveText(acc.name) }
+          : {}),
+        ...(isStableId(acc.roomId)
+          ? { room_ref: roomRef(serial, acc.roomId) }
+          : {}),
+        ...(typeof acc.online === "boolean" ? { online: acc.online } : {}),
+      }))
+    : [];
+  const errorText =
+    typeof catalog.error === "string" && catalog.error.trim().length > 0
+      ? redactSensitiveText(catalog.error)
+      : undefined;
+  return {
+    kind: "catalog_template",
+    ref: catalogRef(serial, catalog.store, catalog.controller, catalog.file),
+    store: catalog.store,
+    controller: catalog.controller,
+    file: catalog.file,
+    active: catalog.active === true,
+    writable: catalog.write === true && catalog.store === "INTERNAL",
+    manufacturer:
+      typeof catalog.manufacturer === "string"
+        ? redactSensitiveText(catalog.manufacturer)
+        : null,
+    model:
+      typeof catalog.model === "string"
+        ? redactSensitiveText(catalog.model)
+        : null,
+    manufacturer_ids: Array.isArray(catalog.manufacturerIds)
+      ? catalog.manufacturerIds
+          .filter((item) => typeof item === "string")
+          .map((item) => redactSensitiveText(item))
+      : [],
+    model_ids: Array.isArray(catalog.modelIds)
+      ? catalog.modelIds
+          .filter((item) => typeof item === "string")
+          .map((item) => redactSensitiveText(item))
+      : [],
+    catalog_id:
+      typeof catalog.catalogId === "number" ? catalog.catalogId : null,
+    template: templateText,
+    ...(errorText !== undefined ? { error: errorText } : {}),
+    referenced_templates: extractReferencedTemplates(
+      serial,
+      catalog.controller,
+      templateText,
+    ),
+    device_count:
+      typeof catalog.deviceCount === "number"
+        ? catalog.deviceCount
+        : linkedDevices.length,
+    linked_devices: linkedDevices,
+    linked_accessories: linkedAccessories,
+  };
 }
 
 function validateDashboard(dashboard, expectedId) {

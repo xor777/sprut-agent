@@ -9,7 +9,9 @@ import { mapWithConcurrency } from "./device-commands.mjs";
 import { lampGroupMark, lampGroupMarks } from "./light-group-members.mjs";
 import {
   accessoryRef,
+  CATALOG_STORE_SET,
   CODE_SOURCE_READS,
+  catalogRef,
   characteristicNotifyOffered,
   characteristicNotifyOn,
   characteristicRef,
@@ -20,6 +22,7 @@ import {
   LAST_REPORT_MEANING,
   lastReportMs,
   matchEnumValue,
+  normalizeCatalogAvailableServices,
   parseEntityRef,
   redactSensitiveText,
   relationFailure,
@@ -112,12 +115,22 @@ export class HomeReads {
     const list = input.list ?? null;
     const query = input.query ?? null;
     const needs = (part) => list === null || list === part;
-    const [homeRead, scenarios, extensions, dashboards] = await Promise.all([
-      needs("rooms") ? client.homeCatalog(serial, deadline) : null,
-      needs("scenarios") ? client.nativeScenarios(serial, deadline) : null,
-      needs("extensions") ? client.nativeExtensions(serial, deadline) : null,
-      list === "dashboards" ? client.nativeDashboards(serial, deadline) : null,
-    ]);
+    const [homeRead, scenarios, extensions, dashboards, catalogTemplates] =
+      await Promise.all([
+        needs("rooms") ? client.homeCatalog(serial, deadline) : null,
+        needs("scenarios") ? client.nativeScenarios(serial, deadline) : null,
+        needs("extensions") ? client.nativeExtensions(serial, deadline) : null,
+        list === "dashboards"
+          ? client.nativeDashboards(serial, deadline)
+          : null,
+        list === "catalog"
+          ? readCatalogList(client, serial, {
+              type: input.type ?? null,
+              query,
+              deadline,
+            })
+          : null,
+      ]);
     const catalog = homeRead?.catalog ?? null;
     const observedAt = latest([
       account.freshness.hubResponseReceivedAt,
@@ -125,6 +138,7 @@ export class HomeReads {
       scenarios?.observedAt,
       extensions?.observedAt,
       dashboards?.observedAt,
+      catalogTemplates?.observedAt,
     ]);
     const roomList =
       catalog &&
@@ -152,6 +166,7 @@ export class HomeReads {
           scenarios: scenarios?.scenarios,
           extensions: extensions?.extensions,
           dashboards: dashboards?.dashboards,
+          catalogTemplates: catalogTemplates?.catalogs,
         }),
         extras: list === null ? deviceMatchesHint(serial, query, catalog) : {},
       });
@@ -1641,7 +1656,7 @@ function checkOverviewInput(input) {
   const allowed =
     input.list === "scenarios"
       ? ["type", "active", "error"]
-      : input.list === "extensions"
+      : input.list === "extensions" || input.list === "catalog"
         ? ["type"]
         : [];
   const refused = ["type", "active", "error"].filter(
@@ -1650,7 +1665,7 @@ function checkOverviewInput(input) {
   if (refused.length > 0) {
     throw new SprutHubError(
       "invalid_filter",
-      `${refused.join(", ")} filter a list: type, active and error the scenarios (list=scenarios), type also the extensions (list=extensions).`,
+      `${refused.join(", ")} filter a list: type, active and error the scenarios (list=scenarios), type also the extensions (list=extensions) and catalog (list=catalog).`,
       "home_overview",
       {
         next: {
@@ -1670,7 +1685,7 @@ function checkOverviewInput(input) {
   ) {
     throw new SprutHubError(
       "invalid_filter",
-      "limit and cursor page a list (list=scenarios, rooms, extensions or dashboards) or a query.",
+      "limit and cursor page a list (list=scenarios, rooms, extensions, dashboards or catalog) or a query.",
       "home_overview",
     );
   }
@@ -1709,7 +1724,7 @@ function overviewSelection(input, serial) {
 // extensions with their kind.
 function overviewEntries(
   selection,
-  { serial, roomList, scenarios, extensions, dashboards },
+  { serial, roomList, scenarios, extensions, dashboards, catalogTemplates },
 ) {
   const sameType = (type) =>
     selection.type === null ||
@@ -1731,9 +1746,14 @@ function overviewEntries(
       extensions.filter(({ type }) => sameType(type)).map(extensionSummary),
     dashboards: () =>
       dashboards.map((dashboard) => dashboardEntry(serial, dashboard)),
+    catalog: () =>
+      (catalogTemplates ?? []).map((entry) => catalogEntry(serial, entry)),
   };
   if (selection.list !== null) {
     const entries = lists[selection.list]();
+    // list=catalog passes query as server-side search to catalog.list; items
+    // do not have a .name field so rankMatches would drop them.
+    if (selection.list === "catalog") return entries;
     return selection.query === null
       ? entries
       : rankMatches(selection.query, entries);
@@ -1749,6 +1769,133 @@ function overviewEntries(
       ...extensionSummary(extension),
     })),
   ]);
+}
+
+async function readCatalogList(client, serial, { type, query, deadline }) {
+  let filter;
+  let typesObservedAt = null;
+  if (type !== null) {
+    const resolved = await resolveCatalogTypeFilter(
+      client,
+      serial,
+      type,
+      deadline,
+    );
+    filter = resolved.filter;
+    typesObservedAt = resolved.observedAt;
+  }
+  const listed = await client.nativeCatalogList(
+    {
+      ...(filter ? { filter } : {}),
+      ...(query !== null ? { search: query } : {}),
+    },
+    { serial, deadline },
+  );
+  return {
+    catalogs: listed.catalogs,
+    observedAt: latest([typesObservedAt, listed.observedAt]),
+  };
+}
+
+async function resolveCatalogTypeFilter(client, serial, rawType, deadline) {
+  const trimmed = rawType.trim();
+  if (trimmed.includes(":")) {
+    const parts = trimmed.split(":");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw invalidCatalogTypeFilter(rawType);
+    }
+    const store = parts[0].toUpperCase();
+    const types = await client.nativeCatalogTypes(serial, deadline);
+    const validStores = new Set([...CATALOG_STORE_SET, ...types.stores]);
+    if (!validStores.has(store)) {
+      throw invalidCatalogTypeFilter(rawType, types);
+    }
+    const controller = matchCatalogController(parts[1], types.controllers);
+    if (!controller) {
+      throw invalidCatalogTypeFilter(rawType, types);
+    }
+    return {
+      filter: { stores: [store], controllers: [controller] },
+      observedAt: types.observedAt,
+    };
+  }
+  const upper = trimmed.toUpperCase();
+  if (CATALOG_STORE_SET.has(upper)) {
+    return { filter: { stores: [upper] }, observedAt: null };
+  }
+  const types = await client.nativeCatalogTypes(serial, deadline);
+  if (types.stores.includes(upper)) {
+    return { filter: { stores: [upper] }, observedAt: types.observedAt };
+  }
+  const controller = matchCatalogController(trimmed, types.controllers);
+  if (controller) {
+    return {
+      filter: { controllers: [controller] },
+      observedAt: types.observedAt,
+    };
+  }
+  throw invalidCatalogTypeFilter(rawType, types);
+}
+
+function matchCatalogController(candidate, controllers) {
+  const needle = candidate.toLocaleLowerCase("en");
+  return (
+    controllers.find((entry) => entry === candidate) ??
+    controllers.find((entry) => entry.toLocaleLowerCase("en") === needle) ??
+    null
+  );
+}
+
+function invalidCatalogTypeFilter(rawType, types = null) {
+  const stores = types?.stores?.length ? types.stores : [...CATALOG_STORE_SET];
+  const controllers = types?.controllers ?? [];
+  const controllersText =
+    controllers.length > 0 ? ` Controllers: ${controllers.join(", ")}.` : "";
+  return new SprutHubError(
+    "invalid_filter",
+    `Invalid catalog type filter "${rawType}". Use a store (${stores.join(", ")}), a controller, or "STORE:controller".${controllersText}`,
+    "home_overview",
+    {
+      stores,
+      ...(controllers.length > 0 ? { controllers } : {}),
+    },
+  );
+}
+
+function catalogEntry(serial, item) {
+  const errorText =
+    typeof item.error === "string" && item.error.trim().length > 0
+      ? redactSensitiveText(item.error)
+      : undefined;
+  return {
+    ref: catalogRef(serial, item.store, item.controller, item.file),
+    store: item.store,
+    controller: item.controller,
+    file: item.file,
+    active: item.active === true,
+    manufacturer:
+      typeof item.manufacturer === "string"
+        ? redactSensitiveText(item.manufacturer)
+        : null,
+    model:
+      typeof item.model === "string" ? redactSensitiveText(item.model) : null,
+    manufacturer_ids: Array.isArray(item.manufacturerIds)
+      ? item.manufacturerIds
+          .filter((entry) => typeof entry === "string")
+          .map((entry) => redactSensitiveText(entry))
+      : [],
+    model_ids: Array.isArray(item.modelIds)
+      ? item.modelIds
+          .filter((entry) => typeof entry === "string")
+          .map((entry) => redactSensitiveText(entry))
+      : [],
+    catalog_id: typeof item.catalogId === "number" ? item.catalogId : null,
+    device_count: typeof item.deviceCount === "number" ? item.deviceCount : 0,
+    available_services: normalizeCatalogAvailableServices(
+      item.availableServices,
+    ),
+    ...(errorText !== undefined ? { error: errorText } : {}),
+  };
 }
 
 function dashboardEntry(serial, dashboard) {

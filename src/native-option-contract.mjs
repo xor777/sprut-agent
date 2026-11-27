@@ -152,6 +152,19 @@ export function matchAllowedWindowButton(windowKey, optionKey) {
       };
     }
     if (
+      ZIGBEE_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
+      optionKey === "Repair"
+    ) {
+      return {
+        id: "zigbee_repair",
+        inputType: "BUTTON",
+        requiresConfirmation: false,
+        requiresTelegramToken: false,
+        extensionKey: controllerChild.extensionKey,
+        childId: controllerChild.childId,
+      };
+    }
+    if (
       XIAOMI_CHILD_WINDOW_KEY_PATTERN.test(windowKey) &&
       optionKey === "joinButton"
     ) {
@@ -220,7 +233,7 @@ export function publicWindowButtonNativeChange(
   if (
     !rule ||
     option.inputType !== rule.inputType ||
-    (rule.id === "physical_device_remove" &&
+    ((rule.id === "physical_device_remove" || rule.id === "zigbee_repair") &&
       isZigbeeCoordinatorWindow(window)) ||
     (rule.id === "xiaomi_join" && hasLinkedAccessories) ||
     option.visible === false ||
