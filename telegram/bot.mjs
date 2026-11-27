@@ -26,6 +26,11 @@ const PAIR_CONFIRMATION =
   "Готово, доступ привязан. Теперь можешь запускать бота в обычном режиме и писать сюда по делам дома.";
 const DEFAULT_PROGRESS_TEXT = "Работаю над запросом…";
 const MAX_PROGRESS_STATUS_CHARS = 400;
+const PERMANENT_PROGRESS_EDIT_ERROR_RE =
+  /message to edit not found|message can't be edited|message_id_invalid/i;
+const MISSING_PROGRESS_MESSAGE_ERROR_RE =
+  /message to edit not found|message_id_invalid/i;
+const MAX_PROGRESS_BACKOFF_MS = 30_000;
 
 function formatProgressStatusText(
   rawText,
@@ -420,10 +425,12 @@ export class TelegramBotRunner {
 
   #createProgressTracker(chatId) {
     let closed = false;
+    let editsDisabled = false;
     let statusMessageId = null;
     let latestText = "";
     let displayedText = "";
-    let lastEditAt = 0;
+    let lastAttemptedText = "";
+    let nextEditAt = 0;
     let editTimer = null;
     let opChain = Promise.resolve();
 
@@ -433,22 +440,34 @@ export class TelegramBotRunner {
       return next;
     };
 
-    const scheduleEdit = () => {
-      if (closed || statusMessageId == null) return;
-      if (!latestText || latestText === displayedText) return;
+    const scheduleEdit = ({ forceAsync = false } = {}) => {
+      if (closed || editsDisabled || statusMessageId == null) return;
+      if (
+        !latestText ||
+        latestText === displayedText ||
+        latestText === lastAttemptedText
+      ) {
+        return;
+      }
       if (editTimer !== null) return;
 
-      const waitMs = Math.max(
-        0,
-        lastEditAt + this.#progressEditIntervalMs - this.#now(),
-      );
+      const rawWaitMs = Math.max(0, nextEditAt - this.#now());
+      const waitMs = forceAsync ? Math.max(1, rawWaitMs) : rawWaitMs;
       const triggerEdit = () => {
         editTimer = null;
-        if (closed || statusMessageId == null) return;
+        if (closed || editsDisabled || statusMessageId == null) return;
         enqueueOp(async () => {
-          if (closed || statusMessageId == null) return;
+          if (closed || editsDisabled || statusMessageId == null) return;
           const targetText = latestText;
-          if (!targetText || targetText === displayedText) return;
+          if (
+            !targetText ||
+            targetText === displayedText ||
+            targetText === lastAttemptedText
+          ) {
+            return;
+          }
+          lastAttemptedText = targetText;
+          let failed = false;
           try {
             await this.#api.editMessageText(
               chatId,
@@ -457,15 +476,48 @@ export class TelegramBotRunner {
               { signal: this.#abortController?.signal },
             );
             displayedText = targetText;
-            lastEditAt = this.#now();
+            nextEditAt = this.#now() + this.#progressEditIntervalMs;
           } catch (error) {
+            failed = true;
             if (this.#stopped || error?.name === "AbortError") return;
             this.#logger(
               `[telegram] progress edit failed for chat ${chatId}: ${error?.message ?? String(error)}`,
             );
+            if (
+              error instanceof TelegramApiError &&
+              error.status === 400 &&
+              PERMANENT_PROGRESS_EDIT_ERROR_RE.test(error.message)
+            ) {
+              editsDisabled = true;
+              if (MISSING_PROGRESS_MESSAGE_ERROR_RE.test(error.message)) {
+                statusMessageId = null;
+              }
+              return;
+            }
+            const retryAfterMs =
+              error instanceof TelegramApiError && error.retryAfterSeconds
+                ? Math.min(
+                    error.retryAfterSeconds * 1000,
+                    MAX_PROGRESS_BACKOFF_MS,
+                  )
+                : 0;
+            const backoffMs = Math.max(
+              this.#progressEditIntervalMs,
+              retryAfterMs,
+              1,
+            );
+            nextEditAt = this.#now() + backoffMs;
           }
-          if (!closed && latestText && latestText !== displayedText) {
-            scheduleEdit();
+          // Never auto-retry the same failed targetText; only reschedule when a
+          // newer commentary arrived while this edit was in flight.
+          if (
+            !closed &&
+            !editsDisabled &&
+            latestText &&
+            latestText !== targetText &&
+            latestText !== displayedText
+          ) {
+            scheduleEdit({ forceAsync: failed });
           }
         });
       };
@@ -489,17 +541,28 @@ export class TelegramBotRunner {
             signal: this.#abortController?.signal,
           });
           statusMessageId = sent?.[0]?.message_id ?? null;
+          if (statusMessageId == null) {
+            editsDisabled = true;
+            return;
+          }
           displayedText = initialText;
-          lastEditAt = this.#now();
+          lastAttemptedText = initialText;
+          nextEditAt = this.#now() + this.#progressEditIntervalMs;
         } catch (error) {
+          editsDisabled = true;
           if (this.#stopped || error?.name === "AbortError") return;
           this.#logger(
             `[telegram] progress status send failed for chat ${chatId}: ${error?.message ?? String(error)}`,
           );
           return;
         }
-        if (!closed && latestText && latestText !== displayedText) {
-          scheduleEdit();
+        if (
+          !closed &&
+          !editsDisabled &&
+          latestText &&
+          latestText !== displayedText
+        ) {
+          scheduleEdit({ forceAsync: true });
         }
       });
     }, this.#progressDelayMs);
@@ -509,9 +572,14 @@ export class TelegramBotRunner {
       update: (rawText) => {
         if (closed) return;
         const formatted = formatProgressStatusText(rawText, this.#config.token);
-        if (!formatted) return;
+        if (!formatted || formatted === latestText) return;
         latestText = formatted;
-        if (statusMessageId != null && latestText !== displayedText) {
+        if (
+          !editsDisabled &&
+          statusMessageId != null &&
+          latestText !== displayedText &&
+          latestText !== lastAttemptedText
+        ) {
           scheduleEdit();
         }
       },

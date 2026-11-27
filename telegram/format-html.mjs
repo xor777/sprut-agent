@@ -516,9 +516,24 @@ function parseMarkdownBlocks(normalized) {
   return { leadingNewlines, trailingNewlines, blocks };
 }
 
+function hasVisibleHtmlText(html) {
+  const visible = String(html ?? "")
+    .replace(/<[^>]*>/g, "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .trim();
+  return visible.length > 0;
+}
+
 function renderBlockHtml(block) {
   if (block.type === "code") {
-    return `${CODE_BLOCK_OPEN}${escapeHtmlText(block.codeLines.join("\n"))}${CODE_BLOCK_CLOSE}`;
+    const codeText = block.codeLines.join("\n");
+    if (codeText.trim().length === 0) {
+      return escapeHtmlText(block.raw);
+    }
+    return `${CODE_BLOCK_OPEN}${escapeHtmlText(codeText)}${CODE_BLOCK_CLOSE}`;
   }
   return block.lines
     .map((line) => renderTokens(parseLineTokens(line)))
@@ -583,37 +598,47 @@ function takePrefixForHtml(
   return lastGoodPos;
 }
 
+function splitPlainEscapedChunks(raw, limit) {
+  const chunks = [];
+  let pos = 0;
+  while (pos < raw.length) {
+    let end = takePrefixForHtml(raw, pos, limit, limit, {
+      preferWordBreak: true,
+      requireWordBreak: false,
+    });
+    if (end <= pos) {
+      const cp = raw.codePointAt(pos);
+      end = pos + (cp > 0xffff ? 2 : 1);
+    }
+    const slice = raw.slice(pos, end);
+    if (slice.trim().length > 0) {
+      chunks.push({ html: escapeHtmlText(slice), plain: slice });
+    }
+    pos = end;
+  }
+  return chunks;
+}
+
 function splitCodeBlock(block, limit) {
+  const fullCodeText = block.codeLines.join("\n");
+  if (fullCodeText.trim().length === 0) {
+    return splitPlainEscapedChunks(block.raw, limit);
+  }
+
+  if (limit < CODE_BLOCK_OVERHEAD + 5) {
+    return splitPlainEscapedChunks(fullCodeText, limit);
+  }
+
   const fullOpenPlain = `${block.fence}${block.info}\n`;
   const fullClosePlain = `\n${block.fence}`;
   let openPlain = "";
   let closePlain = "";
-  if (fullOpenPlain.length + fullClosePlain.length + 1 <= limit) {
+  if (fullOpenPlain.length + fullClosePlain.length + 2 <= limit) {
     openPlain = fullOpenPlain;
     closePlain = fullClosePlain;
-  } else if (8 + 1 <= limit) {
+  } else if (8 + 2 <= limit) {
     openPlain = "```\n";
     closePlain = "\n```";
-  }
-
-  if (limit <= CODE_BLOCK_OVERHEAD) {
-    const raw = block.codeLines.join("\n");
-    const pieces = [];
-    let pos = 0;
-    while (pos < raw.length) {
-      let end = takePrefixForHtml(raw, pos, limit, limit, {
-        preferWordBreak: true,
-        requireWordBreak: false,
-      });
-      if (end <= pos) {
-        const cp = raw.codePointAt(pos);
-        end = pos + (cp > 0xffff ? 2 : 1);
-      }
-      const slice = raw.slice(pos, end);
-      pieces.push({ html: escapeHtmlText(slice), plain: slice });
-      pos = end;
-    }
-    return pieces;
   }
 
   const maxEscaped = limit - CODE_BLOCK_OVERHEAD;
@@ -624,18 +649,33 @@ function splitCodeBlock(block, limit) {
   let accPlainLen = 0;
 
   const flushAcc = () => {
-    if (accLines.length === 0) return;
+    while (
+      accLines.length > 0 &&
+      accLines[accLines.length - 1].trim().length === 0
+    ) {
+      accLines.pop();
+    }
+    if (accLines.length === 0) {
+      accEscLen = 0;
+      accPlainLen = 0;
+      return;
+    }
     const raw = accLines.join("\n");
-    chunks.push({
-      html: `${CODE_BLOCK_OPEN}${escapeHtmlText(raw)}${CODE_BLOCK_CLOSE}`,
-      plain: `${openPlain}${raw}${closePlain}`,
-    });
+    if (raw.trim().length > 0) {
+      chunks.push({
+        html: `${CODE_BLOCK_OPEN}${escapeHtmlText(raw)}${CODE_BLOCK_CLOSE}`,
+        plain: `${openPlain}${raw}${closePlain}`,
+      });
+    }
     accLines = [];
     accEscLen = 0;
     accPlainLen = 0;
   };
 
   for (const codeLine of block.codeLines) {
+    if (accLines.length === 0 && codeLine.trim().length === 0) {
+      continue;
+    }
     const lineEscLen = escapeHtmlText(codeLine).length;
     const linePlainLen = codeLine.length;
     const nl = accLines.length > 0 ? 1 : 0;
@@ -651,6 +691,10 @@ function splitCodeBlock(block, limit) {
     }
 
     flushAcc();
+
+    if (codeLine.trim().length === 0) {
+      continue;
+    }
 
     if (lineEscLen <= maxEscaped && linePlainLen <= maxPlain) {
       accLines.push(codeLine);
@@ -670,10 +714,12 @@ function splitCodeBlock(block, limit) {
         end = pos + (cp > 0xffff ? 2 : 1);
       }
       const slice = codeLine.slice(pos, end);
-      chunks.push({
-        html: `${CODE_BLOCK_OPEN}${escapeHtmlText(slice)}${CODE_BLOCK_CLOSE}`,
-        plain: `${openPlain}${slice}${closePlain}`,
-      });
+      if (slice.trim().length > 0) {
+        chunks.push({
+          html: `${CODE_BLOCK_OPEN}${escapeHtmlText(slice)}${CODE_BLOCK_CLOSE}`,
+          plain: `${openPlain}${slice}${closePlain}`,
+        });
+      }
       pos = end;
     }
   }
@@ -681,14 +727,7 @@ function splitCodeBlock(block, limit) {
   flushAcc();
 
   if (chunks.length === 0) {
-    const plainEnd = takePrefixForHtml(block.raw, 0, limit, limit, {
-      preferWordBreak: false,
-      requireWordBreak: false,
-    });
-    chunks.push({
-      html: `${CODE_BLOCK_OPEN}${CODE_BLOCK_CLOSE}`,
-      plain: block.raw.slice(0, plainEnd),
-    });
+    return splitPlainEscapedChunks(block.raw, limit);
   }
   return chunks;
 }
@@ -771,7 +810,7 @@ function splitOversizedLine(line, limit) {
       while (/<(b|i|s)><\/\1>/.test(fullHtml)) {
         fullHtml = fullHtml.replace(/<(b|i|s)><\/\1>/g, "");
       }
-      if (fullHtml.length > 0) {
+      if (hasVisibleHtmlText(fullHtml)) {
         chunks.push({ html: fullHtml, plain: trimmedPlain });
         emittedAny = true;
       }
@@ -911,11 +950,13 @@ function splitOversizedLine(line, limit) {
         end = pos + (cp > 0xffff ? 2 : 1);
       }
       const slice = code.slice(pos, end);
-      chunks.push({
-        html: `${openWrappers}<code>${escapeHtmlText(slice)}</code>${closeWrappers}`,
-        plain: useTicksInPlain ? `\`${slice}\`` : slice,
-      });
-      emittedAny = true;
+      if (slice.trim().length > 0) {
+        chunks.push({
+          html: `${openWrappers}<code>${escapeHtmlText(slice)}</code>${closeWrappers}`,
+          plain: useTicksInPlain ? `\`${slice}\`` : slice,
+        });
+        emittedAny = true;
+      }
       pos = end;
     }
   };
@@ -995,7 +1036,10 @@ export function splitTelegramHtmlChunks(text, maxLength = DEFAULT_MAX_LENGTH) {
     wholePlain += block.sepBefore + block.raw;
   }
   if (wholeHtml.length <= limit && wholePlain.length <= limit) {
-    return [{ html: wholeHtml, plain: wholePlain }];
+    if (hasVisibleHtmlText(wholeHtml)) {
+      return [{ html: wholeHtml, plain: wholePlain }];
+    }
+    return splitPlainEscapedChunks(wholePlain, limit);
   }
 
   const chunks = [];
@@ -1003,11 +1047,11 @@ export function splitTelegramHtmlChunks(text, maxLength = DEFAULT_MAX_LENGTH) {
   let curPlain = "";
 
   const flushCurrent = () => {
-    if (curHtml.length > 0) {
+    if (curHtml.length > 0 && hasVisibleHtmlText(curHtml)) {
       chunks.push({ html: curHtml, plain: curPlain });
-      curHtml = "";
-      curPlain = "";
     }
+    curHtml = "";
+    curPlain = "";
   };
 
   const tryAppend = (piece, sep) => {
@@ -1025,18 +1069,23 @@ export function splitTelegramHtmlChunks(text, maxLength = DEFAULT_MAX_LENGTH) {
 
   for (const block of blocks) {
     const blockPiece = { html: renderBlockHtml(block), plain: block.raw };
-    if (tryAppend(blockPiece, block.sepBefore)) {
+    if (
+      hasVisibleHtmlText(blockPiece.html) &&
+      tryAppend(blockPiece, block.sepBefore)
+    ) {
       continue;
     }
 
     flushCurrent();
 
-    if (tryAppend(blockPiece, "")) {
+    if (hasVisibleHtmlText(blockPiece.html) && tryAppend(blockPiece, "")) {
       continue;
     }
 
     if (block.type === "code") {
-      const codeChunks = splitCodeBlock(block, limit);
+      const codeChunks = splitCodeBlock(block, limit).filter((chunk) =>
+        hasVisibleHtmlText(chunk.html),
+      );
       for (let i = 0; i < codeChunks.length - 1; i += 1) {
         chunks.push(codeChunks[i]);
       }
@@ -1056,17 +1105,19 @@ export function splitTelegramHtmlChunks(text, maxLength = DEFAULT_MAX_LENGTH) {
       };
       const sep = lineIdx === 0 ? "" : "\n";
 
-      if (tryAppend(linePiece, sep)) {
+      if (hasVisibleHtmlText(linePiece.html) && tryAppend(linePiece, sep)) {
         continue;
       }
 
       flushCurrent();
 
-      if (tryAppend(linePiece, "")) {
+      if (hasVisibleHtmlText(linePiece.html) && tryAppend(linePiece, "")) {
         continue;
       }
 
-      const lineChunks = splitOversizedLine(line, limit);
+      const lineChunks = splitOversizedLine(line, limit).filter((chunk) =>
+        hasVisibleHtmlText(chunk.html),
+      );
       for (let i = 0; i < lineChunks.length - 1; i += 1) {
         chunks.push(lineChunks[i]);
       }
@@ -1079,5 +1130,8 @@ export function splitTelegramHtmlChunks(text, maxLength = DEFAULT_MAX_LENGTH) {
   }
 
   flushCurrent();
+  if (chunks.length === 0) {
+    return splitPlainEscapedChunks(wholePlain, limit);
+  }
   return chunks;
 }
