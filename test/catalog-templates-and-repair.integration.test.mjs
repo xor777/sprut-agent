@@ -473,7 +473,6 @@ test("catalog write + undo lifecycle: create, update, delete, already_desired, o
         { key: "PowerOnBehavior", value: "0x01" },
         { key: "token", value: "" },
       ],
-      token: "",
       services: [{ type: "Outlet" }],
     },
     null,
@@ -496,13 +495,17 @@ test("catalog write + undo lifecycle: create, update, delete, already_desired, o
   );
   assert.equal(aCreate.restore_supported, true);
 
-  // Read back via get_entity
+  // Read back via get_entity: full unredacted JSON must be preserved (never "[REDACTED]")
   const createdEntity = await callOk(client, "get_entity", {
     entity_ref: aCreate.created_catalog_ref,
   });
   assert.equal(createdEntity.entity.writable, true);
   assert.equal(createdEntity.entity.active, true);
   assert.equal(createdEntity.entity.model, "TS011F Meter");
+  assert.notEqual(createdEntity.entity.template, "[REDACTED]");
+  assert.ok(createdEntity.entity.template.includes("00158d0001a2b3c4"));
+  assert.ok(createdEntity.entity.template.includes("PowerOnBehavior"));
+  assert.ok(createdEntity.entity.template.includes("TS011F Meter"));
 
   // 2. Creating another INTERNAL template overlapping manufacturerIds + modelIds returns non-blocking warning
   const pOverlap = await callOk(client, "prepare_native_change", {
@@ -1313,6 +1316,680 @@ test("MCP surface budgets stay intact: 13 tools, <= 2048 instructions, <= 1000 d
     assert.ok(
       bytes < 4_096,
       `${operation} contract must be < 4096 bytes, got ${bytes}`,
+    );
+  }
+});
+
+test("regression P1-1: read-only get_native_change never sends catalog.update rollback writes and confirmed rollback clears contradictory flags", async (t) => {
+  let refuseGetAfterNextUpdate = false;
+  let hubRef;
+  const { hub, client } = await setup(t, {
+    timeoutMs: 350,
+    onRequest: (req) => {
+      if (refuseGetAfterNextUpdate && req.method === "catalog.update") {
+        refuseGetAfterNextUpdate = false;
+        hubRef.refuseNext("catalog.get", {
+          code: -32000,
+          message: "temporary read error",
+        });
+      }
+    },
+  });
+  hubRef = hub;
+  const baseJson = JSON.stringify({
+    manufacturer: "Tuya",
+    model: "ReadOnlyGuardBase",
+    services: [{ type: "Outlet" }],
+  });
+  const badJson = JSON.stringify({
+    manufacturer: "Tuya",
+    model: "ReadOnlyGuardBad",
+    services: [{ type: "Outlet" }],
+  });
+  const { applied: created } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: baseJson,
+    reason: "Создать шаблон для проверки read-only get_native_change",
+  });
+
+  // 1. catalog.update reply is dropped while hub marks template active=false,
+  // and post-timeout catalog.get also fails -> apply settles uncertain.
+  const prep = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_update",
+    target_ref: created.created_catalog_ref,
+    source: badJson,
+    reason: "Обновить шаблон с потерей ответа и ошибкой хаба",
+  });
+  hub.state.catalogRejectNext.push({
+    error: "Неправильный шаблон: ошибка после потери ответа",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "catalog.update",
+    remaining: 1,
+  });
+  refuseGetAfterNextUpdate = true;
+  const uncertain = await callOk(client, "apply_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(uncertain.status, "uncertain");
+
+  // Calling read-only get_native_change MUST send ZERO catalog.update writes!
+  const updatesBeforeGet = hub.requests.filter(
+    ({ method }) => method === "catalog.update",
+  ).length;
+  const inspected = await callOk(client, "get_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "catalog.update").length,
+    updatesBeforeGet,
+    "read-only get_native_change must NEVER send catalog.update writes",
+  );
+  assert.equal(inspected.status, "applied");
+  assert.equal(inspected.rollback_failed, true);
+  assert.match(inspected.hub_template_error, /ошибка после потери ответа/);
+  assert.equal(inspected.restore_supported, true);
+  assert.equal(inspected.next?.tool, "restore_native_change");
+  assert.equal(inspected.verification?.result, "hub_template_rollback_failed");
+
+  // Explicit restore_native_change now rolls back to baseline cleanly.
+  const restored = await callOk(client, "restore_native_change", {
+    change_ref: prep.change_ref,
+  });
+  assert.equal(restored.status, "restored");
+
+  // 2. When rollback catalog.update succeeded on hub after a transient readback
+  // failure, settling to rejected must clear rollback_failed & rollback_error.
+  const prep2 = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_update",
+    target_ref: created.created_catalog_ref,
+    source: badJson,
+    reason: "Проверить очистку флагов после подтверждённого rollback",
+  });
+  let getCount = 0;
+  const origRefuse = hub.state.faults.refused;
+  // First catalog.get is apply precondition (must pass); second catalog.get is
+  // post-rollback readback (must fail once so change settles uncertain with rollback_failed).
+  hub.state.catalogRejectNext.push({
+    error: "Неправильный шаблон: повторная ошибка",
+  });
+  let updateSeen = 0;
+  hub.state.catalogValidator = (ctx) => {
+    if (ctx.op === "update") {
+      updateSeen += 1;
+      if (updateSeen === 1) {
+        // After rollback update executes, fail its post-rollback catalog.get once
+        origRefuse.push({
+          method: "catalog.get",
+          code: -32000,
+          message: "post-rollback read timeout",
+          remaining: 1,
+        });
+      }
+    }
+    return null;
+  };
+  const uncertainRollback = await callOk(client, "apply_native_change", {
+    change_ref: prep2.change_ref,
+  });
+  hub.state.catalogValidator = null;
+  assert.equal(uncertainRollback.status, "uncertain");
+  assert.equal(uncertainRollback.rollback_failed, true);
+  getCount = hub.requests.filter(
+    ({ method }) => method === "catalog.update",
+  ).length;
+
+  const confirmedRejected = await callOk(client, "get_native_change", {
+    change_ref: prep2.change_ref,
+  });
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "catalog.update").length,
+    getCount,
+    "get_native_change must not write when confirming rollback",
+  );
+  assert.equal(confirmedRejected.status, "rejected");
+  assert.equal(confirmedRejected.rollback_confirmed, true);
+  assert.equal(confirmedRejected.rollback_failed, undefined);
+  assert.equal(confirmedRejected.rollback_error, undefined);
+});
+
+test("regression P1-2: hub-refused restore_native_change never leaves stale pending restore intent on create, update, or delete", async (t) => {
+  const { hub, client } = await setup(t);
+  const v1 = JSON.stringify({ manufacturer: "Tuya", model: "RefusedV1" });
+  const v2 = JSON.stringify({ manufacturer: "Tuya", model: "RefusedV2" });
+  const v3 = JSON.stringify({ manufacturer: "Tuya", model: "RefusedV3" });
+
+  // 1. Create settled uncertain (transient post-create readback failure) ->
+  // restore_native_change refused by hub -> status must become applied (not uncertain
+  // with pending restore!), so external deletion reports conflict (not restored).
+  const pCreate1 = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v1,
+    reason: "Создать шаблон 1 с отказом readback",
+  });
+  hub.refuseNext("catalog.get", { code: -32000, message: "readback glitch" });
+  const uCreate1 = await callOk(client, "apply_native_change", {
+    change_ref: pCreate1.change_ref,
+  });
+  assert.equal(uCreate1.status, "uncertain");
+
+  hub.refuseNext("catalog.delete", { code: -32603, message: "delete refused" });
+  const refusedRestore1 = await callError(client, "restore_native_change", {
+    change_ref: pCreate1.change_ref,
+  });
+  assert.ok(refusedRestore1.error);
+
+  // Externally delete /1.json on hub
+  hub.state.catalogs = hub.state.catalogs.filter(
+    (entry) => !(entry.store === "INTERNAL" && entry.file === "/1.json"),
+  );
+  const afterManualDelGet = await callOk(client, "get_native_change", {
+    change_ref: pCreate1.change_ref,
+  });
+  assert.equal(
+    afterManualDelGet.status,
+    "conflict",
+    "external deletion after hub-refused restore must report conflict, never restored",
+  );
+  assert.equal(
+    afterManualDelGet.conflict_reason,
+    "created_catalog_template_missing",
+  );
+
+  // 2. Update -> hub refuses restore_native_change -> external manual revert to v1 ->
+  // batch restore_native_change must report skipped/changed_since (already_previous=true),
+  // NOT falsely restored via stale rejected write_intent.at!
+  const { applied: create2 } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v1,
+    reason: "Создать шаблон 2",
+  });
+  const { applied: upd1 } = await prepareAndApply(client, {
+    operation: "catalog_template_update",
+    target_ref: create2.created_catalog_ref,
+    source: v2,
+    reason: "Обновить шаблон 2 до v2",
+  });
+  hub.refuseNext("catalog.update", { code: -32603, message: "update refused" });
+  await callError(client, "restore_native_change", {
+    change_ref: upd1.change_ref,
+  });
+  // External manual revert back to v1 on hub
+  const liveEntry = hub.state.catalogs.find(
+    (entry) => entry.store === "INTERNAL" && entry.file === create2.file,
+  );
+  liveEntry.template = v1;
+  const batchAfterRefused = await callOk(client, "restore_native_change", {
+    home_ref: HOME_REF,
+    change_refs: [upd1.change_ref],
+  });
+  assert.equal(batchAfterRefused.results[0].status, "skipped");
+  assert.equal(batchAfterRefused.results[0].reason, "changed_since");
+  assert.equal(batchAfterRefused.results[0].already_previous, true);
+  assert.equal(batchAfterRefused.results[0].sent, false);
+
+  // 3. Delete -> hub refuses restore catalog.create -> get_native_change stays applied,
+  // and retrying restore_native_change actually sends catalog.create and succeeds!
+  const { applied: create3 } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v3,
+    reason: "Создать шаблон 3 для удаления",
+  });
+  const { applied: del3 } = await prepareAndApply(client, {
+    operation: "catalog_template_delete",
+    target_ref: create3.created_catalog_ref,
+    reason: "Удалить шаблон 3",
+  });
+  hub.refuseNext("catalog.create", { code: -32603, message: "create refused" });
+  await callError(client, "restore_native_change", {
+    change_ref: del3.change_ref,
+  });
+  const afterRefusedDelGet = await callOk(client, "get_native_change", {
+    change_ref: del3.change_ref,
+  });
+  assert.equal(afterRefusedDelGet.status, "applied");
+  assert.equal(
+    afterRefusedDelGet.verification?.result,
+    "deleted_catalog_template_absent",
+  );
+  const retriedDelRestore = await callOk(client, "restore_native_change", {
+    change_ref: del3.change_ref,
+  });
+  assert.equal(retriedDelRestore.status, "restored");
+  assert.ok(retriedDelRestore.restored_catalog_ref);
+});
+
+test("regression P1-3: proto3 implicit-presence omitted store (MAIN) and omitted active (false) work end-to-end", async (t) => {
+  const { hub, client } = await setup(t, {
+    patchFixture: (fixture) => {
+      fixture.catalog = { omitProto3Defaults: true };
+    },
+  });
+
+  // 1. home_overview list="catalog" and get_entity decode omitted store as "MAIN"
+  const listed = await callOk(client, "home_overview", {
+    home_ref: HOME_REF,
+    list: "catalog",
+    type: "MAIN",
+  });
+  assert.ok(listed.items.length >= 2);
+  assert.ok(listed.items.every((item) => item.store === "MAIN"));
+
+  const mainRef = catalogRef("MAIN", "zigbee", "/Tuya/TS011F.json");
+  const mainEntity = await callOk(client, "get_entity", {
+    entity_ref: mainRef,
+  });
+  assert.equal(mainEntity.entity.store, "MAIN");
+  assert.equal(mainEntity.entity.writable, false);
+  assert.equal(mainEntity.entity.active, true);
+
+  // 2. catalog.create returning proto3-omitted active (no active key, no error key)
+  // MUST be detected as inactive (active=false) -> cleaned up -> rejected!
+  const pCreate = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({
+      manufacturer: "Tuya",
+      model: "Proto3SilentInactive",
+    }),
+    reason: "Проверить proto3-пропуск active=false при create",
+  });
+  hub.state.catalogRejectNext.push({ error: null });
+  const aCreate = await callOk(client, "apply_native_change", {
+    change_ref: pCreate.change_ref,
+  });
+  assert.equal(aCreate.status, "rejected");
+  assert.equal(aCreate.cleanup_confirmed, true);
+  assert.match(aCreate.hub_template_error, /inactive/i);
+
+  // 3. catalog.update returning proto3-omitted active (no active key, no error key)
+  // MUST be detected as inactive -> rolled back -> rejected!
+  const { applied: good } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({ manufacturer: "Tuya", model: "Proto3Base" }),
+    reason: "Создать рабочий шаблон для update",
+  });
+  const pUpd = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_update",
+    target_ref: good.created_catalog_ref,
+    source: JSON.stringify({ manufacturer: "Tuya", model: "Proto3BadUpd" }),
+    reason: "Проверить proto3-пропуск active=false при update",
+  });
+  hub.state.catalogRejectNext.push({ error: null });
+  const aUpd = await callOk(client, "apply_native_change", {
+    change_ref: pUpd.change_ref,
+  });
+  assert.equal(aUpd.status, "rejected");
+  assert.equal(aUpd.rollback_confirmed, true);
+  assert.match(aUpd.hub_template_error, /inactive/i);
+});
+
+test("regression P1-4: later_owned_change is never bypassed by cyclic content updates and inactive baseline is never marked restored", async (t) => {
+  const { hub, client } = await setup(t);
+  const v1 = JSON.stringify({ manufacturer: "Tuya", model: "CycleV1" });
+  const v2 = JSON.stringify({ manufacturer: "Tuya", model: "CycleV2" });
+
+  // Create V1 -> Update 1 (V1 -> V2) -> Update 2 (V2 -> V1, cycling back to V1!)
+  const { applied: created } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v1,
+    reason: "Создать шаблон V1",
+  });
+  const { applied: upd1 } = await prepareAndApply(client, {
+    operation: "catalog_template_update",
+    target_ref: created.created_catalog_ref,
+    source: v2,
+    reason: "Обновить V1 -> V2",
+  });
+  const { applied: upd2 } = await prepareAndApply(client, {
+    operation: "catalog_template_update",
+    target_ref: created.created_catalog_ref,
+    source: v1,
+    reason: "Вернуть V2 -> V1 новым обновлением",
+  });
+
+  // Undoing CREATE while upd2 is still applied MUST report later_owned_change (not delete!)
+  const rCreateBlocked = await callOk(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+  assert.equal(rCreateBlocked.status, "conflict");
+  assert.equal(rCreateBlocked.conflict_reason, "later_owned_change");
+  assert.equal(rCreateBlocked.restore_first_change_ref, upd2.change_ref);
+  assert.ok(
+    hub.state.catalogs.some(
+      (entry) => entry.store === "INTERNAL" && entry.file === created.file,
+    ),
+    "template must NOT be deleted while later owned changes exist",
+  );
+
+  // Undoing UPDATE 1 while upd2 cycled content back to V1 MUST report later_owned_change
+  // (NOT falsely return status=restored!)
+  const rUpd1Blocked = await callOk(client, "restore_native_change", {
+    change_ref: upd1.change_ref,
+  });
+  assert.equal(rUpd1Blocked.status, "conflict");
+  assert.equal(rUpd1Blocked.conflict_reason, "later_owned_change");
+  assert.equal(rUpd1Blocked.restore_first_change_ref, upd2.change_ref);
+
+  // Proper reverse order: upd2 -> upd1 -> create succeeds cleanly
+  const rUpd2 = await callOk(client, "restore_native_change", {
+    change_ref: upd2.change_ref,
+  });
+  assert.equal(rUpd2.status, "restored");
+  const rUpd1 = await callOk(client, "restore_native_change", {
+    change_ref: upd1.change_ref,
+  });
+  assert.equal(rUpd1.status, "restored");
+  const rCreate = await callOk(client, "restore_native_change", {
+    change_ref: created.change_ref,
+  });
+  assert.equal(rCreate.status, "restored");
+
+  // Active-baseline guard: if baseline was active V1 and live is now V1 but inactive/broken,
+  // restore_native_change MUST NOT claim status=restored!
+  const { applied: createdB } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v1,
+    reason: "Создать активный V1",
+  });
+  const { applied: updB } = await prepareAndApply(client, {
+    operation: "catalog_template_update",
+    target_ref: createdB.created_catalog_ref,
+    source: v2,
+    reason: "Обновить активный V1 -> V2",
+  });
+  const entryB = hub.state.catalogs.find(
+    (entry) => entry.store === "INTERNAL" && entry.file === createdB.file,
+  );
+  entryB.template = v1;
+  entryB.active = false;
+  entryB.error = "Базовый шаблон повреждён";
+  const rBrokenBaseline = await callOk(client, "restore_native_change", {
+    change_ref: updB.change_ref,
+  });
+  assert.notEqual(rBrokenBaseline.status, "restored");
+  assert.equal(rBrokenBaseline.status, "conflict");
+  assert.match(rBrokenBaseline.hub_template_error, /повреждён/);
+});
+
+test("regression P2-1: catalog_template_create settles from uncertain after transient post-create readback failure and clears cleanup_error on delayed cleanup", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // 1. Healthy create whose immediate post-create catalog.get fails -> apply returns uncertain;
+  // subsequent get_native_change MUST settle to applied (not stay stuck in uncertain!).
+  const p1 = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({ manufacturer: "Tuya", model: "SettleUncertain1" }),
+    reason: "Создать шаблон с временным сбоем readback",
+  });
+  hub.refuseNext("catalog.get", {
+    code: -32000,
+    message: "transient readback error",
+  });
+  const u1 = await callOk(client, "apply_native_change", {
+    change_ref: p1.change_ref,
+  });
+  assert.equal(u1.status, "uncertain");
+  assert.ok(u1.created_catalog_ref);
+
+  const settled1 = await callOk(client, "get_native_change", {
+    change_ref: p1.change_ref,
+  });
+  assert.equal(settled1.status, "applied");
+  assert.equal(
+    settled1.verification?.result,
+    "created_catalog_template_observed",
+  );
+
+  // 2. Create rejected by hub + cleanup delete fails + post-delete readback fails -> uncertain
+  // with cleanup_failed & cleanup_error. Subsequent get_native_change while broken file is still
+  // present sends ZERO writes and settles to applied with cleanup_failed & next=restore_native_change.
+  const p2 = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({ manufacturer: "Tuya", model: "SettleUncertain2" }),
+    reason: "Создать битый шаблон со сбоем cleanup и readback",
+  });
+  hub.state.catalogRejectNext.push({ error: "Неправильный шаблон: сбой 2" });
+  hub.refuseNext("catalog.delete", {
+    code: -32603,
+    message: "cleanup refused",
+  });
+  hub.refuseNext("catalog.get", {
+    code: -32000,
+    message: "post-cleanup read failed",
+  });
+  const u2 = await callOk(client, "apply_native_change", {
+    change_ref: p2.change_ref,
+  });
+  assert.equal(u2.status, "uncertain");
+  assert.equal(u2.cleanup_failed, true);
+  assert.ok(u2.cleanup_error);
+
+  const deletesBeforeGet = hub.requests.filter(
+    ({ method }) => method === "catalog.delete",
+  ).length;
+  const settled2 = await callOk(client, "get_native_change", {
+    change_ref: p2.change_ref,
+  });
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "catalog.delete").length,
+    deletesBeforeGet,
+    "get_native_change must send ZERO delete writes",
+  );
+  assert.equal(settled2.status, "applied");
+  assert.equal(settled2.cleanup_failed, true);
+  assert.match(settled2.hub_template_error, /сбой 2/);
+  assert.equal(settled2.next?.tool, "restore_native_change");
+
+  // 3. Delayed cleanup confirmed via get_native_change clears cleanup_failed AND cleanup_error!
+  const p3 = await callOk(client, "prepare_native_change", {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({ manufacturer: "Tuya", model: "DelayedCleanup" }),
+    reason: "Проверить очистку cleanup_error при отложенном удалении",
+  });
+  hub.state.catalogRejectNext.push({ error: "Неправильный шаблон: сбой 3" });
+  hub.refuseNext("catalog.delete", {
+    code: -32603,
+    message: "cleanup refused 3",
+  });
+  hub.refuseNext("catalog.get", { code: -32000, message: "read failed 3" });
+  const u3 = await callOk(client, "apply_native_change", {
+    change_ref: p3.change_ref,
+  });
+  assert.equal(u3.status, "uncertain");
+  assert.ok(u3.cleanup_error);
+
+  // Remove the broken file from hub (delayed cleanup succeeded)
+  hub.state.catalogs = hub.state.catalogs.filter(
+    (entry) => !(entry.store === "INTERNAL" && entry.file === u3.file),
+  );
+  const confirmed3 = await callOk(client, "get_native_change", {
+    change_ref: p3.change_ref,
+  });
+  assert.equal(confirmed3.status, "rejected");
+  assert.equal(confirmed3.cleanup_confirmed, true);
+  assert.equal(confirmed3.cleanup_failed, undefined);
+  assert.equal(confirmed3.cleanup_error, undefined);
+});
+
+test("regression P2-2: restoreCatalogTemplateDelete handles inactive baselines, preserves ghost file on failed cleanup, and never re-creates from conflict", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // 1. Previously-inactive INTERNAL template deleted and restored -> succeeds (status=restored)!
+  const inactiveTemplate = JSON.stringify({
+    manufacturer: "Tuya",
+    model: "AlreadyInactive",
+  });
+  hub.state.catalogs.push({
+    active: false,
+    store: "INTERNAL",
+    controller: "zigbee",
+    file: "/50.json",
+    write: true,
+    error: "Старое предупреждение шаблона",
+    manufacturer: "Tuya",
+    model: "AlreadyInactive",
+    manufacturerIds: [],
+    modelIds: [],
+    availableServices: [],
+    template: inactiveTemplate,
+    deviceCount: 0,
+    devices: [],
+    accessories: [],
+  });
+  const { applied: delInactive } = await prepareAndApply(client, {
+    operation: "catalog_template_delete",
+    target_ref: catalogRef("INTERNAL", "zigbee", "/50.json"),
+    reason: "Удалить ранее неактивный шаблон",
+  });
+  hub.state.catalogRejectNext.push({ error: "Старое предупреждение шаблона" });
+  const restoredInactive = await callOk(client, "restore_native_change", {
+    change_ref: delInactive.change_ref,
+  });
+  assert.equal(restoredInactive.status, "restored");
+  assert.ok(restoredInactive.restored_catalog_ref);
+
+  // 2. Active template deleted -> restore hits hub rejection AND cleanup delete fails ->
+  // MUST preserve cleanup_failed, cleanup_error, and leftover broken file identity!
+  const { applied: activeCreated } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({ manufacturer: "Tuya", model: "GhostIdentity" }),
+    reason: "Создать активный шаблон для теста ghost cleanup",
+  });
+  const { applied: delActive } = await prepareAndApply(client, {
+    operation: "catalog_template_delete",
+    target_ref: activeCreated.created_catalog_ref,
+    reason: "Удалить активный шаблон",
+  });
+  hub.state.catalogRejectNext.push({
+    error: "Неправильный шаблон: базовый файл отсутствует",
+  });
+  hub.refuseNext("catalog.delete", { code: -32603, message: "delete busy" });
+  const failedCleanupRestore = await callOk(client, "restore_native_change", {
+    change_ref: delActive.change_ref,
+  });
+  assert.equal(failedCleanupRestore.status, "uncertain");
+  assert.equal(failedCleanupRestore.cleanup_failed, true);
+  assert.ok(failedCleanupRestore.cleanup_error);
+  assert.ok(
+    failedCleanupRestore.restored_catalog_ref,
+    "failed cleanup on delete restore must NOT drop the leftover broken file identity",
+  );
+  assert.match(
+    failedCleanupRestore.hub_template_error,
+    /базовый файл отсутствует/,
+  );
+
+  // Retrying restore_native_change on this uncertain failed-cleanup delete must NOT create another file!
+  const createsBeforeRetry = hub.requests.filter(
+    ({ method }) => method === "catalog.create",
+  ).length;
+  const retriedUncertain = await callOk(client, "restore_native_change", {
+    change_ref: delActive.change_ref,
+  });
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "catalog.create").length,
+    createsBeforeRetry,
+  );
+  assert.equal(retriedUncertain.status, "uncertain");
+
+  // 3. Delete restore settles to conflict (hub rejected & cleanup succeeded) ->
+  // calling restore_native_change again MUST return stored conflict with ZERO duplicate catalog.create!
+  const { applied: activeCreated2 } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: JSON.stringify({
+      manufacturer: "Tuya",
+      model: "NoRecreateFromConflict",
+    }),
+    reason: "Создать шаблон для теста conflict",
+  });
+  const { applied: delActive2 } = await prepareAndApply(client, {
+    operation: "catalog_template_delete",
+    target_ref: activeCreated2.created_catalog_ref,
+    reason: "Удалить шаблон для теста conflict",
+  });
+  hub.state.catalogRejectNext.push({
+    error: "Неправильный шаблон: отклонён при восстановлении",
+  });
+  const conflictRestore = await callOk(client, "restore_native_change", {
+    change_ref: delActive2.change_ref,
+  });
+  assert.equal(conflictRestore.status, "conflict");
+  assert.equal(conflictRestore.cleanup_confirmed, true);
+
+  const createsBeforeConflictRetry = hub.requests.filter(
+    ({ method }) => method === "catalog.create",
+  ).length;
+  const secondConflictRestore = await callOk(client, "restore_native_change", {
+    change_ref: delActive2.change_ref,
+  });
+  assert.equal(secondConflictRestore.status, "conflict");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "catalog.create").length,
+    createsBeforeConflictRetry,
+    "restore_native_change on conflict delete must NEVER send a duplicate catalog.create",
+  );
+});
+
+test("regression P3-1: isValidCatalogFile rejects backslashes, empty/trailing segments, dot segments, and whitespace-only segments", async (t) => {
+  const { client } = await setup(t);
+  const badFiles = [
+    "/Tuya\\TS011F.json",
+    "//Tuya/TS011F.json",
+    "/Tuya//TS011F.json",
+    "/Tuya/",
+    "/./TS011F.json",
+    "/ /TS011F.json",
+  ];
+  for (const badFile of badFiles) {
+    const getErr = await callError(client, "get_entity", {
+      entity_ref: catalogRef("MAIN", "zigbee", badFile),
+    });
+    assert.equal(
+      getErr.error.code,
+      "invalid_entity_ref",
+      `get_entity must reject invalid catalog file ${JSON.stringify(badFile)}`,
+    );
+
+    const prepErr = await callError(client, "prepare_native_change", {
+      operation: "catalog_template_create",
+      target_ref: HOME_REF,
+      value: "zigbee",
+      source: JSON.stringify({
+        manufacturer: "Tuya",
+        template: badFile,
+      }),
+      reason: `Проверить отказ невалидного пути ${badFile}`,
+    });
+    assert.equal(
+      prepErr.error.code,
+      "invalid_native_value",
+      `prepare_native_change must reject invalid base template path ${JSON.stringify(badFile)}`,
     );
   }
 });

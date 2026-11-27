@@ -3034,7 +3034,9 @@ const HANDLERS = {
     if (Number.isSafeInteger(input?.limit) && input.limit > 0) {
       listed = listed.slice(0, input.limit);
     }
-    const projected = listed.map(projectCatalogListItem);
+    const projected = listed.map((entry) =>
+      projectCatalogListItem(entry, state.catalogOmitProto3Defaults === true),
+    );
     return projected.length > 0 ? { catalogs: projected } : {};
   },
   "catalog.get": (state, input) => {
@@ -3049,7 +3051,10 @@ const HANDLERS = {
         `Catalog ${input?.store}:${input?.controller}:${input?.file}`,
       );
     }
-    return projectCatalogDetail(entry);
+    return projectCatalogDetail(
+      entry,
+      state.catalogOmitProto3Defaults === true,
+    );
   },
   "catalog.create": (state, input) => {
     const controller = input?.controller;
@@ -3085,7 +3090,10 @@ const HANDLERS = {
       accessories: [],
     };
     state.catalogs.push(entry);
-    return projectCatalogDetail(entry);
+    return projectCatalogDetail(
+      entry,
+      state.catalogOmitProto3Defaults === true,
+    );
   },
   "catalog.update": (state, input) => {
     if (input?.store !== "INTERNAL") {
@@ -3120,7 +3128,10 @@ const HANDLERS = {
       delete entry.error;
     }
     Object.assign(entry, evaluation.metadata);
-    return projectCatalogDetail(entry);
+    return projectCatalogDetail(
+      entry,
+      state.catalogOmitProto3Defaults === true,
+    );
   },
   "catalog.delete": (state, input) => {
     if (input?.store !== "INTERNAL") {
@@ -3501,6 +3512,7 @@ function buildState(fixture, hubTime) {
     nextCatalogFileId: new Map(),
     catalogRejectNext: [],
     catalogValidator: null,
+    catalogOmitProto3Defaults: Boolean(fixture.catalog?.omitProto3Defaults),
   };
   for (const input of fixture.accessories) {
     state.accessories.push({
@@ -6190,7 +6202,7 @@ function evaluateCatalogTemplate(state, context) {
     const message =
       typeof next === "string"
         ? next
-        : typeof next?.error === "string"
+        : next && Object.hasOwn(next, "error")
           ? next.error
           : "Неправильный шаблон: ошибка проверки на хабе";
     return { active: false, error: message, metadata: {} };
@@ -6238,10 +6250,13 @@ function evaluateCatalogTemplate(state, context) {
   return { active: true, error: null, metadata };
 }
 
-function projectCatalogListItem(entry) {
+function projectCatalogListItem(entry, omitProto3Defaults = false) {
+  const isActive = entry.active === true;
+  const omitStore = omitProto3Defaults && entry.store === "MAIN";
+  const omitActive = omitProto3Defaults && !isActive;
   return {
-    active: entry.active === true,
-    store: entry.store,
+    ...(omitActive ? {} : { active: isActive }),
+    ...(omitStore ? {} : { store: entry.store }),
     controller: entry.controller,
     file: entry.file,
     deviceCount: entry.deviceCount ?? 0,
@@ -6262,9 +6277,9 @@ function projectCatalogListItem(entry) {
   };
 }
 
-function projectCatalogDetail(entry) {
+function projectCatalogDetail(entry, omitProto3Defaults = false) {
   return {
-    ...projectCatalogListItem(entry),
+    ...projectCatalogListItem(entry, omitProto3Defaults),
     template: entry.template,
     ...(entry.devices?.length > 0
       ? { devices: structuredClone(entry.devices) }
