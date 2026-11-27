@@ -1,7 +1,12 @@
 import { DEFAULT_TELEGRAM_API_BASE, redactTelegramSecrets } from "./config.mjs";
+import { splitTelegramHtmlChunks } from "./format-html.mjs";
 
 export const MAX_TELEGRAM_MESSAGE_LENGTH = 4096;
 export const MAX_TELEGRAM_PHOTO_BYTES = 5 * 1024 * 1024;
+const TELEGRAM_HTML_PARSE_ERROR_RE =
+  /can't parse entities|unsupported start tag|unclosed|expected end tag/i;
+const TELEGRAM_NOT_MODIFIED_ERROR_RE = /message is not modified/i;
+const DISABLED_LINK_PREVIEW = { is_disabled: true };
 
 export class TelegramApiError extends Error {
   constructor(
@@ -245,18 +250,131 @@ export class TelegramApi {
   async sendMessage(chatId, text, options = {}) {
     const trimmed = this.#scrub(String(text ?? "")).trim();
     if (trimmed.length === 0) return [];
-    const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
+    const {
+      parseMode,
+      disableNotification = false,
+      ...callOptions
+    } = options ?? {};
+    const baseParams = {
+      chat_id: chatId,
+      link_preview_options: DISABLED_LINK_PREVIEW,
+      ...(disableNotification ? { disable_notification: true } : {}),
+    };
+
+    if (parseMode === null || parseMode === false) {
+      const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
+      const sent = [];
+      for (const chunk of chunks) {
+        sent.push(
+          await this.call(
+            "sendMessage",
+            { ...baseParams, text: chunk },
+            callOptions,
+          ),
+        );
+      }
+      return sent;
+    }
+
+    const chunks = splitTelegramHtmlChunks(
+      trimmed,
+      MAX_TELEGRAM_MESSAGE_LENGTH,
+    );
     const sent = [];
     for (const chunk of chunks) {
-      sent.push(
-        await this.call(
-          "sendMessage",
-          { chat_id: chatId, text: chunk },
-          options,
-        ),
-      );
+      try {
+        sent.push(
+          await this.call(
+            "sendMessage",
+            { ...baseParams, text: chunk.html, parse_mode: "HTML" },
+            callOptions,
+          ),
+        );
+      } catch (error) {
+        if (
+          error instanceof TelegramApiError &&
+          error.status === 400 &&
+          TELEGRAM_HTML_PARSE_ERROR_RE.test(error.message)
+        ) {
+          sent.push(
+            await this.call(
+              "sendMessage",
+              { ...baseParams, text: chunk.plain },
+              callOptions,
+            ),
+          );
+          continue;
+        }
+        throw error;
+      }
     }
     return sent;
+  }
+
+  async editMessageText(chatId, messageId, text, options = {}) {
+    const trimmed = this.#scrub(String(text ?? "")).trim();
+    if (trimmed.length === 0) return null;
+    const { parseMode, ...callOptions } = options ?? {};
+    const baseParams = {
+      chat_id: chatId,
+      message_id: messageId,
+      link_preview_options: DISABLED_LINK_PREVIEW,
+    };
+
+    const callEdit = async (params) => {
+      try {
+        return await this.call("editMessageText", params, callOptions);
+      } catch (error) {
+        if (
+          error instanceof TelegramApiError &&
+          error.status === 400 &&
+          TELEGRAM_NOT_MODIFIED_ERROR_RE.test(error.message)
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+    if (parseMode === null || parseMode === false) {
+      const plainChunk = splitTelegramMessage(
+        trimmed,
+        MAX_TELEGRAM_MESSAGE_LENGTH,
+      )[0];
+      if (!plainChunk) return null;
+      return callEdit({ ...baseParams, text: plainChunk });
+    }
+
+    const chunk = splitTelegramHtmlChunks(
+      trimmed,
+      MAX_TELEGRAM_MESSAGE_LENGTH,
+    )[0];
+    if (!chunk) return null;
+
+    try {
+      return await callEdit({
+        ...baseParams,
+        text: chunk.html,
+        parse_mode: "HTML",
+      });
+    } catch (error) {
+      if (
+        error instanceof TelegramApiError &&
+        error.status === 400 &&
+        TELEGRAM_HTML_PARSE_ERROR_RE.test(error.message)
+      ) {
+        return callEdit({ ...baseParams, text: chunk.plain });
+      }
+      throw error;
+    }
+  }
+
+  deleteMessage(chatId, messageId, options = {}) {
+    return this.call(
+      "deleteMessage",
+      { chat_id: chatId, message_id: messageId },
+      options,
+    );
   }
 
   async downloadPhotoAsDataUrl(fileId, { signal, timeoutMs = 30_000 } = {}) {

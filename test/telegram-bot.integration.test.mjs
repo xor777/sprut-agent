@@ -75,6 +75,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
   const updates = [];
   const files = new Map();
   const methodFaults = new Map();
+  const messageSnapshots = new Map();
   let ackedOffset = 0;
   let pendingPolls = [];
 
@@ -147,6 +148,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
           ok: false,
           error_code: fault.status ?? 500,
           description: fault.description ?? "Injected Telegram error",
+          ...(fault.parameters ? { parameters: fault.parameters } : {}),
         }),
       );
       return;
@@ -175,9 +177,21 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
       sendOk(true);
       return;
     }
+    const isHtmlVisiblyEmpty = (raw, parseMode) => {
+      if (parseMode !== "HTML") return raw.trim().length === 0;
+      const visible = raw
+        .replace(/<[^>]*>/g, "")
+        .replaceAll("&amp;", "&")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&quot;", '"')
+        .trim();
+      return visible.length === 0;
+    };
+
     if (method === "sendMessage") {
       const text = String(body.text ?? "");
-      if (text.length === 0) {
+      if (text.length === 0 || isHtmlVisiblyEmpty(text, body.parse_mode)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -197,11 +211,71 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
         );
         return;
       }
+      const messageId = calls.length;
+      messageSnapshots.set(`${body.chat_id}:${messageId}`, {
+        text,
+        parse_mode: body.parse_mode ?? null,
+      });
       sendOk({
-        message_id: calls.length,
+        message_id: messageId,
         chat: { id: body.chat_id, type: "private" },
         text,
       });
+      return;
+    }
+    if (method === "editMessageText") {
+      const text = String(body.text ?? "");
+      if (text.length === 0 || isHtmlVisiblyEmpty(text, body.parse_mode)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description: "Bad Request: message text is empty",
+          }),
+        );
+        return;
+      }
+      if (text.length > 4096) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description: "Bad Request: message is too long",
+          }),
+        );
+        return;
+      }
+      const key = `${body.chat_id}:${body.message_id}`;
+      const prev = messageSnapshots.get(key);
+      if (
+        prev &&
+        prev.text === text &&
+        prev.parse_mode === (body.parse_mode ?? null)
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description:
+              "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+          }),
+        );
+        return;
+      }
+      messageSnapshots.set(key, {
+        text,
+        parse_mode: body.parse_mode ?? null,
+      });
+      sendOk({
+        message_id: body.message_id,
+        chat: { id: body.chat_id, type: "private" },
+        text,
+      });
+      return;
+    }
+    if (method === "deleteMessage") {
+      messageSnapshots.delete(`${body.chat_id}:${body.message_id}`);
+      sendOk(true);
       return;
     }
     if (method === "getFile") {
@@ -291,11 +365,36 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
       if (!methodFaults.has(method)) methodFaults.set(method, []);
       methodFaults.get(method).push(fault);
     },
+    clearFaults(method = null) {
+      if (method === null) {
+        methodFaults.clear();
+      } else {
+        methodFaults.delete(method);
+      }
+    },
     sentMessages(chatId = null) {
       return calls
         .filter(
           (call) =>
             call.method === "sendMessage" &&
+            (chatId === null || call.body.chat_id === chatId),
+        )
+        .map((call) => call.body);
+    },
+    editedMessages(chatId = null) {
+      return calls
+        .filter(
+          (call) =>
+            call.method === "editMessageText" &&
+            (chatId === null || call.body.chat_id === chatId),
+        )
+        .map((call) => call.body);
+    },
+    deletedMessages(chatId = null) {
+      return calls
+        .filter(
+          (call) =>
+            call.method === "deleteMessage" &&
             (chatId === null || call.body.chat_id === chatId),
         )
         .map((call) => call.body);
@@ -779,6 +878,121 @@ rl.on("line", async (line) => {
             type: "agentMessage",
             phase: "final_answer",
             text: "Вижу фото (" + imageItem.url.slice(0, 32) + ") и подпись: " + prompt,
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[LONG_COMMENTARY]")) {
+      const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Проверяю устройства и токен " + secretToken + "…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 170));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Читаю журнал **ZigBee**…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Собираю ответ…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Итоговый ответ после диагностики.",
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[LONG_SILENT]")) {
+      await new Promise((resolve) => setTimeout(resolve, 210));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Готово без комментариев.",
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[MARKDOWN_REPLY]")) {
+      const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
+      const markdownReply = [
+        "### Диагностика \`_TZ3000_w0qqde0g\`",
+        "",
+        "Проверил **состояние** и *журнал*, ошибка \`UNREPORTABLE_ATTRIBUTE\` (2 * 3 < 7 & T > 1).",
+        "- Шаблон: \`catalog_template_create\` и ~~старый~~ вариант",
+        "* Подробности: [справка **SprutHub**](https://wiki.spruthub.ru/Что_такое_шаблоны%3F) и [добавление](https://wiki.spruthub.ru/Добавление_кастомных_шаблонов_для_любых_устройств)",
+        "  - Ещё [Zigbee (protocol)](https://en.wikipedia.org/wiki/Zigbee_(protocol))",
+        "  - Небезопасное: [js](javascript:alert(1)) и [data](data:text/html,<svg>)",
+        "",
+        "\`\`\`json",
+        '{"model": "_TZ3000_w0qqde0g", "expr": "a < b & c > d", "bold": "**raw**"}',
+        "\`\`\`",
+        "",
+        "Поля: service_grid, home_overview, токен: " + secretToken,
+      ].join("\\n");
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: markdownReply,
           },
         },
       });
@@ -1916,4 +2130,931 @@ test("mcpServer/elicitation/request accepts sprut-agent tool calls with session 
     harness.tg.sentMessages(1001)[0].text,
     "elicit:accept:session/decline/decline",
   );
+});
+
+function assertNoLoneSurrogates(str, label = "text") {
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = str.charCodeAt(i + 1);
+      assert.ok(
+        next >= 0xdc00 && next <= 0xdfff,
+        `${label}: lone high surrogate at index ${i}`,
+      );
+      i += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      assert.fail(`${label}: lone low surrogate at index ${i}`);
+    }
+  }
+}
+
+function assertValidTelegramHtml(html, maxLength = 4096) {
+  assert.ok(html.length > 0, "HTML chunk must be non-empty");
+  assert.ok(
+    html.length <= maxLength,
+    `HTML chunk length ${html.length} exceeds maxLength ${maxLength}`,
+  );
+  assertNoLoneSurrogates(html, "html");
+
+  const stack = [];
+  let i = 0;
+  while (i < html.length) {
+    const ch = html[i];
+    if (ch === "<") {
+      const closeIdx = html.indexOf(">", i + 1);
+      assert.notEqual(closeIdx, -1, `unclosed '<' at index ${i}: ${html}`);
+      const tagBody = html.slice(i + 1, closeIdx);
+      if (tagBody.startsWith("/")) {
+        const tagName = tagBody.slice(1);
+        assert.ok(
+          ["b", "i", "s", "code", "pre", "a"].includes(tagName),
+          `unexpected closing tag </${tagName}>`,
+        );
+        const top = stack.pop();
+        assert.equal(
+          top,
+          tagName,
+          `mismatched closing tag </${tagName}> (expected </${top ?? "none"}>) in: ${html}`,
+        );
+      } else if (tagBody.startsWith("a ")) {
+        assert.equal(
+          stack.includes("a"),
+          false,
+          `nested <a> tag is forbidden in: ${html}`,
+        );
+        const hrefMatch = /^href="([^"]*)"$/.exec(tagBody.slice(2));
+        assert.ok(hrefMatch, `malformed <a> tag <${tagBody}>`);
+        const href = hrefMatch[1];
+        assert.match(href, /^https?:\/\//i, `unsafe href scheme: ${href}`);
+        assert.equal(
+          /[<>"]/.test(href),
+          false,
+          `unescaped special char in href: ${href}`,
+        );
+        assert.equal(
+          /&(?!amp;|lt;|gt;|quot;)/.test(href),
+          false,
+          `unescaped '&' in href: ${href}`,
+        );
+        stack.push("a");
+      } else {
+        assert.ok(
+          ["b", "i", "s", "code", "pre"].includes(tagBody),
+          `unexpected opening tag <${tagBody}> in: ${html}`,
+        );
+        if (tagBody === "code") {
+          assert.equal(
+            stack.includes("code"),
+            false,
+            `nested <code> tag in: ${html}`,
+          );
+        }
+        stack.push(tagBody);
+      }
+      i = closeIdx + 1;
+      continue;
+    }
+    assert.notEqual(ch, ">", `unescaped '>' at index ${i} in: ${html}`);
+    if (ch === "&") {
+      const rest = html.slice(i);
+      assert.match(
+        rest,
+        /^&(amp|lt|gt|quot);/,
+        `unescaped or split '&' entity at index ${i}: ${rest.slice(0, 12)}`,
+      );
+    }
+    i += 1;
+  }
+  assert.deepEqual(
+    stack,
+    [],
+    `unclosed HTML tags remaining: ${stack.join(",")}`,
+  );
+  const visible = html
+    .replace(/<[^>]*>/g, "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .trim();
+  assert.ok(
+    visible.length > 0,
+    `HTML chunk must have non-empty visible text, got: ${html}`,
+  );
+}
+
+test("bot sends Markdown replies as valid Telegram HTML with link previews disabled, identifiers intact, unsafe links neutralized, and secrets scrubbed first", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config,
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(
+      600,
+      1001,
+      `[MARKDOWN_REPLY] SECRET=${TEST_TOKEN}`,
+    ),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+
+  const sent = harness.tg.sentMessages(1001)[0];
+  assert.equal(
+    sent.parse_mode,
+    "HTML",
+    "replies must be sent with parse_mode HTML",
+  );
+  assert.deepEqual(
+    sent.link_preview_options,
+    { is_disabled: true },
+    "replies must disable Telegram link previews",
+  );
+  assertValidTelegramHtml(sent.text, 4096);
+
+  assert.ok(
+    sent.text.includes("<b>Диагностика <code>_TZ3000_w0qqde0g</code></b>"),
+    `heading with inline code should render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      "Проверил <b>состояние</b> и <i>журнал</i>, ошибка <code>UNREPORTABLE_ATTRIBUTE</code> (2 * 3 &lt; 7 &amp; T &gt; 1).",
+    ),
+    `bold/italic/code/math/escaping must render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      "• Шаблон: <code>catalog_template_create</code> и <s>старый</s> вариант",
+    ),
+    `bullet list and strikethrough must render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '• Подробности: <a href="https://wiki.spruthub.ru/Что_такое_шаблоны%3F">справка <b>SprutHub</b></a> и <a href="https://wiki.spruthub.ru/Добавление_кастомных_шаблонов_для_любых_устройств">добавление</a>',
+    ),
+    `Cyrillic and percent-encoded URLs with formatted labels must render as <a>, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '  • Ещё <a href="https://en.wikipedia.org/wiki/Zigbee_(protocol)">Zigbee (protocol)</a>',
+    ),
+    `balanced parentheses inside URLs must render as <a>, got:\n${sent.text}`,
+  );
+  assert.equal(
+    sent.text.includes("javascript:"),
+    true,
+    "unsafe link text should remain visible as plain escaped text",
+  );
+  assert.equal(
+    sent.text.includes('<a href="javascript:'),
+    false,
+    "javascript: links must never render as <a>",
+  );
+  assert.equal(
+    sent.text.includes('<a href="data:'),
+    false,
+    "data: links must never render as <a>",
+  );
+  assert.ok(
+    sent.text.includes("[data](data:text/html,&lt;svg&gt;)"),
+    `unsafe data: link must be HTML-escaped plain text, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '<pre><code>{"model": "_TZ3000_w0qqde0g", "expr": "a &lt; b &amp; c &gt; d", "bold": "**raw**"}</code></pre>',
+    ),
+    `fenced code block must escape HTML and skip inner Markdown, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes("Поля: service_grid, home_overview, токен: [REDACTED]"),
+    `underscores in identifiers must stay untouched and secrets scrubbed before HTML formatting, got:\n${sent.text}`,
+  );
+  assert.equal(
+    sent.text.includes(TEST_TOKEN),
+    false,
+    "bot token must never appear in formatted Telegram HTML",
+  );
+});
+
+test("TelegramApi.sendMessage falls back to plain text only on HTTP 400 HTML parse errors, supports parseMode opt-out, and keeps splitTelegramMessage", async (t) => {
+  const { TelegramApi, TelegramApiError, splitTelegramMessage } = await import(
+    "../telegram/telegram-api.mjs"
+  );
+  assert.deepEqual(splitTelegramMessage("hello world", 5), ["hello", "world"]);
+
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  // 1. Multi-chunk send where chunk 1 hits a Telegram HTTP 400 HTML parse error:
+  //    chunk 1 retries as plain text without parse_mode; chunks 2 and 3 still send HTML.
+  const para1 = `**Блок 1**: ${"а".repeat(2500)}`;
+  const para2 = `**Блок 2**: [справка](https://wiki.spruthub.ru/Тест) ${"б".repeat(2500)}`;
+  const para3 = `**Блок 3**: \`home_overview\` ${"в".repeat(2500)}`;
+  const fullText = `${para1}\n\n${para2}\n\n${para3}`;
+
+  tg.failNext("sendMessage", {
+    status: 400,
+    description:
+      'Bad Request: can\'t parse entities: Unsupported start tag "weird" at byte offset 5',
+  });
+  const multiRes = await api.sendMessage(1001, fullText);
+  assert.equal(multiRes.length, 3, "all 3 chunks must be delivered");
+
+  const multiCalls = tg.sentMessages(1001);
+  assert.equal(
+    multiCalls.length,
+    4,
+    "expected 3 normal sends + 1 plain-text retry for failed chunk",
+  );
+  assert.equal(multiCalls[0].parse_mode, "HTML");
+  assert.deepEqual(multiCalls[0].link_preview_options, { is_disabled: true });
+  assert.equal(
+    multiCalls[1].parse_mode,
+    undefined,
+    "fallback retry must omit parse_mode",
+  );
+  assert.deepEqual(multiCalls[1].link_preview_options, { is_disabled: true });
+  assert.ok(
+    multiCalls[1].text.includes("**Блок 1**"),
+    "plain fallback must send plain source text for that chunk",
+  );
+  assert.equal(
+    multiCalls[2].parse_mode,
+    "HTML",
+    "subsequent chunks must still use HTML mode",
+  );
+  assert.equal(multiCalls[3].parse_mode, "HTML");
+
+  // Also check other parse error descriptions ("unclosed", "expected end tag")
+  for (const description of [
+    "Bad Request: unclosed start tag at byte offset 10",
+    "Bad Request: expected end tag 'b' at byte offset 14",
+  ]) {
+    const before = tg.sentMessages(1002).length;
+    tg.failNext("sendMessage", { status: 400, description });
+    await api.sendMessage(1002, "**Тест** фоллбэка");
+    const after = tg.sentMessages(1002).slice(before);
+    assert.equal(after.length, 2, `should retry once on "${description}"`);
+    assert.equal(after[0].parse_mode, "HTML");
+    assert.equal(after[1].parse_mode, undefined);
+    assert.equal(after[1].text, "**Тест** фоллбэка");
+  }
+
+  // 2. Non-parse errors (400 chat not found, 401, 429, 500) must NOT retry or swallow
+  for (const fault of [
+    { status: 400, description: "Bad Request: chat not found" },
+    { status: 401, description: "Unauthorized" },
+    { status: 429, description: "Too Many Requests: retry after 3" },
+    { status: 500, description: "Internal Server Error" },
+  ]) {
+    const before = tg.sentMessages(1003).length;
+    tg.failNext("sendMessage", fault);
+    await assert.rejects(
+      () => api.sendMessage(1003, "**Ошибка**"),
+      (err) => err instanceof TelegramApiError && err.status === fault.status,
+      `HTTP ${fault.status} (${fault.description}) must reject without retry`,
+    );
+    const attempts = tg.sentMessages(1003).slice(before);
+    assert.equal(
+      attempts.length,
+      1,
+      `HTTP ${fault.status} (${fault.description}) must not trigger plain-text fallback`,
+    );
+  }
+
+  // 3. Network error must NOT retry or swallow
+  const failingApi = new TelegramApi({
+    token: TEST_TOKEN,
+    apiBase: tg.apiBase,
+    fetchImpl: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  await assert.rejects(
+    () => failingApi.sendMessage(1003, "**Сеть**"),
+    (err) => err instanceof TelegramApiError && err.code === "network",
+  );
+
+  // 4. parseMode: null and parseMode: false bypass HTML formatting
+  const beforeOptOut = tg.sentMessages(1004).length;
+  await api.sendMessage(1004, "**без** <форматирования>", { parseMode: null });
+  await api.sendMessage(1004, "*тоже* без", { parseMode: false });
+  const optOutCalls = tg.sentMessages(1004).slice(beforeOptOut);
+  assert.equal(optOutCalls.length, 2);
+  assert.equal(optOutCalls[0].parse_mode, undefined);
+  assert.equal(optOutCalls[0].text, "**без** <форматирования>");
+  assert.equal(optOutCalls[1].parse_mode, undefined);
+  assert.equal(optOutCalls[1].text, "*тоже* без");
+});
+
+test("markdownToTelegramHtml and splitTelegramHtmlChunks handle edge cases, chunk limits, oversized code blocks, long formatted lines, and surrogate pairs", async () => {
+  const { markdownToTelegramHtml, splitTelegramHtmlChunks } = await import(
+    "../telegram/format-html.mjs"
+  );
+
+  // Identifiers with underscores and math stay untouched
+  assert.equal(
+    markdownToTelegramHtml(
+      "_TZ3000_w0qqde0g catalog_template_create service_grid home_overview __init__ 2 * 3 * 4 2 ** 8 ~20°C",
+    ),
+    "_TZ3000_w0qqde0g catalog_template_create service_grid home_overview __init__ 2 * 3 * 4 2 ** 8 ~20°C",
+  );
+
+  // Nested inline formatting, links with query escaping, unsafe schemes, no nested <a>
+  assert.equal(
+    markdownToTelegramHtml(
+      '[**Ж** `a&b`](https://example.com/p?x=1&y="2") [bad](file:///etc/passwd) [outer [inner](https://b.example)](https://a.example)',
+    ),
+    '<a href="https://example.com/p?x=1&amp;y=&quot;2&quot;"><b>Ж</b> <code>a&amp;b</code></a> [bad](file:///etc/passwd) <a href="https://a.example">outer [inner](https://b.example)</a>',
+  );
+
+  // Bold containing inline code with asterisks, heading with already-bold text, multi-backtick code
+  assert.equal(
+    markdownToTelegramHtml("## **Заголовок**\n**код `2**3` ок** и ``a `b` c``"),
+    "<b>Заголовок</b>\n<b>код <code>2**3</code> ок</b> и <code>a `b` c</code>",
+  );
+
+  // Split oversized fenced code block with HTML-escapable chars and emoji (surrogate pairs)
+  const bigCodeLines = [
+    "```json",
+    '{"a": "<tag> & value", "emoji": "🔥💡🏠🔥💡🏠"}',
+    `{"long": "${"x<y&z🔥".repeat(25)}"}`,
+    '{"end": true}',
+    "```",
+  ].join("\n");
+  const codeChunks = splitTelegramHtmlChunks(bigCodeLines, 90);
+  assert.ok(codeChunks.length >= 3, "oversized fenced code block must split");
+  for (const chunk of codeChunks) {
+    assertValidTelegramHtml(chunk.html, 90);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+    assertNoLoneSurrogates(chunk.plain, "code plain chunk");
+    assert.match(
+      chunk.html,
+      /^<pre><code>[\s\S]*<\/code><\/pre>$/,
+      `each split code chunk must wrap in <pre><code>...</code></pre>, got: ${chunk.html}`,
+    );
+  }
+  const reconstructedCode = codeChunks
+    .map((c) =>
+      c.html
+        .replace(/^<pre><code>/, "")
+        .replace(/<\/code><\/pre>$/, "")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&amp;", "&"),
+    )
+    .join("");
+  assert.ok(reconstructedCode.includes('"a": "<tag> & value"'));
+  assert.ok(reconstructedCode.includes('"end": true'));
+  assert.ok(reconstructedCode.includes("🔥💡🏠🔥💡🏠"));
+
+  // Split oversized single line with bold, links, entities, and emoji (never cut mid-tag, mid-entity, mid-<a>, or mid-surrogate-pair)
+  const longFormattedLine =
+    "Начало & <проверка> **очень длинная жирная строка с " +
+    "🔥".repeat(12) +
+    " и [Справка SprutHub](https://wiki.spruthub.ru/Тест) а также `inline_code_token` и ещё много слов & знаков < > для разбиения** финал.";
+  const lineChunks = splitTelegramHtmlChunks(longFormattedLine, 95);
+  assert.ok(lineChunks.length >= 3, "long formatted line must split cleanly");
+  for (const chunk of lineChunks) {
+    assertValidTelegramHtml(chunk.html, 95);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 95);
+    assertNoLoneSurrogates(chunk.plain, "line plain chunk");
+  }
+  const joinedLineHtml = lineChunks.map((c) => c.html).join(" ");
+  assert.ok(
+    joinedLineHtml.includes(
+      '<a href="https://wiki.spruthub.ru/Тест">Справка SprutHub</a>',
+    ),
+    "link must stay intact inside a single chunk, never split mid-<a>",
+  );
+  assert.ok(
+    joinedLineHtml.includes("<code>inline_code_token</code>"),
+    "inline code must stay intact inside a chunk",
+  );
+  assert.ok(
+    joinedLineHtml.includes("финал."),
+    "tail of line must be preserved",
+  );
+
+  // Empty/blank, unclosed delimiters, nested bold/italic, non-headings
+  assert.equal(markdownToTelegramHtml(""), "");
+  assert.deepEqual(splitTelegramHtmlChunks(""), []);
+  assert.deepEqual(splitTelegramHtmlChunks("   \n\t  "), []);
+  assert.equal(
+    markdownToTelegramHtml(
+      "#хэштег\n####### семь\n*курсив и **жирный** вместе* / ***три***",
+    ),
+    "#хэштег\n####### семь\n<i>курсив и <b>жирный</b> вместе</i> / <b><i>три</i></b>",
+  );
+  const unclosedHtml = markdownToTelegramHtml(
+    "**unclosed *ital `code ~~strike [link](https://a.example/x(y\n```\nconst a = 1 < 2;",
+  );
+  assertValidTelegramHtml(unclosedHtml, 4096);
+  assert.ok(
+    unclosedHtml.includes("<pre><code>const a = 1 &lt; 2;</code></pre>"),
+  );
+
+  // Degenerate oversized single link and oversized single inline code span stay valid within maxLength
+  const hugeLink = `[длинная ссылка](https://wiki.spruthub.ru/${"шаблон_".repeat(15)})`;
+  const hugeLinkChunks = splitTelegramHtmlChunks(hugeLink, 60);
+  assert.ok(hugeLinkChunks.length >= 2);
+  for (const chunk of hugeLinkChunks) {
+    assertValidTelegramHtml(chunk.html, 60);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 60);
+    assertNoLoneSurrogates(chunk.plain, "hugeLink plain");
+  }
+
+  const hugeInlineCode = `\`${"a&b<c🔥".repeat(20)}\``;
+  const hugeCodeChunks = splitTelegramHtmlChunks(hugeInlineCode, 50);
+  assert.ok(hugeCodeChunks.length >= 3);
+  for (const chunk of hugeCodeChunks) {
+    assertValidTelegramHtml(chunk.html, 50);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 50);
+    assertNoLoneSurrogates(chunk.plain, "hugeInlineCode plain");
+  }
+
+  // Plain length > HTML length (e.g. "### **...**") must still enforce plain.length <= maxLength
+  const verboseMarkdownHeading = `### **${"Заголовок ".repeat(6)}**`;
+  const headingChunks = splitTelegramHtmlChunks(verboseMarkdownHeading, 45);
+  assert.ok(headingChunks.length >= 2);
+  for (const chunk of headingChunks) {
+    assertValidTelegramHtml(chunk.html, 45);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 45);
+  }
+});
+
+test("TelegramApi supports silent sendMessage, HTML editMessageText with parse fallback and not-modified ignore, and deleteMessage", async (t) => {
+  const { TelegramApi, TelegramApiError } = await import(
+    "../telegram/telegram-api.mjs"
+  );
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  const sent = await api.sendMessage(2001, "Статус **1**", {
+    disableNotification: true,
+  });
+  assert.equal(sent.length, 1);
+  const msgId = sent[0].message_id;
+  const sentBody = tg.sentMessages(2001)[0];
+  assert.equal(sentBody.disable_notification, true);
+  assert.equal(sentBody.parse_mode, "HTML");
+
+  // Edit with HTML formatting + secret scrubbing
+  await api.editMessageText(2001, msgId, `Статус **2** ${TEST_TOKEN}`);
+  const edit1 = tg.editedMessages(2001)[0];
+  assert.equal(edit1.message_id, msgId);
+  assert.equal(edit1.parse_mode, "HTML");
+  assert.deepEqual(edit1.link_preview_options, { is_disabled: true });
+  assert.equal(edit1.text, "Статус <b>2</b> [REDACTED]");
+  assert.equal(edit1.text.includes(TEST_TOKEN), false);
+
+  // Editing with identical content returns "message is not modified" 400 and must resolve cleanly
+  const unchanged = await api.editMessageText(
+    2001,
+    msgId,
+    `Статус **2** ${TEST_TOKEN}`,
+  );
+  assert.equal(unchanged, null);
+
+  // HTTP 400 HTML parse error on edit falls back to plain text
+  const editsBeforeFallback = tg.editedMessages(2001).length;
+  tg.failNext("editMessageText", {
+    status: 400,
+    description: "Bad Request: can't parse entities: unclosed start tag",
+  });
+  await api.editMessageText(2001, msgId, "Статус **3**");
+  const fallbackEdits = tg.editedMessages(2001).slice(editsBeforeFallback);
+  assert.equal(fallbackEdits.length, 2);
+  assert.equal(fallbackEdits[0].parse_mode, "HTML");
+  assert.equal(fallbackEdits[1].parse_mode, undefined);
+  assert.equal(fallbackEdits[1].text, "Статус **3**");
+
+  // Non-parse 500 error on edit must still reject
+  tg.failNext("editMessageText", { status: 500, description: "Server error" });
+  await assert.rejects(
+    () => api.editMessageText(2001, msgId, "Статус **4**"),
+    (err) => err instanceof TelegramApiError && err.status === 500,
+  );
+
+  // deleteMessage sends chat_id and message_id
+  await api.deleteMessage(2001, msgId);
+  const deleted = tg.deletedMessages(2001);
+  assert.equal(deleted.length, 1);
+  assert.deepEqual(deleted[0], { chat_id: 2001, message_id: msgId });
+});
+
+test("TelegramBotRunner shows a single silent in-place progress status on long turns, redacts commentary secrets, and deletes it before the final or error reply", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1000 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 120,
+    progressEditIntervalMs: 60,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  // 1. Long turn with NO commentary (also warms up the app-server child):
+  //    silent fallback "Работаю над запросом…", deleted before final reply
+  const callsBeforeSilent = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(701, 1001, "[LONG_SILENT]"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Готово без комментариев."),
+  );
+  const silentTurnCalls = harness.tg.calls
+    .slice(callsBeforeSilent)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    silentTurnCalls.map((c) => c.method),
+    ["sendMessage", "deleteMessage", "sendMessage"],
+  );
+  assert.equal(silentTurnCalls[0].body.disable_notification, true);
+  assert.equal(silentTurnCalls[0].body.text, "Работаю над запросом…");
+  assert.equal(silentTurnCalls[2].body.disable_notification, undefined);
+  assert.equal(silentTurnCalls[2].body.text, "Готово без комментариев.");
+
+  // 2. Fast turn on warm session (< progressDelayMs): ZERO progress messages, ZERO edits, ZERO deletes
+  const callsBeforeFast = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(702, 1001, "Быстрый запрос"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Быстрый запрос"),
+  );
+  const fastCalls = harness.tg.calls
+    .slice(callsBeforeFast)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    fastCalls.map((c) => c.method),
+    ["sendMessage"],
+    "fast turn must send only the final reply without any progress message",
+  );
+  assert.equal(fastCalls[0].body.text, "Ответ[thr_1]: Быстрый запрос");
+  assert.equal(fastCalls[0].body.disable_notification, undefined);
+
+  // 3. Long turn with commentary updates + secret in commentary:
+  //    1 silent send -> in-place edit(s) on same message_id -> delete before final reply
+  const callsBeforeCommentary = harness.tg.calls.length;
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(
+      703,
+      1001,
+      `[LONG_COMMENTARY] SECRET=${TEST_TOKEN}`,
+    ),
+  );
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Итоговый ответ после диагностики."),
+  );
+
+  const commentaryCalls = harness.tg.calls
+    .slice(callsBeforeCommentary)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  const sends = commentaryCalls.filter((c) => c.method === "sendMessage");
+  const edits = commentaryCalls.filter((c) => c.method === "editMessageText");
+  const deletes = commentaryCalls.filter((c) => c.method === "deleteMessage");
+
+  assert.equal(
+    sends.length,
+    2,
+    "must send exactly 1 silent progress message + 1 final reply",
+  );
+  assert.equal(
+    sends[0].body.disable_notification,
+    true,
+    "progress status message must be silent",
+  );
+  assert.equal(
+    sends[0].body.text.includes(TEST_TOKEN),
+    false,
+    "progress status must never leak TELEGRAM_BOT_TOKEN",
+  );
+  assert.match(sends[0].body.text, /\[REDACTED\]/);
+  assert.ok(
+    edits.length >= 1,
+    "newer commentary must update the status message in place",
+  );
+  assert.equal(
+    deletes.length,
+    1,
+    "temporary status message must be deleted before the final reply",
+  );
+
+  const statusMsgId = deletes[0].body.message_id;
+  for (const edit of edits) {
+    assert.equal(
+      edit.body.message_id,
+      statusMsgId,
+      "all progress edits must target the same single status message",
+    );
+    assert.equal(
+      edit.body.text.includes(TEST_TOKEN),
+      false,
+      "edited progress status must never leak TELEGRAM_BOT_TOKEN",
+    );
+  }
+  assert.ok(
+    edits.some(
+      (e) =>
+        e.body.text.includes("<b>ZigBee</b>") ||
+        e.body.text.includes("Собираю ответ…"),
+    ),
+    "in-place edits must show updated formatted commentary",
+  );
+  assert.equal(
+    sends[1].body.disable_notification,
+    undefined,
+    "final reply must notify normally",
+  );
+  assert.equal(sends[1].body.text, "Итоговый ответ после диагностики.");
+
+  // Verify chronological ordering: silent send < edits < delete < final send
+  const idxSilentSend = commentaryCalls.indexOf(sends[0]);
+  const idxLastEdit = commentaryCalls.indexOf(edits[edits.length - 1]);
+  const idxDelete = commentaryCalls.indexOf(deletes[0]);
+  const idxFinalSend = commentaryCalls.indexOf(sends[1]);
+  assert.ok(idxSilentSend < idxLastEdit, "edits must follow initial send");
+  assert.ok(idxLastEdit < idxDelete, "delete must follow all edits");
+  assert.ok(idxDelete < idxFinalSend, "delete must happen before final reply");
+
+  // 4. Long turn that times out -> status message deleted before error reply
+  const callsBeforeTimeout = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(704, 1001, "[HANG]"));
+  await waitFor(() => {
+    const after = harness.tg.calls
+      .slice(callsBeforeTimeout)
+      .filter((c) => c.method === "sendMessage" && c.body.chat_id === 1001);
+    return after.length >= 2;
+  });
+  const timeoutCalls = harness.tg.calls
+    .slice(callsBeforeTimeout)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" || c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    timeoutCalls.map((c) => c.method),
+    ["sendMessage", "deleteMessage", "sendMessage"],
+  );
+  assert.equal(timeoutCalls[0].body.disable_notification, true);
+  assert.equal(timeoutCalls[2].body.disable_notification, undefined);
+});
+
+test("TelegramBotRunner does not retry-storm on progress editMessageText 429, permanent 400, or 500 errors and still delivers final replies", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 90,
+    progressEditIntervalMs: 30,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  // Warm up app-server child first so turn timings are deterministic
+  harness.tg.pushUpdate(makePrivateMessageUpdate(800, 1001, "Прогрев"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Прогрев"),
+  );
+
+  // Case A: Persistent HTTP 429 with retry_after=30 on editMessageText must back off instead of retry-storming
+  const callsBefore429 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 429,
+      description: "Too Many Requests: retry after 30",
+      parameters: { retry_after: 30 },
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(801, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore429)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const calls429 = harness.tg.calls
+    .slice(callsBefore429)
+    .filter((c) => c.body.chat_id === 1001);
+  const edits429 = calls429.filter((c) => c.method === "editMessageText");
+  const deletes429 = calls429.filter((c) => c.method === "deleteMessage");
+  assert.equal(
+    edits429.length,
+    1,
+    `HTTP 429 retry_after=30 must not retry-storm editMessageText (got ${edits429.length} calls)`,
+  );
+  assert.equal(
+    deletes429.length,
+    1,
+    "status message must still be deleted after 429 edit failure",
+  );
+
+  // Case B: Persistent HTTP 400 "message to edit not found" disables further edits & skips delete
+  harness.tg.clearFaults("editMessageText");
+  const callsBefore400 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 400,
+      description: "Bad Request: message to edit not found",
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(802, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore400)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const calls400 = harness.tg.calls
+    .slice(callsBefore400)
+    .filter((c) => c.body.chat_id === 1001);
+  const edits400 = calls400.filter((c) => c.method === "editMessageText");
+  const deletes400 = calls400.filter((c) => c.method === "deleteMessage");
+  assert.equal(
+    edits400.length,
+    1,
+    `permanent 400 edit failure must stop further edits (got ${edits400.length} calls)`,
+  );
+  assert.equal(
+    deletes400.length,
+    0,
+    "vanished status message (message to edit not found) must not trigger pointless deleteMessage",
+  );
+
+  await runner.stop();
+
+  // Case C: progressEditIntervalMs=0 with persistent HTTP 500 on editMessageText must not spin/starve
+  harness.tg.clearFaults("editMessageText");
+  const runnerZero = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 90,
+    progressEditIntervalMs: 0,
+    logger: () => {},
+  });
+  await runnerZero.start();
+  harness.onCleanup(() => runnerZero.stop());
+
+  harness.tg.pushUpdate(makePrivateMessageUpdate(803, 1001, "Прогрев 2"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Прогрев 2"),
+  );
+
+  const callsBefore500 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 500,
+      description: "Internal Server Error",
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(804, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore500)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const edits500 = harness.tg.calls
+    .slice(callsBefore500)
+    .filter((c) => c.method === "editMessageText" && c.body.chat_id === 1001);
+  assert.ok(
+    edits500.length >= 1 && edits500.length <= 2,
+    `HTTP 500 with progressEditIntervalMs=0 must never retry-storm same text (got ${edits500.length} calls)`,
+  );
+});
+
+test("splitTelegramHtmlChunks and TelegramApi never emit empty HTML chunks or exceed tiny maxLength with entities", async (t) => {
+  const { splitTelegramHtmlChunks } = await import(
+    "../telegram/format-html.mjs"
+  );
+  const { TelegramApi } = await import("../telegram/telegram-api.mjs");
+
+  // 1. Fenced code block split around a blank line or trailing blank line (P2)
+  const codeWithBlankLine = `\`\`\`js\n${"a".repeat(66)}\n\n${"b".repeat(66)}\n\`\`\``;
+  const blankSplitChunks = splitTelegramHtmlChunks(codeWithBlankLine, 90);
+  assert.equal(blankSplitChunks.length, 2);
+  for (const chunk of blankSplitChunks) {
+    assertValidTelegramHtml(chunk.html, 90);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+  }
+  assert.ok(blankSplitChunks[0].html.includes("a".repeat(66)));
+  assert.ok(blankSplitChunks[1].html.includes("b".repeat(66)));
+
+  const codeTrailingBlank = `\`\`\`js\n${"a".repeat(66)}\n\n\`\`\``;
+  const trailingBlankChunks = splitTelegramHtmlChunks(codeTrailingBlank, 90);
+  assert.equal(trailingBlankChunks.length, 1);
+  assertValidTelegramHtml(trailingBlankChunks[0].html, 90);
+
+  // 2. Empty and whitespace-only fenced code blocks & whitespace-only inline code spans (P2)
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  for (const sample of [
+    "```\n```",
+    "```\n   \n```",
+    "```json\n   \t  \n```",
+    "`   `",
+  ]) {
+    const chunks = splitTelegramHtmlChunks(sample, 90);
+    assert.ok(
+      chunks.length >= 1,
+      `sample ${JSON.stringify(sample)} must yield chunks`,
+    );
+    for (const chunk of chunks) {
+      assertValidTelegramHtml(chunk.html, 90);
+      assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+    }
+    // Must succeed against Telegram mock server rejecting visibly-empty HTML
+    const delivered = await api.sendMessage(3001, sample);
+    assert.ok(delivered.length >= 1);
+  }
+
+  // Oversized inline code span containing a huge whitespace run must not emit whitespace-only <code> chunk
+  const spacedInlineCode = `\`${"a".repeat(35)}${" ".repeat(70)}${"b".repeat(35)}\``;
+  const spacedInlineChunks = splitTelegramHtmlChunks(spacedInlineCode, 50);
+  assert.ok(spacedInlineChunks.length >= 2);
+  for (const chunk of spacedInlineChunks) {
+    assertValidTelegramHtml(chunk.html, 50);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 50);
+  }
+
+  // 3. Fenced code block at maxLength in 25..29 with HTML-escapable chars must never exceed maxLength (P3)
+  for (const maxLen of [25, 26, 27, 28, 29]) {
+    for (const sample of ["```\n&&&\n```", "```\n&&&&&&&&&&\n```"]) {
+      const chunks = splitTelegramHtmlChunks(sample, maxLen);
+      assert.ok(chunks.length >= 1);
+      for (const chunk of chunks) {
+        assertValidTelegramHtml(chunk.html, maxLen);
+        assert.ok(chunk.plain.length > 0 && chunk.plain.length <= maxLen);
+        assertNoLoneSurrogates(chunk.plain, `code plain maxLen=${maxLen}`);
+      }
+    }
+  }
 });
