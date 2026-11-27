@@ -75,6 +75,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
   const updates = [];
   const files = new Map();
   const methodFaults = new Map();
+  const messageSnapshots = new Map();
   let ackedOffset = 0;
   let pendingPolls = [];
 
@@ -197,11 +198,71 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
         );
         return;
       }
+      const messageId = calls.length;
+      messageSnapshots.set(`${body.chat_id}:${messageId}`, {
+        text,
+        parse_mode: body.parse_mode ?? null,
+      });
       sendOk({
-        message_id: calls.length,
+        message_id: messageId,
         chat: { id: body.chat_id, type: "private" },
         text,
       });
+      return;
+    }
+    if (method === "editMessageText") {
+      const text = String(body.text ?? "");
+      if (text.length === 0) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description: "Bad Request: message text is empty",
+          }),
+        );
+        return;
+      }
+      if (text.length > 4096) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description: "Bad Request: message is too long",
+          }),
+        );
+        return;
+      }
+      const key = `${body.chat_id}:${body.message_id}`;
+      const prev = messageSnapshots.get(key);
+      if (
+        prev &&
+        prev.text === text &&
+        prev.parse_mode === (body.parse_mode ?? null)
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            description:
+              "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message",
+          }),
+        );
+        return;
+      }
+      messageSnapshots.set(key, {
+        text,
+        parse_mode: body.parse_mode ?? null,
+      });
+      sendOk({
+        message_id: body.message_id,
+        chat: { id: body.chat_id, type: "private" },
+        text,
+      });
+      return;
+    }
+    if (method === "deleteMessage") {
+      messageSnapshots.delete(`${body.chat_id}:${body.message_id}`);
+      sendOk(true);
       return;
     }
     if (method === "getFile") {
@@ -296,6 +357,24 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
         .filter(
           (call) =>
             call.method === "sendMessage" &&
+            (chatId === null || call.body.chat_id === chatId),
+        )
+        .map((call) => call.body);
+    },
+    editedMessages(chatId = null) {
+      return calls
+        .filter(
+          (call) =>
+            call.method === "editMessageText" &&
+            (chatId === null || call.body.chat_id === chatId),
+        )
+        .map((call) => call.body);
+    },
+    deletedMessages(chatId = null) {
+      return calls
+        .filter(
+          (call) =>
+            call.method === "deleteMessage" &&
             (chatId === null || call.body.chat_id === chatId),
         )
         .map((call) => call.body);
@@ -779,6 +858,87 @@ rl.on("line", async (line) => {
             type: "agentMessage",
             phase: "final_answer",
             text: "Вижу фото (" + imageItem.url.slice(0, 32) + ") и подпись: " + prompt,
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[LONG_COMMENTARY]")) {
+      const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Проверяю устройства и токен " + secretToken + "…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Читаю журнал **ZigBee**…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "commentary",
+            text: "Собираю ответ…",
+          },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Итоговый ответ после диагностики.",
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
+    if (prompt.includes("[LONG_SILENT]")) {
+      await new Promise((resolve) => setTimeout(resolve, 140));
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "Готово без комментариев.",
           },
         },
       });
@@ -2399,4 +2559,234 @@ test("markdownToTelegramHtml and splitTelegramHtmlChunks handle edge cases, chun
     assertValidTelegramHtml(chunk.html, 45);
     assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 45);
   }
+});
+
+test("TelegramApi supports silent sendMessage, HTML editMessageText with parse fallback and not-modified ignore, and deleteMessage", async (t) => {
+  const { TelegramApi, TelegramApiError } = await import(
+    "../telegram/telegram-api.mjs"
+  );
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  const sent = await api.sendMessage(2001, "Статус **1**", {
+    disableNotification: true,
+  });
+  assert.equal(sent.length, 1);
+  const msgId = sent[0].message_id;
+  const sentBody = tg.sentMessages(2001)[0];
+  assert.equal(sentBody.disable_notification, true);
+  assert.equal(sentBody.parse_mode, "HTML");
+
+  // Edit with HTML formatting + secret scrubbing
+  await api.editMessageText(2001, msgId, `Статус **2** ${TEST_TOKEN}`);
+  const edit1 = tg.editedMessages(2001)[0];
+  assert.equal(edit1.message_id, msgId);
+  assert.equal(edit1.parse_mode, "HTML");
+  assert.deepEqual(edit1.link_preview_options, { is_disabled: true });
+  assert.equal(edit1.text, "Статус <b>2</b> [REDACTED]");
+  assert.equal(edit1.text.includes(TEST_TOKEN), false);
+
+  // Editing with identical content returns "message is not modified" 400 and must resolve cleanly
+  const unchanged = await api.editMessageText(
+    2001,
+    msgId,
+    `Статус **2** ${TEST_TOKEN}`,
+  );
+  assert.equal(unchanged, null);
+
+  // HTTP 400 HTML parse error on edit falls back to plain text
+  const editsBeforeFallback = tg.editedMessages(2001).length;
+  tg.failNext("editMessageText", {
+    status: 400,
+    description: "Bad Request: can't parse entities: unclosed start tag",
+  });
+  await api.editMessageText(2001, msgId, "Статус **3**");
+  const fallbackEdits = tg.editedMessages(2001).slice(editsBeforeFallback);
+  assert.equal(fallbackEdits.length, 2);
+  assert.equal(fallbackEdits[0].parse_mode, "HTML");
+  assert.equal(fallbackEdits[1].parse_mode, undefined);
+  assert.equal(fallbackEdits[1].text, "Статус **3**");
+
+  // Non-parse 500 error on edit must still reject
+  tg.failNext("editMessageText", { status: 500, description: "Server error" });
+  await assert.rejects(
+    () => api.editMessageText(2001, msgId, "Статус **4**"),
+    (err) => err instanceof TelegramApiError && err.status === 500,
+  );
+
+  // deleteMessage sends chat_id and message_id
+  await api.deleteMessage(2001, msgId);
+  const deleted = tg.deletedMessages(2001);
+  assert.equal(deleted.length, 1);
+  assert.deepEqual(deleted[0], { chat_id: 2001, message_id: msgId });
+});
+
+test("TelegramBotRunner shows a single silent in-place progress status on long turns, redacts commentary secrets, and deletes it before the final or error reply", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 550 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 60,
+    progressEditIntervalMs: 50,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  // 1. Fast turn (< progressDelayMs): ZERO progress messages, ZERO edits, ZERO deletes
+  harness.tg.pushUpdate(makePrivateMessageUpdate(700, 1001, "Быстрый запрос"));
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+  assert.equal(
+    harness.tg.sentMessages(1001)[0].text,
+    "Ответ[thr_1]: Быстрый запрос",
+  );
+  assert.equal(
+    harness.tg.sentMessages(1001)[0].disable_notification,
+    undefined,
+  );
+  assert.equal(harness.tg.editedMessages(1001).length, 0);
+  assert.equal(harness.tg.deletedMessages(1001).length, 0);
+
+  // 2. Long turn with commentary updates + secret in commentary:
+  //    1 silent send -> in-place edit(s) on same message_id -> delete before final reply
+  const callsBeforeCommentary = harness.tg.calls.length;
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(
+      701,
+      1001,
+      `[LONG_COMMENTARY] SECRET=${TEST_TOKEN}`,
+    ),
+  );
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Итоговый ответ после диагностики."),
+  );
+
+  const commentaryCalls = harness.tg.calls
+    .slice(callsBeforeCommentary)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  const sends = commentaryCalls.filter((c) => c.method === "sendMessage");
+  const edits = commentaryCalls.filter((c) => c.method === "editMessageText");
+  const deletes = commentaryCalls.filter((c) => c.method === "deleteMessage");
+
+  assert.equal(
+    sends.length,
+    2,
+    "must send exactly 1 silent progress message + 1 final reply",
+  );
+  assert.equal(
+    sends[0].body.disable_notification,
+    true,
+    "progress status message must be silent",
+  );
+  assert.equal(
+    sends[0].body.text.includes(TEST_TOKEN),
+    false,
+    "progress status must never leak TELEGRAM_BOT_TOKEN",
+  );
+  assert.match(sends[0].body.text, /\[REDACTED\]/);
+  assert.ok(
+    edits.length >= 1,
+    "newer commentary must update the status message in place",
+  );
+  assert.equal(
+    deletes.length,
+    1,
+    "temporary status message must be deleted before the final reply",
+  );
+
+  const statusMsgId = deletes[0].body.message_id;
+  for (const edit of edits) {
+    assert.equal(
+      edit.body.message_id,
+      statusMsgId,
+      "all progress edits must target the same single status message",
+    );
+  }
+  assert.ok(
+    edits.some(
+      (e) =>
+        e.body.text.includes("<b>ZigBee</b>") ||
+        e.body.text.includes("Собираю ответ…"),
+    ),
+    "in-place edits must show updated formatted commentary",
+  );
+  assert.equal(
+    sends[1].body.disable_notification,
+    undefined,
+    "final reply must notify normally",
+  );
+  assert.equal(sends[1].body.text, "Итоговый ответ после диагностики.");
+
+  // Verify chronological ordering: silent send < edits < delete < final send
+  const idxSilentSend = commentaryCalls.indexOf(sends[0]);
+  const idxLastEdit = commentaryCalls.indexOf(edits[edits.length - 1]);
+  const idxDelete = commentaryCalls.indexOf(deletes[0]);
+  const idxFinalSend = commentaryCalls.indexOf(sends[1]);
+  assert.ok(idxSilentSend < idxLastEdit, "edits must follow initial send");
+  assert.ok(idxLastEdit < idxDelete, "delete must follow all edits");
+  assert.ok(idxDelete < idxFinalSend, "delete must happen before final reply");
+
+  // 3. Long turn with NO commentary -> silent fallback "Работаю над запросом…", deleted before final reply
+  const callsBeforeSilent = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(702, 1001, "[LONG_SILENT]"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Готово без комментариев."),
+  );
+  const silentTurnCalls = harness.tg.calls
+    .slice(callsBeforeSilent)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    silentTurnCalls.map((c) => c.method),
+    ["sendMessage", "deleteMessage", "sendMessage"],
+  );
+  assert.equal(silentTurnCalls[0].body.disable_notification, true);
+  assert.equal(silentTurnCalls[0].body.text, "Работаю над запросом…");
+  assert.equal(silentTurnCalls[2].body.disable_notification, undefined);
+  assert.equal(silentTurnCalls[2].body.text, "Готово без комментариев.");
+
+  // 4. Long turn that times out -> status message deleted before error reply
+  const callsBeforeTimeout = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(703, 1001, "[HANG]"));
+  await waitFor(() => {
+    const after = harness.tg.calls
+      .slice(callsBeforeTimeout)
+      .filter((c) => c.method === "sendMessage" && c.body.chat_id === 1001);
+    return after.length >= 2;
+  });
+  const timeoutCalls = harness.tg.calls
+    .slice(callsBeforeTimeout)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" || c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    timeoutCalls.map((c) => c.method),
+    ["sendMessage", "deleteMessage", "sendMessage"],
+  );
+  assert.equal(timeoutCalls[0].body.disable_notification, true);
+  assert.equal(timeoutCalls[2].body.disable_notification, undefined);
 });
