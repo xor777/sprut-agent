@@ -2256,6 +2256,11 @@ test("characteristic widget warns on duplicate characteristic_type across >=2 de
     pDupCreate.warnings.some((message) => message.includes("C_Watt")),
     `warning must name repeated type C_Watt: ${JSON.stringify(pDupCreate.warnings)}`,
   );
+  assert.match(
+    pDupCreate.warning,
+    /show_rooms|service/i,
+    "characteristic duplicate warning should recommend service widget with show_rooms: true for sensor/meter tiles",
+  );
 
   // 2. Same accessory with different characteristic types (C_Watt + C_KiloWattHour) -> NO warning!
   const pSameDevice = await call(client, "prepare_native_change", {
@@ -2305,7 +2310,8 @@ test("characteristic widget warns on duplicate characteristic_type across >=2 de
   assert.equal(pDupUpdate.status, "prepared");
   assert.ok(pDupUpdate.warnings?.some((message) => message.includes("C_Watt")));
 
-  // 5. Strengthened HISTORY_MISSING_WARNING advises against empty chart placeholders and notes microSD/USB.
+  // 5. Strengthened HISTORY_MISSING_WARNING advises against empty chart placeholders and notes microSD/USB;
+  //    chart with duplicate C_Watt across 2 accessories ALSO emits the duplicate-characteristic warning!
   const pChartMissing = await call(client, "prepare_native_change", {
     operation: "dashboard_widget_create",
     target_ref: colRef,
@@ -2318,9 +2324,13 @@ test("characteristic widget warns on duplicate characteristic_type across >=2 de
     reason: "График без приложения История",
   });
   assert.equal(pChartMissing.history_app_missing, true);
-  assert.equal(pChartMissing.warnings?.length, 1);
+  assert.equal(pChartMissing.warnings?.length, 2);
+  assert.ok(
+    pChartMissing.warnings.some((message) => message.includes("C_Watt")),
+    `chart duplicate warning must name C_Watt: ${JSON.stringify(pChartMissing.warnings)}`,
+  );
   assert.match(pChartMissing.warning, /microSD|USB/i);
-  assert.match(pChartMissing.warning, /characteristic/i);
+  assert.match(pChartMissing.warning, /service|characteristic/i);
   assert.match(pChartMissing.warning, /placeholder|empty|by default/i);
 });
 
@@ -3194,4 +3204,827 @@ test("review return 1: interrupted restore retry on double-spaced baseline, refu
       );
     },
   );
+});
+
+test("shortcut widget: get_entity enrichment (and zero dashboard.list without shortcuts), prepare/apply missing-dashboard guards, and restore safety", async (t) => {
+  const { hub, client } = await setup(t);
+
+  // Create target dashboards (including one with a secret-shaped name) and a hub/main dashboard.
+  const { applied: mainDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Главная",
+    column_names: ["Навигация", "Вторая"],
+    reason: "Главная панель навигации",
+  });
+  const { applied: climateDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Климат",
+    reason: "Панель климата",
+  });
+  const { applied: energyDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Энергия",
+    reason: "Панель энергии",
+  });
+  const SECRET = "sk-ant-api03-shortcutsecret1234567890abcdef";
+  const secretDashRaw = hub.request({
+    dashboard: { create: { name: `Секрет Bearer ${SECRET}` } },
+  }).result.dashboard.create;
+  const secretDashId = secretDashRaw.id;
+
+  const mainDashRef = mainDash.created_dashboard_ref;
+  const navColRef = mainDash.created_columns[0].ref;
+  const secondColRef = mainDash.created_columns[1].ref;
+  const climateDashId = Number(
+    climateDash.created_dashboard_ref.split("/").at(-1),
+  );
+  const energyDashId = Number(
+    energyDash.created_dashboard_ref.split("/").at(-1),
+  );
+
+  // 1. get_entity on dashboard/column/widget WITHOUT any shortcut widget sends ZERO dashboard.list RPCs!
+  const { applied: clockW } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: navColRef,
+    widget: { type: "clock", name: "Часы" },
+    reason: "Часы без shortcut",
+  });
+  const listCallsBefore = hub.requests.filter(
+    ({ method }) => method === "dashboard.list",
+  ).length;
+  await call(client, "get_entity", { entity_ref: mainDashRef });
+  await call(client, "get_entity", { entity_ref: navColRef });
+  await call(client, "get_entity", { entity_ref: clockW.created_widget_ref });
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboard.list").length,
+    listCallsBefore,
+    "get_entity without shortcut widgets must NOT call dashboard.list",
+  );
+
+  // 2. prepare rejects nonexistent shortcut_ids with entity_not_found, and duplicate IDs with invalid_native_value + inline contract.
+  const missingCreateErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: navColRef,
+    widget: {
+      type: "shortcut",
+      name: "Дашборды",
+      shortcut_ids: [climateDashId, 9999],
+    },
+    reason: "Несуществующий дашборд в shortcut",
+  });
+  assert.equal(missingCreateErr.error.code, "entity_not_found");
+
+  const dupIdsErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: navColRef,
+    widget: {
+      type: "shortcut",
+      name: "Дубль",
+      shortcut_ids: [climateDashId, climateDashId],
+    },
+    reason: "Дубликат ID в shortcut",
+  });
+  assert.equal(dupIdsErr.error.code, "invalid_native_value");
+  assert.ok(dupIdsErr.contract !== undefined);
+
+  // 3. Create shortcut widget referencing existing dashboards (including secret-named dashboard) -> get_entity enriches dashboard_ref + redacted dashboard_name!
+  const { applied: shortcutW } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: navColRef,
+    widget: {
+      type: "shortcut",
+      name: "Разделы",
+      shortcut_ids: [climateDashId, energyDashId, secretDashId],
+    },
+    reason: "Ссылки на тематические панели",
+  });
+
+  // Also test dashboard_widget_update rejecting nonexistent shortcut_ids on prepare:
+  const missingUpdateErr = await callError(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: shortcutW.created_widget_ref,
+    widget: {
+      type: "shortcut",
+      name: "Разделы",
+      shortcut_ids: [9999],
+    },
+    reason: "Обновить на несуществующий дашборд",
+  });
+  assert.equal(missingUpdateErr.error.code, "entity_not_found");
+
+  for (const entityRef of [
+    mainDashRef,
+    navColRef,
+    shortcutW.created_widget_ref,
+  ]) {
+    const listsBefore = hub.requests.filter(
+      ({ method }) => method === "dashboard.list",
+    ).length;
+    const res = await call(client, "get_entity", { entity_ref: entityRef });
+    assert.equal(
+      JSON.stringify(res).includes(SECRET),
+      false,
+      "secret in target dashboard name must never leak through shortcut enrichment",
+    );
+    assert.equal(
+      hub.requests.filter(({ method }) => method === "dashboard.list").length,
+      listsBefore + 1,
+      `get_entity(${entityRef}) with shortcut widget should call dashboard.list exactly once`,
+    );
+    const widget =
+      res.entity.kind === "dashboard_widget"
+        ? res.entity
+        : res.entity.kind === "dashboard_column"
+          ? res.entity.widgets.find(
+              ({ ref }) => ref === shortcutW.created_widget_ref,
+            )
+          : res.entity.columns[0].widgets.find(
+              ({ ref }) => ref === shortcutW.created_widget_ref,
+            );
+    assert.deepEqual(widget.shortcut_ids, [
+      climateDashId,
+      energyDashId,
+      secretDashId,
+    ]);
+    assert.deepEqual(widget.items[0], {
+      id: climateDashId,
+      dashboard_ref: climateDash.created_dashboard_ref,
+      dashboard_name: "Климат",
+    });
+    assert.deepEqual(widget.items[1], {
+      id: energyDashId,
+      dashboard_ref: energyDash.created_dashboard_ref,
+      dashboard_name: "Энергия",
+    });
+    assert.equal(widget.items[2].id, secretDashId);
+    assert.equal(
+      widget.items[2].dashboard_ref,
+      `${HOME_REF}/dashboard/${secretDashId}`,
+    );
+    assert.ok(widget.items[2].dashboard_name.includes("[REDACTED]"));
+    assert.equal(widget.items[2].missing, undefined);
+  }
+
+  // 4. Target dashboard deleted between prepare and apply -> conflict: referenced_entity_missing (0 writes)!
+  const { applied: ephemeralDash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Временная панель",
+    reason: "Панель для проверки исчезновения перед apply",
+  });
+  const ephemeralDashId = Number(
+    ephemeralDash.created_dashboard_ref.split("/").at(-1),
+  );
+  const pShortcutCreateConflict = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: secondColRef,
+    widget: {
+      type: "shortcut",
+      name: "На временную",
+      shortcut_ids: [ephemeralDashId],
+    },
+    reason: "Ссылка на панель, которую удалят до apply",
+  });
+  const pShortcutUpdateConflict = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: shortcutW.created_widget_ref,
+    widget: {
+      type: "shortcut",
+      name: "Разделы 2",
+      shortcut_ids: [climateDashId, ephemeralDashId],
+    },
+    reason: "Обновить на панель, которую удалят до apply",
+  });
+  hub.request({ dashboard: { delete: { id: ephemeralDashId } } });
+
+  const widgetCreatesBefore = hub.requests.filter(
+    ({ method }) => method === "dashboardWidget.create",
+  ).length;
+  const aCreateMissing = await call(client, "apply_native_change", {
+    change_ref: pShortcutCreateConflict.change_ref,
+  });
+  assert.equal(aCreateMissing.status, "conflict");
+  assert.equal(aCreateMissing.conflict_reason, "referenced_entity_missing");
+  assert.deepEqual(aCreateMissing.missing_refs, [
+    ephemeralDash.created_dashboard_ref,
+  ]);
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.create")
+      .length,
+    widgetCreatesBefore,
+  );
+
+  const widgetUpdatesBefore = hub.requests.filter(
+    ({ method }) => method === "dashboardWidget.update",
+  ).length;
+  const aUpdateMissing = await call(client, "apply_native_change", {
+    change_ref: pShortcutUpdateConflict.change_ref,
+  });
+  assert.equal(aUpdateMissing.status, "conflict");
+  assert.equal(aUpdateMissing.conflict_reason, "referenced_entity_missing");
+  assert.deepEqual(aUpdateMissing.missing_refs, [
+    ephemeralDash.created_dashboard_ref,
+  ]);
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "dashboardWidget.update")
+      .length,
+    widgetUpdatesBefore,
+  );
+
+  // 5. Deleting secretDashId marks it missing: true on get_entity and guards single-widget restore!
+  // First prepare and apply a widget update changing shortcutW away from secretDashId -> clock, then delete secretDashId and try to restore update!
+  const { applied: updatedAway } = await prepareAndApply(client, {
+    operation: "dashboard_widget_update",
+    target_ref: shortcutW.created_widget_ref,
+    widget: {
+      type: "shortcut",
+      name: "Только климат и энергия",
+      shortcut_ids: [climateDashId, energyDashId],
+    },
+    reason: "Убрать секретную панель из меню",
+  });
+  hub.request({ dashboard: { delete: { id: secretDashId } } });
+  const restoreUpdateMissing = await call(client, "restore_native_change", {
+    change_ref: updatedAway.change_ref,
+  });
+  assert.equal(restoreUpdateMissing.status, "conflict");
+  assert.equal(
+    restoreUpdateMissing.conflict_reason,
+    "referenced_entity_missing",
+  );
+  assert.deepEqual(restoreUpdateMissing.missing_refs, [
+    `${HOME_REF}/dashboard/${secretDashId}`,
+  ]);
+
+  // Deleting energyDash marks it missing: true on get_entity!
+  hub.request({ dashboard: { delete: { id: energyDashId } } });
+  const shortcutAfterTargetDelete = await call(client, "get_entity", {
+    entity_ref: shortcutW.created_widget_ref,
+  });
+  assert.deepEqual(shortcutAfterTargetDelete.entity.shortcut_ids, [
+    climateDashId,
+    energyDashId,
+  ]);
+  assert.deepEqual(shortcutAfterTargetDelete.entity.items, [
+    {
+      id: climateDashId,
+      dashboard_ref: climateDash.created_dashboard_ref,
+      dashboard_name: "Климат",
+    },
+    {
+      id: energyDashId,
+      dashboard_ref: energyDash.created_dashboard_ref,
+      dashboard_name: null,
+      missing: true,
+    },
+  ]);
+
+  // 6. Single dashboard_widget_delete restore conflicts with referenced_entity_missing!
+  const { applied: deletedShortcut } = await prepareAndApply(client, {
+    operation: "dashboard_widget_delete",
+    target_ref: shortcutW.created_widget_ref,
+    reason: "Удалить виджет со сломанной ссылкой",
+  });
+  const restoreDelMissing = await call(client, "restore_native_change", {
+    change_ref: deletedShortcut.change_ref,
+  });
+  assert.equal(restoreDelMissing.status, "conflict");
+  assert.equal(restoreDelMissing.conflict_reason, "referenced_entity_missing");
+  assert.deepEqual(restoreDelMissing.missing_refs, [
+    energyDash.created_dashboard_ref,
+  ]);
+
+  // 7. Multi-widget column delete & dashboard delete restore skip broken shortcut widgets cleanly in skipped_widgets!
+  const { applied: extraDash1 } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Удалят позже 1",
+    reason: "Цель для теста column delete restore",
+  });
+  const extraDash1Id = Number(
+    extraDash1.created_dashboard_ref.split("/").at(-1),
+  );
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: secondColRef,
+    widget: { type: "clock", name: "Выжившие часы" },
+    reason: "Выживающий виджет",
+  });
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: secondColRef,
+    widget: {
+      type: "shortcut",
+      name: "Сломанное меню колонки",
+      shortcut_ids: [extraDash1Id],
+    },
+    reason: "Shortcut в удаляемой колонке",
+  });
+  const pColDel = await call(client, "prepare_native_change", {
+    operation: "dashboard_column_delete",
+    target_ref: secondColRef,
+    reason: "Удалить вторую колонку",
+  });
+  await call(client, "apply_native_change", { change_ref: pColDel.change_ref });
+  hub.request({ dashboard: { delete: { id: extraDash1Id } } });
+  const undoColDel = await call(client, "restore_native_change", {
+    change_ref: pColDel.change_ref,
+  });
+  assert.equal(undoColDel.status, "restored");
+  assert.equal(undoColDel.skipped_widgets.length, 1);
+  assert.equal(
+    undoColDel.skipped_widgets[0].widget_name,
+    "Сломанное меню колонки",
+  );
+  assert.equal(
+    undoColDel.skipped_widgets[0].reason,
+    "referenced_entity_missing",
+  );
+  assert.deepEqual(undoColDel.skipped_widgets[0].missing_refs, [
+    extraDash1.created_dashboard_ref,
+  ]);
+
+  // dashboard_delete restore skipping broken shortcut widget:
+  const { applied: extraDash2 } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Удалят позже 2",
+    reason: "Цель для теста dashboard delete restore",
+  });
+  const extraDash2Id = Number(
+    extraDash2.created_dashboard_ref.split("/").at(-1),
+  );
+  await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: navColRef,
+    widget: {
+      type: "shortcut",
+      name: "Сломанное меню панели",
+      shortcut_ids: [extraDash2Id],
+    },
+    reason: "Shortcut в удаляемой панели",
+  });
+  const pDashDel = await call(client, "prepare_native_change", {
+    operation: "dashboard_delete",
+    target_ref: mainDashRef,
+    reason: "Удалить главную панель",
+  });
+  await call(client, "apply_native_change", {
+    change_ref: pDashDel.change_ref,
+  });
+  hub.request({ dashboard: { delete: { id: extraDash2Id } } });
+  const undoDashDel = await call(client, "restore_native_change", {
+    change_ref: pDashDel.change_ref,
+  });
+  assert.equal(undoDashDel.status, "restored");
+  assert.equal(undoDashDel.skipped_widgets.length, 1);
+  assert.equal(
+    undoDashDel.skipped_widgets[0].widget_name,
+    "Сломанное меню панели",
+  );
+  assert.equal(
+    undoDashDel.skipped_widgets[0].reason,
+    "referenced_entity_missing",
+  );
+  assert.deepEqual(undoDashDel.skipped_widgets[0].missing_refs, [
+    extraDash2.created_dashboard_ref,
+  ]);
+});
+
+test("real SprutHub 3.0 UI warnings: chart duplicate characteristic_type & history_group DAY fallback, tile unrendered, and weather stub", async (t) => {
+  const { client } = await setup(t, (fixture) => {
+    fixture.extensions.push({
+      extensionKey: "Bridge:history",
+      type: "history",
+      index: "history",
+      bundleType: "BRIDGE",
+      name: "История",
+      optionsWindow: "Bridge/history/",
+      enabled: true,
+      state: "LOADED",
+    });
+    fixture.accessories.push(
+      {
+        id: 50,
+        roomId: 3,
+        name: "Розетка 1",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка 1",
+            characteristics: [
+              { cId: 15, type: "C_Watt", value: 300 },
+              { cId: 16, type: "C_KiloWattHour", value: 10 },
+            ],
+          },
+        ],
+      },
+      {
+        id: 51,
+        roomId: 4,
+        name: "Розетка 2",
+        services: [
+          {
+            sId: 13,
+            type: "Outlet",
+            name: "Розетка 2",
+            characteristics: [{ cId: 15, type: "C_Watt", value: 400 }],
+          },
+        ],
+      },
+    );
+  });
+
+  const WATT1 = `${HOME_REF}/accessory/50/service/13/characteristic/15`;
+  const KWH1 = `${HOME_REF}/accessory/50/service/13/characteristic/16`;
+  const WATT2 = `${HOME_REF}/accessory/51/service/13/characteristic/15`;
+
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Тренды",
+    reason: "Проверка предупреждений UI 3.0",
+  });
+  const colRef = dash.created_columns[0].ref;
+
+  // 1. chart duplicate characteristic_type across >=2 distinct accessories warns on create & update.
+  const pChartDup = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: {
+      type: "chart",
+      name: "Мощность",
+      item_refs: [WATT1, WATT2],
+      history_group: "MINUTE",
+    },
+    reason: "График двух розеток",
+  });
+  assert.equal(pChartDup.status, "prepared");
+  assert.equal(pChartDup.history_app_missing, undefined);
+  assert.equal(pChartDup.warnings?.length, 1);
+  assert.ok(pChartDup.warnings[0].includes("C_Watt"));
+
+  // Same device (C_Watt + C_KiloWattHour) with omitted / MINUTE / HOUR -> ZERO warnings!
+  for (const group of [undefined, "MINUTE", "HOUR"]) {
+    const pClean = await call(client, "prepare_native_change", {
+      operation: "dashboard_widget_create",
+      target_ref: colRef,
+      widget: {
+        type: "chart",
+        name: "Розетка 1",
+        item_refs: [WATT1, KWH1],
+        ...(group !== undefined ? { history_group: group } : {}),
+      },
+      reason: `Чистый график (${group ?? "omitted"})`,
+    });
+    assert.equal(pClean.status, "prepared");
+    assert.equal(
+      pClean.warnings,
+      undefined,
+      `unexpected warnings for history_group=${group}: ${JSON.stringify(pClean.warnings)}`,
+    );
+  }
+
+  // 2. chart with history_group: "DAY" warns about fallback to 1 hour (Час) in SprutHub 3.0 web UI.
+  const { prepared: pChartDay, applied: aChartDay } = await prepareAndApply(
+    client,
+    {
+      operation: "dashboard_widget_create",
+      target_ref: colRef,
+      widget: {
+        type: "chart",
+        name: "Розетка день",
+        item_refs: [WATT1],
+        history_group: "DAY",
+      },
+      reason: "Проверка предупреждения DAY",
+    },
+  );
+  assert.equal(pChartDay.warnings?.length, 1);
+  assert.match(pChartDay.warnings[0], /DAY/);
+  assert.match(pChartDay.warnings[0], /MINUTE/);
+  assert.match(pChartDay.warnings[0], /HOUR/);
+  assert.match(pChartDay.warnings[0], /1 hour|час/i);
+
+  // dashboard_widget_update on chart triggers BOTH duplicate-type AND DAY warnings when both apply!
+  const pChartUpdateBoth = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: aChartDay.created_widget_ref,
+    widget: {
+      type: "chart",
+      name: "Обе розетки",
+      item_refs: [WATT1, WATT2],
+      history_group: "DAY",
+    },
+    reason: "Обновить график с дублем и DAY",
+  });
+  assert.equal(pChartUpdateBoth.status, "prepared");
+  assert.equal(pChartUpdateBoth.warnings?.length, 2);
+  assert.ok(pChartUpdateBoth.warnings.some((w) => w.includes("C_Watt")));
+  assert.ok(pChartUpdateBoth.warnings.some((w) => w.includes("DAY")));
+
+  // 3. tile widget warns that SprutHub 3.0 web UI does not render tile widgets (create & update).
+  const { prepared: pTile, applied: aTile } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: { type: "tile", name: "Плитка" },
+    reason: "Проверка предупреждения tile",
+  });
+  assert.equal(pTile.warnings?.length, 1);
+  assert.match(pTile.warnings[0], /does not render|not render/i);
+  assert.match(pTile.warnings[0], /service/i);
+
+  // 4. weather widget warns that SprutHub 3.0 web UI renders weather as a hardcoded placeholder (create & update).
+  const pWeather = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_create",
+    target_ref: colRef,
+    widget: { type: "weather", name: "Погода" },
+    reason: "Проверка предупреждения weather",
+  });
+  assert.equal(pWeather.status, "prepared");
+  assert.equal(pWeather.warnings?.length, 1);
+  assert.match(pWeather.warnings[0], /placeholder|hardcoded|Москва/i);
+
+  const pUpdateToWeather = await call(client, "prepare_native_change", {
+    operation: "dashboard_widget_update",
+    target_ref: aTile.created_widget_ref,
+    widget: { type: "weather", name: "Погода 2" },
+    reason: "Перевести tile в weather",
+  });
+  assert.equal(pUpdateToWeather.warnings?.length, 1);
+  assert.match(pUpdateToWeather.warnings[0], /placeholder|hardcoded|Москва/i);
+
+  // 5. Updated contracts fit <= 4096 B and reflect verified SprutHub 3.0 UI facts.
+  const widgetContract = await call(client, "get_native_change_contract", {
+    operation: "dashboard_widget_create",
+  });
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(widgetContract.contract), "utf8") <= 4_096,
+  );
+  assert.match(
+    widgetContract.contract.fields.widget.types.shortcut,
+    /dashboard/i,
+  );
+  assert.match(
+    widgetContract.contract.fields.widget.types.service,
+    /sensor|3-column/i,
+  );
+});
+
+test("service_grid: contract, validation, order preservation, get_entity exposure, conflicts, uncertain recovery, history, and restore", async (t) => {
+  const { hub, client } = await setup(t, (fixture) => {
+    const acc = fixture.accessories.find(({ id }) => id === 16);
+    const svc = acc?.services?.find(({ sId }) => sId === 13);
+    assert.ok(svc);
+    svc.grid = { order: 7, width: 1, height: 1 };
+  });
+
+  // 1. Contract exists (with and without target_ref), fits <= 4096 B, and warns about room + dashboard impact.
+  const contractRes = await call(client, "get_native_change_contract", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+  });
+  assert.equal(contractRes.operation, "service_grid");
+  assert.equal(contractRes.restore_supported, true);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(contractRes.contract), "utf8") <= 4_096,
+  );
+  assert.ok(
+    contractRes.contract.limitations.some(
+      (line) => /dashboard/i.test(line) && /room/i.test(line),
+    ),
+    `contract must warn that service.grid affects both dashboard widgets and room grid: ${JSON.stringify(contractRes.contract)}`,
+  );
+
+  // 2. already_desired when service already has requested grid size (case-insensitive normalization).
+  const already = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "1X1",
+    reason: "Уже 1x1",
+  });
+  assert.equal(already.status, "already_desired");
+  assert.equal(already.native_write_sent, false);
+
+  // 3. Invalid values return invalid_native_value WITH compact inline contract (<= 4096 B); missing service returns service_not_found.
+  for (const badValue of ["4x1", "0x1", "1x4", "wide", "", 21, true]) {
+    const err = await callError(client, "prepare_native_change", {
+      operation: "service_grid",
+      target_ref: FLOOR_LAMP_SERVICE_REF,
+      value: badValue,
+      reason: `Некорректный размер ${String(badValue)}`,
+    });
+    assert.equal(err.error.code, "invalid_native_value", String(badValue));
+    assert.ok(
+      err.contract !== undefined,
+      `inline contract missing for ${String(badValue)}`,
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(err.contract), "utf8") <= 4_096);
+  }
+  const missingSvcErr = await callError(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: `${HOME_REF}/accessory/9999/service/13`,
+    value: "2x1",
+    reason: "Несуществующий сервис",
+  });
+  assert.equal(missingSvcErr.error.code, "service_not_found");
+
+  // 4. Prepare ("2X1" -> normalized "2x1"), mutate live grid.order 7 -> 11 before apply, apply preserves order 11!
+  const pGrid1 = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "2X1",
+    reason: "Сделать плитку торшера широкой 2x1",
+  });
+  assert.equal(pGrid1.status, "prepared");
+  assert.equal(pGrid1.diff.value.from, "1x1");
+  assert.equal(pGrid1.diff.value.to, "2x1");
+  assert.equal(pGrid1.restore_supported, true);
+
+  const liveSvc = hub.state.accessories
+    .find(({ id }) => id === 16)
+    .services.find(({ sId }) => sId === 13);
+  liveSvc.grid.order = 11;
+
+  const aGrid1 = await call(client, "apply_native_change", {
+    change_ref: pGrid1.change_ref,
+  });
+  assert.equal(aGrid1.status, "applied");
+  assert.equal(aGrid1.observed_value?.value, "2x1");
+  assert.deepEqual(liveSvc.grid, { order: 11, width: 2, height: 1 });
+
+  // 5. get_entity exposes grid: { width, height } on BOTH service entity AND dashboard service widget items!
+  const svcEntity = await call(client, "get_entity", {
+    entity_ref: FLOOR_LAMP_SERVICE_REF,
+  });
+  assert.deepEqual(svcEntity.entity.grid, { width: 2, height: 1 });
+
+  const { applied: dash } = await prepareAndApply(client, {
+    operation: "dashboard_create",
+    target_ref: HOME_REF,
+    name: "Свет",
+    reason: "Панель света",
+  });
+  const { applied: svcWidget } = await prepareAndApply(client, {
+    operation: "dashboard_widget_create",
+    target_ref: dash.created_columns[0].ref,
+    widget: {
+      type: "service",
+      name: "Свет",
+      item_refs: [FLOOR_LAMP_SERVICE_REF],
+      show_rooms: true,
+    },
+    reason: "Плитки света",
+  });
+  const svcWidgetEntity = await call(client, "get_entity", {
+    entity_ref: svcWidget.created_widget_ref,
+  });
+  assert.deepEqual(svcWidgetEntity.entity.items[0].grid, {
+    width: 2,
+    height: 1,
+  });
+
+  // 6. Concurrent service.grid change between prepare and apply -> conflict: baseline_changed (0 writes)!
+  const pDrift = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "3x1",
+    reason: "Попробовать 3x1 при конкурентной правке",
+  });
+  liveSvc.grid = { order: 11, width: 2, height: 2 };
+  const svcUpdatesBeforeDrift = hub.requests.filter(
+    ({ method }) => method === "service.update",
+  ).length;
+  const aDrift = await call(client, "apply_native_change", {
+    change_ref: pDrift.change_ref,
+  });
+  assert.equal(aDrift.status, "conflict");
+  assert.equal(aDrift.conflict_reason, "baseline_changed");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "service.update").length,
+    svcUpdatesBeforeDrift,
+  );
+
+  // Put back to 2x1 cleanly via hub for next tests:
+  liveSvc.grid = { order: 11, width: 2, height: 1 };
+
+  // 7. Refused write returns hub_effect: not_applied with rejection.
+  const pRefused = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "3x1",
+    reason: "Отказ хаба",
+  });
+  hub.refuseNext("service.update", { code: -32000, message: "grid refused" });
+  const refusedErr = await callError(client, "apply_native_change", {
+    change_ref: pRefused.change_ref,
+  });
+  assert.equal(refusedErr.hub_effect, "not_applied");
+  assert.equal(refusedErr.rejection?.protocol_code, -32000);
+
+  // 8. Uncertain write recovery: droppedReply -> recovered applied; loseNext -> uncertain, get does not resend, retry apply succeeds!
+  const pDrop = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "3x1",
+    reason: "Потерянный ответ 2x1 -> 3x1",
+  });
+  hub.state.faults.droppedReply.push({
+    method: "service.update",
+    remaining: 1,
+  });
+  const aDrop = await call(client, "apply_native_change", {
+    change_ref: pDrop.change_ref,
+  });
+  const settledDrop =
+    aDrop.status === "applied"
+      ? aDrop
+      : await call(client, "get_native_change", {
+          change_ref: pDrop.change_ref,
+        });
+  assert.equal(settledDrop.status, "applied");
+  assert.equal(settledDrop.recovered_after_uncertain_write, true);
+  assert.deepEqual(liveSvc.grid, { order: 11, width: 3, height: 1 });
+
+  const pLose = await call(client, "prepare_native_change", {
+    operation: "service_grid",
+    target_ref: FLOOR_LAMP_SERVICE_REF,
+    value: "2x2",
+    reason: "Потерянный запрос 3x1 -> 2x2",
+  });
+  const updatesBeforeLose = hub.requests.filter(
+    ({ method }) => method === "service.update",
+  ).length;
+  hub.loseNext("service.update");
+  const aLose = await call(client, "apply_native_change", {
+    change_ref: pLose.change_ref,
+  });
+  assert.equal(aLose.status, "uncertain");
+  const getLose = await call(client, "get_native_change", {
+    change_ref: pLose.change_ref,
+  });
+  assert.equal(getLose.status, "uncertain");
+  assert.equal(
+    hub.requests.filter(({ method }) => method === "service.update").length,
+    updatesBeforeLose + 1,
+    "get_native_change must NOT resend lost service.update",
+  );
+  // Explicit retry of apply_native_change resends and settles as applied:
+  const retriedLose = await call(client, "apply_native_change", {
+    change_ref: pLose.change_ref,
+  });
+  assert.equal(retriedLose.status, "applied");
+  assert.deepEqual(liveSvc.grid, { order: 11, width: 2, height: 2 });
+
+  // 9. Restore refuses earlier change when later owned service_grid is in place (later_owned_change),
+  //    then restoring newest-first preserves live order (15) at every step!
+  const refuseEarlier = await call(client, "restore_native_change", {
+    change_ref: pDrop.change_ref,
+  });
+  assert.equal(refuseEarlier.status, "conflict");
+  assert.equal(refuseEarlier.conflict_reason, "later_owned_change");
+  assert.equal(refuseEarlier.restore_first_change_ref, pLose.change_ref);
+
+  liveSvc.grid.order = 15;
+  const restoredLatest = await call(client, "restore_native_change", {
+    change_ref: pLose.change_ref,
+  });
+  assert.equal(restoredLatest.status, "restored");
+  assert.deepEqual(liveSvc.grid, { order: 15, width: 3, height: 1 });
+
+  const restoredEarlier = await call(client, "restore_native_change", {
+    change_ref: pDrop.change_ref,
+  });
+  assert.equal(restoredEarlier.status, "restored");
+  assert.deepEqual(liveSvc.grid, { order: 15, width: 2, height: 1 });
+
+  // get_native_change on settled restored record stays restored:
+  const settledRestored = await call(client, "get_native_change", {
+    change_ref: pDrop.change_ref,
+  });
+  assert.equal(settledRestored.status, "restored");
+
+  // Manual change to a third size (1x2) blocks restore of aGrid1 with conflict: manual_change:
+  liveSvc.grid = { order: 15, width: 1, height: 2 };
+  const manualConflict = await call(client, "restore_native_change", {
+    change_ref: aGrid1.change_ref,
+  });
+  assert.equal(manualConflict.status, "conflict");
+  assert.equal(manualConflict.conflict_reason, "manual_change");
+
+  // 10. History list exposes service_grid with value { from, to }.
+  const history = await call(client, "get_native_change", {
+    entity_ref: FLOOR_LAMP_SERVICE_REF,
+    limit: 20,
+  });
+  const gridEntry = history.changes.find(
+    ({ change_ref }) => change_ref === aGrid1.change_ref,
+  );
+  assert.ok(gridEntry);
+  assert.equal(gridEntry.operation, "service_grid");
+  assert.deepEqual(gridEntry.value, { from: "1x1", to: "2x1" });
 });
