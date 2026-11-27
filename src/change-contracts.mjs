@@ -4,6 +4,7 @@ import {
   TIME_TRIGGER,
 } from "./block-model.mjs";
 import { REDACTED_MARK, refuseRedactionMark } from "./change-refs.mjs";
+import { LAMP_GROUP_TYPES } from "./light-group-members.mjs";
 import {
   isSelectableNativeValidValue,
   nativeScalarContract,
@@ -27,11 +28,21 @@ export const ROOM_NAME_REFUSED_CHARACTER =
 
 export const ROOM_NAME_LIMIT_NOTE = `SprutHub keeps the first ${ROOM_NAME_MAX_LENGTH} characters of a room name and dropped an emoji from one, so a longer name, or one with emoji, pictographs, variation selectors or other characters outside the Basic Multilingual Plane, is refused before any write (only one emoji was seen dropped; the rest are refused as a precaution). A stored name that still differs from the request is reported: name_normalized for room_create, uncertain for room_name.`;
 
-export function accessoryPlacementContract(accessory) {
+export function accessoryPlacementContract(accessory = null) {
   return {
-    current: {
-      name: accessory.name,
-      room_id: accessory.roomId,
+    ...(accessory
+      ? {
+          current: {
+            name: accessory.name,
+            room_id: accessory.roomId,
+          },
+        }
+      : {}),
+    fields: {
+      target_ref: "accessory ref from find_devices or get_entity",
+      name: "optional new accessory name (defaults to current name)",
+      room_ref: "optional destination room ref (defaults to current room)",
+      note: "provide at least one of name or room_ref",
     },
     write: "accessory.update({id,name,roomId})",
     scope: "one_accessory",
@@ -69,7 +80,7 @@ export function roomCreateContract() {
 export function virtualLightGroupContract() {
   return {
     write: [
-      "accessory.create({name,roomId,services:[{type:'Lightbulb',name,optional:['Brightness']}]})",
+      "accessory.create({name,roomId,services:[{type:'Lightbulb',name,optional:[...]}]})",
       "link.addVirtual({aId,sId,cId,tAId,tSId,tCId})",
       "characteristic.update({aId,sId,cId,hasLinks:true})",
       "link.remove({aId,sId,cId,linkId})",
@@ -78,7 +89,11 @@ export function virtualLightGroupContract() {
     scope: "one_created_virtual_light_and_explicit_member_services",
     existing_group:
       "To change the lamps of an existing group (find_devices marks it with lamp_group), read this contract with target_ref = the group's lamp service: it lists the group's lamps and what it links.",
-    characteristics: ["On", "Brightness"],
+    characteristics: [...LAMP_GROUP_TYPES],
+    characteristic_types:
+      "Optional on create. When omitted, automatically inferred as On plus every optional Lightbulb control exposed by at least one member. When provided, must include On and each requested control must be exposed by at least one member.",
+    selective_linking:
+      "Each member is linked only on the controls it exposes; lamps lacking an optional control (e.g. a CW/WW lamp in an RGBW group) are linked on their supported controls and report lacks.",
     feedback: "LAST_VALUE",
     restore:
       "remove_owned_in_links_disable_hasLinks_verify_physical_out_absence_then_delete_confirmed_created_accessory",
@@ -87,6 +102,7 @@ export function virtualLightGroupContract() {
       request_and_response_shapes: "current_bundled_official_protobuf_schema",
       existing_native_group_read: true,
       live_create_and_link: true,
+      live_all_five_controls: "SprutHub 3.0.0 rev 20131, 2026-11-27",
       live_same_value_repeat_delivery: false,
       ui_ordered_link_cleanup_requires_live_recheck: true,
     },
@@ -368,7 +384,29 @@ export function characteristicContract(control, { requireWrite = true } = {}) {
   };
 }
 
-export function logicAssignmentContract(target, type, assigned) {
+export function logicAssignmentContract(
+  target = null,
+  type = null,
+  assigned = undefined,
+) {
+  if (!target) {
+    return {
+      write: "logic.create({aId,sId,type})",
+      fields: {
+        target_ref:
+          "logic ref .../accessory/<aId>/service/<sId>/logic/<type> from get_entity",
+        reason: "why the owner asked",
+      },
+      scope: "one_service_logic_assignment",
+      create_active: false,
+      confirmation: "scoped_logic_list_and_configuration_readback",
+      restore:
+        "deletes owned assignment after child option/active changes are restored",
+      limitations: [
+        "Assignment creation, option updates, and activation are separate native operations.",
+      ],
+    };
+  }
   return {
     type: target.type,
     name:
@@ -572,7 +610,9 @@ const INLINE_CONTRACT_ERROR_CODES = new Set([
   "group_members_required",
   "duplicate_group_member",
   "group_member_is_group",
+  "unsupported_group_characteristics",
   "unsupported_virtual_device_type",
+  "unsupported_virtual_device_characteristics",
 ]);
 
 function isCallerFieldValidationError(error) {

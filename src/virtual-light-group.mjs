@@ -1,23 +1,37 @@
 import { isDeepStrictEqual } from "node:util";
 import { characteristicContract } from "./change-contracts.mjs";
 import { nativeTargetKey } from "./change-refs.mjs";
+import { LAMP_GROUP_TYPES } from "./light-group-members.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 
+const NUMERIC_LIGHT_VALUE_KINDS = new Set([
+  "intValue",
+  "longValue",
+  "doubleValue",
+]);
+
+function isCompatibleLightControlKind(type, kind) {
+  return type === "On"
+    ? kind === "boolValue"
+    : NUMERIC_LIGHT_VALUE_KINDS.has(kind);
+}
+
 export function validateVirtualLightCharacteristicTypes(types) {
-  const required = ["On", "Brightness"];
+  if (types === undefined) return undefined;
   if (
     !Array.isArray(types) ||
-    types.length !== required.length ||
+    types.length === 0 ||
     new Set(types).size !== types.length ||
-    !required.every((type) => types.includes(type))
+    !types.includes("On") ||
+    !types.every((type) => LAMP_GROUP_TYPES.includes(type))
   ) {
     throw new SprutHubError(
       "unsupported_group_characteristics",
-      "This virtual light path requires exactly the common On and Brightness controls.",
-      "get_entity",
+      `characteristic_types must include On and use only unique Lightbulb controls from ${LAMP_GROUP_TYPES.join(", ")}.`,
+      "get_native_change_contract",
     );
   }
-  return required;
+  return LAMP_GROUP_TYPES.filter((type) => types.includes(type));
 }
 
 export function characteristicTypeName(type) {
@@ -35,8 +49,12 @@ export function validateVirtualLightServiceType(
       "get_native_change_contract",
     );
   }
-  const required = new Set(serviceType.required.map(characteristicTypeName));
-  const optional = new Set(serviceType.optional.map(characteristicTypeName));
+  const required = new Set(
+    (serviceType.required ?? []).map(characteristicTypeName),
+  );
+  const optional = new Set(
+    (serviceType.optional ?? []).map(characteristicTypeName),
+  );
   if (
     !required.has("On") ||
     !characteristicTypes.every(
@@ -45,17 +63,54 @@ export function validateVirtualLightServiceType(
   ) {
     throw new SprutHubError(
       "unsupported_virtual_light",
-      "The current native Lightbulb catalog cannot create the requested On and Brightness controls.",
+      `The current native Lightbulb catalog cannot create the requested controls (${characteristicTypes.join(", ")}).`,
       "get_native_change_contract",
     );
   }
+}
+
+export function resolveVirtualLightCharacteristicTypes(
+  requestedTypes,
+  serviceType,
+  members,
+) {
+  validateVirtualLightServiceType(serviceType, ["On"]);
+  if (requestedTypes === undefined) {
+    const advertised = new Set(
+      [...(serviceType.required ?? []), ...(serviceType.optional ?? [])].map(
+        characteristicTypeName,
+      ),
+    );
+    const inferred = LAMP_GROUP_TYPES.filter(
+      (type) =>
+        type === "On" ||
+        (advertised.has(type) &&
+          members.some((member) => member.characteristics[type] !== undefined)),
+    );
+    validateVirtualLightServiceType(serviceType, inferred);
+    return inferred;
+  }
+  validateVirtualLightServiceType(serviceType, requestedTypes);
+  const missingAcrossMembers = requestedTypes.filter(
+    (type) =>
+      !members.some((member) => member.characteristics[type] !== undefined),
+  );
+  if (missingAcrossMembers.length > 0) {
+    throw new SprutHubError(
+      "unsupported_group_characteristics",
+      `No selected member exposes a readable and writable ${missingAcrossMembers.join(", ")} characteristic.`,
+      "get_entity",
+    );
+  }
+  return requestedTypes;
 }
 
 export function selectVirtualLightMember(
   ref,
   target,
   accessory,
-  characteristicTypes,
+  characteristicTypes = LAMP_GROUP_TYPES,
+  { strictOptional = true } = {},
 ) {
   if (accessory.id !== target.aId) {
     throw new SprutHubError(
@@ -79,13 +134,13 @@ export function selectVirtualLightMember(
       "get_entity",
     );
   }
-  const characteristics = Object.fromEntries(
-    characteristicTypes.map((type) => {
-      const matches = (service.characteristics ?? []).filter(
-        (characteristic) =>
-          (characteristic.control?.type ?? characteristic.control?.key) ===
-          type,
-      );
+  const characteristics = {};
+  for (const type of characteristicTypes) {
+    const matches = (service.characteristics ?? []).filter(
+      (characteristic) =>
+        (characteristic.control?.type ?? characteristic.control?.key) === type,
+    );
+    if (type === "On") {
       if (
         matches.length !== 1 ||
         matches[0].control?.read !== true ||
@@ -93,34 +148,75 @@ export function selectVirtualLightMember(
       ) {
         throw new SprutHubError(
           "unsupported_group_characteristics",
-          `A selected member does not expose one readable and writable ${type} characteristic.`,
+          "A selected member does not expose one readable and writable On characteristic.",
           "get_entity",
         );
       }
       const contract = characteristicContract(matches[0].control, {
         requireWrite: true,
       });
-      if (
-        (type === "On" && contract.kind !== "boolValue") ||
-        (type === "Brightness" &&
-          !["intValue", "longValue", "doubleValue"].includes(contract.kind))
-      ) {
+      if (!isCompatibleLightControlKind(type, contract.kind)) {
         throw new SprutHubError(
           "unsupported_group_characteristics",
-          `The ${type} characteristic has an incompatible native value type.`,
+          "The On characteristic has an incompatible native value type.",
           "get_entity",
         );
       }
-      return [
-        type,
-        {
-          aId: accessory.id,
-          sId: service.sId,
-          cId: matches[0].cId,
-        },
-      ];
-    }),
-  );
+      characteristics.On = {
+        aId: accessory.id,
+        sId: service.sId,
+        cId: matches[0].cId,
+      };
+      continue;
+    }
+    const rwMatches = matches.filter(
+      (characteristic) =>
+        characteristic.control?.read === true &&
+        characteristic.control?.write === true,
+    );
+    if (rwMatches.length === 0) continue;
+    if (!strictOptional) {
+      const usable = rwMatches.filter((characteristic) => {
+        try {
+          const contract = characteristicContract(characteristic.control, {
+            requireWrite: true,
+          });
+          return isCompatibleLightControlKind(type, contract.kind);
+        } catch {
+          return false;
+        }
+      });
+      if (usable.length !== 1) continue;
+      characteristics[type] = {
+        aId: accessory.id,
+        sId: service.sId,
+        cId: usable[0].cId,
+      };
+      continue;
+    }
+    if (rwMatches.length > 1) {
+      throw new SprutHubError(
+        "unsupported_group_characteristics",
+        `A selected member exposes more than one readable and writable ${type} characteristic.`,
+        "get_entity",
+      );
+    }
+    const contract = characteristicContract(rwMatches[0].control, {
+      requireWrite: true,
+    });
+    if (!isCompatibleLightControlKind(type, contract.kind)) {
+      throw new SprutHubError(
+        "unsupported_group_characteristics",
+        `The ${type} characteristic has an incompatible native value type.`,
+        "get_entity",
+      );
+    }
+    characteristics[type] = {
+      aId: accessory.id,
+      sId: service.sId,
+      cId: rwMatches[0].cId,
+    };
+  }
   return {
     ref,
     accessory_ref: ref.replace(/\/service\/\d+$/, ""),
@@ -181,11 +277,7 @@ export function createdVirtualLightTarget(accessory, change) {
       const contract = characteristicContract(matches[0].control, {
         requireWrite: true,
       });
-      if (
-        (type === "On" && contract.kind !== "boolValue") ||
-        (type === "Brightness" &&
-          !["intValue", "longValue", "doubleValue"].includes(contract.kind))
-      ) {
+      if (!isCompatibleLightControlKind(type, contract.kind)) {
         throw new SprutHubError(
           "incompatible_response",
           `SprutHub returned an incompatible created ${type} characteristic.`,

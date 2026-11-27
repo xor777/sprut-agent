@@ -273,6 +273,27 @@ export function publicNativeChange(
     });
   }
   if (change.kind === "virtual_light_group") {
+    const members = (change.members ?? []).map((member) => {
+      const characteristics = change.characteristic_types.filter(
+        (type) => member.characteristics?.[type] !== undefined,
+      );
+      const lacks = change.characteristic_types.filter(
+        (type) => member.characteristics?.[type] === undefined,
+      );
+      return {
+        service_ref: member.ref,
+        name: member.name,
+        characteristics,
+        ...(lacks.length > 0 ? { lacks } : {}),
+      };
+    });
+    const notes = members.flatMap((member) => {
+      if (!member.lacks?.length) return [];
+      const label = member.name ? `«${member.name}»` : member.service_ref;
+      return [
+        `${label} has no ${member.lacks.join(", ")}: the group's ${member.lacks.join(", ")} will not reach it.`,
+      ];
+    });
     return {
       status: change.status,
       change_ref: `spruthub-change://native/${change.id}`,
@@ -290,6 +311,8 @@ export function publicNativeChange(
         : {}),
       characteristic_types: [...change.characteristic_types],
       member_service_refs: [...change.member_service_refs],
+      ...(members.length > 0 ? { members } : {}),
+      ...(notes.length > 0 ? { notes } : {}),
       ...(change.created_accessory_id !== undefined
         ? {
             virtual_accessory_ref: `${change.home_ref}/accessory/${change.created_accessory_id}`,
@@ -359,7 +382,7 @@ export function publicNativeChange(
         : {}),
       restore_supported: change.virtual_accessory_creation_owned === true,
       limitations: [
-        "The group exposes only the explicitly validated common On and Brightness controls.",
+        "The group exposes the selected Lightbulb controls (On, Brightness, Hue, Saturation, ColorTemperature) and links each member only on the controls it exposes.",
         "Last-value feedback is configured; a manual member change is not synchronized to other members.",
         "Creation and link writes are sequential, and SprutHub exposes no native compare-and-set.",
         "Create and addVirtual were replayed on hub 3.0.0; removal first follows the current native UI path, preserves foreign links observed immediately before the owned removal, and reports only new empty native OUT descriptors as residues.",

@@ -232,7 +232,7 @@ test("simple write field/value errors return an inline compact contract so the c
     target_ref: homeRef,
     room_ref: roomRef(LIVING_ROOM),
     name: "Режим гостей",
-    value: "Thermostat",
+    value: "FilterMaintenance",
     reason: "Создать виртуальный выключатель",
   });
   assert.equal(virtualError.error.code, "unsupported_virtual_device_type");
