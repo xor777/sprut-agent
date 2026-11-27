@@ -4028,3 +4028,108 @@ test("service_grid: contract, validation, order preservation, get_entity exposur
   assert.equal(gridEntry.operation, "service_grid");
   assert.deepEqual(gridEntry.value, { from: "1x1", to: "2x1" });
 });
+
+test("review return 1: service_grid decouples grid.order from service.order and never resurrects stale baseline_grid_order when live order is omitted (0)", async (t) => {
+  const { hub, client } = await setup(t, (fixture) => {
+    const hallAcc = fixture.accessories.find(({ id }) => id === 14);
+    const hallSvc = hallAcc?.services?.find(({ sId }) => sId === 13);
+    assert.ok(hallSvc);
+    hallSvc.order = 4;
+    delete hallSvc.grid;
+
+    const floorAcc = fixture.accessories.find(({ id }) => id === 16);
+    const floorSvc = floorAcc?.services?.find(({ sId }) => sId === 13);
+    assert.ok(floorSvc);
+    floorSvc.grid = { order: 7, width: 1, height: 1 };
+  });
+
+  await t.test(
+    "service.order = 4 with omitted grid.order sends grid.order = 0 (never 4)",
+    async () => {
+      const liveHallSvc = hub.state.accessories
+        .find(({ id }) => id === 14)
+        .services.find(({ sId }) => sId === 13);
+      const initialGridOrder = liveHallSvc.grid.order;
+      liveHallSvc.order = 4;
+      liveHallSvc.grid = { width: 1, height: 1 };
+
+      const { applied: hallApplied } = await prepareAndApply(client, {
+        operation: "service_grid",
+        target_ref: HALL_LAMP_SERVICE_REF,
+        value: "2x1",
+        reason: "Проверить независимость grid.order от service.order",
+      });
+      const hallApplyRpc = hub.requests
+        .filter(({ method }) => method === "service.update")
+        .at(-1);
+      assert.deepEqual(
+        hallApplyRpc?.params?.service?.update?.grid,
+        { order: 0, width: 2, height: 1 },
+        "apply must send grid.order = 0 when live grid.order is omitted, never service.order = 4",
+      );
+
+      liveHallSvc.grid = { width: 2, height: 1 };
+      const hallRestored = await call(client, "restore_native_change", {
+        change_ref: hallApplied.change_ref,
+      });
+      assert.equal(hallRestored.status, "restored");
+      const hallRestoreRpc = hub.requests
+        .filter(({ method }) => method === "service.update")
+        .at(-1);
+      assert.deepEqual(
+        hallRestoreRpc?.params?.service?.update?.grid,
+        { order: 0, width: 1, height: 1 },
+        "restore must send grid.order = 0 when live grid.order is omitted, never service.order = 4",
+      );
+      assert.equal(
+        initialGridOrder,
+        0,
+        "simulated hub must decouple initial grid.order from service.order",
+      );
+    },
+  );
+
+  await t.test(
+    "baseline grid.order = 7 followed by proto3-omitted live order (0) writes 0 on apply and restore",
+    async () => {
+      const liveFloorSvc = hub.state.accessories
+        .find(({ id }) => id === 16)
+        .services.find(({ sId }) => sId === 13);
+      const pFloor = await call(client, "prepare_native_change", {
+        operation: "service_grid",
+        target_ref: FLOOR_LAMP_SERVICE_REF,
+        value: "2x1",
+        reason: "Проверить незатирание live omitted grid.order=0 устаревшим 7",
+      });
+      assert.equal(pFloor.status, "prepared");
+
+      liveFloorSvc.grid = { width: 1, height: 1 };
+      const aFloor = await call(client, "apply_native_change", {
+        change_ref: pFloor.change_ref,
+      });
+      assert.equal(aFloor.status, "applied");
+      const floorApplyRpc = hub.requests
+        .filter(({ method }) => method === "service.update")
+        .at(-1);
+      assert.deepEqual(
+        floorApplyRpc?.params?.service?.update?.grid,
+        { order: 0, width: 2, height: 1 },
+        "apply must preserve proto3-omitted live grid.order = 0 instead of resurrecting stale baseline_grid_order = 7",
+      );
+
+      liveFloorSvc.grid = { width: 2, height: 1 };
+      const rFloor = await call(client, "restore_native_change", {
+        change_ref: aFloor.change_ref,
+      });
+      assert.equal(rFloor.status, "restored");
+      const floorRestoreRpc = hub.requests
+        .filter(({ method }) => method === "service.update")
+        .at(-1);
+      assert.deepEqual(
+        floorRestoreRpc?.params?.service?.update?.grid,
+        { order: 0, width: 1, height: 1 },
+        "restore must preserve proto3-omitted live grid.order = 0 instead of resurrecting stale baseline_grid_order = 7",
+      );
+    },
+  );
+});
