@@ -895,7 +895,7 @@ export function publicNativeChange(
         : [
             "Readback observes the value but cannot prove this command caused it.",
             "SprutHub exposes no native compare-and-set for this operation.",
-            "A setting write other than characteristic_value (an option, active flag, room or service name, or service visibility) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
+            "A setting write other than characteristic_value (an option, active flag, room or service name, service visibility, or service grid) with an unknown outcome may be retried only while this change retains ownership; a characteristic-value write is not retried automatically. After ownership is lost, any further authorized write requires a newly prepared change.",
           ]),
       ...(kind.limitations?.(change) ?? []),
       ...(change.group_member_targets

@@ -5,6 +5,8 @@ import {
   ROOM_NAME_REFUSED_CHARACTER,
   requiredNativeName,
   roomNameLimits,
+  SERVICE_GRID_LIMITATION,
+  serviceGridContract,
   typedNativeValue,
   validateCharacteristicValue,
   valuesEqual,
@@ -22,6 +24,7 @@ import {
   parseServiceRef,
   parseWindowOptionOwner,
   predefinedScenarioReadOnly,
+  refuseRedactionMark,
   SCENARIO_METADATA_KEYS,
   scenarioActiveOwnerRequired,
   scenarioNotFound,
@@ -484,6 +487,70 @@ export const NATIVE_VALUE_KINDS = {
       readServiceVisible(service.client, change.target),
     write: (service, change, value) =>
       service.client.updateService(change.target, { visible: value.value }),
+  },
+  service_grid: {
+    restoration: scalarValueRestoration,
+    knownSetting: () => true,
+    async contract(service, input) {
+      if (input.target_ref !== undefined) {
+        return nativeValueContractFields(
+          service,
+          NATIVE_VALUE_KINDS.service_grid,
+          input,
+        );
+      }
+      return {
+        contract: serviceGridContract(),
+        restore_supported: true,
+        limitations: [SERVICE_GRID_LIMITATION],
+      };
+    },
+    async inspect(service, input) {
+      const target = parseServiceRef(input.target_ref, service.hubSerial);
+      const { value, contract, order } = await readServiceGrid(
+        service.client,
+        target,
+      );
+      return {
+        fields: { target, baseline_grid_order: order ?? 0 },
+        value,
+        contract,
+      };
+    },
+    async prepare(service, input) {
+      const state = await NATIVE_VALUE_KINDS.service_grid.inspect(
+        service,
+        input,
+      );
+      const normalized = normalizeServiceGridValue(input.value);
+      return {
+        ...state,
+        requested: validateCharacteristicValue(normalized, state.contract),
+      };
+    },
+    async read(service, change) {
+      const { value, contract, order } = await readServiceGrid(
+        service.client,
+        change.target,
+      );
+      if (order !== undefined) {
+        observedServiceGridOrders.set(change, order);
+      } else {
+        observedServiceGridOrders.delete(change);
+      }
+      return { value, contract };
+    },
+    write(service, change, value) {
+      const { width, height } = parseServiceGridDimensions(value.value);
+      const order =
+        observedServiceGridOrders.get(change) ??
+        change.baseline_grid_order ??
+        0;
+      return service.client.updateService(change.target, {
+        grid: { order, width, height },
+      });
+    },
+    limitations: () => [SERVICE_GRID_LIMITATION],
   },
   // SprutHub's own notification on a change of one characteristic; on the
   // C_Online characteristic of a device's information service, on the
@@ -1554,6 +1621,49 @@ export async function readServiceVisible(client, target) {
       kind: "boolValue",
       confirmation: "separate_accessory_get_readback",
     },
+  };
+}
+
+const SERVICE_GRID_PATTERN = /^[1-3]x[1-3]$/i;
+const observedServiceGridOrders = new WeakMap();
+
+export function normalizeServiceGridValue(value) {
+  refuseRedactionMark(value, "value");
+  if (typeof value !== "string" || !SERVICE_GRID_PATTERN.test(value)) {
+    throw new SprutHubError(
+      "invalid_native_value",
+      'service_grid requires value formatted as "<width>x<height>" with width 1..3 and height 1..3 (for example "1x1", "2x1", "3x1", "2x2").',
+      "prepare_native_change",
+    );
+  }
+  return value.toLowerCase();
+}
+
+export function parseServiceGridDimensions(normalized) {
+  const [width, height] = normalized.split("x").map(Number);
+  return { width, height };
+}
+
+function readServiceGridOrder(service) {
+  if (Number.isSafeInteger(service?.grid?.order)) return service.grid.order;
+  if (Number.isSafeInteger(service?.order)) return service.order;
+  return undefined;
+}
+
+export async function readServiceGrid(client, target) {
+  const service = await readService(client, target);
+  const width =
+    Number.isSafeInteger(service.grid?.width) && service.grid.width > 0
+      ? service.grid.width
+      : 1;
+  const height =
+    Number.isSafeInteger(service.grid?.height) && service.grid.height > 0
+      ? service.grid.height
+      : 1;
+  return {
+    value: { value: `${width}x${height}`, kind: "stringValue" },
+    contract: serviceGridContract(),
+    order: readServiceGridOrder(service),
   };
 }
 

@@ -1683,11 +1683,19 @@ export class SprutHubClient {
     }
   }
 
-  // Sends only the named fields, never order or grid.
+  // Sends only the named fields (name, visible, grid), never top-level order.
   async updateService({ aId, sId }, fields) {
     const update = { aId, sId };
     if (Object.hasOwn(fields, "name")) update.name = fields.name;
     if (Object.hasOwn(fields, "visible")) update.visible = fields.visible;
+    if (Object.hasOwn(fields, "grid")) {
+      const grid = {
+        width: fields.grid.width,
+        height: fields.grid.height,
+      };
+      if (fields.grid.order !== undefined) grid.order = fields.grid.order;
+      update.grid = grid;
+    }
     const response = await this.#request(
       { service: { update } },
       Date.now() + this.timeoutMs,
@@ -1740,11 +1748,11 @@ export class SprutHubClient {
     };
   }
 
-  async listDashboards() {
-    const { dashboards } = await this.nativeDashboards(
-      this.serial,
-      Date.now() + this.timeoutMs,
-    );
+  async listDashboards({
+    serial = this.serial,
+    deadline = Date.now() + this.timeoutMs,
+  } = {}) {
+    const { dashboards } = await this.nativeDashboards(serial, deadline);
     return dashboards;
   }
 
@@ -2676,6 +2684,11 @@ export class SprutHubClient {
     return addIncludeResolution(entity, requested, ownerContext);
   }
 
+  async #dashboardsById(serial, deadline) {
+    const dashboards = await this.listDashboards({ serial, deadline });
+    return new Map(dashboards.map((dashboard) => [dashboard.id, dashboard]));
+  }
+
   async #readDashboardEntity(parsed, deadline) {
     const dashboard = await this.getDashboard(parsed.dashboardId, {
       serial: parsed.serial,
@@ -2683,9 +2696,16 @@ export class SprutHubClient {
     });
     if (!dashboard) throw entityNotFound("dashboard");
     const widgets = dashboard.columns.flatMap((column) => column.widgets);
-    const catalog = widgets.some(widgetReferencesHomeDevice)
-      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
-      : null;
+    const [catalog, dashboardsById] = await Promise.all([
+      widgets.some(widgetReferencesHomeDevice)
+        ? this.homeCatalog(parsed.serial, deadline).then(
+            ({ catalog }) => catalog,
+          )
+        : Promise.resolve(null),
+      widgets.some(widgetReferencesDashboards)
+        ? this.#dashboardsById(parsed.serial, deadline)
+        : Promise.resolve(null),
+    ]);
     return {
       kind: "dashboard",
       ref: dashboardRef(parsed.serial, dashboard.id),
@@ -2695,7 +2715,13 @@ export class SprutHubClient {
       column_count: dashboard.columns.length,
       widget_count: widgets.length,
       columns: dashboard.columns.map((column) =>
-        presentDashboardColumn(parsed.serial, dashboard.id, column, catalog),
+        presentDashboardColumn(
+          parsed.serial,
+          dashboard.id,
+          column,
+          catalog,
+          dashboardsById,
+        ),
       ),
     };
   }
@@ -2707,9 +2733,16 @@ export class SprutHubClient {
       { serial: parsed.serial, deadline },
     );
     if (!column) throw entityNotFound("dashboard column");
-    const catalog = column.widgets.some(widgetReferencesHomeDevice)
-      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
-      : null;
+    const [catalog, dashboardsById] = await Promise.all([
+      column.widgets.some(widgetReferencesHomeDevice)
+        ? this.homeCatalog(parsed.serial, deadline).then(
+            ({ catalog }) => catalog,
+          )
+        : Promise.resolve(null),
+      column.widgets.some(widgetReferencesDashboards)
+        ? this.#dashboardsById(parsed.serial, deadline)
+        : Promise.resolve(null),
+    ]);
     return {
       kind: "dashboard_column",
       ...presentDashboardColumn(
@@ -2717,6 +2750,7 @@ export class SprutHubClient {
         parsed.dashboardId,
         column,
         catalog,
+        dashboardsById,
       ),
     };
   }
@@ -2728,9 +2762,16 @@ export class SprutHubClient {
       { serial: parsed.serial, deadline },
     );
     if (!widget) throw entityNotFound("dashboard widget");
-    const catalog = widgetReferencesHomeDevice(widget)
-      ? (await this.homeCatalog(parsed.serial, deadline)).catalog
-      : null;
+    const [catalog, dashboardsById] = await Promise.all([
+      widgetReferencesHomeDevice(widget)
+        ? this.homeCatalog(parsed.serial, deadline).then(
+            ({ catalog }) => catalog,
+          )
+        : Promise.resolve(null),
+      widgetReferencesDashboards(widget)
+        ? this.#dashboardsById(parsed.serial, deadline)
+        : Promise.resolve(null),
+    ]);
     return {
       kind: "dashboard_widget",
       ...presentDashboardWidget(
@@ -2738,6 +2779,7 @@ export class SprutHubClient {
         parsed.dashboardId,
         widget,
         catalog,
+        dashboardsById,
       ),
     };
   }
@@ -5726,6 +5768,28 @@ function widgetReferencesHomeDevice(widget) {
   );
 }
 
+function widgetReferencesDashboards(widget) {
+  return (
+    widget?.type === "shortcut" &&
+    Array.isArray(widget.payload?.items) &&
+    widget.payload.items.length > 0
+  );
+}
+
+function presentServiceGrid(service) {
+  const width = service?.grid?.width;
+  const height = service?.grid?.height;
+  if (
+    Number.isSafeInteger(width) &&
+    width > 0 &&
+    Number.isSafeInteger(height) &&
+    height > 0
+  ) {
+    return { width, height };
+  }
+  return undefined;
+}
+
 function enrichCharacteristicItem(serial, item, catalog) {
   const accessory = catalog?.byId?.get(item.aId) ?? null;
   const service =
@@ -5766,6 +5830,7 @@ function enrichServiceItem(serial, item, catalog) {
       null)
     : null;
   const missing = !accessory || !service;
+  const grid = presentServiceGrid(service);
   return {
     service_ref: serviceRef(serial, item.aId, item.sId),
     aId: item.aId,
@@ -5776,11 +5841,18 @@ function enrichServiceItem(serial, item, catalog) {
     room_name: room ? redactSensitiveText(room.name ?? "") : null,
     service_name: service ? redactSensitiveText(service.name ?? "") : null,
     ...(service?.type ? { service_type: service.type } : {}),
+    ...(grid ? { grid } : {}),
     ...(missing ? { missing: true } : {}),
   };
 }
 
-function presentDashboardWidget(serial, dashboardId, widget, catalog) {
+function presentDashboardWidget(
+  serial,
+  dashboardId,
+  widget,
+  catalog,
+  dashboardsById = null,
+) {
   const base = {
     ref: dashboardWidgetRef(serial, dashboardId, widget.id),
     dashboard_ref: dashboardRef(serial, dashboardId),
@@ -5831,7 +5903,15 @@ function presentDashboardWidget(serial, dashboardId, widget, catalog) {
     };
   }
   if (widget.type === "shortcut") {
-    const items = (widget.payload.items ?? []).map(({ id }) => ({ id }));
+    const items = (widget.payload.items ?? []).map(({ id }) => {
+      const target = dashboardsById?.get(id) ?? null;
+      return {
+        id,
+        dashboard_ref: dashboardRef(serial, id),
+        dashboard_name: target ? redactSensitiveText(target.name ?? "") : null,
+        ...(target ? {} : { missing: true }),
+      };
+    });
     return {
       ...base,
       shortcut_ids: items.map(({ id }) => id),
@@ -5841,7 +5921,13 @@ function presentDashboardWidget(serial, dashboardId, widget, catalog) {
   return base;
 }
 
-function presentDashboardColumn(serial, dashboardId, column, catalog) {
+function presentDashboardColumn(
+  serial,
+  dashboardId,
+  column,
+  catalog,
+  dashboardsById = null,
+) {
   return {
     ref: dashboardColumnRef(serial, dashboardId, column.id),
     dashboard_ref: dashboardRef(serial, dashboardId),
@@ -5851,7 +5937,13 @@ function presentDashboardColumn(serial, dashboardId, column, catalog) {
     order: column.order ?? 0,
     widget_count: column.widgets.length,
     widgets: column.widgets.map((widget) =>
-      presentDashboardWidget(serial, dashboardId, widget, catalog),
+      presentDashboardWidget(
+        serial,
+        dashboardId,
+        widget,
+        catalog,
+        dashboardsById,
+      ),
     ),
   };
 }
@@ -6324,11 +6416,13 @@ function normalizeAccessoryDetail(serial, accessory, observedAt) {
 }
 
 function normalizeServiceDetail(serial, accessory, service, observedAt) {
+  const grid = presentServiceGrid(service);
   return {
     kind: "service",
     ref: serviceRef(serial, accessory.id, service.sId),
     name: service.name,
     type: service.type,
+    ...(grid ? { grid } : {}),
     characteristics: (service.characteristics ?? []).map((characteristic) =>
       normalizeCharacteristicDetail(
         serial,

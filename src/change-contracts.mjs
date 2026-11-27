@@ -391,6 +391,38 @@ export function logicActiveContract() {
   };
 }
 
+export const SERVICE_GRID_VALUES = [
+  "1x1",
+  "1x2",
+  "1x3",
+  "2x1",
+  "2x2",
+  "2x3",
+  "3x1",
+  "3x2",
+  "3x3",
+];
+
+export const SERVICE_GRID_LIMITATION =
+  "service.grid changes the tile size BOTH in service dashboard widgets AND in the room's service grid.";
+
+export function serviceGridContract() {
+  return {
+    type: "ServiceGrid",
+    kind: "stringValue",
+    format:
+      '"<width>x<height>" (width 1..3, height 1..3 in SprutHub\'s 3-column tile grid)',
+    valid_values: SERVICE_GRID_VALUES.map((value) => ({
+      value,
+      kind: "stringValue",
+    })),
+    write: "service.update({aId,sId,grid:{order,width,height}})",
+    confirmation: "separate_accessory_get_readback",
+    restore_supported: true,
+    limitations: [SERVICE_GRID_LIMITATION],
+  };
+}
+
 export function typedNativeValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new SprutHubError(

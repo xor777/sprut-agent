@@ -375,7 +375,7 @@ registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge; safe Telegram/listed TEXT), window_button (allowlisted BUTTON/BUTTON_DANGER by option_key: Telegram Login/Logout, thermostat valve calibration, Xiaomi child joinButton, ZigBee/Xiaomi child Remove), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (code of a LOGIC, whose info sets name, description and start, or of a GLOBAL). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, virtual_light_group (a lamp group: create, or set its lamps), virtual_device (a virtual switch, button or sensor: create), virtual_device_delete. Dashboards: dashboard_create, dashboard_update, dashboard_delete, dashboard_column_create, dashboard_column_update, dashboard_column_delete, dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete, dashboard_widget_move.",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge; safe Telegram/listed TEXT), window_button (allowlisted BUTTON/BUTTON_DANGER by option_key: Telegram Login/Logout, thermostat valve calibration, Xiaomi child joinButton, ZigBee/Xiaomi child Remove), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (code of a LOGIC, whose info sets name, description and start, or of a GLOBAL). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, service_grid (tile size 1x1..3x3), virtual_light_group (a lamp group: create, or set its lamps), virtual_device (a virtual switch, button or sensor: create), virtual_device_delete. Dashboards: dashboard_create, dashboard_update, dashboard_delete, dashboard_column_create, dashboard_column_update, dashboard_column_delete, dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete, dashboard_widget_move.",
         ),
       target_ref: z
         .string()
@@ -387,7 +387,7 @@ registerTool(
         .union([z.boolean(), z.number(), z.string()])
         .optional()
         .describe(
-          "The new value; true or false for *_active, service_visible and characteristic_notify; a virtual_device's service type.",
+          'The new value; true or false for *_active, service_visible and characteristic_notify; "1x1".."3x3" for service_grid; a virtual_device\'s service type.',
         ),
       option_key: z
         .string()

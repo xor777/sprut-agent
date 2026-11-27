@@ -33,6 +33,7 @@ export const NATIVE_CHANGE_OPERATIONS = [
   "room_name",
   "service_name",
   "service_visible",
+  "service_grid",
   "virtual_light_group",
   "virtual_device",
   "virtual_device_delete",
