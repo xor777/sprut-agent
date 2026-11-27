@@ -2078,6 +2078,26 @@ const HANDLERS = {
       services: [virtualInformationService(id, stored), ...created],
     };
     state.accessories.push(accessory);
+    // Live SprutHub 3.0.0 auto-attaches an active LightbulbControl logic
+    // ("Связь включения и уровня") to every created virtual Lightbulb with
+    // Brightness (observed on owner hub, 2026-11-27).
+    for (const service of created) {
+      if (
+        service.type === "Lightbulb" &&
+        service.characteristics.some(
+          ({ control }) => control.type === "Brightness",
+        )
+      ) {
+        state.logics.push({
+          aId: id,
+          sId: service.sId,
+          type: "LightbulbControl",
+          name: "Связь включения и уровня",
+          active: true,
+          optionsWindow: `Logic/LightbulbControl/${id}.${service.sId}/`,
+        });
+      }
+    }
     emitAccessories(state, "EVENT_ADD", [accessory]);
     // The create reply of the fake hubs omits `virtual`; the stored accessory
     // keeps it, as accessory.get reports it. notify was not seen in it.

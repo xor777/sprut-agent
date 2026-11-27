@@ -1028,3 +1028,139 @@ test("virtual_device accepts any non-system service.types entry and optional cha
   assert.equal(writes(hub, "accessory.create").length, writesBeforeInvalid);
   assert.ok(created(hub, before).length >= 3);
 });
+
+test("undo of a virtual Lightbulb ignores hub-auto-attached default LightbulbControl but blocks if modified or another logic is assigned", async (t) => {
+  const { hub, client, before } = await setup(t);
+
+  // 1. Fresh virtual Lightbulb with Brightness gets SprutHub's default
+  // LightbulbControl logic on create and still restores cleanly.
+  const preparedClean = await call(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Пробная RGBW",
+    value: "Lightbulb",
+    characteristic_types: [
+      "Brightness",
+      "Hue",
+      "Saturation",
+      "ColorTemperature",
+    ],
+    reason: "Создать временную виртуальную лампу",
+  });
+  const appliedClean = await call(client, "apply_native_change", {
+    change_ref: preparedClean.change_ref,
+  });
+  assert.equal(appliedClean.status, "applied");
+  const [cleanLight] = created(hub, before);
+  assert.ok(
+    hub.state.logics.some(
+      (logic) =>
+        logic.aId === cleanLight.id &&
+        logic.type === "LightbulbControl" &&
+        logic.active === true,
+    ),
+    "simulated hub must mirror live SprutHub 3.0.0 auto-attaching LightbulbControl",
+  );
+  const restoredClean = await call(client, "restore_native_change", {
+    change_ref: appliedClean.change_ref,
+  });
+  assert.equal(
+    restoredClean.status,
+    "restored",
+    JSON.stringify(restoredClean),
+  );
+  assert.deepEqual(diffHomeSnapshots(before, homeSnapshot(hub.state)), []);
+
+  // 2. If the owner toggles the auto-attached default logic, undo refuses with virtual_device_in_use.
+  const preparedToggled = await call(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Лампа с изменённой логикой",
+    value: "Lightbulb",
+    characteristic_types: ["Brightness"],
+    reason: "Создать диммируемую виртуальную лампу",
+  });
+  const appliedToggled = await call(client, "apply_native_change", {
+    change_ref: preparedToggled.change_ref,
+  });
+  assert.equal(appliedToggled.status, "applied");
+  const [toggledLight] = created(hub, before);
+  const defaultLogic = hub.state.logics.find(
+    (logic) =>
+      logic.aId === toggledLight.id && logic.type === "LightbulbControl",
+  );
+  assert.ok(defaultLogic);
+  defaultLogic.active = false;
+  const blockedToggled = await call(client, "restore_native_change", {
+    change_ref: appliedToggled.change_ref,
+  });
+  assert.equal(blockedToggled.status, "conflict");
+  assert.equal(blockedToggled.conflict_reason, "virtual_device_in_use");
+  assert.deepEqual(blockedToggled.dependencies.logics, [
+    { name: "Связь включения и уровня" },
+  ]);
+
+  // 3. If the owner assigns an extra logic (while keeping default untouched), undo refuses and reports only the added logic.
+  defaultLogic.active = true;
+  hub.state.logics.push({
+    aId: toggledLight.id,
+    sId: ownServices(toggledLight)[0].sId,
+    type: "AdaptiveLighting",
+    name: "Адаптивное освещение",
+    active: true,
+  });
+  const blockedExtra = await call(client, "restore_native_change", {
+    change_ref: appliedToggled.change_ref,
+  });
+  assert.equal(blockedExtra.status, "conflict");
+  assert.equal(blockedExtra.conflict_reason, "virtual_device_in_use");
+  assert.deepEqual(blockedExtra.dependencies.logics, [
+    { name: "Адаптивное освещение" },
+  ]);
+  assert.equal(writes(hub, "accessory.delete").length, 1);
+
+  // Removing the extra logic lets undo succeed cleanly.
+  hub.state.logics = hub.state.logics.filter(
+    (logic) =>
+      !(logic.aId === toggledLight.id && logic.type === "AdaptiveLighting"),
+  );
+  const restoredAfterRemoval = await call(client, "restore_native_change", {
+    change_ref: appliedToggled.change_ref,
+  });
+  assert.equal(restoredAfterRemoval.status, "restored");
+  assert.deepEqual(diffHomeSnapshots(before, homeSnapshot(hub.state)), []);
+
+  // 4. If logic.list fails transiently during apply, apply still settles as
+  // applied (the device was created and observed), and undo fails closed
+  // because default logics were never observed at creation time.
+  const preparedTransient = await call(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Лампа при сбое logic.list",
+    value: "Lightbulb",
+    characteristic_types: ["Brightness"],
+    reason: "Проверить fail-closed при сбое чтения логик",
+  });
+  hub.refuseNext("logic.list", {
+    code: -32603,
+    message: "Temporary logic read error",
+  });
+  const appliedTransient = await call(client, "apply_native_change", {
+    change_ref: preparedTransient.change_ref,
+  });
+  assert.equal(appliedTransient.status, "applied");
+  // Even a follow-up get_native_change must NOT retroactively classify
+  // logics as creation-time defaults.
+  const observedTransient = await call(client, "get_native_change", {
+    change_ref: appliedTransient.change_ref,
+  });
+  assert.equal(observedTransient.status, "applied");
+  const blockedTransient = await call(client, "restore_native_change", {
+    change_ref: appliedTransient.change_ref,
+  });
+  assert.equal(blockedTransient.status, "conflict");
+  assert.equal(blockedTransient.conflict_reason, "virtual_device_in_use");
+});
