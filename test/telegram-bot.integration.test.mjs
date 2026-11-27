@@ -148,6 +148,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
           ok: false,
           error_code: fault.status ?? 500,
           description: fault.description ?? "Injected Telegram error",
+          ...(fault.parameters ? { parameters: fault.parameters } : {}),
         }),
       );
       return;
@@ -176,9 +177,21 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
       sendOk(true);
       return;
     }
+    const isHtmlVisiblyEmpty = (raw, parseMode) => {
+      if (parseMode !== "HTML") return raw.trim().length === 0;
+      const visible = raw
+        .replace(/<[^>]*>/g, "")
+        .replaceAll("&amp;", "&")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&quot;", '"')
+        .trim();
+      return visible.length === 0;
+    };
+
     if (method === "sendMessage") {
       const text = String(body.text ?? "");
-      if (text.length === 0) {
+      if (text.length === 0 || isHtmlVisiblyEmpty(text, body.parse_mode)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -212,7 +225,7 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
     }
     if (method === "editMessageText") {
       const text = String(body.text ?? "");
-      if (text.length === 0) {
+      if (text.length === 0 || isHtmlVisiblyEmpty(text, body.parse_mode)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -351,6 +364,13 @@ async function startMockTelegramServer({ token = TEST_TOKEN } = {}) {
     failNext(method, fault) {
       if (!methodFaults.has(method)) methodFaults.set(method, []);
       methodFaults.get(method).push(fault);
+    },
+    clearFaults(method = null) {
+      if (method === null) {
+        methodFaults.clear();
+      } else {
+        methodFaults.delete(method);
+      }
     },
     sentMessages(chatId = null) {
       return calls
@@ -2210,6 +2230,17 @@ function assertValidTelegramHtml(html, maxLength = 4096) {
     [],
     `unclosed HTML tags remaining: ${stack.join(",")}`,
   );
+  const visible = html
+    .replace(/<[^>]*>/g, "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .trim();
+  assert.ok(
+    visible.length > 0,
+    `HTML chunk must have non-empty visible text, got: ${html}`,
+  );
 }
 
 test("bot sends Markdown replies as valid Telegram HTML with link previews disabled, identifiers intact, unsafe links neutralized, and secrets scrubbed first", async (t) => {
@@ -2806,4 +2837,224 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   );
   assert.equal(timeoutCalls[0].body.disable_notification, true);
   assert.equal(timeoutCalls[2].body.disable_notification, undefined);
+});
+
+test("TelegramBotRunner does not retry-storm on progress editMessageText 429, permanent 400, or 500 errors and still delivers final replies", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 90,
+    progressEditIntervalMs: 30,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  // Warm up app-server child first so turn timings are deterministic
+  harness.tg.pushUpdate(makePrivateMessageUpdate(800, 1001, "Прогрев"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Прогрев"),
+  );
+
+  // Case A: Persistent HTTP 429 with retry_after=30 on editMessageText must back off instead of retry-storming
+  const callsBefore429 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 429,
+      description: "Too Many Requests: retry after 30",
+      parameters: { retry_after: 30 },
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(801, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore429)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const calls429 = harness.tg.calls
+    .slice(callsBefore429)
+    .filter((c) => c.body.chat_id === 1001);
+  const edits429 = calls429.filter((c) => c.method === "editMessageText");
+  const deletes429 = calls429.filter((c) => c.method === "deleteMessage");
+  assert.equal(
+    edits429.length,
+    1,
+    `HTTP 429 retry_after=30 must not retry-storm editMessageText (got ${edits429.length} calls)`,
+  );
+  assert.equal(
+    deletes429.length,
+    1,
+    "status message must still be deleted after 429 edit failure",
+  );
+
+  // Case B: Persistent HTTP 400 "message to edit not found" disables further edits & skips delete
+  harness.tg.clearFaults("editMessageText");
+  const callsBefore400 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 400,
+      description: "Bad Request: message to edit not found",
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(802, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore400)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const calls400 = harness.tg.calls
+    .slice(callsBefore400)
+    .filter((c) => c.body.chat_id === 1001);
+  const edits400 = calls400.filter((c) => c.method === "editMessageText");
+  const deletes400 = calls400.filter((c) => c.method === "deleteMessage");
+  assert.equal(
+    edits400.length,
+    1,
+    `permanent 400 edit failure must stop further edits (got ${edits400.length} calls)`,
+  );
+  assert.equal(
+    deletes400.length,
+    0,
+    "vanished status message (message to edit not found) must not trigger pointless deleteMessage",
+  );
+
+  await runner.stop();
+
+  // Case C: progressEditIntervalMs=0 with persistent HTTP 500 on editMessageText must not spin/starve
+  harness.tg.clearFaults("editMessageText");
+  const runnerZero = new TelegramBotRunner({
+    config: { ...config, turnTimeoutMs: 1500 },
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    interruptGraceMs: 150,
+    progressDelayMs: 90,
+    progressEditIntervalMs: 0,
+    logger: () => {},
+  });
+  await runnerZero.start();
+  harness.onCleanup(() => runnerZero.stop());
+
+  harness.tg.pushUpdate(makePrivateMessageUpdate(803, 1001, "Прогрев 2"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Прогрев 2"),
+  );
+
+  const callsBefore500 = harness.tg.calls.length;
+  for (let i = 0; i < 6; i += 1) {
+    harness.tg.failNext("editMessageText", {
+      status: 500,
+      description: "Internal Server Error",
+    });
+  }
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(804, 1001, "[LONG_COMMENTARY] SECRET=none"),
+  );
+  await waitFor(() =>
+    harness.tg.calls
+      .slice(callsBefore500)
+      .some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.body.text === "Итоговый ответ после диагностики.",
+      ),
+  );
+  const edits500 = harness.tg.calls
+    .slice(callsBefore500)
+    .filter((c) => c.method === "editMessageText" && c.body.chat_id === 1001);
+  assert.ok(
+    edits500.length >= 1 && edits500.length <= 2,
+    `HTTP 500 with progressEditIntervalMs=0 must never retry-storm same text (got ${edits500.length} calls)`,
+  );
+});
+
+test("splitTelegramHtmlChunks and TelegramApi never emit empty HTML chunks or exceed tiny maxLength with entities", async (t) => {
+  const { splitTelegramHtmlChunks } = await import(
+    "../telegram/format-html.mjs"
+  );
+  const { TelegramApi } = await import("../telegram/telegram-api.mjs");
+
+  // 1. Fenced code block split around a blank line or trailing blank line (P2)
+  const codeWithBlankLine = `\`\`\`js\n${"a".repeat(66)}\n\n${"b".repeat(66)}\n\`\`\``;
+  const blankSplitChunks = splitTelegramHtmlChunks(codeWithBlankLine, 90);
+  assert.equal(blankSplitChunks.length, 2);
+  for (const chunk of blankSplitChunks) {
+    assertValidTelegramHtml(chunk.html, 90);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+  }
+  assert.ok(blankSplitChunks[0].html.includes("a".repeat(66)));
+  assert.ok(blankSplitChunks[1].html.includes("b".repeat(66)));
+
+  const codeTrailingBlank = `\`\`\`js\n${"a".repeat(66)}\n\n\`\`\``;
+  const trailingBlankChunks = splitTelegramHtmlChunks(codeTrailingBlank, 90);
+  assert.equal(trailingBlankChunks.length, 1);
+  assertValidTelegramHtml(trailingBlankChunks[0].html, 90);
+
+  // 2. Empty and whitespace-only fenced code blocks & whitespace-only inline code spans (P2)
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  for (const sample of [
+    "```\n```",
+    "```\n   \n```",
+    "```json\n   \t  \n```",
+    "`   `",
+  ]) {
+    const chunks = splitTelegramHtmlChunks(sample, 90);
+    assert.ok(
+      chunks.length >= 1,
+      `sample ${JSON.stringify(sample)} must yield chunks`,
+    );
+    for (const chunk of chunks) {
+      assertValidTelegramHtml(chunk.html, 90);
+      assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+    }
+    // Must succeed against Telegram mock server rejecting visibly-empty HTML
+    const delivered = await api.sendMessage(3001, sample);
+    assert.ok(delivered.length >= 1);
+  }
+
+  // Oversized inline code span containing a huge whitespace run must not emit whitespace-only <code> chunk
+  const spacedInlineCode = `\`${"a".repeat(35)}${" ".repeat(70)}${"b".repeat(35)}\``;
+  const spacedInlineChunks = splitTelegramHtmlChunks(spacedInlineCode, 50);
+  assert.ok(spacedInlineChunks.length >= 2);
+  for (const chunk of spacedInlineChunks) {
+    assertValidTelegramHtml(chunk.html, 50);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 50);
+  }
+
+  // 3. Fenced code block at maxLength in 25..29 with HTML-escapable chars must never exceed maxLength (P3)
+  for (const maxLen of [25, 26, 27, 28, 29]) {
+    for (const sample of ["```\n&&&\n```", "```\n&&&&&&&&&&\n```"]) {
+      const chunks = splitTelegramHtmlChunks(sample, maxLen);
+      assert.ok(chunks.length >= 1);
+      for (const chunk of chunks) {
+        assertValidTelegramHtml(chunk.html, maxLen);
+        assert.ok(chunk.plain.length > 0 && chunk.plain.length <= maxLen);
+        assertNoLoneSurrogates(chunk.plain, `code plain maxLen=${maxLen}`);
+      }
+    }
+  }
 });
