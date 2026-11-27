@@ -786,6 +786,40 @@ rl.on("line", async (line) => {
       return;
     }
 
+    if (prompt.includes("[MARKDOWN_REPLY]")) {
+      const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
+      const markdownReply = [
+        "### Диагностика \`_TZ3000_w0qqde0g\`",
+        "",
+        "Проверил **состояние** и *журнал*, ошибка \`UNREPORTABLE_ATTRIBUTE\` (2 * 3 < 7 & T > 1).",
+        "- Шаблон: \`catalog_template_create\` и ~~старый~~ вариант",
+        "* Подробности: [справка **SprutHub**](https://wiki.spruthub.ru/Что_такое_шаблоны%3F) и [добавление](https://wiki.spruthub.ru/Добавление_кастомных_шаблонов_для_любых_устройств)",
+        "  - Ещё [Zigbee (protocol)](https://en.wikipedia.org/wiki/Zigbee_(protocol))",
+        "  - Небезопасное: [js](javascript:alert(1)) и [data](data:text/html,<svg>)",
+        "",
+        "\`\`\`json",
+        '{"model": "_TZ3000_w0qqde0g", "expr": "a < b & c > d", "bold": "**raw**"}',
+        "\`\`\`",
+        "",
+        "Поля: service_grid, home_overview, токен: " + secretToken,
+      ].join("\\n");
+      send({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            phase: "final_answer",
+            text: markdownReply,
+          },
+        },
+      });
+      finish("completed");
+      return;
+    }
+
     if (prompt.includes("[NO_FINAL_PHASE]")) {
       send({
         jsonrpc: "2.0",
@@ -1916,4 +1950,453 @@ test("mcpServer/elicitation/request accepts sprut-agent tool calls with session 
     harness.tg.sentMessages(1001)[0].text,
     "elicit:accept:session/decline/decline",
   );
+});
+
+function assertNoLoneSurrogates(str, label = "text") {
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = str.charCodeAt(i + 1);
+      assert.ok(
+        next >= 0xdc00 && next <= 0xdfff,
+        `${label}: lone high surrogate at index ${i}`,
+      );
+      i += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      assert.fail(`${label}: lone low surrogate at index ${i}`);
+    }
+  }
+}
+
+function assertValidTelegramHtml(html, maxLength = 4096) {
+  assert.ok(html.length > 0, "HTML chunk must be non-empty");
+  assert.ok(
+    html.length <= maxLength,
+    `HTML chunk length ${html.length} exceeds maxLength ${maxLength}`,
+  );
+  assertNoLoneSurrogates(html, "html");
+
+  const stack = [];
+  let i = 0;
+  while (i < html.length) {
+    const ch = html[i];
+    if (ch === "<") {
+      const closeIdx = html.indexOf(">", i + 1);
+      assert.notEqual(closeIdx, -1, `unclosed '<' at index ${i}: ${html}`);
+      const tagBody = html.slice(i + 1, closeIdx);
+      if (tagBody.startsWith("/")) {
+        const tagName = tagBody.slice(1);
+        assert.ok(
+          ["b", "i", "s", "code", "pre", "a"].includes(tagName),
+          `unexpected closing tag </${tagName}>`,
+        );
+        const top = stack.pop();
+        assert.equal(
+          top,
+          tagName,
+          `mismatched closing tag </${tagName}> (expected </${top ?? "none"}>) in: ${html}`,
+        );
+      } else if (tagBody.startsWith("a ")) {
+        assert.equal(
+          stack.includes("a"),
+          false,
+          `nested <a> tag is forbidden in: ${html}`,
+        );
+        const hrefMatch = /^href="([^"]*)"$/.exec(tagBody.slice(2));
+        assert.ok(hrefMatch, `malformed <a> tag <${tagBody}>`);
+        const href = hrefMatch[1];
+        assert.match(href, /^https?:\/\//i, `unsafe href scheme: ${href}`);
+        assert.equal(
+          /[<>"]/.test(href),
+          false,
+          `unescaped special char in href: ${href}`,
+        );
+        assert.equal(
+          /&(?!amp;|lt;|gt;|quot;)/.test(href),
+          false,
+          `unescaped '&' in href: ${href}`,
+        );
+        stack.push("a");
+      } else {
+        assert.ok(
+          ["b", "i", "s", "code", "pre"].includes(tagBody),
+          `unexpected opening tag <${tagBody}> in: ${html}`,
+        );
+        if (tagBody === "code") {
+          assert.equal(
+            stack.includes("code"),
+            false,
+            `nested <code> tag in: ${html}`,
+          );
+        }
+        stack.push(tagBody);
+      }
+      i = closeIdx + 1;
+      continue;
+    }
+    assert.notEqual(ch, ">", `unescaped '>' at index ${i} in: ${html}`);
+    if (ch === "&") {
+      const rest = html.slice(i);
+      assert.match(
+        rest,
+        /^&(amp|lt|gt|quot);/,
+        `unescaped or split '&' entity at index ${i}: ${rest.slice(0, 12)}`,
+      );
+    }
+    i += 1;
+  }
+  assert.deepEqual(
+    stack,
+    [],
+    `unclosed HTML tags remaining: ${stack.join(",")}`,
+  );
+}
+
+test("bot sends Markdown replies as valid Telegram HTML with link previews disabled, identifiers intact, unsafe links neutralized, and secrets scrubbed first", async (t) => {
+  const { loadTelegramConfig, TelegramBotRunner } = await loadTelegramModules();
+  const harness = await createTestHarness(t, { allowedUserIds: "1001" });
+  const config = await loadTelegramConfig({ env: harness.baseEnv });
+
+  const runner = new TelegramBotRunner({
+    config,
+    env: harness.baseEnv,
+    pollTimeoutSec: 1,
+    logger: () => {},
+  });
+  await runner.start();
+  harness.onCleanup(() => runner.stop());
+
+  harness.tg.pushUpdate(
+    makePrivateMessageUpdate(
+      600,
+      1001,
+      `[MARKDOWN_REPLY] SECRET=${TEST_TOKEN}`,
+    ),
+  );
+  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
+
+  const sent = harness.tg.sentMessages(1001)[0];
+  assert.equal(
+    sent.parse_mode,
+    "HTML",
+    "replies must be sent with parse_mode HTML",
+  );
+  assert.deepEqual(
+    sent.link_preview_options,
+    { is_disabled: true },
+    "replies must disable Telegram link previews",
+  );
+  assertValidTelegramHtml(sent.text, 4096);
+
+  assert.ok(
+    sent.text.includes("<b>Диагностика <code>_TZ3000_w0qqde0g</code></b>"),
+    `heading with inline code should render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      "Проверил <b>состояние</b> и <i>журнал</i>, ошибка <code>UNREPORTABLE_ATTRIBUTE</code> (2 * 3 &lt; 7 &amp; T &gt; 1).",
+    ),
+    `bold/italic/code/math/escaping must render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      "• Шаблон: <code>catalog_template_create</code> и <s>старый</s> вариант",
+    ),
+    `bullet list and strikethrough must render cleanly, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '• Подробности: <a href="https://wiki.spruthub.ru/Что_такое_шаблоны%3F">справка <b>SprutHub</b></a> и <a href="https://wiki.spruthub.ru/Добавление_кастомных_шаблонов_для_любых_устройств">добавление</a>',
+    ),
+    `Cyrillic and percent-encoded URLs with formatted labels must render as <a>, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '  • Ещё <a href="https://en.wikipedia.org/wiki/Zigbee_(protocol)">Zigbee (protocol)</a>',
+    ),
+    `balanced parentheses inside URLs must render as <a>, got:\n${sent.text}`,
+  );
+  assert.equal(
+    sent.text.includes("javascript:"),
+    true,
+    "unsafe link text should remain visible as plain escaped text",
+  );
+  assert.equal(
+    sent.text.includes('<a href="javascript:'),
+    false,
+    "javascript: links must never render as <a>",
+  );
+  assert.equal(
+    sent.text.includes('<a href="data:'),
+    false,
+    "data: links must never render as <a>",
+  );
+  assert.ok(
+    sent.text.includes("[data](data:text/html,&lt;svg&gt;)"),
+    `unsafe data: link must be HTML-escaped plain text, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes(
+      '<pre><code>{"model": "_TZ3000_w0qqde0g", "expr": "a &lt; b &amp; c &gt; d", "bold": "**raw**"}</code></pre>',
+    ),
+    `fenced code block must escape HTML and skip inner Markdown, got:\n${sent.text}`,
+  );
+  assert.ok(
+    sent.text.includes("Поля: service_grid, home_overview, токен: [REDACTED]"),
+    `underscores in identifiers must stay untouched and secrets scrubbed before HTML formatting, got:\n${sent.text}`,
+  );
+  assert.equal(
+    sent.text.includes(TEST_TOKEN),
+    false,
+    "bot token must never appear in formatted Telegram HTML",
+  );
+});
+
+test("TelegramApi.sendMessage falls back to plain text only on HTTP 400 HTML parse errors, supports parseMode opt-out, and keeps splitTelegramMessage", async (t) => {
+  const { TelegramApi, TelegramApiError, splitTelegramMessage } = await import(
+    "../telegram/telegram-api.mjs"
+  );
+  assert.deepEqual(splitTelegramMessage("hello world", 5), ["hello", "world"]);
+
+  const tg = await startMockTelegramServer({ token: TEST_TOKEN });
+  t.after(() => tg.close());
+
+  const api = new TelegramApi({ token: TEST_TOKEN, apiBase: tg.apiBase });
+
+  // 1. Multi-chunk send where chunk 1 hits a Telegram HTTP 400 HTML parse error:
+  //    chunk 1 retries as plain text without parse_mode; chunks 2 and 3 still send HTML.
+  const para1 = `**Блок 1**: ${"а".repeat(2500)}`;
+  const para2 = `**Блок 2**: [справка](https://wiki.spruthub.ru/Тест) ${"б".repeat(2500)}`;
+  const para3 = `**Блок 3**: \`home_overview\``;
+  const fullText = `${para1}\n\n${para2}\n\n${para3}`;
+
+  tg.failNext("sendMessage", {
+    status: 400,
+    description:
+      'Bad Request: can\'t parse entities: Unsupported start tag "weird" at byte offset 5',
+  });
+  const multiRes = await api.sendMessage(1001, fullText);
+  assert.equal(multiRes.length, 3, "all 3 chunks must be delivered");
+
+  const multiCalls = tg.sentMessages(1001);
+  assert.equal(
+    multiCalls.length,
+    4,
+    "expected 3 normal sends + 1 plain-text retry for failed chunk",
+  );
+  assert.equal(multiCalls[0].parse_mode, "HTML");
+  assert.deepEqual(multiCalls[0].link_preview_options, { is_disabled: true });
+  assert.equal(
+    multiCalls[1].parse_mode,
+    undefined,
+    "fallback retry must omit parse_mode",
+  );
+  assert.deepEqual(multiCalls[1].link_preview_options, { is_disabled: true });
+  assert.ok(
+    multiCalls[1].text.includes("**Блок 1**"),
+    "plain fallback must send plain source text for that chunk",
+  );
+  assert.equal(
+    multiCalls[2].parse_mode,
+    "HTML",
+    "subsequent chunks must still use HTML mode",
+  );
+  assert.equal(multiCalls[3].parse_mode, "HTML");
+
+  // Also check other parse error descriptions ("unclosed", "expected end tag")
+  for (const description of [
+    "Bad Request: unclosed start tag at byte offset 10",
+    "Bad Request: expected end tag 'b' at byte offset 14",
+  ]) {
+    const before = tg.sentMessages(1002).length;
+    tg.failNext("sendMessage", { status: 400, description });
+    await api.sendMessage(1002, "**Тест** фоллбэка");
+    const after = tg.sentMessages(1002).slice(before);
+    assert.equal(after.length, 2, `should retry once on "${description}"`);
+    assert.equal(after[0].parse_mode, "HTML");
+    assert.equal(after[1].parse_mode, undefined);
+    assert.equal(after[1].text, "**Тест** фоллбэка");
+  }
+
+  // 2. Non-parse errors (400 chat not found, 401, 429, 500) must NOT retry or swallow
+  for (const fault of [
+    { status: 400, description: "Bad Request: chat not found" },
+    { status: 401, description: "Unauthorized" },
+    { status: 429, description: "Too Many Requests: retry after 3" },
+    { status: 500, description: "Internal Server Error" },
+  ]) {
+    const before = tg.sentMessages(1003).length;
+    tg.failNext("sendMessage", fault);
+    await assert.rejects(
+      () => api.sendMessage(1003, "**Ошибка**"),
+      (err) => err instanceof TelegramApiError && err.status === fault.status,
+      `HTTP ${fault.status} (${fault.description}) must reject without retry`,
+    );
+    const attempts = tg.sentMessages(1003).slice(before);
+    assert.equal(
+      attempts.length,
+      1,
+      `HTTP ${fault.status} (${fault.description}) must not trigger plain-text fallback`,
+    );
+  }
+
+  // 3. Network error must NOT retry or swallow
+  const failingApi = new TelegramApi({
+    token: TEST_TOKEN,
+    apiBase: tg.apiBase,
+    fetchImpl: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  await assert.rejects(
+    () => failingApi.sendMessage(1003, "**Сеть**"),
+    (err) => err instanceof TelegramApiError && err.code === "network",
+  );
+
+  // 4. parseMode: null and parseMode: false bypass HTML formatting
+  const beforeOptOut = tg.sentMessages(1004).length;
+  await api.sendMessage(1004, "**без** <форматирования>", { parseMode: null });
+  await api.sendMessage(1004, "*тоже* без", { parseMode: false });
+  const optOutCalls = tg.sentMessages(1004).slice(beforeOptOut);
+  assert.equal(optOutCalls.length, 2);
+  assert.equal(optOutCalls[0].parse_mode, undefined);
+  assert.equal(optOutCalls[0].text, "**без** <форматирования>");
+  assert.equal(optOutCalls[1].parse_mode, undefined);
+  assert.equal(optOutCalls[1].text, "*тоже* без");
+});
+
+test("markdownToTelegramHtml and splitTelegramHtmlChunks handle edge cases, chunk limits, oversized code blocks, long formatted lines, and surrogate pairs", async () => {
+  const { markdownToTelegramHtml, splitTelegramHtmlChunks } = await import(
+    "../telegram/format-html.mjs"
+  );
+
+  // Identifiers with underscores and math stay untouched
+  assert.equal(
+    markdownToTelegramHtml(
+      "_TZ3000_w0qqde0g catalog_template_create service_grid home_overview __init__ 2 * 3 * 4 2 ** 8 ~20°C",
+    ),
+    "_TZ3000_w0qqde0g catalog_template_create service_grid home_overview __init__ 2 * 3 * 4 2 ** 8 ~20°C",
+  );
+
+  // Nested inline formatting, links with query escaping, unsafe schemes, no nested <a>
+  assert.equal(
+    markdownToTelegramHtml(
+      '[**Ж** `a&b`](https://example.com/p?x=1&y="2") [bad](file:///etc/passwd) [outer [inner](https://b.example)](https://a.example)',
+    ),
+    '<a href="https://example.com/p?x=1&amp;y=&quot;2&quot;"><b>Ж</b> <code>a&amp;b</code></a> [bad](file:///etc/passwd) <a href="https://a.example">outer [inner](https://b.example)</a>',
+  );
+
+  // Bold containing inline code with asterisks, heading with already-bold text, multi-backtick code
+  assert.equal(
+    markdownToTelegramHtml("## **Заголовок**\n**код `2**3` ок** и ``a `b` c``"),
+    "<b>Заголовок</b>\n<b>код <code>2**3</code> ок</b> и <code>a `b` c</code>",
+  );
+
+  // Split oversized fenced code block with HTML-escapable chars and emoji (surrogate pairs)
+  const bigCodeLines = [
+    "```json",
+    '{"a": "<tag> & value", "emoji": "🔥💡🏠🔥💡🏠"}',
+    `{"long": "${"x<y&z🔥".repeat(25)}"}`,
+    '{"end": true}',
+    "```",
+  ].join("\n");
+  const codeChunks = splitTelegramHtmlChunks(bigCodeLines, 90);
+  assert.ok(codeChunks.length >= 3, "oversized fenced code block must split");
+  for (const chunk of codeChunks) {
+    assertValidTelegramHtml(chunk.html, 90);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 90);
+    assertNoLoneSurrogates(chunk.plain, "code plain chunk");
+    assert.match(
+      chunk.html,
+      /^<pre><code>[\s\S]*<\/code><\/pre>$/,
+      `each split code chunk must wrap in <pre><code>...</code></pre>, got: ${chunk.html}`,
+    );
+  }
+  const reconstructedCode = codeChunks
+    .map((c) =>
+      c.html
+        .replace(/^<pre><code>/, "")
+        .replace(/<\/code><\/pre>$/, "")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&amp;", "&"),
+    )
+    .join("");
+  assert.ok(reconstructedCode.includes('"a": "<tag> & value"'));
+  assert.ok(reconstructedCode.includes('"end": true'));
+  assert.ok(reconstructedCode.includes("🔥💡🏠🔥💡🏠"));
+
+  // Split oversized single line with bold, links, entities, and emoji (never cut mid-tag, mid-entity, mid-<a>, or mid-surrogate-pair)
+  const longFormattedLine =
+    "Начало & <проверка> **очень длинная жирная строка с " +
+    "🔥".repeat(12) +
+    " и [Справка SprutHub](https://wiki.spruthub.ru/Тест) а также `inline_code_token` и ещё много слов & знаков < > для разбиения** финал.";
+  const lineChunks = splitTelegramHtmlChunks(longFormattedLine, 95);
+  assert.ok(lineChunks.length >= 3, "long formatted line must split cleanly");
+  for (const chunk of lineChunks) {
+    assertValidTelegramHtml(chunk.html, 95);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 95);
+    assertNoLoneSurrogates(chunk.plain, "line plain chunk");
+  }
+  const joinedLineHtml = lineChunks.map((c) => c.html).join(" ");
+  assert.ok(
+    joinedLineHtml.includes(
+      '<a href="https://wiki.spruthub.ru/Тест">Справка SprutHub</a>',
+    ),
+    "link must stay intact inside a single chunk, never split mid-<a>",
+  );
+  assert.ok(
+    joinedLineHtml.includes("<code>inline_code_token</code>"),
+    "inline code must stay intact inside a chunk",
+  );
+  assert.ok(
+    joinedLineHtml.includes("финал."),
+    "tail of line must be preserved",
+  );
+
+  // Empty/blank, unclosed delimiters, nested bold/italic, non-headings
+  assert.equal(markdownToTelegramHtml(""), "");
+  assert.deepEqual(splitTelegramHtmlChunks(""), []);
+  assert.deepEqual(splitTelegramHtmlChunks("   \n\t  "), []);
+  assert.equal(
+    markdownToTelegramHtml(
+      "#хэштег\n####### семь\n*курсив и **жирный** вместе* / ***три***",
+    ),
+    "#хэштег\n####### семь\n<i>курсив и <b>жирный</b> вместе</i> / <b><i>три</i></b>",
+  );
+  const unclosedHtml = markdownToTelegramHtml(
+    "**unclosed *ital `code ~~strike [link](https://a.example/x(y\n```\nconst a = 1 < 2;",
+  );
+  assertValidTelegramHtml(unclosedHtml, 4096);
+  assert.ok(
+    unclosedHtml.includes("<pre><code>const a = 1 &lt; 2;</code></pre>"),
+  );
+
+  // Degenerate oversized single link and oversized single inline code span stay valid within maxLength
+  const hugeLink = `[длинная ссылка](https://wiki.spruthub.ru/${"шаблон_".repeat(15)})`;
+  const hugeLinkChunks = splitTelegramHtmlChunks(hugeLink, 60);
+  assert.ok(hugeLinkChunks.length >= 2);
+  for (const chunk of hugeLinkChunks) {
+    assertValidTelegramHtml(chunk.html, 60);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 60);
+    assertNoLoneSurrogates(chunk.plain, "hugeLink plain");
+  }
+
+  const hugeInlineCode = `\`${"a&b<c🔥".repeat(20)}\``;
+  const hugeCodeChunks = splitTelegramHtmlChunks(hugeInlineCode, 50);
+  assert.ok(hugeCodeChunks.length >= 3);
+  for (const chunk of hugeCodeChunks) {
+    assertValidTelegramHtml(chunk.html, 50);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 50);
+    assertNoLoneSurrogates(chunk.plain, "hugeInlineCode plain");
+  }
+
+  // Plain length > HTML length (e.g. "### **...**") must still enforce plain.length <= maxLength
+  const verboseMarkdownHeading = `### **${"Заголовок ".repeat(6)}**`;
+  const headingChunks = splitTelegramHtmlChunks(verboseMarkdownHeading, 45);
+  assert.ok(headingChunks.length >= 2);
+  for (const chunk of headingChunks) {
+    assertValidTelegramHtml(chunk.html, 45);
+    assert.ok(chunk.plain.length > 0 && chunk.plain.length <= 45);
+  }
 });
