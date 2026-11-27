@@ -19,7 +19,29 @@
 
 ## Текущее состояние (27.11.2026)
 
-- **Опубликовано `0.9.1`:**
+- **В `main` после `0.9.1` (готово к выпуску `0.9.2` по согласованию):**
+  - **Волна 5.3 — каталог шаблонов SprutHub 3.0, ZigBee `Repair` и Telegram UX (`5f1d352`):**
+    0 новых MCP-инструментов (остаётся **13**) и 0 новых полей схемы `prepare_native_change`.
+    - **Каталог шаблонов (`catalog.*`):** чтение через `home_overview({ list: "catalog", query, type })`
+      и `get_entity` (`referenced_templates`, `writable`, `error`, нейтрально к `HomeState`);
+      создание/правка/удаление пользовательских шаблонов строго в `INTERNAL`
+      (`catalog_template_create`, `catalog_template_update`, `catalog_template_delete`) с
+      локальной валидацией JSON и проверкой родительских шаблонов, защитой от особенности хаба
+      создавать `active: false` файл при ошибке (автоочистка/откат) и полным откатом через
+      `restore_native_change`. Проверено вживую на SprutHub `3.0.0` (rev `20131`) через
+      `dist/plugin/dist/server.mjs` (`create` → `get_entity` → `update` → `restore` update →
+      `restore` create, автоочистка подтверждена).
+    - **ZigBee `Repair` («Переспарить»):** добавлена в allowlist `window_button` на окнах
+      `Controller/zigbee_<id>/Child/<child>/` с защитой координатора (`0000`); подтверждено
+      вживую, что `Repair` перепроверяет устройство под текущим шаблоном (`MAIN`), а новый
+      `INTERNAL`-шаблон подхватывается через `Remove` + свежий `device_search`.
+    - **Telegram HTML, живой статус и диагностический навык:** конвертация Markdown →
+      Telegram `HTML` (`telegram/format-html.mjs`, кликабельные ссылки, отключённые превью,
+      автофолбэк в plain text), тихое обновляемое статус-сообщение на длинных запросах с
+      реальными комментариями Codex (удаляется перед финальным ответом), очищенная от
+      занудных оговорок `telegram/persona.mjs` и 6-шаговый порядок диагностики подключения в
+      [references/diagnostics-workflow.md](skills/spruthub-master/references/diagnostics-workflow.md).
+- **Опубликовано `0.9.1` (`33c15f7`):**
   - **Волна 5.2 — реальная UI-модель дашбордов SprutHub 3.0 и `service_grid` (`ccbffa5`):**
     по итогам разбора исходника официального веб-клиента (`beta.spruthub.ru/js/app.16735171810a795a9f2d.js`)
     и живой пробы `service.grid` на SprutHub `3.0.0` (rev `20131`). `service` (`show_rooms: true`)
@@ -74,7 +96,7 @@
   - **Обновлённая документация (`cee4809`):** сокращены и переписаны `README.md`, `DEVELOPMENT.md`
     и `PLAN.md`, из активных доков удалена личная инфраструктура.
 - **Поверхность и проверки:** **13** MCP-инструментов, `instructions` **1547 / 2048**,
-  макс. описание **914 / 1000** (`get_entity`), **1394** офлайн-тестов (0 пропусков).
+  макс. описание **922 / 1000** (`get_entity`), **1415** офлайн-тестов (0 пропусков).
   AX-прогоны субагента `flash` на симуляторе (не Claude Sonnet): `6/6` (волна 2) и
   `3/3` (волна 4).
 
@@ -138,6 +160,18 @@
   ревью (1×P2, 1×P3): отвязали `service.grid.order` от внутриаксессуарного `service.order` и
   исключили воскрешение устаревшего `baseline_grid_order` при proto3-опущенном `grid.order=0` —
   закрыто в повторном ревью (`APPROVE`).
+- **Каталог шаблонов `INTERNAL`, ZigBee `Repair` и Telegram UX (Волна 5.3, 27.11.2026):**
+  живая проба на SprutHub `3.0.0` (rev `20131`) и реальный случай с розеткой `Aubess TS011F`
+  (`_TZ3000_w0qqde0g`) подтвердили 3 факта: (1) `catalog.create` при ошибке JSON/схемы
+  создаёт на хабе файл `active: false` с `error` вместо JSON-RPC отказа — нужна локальная
+  валидация + немедленная очистка/откат при `active !== true`; (2) `Repair` («Переспарить»)
+  перепроверяет устройство под прежним `template=MAIN`, а новый `INTERNAL`-шаблон
+  применяется через `Remove` + свежий `device_search` (проверено вживую заменой
+  `BindOutletMetering` → `PollOutletMetering`); (3) по одному возврату с ревью на каждую
+  ветку закрыли шторм повторов при ошибке `editMessageText`, пустые HTML-чанки при разрезании
+  блоков кода, запрет записей из read-only `get_native_change`, очистку `write_intent.rejection`
+  в `change-restore.mjs`/`catalog-changes.mjs`, proto3-дефолты `store="MAIN"`/`active=false`
+  и защиту `later_owned_change` при цикличных обновлениях — обе ветки получили `APPROVE`.
 - **Не делаем без подтверждённой потребности:** новые MCP-инструменты, развитие
   `voice/` сверх эксперимента, рефакторинг без конкретной поломки, общие BI-фичи вне
   возможностей SprutHub.
