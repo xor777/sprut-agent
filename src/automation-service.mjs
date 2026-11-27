@@ -147,6 +147,7 @@ import {
   foreignDifferences,
   incomingLinks,
   isHomeRef,
+  LAMP_GROUP_TYPES,
   LIGHT_GROUP_MEMBERS,
   lampControls,
   lampGroupContract,
@@ -1588,10 +1589,22 @@ export class AutomationService {
       ),
     ]);
     const lightbulbType = serviceTypes.find(({ type }) => type === "Lightbulb");
+    let candidateTypes = requestedCharacteristicTypes;
     if (requestedCharacteristicTypes !== undefined) {
       validateVirtualLightServiceType(
         lightbulbType,
         requestedCharacteristicTypes,
+      );
+    } else {
+      validateVirtualLightServiceType(lightbulbType, ["On"]);
+      const advertised = new Set(
+        [
+          ...(lightbulbType.required ?? []),
+          ...(lightbulbType.optional ?? []),
+        ].map(characteristicTypeName),
+      );
+      candidateTypes = LAMP_GROUP_TYPES.filter(
+        (type) => type === "On" || advertised.has(type),
       );
     }
     const inspectedMembers = memberTargets.map(({ ref, target }, index) =>
@@ -1599,7 +1612,8 @@ export class AutomationService {
         ref,
         target,
         accessories[index],
-        requestedCharacteristicTypes,
+        candidateTypes,
+        { strictOptional: requestedCharacteristicTypes !== undefined },
       ),
     );
     const characteristicTypes = resolveVirtualLightCharacteristicTypes(
@@ -3874,9 +3888,13 @@ export class AutomationService {
       current,
       change.requested_snapshot,
     );
+    const matchesBaseline = accessoryPlacementMatches(
+      current,
+      change.baseline_snapshot,
+    );
     const requestedRoomObserved =
       current.room_id === change.requested_snapshot.room_id;
-    if (acknowledged && requestedRoomObserved) {
+    if (acknowledged && requestedRoomObserved && !matchesBaseline) {
       change.applied_snapshot = structuredClone(current);
       return this.#finishAccessoryReconciliation(
         change,
@@ -3905,9 +3923,9 @@ export class AutomationService {
         },
       );
     }
-    const possibleNormalization =
-      requestedRoomObserved &&
-      !accessoryPlacementMatches(current, change.baseline_snapshot);
+    const possibleNormalization = requestedRoomObserved && !matchesBaseline;
+    const wasAcknowledged =
+      acknowledged || change.write_intent?.acknowledged === true;
     return this.#finishAccessoryReconciliation(
       change,
       "expected_missing",
@@ -3918,7 +3936,9 @@ export class AutomationService {
         configuration_matches: undefined,
         conflict_reason: possibleNormalization
           ? "possible_name_normalization_after_lost_response"
-          : undefined,
+          : wasAcknowledged
+            ? "ack_without_requested_result"
+            : undefined,
         last_verification: freshVerification(
           possibleNormalization
             ? "requested_room_observed_name_unknown"
@@ -5396,6 +5416,7 @@ export class AutomationService {
         member.target,
         accessories[index],
         change.characteristic_types,
+        { strictOptional: false },
       ),
     );
     if (

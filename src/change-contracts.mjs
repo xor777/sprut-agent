@@ -610,6 +610,7 @@ const INLINE_CONTRACT_ERROR_CODES = new Set([
   "group_members_required",
   "duplicate_group_member",
   "group_member_is_group",
+  "unsupported_group_characteristics",
   "unsupported_virtual_device_type",
   "unsupported_virtual_device_characteristics",
 ]);

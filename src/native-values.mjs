@@ -502,11 +502,7 @@ export const NATIVE_VALUE_KINDS = {
           input,
         );
       }
-      return {
-        contract: serviceGridContract(),
-        restore_supported: true,
-        limitations: [SERVICE_GRID_LIMITATION],
-      };
+      return generalNativeValueContractFields("service_grid");
     },
     async inspect(service, input) {
       const target = parseServiceRef(input.target_ref, service.hubSerial);

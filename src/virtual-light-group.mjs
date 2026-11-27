@@ -110,6 +110,7 @@ export function selectVirtualLightMember(
   target,
   accessory,
   characteristicTypes = LAMP_GROUP_TYPES,
+  { strictOptional = true } = {},
 ) {
   if (accessory.id !== target.aId) {
     throw new SprutHubError(
@@ -168,21 +169,39 @@ export function selectVirtualLightMember(
       };
       continue;
     }
-    if (matches.length === 0) continue;
-    if (matches.length > 1) {
+    const rwMatches = matches.filter(
+      (characteristic) =>
+        characteristic.control?.read === true &&
+        characteristic.control?.write === true,
+    );
+    if (rwMatches.length === 0) continue;
+    if (!strictOptional) {
+      const usable = rwMatches.filter((characteristic) => {
+        try {
+          const contract = characteristicContract(characteristic.control, {
+            requireWrite: true,
+          });
+          return isCompatibleLightControlKind(type, contract.kind);
+        } catch {
+          return false;
+        }
+      });
+      if (usable.length !== 1) continue;
+      characteristics[type] = {
+        aId: accessory.id,
+        sId: service.sId,
+        cId: usable[0].cId,
+      };
+      continue;
+    }
+    if (rwMatches.length > 1) {
       throw new SprutHubError(
         "unsupported_group_characteristics",
-        `A selected member exposes more than one ${type} characteristic.`,
+        `A selected member exposes more than one readable and writable ${type} characteristic.`,
         "get_entity",
       );
     }
-    if (
-      matches[0].control?.read !== true ||
-      matches[0].control?.write !== true
-    ) {
-      continue;
-    }
-    const contract = characteristicContract(matches[0].control, {
+    const contract = characteristicContract(rwMatches[0].control, {
       requireWrite: true,
     });
     if (!isCompatibleLightControlKind(type, contract.kind)) {
@@ -195,7 +214,7 @@ export function selectVirtualLightMember(
     characteristics[type] = {
       aId: accessory.id,
       sId: service.sId,
-      cId: matches[0].cId,
+      cId: rwMatches[0].cId,
     };
   }
   return {
