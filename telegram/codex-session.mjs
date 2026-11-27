@@ -261,6 +261,7 @@ class CodexAppServerClient {
     input,
     timeoutMs,
     interruptGraceMs = 2000,
+    onProgress = null,
   }) {
     let resolveCompletion;
     let rejectCompletion;
@@ -279,6 +280,7 @@ class CodexAppServerClient {
       messages: [],
       deltaBuffer: "",
       settled: false,
+      onProgress: typeof onProgress === "function" ? onProgress : null,
       resolve(outcome) {
         if (this.settled) return;
         this.settled = true;
@@ -532,10 +534,16 @@ class CodexAppServerClient {
         typeof item.text === "string" &&
         item.text.trim().length > 0
       ) {
-        turnCtx.messages.push({
-          phase: item.phase ?? null,
-          text: item.text.trim(),
-        });
+        const text = item.text.trim();
+        const phase = item.phase ?? null;
+        turnCtx.messages.push({ phase, text });
+        if (phase === "commentary" && !turnCtx.settled && turnCtx.onProgress) {
+          try {
+            turnCtx.onProgress(text);
+          } catch {
+            // Never let progress listener errors break an active Codex turn.
+          }
+        }
       }
       return;
     }
@@ -888,7 +896,7 @@ export class CodexSessionManager {
     return run;
   }
 
-  sendTurn(chatId, input) {
+  sendTurn(chatId, input, { onProgress } = {}) {
     const chatKey = String(chatId);
     return this.#enqueueChat(chatKey, async () => {
       let client = await this.#ensureClient();
@@ -912,6 +920,7 @@ export class CodexSessionManager {
         input,
         timeoutMs: this.#config.turnTimeoutMs,
         interruptGraceMs: this.#interruptGraceMs,
+        onProgress,
       });
 
       this.#sessions.set(chatKey, {

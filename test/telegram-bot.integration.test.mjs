@@ -867,7 +867,7 @@ rl.on("line", async (line) => {
 
     if (prompt.includes("[LONG_COMMENTARY]")) {
       const secretToken = prompt.split("SECRET=")[1]?.trim() ?? "";
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      await new Promise((resolve) => setTimeout(resolve, 20));
       send({
         jsonrpc: "2.0",
         method: "item/completed",
@@ -881,7 +881,7 @@ rl.on("line", async (line) => {
           },
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 110));
+      await new Promise((resolve) => setTimeout(resolve, 170));
       send({
         jsonrpc: "2.0",
         method: "item/completed",
@@ -895,7 +895,7 @@ rl.on("line", async (line) => {
           },
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 90));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       send({
         jsonrpc: "2.0",
         method: "item/completed",
@@ -909,7 +909,7 @@ rl.on("line", async (line) => {
           },
         },
       });
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      await new Promise((resolve) => setTimeout(resolve, 90));
       send({
         jsonrpc: "2.0",
         method: "item/completed",
@@ -928,7 +928,7 @@ rl.on("line", async (line) => {
     }
 
     if (prompt.includes("[LONG_SILENT]")) {
-      await new Promise((resolve) => setTimeout(resolve, 140));
+      await new Promise((resolve) => setTimeout(resolve, 210));
       send({
         jsonrpc: "2.0",
         method: "item/completed",
@@ -2629,37 +2629,75 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   const config = await loadTelegramConfig({ env: harness.baseEnv });
 
   const runner = new TelegramBotRunner({
-    config: { ...config, turnTimeoutMs: 550 },
+    config: { ...config, turnTimeoutMs: 1000 },
     env: harness.baseEnv,
     pollTimeoutSec: 1,
     interruptGraceMs: 150,
-    progressDelayMs: 60,
-    progressEditIntervalMs: 50,
+    progressDelayMs: 120,
+    progressEditIntervalMs: 60,
     logger: () => {},
   });
   await runner.start();
   harness.onCleanup(() => runner.stop());
 
-  // 1. Fast turn (< progressDelayMs): ZERO progress messages, ZERO edits, ZERO deletes
-  harness.tg.pushUpdate(makePrivateMessageUpdate(700, 1001, "Быстрый запрос"));
-  await waitFor(() => harness.tg.sentMessages(1001).length === 1);
-  assert.equal(
-    harness.tg.sentMessages(1001)[0].text,
-    "Ответ[thr_1]: Быстрый запрос",
+  // 1. Long turn with NO commentary (also warms up the app-server child):
+  //    silent fallback "Работаю над запросом…", deleted before final reply
+  const callsBeforeSilent = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(701, 1001, "[LONG_SILENT]"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Готово без комментариев."),
   );
-  assert.equal(
-    harness.tg.sentMessages(1001)[0].disable_notification,
-    undefined,
+  const silentTurnCalls = harness.tg.calls
+    .slice(callsBeforeSilent)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    silentTurnCalls.map((c) => c.method),
+    ["sendMessage", "deleteMessage", "sendMessage"],
   );
-  assert.equal(harness.tg.editedMessages(1001).length, 0);
-  assert.equal(harness.tg.deletedMessages(1001).length, 0);
+  assert.equal(silentTurnCalls[0].body.disable_notification, true);
+  assert.equal(silentTurnCalls[0].body.text, "Работаю над запросом…");
+  assert.equal(silentTurnCalls[2].body.disable_notification, undefined);
+  assert.equal(silentTurnCalls[2].body.text, "Готово без комментариев.");
 
-  // 2. Long turn with commentary updates + secret in commentary:
+  // 2. Fast turn on warm session (< progressDelayMs): ZERO progress messages, ZERO edits, ZERO deletes
+  const callsBeforeFast = harness.tg.calls.length;
+  harness.tg.pushUpdate(makePrivateMessageUpdate(702, 1001, "Быстрый запрос"));
+  await waitFor(() =>
+    harness.tg
+      .sentMessages(1001)
+      .some((m) => m.text === "Ответ[thr_1]: Быстрый запрос"),
+  );
+  const fastCalls = harness.tg.calls
+    .slice(callsBeforeFast)
+    .filter(
+      (c) =>
+        (c.method === "sendMessage" ||
+          c.method === "editMessageText" ||
+          c.method === "deleteMessage") &&
+        c.body.chat_id === 1001,
+    );
+  assert.deepEqual(
+    fastCalls.map((c) => c.method),
+    ["sendMessage"],
+    "fast turn must send only the final reply without any progress message",
+  );
+  assert.equal(fastCalls[0].body.text, "Ответ[thr_1]: Быстрый запрос");
+  assert.equal(fastCalls[0].body.disable_notification, undefined);
+
+  // 3. Long turn with commentary updates + secret in commentary:
   //    1 silent send -> in-place edit(s) on same message_id -> delete before final reply
   const callsBeforeCommentary = harness.tg.calls.length;
   harness.tg.pushUpdate(
     makePrivateMessageUpdate(
-      701,
+      703,
       1001,
       `[LONG_COMMENTARY] SECRET=${TEST_TOKEN}`,
     ),
@@ -2716,6 +2754,11 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
       statusMsgId,
       "all progress edits must target the same single status message",
     );
+    assert.equal(
+      edit.body.text.includes(TEST_TOKEN),
+      false,
+      "edited progress status must never leak TELEGRAM_BOT_TOKEN",
+    );
   }
   assert.ok(
     edits.some(
@@ -2741,35 +2784,9 @@ test("TelegramBotRunner shows a single silent in-place progress status on long t
   assert.ok(idxLastEdit < idxDelete, "delete must follow all edits");
   assert.ok(idxDelete < idxFinalSend, "delete must happen before final reply");
 
-  // 3. Long turn with NO commentary -> silent fallback "Работаю над запросом…", deleted before final reply
-  const callsBeforeSilent = harness.tg.calls.length;
-  harness.tg.pushUpdate(makePrivateMessageUpdate(702, 1001, "[LONG_SILENT]"));
-  await waitFor(() =>
-    harness.tg
-      .sentMessages(1001)
-      .some((m) => m.text === "Готово без комментариев."),
-  );
-  const silentTurnCalls = harness.tg.calls
-    .slice(callsBeforeSilent)
-    .filter(
-      (c) =>
-        (c.method === "sendMessage" ||
-          c.method === "editMessageText" ||
-          c.method === "deleteMessage") &&
-        c.body.chat_id === 1001,
-    );
-  assert.deepEqual(
-    silentTurnCalls.map((c) => c.method),
-    ["sendMessage", "deleteMessage", "sendMessage"],
-  );
-  assert.equal(silentTurnCalls[0].body.disable_notification, true);
-  assert.equal(silentTurnCalls[0].body.text, "Работаю над запросом…");
-  assert.equal(silentTurnCalls[2].body.disable_notification, undefined);
-  assert.equal(silentTurnCalls[2].body.text, "Готово без комментариев.");
-
   // 4. Long turn that times out -> status message deleted before error reply
   const callsBeforeTimeout = harness.tg.calls.length;
-  harness.tg.pushUpdate(makePrivateMessageUpdate(703, 1001, "[HANG]"));
+  harness.tg.pushUpdate(makePrivateMessageUpdate(704, 1001, "[HANG]"));
   await waitFor(() => {
     const after = harness.tg.calls
       .slice(callsBeforeTimeout)

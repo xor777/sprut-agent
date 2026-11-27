@@ -5,6 +5,7 @@ export const MAX_TELEGRAM_MESSAGE_LENGTH = 4096;
 export const MAX_TELEGRAM_PHOTO_BYTES = 5 * 1024 * 1024;
 const TELEGRAM_HTML_PARSE_ERROR_RE =
   /can't parse entities|unsupported start tag|unclosed|expected end tag/i;
+const TELEGRAM_NOT_MODIFIED_ERROR_RE = /message is not modified/i;
 const DISABLED_LINK_PREVIEW = { is_disabled: true };
 
 export class TelegramApiError extends Error {
@@ -249,7 +250,16 @@ export class TelegramApi {
   async sendMessage(chatId, text, options = {}) {
     const trimmed = this.#scrub(String(text ?? "")).trim();
     if (trimmed.length === 0) return [];
-    const { parseMode, ...callOptions } = options ?? {};
+    const {
+      parseMode,
+      disableNotification = false,
+      ...callOptions
+    } = options ?? {};
+    const baseParams = {
+      chat_id: chatId,
+      link_preview_options: DISABLED_LINK_PREVIEW,
+      ...(disableNotification ? { disable_notification: true } : {}),
+    };
 
     if (parseMode === null || parseMode === false) {
       const chunks = splitTelegramMessage(trimmed, MAX_TELEGRAM_MESSAGE_LENGTH);
@@ -258,11 +268,7 @@ export class TelegramApi {
         sent.push(
           await this.call(
             "sendMessage",
-            {
-              chat_id: chatId,
-              text: chunk,
-              link_preview_options: DISABLED_LINK_PREVIEW,
-            },
+            { ...baseParams, text: chunk },
             callOptions,
           ),
         );
@@ -280,12 +286,7 @@ export class TelegramApi {
         sent.push(
           await this.call(
             "sendMessage",
-            {
-              chat_id: chatId,
-              text: chunk.html,
-              parse_mode: "HTML",
-              link_preview_options: DISABLED_LINK_PREVIEW,
-            },
+            { ...baseParams, text: chunk.html, parse_mode: "HTML" },
             callOptions,
           ),
         );
@@ -298,11 +299,7 @@ export class TelegramApi {
           sent.push(
             await this.call(
               "sendMessage",
-              {
-                chat_id: chatId,
-                text: chunk.plain,
-                link_preview_options: DISABLED_LINK_PREVIEW,
-              },
+              { ...baseParams, text: chunk.plain },
               callOptions,
             ),
           );
@@ -312,6 +309,72 @@ export class TelegramApi {
       }
     }
     return sent;
+  }
+
+  async editMessageText(chatId, messageId, text, options = {}) {
+    const trimmed = this.#scrub(String(text ?? "")).trim();
+    if (trimmed.length === 0) return null;
+    const { parseMode, ...callOptions } = options ?? {};
+    const baseParams = {
+      chat_id: chatId,
+      message_id: messageId,
+      link_preview_options: DISABLED_LINK_PREVIEW,
+    };
+
+    const callEdit = async (params) => {
+      try {
+        return await this.call("editMessageText", params, callOptions);
+      } catch (error) {
+        if (
+          error instanceof TelegramApiError &&
+          error.status === 400 &&
+          TELEGRAM_NOT_MODIFIED_ERROR_RE.test(error.message)
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+    if (parseMode === null || parseMode === false) {
+      const plainChunk = splitTelegramMessage(
+        trimmed,
+        MAX_TELEGRAM_MESSAGE_LENGTH,
+      )[0];
+      if (!plainChunk) return null;
+      return callEdit({ ...baseParams, text: plainChunk });
+    }
+
+    const chunk = splitTelegramHtmlChunks(
+      trimmed,
+      MAX_TELEGRAM_MESSAGE_LENGTH,
+    )[0];
+    if (!chunk) return null;
+
+    try {
+      return await callEdit({
+        ...baseParams,
+        text: chunk.html,
+        parse_mode: "HTML",
+      });
+    } catch (error) {
+      if (
+        error instanceof TelegramApiError &&
+        error.status === 400 &&
+        TELEGRAM_HTML_PARSE_ERROR_RE.test(error.message)
+      ) {
+        return callEdit({ ...baseParams, text: chunk.plain });
+      }
+      throw error;
+    }
+  }
+
+  deleteMessage(chatId, messageId, options = {}) {
+    return this.call(
+      "deleteMessage",
+      { chat_id: chatId, message_id: messageId },
+      options,
+    );
   }
 
   async downloadPhotoAsDataUrl(fileId, { signal, timeoutMs = 30_000 } = {}) {
