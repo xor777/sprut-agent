@@ -47,3 +47,24 @@
 11. **Наблюдения реального мобильного UI SprutHub 3.0:**
     - Каждая колонка дашборда в мобильном приложении отображается как **отдельный горизонтальный экран (свайп)**, а не вертикальная стопка на одном экране.
     - В виджете `characteristic` каждая строка подписывается **только названием самой характеристики** («Ватт», «°C»), без имени устройства и комнаты. Смешивание одинаковых `characteristic_type` от разных устройств в одном виджете `characteristic` даёт неразличимые строки.
+
+## Проверка реального веб-клиента SprutHub 3.0 и живая проба `service.grid` (2026-11-27)
+
+- **Источники:**
+  1. Официальный веб-клиент SprutHub 3.0 (`beta.spruthub.ru/js/app.16735171810a795a9f2d.js`: `Column.vue`, `CreateWidgetScreen`, `WidgetServices`, `ServiceCard`, `WidgetCharacteristics`, `WidgetCharts`, `ChartItem`, `WidgetShortcuts`, `WidgetCamera`, `WidgetClock`, `WidgetWeather`).
+  2. Живая самоочищающаяся проба `service.update({ aId, sId, grid })` на SprutHub владельца (`3.0.0`, rev `20131`, временный виртуальный `Switch` `aId=214`, удалён в `finally`).
+- **Подтверждённые факты рендеринга 8 типов виджетов:**
+  1. **`WidgetServices` (`service`):** 3-колоночная сетка плиток (`grid-template-columns: repeat(3, 1fr)`) через `ServiceCard` (74 типа сервисов, включая все датчики и счётчики: `C_WattMeter`, `C_KiloWattHourMeter`, `TemperatureSensor`, `HumiditySensor`, `CarbonDioxideSensor`, `AirQualitySensor`, `BatteryService`, `LeakSensor`, `ContactSensor`, `MotionSensor`, `SmokeSensor` и др.). Плитка показывает иконку, крупное значение с единицей, `service.name`, `room.name` (при `showRooms: true`) и статус активности/офлайна; тап по датчику открывает его карточку без переключения. Размер плитки в сетке — `w{service.grid.width}_h{service.grid.height}` (`1..3` × `1..3`).
+  2. **`WidgetCharacteristics` (`characteristic`):** строки элементов формы (`CharacteristicControl`), подписанные **только `characteristic.control.name`** (без иконки, устройства и комнаты) — подходит для прямых контролов одного устройства, но не для плиток датчиков из разных комнат.
+  3. **`WidgetCharts` (`chart`):** стопка `ChartItem` в общей карточке с переключателем периода `Час / Сутки / Неделя`. Заголовок каждого `ChartItem` показывает **только `characteristic.control.name` + текущее значение** (без устройства и комнаты — дублирование `characteristic_type` от `>= 2` устройств даёт одинаковые неразличимые заголовки). Реальная привязка `history_group` в веб-UI: опущенное поле → **Час (1 ч)**, `MINUTE` → **Сутки (24 ч)**, `HOUR` → **Неделя (7 д)**; **`DAY` не привязан и откатывается к «Часу» (1 ч)**.
+  4. **`WidgetShortcuts` (`shortcut`):** меню «Дашборды» для навигации между дашбордами: `shortcut_ids` — это **ID других дашбордов**, рендерятся кликабельными строками с `>` и историей возврата (`?from=...`). Это **не** сцены и не сценарии хаба.
+  5. **`WidgetCamera` (`camera`):** живые карточки потоков камер.
+  6. **`WidgetClock` (`clock`):** живые часы со шкалой рассвета/заката, но жёстко привязаны к `Europe/Moscow` (55.7558, 37.6173).
+  7. **`tile` (`DashboardTileWidget`):** **не рендерится** компонентом `Column.vue` (игнорируется; в `CreateWidgetScreen` доступно только 7 типов).
+  8. **`WidgetWeather` (`weather`):** текущая реализация — **жёсткая заглушка** (`Москва, 21°, Облачно, от 12° до 22°`, выбор локации отключён).
+- **Сетка колонок (`Column.vue`):**
+  - `column.name` **не отображается** на дашборде; видимы только `dashboard.name` и `widget.name` (опущенный `widget.name` скрывает заголовок виджета).
+  - Каждая колонка имеет ширину **350 px** (+ 20 px зазор), формула числа видимых колонок: `floor((screenWidth + 20) / 370)` — 1 экран-свайп на телефонах (`<720px`), 2–4 колонки рядом на планшетах и десктопах.
+- **Живая проба `service.grid` (`SprutHub 3.0.0` rev `20131`):**
+  - `service.update({ aId: 214, sId, grid: { order, width, height } })` подтвердил сохранение и перечитывание через `accessory.get` для `1x1`, `2x1`, `3x1`, `2x2` (виртуальный `Switch` удалён в `finally`).
+  - `service.grid` также содержит `order`, поэтому при изменении размера плитки нужно сохранять актуальный живой `order`; изменение `service.grid` влияет **одновременно и на `service`-виджеты дашбордов, и на сетку сервисов в комнате**.

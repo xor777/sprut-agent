@@ -85,7 +85,13 @@ const DEVICE_WIDGET_TYPES = new Set([
 const DASHBOARD_NAME_RULE_NOTE =
   "SprutHub 3.0 truncates names to 32 chars and strips punctuation outside letters, digits, spaces, and - _ ' `.";
 const HISTORY_MISSING_WARNING =
-  "The History app («История») is not installed and running on this hub, so this chart widget will stay empty. Do not add empty chart widgets by default unless the owner explicitly asked for placeholders — prefer characteristic widgets for live values, and tell the owner that History requires an external microSD/USB drive plus the History app.";
+  "The History app («История») is not installed and running on this hub, so this chart widget will stay empty. Do not add empty chart widgets by default unless the owner explicitly asked for placeholders — prefer service widgets (with show_rooms: true) or characteristic widgets for live values, and tell the owner that History requires an external microSD/USB drive plus the History app.";
+const CHART_DAY_GROUP_WARNING =
+  "SprutHub 3.0's web UI maps chart history_group omitted -> 1 hour («Час»), MINUTE -> 24 hours («Сутки»), HOUR -> 1 week («Неделя»); DAY is unbound in the web UI and falls back to 1 hour («Час»).";
+const TILE_UNRENDERED_WARNING =
+  "SprutHub 3.0's current web UI does not render tile widgets (they are ignored by Column.vue). Use a service widget with show_rooms: true for tile grids.";
+const WEATHER_PLACEHOLDER_WARNING =
+  "SprutHub 3.0's current web UI renders weather widgets as a hardcoded placeholder («Москва, 21°, Облачно»).";
 
 // Single source of truth for SprutHub 3.0.0 rev 20131 dashboard, column, and
 // widget name normalization: trims & collapses whitespace, strips characters
@@ -144,9 +150,15 @@ function nameNormalizationWarning(label, name) {
   return `SprutHub 3.0 truncates ${label} to ${DASHBOARD_HUB_NAME_MAX_LENGTH} chars and strips punctuation outside letters, digits, spaces, and - _ ' \`; expected stored name: ${shownStored}.`;
 }
 
-function duplicateCharacteristicWarning(repeatedTypes) {
+function duplicateCharacteristicWarning(
+  repeatedTypes,
+  widgetType = "characteristic",
+) {
   const typesList = repeatedTypes.join(", ");
-  return `SprutHub 3.0 characteristic widgets label each row only by characteristic name (without device or room), so repeating ${typesList} across multiple devices produces identical unreadable rows. Prefer one widget per device with device and room in widget.name, or group only different characteristics of the same device.`;
+  if (widgetType === "chart") {
+    return `SprutHub 3.0 chart widgets label each stacked graph header only by characteristic name and current value (without device or room), so repeating ${typesList} across multiple devices produces identical unreadable graph headers. Prefer one chart widget per device with device and room in widget.name.`;
+  }
+  return `SprutHub 3.0 characteristic widgets render form-control rows labeled only by characteristic name (without device or room), so repeating ${typesList} across multiple devices produces identical unreadable rows. For sensor/meter tiles across rooms, prefer a service widget with show_rooms: true (3-column tile grid with icon, value, service name, and room); for direct controls, prefer one characteristic widget per device with device and room in widget.name.`;
 }
 
 function warningRecordFields(warnings, historyAppMissing = false) {
@@ -213,7 +225,7 @@ export function dashboardContract(operation) {
             optional: true,
             max_items: MAX_COLUMNS,
             default: DEFAULT_COLUMN_NAMES,
-            note: "On mobile each column is a separate horizontal swipe screen: default to 1 column for one-screen phone dashboards, 2-3 for swipe tabs/desktop. Pass [] for 0 columns.",
+            note: "column.name is not rendered on the dashboard view (only dashboard.name and widget.name show; omitting widget.name hides the widget header). Columns are 350px wide: 1 swipe screen on phones (<720px), 2-4 side-by-side on tablet/desktop. Default to 1 column for phone-first dashboards; pass [] for 0 columns.",
           },
           reason: "required",
         },
@@ -246,7 +258,7 @@ export function dashboardContract(operation) {
         confirmation:
           "if widget_count > 0, prepare returns tell_owner with no next call until owner confirms.",
         restore:
-          "recreates dashboard, columns and widgets under a new dashboard ID, skipping widgets whose devices no longer exist (reported in skipped_widgets).",
+          "recreates dashboard, columns and widgets under a new dashboard ID, skipping widgets whose devices or shortcut dashboards no longer exist (reported in skipped_widgets).",
         restore_supported: true,
       };
     case DASHBOARD_COLUMN_CREATE:
@@ -258,7 +270,7 @@ export function dashboardContract(operation) {
             optional: true,
             max_length: MAX_NAME_LENGTH,
             hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
-            note: DASHBOARD_NAME_RULE_NOTE,
+            note: `column.name is not rendered on the dashboard view (only dashboard.name and widget.name show). Columns are 350px wide (1 swipe screen on phones <720px, 2-4 side-by-side on tablet/desktop). ${DASHBOARD_NAME_RULE_NOTE}`,
           },
           reason: "required",
         },
@@ -275,7 +287,7 @@ export function dashboardContract(operation) {
             required: true,
             max_length: MAX_NAME_LENGTH,
             hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
-            note: DASHBOARD_NAME_RULE_NOTE,
+            note: `column.name is not rendered on the dashboard view (only dashboard.name and widget.name show). Columns are 350px wide (1 swipe screen on phones <720px, 2-4 side-by-side on tablet/desktop). ${DASHBOARD_NAME_RULE_NOTE}`,
           },
           reason: "required",
         },
@@ -290,7 +302,7 @@ export function dashboardContract(operation) {
         confirmation:
           "cascades widgets in the column; if widget_count > 0, prepare returns tell_owner with no next call.",
         restore:
-          "recreates column and widgets if the parent dashboard still exists (refuses dashboard_missing), skipping widgets whose devices are gone.",
+          "recreates column and widgets if the parent dashboard still exists (refuses dashboard_missing), skipping widgets whose devices or shortcut dashboards are gone.",
         restore_supported: true,
       };
     case DASHBOARD_WIDGET_CREATE:
@@ -311,20 +323,24 @@ export function dashboardContract(operation) {
               optional: true,
               max_length: MAX_NAME_LENGTH,
               hub_max_length: DASHBOARD_HUB_NAME_MAX_LENGTH,
-              note: `Put widget title in widget.name, not top-level name. ${DASHBOARD_NAME_RULE_NOTE}`,
+              note: `Put widget title in widget.name, not top-level name; omitting widget.name hides the widget header cleanly. ${DASHBOARD_NAME_RULE_NOTE}`,
             },
             types: {
-              characteristic:
-                "item_refs: characteristic refs (1..50). Rows show only characteristic name (no device/room): use 1 card per device for the same metric across devices.",
-              chart:
-                "item_refs: characteristic refs (1..50), optional history_group (MINUTE|HOUR|DAY). Requires running History app + microSD/USB; do not add empty placeholders by default.",
               service:
-                "item_refs: service refs (1..50), optional show_rooms (boolean)",
-              camera: "item_refs: service refs (1..50)",
-              shortcut: "shortcut_ids: positive integers (1..50)",
-              weather: "no item_refs/show_rooms/history_group/shortcut_ids",
-              clock: "no item_refs/show_rooms/history_group/shortcut_ids",
-              tile: "no item_refs/show_rooms/history_group/shortcut_ids",
+                "item_refs: service refs (1..50), optional show_rooms (boolean). 3-column tile grid (icon, value+unit, service name, room when show_rooms=true) for BOTH controls AND sensors/meters (tile span via service_grid).",
+              characteristic:
+                "item_refs: characteristic refs (1..50). Form-control rows labeled only by characteristic name (no device/room): best for direct controls of one device, not multi-device sensor grids.",
+              chart:
+                "item_refs: characteristic refs (1..50), optional history_group (omitted=1h Hour, MINUTE=24h Day, HOUR=7d Week; DAY falls back to 1h in 3.0 web UI). Stacked per-item graphs showing only characteristic name + value (1 chart per device for same metric). Requires running History app + microSD/USB.",
+              shortcut:
+                "shortcut_ids: existing dashboard IDs (1..50). Navigation menu linking to other dashboards with automatic Back history (not hub scenes/scenarios).",
+              camera:
+                "item_refs: service refs (1..50). Live camera stream cards.",
+              clock:
+                "no extra fields. Live clock + sunrise/sunset timeline (hardcoded to Europe/Moscow in 3.0 UI).",
+              tile: "no extra fields. Not rendered by SprutHub 3.0 web UI (use service widget with show_rooms: true).",
+              weather:
+                "no extra fields. Hardcoded placeholder («Москва, 21°, Облачно») in SprutHub 3.0 web UI.",
             },
           },
           reason: "required",
@@ -340,7 +356,7 @@ export function dashboardContract(operation) {
         write: "dashboardWidget.delete({dashboardId,id})",
         fields: { target_ref: "dashboard_widget_ref", reason: "required" },
         restore:
-          "recreates the widget in the same column if dashboard, column and referenced devices still exist.",
+          "recreates the widget in the same column if dashboard, column and referenced devices or shortcut dashboards still exist.",
         restore_supported: true,
       };
     case DASHBOARD_WIDGET_MOVE:
@@ -446,6 +462,14 @@ function canonicalWidgetPayload(type, raw = {}) {
 function widgetNeedsHomeCatalog(widget) {
   return (
     DEVICE_WIDGET_TYPES.has(widget?.type) &&
+    Array.isArray(widget.payload?.items) &&
+    widget.payload.items.length > 0
+  );
+}
+
+function widgetNeedsDashboardList(widget) {
+  return (
+    widget?.type === "shortcut" &&
     Array.isArray(widget.payload?.items) &&
     widget.payload.items.length > 0
   );
@@ -681,32 +705,63 @@ async function verifyServiceExists(client, catalog, target, rawRef) {
   }
 }
 
-function findMissingWidgetRefs(catalog, homeRef, widget) {
-  if (!catalog || !widgetNeedsHomeCatalog(widget)) return [];
+function findMissingWidgetRefs(catalog, homeRef, widget, dashboardIds = null) {
   const missing = [];
-  if (widget.type === "characteristic" || widget.type === "chart") {
-    for (const item of widget.payload?.items ?? []) {
-      const accessory = catalog.byId.get(item.aId);
-      const service = accessory?.services?.find(({ sId }) => sId === item.sId);
-      const characteristic = service?.characteristics?.find(
-        ({ cId }) => cId === item.cId,
-      );
-      if (!characteristic) {
-        missing.push(
-          `${homeRef}/accessory/${item.aId}/service/${item.sId}/characteristic/${item.cId}`,
+  if (catalog && widgetNeedsHomeCatalog(widget)) {
+    if (widget.type === "characteristic" || widget.type === "chart") {
+      for (const item of widget.payload?.items ?? []) {
+        const accessory = catalog.byId.get(item.aId);
+        const service = accessory?.services?.find(
+          ({ sId }) => sId === item.sId,
         );
+        const characteristic = service?.characteristics?.find(
+          ({ cId }) => cId === item.cId,
+        );
+        if (!characteristic) {
+          missing.push(
+            `${homeRef}/accessory/${item.aId}/service/${item.sId}/characteristic/${item.cId}`,
+          );
+        }
+      }
+    } else if (widget.type === "service" || widget.type === "camera") {
+      for (const item of widget.payload?.items ?? []) {
+        const accessory = catalog.byId.get(item.aId);
+        const service = accessory?.services?.find(
+          ({ sId }) => sId === item.sId,
+        );
+        if (!service) {
+          missing.push(`${homeRef}/accessory/${item.aId}/service/${item.sId}`);
+        }
       }
     }
-  } else if (widget.type === "service" || widget.type === "camera") {
+  }
+  if (dashboardIds && widgetNeedsDashboardList(widget)) {
+    const seen = new Set();
     for (const item of widget.payload?.items ?? []) {
-      const accessory = catalog.byId.get(item.aId);
-      const service = accessory?.services?.find(({ sId }) => sId === item.sId);
-      if (!service) {
-        missing.push(`${homeRef}/accessory/${item.aId}/service/${item.sId}`);
+      if (!dashboardIds.has(item.id) && !seen.has(item.id)) {
+        seen.add(item.id);
+        missing.push(`${homeRef}/dashboard/${item.id}`);
       }
     }
   }
   return missing;
+}
+
+async function findMissingLiveWidgetRefs(
+  ctx,
+  homeRef,
+  widget,
+  { refreshCatalog = false } = {},
+) {
+  const catalog = widgetNeedsHomeCatalog(widget)
+    ? await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
+        refresh: refreshCatalog,
+      })
+    : null;
+  const dashboardIds = widgetNeedsDashboardList(widget)
+    ? new Set((await ctx.client.listDashboards()).map(({ id }) => id))
+    : null;
+  return findMissingWidgetRefs(catalog, homeRef, widget, dashboardIds);
 }
 
 function isHistoryExtension(extension) {
@@ -799,12 +854,14 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
       type,
     );
     if (repeatedTypes.length > 0) {
-      warnings.push(duplicateCharacteristicWarning(repeatedTypes));
+      warnings.push(
+        duplicateCharacteristicWarning(repeatedTypes, "characteristic"),
+      );
     }
     payload = { items };
   } else if (type === "chart") {
     forbidWidgetKeys(rawWidget, ["show_rooms", "shortcut_ids"], type);
-    const { items } = await parseAndVerifyCharacteristicRefs(
+    const { items, repeatedTypes } = await parseAndVerifyCharacteristicRefs(
       client,
       serial,
       rawWidget.item_refs,
@@ -818,6 +875,12 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
         "invalid_native_value",
         "widget.history_group must be MINUTE, HOUR, or DAY.",
       );
+    }
+    if (repeatedTypes.length > 0) {
+      warnings.push(duplicateCharacteristicWarning(repeatedTypes, "chart"));
+    }
+    if (rawWidget.history_group === "DAY") {
+      warnings.push(CHART_DAY_GROUP_WARNING);
     }
     payload = {
       items,
@@ -878,6 +941,29 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
         `widget.shortcut_ids must be a non-empty array of positive integers (max ${MAX_ITEMS}) for shortcut widgets.`,
       );
     }
+    if (
+      new Set(rawWidget.shortcut_ids).size !== rawWidget.shortcut_ids.length
+    ) {
+      throw new SprutHubError(
+        "invalid_native_value",
+        "widget.shortcut_ids must not contain duplicate dashboard IDs.",
+      );
+    }
+    const dashboards = await client.listDashboards();
+    const existingIds = new Set(dashboards.map(({ id }) => id));
+    const missingIds = rawWidget.shortcut_ids.filter(
+      (id) => !existingIds.has(id),
+    );
+    if (missingIds.length > 0) {
+      throw new SprutHubError(
+        "entity_not_found",
+        `Shortcut target dashboard(s) not found: ${missingIds.map((id) => dashboardRef(serial, id)).join(", ")}.`,
+        "home_overview",
+        {
+          next: { tool: "home_overview", arguments: { list: "dashboards" } },
+        },
+      );
+    }
     payload = { items: rawWidget.shortcut_ids.map((id) => ({ id })) };
   } else {
     // weather, clock, tile
@@ -886,6 +972,11 @@ async function validateAndBuildWidget(client, serial, rawWidget, fallbackName) {
       ["item_refs", "show_rooms", "history_group", "shortcut_ids"],
       type,
     );
+    if (type === "tile") {
+      warnings.push(TILE_UNRENDERED_WARNING);
+    } else if (type === "weather") {
+      warnings.push(WEATHER_PLACEHOLDER_WARNING);
+    }
     payload = {};
   }
 
@@ -969,7 +1060,7 @@ async function parseAndVerifyCharacteristicRefs(
     });
   }
   const repeatedTypes =
-    type === "characteristic" && resolved.length > 1
+    (type === "characteristic" || type === "chart") && resolved.length > 1
       ? findRepeatedCharacteristicTypesAcrossDevices(resolved)
       : [];
   return {
@@ -2158,20 +2249,17 @@ async function applyDashboardWidgetCreate(ctx, change) {
       last_verification: freshVerification("column_missing"),
     });
   }
-  if (widgetNeedsHomeCatalog(change.requested_widget)) {
-    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
-    const missingRefs = findMissingWidgetRefs(
-      catalog,
-      change.home_ref,
-      change.requested_widget,
-    );
-    if (missingRefs.length > 0) {
-      return ctx.finishNative(change, "conflict", undefined, {
-        missing_refs: missingRefs,
-        conflict_reason: "referenced_entity_missing",
-        last_verification: freshVerification("referenced_entity_missing"),
-      });
-    }
+  const missingRefs = await findMissingLiveWidgetRefs(
+    ctx,
+    change.home_ref,
+    change.requested_widget,
+  );
+  if (missingRefs.length > 0) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      missing_refs: missingRefs,
+      conflict_reason: "referenced_entity_missing",
+      last_verification: freshVerification("referenced_entity_missing"),
+    });
   }
   await ctx.persistNativeIntent(change, "applying", "apply");
   let created;
@@ -2240,20 +2328,17 @@ async function applyDashboardWidgetUpdate(ctx, change) {
       last_verification: freshVerification("widget_changed_since"),
     });
   }
-  if (widgetNeedsHomeCatalog(change.requested_widget)) {
-    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial);
-    const missingRefs = findMissingWidgetRefs(
-      catalog,
-      change.home_ref,
-      change.requested_widget,
-    );
-    if (missingRefs.length > 0) {
-      return ctx.finishNative(change, "conflict", undefined, {
-        missing_refs: missingRefs,
-        conflict_reason: "referenced_entity_missing",
-        last_verification: freshVerification("referenced_entity_missing"),
-      });
-    }
+  const missingRefs = await findMissingLiveWidgetRefs(
+    ctx,
+    change.home_ref,
+    change.requested_widget,
+  );
+  if (missingRefs.length > 0) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      missing_refs: missingRefs,
+      conflict_reason: "referenced_entity_missing",
+      last_verification: freshVerification("referenced_entity_missing"),
+    });
   }
   await ctx.persistNativeIntent(change, "applying", "apply");
   try {
@@ -3823,8 +3908,17 @@ async function runDashboardDeleteRecreation(ctx, change) {
         widgetStep.status === "pending" && widgetNeedsHomeCatalog(widgetStep),
     ),
   );
+  const needsDashboards = plan.some((columnStep) =>
+    columnStep.widgets.some(
+      (widgetStep) =>
+        widgetStep.status === "pending" && widgetNeedsDashboardList(widgetStep),
+    ),
+  );
   const catalog = needsCatalog
     ? await resolveHomeCatalog(ctx.client, ctx.hubSerial, { refresh: true })
+    : null;
+  const dashboardIds = needsDashboards
+    ? new Set((await ctx.client.listDashboards()).map(({ id }) => id))
     : null;
 
   for (const columnStep of plan) {
@@ -3891,6 +3985,7 @@ async function runDashboardDeleteRecreation(ctx, change) {
         catalog,
         change.home_ref,
         widgetStep,
+        dashboardIds,
       );
       if (missingRefs.length > 0) {
         widgetStep.status = "skipped";
@@ -4252,8 +4347,14 @@ async function runColumnDeleteRecreation(ctx, change) {
   const needsCatalog = widgetSteps.some(
     (step) => step.status === "pending" && widgetNeedsHomeCatalog(step),
   );
+  const needsDashboards = widgetSteps.some(
+    (step) => step.status === "pending" && widgetNeedsDashboardList(step),
+  );
   const catalog = needsCatalog
     ? await resolveHomeCatalog(ctx.client, ctx.hubSerial, { refresh: true })
+    : null;
+  const dashboardIds = needsDashboards
+    ? new Set((await ctx.client.listDashboards()).map(({ id }) => id))
     : null;
 
   for (const widgetStep of widgetSteps) {
@@ -4262,6 +4363,7 @@ async function runColumnDeleteRecreation(ctx, change) {
       catalog,
       change.home_ref,
       widgetStep,
+      dashboardIds,
     );
     if (missingRefs.length > 0) {
       widgetStep.status = "skipped";
@@ -4576,22 +4678,18 @@ async function restoreDashboardWidgetUpdate(ctx, change) {
       ),
     });
   }
-  if (widgetNeedsHomeCatalog(change.baseline_snapshot)) {
-    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-      refresh: true,
+  const missingRefs = await findMissingLiveWidgetRefs(
+    ctx,
+    change.home_ref,
+    change.baseline_snapshot,
+    { refreshCatalog: true },
+  );
+  if (missingRefs.length > 0) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      missing_refs: missingRefs,
+      conflict_reason: "referenced_entity_missing",
+      last_verification: freshVerification("referenced_entity_missing"),
     });
-    const missingRefs = findMissingWidgetRefs(
-      catalog,
-      change.home_ref,
-      change.baseline_snapshot,
-    );
-    if (missingRefs.length > 0) {
-      return ctx.finishNative(change, "conflict", undefined, {
-        missing_refs: missingRefs,
-        conflict_reason: "referenced_entity_missing",
-        last_verification: freshVerification("referenced_entity_missing"),
-      });
-    }
   }
   await ctx.persistNativeIntent(change, "restoring", "restore");
   try {
@@ -4655,22 +4753,18 @@ async function restoreDashboardWidgetDelete(ctx, change) {
       last_verification: freshVerification("widget_still_present"),
     });
   }
-  if (widgetNeedsHomeCatalog(change.baseline_snapshot)) {
-    const catalog = await resolveHomeCatalog(ctx.client, ctx.hubSerial, {
-      refresh: true,
+  const missingRefs = await findMissingLiveWidgetRefs(
+    ctx,
+    change.home_ref,
+    change.baseline_snapshot,
+    { refreshCatalog: true },
+  );
+  if (missingRefs.length > 0) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      missing_refs: missingRefs,
+      conflict_reason: "referenced_entity_missing",
+      last_verification: freshVerification("referenced_entity_missing"),
     });
-    const missingRefs = findMissingWidgetRefs(
-      catalog,
-      change.home_ref,
-      change.baseline_snapshot,
-    );
-    if (missingRefs.length > 0) {
-      return ctx.finishNative(change, "conflict", undefined, {
-        missing_refs: missingRefs,
-        conflict_reason: "referenced_entity_missing",
-        last_verification: freshVerification("referenced_entity_missing"),
-      });
-    }
   }
   change.restore_baseline_widget_ids = column.widgets.map(({ id }) => id);
   await ctx.persistNativeIntent(change, "restoring", "restore");
@@ -4994,7 +5088,7 @@ export function publicDashboardChange(change, options = {}) {
           change.recreated_dashboard_id !== undefined &&
           change.recreation_complete !== true),
       limitations: [
-        "Deleting a dashboard cascades all columns and widgets; undo recreates them under a new dashboard ID and skips widgets whose referenced devices no longer exist.",
+        "Deleting a dashboard cascades all columns and widgets; undo recreates them under a new dashboard ID and skips widgets whose referenced devices or shortcut dashboards no longer exist.",
       ],
     };
   }
@@ -5073,7 +5167,7 @@ export function publicDashboardChange(change, options = {}) {
           change.recreated_column_id !== undefined &&
           change.recreation_complete !== true),
       limitations: [
-        "Deleting a column cascades all widgets inside it; undo recreates the column and widgets while the dashboard still exists.",
+        "Deleting a column cascades all widgets inside it; undo recreates the column and widgets while the dashboard still exists, skipping widgets whose referenced devices or shortcut dashboards no longer exist.",
       ],
     };
   }
@@ -5118,7 +5212,7 @@ export function publicDashboardChange(change, options = {}) {
       ...tail,
       restore_supported: true,
       limitations: [
-        "Restore writes the previous widget payload back only while live state still matches the applied snapshot and referenced devices still exist.",
+        "Restore writes the previous widget payload back only while live state still matches the applied snapshot and referenced devices or shortcut dashboards still exist.",
       ],
     };
   }
@@ -5170,7 +5264,7 @@ export function publicDashboardChange(change, options = {}) {
       "applied",
     ].includes(change.status),
     limitations: [
-      "Undo recreates the widget in the same column under a new widget ID if dashboard, column and referenced devices still exist.",
+      "Undo recreates the widget in the same column under a new widget ID if dashboard, column and referenced devices or shortcut dashboards still exist.",
     ],
   };
 }

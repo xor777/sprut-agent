@@ -320,6 +320,7 @@ export const SUMMARY_VALUE_KINDS = new Set([
   "logic_active",
   "scenario_active",
   "service_visible",
+  "service_grid",
   "room_name",
   "service_name",
 ]);

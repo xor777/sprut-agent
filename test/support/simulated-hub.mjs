@@ -2058,8 +2058,7 @@ const HANDLERS = {
   },
 
   "service.types": () => ({ types: SERVICE_TYPES }),
-  // ServiceUpdateRequest {aId, sId, order, grid, name, visible}: only the
-  // sent name and visible change; order and grid are not modelled.
+  // ServiceUpdateRequest {aId, sId, order, grid, name, visible}.
   "service.update": (state, input) => {
     const service = requireService(state, input.aId, input.sId);
     const changed = { aId: service.aId, sId: service.sId };
@@ -2083,6 +2082,39 @@ const HANDLERS = {
       }
       service.visible = input.visible;
       changed.visible = input.visible;
+    }
+    if (Object.hasOwn(input, "grid")) {
+      if (
+        !input.grid ||
+        typeof input.grid !== "object" ||
+        Array.isArray(input.grid)
+      ) {
+        throw invalidParams("Service grid must be an object");
+      }
+      const existingOrder =
+        Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0
+          ? service.grid.order
+          : 0;
+      const order =
+        input.grid.order !== undefined ? input.grid.order : existingOrder;
+      const width = input.grid.width;
+      const height = input.grid.height;
+      if (
+        !Number.isSafeInteger(order) ||
+        order < 0 ||
+        !Number.isSafeInteger(width) ||
+        width < 1 ||
+        width > 3 ||
+        !Number.isSafeInteger(height) ||
+        height < 1 ||
+        height > 3
+      ) {
+        throw invalidParams(
+          "Service grid requires valid order, width (1..3), and height (1..3)",
+        );
+      }
+      service.grid = { order, width, height };
+      changed.grid = structuredClone(service.grid);
     }
     state.emitAfterReply?.({
       service: { event: "EVENT_UPDATE", services: [changed] },
@@ -3416,6 +3448,14 @@ function buildAccessory(state, input) {
       type: service.type,
       // A live accessory.get reports service visible (owner hub, 2026-09-24).
       visible: service.visible !== false,
+      grid: {
+        order:
+          Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0
+            ? service.grid.order
+            : 0,
+        width: service.grid?.width ?? 1,
+        height: service.grid?.height ?? 1,
+      },
       characteristics: service.characteristics.map((characteristic) => {
         const built = buildCharacteristic(
           input.id,
