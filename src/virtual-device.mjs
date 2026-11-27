@@ -229,6 +229,36 @@ export function ownServices(accessory) {
   );
 }
 
+// SprutHub 3.0.0 auto-attaches hub-default logics to some newly created
+// virtual services (e.g. active LightbulbControl on a Lightbulb with
+// Brightness). Recording them at creation time lets virtual_device undo
+// delete an untouched device while still refusing if default logic was
+// changed or another logic was assigned later.
+export function defaultServiceLogicEntry(sId, logic) {
+  return {
+    sId,
+    ...(typeof logic.type === "string" && logic.type.length > 0
+      ? { type: logic.type }
+      : {}),
+    name: typeof logic.name === "string" ? logic.name : String(logic.type),
+    // Proto3 omits active when false, so normalize explicitly to boolean.
+    active: logic.active === true,
+  };
+}
+
+export function isDefaultServiceLogic(sId, logic, defaults) {
+  if (!Array.isArray(defaults) || defaults.length === 0) return false;
+  const current = defaultServiceLogicEntry(sId, logic);
+  return defaults.some((saved) => {
+    if (saved.sId !== current.sId) return false;
+    if ((saved.active === true) !== current.active) return false;
+    if (saved.type !== undefined || current.type !== undefined) {
+      return saved.type === current.type;
+    }
+    return saved.name === current.name;
+  });
+}
+
 export function virtualDeviceSnapshot(accessory) {
   return {
     id: accessory.id,

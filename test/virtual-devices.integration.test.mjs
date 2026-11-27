@@ -1065,11 +1065,7 @@ test("undo of a virtual Lightbulb ignores hub-auto-attached default LightbulbCon
   const restoredClean = await call(client, "restore_native_change", {
     change_ref: appliedClean.change_ref,
   });
-  assert.equal(
-    restoredClean.status,
-    "restored",
-    JSON.stringify(restoredClean),
-  );
+  assert.equal(restoredClean.status, "restored", JSON.stringify(restoredClean));
   assert.deepEqual(diffHomeSnapshots(before, homeSnapshot(hub.state)), []);
 
   // 2. If the owner toggles the auto-attached default logic, undo refuses with virtual_device_in_use.

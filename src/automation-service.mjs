@@ -287,9 +287,11 @@ import {
   sanitizeNativeData,
 } from "./spruthub-client.mjs";
 import {
+  defaultServiceLogicEntry,
   dependenciesWithin,
   foundDependencies,
   hasDependencies,
+  isDefaultServiceLogic,
   notAVirtualDevice,
   ownServices,
   recreateServices,
@@ -1101,10 +1103,10 @@ export class AutomationService {
     change.created_snapshot = virtualDeviceSnapshot(created);
     change.creation_owned = true;
     await this.store.save(change);
-    return this.#observeVirtualDevice(change);
+    return this.#observeVirtualDevice(change, { captureDefaultLogics: true });
   }
 
-  async #observeVirtualDevice(change) {
+  async #observeVirtualDevice(change, { captureDefaultLogics = false } = {}) {
     let accessory;
     try {
       accessory = await this.client.getAccessoryOrNull(change.created_id);
@@ -1126,9 +1128,31 @@ export class AutomationService {
     }
     const changed = await this.#changedCreatedDevice(change, accessory);
     if (changed) return changed;
+    if (captureDefaultLogics && change.created_default_logics === undefined) {
+      try {
+        change.created_default_logics =
+          await this.#readServiceDefaultLogics(accessory);
+      } catch {
+        // Leave unset on transient read error so undo fails closed if any
+        // logic is present, without failing an already created device.
+      }
+    }
     return this.#finishNative(change, "applied", undefined, {
       last_verification: freshVerification("created_device_observed"),
     });
+  }
+
+  async #readServiceDefaultLogics(accessory) {
+    const defaults = [];
+    for (const service of ownServices(accessory)) {
+      for (const logic of await this.client.listLogics({
+        aId: accessory.id,
+        sId: service.sId,
+      })) {
+        defaults.push(defaultServiceLogicEntry(service.sId, logic));
+      }
+    }
+    return defaults;
   }
 
   // The saved id holds another device than the one created: a physical
@@ -1189,7 +1213,9 @@ export class AutomationService {
     }
     const changed = await this.#changedCreatedDevice(change, accessory);
     if (changed) return changed;
-    const dependencies = await this.#accessoryDependencies(accessory);
+    const dependencies = await this.#accessoryDependencies(accessory, {
+      ignoreDefaultLogics: change.created_default_logics,
+    });
     if (foundDependencies(dependencies)) {
       return this.#finishNative(change, "conflict", undefined, {
         dependencies,
@@ -1266,7 +1292,7 @@ export class AutomationService {
   // What refers to an accessory: the scenarios the hub lists for it,
   // the devices its characteristics are linked with, the bridges that
   // export it, the logic assigned to its services, and code mentions.
-  async #accessoryDependencies(accessory) {
+  async #accessoryDependencies(accessory, { ignoreDefaultLogics } = {}) {
     const homeRef = configuredHomeRef(this.hubSerial);
     const services = ownServices(accessory);
     const scenarios = (
@@ -1312,6 +1338,9 @@ export class AutomationService {
         aId: accessory.id,
         sId: service.sId,
       })) {
+        if (isDefaultServiceLogic(service.sId, logic, ignoreDefaultLogics)) {
+          continue;
+        }
         logics.push({
           name:
             typeof logic.name === "string" ? logic.name : String(logic.type),
