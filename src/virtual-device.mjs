@@ -11,12 +11,18 @@ export { CODE_DEPENDENCY_NOTE };
 export const VIRTUAL_DEVICE = "virtual_device";
 export const VIRTUAL_DEVICE_DELETE = "virtual_device_delete";
 
-// The service types created and written on the hub in the probe. The hub
-// offers more (every non-system type of service.types); they were not
-// tried, so they are not offered here.
+// Common service types offered as examples in the contract. Creation checks
+// the hub's live non-system service.types list instead of a fixed allowlist.
 export const VIRTUAL_DEVICE_TYPES = [
   "Switch",
   "Outlet",
+  "Lightbulb",
+  "Thermostat",
+  "HeaterCooler",
+  "Fan",
+  "WindowCovering",
+  "AirPurifier",
+  "SecuritySystem",
   "StatelessProgrammableSwitch",
   "ContactSensor",
   "MotionSensor",
@@ -27,7 +33,35 @@ export const VIRTUAL_DEVICE_TYPES = [
   "SmokeSensor",
   "LightSensor",
   "CarbonDioxideSensor",
+  "C_WattMeter",
 ];
+
+// Hardware/media-stream services and AccessoryInformation cannot work as plain
+// virtual services even when listed with system=false.
+export const REFUSED_VIRTUAL_DEVICE_TYPES = new Set([
+  "AccessoryInformation",
+  "CameraRTPStreamManagement",
+  "AudioStreamManagement",
+  "DataStreamTransportManagement",
+  "Microphone",
+  "Speaker",
+]);
+
+function serviceCharacteristicName(entry) {
+  return typeof entry === "string"
+    ? entry
+    : (entry?.type ?? entry?.shortId ?? null);
+}
+
+export function isAllowedVirtualDeviceServiceType(serviceType) {
+  return (
+    Boolean(serviceType) &&
+    typeof serviceType.type === "string" &&
+    serviceType.type.length > 0 &&
+    serviceType.system !== true &&
+    !REFUSED_VIRTUAL_DEVICE_TYPES.has(serviceType.type)
+  );
+}
 
 // accessory.create kept the first 32 characters of an accessory's and a
 // service's name, Latin and Cyrillic alike, without an error (probe, 15).
@@ -40,16 +74,85 @@ export function virtualDeviceName(name) {
   return nameWithinLimit(name, "a device name", ACCESSORY_NAME_MAX_LENGTH);
 }
 
-export function virtualDeviceType(value) {
-  if (!VIRTUAL_DEVICE_TYPES.includes(value)) {
+export function virtualDeviceServiceType(value, serviceTypes) {
+  const supportedTypes = serviceTypes
+    .filter(isAllowedVirtualDeviceServiceType)
+    .map(({ type }) => type);
+  const matched =
+    typeof value === "string"
+      ? serviceTypes.find(({ type }) => type === value)
+      : undefined;
+  if (!isAllowedVirtualDeviceServiceType(matched)) {
+    const message =
+      matched !== undefined
+        ? `Service type "${matched.type}" cannot be created as a virtual device (system or hardware/media-stream service). Choose a non-system type from supported_types.`
+        : `value must be a supported non-system service type from SprutHub's service.types catalog (supported_types).`;
     throw new SprutHubError(
       "unsupported_virtual_device_type",
-      `value is the service type of the virtual device, one of ${VIRTUAL_DEVICE_TYPES.join(", ")}.`,
+      message,
       "get_native_change_contract",
-      { supported_types: VIRTUAL_DEVICE_TYPES },
+      { supported_types: supportedTypes },
     );
   }
-  return value;
+  return matched;
+}
+
+export function virtualDeviceOptionalCharacteristics(types, serviceType) {
+  if (types === undefined) return [];
+  const required = new Set(
+    (serviceType.required ?? [])
+      .map(serviceCharacteristicName)
+      .filter((name) => typeof name === "string"),
+  );
+  const availableOptional = (serviceType.optional ?? [])
+    .map(serviceCharacteristicName)
+    .filter(
+      (name) =>
+        typeof name === "string" && name !== "Name" && !required.has(name),
+    );
+  const availableSet = new Set(availableOptional);
+  const listText =
+    availableOptional.length > 0 ? availableOptional.join(", ") : "(none)";
+  if (
+    !Array.isArray(types) ||
+    types.length === 0 ||
+    types.some((item) => typeof item !== "string" || item.length === 0) ||
+    new Set(types).size !== types.length
+  ) {
+    throw new SprutHubError(
+      "unsupported_virtual_device_characteristics",
+      `characteristic_types must be a non-empty array of unique optional characteristic names for ${serviceType.type}. Available optional characteristics: ${listText}.`,
+      "get_native_change_contract",
+      { available_optional: availableOptional },
+    );
+  }
+  for (const item of types) {
+    if (item === "Name") {
+      throw new SprutHubError(
+        "unsupported_virtual_device_characteristics",
+        `Name is managed automatically by SprutHub and cannot be passed in characteristic_types. Available optional characteristics for ${serviceType.type}: ${listText}.`,
+        "get_native_change_contract",
+        { available_optional: availableOptional },
+      );
+    }
+    if (required.has(item)) {
+      throw new SprutHubError(
+        "unsupported_virtual_device_characteristics",
+        `${item} is already a required characteristic of ${serviceType.type}; omit it from characteristic_types. Available optional characteristics: ${listText}.`,
+        "get_native_change_contract",
+        { available_optional: availableOptional },
+      );
+    }
+    if (!availableSet.has(item)) {
+      throw new SprutHubError(
+        "unsupported_virtual_device_characteristics",
+        `${item} is not an optional characteristic of ${serviceType.type}. Available optional characteristics: ${listText}.`,
+        "get_native_change_contract",
+        { available_optional: availableOptional },
+      );
+    }
+  }
+  return [...types];
 }
 
 export function notAVirtualDevice() {
@@ -69,11 +172,12 @@ export function virtualDeviceContract(operation) {
         "prepare reads what refers to the device: the BLOCK scenarios the hub lists for it, code scenarios that name it (code), its links, bridge exports and logic. With any, the result has tell_owner: name them and apply only after the owner confirms. Scenarios and code stay and no longer reach it; links and exports go with it. " +
         CODE_DEPENDENCY_NOTE,
       restore:
-        "creates the device again with the same name, room and service types: a new id, and the scenarios, links, export and logic are not put back on it (not_restored)",
+        "creates the device again with the same name, room, service types and optional characteristics: a new id, and the scenarios, links, export and logic are not put back on it (not_restored)",
     };
   }
   return {
-    write: "accessory.create({name,roomId,services:[{type,name,optional:[]}]})",
+    write:
+      "accessory.create({name,roomId,services:[{type,name,optional:[...]}]})",
     fields: {
       target_ref: "the home ref",
       room_ref: "an existing room",
@@ -84,10 +188,15 @@ export function virtualDeviceContract(operation) {
           "emoji and other characters outside the Basic Multilingual Plane, as in a room name",
         note: "also the name of its service",
       },
-      value: { service_type: VIRTUAL_DEVICE_TYPES },
+      value: {
+        service_type:
+          "any non-system SprutHub service.types entry (e.g. Switch, Outlet, Lightbulb, Thermostat, HeaterCooler, Fan, WindowCovering, AirPurifier, SecuritySystem, StatelessProgrammableSwitch, sensors, C_WattMeter); system types, AccessoryInformation and media-stream types are refused",
+      },
+      characteristic_types:
+        "optional array of unique optional characteristic names for the chosen service type (excluding Name and already-required characteristics)",
     },
     types:
-      "Switch and Outlet: On. StatelessProgrammableSwitch: a button; writing ProgrammableSwitchEvent with send_device_commands is a press (0 single, 1 double, 2 long). The sensors' reading (ContactSensorState, MotionDetected, LeakDetected, …) is written with send_device_commands too, so a scenario on it can be tried.",
+      "Validated against the hub's live non-system service.types. Pass characteristic_types to include optional controls (e.g. Brightness, Hue, Saturation, ColorTemperature on Lightbulb). StatelessProgrammableSwitch: writing ProgrammableSwitchEvent with send_device_commands is a press (0 single, 1 double, 2 long). Virtual sensor readings are writable with send_device_commands too.",
     duplicate:
       "a virtual device of the same name in the room is named in matching_devices with tell_owner",
     restore:
@@ -130,7 +239,7 @@ export function virtualDeviceSnapshot(accessory) {
       type: service.type,
       name: service.name,
       characteristic_types: (service.characteristics ?? [])
-        .map(({ control }) => control?.type)
+        .map(({ control }) => control?.type ?? control?.key)
         .filter((type) => typeof type === "string" && type !== "Name"),
     })),
   };
@@ -178,14 +287,17 @@ export function unreadDependencies(dependencies) {
 export function recreateServices(snapshot, serviceTypes) {
   return snapshot.services.map((service) => {
     const catalog = serviceTypes.find(({ type }) => type === service.type);
+    const required = new Set(
+      (catalog?.required ?? []).map(serviceCharacteristicName),
+    );
     const listed = new Set(
-      (catalog?.optional ?? []).map((entry) => entry?.type ?? entry),
+      (catalog?.optional ?? []).map(serviceCharacteristicName),
     );
     return {
       type: service.type,
       name: service.name,
       optional: service.characteristic_types.filter(
-        (type) => type !== "Name" && listed.has(type),
+        (type) => type !== "Name" && !required.has(type) && listed.has(type),
       ),
     };
   });
@@ -238,9 +350,19 @@ export function publicVirtualDeviceChange(change, { verification }) {
         name: created?.name ?? change.requested_name,
         room,
         type: change.service_type,
+        ...(change.optional_characteristics?.length
+          ? { optional_characteristics: [...change.optional_characteristics] }
+          : {}),
         ...(created?.services?.[0]
           ? {
               service_ref: `${deviceRef(homeRef, created.id)}/service/${created.services[0].sId}`,
+              ...(created.services[0].characteristic_types?.length
+                ? {
+                    characteristic_types: [
+                      ...created.services[0].characteristic_types,
+                    ],
+                  }
+                : {}),
             }
           : {}),
       },

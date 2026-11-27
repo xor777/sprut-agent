@@ -193,6 +193,7 @@ import {
   characteristicValueState,
   failedVerification,
   freshVerification,
+  generalNativeValueContractFields,
   hasKnownSettingSemantics,
   isNativeChange,
   isNativeValueChange,
@@ -299,8 +300,9 @@ import {
   VIRTUAL_DEVICE_DUPLICATE_NOTE,
   virtualDeviceContract,
   virtualDeviceName,
+  virtualDeviceOptionalCharacteristics,
+  virtualDeviceServiceType,
   virtualDeviceSnapshot,
-  virtualDeviceType,
 } from "./virtual-device.mjs";
 import {
   characteristicTypeName,
@@ -315,6 +317,7 @@ import {
   physicalLinkBaseline,
   physicalLinkContains,
   physicalLinksPreservedAcrossOwnRemoval,
+  resolveVirtualLightCharacteristicTypes,
   safeOwnedVirtualLightConfiguration,
   safeRestoringVirtualLightConfiguration,
   selectCreatedVirtualLight,
@@ -395,13 +398,24 @@ export class AutomationService {
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         ...(valueKind.contract
           ? await valueKind.contract(this, input)
-          : await nativeValueContractFields(this, valueKind, input)),
+          : input.target_ref === undefined
+            ? generalNativeValueContractFields(input.operation)
+            : await nativeValueContractFields(this, valueKind, input)),
       };
     }
     if (input.operation === "logic_assignment") {
+      if (input.target_ref === undefined) {
+        return {
+          status: "ok",
+          operation: input.operation,
+          contract: logicAssignmentContract(),
+        };
+      }
       const target = parseLogicRef(input.target_ref, this.hubSerial);
       const { assigned, type } = await this.#readLogicSelection(target);
       return {
@@ -412,6 +426,13 @@ export class AutomationService {
       };
     }
     if (input.operation === "accessory_placement") {
+      if (input.target_ref === undefined) {
+        return {
+          status: "ok",
+          operation: input.operation,
+          contract: accessoryPlacementContract(),
+        };
+      }
       const target = parseAccessoryRef(input.target_ref, this.hubSerial);
       const accessory = await this.client.getAccessory(target.id);
       return {
@@ -484,11 +505,15 @@ export class AutomationService {
       return getWindowButtonContract(this.client, input, this.hubSerial);
     }
     if (input.operation === "scenario_run") {
-      await this.#readRunnableScenario(input.target_ref);
+      if (input.target_ref !== undefined) {
+        await this.#readRunnableScenario(input.target_ref);
+      }
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         contract: scenarioRunContract(),
       };
     }
@@ -513,28 +538,46 @@ export class AutomationService {
       };
     }
     if (input.operation === "block_action_pause") {
-      const { scenario } = await this.#readChangeableScenario(input.target_ref);
-      if (scenarioSnapshot(scenario).type !== "BLOCK")
-        throw unsupportedScenarioType();
+      if (input.target_ref !== undefined) {
+        const { scenario } = await this.#readChangeableScenario(
+          input.target_ref,
+        );
+        if (scenarioSnapshot(scenario).type !== "BLOCK")
+          throw unsupportedScenarioType();
+      }
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         contract: blockActionPauseContract(),
       };
     }
     if (input.operation === "logic_source_create") {
-      const target = parseServiceRef(input.target_ref, this.hubSerial);
-      await this.#readLogicTypeCatalog(target);
+      if (input.target_ref !== undefined) {
+        const target = parseServiceRef(input.target_ref, this.hubSerial);
+        await this.#readLogicTypeCatalog(target);
+      }
       return {
         status: "ok",
         operation: input.operation,
-        target_ref: input.target_ref,
+        ...(input.target_ref === undefined
+          ? {}
+          : { target_ref: input.target_ref }),
         contract: logicSourceContract("create"),
         next: sdkNext(this.hubSerial),
       };
     }
     if (input.operation === "logic_source_update") {
+      if (input.target_ref === undefined) {
+        return {
+          status: "ok",
+          operation: input.operation,
+          contract: logicSourceContract("update"),
+          next: sdkNext(this.hubSerial),
+        };
+      }
       const { scenario } = await this.#readChangeableScenario(input.target_ref);
       if (!CODE_SCENARIO_TYPES.includes(scenario.type)) {
         throw notCodeScenario();
@@ -764,26 +807,46 @@ export class AutomationService {
 
   async #prepareAccessoryPlacement(input) {
     const target = parseAccessoryRef(input.target_ref, this.hubSerial);
-    const roomId = parseRoomRef(input.room_ref, this.hubSerial);
-    const name = requiredNativeName(input.name, "accessory placement");
-    const [accessory, room] = await Promise.all([
+    if (input.name === undefined && input.room_ref === undefined) {
+      throw new SprutHubError(
+        "invalid_native_change",
+        "accessory_placement requires at least one of name or room_ref.",
+        "prepare_native_change",
+      );
+    }
+    const requestedRoomId =
+      input.room_ref !== undefined
+        ? parseRoomRef(input.room_ref, this.hubSerial)
+        : undefined;
+    const requestedName =
+      input.name !== undefined
+        ? requiredNativeName(input.name, "accessory placement")
+        : undefined;
+    const [accessory, destinationRoom] = await Promise.all([
       this.client.getAccessory(target.id),
-      this.client.getRoom(roomId),
+      requestedRoomId !== undefined
+        ? this.client.getRoom(requestedRoomId)
+        : Promise.resolve(undefined),
     ]);
-    if (!room) {
+    if (requestedRoomId !== undefined && !destinationRoom) {
       throw new SprutHubError(
         "room_not_found",
         "The selected destination room was not found.",
         "home_overview",
       );
     }
-    const baselineRoom = await this.client.getRoom(accessory.roomId);
+    const baselineRoom =
+      destinationRoom && requestedRoomId === accessory.roomId
+        ? destinationRoom
+        : await this.client.getRoom(accessory.roomId);
     if (!baselineRoom) {
       throw new SprutHubError(
         "incompatible_response",
         "The accessory references a room that SprutHub did not return.",
       );
     }
+    const room = destinationRoom ?? baselineRoom;
+    const name = requestedName ?? accessory.name;
     const baseline = accessoryPlacementSnapshot(accessory, baselineRoom);
     const requested = {
       name,
@@ -872,7 +935,13 @@ export class AutomationService {
     const name = virtualDeviceName(
       requiredNativeName(input.name, "a virtual device").trim(),
     );
-    const type = virtualDeviceType(input.value);
+    const serviceTypes = await this.client.listServiceTypes();
+    const serviceType = virtualDeviceServiceType(input.value, serviceTypes);
+    const optional = virtualDeviceOptionalCharacteristics(
+      input.characteristic_types,
+      serviceType,
+    );
+    const type = serviceType.type;
     const room = await this.#requireRoom(input.room_ref);
     const accessories = await this.client.listAccessories();
     const matching = await this.#virtualAccessories(
@@ -892,10 +961,11 @@ export class AutomationService {
       room_name: room.name,
       requested_name: name,
       service_type: type,
+      ...(optional.length > 0 ? { optional_characteristics: optional } : {}),
       create_request: {
         name,
         roomId: room.id,
-        services: [{ type, name, optional: [] }],
+        services: [{ type, name, optional }],
       },
       baseline_accessory_ids: accessories.map(({ id }) => id),
       ...(matching.length > 0
@@ -1485,9 +1555,8 @@ export class AutomationService {
         "home_overview",
       );
     }
-    const characteristicTypes = validateVirtualLightCharacteristicTypes(
-      input.characteristic_types,
-    );
+    const requestedCharacteristicTypes =
+      validateVirtualLightCharacteristicTypes(input.characteristic_types);
     if (
       !Array.isArray(input.member_service_refs) ||
       input.member_service_refs.length < 2
@@ -1519,15 +1588,40 @@ export class AutomationService {
       ),
     ]);
     const lightbulbType = serviceTypes.find(({ type }) => type === "Lightbulb");
-    validateVirtualLightServiceType(lightbulbType, characteristicTypes);
-    const members = memberTargets.map(({ ref, target }, index) =>
+    if (requestedCharacteristicTypes !== undefined) {
+      validateVirtualLightServiceType(
+        lightbulbType,
+        requestedCharacteristicTypes,
+      );
+    }
+    const inspectedMembers = memberTargets.map(({ ref, target }, index) =>
       selectVirtualLightMember(
         ref,
         target,
         accessories[index],
-        characteristicTypes,
+        requestedCharacteristicTypes,
       ),
     );
+    const characteristicTypes = resolveVirtualLightCharacteristicTypes(
+      requestedCharacteristicTypes,
+      lightbulbType,
+      inspectedMembers,
+    );
+    const members = inspectedMembers.map((member) => {
+      const characteristics = Object.fromEntries(
+        characteristicTypes
+          .filter((type) => member.characteristics[type] !== undefined)
+          .map((type) => [type, member.characteristics[type]]),
+      );
+      const lacks = characteristicTypes.filter(
+        (type) => member.characteristics[type] === undefined,
+      );
+      return {
+        ...member,
+        characteristics,
+        ...(lacks.length > 0 ? { lacks } : {}),
+      };
+    });
     const allAccessories = await this.client.listAccessories();
     const matching = await this.#virtualAccessories(
       allAccessories.filter(
@@ -1550,18 +1644,20 @@ export class AutomationService {
     }
     const physicalLinkBaselines = await Promise.all(
       characteristicTypes.flatMap((type) =>
-        members.map(async (member) => ({
-          type,
-          member_ref: member.ref,
-          target: structuredClone(member.characteristics[type]),
-          links: normalizePhysicalLinks(
-            await this.client.listLinks(member.characteristics[type]),
-          ),
-        })),
+        members
+          .filter((member) => member.characteristics[type] !== undefined)
+          .map(async (member) => ({
+            type,
+            member_ref: member.ref,
+            target: structuredClone(member.characteristics[type]),
+            links: normalizePhysicalLinks(
+              await this.client.listLinks(member.characteristics[type]),
+            ),
+          })),
       ),
     );
     const requiredTypes = new Set(
-      lightbulbType.required.map(characteristicTypeName),
+      (lightbulbType.required ?? []).map(characteristicTypeName),
     );
     const optional = characteristicTypes.filter(
       (type) => !requiredTypes.has(type),
@@ -1594,14 +1690,16 @@ export class AutomationService {
       progress: {
         creation: { sent: false, acknowledged: false },
         links: characteristicTypes.flatMap((type) =>
-          members.map((member) => ({
-            type,
-            member_ref: member.ref,
-            target: member.characteristics[type],
-            sent: false,
-            acknowledged: false,
-            completed: false,
-          })),
+          members
+            .filter((member) => member.characteristics[type] !== undefined)
+            .map((member) => ({
+              type,
+              member_ref: member.ref,
+              target: member.characteristics[type],
+              sent: false,
+              acknowledged: false,
+              completed: false,
+            })),
         ),
         settings: characteristicTypes.map((type) => ({
           type,

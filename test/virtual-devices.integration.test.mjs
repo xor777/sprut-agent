@@ -922,7 +922,12 @@ test("virtual_device accepts any non-system service.types entry and optional cha
     ({ name }) => name === "Виртуальная лампа",
   );
   assert.ok(recreatedLight);
-  assert.notEqual(recreatedLight.id, createdLight.id);
+  assert.equal(
+    delRestored.recreated_device.ref,
+    accessoryRef(recreatedLight.id),
+  );
+  assert.equal(writes(hub, "accessory.delete").length, 1);
+  assert.equal(writes(hub, "accessory.create").length, 2);
   assert.deepEqual(
     ownServices(recreatedLight)[0]
       .characteristics.map(({ control }) => control.type)

@@ -337,6 +337,9 @@ export const NATIVE_VALUE_KINDS = {
     restoration: scalarValueRestoration,
     knownSetting: () => false,
     async contract(service, input) {
+      if (input.target_ref === undefined) {
+        return generalNativeValueContractFields("logic_active");
+      }
       const target = parseLogicRef(input.target_ref, service.hubSerial);
       if (!(await service.client.getLogic(target))) throw logicNotFound();
       return { contract: logicActiveContract() };
@@ -640,6 +643,207 @@ export function isNativeChange(change) {
   );
 }
 
+export function generalNativeValueContractFields(operation) {
+  switch (operation) {
+    case "characteristic_value":
+      return {
+        contract: {
+          write: "characteristic.update({aId,sId,cId,control:{value}})",
+          fields: {
+            target_ref: "characteristic ref from find_devices or get_entity",
+            value:
+              "scalar value in the characteristic's native type, range and valid_values",
+            reason: "why the owner asked",
+          },
+          scope: "one_writable_characteristic",
+          inspect_target:
+            "Pass target_ref to get_native_change_contract to read exact type, kind, min/max/step and valid_values. Prefer send_device_commands for direct device commands.",
+          restore:
+            "writes back the saved baseline value while observed value matches applied (except virtual button presses and lamp levels)",
+        },
+        restore_supported: true,
+        physical_effect_reversible: false,
+      };
+    case "characteristic_option":
+      return {
+        contract: {
+          write:
+            "characteristic.setOptions({aId,sId,cId,options:[{key,value}]})",
+          fields: {
+            target_ref: "characteristic ref from get_entity",
+            option_key: "writable option key from get_entity include=options",
+            value:
+              "scalar value matching the option's native type and valid_values",
+            reason: "why the owner asked",
+          },
+          scope: "one_characteristic_option",
+          inspect_target:
+            "Pass target_ref and option_key to get_native_change_contract to inspect exact input_type, kind, range and valid_values.",
+          restore:
+            "writes back the saved baseline option value while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "window_option":
+      return {
+        contract: {
+          write: "window.update({windowKey,options:[{key,value}]})",
+          fields: {
+            target_ref:
+              "window ref from get_entity, or scenario ref for Name, Desc, OnStart, Sync",
+            option_key:
+              "writable option key (typed setting, scenario Name/Desc/OnStart/Sync, bridge export s:<sId>, or allowlisted Telegram/listed TEXT)",
+            value:
+              "scalar value matching the option's native type and valid_values",
+            reason: "why the owner asked",
+          },
+          scope: "one_window_option",
+          inspect_target:
+            "Pass target_ref and option_key to get_native_change_contract to inspect exact input_type, kind, range and valid_values.",
+          restore:
+            "writes back the saved baseline option value while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "logic_active":
+      return {
+        contract: {
+          ...logicActiveContract(),
+          write: "logic.update({aId,sId,type,active})",
+          fields: {
+            target_ref: "logic assignment ref from get_entity",
+            value: "boolean (true to enable, false to disable)",
+            reason: "why the owner asked",
+          },
+          scope: "one_logic_assignment",
+          restore: "writes back the saved baseline active flag while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "logic_option":
+      return {
+        contract: {
+          write: "logic.setOptions({aId,sId,type,options:[{key,value}]})",
+          fields: {
+            target_ref: "logic assignment ref from get_entity",
+            option_key: "writable option key from get_entity include=options",
+            value:
+              "scalar value matching the option's native type and valid_values",
+            reason: "why the owner asked",
+          },
+          scope: "one_logic_option",
+          inspect_target:
+            "Pass target_ref and option_key to get_native_change_contract to inspect exact input_type, kind, range and valid_values.",
+          restore:
+            "writes back the saved baseline option value while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "scenario_active":
+      return {
+        contract: {
+          type: "ScenarioActive",
+          kind: "boolValue",
+          write:
+            'window.update({windowKey: scenario.optionsWindow, options: [{key: "Active", value: {boolValue}}]})',
+          fields: {
+            target_ref: "scenario ref from home_overview list=scenarios",
+            value: "boolean (true to enable, false to disable)",
+            reason: "why the owner asked",
+          },
+          scope: "one_user_scenario",
+          confirmation: "separate_scenario_get_and_window_get_readback",
+          restore: "writes back the saved baseline active flag while unchanged",
+          limitations: [
+            "Predefined (built-in) scenarios cannot be toggled.",
+            "Written as the Active option of the scenario's options window and confirmed when both scenario.get and window.get agree.",
+          ],
+        },
+        restore_supported: true,
+      };
+    case "room_name":
+      return {
+        contract: {
+          ...nativeNameContract("RoomName", "separate_room_get_readback"),
+          ...roomNameLimits(),
+          write: "room.update({id,name})",
+          fields: {
+            target_ref: "room ref from home_overview",
+            value: "non-empty room name (max 32 characters, no emoji)",
+            reason: "why the owner asked",
+          },
+          scope: "one_room",
+          restore: "writes back the saved baseline room name while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "service_name":
+      return {
+        contract: {
+          ...nativeNameContract(
+            "ServiceName",
+            "separate_accessory_get_readback",
+          ),
+          write: "service.update({aId,sId,name})",
+          fields: {
+            target_ref: "service ref from find_devices or get_entity",
+            value: "non-empty service name",
+            reason: "why the owner asked",
+          },
+          scope: "one_service",
+          restore:
+            "writes back the saved baseline service name while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "service_visible":
+      return {
+        contract: {
+          type: "ServiceVisible",
+          kind: "boolValue",
+          write: "service.update({aId,sId,visible})",
+          fields: {
+            target_ref: "service ref from find_devices or get_entity",
+            value: "boolean (true to show, false to hide)",
+            reason: "why the owner asked",
+          },
+          scope: "one_service",
+          confirmation: "separate_accessory_get_readback",
+          restore: "writes back the saved baseline visibility while unchanged",
+        },
+        restore_supported: true,
+      };
+    case "service_grid":
+      return {
+        contract: serviceGridContract(),
+        restore_supported: true,
+        limitations: [SERVICE_GRID_LIMITATION],
+      };
+    case "characteristic_notify":
+      return {
+        contract: {
+          type: "CharacteristicNotify",
+          kind: "boolValue",
+          write: "characteristic.update({aId,sId,cId,notify})",
+          fields: {
+            target_ref:
+              "characteristic ref from get_entity (C_Online for offline notifications, or a service characteristic)",
+            value: "boolean (true to enable, false to disable)",
+            reason: "why the owner asked",
+          },
+          scope: "one_characteristic",
+          confirmation: "separate_accessory_get_readback",
+          restore:
+            "writes back the saved baseline notify setting while unchanged",
+        },
+        restore_supported: true,
+        limitations: characteristicNotifyLimitations(),
+      };
+    default:
+      throw new Error(`No general contract for native value op ${operation}`);
+  }
+}
+
 export async function nativeValueContractFields(service, kind, input) {
   const state = await kind.inspect(service, input);
   const { target } = state.fields;
@@ -813,10 +1017,12 @@ export function ownedVirtualGroupContext(changes, target) {
       matches.push({
         change_id: change.id,
         characteristic_type: type,
-        members: change.members.map((member) => ({
-          member_ref: member.ref,
-          target: structuredClone(member.characteristics[type]),
-        })),
+        members: change.members
+          .filter((member) => member.characteristics?.[type] !== undefined)
+          .map((member) => ({
+            member_ref: member.ref,
+            target: structuredClone(member.characteristics[type]),
+          })),
       });
     }
   }
