@@ -1409,7 +1409,6 @@ test("regression P1-1: read-only get_native_change never sends catalog.update ro
     reason: "Проверить очистку флагов после подтверждённого rollback",
   });
   let getCount = 0;
-  const origRefuse = hub.state.faults.refused;
   // First catalog.get is apply precondition (must pass); second catalog.get is
   // post-rollback readback (must fail once so change settles uncertain with rollback_failed).
   hub.state.catalogRejectNext.push({
@@ -1421,11 +1420,9 @@ test("regression P1-1: read-only get_native_change never sends catalog.update ro
       updateSeen += 1;
       if (updateSeen === 1) {
         // After rollback update executes, fail its post-rollback catalog.get once
-        origRefuse.push({
-          method: "catalog.get",
+        hub.refuseNext("catalog.get", {
           code: -32000,
           message: "post-rollback read timeout",
-          remaining: 1,
         });
       }
     }
@@ -1498,6 +1495,39 @@ test("regression P1-2: hub-refused restore_native_change never leaves stale pend
   assert.equal(
     afterManualDelGet.conflict_reason,
     "created_catalog_template_missing",
+  );
+
+  // 1b. Create -> hub refuses restore -> later update applied -> restore on create
+  // MUST report later_owned_change (never bypassed by stale refused restore intent!).
+  const { applied: createGuard } = await prepareAndApply(client, {
+    operation: "catalog_template_create",
+    target_ref: HOME_REF,
+    value: "zigbee",
+    source: v1,
+    reason:
+      "Создать шаблон 1b для проверки later_owned_change после отказа restore",
+  });
+  hub.refuseNext("catalog.delete", {
+    code: -32603,
+    message: "delete refused 1b",
+  });
+  await callError(client, "restore_native_change", {
+    change_ref: createGuard.change_ref,
+  });
+  const { applied: updAfterRefused } = await prepareAndApply(client, {
+    operation: "catalog_template_update",
+    target_ref: createGuard.created_catalog_ref,
+    source: v2,
+    reason: "Обновить шаблон 1b после отказа restore",
+  });
+  const blockedCreateGuard = await callOk(client, "restore_native_change", {
+    change_ref: createGuard.change_ref,
+  });
+  assert.equal(blockedCreateGuard.status, "conflict");
+  assert.equal(blockedCreateGuard.conflict_reason, "later_owned_change");
+  assert.equal(
+    blockedCreateGuard.restore_first_change_ref,
+    updAfterRefused.change_ref,
   );
 
   // 2. Update -> hub refuses restore_native_change -> external manual revert to v1 ->
@@ -1580,8 +1610,8 @@ test("regression P1-3: proto3 implicit-presence omitted store (MAIN) and omitted
     list: "catalog",
     type: "MAIN",
   });
-  assert.ok(listed.items.length >= 2);
-  assert.ok(listed.items.every((item) => item.store === "MAIN"));
+  assert.ok(listed.catalog.length >= 2);
+  assert.ok(listed.catalog.every((item) => item.store === "MAIN"));
 
   const mainRef = catalogRef("MAIN", "zigbee", "/Tuya/TS011F.json");
   const mainEntity = await callOk(client, "get_entity", {
@@ -1915,6 +1945,24 @@ test("regression P2-2: restoreCatalogTemplateDelete handles inactive baselines, 
     createsBeforeRetry,
   );
   assert.equal(retriedUncertain.status, "uncertain");
+  assert.equal(retriedUncertain.next?.tool, "get_native_change");
+
+  // Once the leftover broken file is removed from the hub, get_native_change settles
+  // cleanly to conflict with cleanup_confirmed=true and cleared cleanup_failed/error/ref.
+  const ghostFile = decodeURIComponent(
+    failedCleanupRestore.restored_catalog_ref.split("/").pop(),
+  );
+  hub.state.catalogs = hub.state.catalogs.filter(
+    (entry) => !(entry.store === "INTERNAL" && entry.file === ghostFile),
+  );
+  const afterGhostRemoved = await callOk(client, "get_native_change", {
+    change_ref: delActive.change_ref,
+  });
+  assert.equal(afterGhostRemoved.status, "conflict");
+  assert.equal(afterGhostRemoved.cleanup_confirmed, true);
+  assert.equal(afterGhostRemoved.cleanup_failed, undefined);
+  assert.equal(afterGhostRemoved.cleanup_error, undefined);
+  assert.equal(afterGhostRemoved.restored_catalog_ref, undefined);
 
   // 3. Delete restore settles to conflict (hub rejected & cleanup succeeded) ->
   // calling restore_native_change again MUST return stored conflict with ZERO duplicate catalog.create!

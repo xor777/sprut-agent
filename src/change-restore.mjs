@@ -16,7 +16,8 @@ import { SprutHubError } from "./spruthub-client.mjs";
 import { WINDOW_BUTTON } from "./window-buttons.mjs";
 
 export function restoreIntentTime(change) {
-  return change.write_intent?.direction === "restore"
+  return change.write_intent?.direction === "restore" &&
+    change.write_intent?.rejection === undefined
     ? change.write_intent.at
     : undefined;
 }
@@ -164,7 +165,7 @@ export function restoreItem(change, result, before) {
     case "uncertain":
     case "applying":
     case "restoring": {
-      const restoring = change.write_intent?.direction === "restore";
+      const restoring = restoreIntentTime(change) !== undefined;
       return {
         ...base,
         status: "uncertain",

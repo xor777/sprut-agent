@@ -1870,8 +1870,7 @@ export class SprutHubClient {
       "catalog",
       "list",
       "catalogs",
-    ]);
-    for (const item of catalogs) validateCatalogMessage(item);
+    ]).map(normalizeCatalogMessage);
     return {
       catalogs,
       observedAt: response.responseReceivedAt,
@@ -1920,8 +1919,7 @@ export class SprutHubClient {
       );
     }
     if (container.get === null) return null;
-    validateCatalogMessage(container.get);
-    return container.get;
+    return normalizeCatalogMessage(container.get);
   }
 
   async createCatalogTemplate({ controller, template }) {
@@ -1931,7 +1929,7 @@ export class SprutHubClient {
     );
     const created = response.result?.catalog?.create;
     try {
-      validateCatalogMessage(created);
+      return normalizeCatalogMessage(created);
     } catch (error) {
       if (error instanceof SprutHubError) {
         error.requestSent = true;
@@ -1939,7 +1937,6 @@ export class SprutHubClient {
       }
       throw error;
     }
-    return created;
   }
 
   async updateCatalogTemplate({ store, controller, file, template }) {
@@ -1949,7 +1946,7 @@ export class SprutHubClient {
     );
     const updated = response.result?.catalog?.update;
     try {
-      validateCatalogMessage(updated);
+      return normalizeCatalogMessage(updated);
     } catch (error) {
       if (error instanceof SprutHubError) {
         error.requestSent = true;
@@ -1957,7 +1954,6 @@ export class SprutHubClient {
       }
       throw error;
     }
-    return updated;
   }
 
   async deleteCatalogTemplate({ store, controller, file }) {
@@ -5667,10 +5663,26 @@ export const CATALOG_STORE_SET = new Set(CATALOG_STORES);
 export const CATALOG_CONTROLLER_PATTERN = /^[a-z0-9_-]{1,64}$/i;
 
 export function isValidCatalogFile(file) {
-  if (typeof file !== "string" || file.length <= 1 || !file.startsWith("/")) {
+  if (
+    typeof file !== "string" ||
+    file.length <= 1 ||
+    !file.startsWith("/") ||
+    file.includes("\\")
+  ) {
     return false;
   }
-  if (file.split("/").includes("..")) return false;
+  const segments = file.slice(1).split("/");
+  if (
+    segments.some(
+      (segment) =>
+        segment.length === 0 ||
+        segment.trim().length === 0 ||
+        segment === "." ||
+        segment === "..",
+    )
+  ) {
+    return false;
+  }
   for (let index = 0; index < file.length; index += 1) {
     const code = file.charCodeAt(index);
     if (code <= 0x1f || code === 0x7f) return false;
@@ -5876,21 +5888,36 @@ function isPositiveDashboardId(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
-function validateCatalogMessage(catalog) {
+function normalizeCatalogMessage(catalog) {
+  if (!isPlainObject(catalog)) {
+    throw new SprutHubError(
+      "incompatible_response",
+      "SprutHub returned an incompatible catalog template message.",
+    );
+  }
+  // In 41851-Catalog.proto, active (bool = false) and store (StoreTemplate =
+  // MAIN = 0) use proto3 implicit presence and are omitted on the wire when
+  // at their default values.
+  const store = catalog.store === undefined ? "MAIN" : catalog.store;
   if (
-    !isPlainObject(catalog) ||
-    typeof catalog.store !== "string" ||
-    !CATALOG_STORE_SET.has(catalog.store) ||
+    typeof store !== "string" ||
+    !CATALOG_STORE_SET.has(store) ||
     typeof catalog.controller !== "string" ||
     !CATALOG_CONTROLLER_PATTERN.test(catalog.controller) ||
     typeof catalog.file !== "string" ||
-    !isValidCatalogFile(catalog.file)
+    !isValidCatalogFile(catalog.file) ||
+    (catalog.active !== undefined && typeof catalog.active !== "boolean")
   ) {
     throw new SprutHubError(
       "incompatible_response",
       "SprutHub returned an incompatible catalog template message.",
     );
   }
+  return {
+    ...catalog,
+    store,
+    active: catalog.active === true,
+  };
 }
 
 export function normalizeCatalogAvailableServices(services) {

@@ -66,10 +66,19 @@ export function isCatalogChangeKind(kind) {
   return CATALOG_OPERATION_SET.has(kind);
 }
 
+function isPendingApplyIntent(change) {
+  return (
+    ["applying", "uncertain"].includes(change?.status) &&
+    nativeIntentDirection(change) === "apply" &&
+    change?.write_intent?.rejection === undefined
+  );
+}
+
 function isPendingRestoreIntent(change) {
   return (
     ["restoring", "uncertain"].includes(change?.status) &&
-    nativeIntentDirection(change) === "restore"
+    nativeIntentDirection(change) === "restore" &&
+    change?.write_intent?.rejection === undefined
   );
 }
 
@@ -81,7 +90,8 @@ export function catalogHubStepsSent(change, direction) {
   return (
     createdBy !== undefined ||
     (["applying", "restoring", "uncertain"].includes(change.status) &&
-      nativeIntentDirection(change) === direction)
+      nativeIntentDirection(change) === direction &&
+      change.write_intent?.rejection === undefined)
   );
 }
 
@@ -212,7 +222,7 @@ function hubTemplateError(entry) {
   if (typeof entry?.error === "string" && entry.error.trim().length > 0) {
     return redactSensitiveText(entry.error.trim());
   }
-  if (entry?.active === false) {
+  if (entry?.active !== true) {
     return "SprutHub marked the catalog template inactive (active=false).";
   }
   return null;
@@ -785,6 +795,8 @@ async function cleanupRejectedCreatedTemplate(ctx, change, created, hubError) {
     return ctx.finishNative(change, "rejected", undefined, {
       hub_template_error: hubError,
       cleanup_confirmed: true,
+      cleanup_failed: undefined,
+      cleanup_error: undefined,
       cleaned_up_file: file,
       creation_owned: false,
       created_store: undefined,
@@ -923,11 +935,14 @@ async function rollbackRejectedUpdatedTemplate(ctx, change, updated, hubError) {
       change.baseline_snapshot.template,
     ) &&
     (change.baseline_snapshot.active !== true ||
-      (afterRollback.active === true && !afterRollback.error))
+      hubTemplateError(afterRollback) === null)
   ) {
     return ctx.finishNative(change, "rejected", undefined, {
       hub_template_error: hubError,
       rollback_confirmed: true,
+      rollback_failed: undefined,
+      rollback_error: undefined,
+      applied_snapshot: undefined,
       observed_sha256: templateFingerprint(afterRollback.template),
       last_verification: freshVerification(
         "hub_template_rejected_and_rolled_back",
@@ -993,7 +1008,9 @@ async function applyCatalogTemplateUpdate(ctx, change) {
     if (!isUncertainWriteError(error)) {
       throw await ctx.finishRefusedWrite(change, "not_applied", error);
     }
-    return reconcileCatalogTemplateUpdate(ctx, change, "apply", true);
+    return reconcileCatalogTemplateUpdate(ctx, change, "apply", true, {
+      allowRollback: true,
+    });
   }
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
@@ -1002,7 +1019,9 @@ async function applyCatalogTemplateUpdate(ctx, change) {
   if (hubError !== null) {
     return rollbackRejectedUpdatedTemplate(ctx, change, updated, hubError);
   }
-  return reconcileCatalogTemplateUpdate(ctx, change, "apply", false);
+  return reconcileCatalogTemplateUpdate(ctx, change, "apply", false, {
+    allowRollback: true,
+  });
 }
 
 async function applyCatalogTemplateDelete(ctx, change) {
@@ -1059,6 +1078,7 @@ async function reconcileCatalogTemplateUpdate(
   change,
   direction,
   uncertainWrite,
+  { allowRollback = false } = {},
 ) {
   let live;
   try {
@@ -1086,7 +1106,17 @@ async function reconcileCatalogTemplateUpdate(
   if (sameCatalogTemplate(live.template, targetTemplate)) {
     const hubError = hubTemplateError(live);
     if (direction === "apply" && hubError !== null) {
-      return rollbackRejectedUpdatedTemplate(ctx, change, live, hubError);
+      if (allowRollback) {
+        return rollbackRejectedUpdatedTemplate(ctx, change, live, hubError);
+      }
+      return ctx.finishNative(change, "applied", undefined, {
+        hub_template_error: hubError,
+        rollback_failed: true,
+        applied_snapshot: catalogSnapshot(live),
+        observed_sha256: templateFingerprint(live.template),
+        ...(uncertainWrite ? { recovered_after_uncertain_write: true } : {}),
+        last_verification: freshVerification("hub_template_rollback_failed"),
+      });
     }
     if (
       direction === "restore" &&
@@ -1123,11 +1153,13 @@ async function reconcileCatalogTemplateUpdate(
       change.rollback_failed === true &&
       change.hub_template_error &&
       (change.baseline_snapshot.active !== true ||
-        (live.active === true && !live.error))
+        hubTemplateError(live) === null)
     ) {
       return ctx.finishNative(change, "rejected", undefined, {
         rollback_confirmed: true,
         rollback_failed: undefined,
+        rollback_error: undefined,
+        applied_snapshot: undefined,
         observed_sha256: templateFingerprint(live.template),
         last_verification: freshVerification(
           "hub_template_rejected_and_rolled_back",
@@ -1230,6 +1262,7 @@ async function getCatalogTemplateCreate(ctx, change) {
       return ctx.finishNative(change, "rejected", undefined, {
         cleanup_confirmed: true,
         cleanup_failed: undefined,
+        cleanup_error: undefined,
         creation_owned: false,
         created_store: undefined,
         created_file: undefined,
@@ -1278,9 +1311,23 @@ async function getCatalogTemplateCreate(ctx, change) {
       verification: freshVerification(change.conflict_reason ?? "conflict"),
     });
   }
-  if (change.status === "applying") {
+  if (change.status === "applying" || change.status === "uncertain") {
+    const hubError = hubTemplateError(live);
+    if (hubError !== null) {
+      return ctx.finishNative(change, "applied", undefined, {
+        hub_template_error: hubError,
+        cleanup_failed: true,
+        applied_snapshot: catalogSnapshot(live),
+        observed_sha256: templateFingerprint(live.template),
+        last_verification: freshVerification("hub_template_cleanup_failed"),
+      });
+    }
     return ctx.finishNative(change, "applied", undefined, {
+      hub_template_error: undefined,
+      cleanup_failed: undefined,
+      cleanup_error: undefined,
       applied_snapshot: catalogSnapshot(live),
+      observed_sha256: templateFingerprint(live.template),
       last_verification: freshVerification("created_catalog_template_observed"),
     });
   }
@@ -1306,7 +1353,10 @@ async function getCatalogTemplateUpdate(ctx, change) {
     return ctx.publicStored(change);
   }
   if (["applying", "restoring", "uncertain"].includes(change.status)) {
-    const direction = nativeIntentDirection(change) ?? "apply";
+    const direction =
+      change.write_intent?.rejection === undefined
+        ? (nativeIntentDirection(change) ?? "apply")
+        : "apply";
     return reconcileCatalogTemplateUpdate(
       ctx,
       change,
@@ -1358,10 +1408,7 @@ async function getCatalogTemplateDelete(ctx, change) {
   ) {
     return ctx.publicStored(change);
   }
-  if (
-    ["applying", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "apply"
-  ) {
+  if (isPendingApplyIntent(change)) {
     return reconcileCatalogTemplateDeleteApply(
       ctx,
       change,
@@ -1383,11 +1430,34 @@ async function getCatalogTemplateDelete(ctx, change) {
     }
     if (isPendingRestoreIntent(change)) {
       if (
+        live === null &&
+        change.cleanup_failed === true &&
+        change.hub_template_error
+      ) {
+        return ctx.finishNative(change, "conflict", undefined, {
+          conflict_reason: "catalog_restore_rejected_by_hub",
+          cleanup_confirmed: true,
+          cleanup_failed: undefined,
+          cleanup_error: undefined,
+          cleaned_up_file: change.restored_file,
+          restored_file: undefined,
+          restored_catalog_ref: undefined,
+          last_verification: freshVerification(
+            "catalog_restore_rejected_by_hub",
+          ),
+        });
+      }
+      if (
         live !== null &&
         sameCatalogTemplate(live.template, change.baseline_snapshot.template) &&
-        hubTemplateError(live) === null
+        (change.baseline_snapshot.active !== true ||
+          hubTemplateError(live) === null)
       ) {
         return ctx.finishNative(change, "restored", undefined, {
+          hub_template_error: undefined,
+          cleanup_failed: undefined,
+          cleanup_error: undefined,
+          conflict_reason: undefined,
           restored_snapshot: catalogSnapshot(live),
           recovered_after_uncertain_write:
             change.write_intent?.acknowledged === false ? true : undefined,
@@ -1397,7 +1467,11 @@ async function getCatalogTemplateDelete(ctx, change) {
         });
       }
       return ctx.finishNative(change, "uncertain", undefined, {
-        last_verification: freshVerification("recreated_template_unverified"),
+        last_verification: freshVerification(
+          change.cleanup_failed === true
+            ? "hub_template_cleanup_failed"
+            : "recreated_template_unverified",
+        ),
       });
     }
     return publicCatalogChange(change, {
@@ -1524,6 +1598,7 @@ async function restoreCatalogTemplateCreate(ctx, change) {
       return ctx.finishNative(change, "rejected", undefined, {
         cleanup_confirmed: true,
         cleanup_failed: undefined,
+        cleanup_error: undefined,
         creation_owned: false,
         created_store: undefined,
         created_file: undefined,
@@ -1558,15 +1633,34 @@ async function restoreCatalogTemplateCreate(ctx, change) {
       ),
     });
   }
-  const expectedTemplate =
-    change.applied_snapshot?.template ?? change.requested_template;
-  if (!sameCatalogTemplate(live.template, expectedTemplate)) {
+  const pendingRestore = isPendingRestoreIntent(change);
+  if (!pendingRestore) {
     const later = await findLaterAppliedCatalogChange(
       ctx,
       change,
       change.created_catalog_ref,
       [CATALOG_TEMPLATE_UPDATE, CATALOG_TEMPLATE_DELETE],
     );
+    if (later) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        observed_sha256: templateFingerprint(live.template),
+        conflict_reason: "later_owned_change",
+        restore_first_change_id: later.id,
+        last_verification: freshVerification("later_owned_change"),
+      });
+    }
+  }
+  const expectedTemplate =
+    change.applied_snapshot?.template ?? change.requested_template;
+  if (!sameCatalogTemplate(live.template, expectedTemplate)) {
+    const later = pendingRestore
+      ? await findLaterAppliedCatalogChange(
+          ctx,
+          change,
+          change.created_catalog_ref,
+          [CATALOG_TEMPLATE_UPDATE, CATALOG_TEMPLATE_DELETE],
+        )
+      : null;
     return ctx.finishNative(change, "conflict", undefined, {
       observed_sha256: templateFingerprint(live.template),
       ...(later
@@ -1580,13 +1674,20 @@ async function restoreCatalogTemplateCreate(ctx, change) {
       ),
     });
   }
-  const priorStatus = change.status === "applied" ? "applied" : change.status;
   await ctx.persistNativeIntent(change, "restoring", "restore");
   try {
     await ctx.client.deleteCatalogTemplate(target);
   } catch (error) {
     if (!isUncertainWriteError(error)) {
-      throw await ctx.finishRefusedWrite(change, priorStatus, error);
+      throw await ctx.finishRefusedWrite(
+        change,
+        "applied",
+        error,
+        undefined,
+        change.applied_snapshot
+          ? {}
+          : { applied_snapshot: catalogSnapshot(live) },
+      );
     }
     const after = await ctx.client
       .getCatalogTemplate(target)
@@ -1620,10 +1721,7 @@ async function restoreCatalogTemplateCreate(ctx, change) {
 }
 
 async function restoreCatalogTemplateUpdate(ctx, change) {
-  if (
-    ["applying", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "apply"
-  ) {
+  if (isPendingApplyIntent(change)) {
     return reconcileCatalogTemplateUpdate(ctx, change, "apply", true);
   }
   if (!change.applied_snapshot) {
@@ -1653,7 +1751,40 @@ async function restoreCatalogTemplateUpdate(ctx, change) {
     });
   }
   const pendingRestore = isPendingRestoreIntent(change);
+  if (!pendingRestore) {
+    const later = await findLaterAppliedCatalogChange(
+      ctx,
+      change,
+      change.target_ref,
+      [CATALOG_TEMPLATE_UPDATE, CATALOG_TEMPLATE_DELETE],
+    );
+    if (later) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        observed_sha256: templateFingerprint(live.template),
+        conflict_reason: "later_owned_change",
+        restore_first_change_id: later.id,
+        last_verification: freshVerification("later_owned_change"),
+      });
+    }
+  }
   if (sameCatalogTemplate(live.template, change.baseline_snapshot.template)) {
+    const baselineHubError =
+      change.baseline_snapshot.active === true ? hubTemplateError(live) : null;
+    if (baselineHubError !== null) {
+      return ctx.finishNative(
+        change,
+        pendingRestore ? "uncertain" : "conflict",
+        undefined,
+        {
+          hub_template_error: baselineHubError,
+          ...(!pendingRestore
+            ? { conflict_reason: "catalog_template_changed_since" }
+            : {}),
+          observed_sha256: templateFingerprint(live.template),
+          last_verification: freshVerification("restore_template_inactive"),
+        },
+      );
+    }
     return ctx.finishNative(change, "restored", undefined, {
       observed_sha256: templateFingerprint(live.template),
       ...(pendingRestore ? { recovered_after_uncertain_write: true } : {}),
@@ -1663,12 +1794,12 @@ async function restoreCatalogTemplateUpdate(ctx, change) {
     });
   }
   if (!sameCatalogTemplate(live.template, change.applied_snapshot.template)) {
-    const later = await findLaterAppliedCatalogChange(
-      ctx,
-      change,
-      change.target_ref,
-      [CATALOG_TEMPLATE_UPDATE, CATALOG_TEMPLATE_DELETE],
-    );
+    const later = pendingRestore
+      ? await findLaterAppliedCatalogChange(ctx, change, change.target_ref, [
+          CATALOG_TEMPLATE_UPDATE,
+          CATALOG_TEMPLATE_DELETE,
+        ])
+      : null;
     return ctx.finishNative(change, "conflict", undefined, {
       observed_sha256: templateFingerprint(live.template),
       ...(later
@@ -1711,10 +1842,10 @@ async function restoreCatalogTemplateUpdate(ctx, change) {
 }
 
 async function restoreCatalogTemplateDelete(ctx, change) {
-  if (
-    ["applying", "uncertain"].includes(change.status) &&
-    nativeIntentDirection(change) === "apply"
-  ) {
+  if (change.status === "conflict") {
+    return ctx.publicStored(change);
+  }
+  if (isPendingApplyIntent(change)) {
     return reconcileCatalogTemplateDeleteApply(ctx, change, true);
   }
   if (isPendingRestoreIntent(change)) {
@@ -1764,38 +1895,86 @@ async function restoreCatalogTemplateDelete(ctx, change) {
   change.native_acknowledged = true;
   change.write_intent.acknowledged = true;
 
-  const hubError = hubTemplateError(created);
+  const hubError =
+    change.baseline_snapshot.active === true ? hubTemplateError(created) : null;
   if (hubError !== null) {
     // Clean up broken recreated file if possible so we don't leave a ghost file.
+    const brokenFile =
+      typeof created.file === "string" && created.file.length > 0
+        ? created.file
+        : undefined;
+    const brokenRef = brokenFile
+      ? catalogRef(
+          ctx.hubSerial,
+          "INTERNAL",
+          change.target.controller,
+          brokenFile,
+        )
+      : undefined;
     let cleaned = false;
-    if (typeof created.file === "string" && created.file.length > 0) {
+    let cleanupError = null;
+    if (brokenFile) {
       try {
         await ctx.client.deleteCatalogTemplate({
           store: "INTERNAL",
           controller: change.target.controller,
-          file: created.file,
+          file: brokenFile,
         });
+      } catch (error) {
+        cleanupError =
+          error instanceof SprutHubError
+            ? { code: error.code, message: redactSensitiveText(error.message) }
+            : { code: "cleanup_failed", message: "Cleanup delete failed." };
+      }
+      try {
         const check = await ctx.client.getCatalogTemplate({
           store: "INTERNAL",
           controller: change.target.controller,
-          file: created.file,
+          file: brokenFile,
         });
         cleaned = check === null;
-      } catch {
+      } catch (readError) {
         cleaned = false;
+        if (!cleanupError) {
+          cleanupError =
+            readError instanceof SprutHubError
+              ? {
+                  code: readError.code,
+                  message: redactSensitiveText(readError.message),
+                }
+              : {
+                  code: "cleanup_readback_failed",
+                  message: "Cleanup readback failed.",
+                };
+        }
       }
     }
-    return ctx.finishNative(
-      change,
-      cleaned ? "conflict" : "uncertain",
-      undefined,
-      {
+    if (cleaned) {
+      return ctx.finishNative(change, "conflict", undefined, {
         hub_template_error: hubError,
         conflict_reason: "catalog_restore_rejected_by_hub",
-        ...(cleaned ? { cleanup_confirmed: true } : {}),
+        cleanup_confirmed: true,
+        cleanup_failed: undefined,
+        cleanup_error: undefined,
+        cleaned_up_file: brokenFile,
+        restored_file: undefined,
+        restored_catalog_ref: undefined,
         last_verification: freshVerification("catalog_restore_rejected_by_hub"),
-      },
-    );
+      });
+    }
+    return ctx.finishNative(change, "uncertain", undefined, {
+      hub_template_error: hubError,
+      conflict_reason: "catalog_restore_rejected_by_hub",
+      cleanup_failed: true,
+      ...(cleanupError ? { cleanup_error: cleanupError } : {}),
+      ...(brokenFile
+        ? {
+            restored_file: brokenFile,
+            restored_catalog_ref: brokenRef,
+          }
+        : {}),
+      last_verification: freshVerification("hub_template_cleanup_failed"),
+    });
   }
 
   const restoredRef = catalogRef(
@@ -1821,7 +2000,8 @@ async function restoreCatalogTemplateDelete(ctx, change) {
       ),
     });
   }
-  const liveError = hubTemplateError(live);
+  const liveError =
+    change.baseline_snapshot.active === true ? hubTemplateError(live) : null;
   if (liveError !== null) {
     return ctx.finishNative(change, "uncertain", undefined, {
       hub_template_error: liveError,
@@ -1898,7 +2078,10 @@ export function publicCatalogChange(change, options = {}) {
     change.status !== "rejected"
       ? {
           next: {
-            tool: "restore_native_change",
+            tool:
+              change.kind === CATALOG_TEMPLATE_DELETE
+                ? "get_native_change"
+                : "restore_native_change",
             arguments: { change_ref: `spruthub-change://native/${change.id}` },
           },
         }
