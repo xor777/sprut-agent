@@ -276,15 +276,31 @@ test("a name too long, a type not offered or a missing room is refused before an
     reason: "Просьба владельца",
   });
   assert.equal(tooLong.error.code, "name_too_long");
-  const thermostat = await refused(client, "prepare_native_change", {
-    operation: "virtual_device",
-    target_ref: homeRef,
-    room_ref: roomRef(LIVING_ROOM),
-    name: "Термостат",
-    value: "Thermostat",
-    reason: "Просьба владельца",
-  });
-  assert.equal(thermostat.error.code, "unsupported_virtual_device_type");
+  for (const refusedType of [
+    "FilterMaintenance",
+    "AccessoryInformation",
+    "CameraRTPStreamManagement",
+    "AudioStreamManagement",
+    "DataStreamTransportManagement",
+    "Microphone",
+    "Speaker",
+    "NotARealService",
+  ]) {
+    const refusedService = await refused(client, "prepare_native_change", {
+      operation: "virtual_device",
+      target_ref: homeRef,
+      room_ref: roomRef(LIVING_ROOM),
+      name: "Системный",
+      value: refusedType,
+      reason: "Просьба владельца",
+    });
+    assert.equal(
+      refusedService.error.code,
+      "unsupported_virtual_device_type",
+      refusedType,
+    );
+    assert.ok(Array.isArray(refusedService.supported_types), refusedType);
+  }
   const noRoom = await refused(client, "prepare_native_change", {
     operation: "virtual_device",
     target_ref: homeRef,
@@ -844,4 +860,142 @@ test("a virtual device nothing refers to is deleted without asking, and a physic
   });
   assert.equal(lamp.error.code, "not_a_virtual_device");
   assert.deepEqual(writes(hub, "accessory.delete"), []);
+});
+
+test("virtual_device accepts any non-system service.types entry and optional characteristic_types, preserving them on delete restore", async (t) => {
+  const { hub, client, before } = await setup(t);
+
+  // 1. Virtual Lightbulb with all 4 optional controls.
+  const preparedLight = await call(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Виртуальная лампа",
+    value: "Lightbulb",
+    characteristic_types: [
+      "Brightness",
+      "Hue",
+      "Saturation",
+      "ColorTemperature",
+    ],
+    reason: "Создать полную виртуальную RGBW-лампу",
+  });
+  assert.equal(preparedLight.status, "prepared");
+  const appliedLight = await call(client, "apply_native_change", {
+    change_ref: preparedLight.change_ref,
+  });
+  assert.equal(appliedLight.status, "applied");
+  assert.deepEqual(
+    writes(hub, "accessory.create").at(-1).params.accessory.create.services[0],
+    {
+      type: "Lightbulb",
+      name: "Виртуальная лампа",
+      optional: ["Brightness", "Hue", "Saturation", "ColorTemperature"],
+    },
+  );
+  const createdLight = hub.state.accessories.find(
+    ({ name }) => name === "Виртуальная лампа",
+  );
+  assert.deepEqual(
+    ownServices(createdLight)[0]
+      .characteristics.map(({ control }) => control.type)
+      .filter((type) => type !== "Name"),
+    ["On", "Brightness", "Hue", "Saturation", "ColorTemperature"],
+  );
+
+  // 2. Delete and restore the virtual Lightbulb -> recreated device keeps all 4 optional characteristics.
+  const delPrepared = await call(client, "prepare_native_change", {
+    operation: "virtual_device_delete",
+    target_ref: accessoryRef(createdLight.id),
+    reason: "Удалить виртуальную лампу",
+  });
+  assert.equal(delPrepared.status, "prepared");
+  const delApplied = await call(client, "apply_native_change", {
+    change_ref: delPrepared.change_ref,
+  });
+  assert.equal(delApplied.status, "applied");
+  const delRestored = await call(client, "restore_native_change", {
+    change_ref: delPrepared.change_ref,
+  });
+  assert.equal(delRestored.status, "restored");
+  const recreatedLight = hub.state.accessories.find(
+    ({ name }) => name === "Виртуальная лампа",
+  );
+  assert.ok(recreatedLight);
+  assert.notEqual(recreatedLight.id, createdLight.id);
+  assert.deepEqual(
+    ownServices(recreatedLight)[0]
+      .characteristics.map(({ control }) => control.type)
+      .filter((type) => type !== "Name"),
+    ["On", "Brightness", "Hue", "Saturation", "ColorTemperature"],
+  );
+
+  // 3. Previously hardcoded-out service types (Thermostat with optional CurrentRelativeHumidity, WindowCovering, C_WattMeter) work.
+  const preparedThermo = await call(client, "prepare_native_change", {
+    operation: "virtual_device",
+    target_ref: homeRef,
+    room_ref: roomRef(LIVING_ROOM),
+    name: "Климат зала",
+    value: "Thermostat",
+    characteristic_types: ["CurrentRelativeHumidity"],
+    reason: "Создать виртуальный термостат с влажностью",
+  });
+  const appliedThermo = await call(client, "apply_native_change", {
+    change_ref: preparedThermo.change_ref,
+  });
+  assert.equal(appliedThermo.status, "applied");
+  const thermo = hub.state.accessories.find(
+    ({ name }) => name === "Климат зала",
+  );
+  assert.ok(
+    ownServices(thermo)[0].characteristics.some(
+      ({ control }) => control.type === "CurrentRelativeHumidity",
+    ),
+  );
+  const appliedCurtain = await createDevice(client, {
+    name: "Виртуальные шторы",
+    type: "WindowCovering",
+  });
+  assert.equal(appliedCurtain.status, "applied");
+  const appliedMeter = await createDevice(client, {
+    name: "Виртуальный счётчик",
+    type: "C_WattMeter",
+  });
+  assert.equal(appliedMeter.status, "applied");
+
+  // 4. Invalid characteristic_types (Name, already-required, unknown, duplicate) are refused with available_optional and 0 writes.
+  const writesBeforeInvalid = writes(hub, "accessory.create").length;
+  for (const badTypes of [
+    ["Name"],
+    ["On"],
+    ["NotACharacteristic"],
+    ["Brightness", "Brightness"],
+  ]) {
+    const err = await refused(client, "prepare_native_change", {
+      operation: "virtual_device",
+      target_ref: homeRef,
+      room_ref: roomRef(LIVING_ROOM),
+      name: "Плохие опции",
+      value: "Lightbulb",
+      characteristic_types: badTypes,
+      reason: "Проверка валидации characteristic_types",
+    });
+    assert.equal(
+      err.error.code,
+      "unsupported_virtual_device_characteristics",
+      JSON.stringify(badTypes),
+    );
+    assert.deepEqual(err.available_optional, [
+      "Brightness",
+      "Hue",
+      "Saturation",
+      "ColorTemperature",
+    ]);
+    assert.ok(
+      err.contract,
+      "invalid virtual_device characteristic_types should include inline compact contract",
+    );
+  }
+  assert.equal(writes(hub, "accessory.create").length, writesBeforeInvalid);
+  assert.ok(created(hub, before).length >= 3);
 });

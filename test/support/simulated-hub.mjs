@@ -988,6 +988,15 @@ const CHARACTERISTIC_TYPES = {
       ["DISARM", 3, "Снять"],
     ]),
   },
+  Mute: {
+    name: "Без звука",
+    format: "bool",
+    write: true,
+  },
+  StreamingStatus: {
+    name: "Статус потока",
+    format: "string",
+  },
 };
 
 const SYSTEM_SERVICE_TYPES = new Set([
@@ -1093,7 +1102,7 @@ const SERVICE_TYPES = [
       "CurrentTemperature",
       "TargetTemperature",
     ],
-    ["Name"],
+    ["CurrentRelativeHumidity", "Name"],
   ],
   [
     "AirPurifier",
@@ -1135,6 +1144,26 @@ const SERVICE_TYPES = [
     "SecuritySystem",
     "Охранная система",
     ["SecuritySystemCurrentState", "SecuritySystemTargetState"],
+    ["Name"],
+  ],
+  ["Microphone", "Микрофон", ["Mute"], ["Name"]],
+  ["Speaker", "Динамик", ["Mute"], ["Name"]],
+  [
+    "CameraRTPStreamManagement",
+    "Управление RTP потоком камеры",
+    ["StreamingStatus"],
+    ["Name"],
+  ],
+  [
+    "AudioStreamManagement",
+    "Управление аудио потоком",
+    ["StreamingStatus"],
+    ["Name"],
+  ],
+  [
+    "DataStreamTransportManagement",
+    "Управление потоком данных",
+    ["StreamingStatus"],
     ["Name"],
   ],
 ].map(([type, name, required, optional]) => ({

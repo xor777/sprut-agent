@@ -19322,14 +19322,20 @@ test("static room discovery does not relax target-dependent reads or preparation
     assert.equal(refused.isError, true);
   }
 
-  const missingEntityTarget = await client.callTool({
+  const generalCharacteristic = await client.callTool({
     name: "get_native_change_contract",
     arguments: { operation: "characteristic_value" },
   });
-  assert.equal(missingEntityTarget.isError, true);
   assert.equal(
-    missingEntityTarget.structuredContent.error.code,
-    "target_required",
+    generalCharacteristic.isError,
+    undefined,
+    generalCharacteristic.content[0]?.text,
+  );
+  assert.equal(generalCharacteristic.structuredContent.status, "ok");
+  assert.equal(
+    generalCharacteristic.structuredContent.contract.type,
+    undefined,
+    "omitting target_ref returns the general characteristic_value contract without reading a specific entity",
   );
   const entityContract = await client.callTool({
     name: "get_native_change_contract",

@@ -23,7 +23,12 @@ const memberServiceRefs = [
 ];
 
 function lightCharacteristic(aId, sId, cId, type, value, extra = {}) {
-  const valueKey = typeof value === "boolean" ? "boolValue" : "intValue";
+  const valueKey =
+    typeof value === "boolean"
+      ? "boolValue"
+      : ["Hue", "Saturation"].includes(type)
+        ? "doubleValue"
+        : "intValue";
   return {
     aId,
     sId,
@@ -39,7 +44,13 @@ function lightCharacteristic(aId, sId, cId, type, value, extra = {}) {
   };
 }
 
-function memberAccessory({ id, sId, name, temperature = false }) {
+function memberAccessory({
+  id,
+  sId,
+  name,
+  temperature = false,
+  color = false,
+}) {
   return {
     id,
     roomId: 1,
@@ -62,8 +73,28 @@ function memberAccessory({ id, sId, name, temperature = false }) {
             id === 34 ? 40 : 70,
             { minValue: 0, maxValue: 100, minStep: 1 },
           ),
+          ...(color
+            ? [
+                lightCharacteristic(id, sId, 23, "Hue", 120, {
+                  minValue: 0,
+                  maxValue: 360,
+                  minStep: 1,
+                }),
+                lightCharacteristic(id, sId, 24, "Saturation", 80, {
+                  minValue: 0,
+                  maxValue: 100,
+                  minStep: 1,
+                }),
+              ]
+            : []),
           ...(temperature
-            ? [lightCharacteristic(id, sId, 17, "ColorTemperature", 300)]
+            ? [
+                lightCharacteristic(id, sId, 17, "ColorTemperature", 300, {
+                  minValue: 140,
+                  maxValue: 500,
+                  minStep: 1,
+                }),
+              ]
             : []),
           lightCharacteristic(
             id,
@@ -95,6 +126,8 @@ async function startHub() {
         required: [{ type: "On" }],
         optional: [
           { type: "Brightness" },
+          { type: "Hue" },
+          { type: "Saturation" },
           { type: "ColorTemperature" },
           { type: "StatusActive" },
         ],
@@ -117,8 +150,10 @@ async function startHub() {
       preservePhysicalOutOnIncomingRemove: false,
       preserveEmptyPhysicalOutOnIncomingRemove: false,
       dropForeignPhysicalConsumersOnIncomingRemove: false,
+      failLinkAddOnAttempt: undefined,
       failLinkRemoveOnAttempt: undefined,
     },
+    linkAddAttempts: 0,
     linkRemoveAttempts: 0,
     linkListsUntilCloseAfterRemove: undefined,
   };
@@ -248,6 +283,19 @@ async function startHub() {
           },
         };
       } else if (params.link?.addVirtual) {
+        state.linkAddAttempts += 1;
+        if (state.linkAddAttempts === state.behavior.failLinkAddOnAttempt) {
+          socket.send(
+            JSON.stringify({
+              id: request.id,
+              error: {
+                code: -32603,
+                message: "Injected link.addVirtual failure",
+              },
+            }),
+          );
+          return;
+        }
         const input = params.link.addVirtual;
         const key = linkKey(input);
         const links = state.links.get(key) ?? [];
@@ -545,7 +593,17 @@ test("the virtual light contract is discoverable without guessing a target", asy
   assert.deepEqual(general.structuredContent.contract.characteristics, [
     "On",
     "Brightness",
+    "Hue",
+    "Saturation",
+    "ColorTemperature",
   ]);
+  assert.ok(
+    Buffer.byteLength(
+      JSON.stringify(general.structuredContent.contract),
+      "utf8",
+    ) < 4_096,
+    "virtual_light_group contract must stay compact (< 4096 B)",
+  );
   assert.equal(general.structuredContent.contract.feedback, "LAST_VALUE");
   assert.equal(
     general.structuredContent.contract.limitations.some((limitation) =>
@@ -1777,19 +1835,224 @@ test("restoring one owned group does not block restoring another shared group", 
   );
 });
 
-test("the group rejects a capability that is absent from one member", async (t) => {
+test("the group rejects a capability absent from every member or invalid characteristic_types", async (t) => {
   const { hub, stateDirectory } = await setup(t);
   const client = await startClient(t, hub, stateDirectory);
 
-  const prepared = await prepareGroup(client, {
-    characteristic_types: ["On", "Brightness", "ColorTemperature"],
-  });
-  assert.equal(prepared.isError, true);
-  assert.equal(
-    prepared.structuredContent.error.code,
-    "unsupported_group_characteristics",
-  );
+  for (const invalidTypes of [
+    ["On", "Brightness", "Hue"],
+    ["Brightness"],
+    ["On", "Brightness", "Brightness"],
+    ["On", "StatusActive"],
+  ]) {
+    const prepared = await prepareGroup(client, {
+      characteristic_types: invalidTypes,
+    });
+    assert.equal(prepared.isError, true, JSON.stringify(invalidTypes));
+    assert.equal(
+      prepared.structuredContent.error.code,
+      "unsupported_group_characteristics",
+      JSON.stringify(invalidTypes),
+    );
+  }
   assert.equal(hub.requests.some(isGroupWrite), false);
+});
+
+test("omitted characteristic_types auto-infers all 5 Lightbulb controls and selectively links mixed RGBW + CW/WW lamps with full undo", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.accessories = [
+    memberAccessory({
+      id: 34,
+      sId: 13,
+      name: "RGBW-лента",
+      color: true,
+      temperature: true,
+    }),
+    memberAccessory({
+      id: 35,
+      sId: 14,
+      name: "Спот CW/WW",
+      temperature: true,
+    }),
+    memberAccessory({ id: 36, sId: 15, name: "Чужая" }),
+  ];
+  const client = await startClient(t, hub, stateDirectory);
+
+  // Omit characteristic_types -> auto-infers all 5 controls in canonical order.
+  const prepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "virtual_light_group",
+      target_ref: homeRef,
+      room_ref: roomRef,
+      name: "Смешанный свет",
+      member_service_refs: memberServiceRefs,
+      reason: "Объединить RGBW и CW/WW лампы в одну группу",
+    },
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.equal(prepared.structuredContent.status, "prepared");
+  assert.deepEqual(prepared.structuredContent.characteristic_types, [
+    "On",
+    "Brightness",
+    "Hue",
+    "Saturation",
+    "ColorTemperature",
+  ]);
+  const memberA = prepared.structuredContent.members.find(
+    ({ service_ref }) => service_ref === memberServiceRefs[0],
+  );
+  const memberB = prepared.structuredContent.members.find(
+    ({ service_ref }) => service_ref === memberServiceRefs[1],
+  );
+  assert.equal(memberA.lacks, undefined);
+  assert.deepEqual(memberB.lacks, ["Hue", "Saturation"]);
+
+  const applied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(applied.isError, undefined, applied.content[0]?.text);
+  assert.equal(applied.structuredContent.status, "applied");
+  assert.deepEqual(
+    applied.structuredContent.characteristics.map(({ type }) => type),
+    ["On", "Brightness", "Hue", "Saturation", "ColorTemperature"],
+  );
+  assert.deepEqual(
+    hub.requests.find(({ accessory }) => accessory?.create).accessory.create
+      .services[0].optional,
+    ["Brightness", "Hue", "Saturation", "ColorTemperature"],
+  );
+
+  // 5 links for RGBW member 34 + 3 links (On, Brightness, ColorTemperature) for CW/WW member 35 = 8 links.
+  const addedLinks = hub.requests
+    .filter(({ link }) => link?.addVirtual)
+    .map(({ link }) => link.addVirtual);
+  assert.equal(addedLinks.length, 8);
+  assert.deepEqual(
+    addedLinks.filter(({ tAId }) => tAId === 34).map(({ cId }) => cId),
+    [1, 2, 3, 4, 5],
+  );
+  assert.deepEqual(
+    addedLinks.filter(({ tAId }) => tAId === 35).map(({ cId }) => cId),
+    [1, 2, 5],
+  );
+
+  // Sending a Hue command to the virtual group checks readback only on RGBW member 34 (not CW/WW member 35).
+  const hueRef = applied.structuredContent.characteristics.find(
+    ({ type }) => type === "Hue",
+  ).ref;
+  const huePrepared = await client.callTool({
+    name: "prepare_native_change",
+    arguments: {
+      operation: "characteristic_value",
+      target_ref: hueRef,
+      value: 240,
+      reason: "Переключить цвет группы на синий",
+    },
+  });
+  assert.equal(huePrepared.isError, undefined, huePrepared.content[0]?.text);
+  const hueApplied = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: huePrepared.structuredContent.change_ref },
+  });
+  assert.equal(hueApplied.isError, undefined, hueApplied.content[0]?.text);
+  assert.equal(hueApplied.structuredContent.status, "applied");
+  assert.equal(hueApplied.structuredContent.group_delivery_confirmed, true);
+  assert.deepEqual(
+    hueApplied.structuredContent.group_member_observations.map(
+      ({ member_ref, value }) => ({ member_ref, value: value.value }),
+    ),
+    [{ member_ref: memberServiceRefs[0], value: 240 }],
+  );
+
+  const inspected = await client.callTool({
+    name: "get_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(inspected.structuredContent.status, "applied");
+  assert.equal(inspected.structuredContent.configuration_matches, true);
+
+  // Full undo removes all 8 links, disables hasLinks on all 5 controls, and deletes the virtual accessory.
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 8);
+  assert.deepEqual(
+    [...hub.state.links.entries()].filter(([, links]) => links.length > 0),
+    [],
+  );
+  assert.deepEqual(
+    hub.state.accessories.map(({ id }) => id),
+    [34, 35, 36],
+  );
+});
+
+test("explicit characteristic_types normalizes order and partial link failure recovers cleanly via restore_native_change", async (t) => {
+  const { hub, stateDirectory } = await setup(t);
+  hub.state.accessories = [
+    memberAccessory({
+      id: 34,
+      sId: 13,
+      name: "RGBW-лента",
+      color: true,
+      temperature: true,
+    }),
+    memberAccessory({
+      id: 35,
+      sId: 14,
+      name: "Спот CW/WW",
+      temperature: true,
+    }),
+    memberAccessory({ id: 36, sId: 15, name: "Чужая" }),
+  ];
+  const client = await startClient(t, hub, stateDirectory);
+
+  const prepared = await prepareGroup(client, {
+    name: "Частичный тест",
+    characteristic_types: ["ColorTemperature", "Hue", "On"],
+  });
+  assert.equal(prepared.isError, undefined, prepared.content[0]?.text);
+  assert.deepEqual(prepared.structuredContent.characteristic_types, [
+    "On",
+    "Hue",
+    "ColorTemperature",
+  ]);
+  assert.deepEqual(
+    prepared.structuredContent.members.find(
+      ({ service_ref }) => service_ref === memberServiceRefs[1],
+    ).lacks,
+    ["Hue"],
+  );
+
+  // Fail on the 3rd link (Hue on member 34) after On links for 34 and 35 succeeded.
+  hub.state.behavior.failLinkAddOnAttempt = 3;
+  const failed = await client.callTool({
+    name: "apply_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.structuredContent.hub_effect, "partial");
+  assert.equal(failed.structuredContent.next?.tool, "restore_native_change");
+
+  const restored = await client.callTool({
+    name: "restore_native_change",
+    arguments: { change_ref: prepared.structuredContent.change_ref },
+  });
+  assert.equal(restored.isError, undefined, restored.content[0]?.text);
+  assert.equal(restored.structuredContent.status, "restored");
+  assert.equal(hub.requests.filter(({ link }) => link?.remove).length, 2);
+  assert.deepEqual(
+    [...hub.state.links.entries()].filter(([, links]) => links.length > 0),
+    [],
+  );
+  assert.deepEqual(
+    hub.state.accessories.map(({ id }) => id),
+    [34, 35, 36],
+  );
 });
 
 test("a matching pre-existing virtual light is a conflict, not owned or duplicated", async (t) => {
@@ -1851,10 +2114,7 @@ test("apply revalidates member bindings before creating the group", async (t) =>
     arguments: { change_ref: prepared.structuredContent.change_ref },
   });
   assert.equal(applied.isError, true);
-  assert.equal(
-    applied.structuredContent.error.code,
-    "unsupported_group_characteristics",
-  );
+  assert.equal(applied.structuredContent.error.code, "binding_changed");
   assert.equal(hub.requests.some(isGroupWrite), false);
 });
 
