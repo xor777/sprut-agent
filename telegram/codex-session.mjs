@@ -142,7 +142,7 @@ async function loadInlineSprutHubGuidance(repoRoot) {
     if (error?.code === "ENOENT") return "";
     throw error;
   }
-  const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/, "").trim();
+  const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n+|$)/, "").trim();
   return body.replaceAll("(references/", "(spruthub-references/");
 }
 

@@ -28,8 +28,6 @@ const DEFAULT_PROGRESS_TEXT = "Работаю над запросом…";
 const MAX_PROGRESS_STATUS_CHARS = 400;
 const PERMANENT_PROGRESS_EDIT_ERROR_RE =
   /message to edit not found|message can't be edited|message_id_invalid/i;
-const MISSING_PROGRESS_MESSAGE_ERROR_RE =
-  /message to edit not found|message_id_invalid/i;
 const MAX_PROGRESS_BACKOFF_MS = 30_000;
 
 function formatProgressStatusText(
@@ -492,9 +490,6 @@ export class TelegramBotRunner {
               PERMANENT_PROGRESS_EDIT_ERROR_RE.test(error.message)
             ) {
               editsDisabled = true;
-              if (MISSING_PROGRESS_MESSAGE_ERROR_RE.test(error.message)) {
-                statusMessageId = null;
-              }
               return;
             }
             const retryAfterMs =

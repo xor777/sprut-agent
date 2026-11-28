@@ -62,8 +62,8 @@ npm run telegram:bot    # запускает бота в режиме long polli
 ```
 
 Состояние бота хранится в `TELEGRAM_STATE_DIR` (по умолчанию подкаталог `telegram/` в каталоге состояния `sprut-agent`):
-- `codex-home/` (`0700`) — изолированный `CODEX_HOME` с симлинками на `auth.json` и `skills/spruthub-master`, `apps = false`, `read-only` песочница для хоста и гранулярное одобрение только `mcp_tool_call` сервера `sprut-agent`;
-- `workspace/` (`0700`) — пустой рабочий каталог;
+- `codex-home/` (`0700`) — изолированный `CODEX_HOME` с симлинком на `auth.json`, `apps = false`, `read-only` песочница для хоста и гранулярное одобрение только `mcp_tool_call` сервера `sprut-agent` (руководство `skills/spruthub-master/SKILL.md` встраивается напрямую в `developerInstructions`, без регистрации как Codex skill);
+- `workspace/` (`0700`) — изолированный рабочий каталог с симлинком `spruthub-references/` на `skills/spruthub-master/references/`;
 - `sessions.json` и `offset.json` (`0600`) — постоянный `threadId` на чат и последний `update_id`.
 
 В личном чате работают `/start`, `/new` (новый тред), `/status` и приём фото до 5 МБ. Офлайн-тест бота:
