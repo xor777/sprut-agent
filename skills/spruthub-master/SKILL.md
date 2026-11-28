@@ -76,6 +76,9 @@ description: Инженерное руководство к MCP-серверу s
   - `accessory_placement` — принимает оба поля либо только `room_ref` или только
     `name` (технический код модели замени понятным именем; имя и комнату
     владельца без просьбы не меняй).
+  - `room_service_order` — меняет порядок видимых плиток в комнате (`get_entity`
+    комнаты показывает `tile_order`), сохраняя размеры `service_grid` и откатывая
+    точный исходный порядок через `restore_native_change`.
 - **Окна (`window_option`, `window_button`):**
   - `window_option` — видимые типовые опции, `TEXT` с `validValues`
     (`joinRoom`), несекретные настройки Telegram (`BotApiUrl`, `ProxyHost`,

@@ -33,6 +33,10 @@ import {
 } from "./native-values.mjs";
 import { publicAccessoryPlacement, publicRoom } from "./placement-rooms.mjs";
 import {
+  isRoomServiceOrderKind,
+  publicRoomServiceOrderChange,
+} from "./room-service-order.mjs";
+import {
   blockCreateObservedFlags,
   blockCreateSnapshot,
   blockDataUpdateDiff,
@@ -262,6 +266,9 @@ export function publicNativeChange(
   }
   if (isDashboardChangeKind(change.kind)) {
     return publicDashboardChange(change, { verification });
+  }
+  if (isRoomServiceOrderKind(change.kind)) {
+    return publicRoomServiceOrderChange(change, { verification });
   }
   if (isCatalogChangeKind(change.kind)) {
     return publicCatalogChange(change, { verification });

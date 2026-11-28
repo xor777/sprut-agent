@@ -12,6 +12,11 @@ import {
   LIGHT_GROUP_MEMBERS,
 } from "./light-group-members.mjs";
 import { isNativeValueChange } from "./native-values.mjs";
+import {
+  isRoomServiceOrderKind,
+  roomServiceOrderChangeName,
+  roomServiceOrderSummaryValue,
+} from "./room-service-order.mjs";
 import { SprutHubError } from "./spruthub-client.mjs";
 import { WINDOW_BUTTON } from "./window-buttons.mjs";
 
@@ -310,9 +315,11 @@ export function changeName(change) {
     default:
       return isDashboardChangeKind(change.kind)
         ? dashboardChangeName(change)
-        : isCatalogChangeKind(change.kind)
-          ? catalogChangeName(change)
-          : undefined;
+        : isRoomServiceOrderKind(change.kind)
+          ? roomServiceOrderChangeName(change)
+          : isCatalogChangeKind(change.kind)
+            ? catalogChangeName(change)
+            : undefined;
   }
 }
 
@@ -333,6 +340,9 @@ export const SUMMARY_VALUE_KINDS = new Set([
 export function summaryValue(change) {
   if (isDashboardChangeKind(change.kind)) {
     return dashboardSummaryValue(change);
+  }
+  if (isRoomServiceOrderKind(change.kind)) {
+    return roomServiceOrderSummaryValue(change);
   }
   if (
     !(SUMMARY_VALUE_KINDS.has(change.kind) || change.bridge_export) ||

@@ -840,14 +840,26 @@ test("a large room gives its size and hands the device list to find_devices", as
       room_ref: study,
     },
   };
-  assert.deepEqual(large.entity, {
-    kind: "room",
-    ref: study,
-    name: "Кабинет",
-    accessory_count: 10,
-    service_count: 21,
-    next: catalog,
-  });
+  assert.deepEqual(
+    {
+      kind: large.entity.kind,
+      ref: large.entity.ref,
+      name: large.entity.name,
+      accessory_count: large.entity.accessory_count,
+      service_count: large.entity.service_count,
+      next: large.entity.next,
+    },
+    {
+      kind: "room",
+      ref: study,
+      name: "Кабинет",
+      accessory_count: 10,
+      service_count: 21,
+      next: catalog,
+    },
+  );
+  assert.ok(Array.isArray(large.entity.tile_order));
+  assert.equal(large.entity.tile_order.length, 11);
   const listed = await client.callTool({
     name: catalog.tool,
     arguments: catalog.arguments,

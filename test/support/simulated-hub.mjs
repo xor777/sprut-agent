@@ -125,6 +125,10 @@ export const METHOD_EVIDENCE = {
     SCHEMA_ONLY,
     "ServiceUpdateRequest in 18003-Service.proto; the web client sends {aId, sId, name} and {aId, sId, visible} (2026-09-24-web-client-evidence); not seen answered live",
   ],
+  "service.orders": [
+    OBSERVED,
+    "2026-11-28 SprutHub 3.0.0: {orders: [{aId, sId, grid: {order}}]} updates service.grid.order while preserving grid.width and grid.height; order: 0 restores unsorted tiles",
+  ],
   "characteristic.get": [OBSERVED, "2026-09-09-automations"],
   "characteristic.getOptions": [OBSERVED, "2026-09-09-automations"],
   "characteristic.setOptions": [SCHEMA_ONLY],
@@ -2207,6 +2211,63 @@ const HANDLERS = {
     }
     return {};
   },
+  // ServiceOrdersRequest {orders: [{aId, sId, grid: {order}} | {aId, sId, order}]}.
+  "service.orders": (state, input) => {
+    if (!Array.isArray(input?.orders) || input.orders.length === 0) {
+      throw invalidParams("Service orders array is required");
+    }
+    const validated = input.orders.map((entry) => {
+      if (
+        !isRecord(entry) ||
+        !Number.isSafeInteger(entry.aId) ||
+        entry.aId <= 0 ||
+        !Number.isSafeInteger(entry.sId) ||
+        entry.sId <= 0
+      ) {
+        throw invalidParams("Invalid service order entry");
+      }
+      const rawOrder =
+        isRecord(entry.grid) && entry.grid.order !== undefined
+          ? entry.grid.order
+          : entry.order;
+      if (!Number.isSafeInteger(rawOrder) || rawOrder < 0) {
+        throw invalidParams(
+          "Service order requires non-negative integer order",
+        );
+      }
+      const service = requireService(state, entry.aId, entry.sId);
+      return { service, order: rawOrder };
+    });
+    const changed = [];
+    for (const { service, order } of validated) {
+      const width =
+        Number.isSafeInteger(service.grid?.width) && service.grid.width >= 1
+          ? service.grid.width
+          : 1;
+      const height =
+        Number.isSafeInteger(service.grid?.height) && service.grid.height >= 1
+          ? service.grid.height
+          : 1;
+      service.grid = { order, width, height };
+      changed.push({
+        aId: service.aId,
+        sId: service.sId,
+        grid: structuredClone(service.grid),
+      });
+    }
+    if (changed.length > 0) {
+      state.emitAfterReply?.({
+        service: { event: "EVENT_UPDATE", services: changed },
+      });
+    }
+    return {
+      orders: validated.map(({ service, order }) => ({
+        aId: service.aId,
+        sId: service.sId,
+        grid: { order },
+      })),
+    };
+  },
 
   "characteristic.get": (state, input) => {
     const characteristic = findCharacteristic(state, input);
@@ -3719,6 +3780,7 @@ function buildAccessory(state, input) {
       type: service.type,
       // A live accessory.get reports service visible (owner hub, 2026-09-24).
       visible: service.visible !== false,
+      ...(service.system === true ? { system: true } : {}),
       grid: {
         order:
           Number.isSafeInteger(service.grid?.order) && service.grid.order >= 0

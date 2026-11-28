@@ -393,7 +393,7 @@ registerTool(
       operation: z
         .enum(NATIVE_CHANGE_OPERATIONS)
         .describe(
-          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge; safe Telegram/listed TEXT), window_button (allowlisted BUTTON/BUTTON_DANGER by option_key: Telegram Login/Logout, thermostat valve calibration, ZigBee child Repair, Xiaomi child joinButton, ZigBee/Xiaomi child Remove), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (code of a LOGIC, whose info sets name, description and start, or of a GLOBAL). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, service_grid (tile size 1x1..3x3), virtual_light_group (a lamp group: create, or set its lamps), virtual_device (a virtual switch, button or sensor: create), virtual_device_delete. Dashboards: dashboard_create, dashboard_update, dashboard_delete, dashboard_column_create, dashboard_column_update, dashboard_column_delete, dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete, dashboard_widget_move. Catalog: catalog_template_create, catalog_template_update, catalog_template_delete.",
+          "Device: characteristic_value (a value or setpoint), characteristic_option, window_option (a typed setting by option_key; a scenario's Name, Desc, OnStart, Sync; a service's export to a bridge; safe Telegram/listed TEXT), window_button (allowlisted BUTTON/BUTTON_DANGER by option_key: Telegram Login/Logout, thermostat valve calibration, ZigBee child Repair, Xiaomi child joinButton, ZigBee/Xiaomi child Remove), characteristic_notify (SprutHub's notification on any change; C_Online: offline). Logic: logic_assignment, logic_active, logic_option, logic_source_create, logic_source_update (code of a LOGIC, whose info sets name, description and start, or of a GLOBAL). Scenarios: block_create, block_data_update, block_action_pause, scenario_active, scenario_run (once), scenario_delete. Home: accessory_placement (rename or move), room_create, room_name, service_name, service_visible, service_grid (tile size 1x1..3x3), room_service_order (tile order in a room), virtual_light_group (a lamp group: create, or set its lamps), virtual_device (a virtual switch, button or sensor: create), virtual_device_delete. Dashboards: dashboard_create, dashboard_update, dashboard_delete, dashboard_column_create, dashboard_column_update, dashboard_column_delete, dashboard_widget_create, dashboard_widget_update, dashboard_widget_delete, dashboard_widget_move. Catalog: catalog_template_create, catalog_template_update, catalog_template_delete.",
         ),
       target_ref: z
         .string()
@@ -414,7 +414,13 @@ registerTool(
         .describe("For *_option and window_button."),
       name: z.string().min(1).optional(),
       room_ref: z.string().min(1).optional(),
-      member_service_refs: z.array(z.string().min(1)).min(1).optional(),
+      member_service_refs: z
+        .array(z.string().min(1))
+        .min(1)
+        .optional()
+        .describe(
+          "For virtual_light_group (lamp services) or room_service_order (visible tiles to place in order).",
+        ),
       characteristic_types: z.array(z.string().min(1)).min(1).optional(),
       description: z.string().optional(),
       active: z
@@ -480,7 +486,7 @@ registerTool(
         .min(0)
         .optional()
         .describe(
-          "0-based target index in destination column for dashboard_widget_move.",
+          "0-based index: destination column for dashboard_widget_move, or remaining room tiles for room_service_order (default 0).",
         ),
       reason: z.string().min(1).describe("Why the owner asked; saved."),
     },

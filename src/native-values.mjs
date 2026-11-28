@@ -628,6 +628,7 @@ export const OTHER_NATIVE_CHANGE_KINDS = new Set([
   "dashboard_widget_update",
   "dashboard_widget_delete",
   "dashboard_widget_move",
+  "room_service_order",
   "catalog_template_create",
   "catalog_template_update",
   "catalog_template_delete",

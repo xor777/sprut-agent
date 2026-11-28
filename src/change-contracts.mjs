@@ -12,6 +12,8 @@ import {
 } from "./native-option-contract.mjs";
 import { SprutHubError, sanitizeNativeData } from "./spruthub-client.mjs";
 
+export { roomServiceOrderContract } from "./room-service-order.mjs";
+
 // SprutHub 3.0.0 keeps the first 32 characters of a room name, Cyrillic and
 // Latin alike (characters, not bytes); the room.create answer already
 // carries the kept name, and the one emoji tried (🙂, outside the Basic
