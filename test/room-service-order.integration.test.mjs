@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { SprutHubClient } from "../src/spruthub-client.mjs";
 import {
   loadHomeFixture,
   startSimulatedHub,
@@ -950,4 +951,414 @@ test("uncertain/dropped reply recovery and refused write + retry on apply and re
     change_ref: cLoseRestore.change_ref,
   });
   assert.equal(rLose2.status, "restored");
+});
+
+test("review return 1: uncertain restore with later owned changes (S0, S2, cyclic S1) always reports later_owned_change via both get and restore with 0 writes", async (t) => {
+  const orderedLivingRoom = (fixture) => {
+    const byId = new Map(fixture.accessories.map((acc) => [acc.id, acc]));
+    byId.get(16).services[0].grid = { order: 1, width: 2, height: 1 };
+    byId.get(15).services[0].grid = { order: 2, width: 1, height: 1 };
+    byId.get(18).services[0].grid = { order: 3, width: 1, height: 1 };
+    byId.get(17).services[0].grid = { order: 4, width: 1, height: 1 };
+    byId.get(19).services[0].grid = { order: 5, width: 1, height: 1 };
+  };
+
+  // Case A: C1 (S0 -> S1), uncertain restore, then C2 returns room to S0.
+  // Check both restore_native_change(C1) first AND get_native_change(C1) first.
+  for (const checkFirst of ["restore", "get"]) {
+    await t.test(
+      `C2 returning to S0 detected via ${checkFirst}_native_change first`,
+      async (subT) => {
+        const { hub, client } = await setup(subT, orderedLivingRoom);
+        const { applied: c1 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [LED_STRIP_REF],
+          reason: "C1: S0 -> S1",
+        });
+        hub.loseNext("service.orders");
+        const lostRestore = await call(client, "restore_native_change", {
+          change_ref: c1.change_ref,
+        });
+        assert.equal(lostRestore.status, "uncertain");
+
+        const { applied: c2 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [
+            FLOOR_LAMP_REF,
+            CHANDELIER_REF,
+            CURTAINS_REF,
+            LED_STRIP_REF,
+            AC_REF,
+          ],
+          reason: "C2: S1 -> S0",
+        });
+        const writesBefore = hub.writes().length;
+
+        const firstTool =
+          checkFirst === "get" ? "get_native_change" : "restore_native_change";
+        const secondTool =
+          checkFirst === "get" ? "restore_native_change" : "get_native_change";
+        const r1 = await call(client, firstTool, { change_ref: c1.change_ref });
+        assert.equal(r1.status, "conflict");
+        assert.equal(r1.conflict_reason, "later_owned_change");
+        assert.equal(r1.restore_first_change_ref, c2.change_ref);
+        assert.equal(r1.recovered_after_uncertain_write, undefined);
+        assert.equal(hub.writes().length, writesBefore);
+
+        const r2 = await call(client, secondTool, {
+          change_ref: c1.change_ref,
+        });
+        assert.equal(r2.status, "conflict");
+        assert.equal(r2.conflict_reason, "later_owned_change");
+        assert.equal(r2.restore_first_change_ref, c2.change_ref);
+        assert.equal(hub.writes().length, writesBefore);
+      },
+    );
+  }
+
+  // Case B: C1 (S0 -> S1), uncertain restore, then C2 moves to S2 (neither S0 nor S1).
+  for (const checkFirst of ["get", "restore"]) {
+    await t.test(
+      `C2 moving to S2 detected via ${checkFirst}_native_change first`,
+      async (subT) => {
+        const { hub, client } = await setup(subT, orderedLivingRoom);
+        const { applied: c1 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [LED_STRIP_REF],
+          reason: "C1: S0 -> S1",
+        });
+        hub.loseNext("service.orders");
+        assert.equal(
+          (
+            await call(client, "restore_native_change", {
+              change_ref: c1.change_ref,
+            })
+          ).status,
+          "uncertain",
+        );
+
+        const { applied: c2 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [AC_REF],
+          reason: "C2: S1 -> S2",
+        });
+        const writesBefore = hub.writes().length;
+
+        const firstTool =
+          checkFirst === "get" ? "get_native_change" : "restore_native_change";
+        const secondTool =
+          checkFirst === "get" ? "restore_native_change" : "get_native_change";
+        const r1 = await call(client, firstTool, { change_ref: c1.change_ref });
+        assert.equal(r1.status, "conflict");
+        assert.equal(r1.conflict_reason, "later_owned_change");
+        assert.equal(r1.restore_first_change_ref, c2.change_ref);
+        assert.equal(hub.writes().length, writesBefore);
+
+        const r2 = await call(client, secondTool, {
+          change_ref: c1.change_ref,
+        });
+        assert.equal(r2.status, "conflict");
+        assert.equal(r2.conflict_reason, "later_owned_change");
+        assert.equal(r2.restore_first_change_ref, c2.change_ref);
+        assert.equal(hub.writes().length, writesBefore);
+      },
+    );
+  }
+
+  // Case C: C1 (S0 -> S1), uncertain restore, then cyclic C2 (S1 -> S2) -> C3 (S2 -> S1).
+  for (const checkFirst of ["get", "restore"]) {
+    await t.test(
+      `cyclic C2->C3 back to S1 detected via ${checkFirst}_native_change first with 0 writes`,
+      async (subT) => {
+        const { hub, client } = await setup(subT, orderedLivingRoom);
+        const { applied: c1 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [LED_STRIP_REF],
+          reason: "C1: S0 -> S1",
+        });
+        hub.loseNext("service.orders");
+        assert.equal(
+          (
+            await call(client, "restore_native_change", {
+              change_ref: c1.change_ref,
+            })
+          ).status,
+          "uncertain",
+        );
+
+        const { applied: c2 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [AC_REF],
+          reason: "C2: S1 -> S2",
+        });
+        const { applied: c3 } = await prepareAndApply(client, {
+          operation: "room_service_order",
+          target_ref: LIVING_ROOM_REF,
+          member_service_refs: [
+            LED_STRIP_REF,
+            FLOOR_LAMP_REF,
+            CHANDELIER_REF,
+            CURTAINS_REF,
+            AC_REF,
+          ],
+          reason: "C3: S2 -> S1",
+        });
+        const writesBefore = hub.writes().length;
+
+        const firstTool =
+          checkFirst === "get" ? "get_native_change" : "restore_native_change";
+        const secondTool =
+          checkFirst === "get" ? "restore_native_change" : "get_native_change";
+        const r1 = await call(client, firstTool, { change_ref: c1.change_ref });
+        assert.equal(r1.status, "conflict");
+        assert.equal(r1.conflict_reason, "later_owned_change");
+        assert.equal(r1.restore_first_change_ref, c3.change_ref);
+        assert.equal(hub.writes().length, writesBefore);
+
+        const r2 = await call(client, secondTool, {
+          change_ref: c1.change_ref,
+        });
+        assert.equal(r2.status, "conflict");
+        assert.equal(r2.conflict_reason, "later_owned_change");
+        assert.equal(r2.restore_first_change_ref, c3.change_ref);
+        assert.equal(hub.writes().length, writesBefore);
+
+        // Unwinding C3 -> C2 -> C1 succeeds cleanly.
+        assert.equal(
+          (
+            await call(client, "restore_native_change", {
+              change_ref: c3.change_ref,
+            })
+          ).status,
+          "restored",
+        );
+        assert.equal(
+          (
+            await call(client, "restore_native_change", {
+              change_ref: c2.change_ref,
+            })
+          ).status,
+          "restored",
+        );
+        assert.equal(
+          (
+            await call(client, "restore_native_change", {
+              change_ref: c1.change_ref,
+            })
+          ).status,
+          "restored",
+        );
+      },
+    );
+  }
+});
+
+test("review return 1: retried not_applied C1 applied after C2/C3 restores without deadlock, restore_supported parity, inline contract on non-service ref, and tile_order name redaction", async (t) => {
+  const { hub, client } = await setup(t, (fixture) => {
+    const byId = new Map(fixture.accessories.map((acc) => [acc.id, acc]));
+    byId.get(16).services[0].grid = { order: 1, width: 2, height: 1 };
+    byId.get(15).services[0].grid = { order: 2, width: 1, height: 1 };
+    byId.get(18).services[0].grid = { order: 3, width: 1, height: 1 };
+    byId.get(17).services[0].grid = { order: 4, width: 1, height: 1 };
+    byId.get(19).services[0].grid = { order: 5, width: 1, height: 1 };
+  });
+
+  await t.test(
+    "P1-2: retried not_applied C1 applied after C2/C3 restores cleanly without deadlock",
+    async () => {
+      const pC1 = await call(client, "prepare_native_change", {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [LED_STRIP_REF],
+        reason: "C1: S0 -> S1 (будет отклонён и повторён позже)",
+      });
+      hub.refuseNext("service.orders", {
+        code: -32000,
+        message: "temporary hub busy",
+      });
+      const c1Refused = await callError(client, "apply_native_change", {
+        change_ref: pC1.change_ref,
+      });
+      assert.equal(c1Refused.hub_effect, "not_applied");
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const { applied: c2 } = await prepareAndApply(client, {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [AC_REF],
+        reason: "C2: S0 -> S2",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const { applied: c3 } = await prepareAndApply(client, {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [
+          FLOOR_LAMP_REF,
+          CHANDELIER_REF,
+          CURTAINS_REF,
+          LED_STRIP_REF,
+          AC_REF,
+        ],
+        reason: "C3: S2 -> S0",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const c1Applied = await call(client, "apply_native_change", {
+        change_ref: pC1.change_ref,
+      });
+      assert.equal(c1Applied.status, "applied");
+
+      const c1Restored = await call(client, "restore_native_change", {
+        change_ref: c1Applied.change_ref,
+      });
+      assert.equal(c1Restored.status, "restored");
+      assert.equal(
+        (
+          await call(client, "restore_native_change", {
+            change_ref: c3.change_ref,
+          })
+        ).status,
+        "restored",
+      );
+      assert.equal(
+        (
+          await call(client, "restore_native_change", {
+            change_ref: c2.change_ref,
+          })
+        ).status,
+        "restored",
+      );
+    },
+  );
+
+  await t.test(
+    "P2: restore_supported parity on manual_change (false) vs later_owned_change (true) in detail and history",
+    async (subT) => {
+      const { hub: p2Hub, client: p2Client } = await setup(subT, (fixture) => {
+        const byId = new Map(fixture.accessories.map((acc) => [acc.id, acc]));
+        byId.get(16).services[0].grid = { order: 1, width: 2, height: 1 };
+        byId.get(15).services[0].grid = { order: 2, width: 1, height: 1 };
+        byId.get(18).services[0].grid = { order: 3, width: 1, height: 1 };
+        byId.get(17).services[0].grid = { order: 4, width: 1, height: 1 };
+        byId.get(19).services[0].grid = { order: 5, width: 1, height: 1 };
+      });
+      const { applied: cFirst } = await prepareAndApply(p2Client, {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [LED_STRIP_REF],
+        reason: "Первое для проверки restore_supported",
+      });
+      const { applied: cSecond } = await prepareAndApply(p2Client, {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [AC_REF],
+        reason: "Второе для проверки restore_supported",
+      });
+      const laterConflict = await call(p2Client, "restore_native_change", {
+        change_ref: cFirst.change_ref,
+      });
+      assert.equal(laterConflict.status, "conflict");
+      assert.equal(laterConflict.conflict_reason, "later_owned_change");
+      assert.equal(laterConflict.restore_supported, true);
+      const laterDetail = await call(p2Client, "get_native_change", {
+        change_ref: cFirst.change_ref,
+      });
+      assert.equal(laterDetail.restore_supported, true);
+      const laterHistory = (
+        await call(p2Client, "get_native_change", {
+          entity_ref: LIVING_ROOM_REF,
+          limit: 20,
+        })
+      ).changes.find(({ change_ref }) => change_ref === cFirst.change_ref);
+      assert.equal(laterHistory?.restore_supported, true);
+
+      p2Hub.request({
+        service: {
+          orders: {
+            orders: [
+              { aId: 18, sId: 13, grid: { order: 1 } },
+              { aId: 19, sId: 13, grid: { order: 2 } },
+            ],
+          },
+        },
+      });
+      const manualConflict = await call(p2Client, "restore_native_change", {
+        change_ref: cSecond.change_ref,
+      });
+      assert.equal(manualConflict.status, "conflict");
+      assert.equal(manualConflict.conflict_reason, "manual_change");
+      assert.equal(manualConflict.restore_supported, false);
+      const manualDetail = await call(p2Client, "get_native_change", {
+        change_ref: cSecond.change_ref,
+      });
+      assert.equal(manualDetail.restore_supported, false);
+      const manualHistory = (
+        await call(p2Client, "get_native_change", {
+          entity_ref: LIVING_ROOM_REF,
+          limit: 20,
+        })
+      ).changes.find(({ change_ref }) => change_ref === cSecond.change_ref);
+      assert.equal(manualHistory?.restore_supported, false);
+    },
+  );
+
+  await t.test(
+    "P3-1: non-service ref in member_service_refs returns invalid_native_value with inline contract",
+    async () => {
+      const nonServiceErr = await callError(client, "prepare_native_change", {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [`${HOME_REF}/accessory/15`],
+        reason: "Передан accessory_ref вместо service_ref",
+      });
+      assert.equal(nonServiceErr.error.code, "invalid_native_value");
+      assert.ok(nonServiceErr.contract);
+      assert.ok(
+        Buffer.byteLength(JSON.stringify(nonServiceErr.contract), "utf8") <
+          4_096,
+      );
+
+      const crossHomeErr = await callError(client, "prepare_native_change", {
+        operation: "room_service_order",
+        target_ref: LIVING_ROOM_REF,
+        member_service_refs: [
+          "spruthub://hub/other-home/accessory/15/service/13",
+        ],
+        reason: "Сервис другого дома",
+      });
+      assert.equal(crossHomeErr.error.code, "unsupported_home_write");
+    },
+  );
+
+  await t.test(
+    "P3-2: direct SprutHubClient.getEntity(room_ref) redacts secret-shaped text in tile_order[].name",
+    async (subT) => {
+      const secretToken = "ghp_1234567890abcdef1234567890abcdef1234";
+      const chandelier = hub.state.accessories.find(({ id }) => id === 15);
+      chandelier.services.find(({ sId }) => sId === 13).name =
+        `Люстра ${secretToken}`;
+      const env = hub.connectionEnv();
+      const rawClient = new SprutHubClient({
+        url: env.SPRUTHUB_URL,
+        token: env.SPRUTHUB_TOKEN,
+        serial: env.SPRUTHUB_SERIAL,
+        cid: env.SPRUTHUB_CID,
+        timeoutMs: 2_000,
+      });
+      subT.after(() => rawClient.close());
+      const rawRoom = await rawClient.getEntity(LIVING_ROOM_REF, []);
+      const chandelierTile = rawRoom.entity.tile_order.find(
+        ({ service_ref }) => service_ref === CHANDELIER_REF,
+      );
+      assert.ok(chandelierTile);
+      assert.equal(chandelierTile.name.includes(secretToken), false);
+      assert.match(chandelierTile.name, /\[REDACTED\]/);
+    },
+  );
 });
