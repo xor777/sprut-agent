@@ -1339,7 +1339,7 @@ test("review return 1: retried not_applied C1 applied after C2/C3 restores witho
   await t.test(
     "P3-2: direct SprutHubClient.getEntity(room_ref) redacts secret-shaped text in tile_order[].name",
     async (subT) => {
-      const secretToken = "ghp_1234567890abcdef1234567890abcdef1234";
+      const secretToken = "Bearer super-secret-token-12345";
       const chandelier = hub.state.accessories.find(({ id }) => id === 15);
       chandelier.services.find(({ sId }) => sId === 13).name =
         `Люстра ${secretToken}`;
@@ -1358,7 +1358,7 @@ test("review return 1: retried not_applied C1 applied after C2/C3 restores witho
       );
       assert.ok(chandelierTile);
       assert.equal(chandelierTile.name.includes(secretToken), false);
-      assert.match(chandelierTile.name, /\[REDACTED\]/);
+      assert.equal(chandelierTile.name, "[REDACTED]");
     },
   );
 });

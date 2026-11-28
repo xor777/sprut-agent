@@ -162,19 +162,23 @@ function sameRoomOrders(liveSnapshot, expectedOrders) {
 
 function changeApplicationTime(change) {
   return (
-    change.history?.find(({ status }) => status === "applying")?.at ??
+    change.history?.findLast(({ status }) => status === "applying")?.at ??
     change.created_at
   );
 }
 
-function isAppliedAfter(other, base) {
-  const otherTime = changeApplicationTime(other);
-  const baseTime = changeApplicationTime(base);
-  if (otherTime !== baseTime) return otherTime > baseTime;
-  if (other.created_at !== base.created_at) {
-    return other.created_at > base.created_at;
+function compareAppliedOrder(left, right) {
+  const leftTime = changeApplicationTime(left);
+  const rightTime = changeApplicationTime(right);
+  if (leftTime !== rightTime) return leftTime.localeCompare(rightTime);
+  if (left.created_at !== right.created_at) {
+    return left.created_at.localeCompare(right.created_at);
   }
-  return other.id > base.id;
+  return left.id.localeCompare(right.id);
+}
+
+function isAppliedAfter(other, base) {
+  return compareAppliedOrder(other, base) > 0;
 }
 
 function isActiveLaterRoomOrderChange(other) {
@@ -207,9 +211,7 @@ async function findLaterRoomServiceOrderChange(ctx, change) {
         isActiveLaterRoomOrderChange(other) &&
         isAppliedAfter(other, change),
     )
-    .sort((left, right) =>
-      changeApplicationTime(right).localeCompare(changeApplicationTime(left)),
-    );
+    .sort((left, right) => compareAppliedOrder(right, left));
   return later[0] ?? null;
 }
 
@@ -233,7 +235,22 @@ export async function prepareRoomServiceOrder(ctx, input) {
   const parsedMembers = [];
   const seenKeys = new Set();
   for (const rawRef of input.member_service_refs) {
-    const parsed = parseServiceRef(rawRef, ctx.hubSerial);
+    let parsed;
+    try {
+      parsed = parseServiceRef(rawRef, ctx.hubSerial);
+    } catch (error) {
+      if (
+        error instanceof SprutHubError &&
+        error.code === "invalid_service_ref"
+      ) {
+        throw new SprutHubError(
+          "invalid_native_value",
+          `member_service_refs must contain home-qualified service refs; got ${redactSensitiveText(String(rawRef))}.`,
+          "prepare_native_change",
+        );
+      }
+      throw error;
+    }
     const key = serviceKey(parsed);
     if (seenKeys.has(key)) {
       throw new SprutHubError(
@@ -472,6 +489,16 @@ async function reconcileRoomServiceOrder(
   const liveOrders = toOrderSnapshot(
     roomVisibleTiles(accessories, ctx.hubSerial),
   );
+  if (direction === "restore") {
+    const later = await findLaterRoomServiceOrderChange(ctx, change);
+    if (later) {
+      return ctx.finishNative(change, "conflict", undefined, {
+        conflict_reason: "later_owned_change",
+        restore_first_change_id: later.id,
+        last_verification: freshVerification("later_owned_change"),
+      });
+    }
+  }
   const expectedOrders =
     direction === "apply" ? change.target_orders : change.baseline_orders;
   const previousOrders =
@@ -568,17 +595,15 @@ export async function restoreRoomServiceOrder(ctx, change) {
   const liveOrders = toOrderSnapshot(
     roomVisibleTiles(accessories, ctx.hubSerial),
   );
-  const pendingRestore = isPendingRestoreIntent(change);
-  if (!pendingRestore) {
-    const later = await findLaterRoomServiceOrderChange(ctx, change);
-    if (later) {
-      return ctx.finishNative(change, "conflict", undefined, {
-        conflict_reason: "later_owned_change",
-        restore_first_change_id: later.id,
-        last_verification: freshVerification("later_owned_change"),
-      });
-    }
+  const later = await findLaterRoomServiceOrderChange(ctx, change);
+  if (later) {
+    return ctx.finishNative(change, "conflict", undefined, {
+      conflict_reason: "later_owned_change",
+      restore_first_change_id: later.id,
+      last_verification: freshVerification("later_owned_change"),
+    });
   }
+  const pendingRestore = isPendingRestoreIntent(change);
   if (sameRoomOrders(liveOrders, change.baseline_orders)) {
     return ctx.finishNative(change, "restored", undefined, {
       restore_first_change_id: undefined,
@@ -587,19 +612,9 @@ export async function restoreRoomServiceOrder(ctx, change) {
     });
   }
   if (!sameRoomOrders(liveOrders, change.applied_orders)) {
-    const later = pendingRestore
-      ? await findLaterRoomServiceOrderChange(ctx, change)
-      : null;
     return ctx.finishNative(change, "conflict", undefined, {
-      ...(later
-        ? {
-            conflict_reason: "later_owned_change",
-            restore_first_change_id: later.id,
-          }
-        : { conflict_reason: "manual_change" }),
-      last_verification: freshVerification(
-        later ? "later_owned_change" : "manual_change",
-      ),
+      conflict_reason: "manual_change",
+      last_verification: freshVerification("manual_change"),
     });
   }
   // persistNativeIntent replaces write_intent cleanly, clearing any stale rejection.
@@ -662,13 +677,7 @@ export function publicRoomServiceOrderChange(change, options = {}) {
           restore_first_change_ref: `spruthub-change://native/${change.restore_first_change_id}`,
         }
       : {}),
-    restore_supported:
-      change.status === "prepared" ||
-      change.status === "applied" ||
-      change.status === "restored" ||
-      (["applying", "restoring", "uncertain"].includes(change.status) &&
-        change.write_intent?.rejection === undefined) ||
-      (change.status === "conflict" && change.applied_orders !== undefined),
+    restore_supported: roomServiceOrderRestoreSupported(change),
     limitations: [
       "Updates grid.order for every visible non-system tile in this room in one service.orders RPC while preserving each tile's grid.width and grid.height.",
       "Restore writes back the exact saved baseline grid.order (including 0 for previously unsorted tiles) only while live visible tiles and orders still match the applied layout.",
@@ -702,10 +711,20 @@ export function roomServiceOrderSummaryValue(change) {
   };
 }
 
-export function roomServiceOrderRestoreSupported(
-  change,
-  { activeStatus, isConflict },
-) {
+export function roomServiceOrderRestoreSupported(change, options) {
+  const hasHistoryFlags = options !== undefined;
+  const activeStatus = hasHistoryFlags
+    ? options.activeStatus
+    : change.status === "applied" ||
+      change.status === "uncertain" ||
+      ((change.status === "applying" || change.status === "restoring") &&
+        change.native_write_sent === true);
+  const isConflict = hasHistoryFlags
+    ? options.isConflict
+    : change.status === "conflict";
+  if (!hasHistoryFlags && change.status === "prepared") {
+    return true;
+  }
   if (
     change.native_write_sent !== true ||
     change.status === "not_applied" ||

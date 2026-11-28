@@ -3158,7 +3158,7 @@ export class SprutHubClient {
     const tileOrder = roomVisibleTiles(inRoom, parsed.serial).map(
       ({ service_ref, name, type, order }) => ({
         service_ref,
-        name,
+        name: redactSensitiveText(name ?? ""),
         type,
         order,
       }),
